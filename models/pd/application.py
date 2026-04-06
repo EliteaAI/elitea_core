@@ -133,6 +133,7 @@ def determine_application_status(version_statuses: Set[PublishStatus]) -> Publis
         PublishStatus.rejected,
         PublishStatus.on_moderation,
         PublishStatus.published,
+        PublishStatus.embedded,
         PublishStatus.draft,
     )
 
