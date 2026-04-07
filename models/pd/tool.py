@@ -233,7 +233,7 @@ class ToolDetails(ToolBase):
 # Used in PATCH version, to construct correct configuration model
 # which uses its expand configuration method later
 class ToolValidatedDetails(ToolDetails):
-    project_id: int = Field(..., exclude=True)
+    project_id: int
     user_id: int = Field(..., exclude=True)
 
     # Subclasses can override this to skip strict SDK validation (e.g., for exports)
