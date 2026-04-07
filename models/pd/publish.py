@@ -84,7 +84,7 @@ class ValidationIssue(BaseModel):
 
 class ValidationRecommendation(BaseModel):
     """Single recommendation from AI validation."""
-    field: str = ''
+    field: str = 'Generic'
     suggestion: str = ''
     context: str | None = None
     source: str = 'ai'
