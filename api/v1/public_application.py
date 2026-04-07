@@ -27,7 +27,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         with db.with_project_schema_session(project_id) as session:
             filters = [
                 ApplicationVersion.application_id == application_id,
-                ApplicationVersion.status == PublishStatus.published
+                ApplicationVersion.status.in_([
+                    PublishStatus.published, PublishStatus.embedded,
+                ]),
             ]
             if version_name:
                 filters.append(ApplicationVersion.name == version_name)
@@ -52,7 +54,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             result.get_likes(project_id)
             result.check_is_liked(project_id)
 
-        return result.model_dump(mode='json'), 200
+        result_dict = result.model_dump(mode='json')
+        for tool in result_dict.get('version_details', {}).get('tools', []):
+            tool['project_id'] = project_id
+        return result_dict, 200
 
 
 class API(api_tools.APIBase):

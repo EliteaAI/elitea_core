@@ -120,12 +120,12 @@ def generate_toolkit_payload(
                 "description": app_participant.meta.get('description', ''),
                 "author_id": user_id,
                 "participant_id": app_participant.id,  # For SDK to identify self
+                "project_id": app_participant.entity_meta.get('project_id'),
                 "settings": {
                     "variables": [],
                     "application_id": app_id,
                     "selected_tools": [],
                     "application_version_id": app_version_id,
-                    "project_id": app_participant.entity_meta.get('project_id'),
                 },
                 "id": None,
                 "toolkit_name": app_participant.meta['name'],
