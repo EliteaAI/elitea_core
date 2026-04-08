@@ -591,6 +591,12 @@ def application_toolkit_change_relation(
                 f'Application[{update_data.application_id}] version[{update_data.version.id}] not found'
             )
 
+        if parent_application_version.status in ('published', 'embedded'):
+            raise ToolkitChangeRelationError(
+                f'Version id {parent_application_version.id} is {parent_application_version.status} '
+                f'and can not be updated'
+            )
+
         # When REMOVING a relation (has_relation=False), find the toolkit that is actually
         # linked to this parent via EntityToolMapping. This ensures we remove the correct mapping
         # even if there are multiple toolkits for the same child application.
