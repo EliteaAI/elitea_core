@@ -115,6 +115,27 @@
       "requires_restart": true,
       "visible_when": { "field": "mcp_enabled", "value": true }
     },
+    "is_publish_blocked": {
+      "type": "boolean",
+      "title": "Block Agent Publishing",
+      "description": "When enabled, agent publishing is blocked platform-wide except for whitelisted projects. Admin publishes from the public project are always exempt.",
+      "path": "publishing_guardrail.is_publish_blocked",
+      "section": "guardrails",
+      "default": false,
+      "requires_restart": true
+    },
+    "publish_whitelist_project_ids": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "title": "Publishing Allowed Projects",
+      "description": "Projects where publishing remains allowed when blocked globally. If empty, publishing is blocked for all projects.",
+      "path": "publishing_guardrail.whitelist_project_ids",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": true,
+      "enum_source": "projects",
+      "visible_when": { "field": "is_publish_blocked", "value": true }
+    },
     "ai_project_id": {
       "type": "integer",
       "title": "Public Project ID",
