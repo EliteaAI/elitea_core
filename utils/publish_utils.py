@@ -32,6 +32,14 @@ from .create_utils import create_application, create_version
 from .utils import get_public_project_id
 
 
+def is_publishing_blocked_for_project(project_id: int) -> bool:
+    """Check if publishing is blocked for a project by platform guardrail."""
+    if not getattr(this.module, 'is_publish_blocked', False):
+        return False
+    whitelist = getattr(this.module, 'publish_whitelist_project_ids', set())
+    return project_id not in whitelist
+
+
 # §12 — fields carried into the public snapshot
 _VERSION_ALLOWLIST = frozenset({
     'name',

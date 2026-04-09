@@ -190,6 +190,17 @@ class Module(module.ModuleModel):
             self._publish_validation_secret = os.urandom(32).hex()
             log.info("Auto-generated publish validation secret (valid until restart)")
 
+    def _init_publishing_guardrail(self):
+        """Cache publishing guardrail settings from config."""
+        guardrail = self.descriptor.config.get('publishing_guardrail', {})
+        self.is_publish_blocked = guardrail.get('is_publish_blocked', False)
+        self.publish_whitelist_project_ids = set(
+            int(x) for x in guardrail.get('whitelist_project_ids', [])
+            if isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit())
+        )
+        log.info("Publishing guardrail: blocked=%s, whitelist=%s",
+                 self.is_publish_blocked, self.publish_whitelist_project_ids)
+
     def preload(self):
         """Preload handler - download UI bundle if needed"""
         log.info("Preloading UI bundle")
@@ -396,6 +407,9 @@ class Module(module.ModuleModel):
 
         # Publish validation secret (HMAC signing key)
         self._init_publish_validation_secret()
+
+        # Publishing guardrail (environment-wide block)
+        self._init_publishing_guardrail()
 
         from .models import all, folder, message_group, participants
         from .models.message_items import base, text, canvas

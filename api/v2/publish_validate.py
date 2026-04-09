@@ -4,7 +4,12 @@ from pydantic import ValidationError
 from ...models.all import ApplicationVersion
 from ...models.pd.publish import PublishValidateRequest
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.publish_utils import AIValidationError, validate_for_publish
+from ...utils.publish_utils import (
+    AIValidationError,
+    is_publishing_blocked_for_project,
+    validate_for_publish,
+)
+from ...utils.utils import get_public_project_id
 
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, db, register_openapi
@@ -33,6 +38,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"error": e.errors()}, 400
 
         user_id = auth.current_user().get("id")
+
+        # --- Publishing guardrail (admin publishes are exempt) ---
+        public_project_id = get_public_project_id()
+        if project_id != public_project_id and is_publishing_blocked_for_project(project_id):
+            return {"error": "publishing_blocked",
+                    "msg": "Agent publishing is blocked for this project by platform policy."}, 403
 
         # Verify version exists
         with db.get_session(project_id) as session:

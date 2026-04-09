@@ -34,6 +34,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "mcp_exposure_enabled": is_mcp_exposure_enabled(),
             "mcp_in_menu_enabled": is_mcp_in_menu_enabled(),
             "analytics_enabled": _is_analytics_enabled(),
+            "is_publish_blocked": getattr(this.module, 'is_publish_blocked', False),
+            "publish_whitelist_project_ids": list(
+                getattr(this.module, 'publish_whitelist_project_ids', set())
+            ),
         }, 200
 
 

@@ -7,6 +7,7 @@ from ...models.pd.publish import PublishRequest
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.utils import get_public_project_id
 from ...utils.publish_utils import (
+    is_publishing_blocked_for_project,
     AIValidationError,
     admin_publish,
     user_publish,
@@ -51,6 +52,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_id = auth.current_user().get("id")
         public_project_id = get_public_project_id()
         max_versions = int(this.descriptor.config.get("max_published_versions_per_agent", 3))
+
+        # --- Publishing guardrail (admin publishes are exempt) ---
+        if project_id != public_project_id and is_publishing_blocked_for_project(project_id):
+            return {"error": "publishing_blocked",
+                    "msg": "Agent publishing is blocked for this project by platform policy."}, 403
 
         try:
             with db.get_session(project_id) as session:
