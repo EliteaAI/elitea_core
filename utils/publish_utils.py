@@ -24,7 +24,7 @@ from tools import db, this, rpc_tools
 
 from ..models.all import Application, ApplicationVersion
 from ..models.elitea_tools import EliteATool, EntityToolMapping
-from ..models.enums.all import NotificationEventTypes, PublishStatus, ToolEntityTypes
+from ..models.enums.all import AgentTypes, NotificationEventTypes, PublishStatus, ToolEntityTypes
 from ..models.pd.application import ApplicationImportModel
 from ..models.pd.version import ApplicationVersionForkCreateModel
 from ..models.pd.publish import PublishAIResult
@@ -202,6 +202,24 @@ class SubAgentNode(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Pipeline guard
+# ---------------------------------------------------------------------------
+
+def check_not_pipeline(
+    version_id: int,
+    session,
+) -> Optional[Tuple[dict, int]]:
+    """Return an error tuple if the version is a pipeline, else None."""
+    ver = session.query(ApplicationVersion).get(version_id)
+    if ver and ver.agent_type == AgentTypes.pipeline.value:
+        return {
+            "error": "pipeline_not_publishable",
+            "msg": "Pipeline agents cannot be published",
+        }, 400
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Sub-agent tree collection
 # ---------------------------------------------------------------------------
 
@@ -209,6 +227,7 @@ def collect_sub_agent_tree(
     project_id: int,
     version_id: int,
     max_depth: int = _MAX_SUB_AGENT_DEPTH,
+    session=None,
 ) -> List[SubAgentNode]:
     """Recursively discover sub-agents referenced by a version's tools.
 
@@ -219,6 +238,7 @@ def collect_sub_agent_tree(
     visited: set = set()
     return _collect_sub_agents_recursive(
         project_id, version_id, max_depth, depth=0, visited=visited,
+        session=session,
     )
 
 
@@ -228,84 +248,116 @@ def _collect_sub_agents_recursive(
     max_depth: int,
     depth: int,
     visited: set,
+    session=None,
 ) -> List[SubAgentNode]:
     """Internal recursive helper for ``collect_sub_agent_tree``."""
+    if session is not None:
+        return _collect_sub_agents_in_session(
+            project_id, version_id, max_depth, depth, visited,
+            session,
+        )
     with db.get_session(project_id) as session:
-        version = (
-            session.query(ApplicationVersion)
-            .filter(ApplicationVersion.id == version_id)
-            .options(
-                selectinload(ApplicationVersion.tools),
+        return _collect_sub_agents_in_session(
+            project_id, version_id, max_depth, depth, visited,
+            session,
+        )
+
+
+def _collect_sub_agents_in_session(
+    project_id: int,
+    version_id: int,
+    max_depth: int,
+    depth: int,
+    visited: set,
+    session,
+) -> List[SubAgentNode]:
+    """Core logic for sub-agent tree collection within a session."""
+    version = (
+        session.query(ApplicationVersion)
+        .filter(ApplicationVersion.id == version_id)
+        .options(
+            selectinload(ApplicationVersion.tools),
+        )
+        .first()
+    )
+    if version is None:
+        raise ValueError(f"Version {version_id} not found in project {project_id}")
+
+    # Collect application-type tools (sub-agents)
+    sub_agent_tools = [
+        t for t in version.tools if t.type == 'application'
+    ]
+    if not sub_agent_tools:
+        return []
+
+    nodes: List[SubAgentNode] = []
+    for tool in sub_agent_tools:
+        child_app_id = (tool.settings or {}).get('application_id')
+        child_ver_id = (tool.settings or {}).get('application_version_id')
+        tool_name = tool.name or f'application_{child_app_id}'
+
+        if child_app_id is None or child_ver_id is None:
+            raise ValueError(
+                f"Sub-agent tool '{tool_name}' has incomplete settings "
+                f"(application_id={child_app_id}, application_version_id={child_ver_id})"
             )
+
+        # Cycle detection
+        key = (child_app_id, child_ver_id)
+        if key in visited:
+            raise SubAgentTreeError(
+                f"Circular sub-agent dependency detected involving "
+                f"application {child_app_id} version {child_ver_id}",
+                error_code='cycle_detected',
+                fix='Remove the circular sub-agent reference before publishing',
+            )
+
+        # Depth check
+        next_depth = depth + 1
+        if next_depth > max_depth:
+            raise SubAgentTreeError(
+                f"Sub-agent nesting exceeds maximum depth of {max_depth}",
+                error_code='depth_exceeded',
+                fix=f'Reduce sub-agent nesting to at most {max_depth} levels',
+            )
+
+        # Validate sub-agent exists
+        child_version = (
+            session.query(ApplicationVersion)
+            .filter(ApplicationVersion.id == child_ver_id)
             .first()
         )
-        if version is None:
-            raise ValueError(f"Version {version_id} not found in project {project_id}")
-
-        # Collect application-type tools (sub-agents)
-        sub_agent_tools = [
-            t for t in version.tools if t.type == 'application'
-        ]
-        if not sub_agent_tools:
-            return []
-
-        nodes: List[SubAgentNode] = []
-        for tool in sub_agent_tools:
-            child_app_id = (tool.settings or {}).get('application_id')
-            child_ver_id = (tool.settings or {}).get('application_version_id')
-            tool_name = tool.name or f'application_{child_app_id}'
-
-            if child_app_id is None or child_ver_id is None:
-                raise ValueError(
-                    f"Sub-agent tool '{tool_name}' has incomplete settings "
-                    f"(application_id={child_app_id}, application_version_id={child_ver_id})"
-                )
-
-            # Cycle detection
-            key = (child_app_id, child_ver_id)
-            if key in visited:
-                raise SubAgentTreeError(
-                    f"Circular sub-agent dependency detected involving "
-                    f"application {child_app_id} version {child_ver_id}",
-                    error_code='cycle_detected',
-                    fix='Remove the circular sub-agent reference before publishing',
-                )
-
-            # Depth check
-            next_depth = depth + 1
-            if next_depth > max_depth:
-                raise SubAgentTreeError(
-                    f"Sub-agent nesting exceeds maximum depth of {max_depth}",
-                    error_code='depth_exceeded',
-                    fix=f'Reduce sub-agent nesting to at most {max_depth} levels',
-                )
-
-            # Validate sub-agent exists
-            child_version = (
-                session.query(ApplicationVersion)
-                .filter(ApplicationVersion.id == child_ver_id)
-                .first()
+        if child_version is None:
+            raise ValueError(
+                f"Sub-agent version {child_ver_id} "
+                f"(referenced by tool '{tool_name}') not found"
             )
-            if child_version is None:
-                raise ValueError(
-                    f"Sub-agent version {child_ver_id} "
-                    f"(referenced by tool '{tool_name}') not found"
-                )
 
-            visited.add(key)
-            children = _collect_sub_agents_recursive(
-                project_id, child_ver_id, max_depth,
-                depth=next_depth, visited=visited,
+        # Skip pipeline-type sub-agents — pipelines must never be
+        # published or validated as sub-agents
+        if child_version.agent_type == AgentTypes.pipeline.value:
+            log.info(
+                "Skipping pipeline sub-agent '%s' (ver=%d) from "
+                "sub-agent tree — pipelines are excluded",
+                tool_name, child_ver_id,
             )
-            nodes.append(SubAgentNode(
-                app_id=child_app_id,
-                version_id=child_ver_id,
-                tool_name=tool_name,
-                depth=next_depth,
-                children=children,
-            ))
+            continue
 
-        return nodes
+        visited.add(key)
+        children = _collect_sub_agents_recursive(
+            project_id, child_ver_id, max_depth,
+            depth=next_depth, visited=visited,
+            session=session,
+        )
+        nodes.append(SubAgentNode(
+            app_id=child_app_id,
+            version_id=child_ver_id,
+            tool_name=tool_name,
+            depth=next_depth,
+            children=children,
+        ))
+
+    return nodes
 
 
 # ---------------------------------------------------------------------------
@@ -626,17 +678,23 @@ def version_name_exists(
     project_id: int,
     application_id: int,
     version_name: str,
+    session=None,
 ) -> bool:
     """Check whether a version with the given name already exists."""
-    with db.get_session(project_id) as session:
-        return session.query(
-            session.query(ApplicationVersion)
+    def _query(s):
+        return s.query(
+            s.query(ApplicationVersion)
             .filter(
                 ApplicationVersion.application_id == application_id,
                 ApplicationVersion.name == version_name,
             )
             .exists()
         ).scalar()
+
+    if session is not None:
+        return _query(session)
+    with db.get_session(project_id) as s:
+        return _query(s)
 
 
 def check_publish_limit(
@@ -1070,20 +1128,32 @@ def _publish_impl(
     When *clone_source* is False (admin flow), snapshots the source
     version directly — no clone is created, the original stays ``draft``.
     """
-    # 0. Pre-validate sub-agent tree (before any mutations)
-    try:
-        sub_agent_tree = collect_sub_agent_tree(project_id, version_id)
-    except SubAgentTreeError as exc:
-        return {"error": exc.error_code, "msg": str(exc)}, 400
-    except ValueError as exc:
-        return {"error": "sub_agent_validation", "msg": str(exc)}, 400
+    # Single source-project session for all read-only pre-checks
+    with db.get_session(project_id) as source_session:
+        # Reject pipeline-type agents (#4525)
+        pipeline_err = check_not_pipeline(version_id, source_session)
+        if pipeline_err is not None:
+            return pipeline_err
 
-    # 1. Reject if version_name already taken in source application (clone only)
-    if clone_source and version_name_exists(project_id, source_app_id, version_name):
-        return {
-            "error": "version_name_exists_in_source",
-            "msg": f"Version name '{version_name}' already exists in this application",
-        }, 400
+        # 0. Pre-validate sub-agent tree (before any mutations)
+        try:
+            sub_agent_tree = collect_sub_agent_tree(
+                project_id, version_id, session=source_session,
+            )
+        except SubAgentTreeError as exc:
+            return {"error": exc.error_code, "msg": str(exc)}, 400
+        except ValueError as exc:
+            return {"error": "sub_agent_validation", "msg": str(exc)}, 400
+
+        # 1. Reject if version_name already taken (clone only)
+        if clone_source and version_name_exists(
+            project_id, source_app_id, version_name,
+            session=source_session,
+        ):
+            return {
+                "error": "version_name_exists_in_source",
+                "msg": f"Version name '{version_name}' already exists in this application",
+            }, 400
 
     # 2. Cheap public-side checks before heavy clone/snapshot
     public_app_id = find_public_twin(public_project_id, project_id, source_app_id)
