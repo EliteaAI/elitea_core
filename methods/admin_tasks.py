@@ -276,3 +276,248 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             total_migrated, end_ts - start_ts
         )
         return {"migrated": total_migrated}
+
+    @web.method()
+    def chat_cleanup_dup_msgs(self, *args, **kwargs):
+        """Admin task: remove duplicate message groups from a single conversation.
+
+        Detects adjacent messages with identical role and content, keeps the
+        highest-ID copy and removes the rest.  Remaps reply_to_id on surviving
+        messages before deletion, then resets context_analytics.
+
+        Dry-run is ON by default — pass dry_run=false to actually mutate.
+
+        Param format:
+            "project_id=<N>;conversation_id=<id_or_uuid>[;dry_run=false]"
+
+        Examples:
+            "project_id=27;conversation_id=43"                - dry run (default)
+            "project_id=27;conversation_id=43;dry_run=false"  - live run
+            "project_id=27;conversation_id=a1b2c3d4-..."      - lookup by UUID
+        """
+        from tools import db  # pylint: disable=C0415
+        from ..models.message_group import ConversationMessageGroup  # pylint: disable=C0415
+        from ..models.message_items.text import TextMessageItem  # pylint: disable=C0415
+        from ..models.conversation import Conversation  # pylint: disable=C0415
+        from ..utils.context_analytics import update_conversation_meta  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = True
+        project_id = None
+        conversation_arg = None
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                try:
+                    project_id = int(seg[len("project_id="):].strip())
+                except ValueError:
+                    log.error("chat_cleanup_dup_msgs: invalid project_id in param: %s", param)
+                    return {"error": "invalid project_id"}
+            elif seg_lower.startswith("conversation_id="):
+                conversation_arg = seg[len("conversation_id="):].strip()
+            elif seg_lower.startswith("dry_run="):
+                dry_run = seg_lower[len("dry_run="):].strip() != "false"
+
+        if project_id is None or not conversation_arg:
+            log.error(
+                "chat_cleanup_dup_msgs: missing required params. "
+                "Format: project_id=<N>;conversation_id=<id_or_uuid>[;dry_run=false]"
+            )
+            return {"error": "missing project_id or conversation_id"}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info(
+            "%sStarting chat_cleanup_dup_msgs (project_id=%s, conversation=%s, dry_run=%s)",
+            prefix, project_id, conversation_arg, dry_run,
+        )
+        start_ts = time.time()
+
+        try:
+            result = _run_chat_cleanup_dup_msgs(
+                project_id, conversation_arg, dry_run, prefix,
+                db, ConversationMessageGroup, TextMessageItem,
+                Conversation, update_conversation_meta,
+            )
+        except Exception:  # pylint: disable=W0703
+            log.exception("%schat_cleanup_dup_msgs: unhandled exception", prefix)
+            result = {"error": "unhandled exception"}
+
+        end_ts = time.time()
+        log.info("%sExiting chat_cleanup_dup_msgs (duration = %ss)", prefix, round(end_ts - start_ts, 2))
+        return result
+
+
+def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
+    project_id, conversation_arg, dry_run, prefix,
+    db, ConversationMessageGroup, TextMessageItem,
+    Conversation, update_conversation_meta,
+):
+    """Core logic for chat_cleanup_dup_msgs, separated for readability."""
+    with db.get_session(project_id) as session:
+        # --- Resolve conversation ---
+        try:
+            conv_id = int(conversation_arg)
+            conversation = session.query(Conversation).filter(
+                Conversation.id == conv_id
+            ).first()
+        except ValueError:
+            conversation = session.query(Conversation).filter(
+                Conversation.uuid == conversation_arg
+            ).first()
+
+        if not conversation:
+            log.error("%sConversation not found: %s", prefix, conversation_arg)
+            return {"error": "conversation not found"}
+
+        conversation_id = conversation.id
+        log.info("%sConversation: id=%s, name='%s'", prefix, conversation_id, conversation.name)
+
+        # --- Fetch all message groups with text content ---
+        groups = (
+            session.query(ConversationMessageGroup)
+            .filter(ConversationMessageGroup.conversation_id == conversation_id)
+            .order_by(ConversationMessageGroup.created_at)
+            .all()
+        )
+
+        # Build fingerprint map: group_id -> (item_count, item_types, text_content)
+        # This ensures multimodal messages (text + attachments) only match if
+        # they have the exact same structure, not just identical text.
+        from ..models.message_items.base import MessageItem  # pylint: disable=C0415
+        fingerprint_map = {}
+        for g in groups:
+            items = (
+                session.query(MessageItem)
+                .filter(MessageItem.message_group_id == g.id)
+                .order_by(MessageItem.order_index)
+                .all()
+            )
+            item_types = tuple(it.item_type for it in items)
+            text_item = (
+                session.query(TextMessageItem)
+                .filter(TextMessageItem.message_group_id == g.id)
+                .first()
+            )
+            text_content = text_item.content if text_item else ""
+            fingerprint_map[g.id] = (len(items), item_types, text_content)
+
+        log.info("%sTotal message groups: %d", prefix, len(groups))
+
+        # --- Detect duplicate clusters ---
+        # Only strictly adjacent messages with same author, content, AND created_at
+        # are duplicates. [a,a,b,b] = 2 dup pairs; [a,b,c,a,b] = no dups.
+        # The created_at check prevents false positives when a user legitimately
+        # sends the same message twice at different times.
+        remove_ids = set()
+        keep_map = {}  # removed_id -> kept_id (for reply_to remapping)
+
+        i = 0
+        while i < len(groups):
+            # Collect a run of adjacent messages with identical author+timestamp+fingerprint
+            run = [groups[i]]
+            while i + 1 < len(groups) \
+                    and groups[i + 1].author_participant_id == run[0].author_participant_id \
+                    and groups[i + 1].created_at == run[0].created_at \
+                    and fingerprint_map[groups[i + 1].id] == fingerprint_map[run[0].id]:
+                i += 1
+                run.append(groups[i])
+
+            if len(run) > 1:
+                max_id = max(g.id for g in run)
+                for g in run:
+                    if g.id != max_id:
+                        remove_ids.add(g.id)
+                        keep_map[g.id] = max_id
+
+            i += 1
+
+        if not remove_ids:
+            log.info("%sNo duplicates found.", prefix)
+            return {"duplicates_found": 0}
+
+        log.info(
+            "%sDuplicates detected: %d messages to remove (keeping %d)",
+            prefix, len(remove_ids), len(groups) - len(remove_ids),
+        )
+
+        # --- Identify reply_to remaps needed ---
+        remaps = {}  # surviving_msg_id -> (old_reply_to, new_reply_to)
+        for g in groups:
+            if g.id in remove_ids:
+                continue
+            if g.reply_to_id and g.reply_to_id in remove_ids:
+                new_target = keep_map.get(g.reply_to_id)
+                if new_target:
+                    remaps[g.id] = (g.reply_to_id, new_target)
+
+        # --- Log details ---
+        for rid in sorted(remove_ids):
+            kept = keep_map[rid]
+            _item_count, _item_types, text = fingerprint_map[rid]
+            log.info(
+                "%s  REMOVE id=%d (kept duplicate id=%d, items=%s, content='%s')",
+                prefix, rid, kept, list(_item_types), text[:60],
+            )
+
+        for msg_id, (old_target, new_target) in remaps.items():
+            log.info(
+                "%s  REMAP id=%d: reply_to %d -> %d",
+                prefix, msg_id, old_target, new_target,
+            )
+
+        log.info(
+            "%sSummary: %d duplicates to remove, %d reply_to remaps, "
+            "%d messages before, %d messages after",
+            prefix, len(remove_ids), len(remaps),
+            len(groups), len(groups) - len(remove_ids),
+        )
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "duplicates_found": len(remove_ids),
+                "reply_to_remaps": len(remaps),
+                "messages_before": len(groups),
+                "messages_after": len(groups) - len(remove_ids),
+            }
+
+        # --- Live run: apply changes ---
+        # Step 1: Remap reply_to_id on surviving messages
+        for msg_id, (_old, new_target) in remaps.items():
+            session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.id == msg_id
+            ).update(
+                {ConversationMessageGroup.reply_to_id: new_target},
+                synchronize_session=False,
+            )
+        if remaps:
+            session.flush()
+            log.info("Remapped %d reply_to_id pointers", len(remaps))
+
+        # Step 2: Delete message items first, then message groups
+        # (ORM bulk delete doesn't trigger FK cascade)
+        from ..models.message_items.base import MessageItem  # pylint: disable=C0415
+        session.query(MessageItem).filter(
+            MessageItem.message_group_id.in_(remove_ids)
+        ).delete(synchronize_session=False)
+        deleted = session.query(ConversationMessageGroup).filter(
+            ConversationMessageGroup.id.in_(remove_ids)
+        ).delete(synchronize_session=False)
+        session.commit()
+        log.info("Deleted %d duplicate message groups", deleted)
+
+        # Step 3: Reset context_analytics
+        try:
+            update_conversation_meta(project_id, conversation_id, {'context_analytics': None})
+            log.info("Reset context_analytics for conversation %d", conversation_id)
+        except Exception:  # pylint: disable=W0703
+            log.exception("Failed to reset context_analytics")
+
+        return {
+            "dry_run": False,
+            "duplicates_removed": deleted,
+            "reply_to_remaps": len(remaps),
+            "messages_before": len(groups),
+            "messages_after": len(groups) - len(remove_ids),
+        }

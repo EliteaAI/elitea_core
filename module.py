@@ -245,6 +245,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_application_description_size", self.migrate_application_description_size
             )
+            this.for_module("admin").module.register_admin_task(
+                "chat_cleanup_dup_msgs", self.chat_cleanup_dup_msgs
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -492,6 +495,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_provider_hub_secrets", self.migrate_provider_hub_secrets
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "chat_cleanup_dup_msgs", self.chat_cleanup_dup_msgs
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
