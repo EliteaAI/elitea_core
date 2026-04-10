@@ -1,0 +1,5 @@
+psycopg[binary]==3.2.10
+pgvector==0.2.5
+mcp[cli]==1.6.0
+datamodel-code-generator~=0.28.5
+jsonref~=1.1.0

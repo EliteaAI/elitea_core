@@ -1,0 +1,114 @@
+# Add needed migrations (SQL + curl/task-based) here
+# Try to make migrations safe to run multiple times (e.g. "IF NOT EXISTS")
+# When release tags are moved - comment with release version will be added
+
+# 1.7.0 -> 2.0.0-beta
+
+curl -X POST https://<url>/api/v2/elitea_core/index_meta_migration/administration \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+ALTER TABLE {pid}.entity_tool_mapping ADD COLUMN IF NOT EXISTS selected_tools JSONB NULL;
+
+ALTER TABLE {pid}.application_versions ALTER COLUMN llm_settings TYPE jsonb USING llm_settings::jsonb;
+UPDATE {pid}.application_versions SET llm_settings = jsonb_set(llm_settings, '{{max_tokens}}', '2048') WHERE llm_settings->>'max_tokens' = '1024';
+
+UPDATE {pid}.application_versions SET meta = jsonb_set(COALESCE(meta, '{{}}'::jsonb), '{{step_limit}}', '25'::jsonb,true);
+
+In administration -> secrets -> ai_project_roles add "viewer".
+
+ALTER TABLE {pid}.chat_messages_attachment ADD COLUMN IF NOT EXISTS attachment_type VARCHAR(256) NOT NULL;
+ALTER TABLE {pid}.chat_messages_attachment ADD COLUMN IF NOT EXISTS content JSON DEFAULT '{{}}'::JSON;
+
+UPDATE {pid}.chat_participant_mapping SET entity_settings = jsonb_set(entity_settings, '{{llm_settings,max_tokens}}', '2048') WHERE entity_settings #>> '{{llm_settings,max_tokens}}' = '1024';
+
+# Elitea Core migrations
+UPDATE {pid}.application_versions SET meta = jsonb_set(meta, '{{icon_meta,url}}', to_jsonb(replace(meta #>> '{{icon_meta,url}}', '/applications/', '/app/'))) WHERE meta #>> '{{icon_meta,url}}' LIKE '%/applications/%';
+
+curl -X POST https://<url>/api/v2/elitea_core/toolkit_names_migration/administration \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+DELETE FROM {pid}.application_version_tag_association a USING {pid}.application_version_tag_association b WHERE a.ctid < b.ctid  AND a.version_id = b.version_id  AND a.tag_id = b.tag_id;
+ALTER TABLE {pid}.application_version_tag_association ADD PRIMARY KEY (version_id, tag_id);
+
+
+# Toolkit type rename migration (for provider toolkit renames like SyngenToolkit -> Syngen)
+# Run with dry_run=true first to see what would be changed
+# There is a possibility to run a migration in DRY_RUN mode. For this pass in the payload dry_run=True. For all projects just left project_id value as 0.
+curl -X POST https://<url>/api/v2/elitea_core/toolkit_type_rename_migration/administration \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": 0, "dry_run": true}'
+
+curl -X POST https://<url>/api/v2/elitea_core/index_features_migration/administration \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+UPDATE {pid}.elitea_tools SET settings = jsonb_set(settings, '{{number_of_threads}}', '5', true) WHERE type = 'figma';
+
+# Remove tool with datasource type
+DELETE FROM {pid}.elitea_tools WHERE type = 'datasource';
+
+
+# Migration of configuration for ado_repos toolkits, use dry_run=true first to see what would be changed
+curl -X POST https://<url>/api/v2/elitea_core/ado_repos_settings_migration/administration \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Add position column to chat_conversation_folders (NOT NULL with default 0 for DB-level sorting)
+ALTER TABLE {pid}.chat_conversation_folders ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0;
+
+# Add meta field to applications table for default version tracking
+ALTER TABLE {pid}.applications ADD COLUMN IF NOT EXISTS meta JSONB DEFAULT '{{}}'::jsonb;
+
+# Rename 'latest' version to 'base' version (safe migration)
+# Step 1: Rename all existing 'base' versions to 'base_01' to avoid conflicts
+UPDATE {pid}.application_versions SET name = 'base_01' WHERE name = 'base';
+# Step 2: Now safely rename 'latest' to 'base'
+UPDATE {pid}.application_versions SET name = 'base' WHERE name = 'latest';
+
+# Attachment refactoring: Migrate attachment_toolkit_id to internal_tools (preserves attachment toggle for existing agents)
+UPDATE {pid}.application_versions SET meta = jsonb_set(COALESCE(meta, '{{}}'::jsonb), '{{internal_tools}}', COALESCE(meta->'internal_tools', '[]'::jsonb) || '["attachments"]'::jsonb, true) WHERE meta->>'attachment_toolkit_id' IS NOT NULL AND NOT (COALESCE(meta->'internal_tools', '[]'::jsonb) @> '["attachments"]'::jsonb);
+
+# Remove llm_settings from entity_settings for application and pipeline participants
+# Architecture change: llm_settings should be fetched dynamically from agent/pipeline version details instead of cached in entity_settings
+# Handles both: entity_name='pipeline' OR entity_name='application' with agent_type='pipeline' in entity_settings
+UPDATE {pid}.chat_participant_mapping pm SET entity_settings = entity_settings - 'llm_settings' FROM {pid}.chat_participants p WHERE pm.participant_id = p.id AND (p.entity_name = 'pipeline' OR (p.entity_name = 'application' AND pm.entity_settings->>'agent_type' = 'pipeline') OR p.entity_name = 'application') AND entity_settings ? 'llm_settings';
+
+# Fix incorrect duration for old MCP/Toolkit runs (Issue #3172)
+UPDATE {pid}.chat_message_group SET updated_at = created_at WHERE reply_to_id IS NOT NULL AND created_at < NOW() - INTERVAL '30 days' AND (meta->>'first_tool_timestamp_start' IS NULL OR (meta->>'execution_time_seconds' IS NULL AND (meta->'thinking_steps' IS NULL OR jsonb_array_length(COALESCE(meta->'thinking_steps', '[]'::jsonb)) = 0)));
+
+# Deprecate chunk read tool and search_file in artifact/gitlab/github toolkit
+Run admin task migrate_toolkit_selected_tools with param: artifact;read_file_chunk,search_file;project_id=all
+Run admin task migrate_toolkit_selected_tools with param: gitlab;read_file_chunk,search_file;project_id=all
+Run admin task migrate_toolkit_selected_tools with param: github;read_file_chunk,search_file;project_id=all
+
+# Deprecate overwriteData tool in artifact toolkit
+Run admin task migrate_toolkit_selected_tools with param: artifact;overwriteData;project_id=all
+
+# Drop file_size column from chat_messages_attachment — no longer used
+ALTER TABLE {pid}.chat_messages_attachment DROP COLUMN IF EXISTS file_size;
+
+# Deprecate edit_file tool in VCS toolkits (replaced by update_file which is already exposed)
+Run admin task migrate_toolkit_selected_tools with param: bitbucket;edit_file;project_id=all
+Run admin task migrate_toolkit_selected_tools with param: github;edit_file;project_id=all
+Run admin task migrate_toolkit_selected_tools with param: gitlab;edit_file;project_id=all
+Run admin task migrate_toolkit_selected_tools with param: gitlab_org;edit_file;project_id=all
+Run admin task migrate_toolkit_selected_tools with param: ado_repos;edit_file;project_id=all
+Run admin task migrate_toolkit_selected_tools with param: localgit;edit_file;project_id=all
+
+# Migrate provider hub toolkit secrets from plain-text to Vault-backed references (EL-3770)
+# Iterates all projects, finds toolkit_configuration_* fields marked "secret": true that still
+# hold plain-text values, wraps them as SecretString, and stores them in Vault.
+# Idempotent: already-vaulted {{secret.*}} values are skipped.
+# Always run dry_run first to verify the expected scope before committing changes.
+Run admin task migrate_provider_hub_secrets with param: project_id=all;dry_run
+Run admin task migrate_provider_hub_secrets with param: project_id=all
+
+# Increase description field size in applications table from 1024 to 2304 characters
+Run admin task migrate_application_description_size with param: project_id=all

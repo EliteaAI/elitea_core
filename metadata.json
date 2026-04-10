@@ -1,0 +1,14 @@
+{
+  "name": "elitea_core",
+  "version": "0.319",
+  "description": "Unified core plugin for Elitea core functionality",
+  "depends_on": [
+    "admin",
+    "auth",
+    "configurations",
+    "projects",
+    "shared",
+    "worker_client"
+  ],
+  "init_after": []
+}

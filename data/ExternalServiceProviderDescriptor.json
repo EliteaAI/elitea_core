@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExternalServiceProviderDescriptor",
+  "type": "object",
+  "description": "The ExternalServiceProviderDescriptor defines a standardized blueprint for representing external service providers within an integration ecosystem. It captures essential metadata such as a unique provider identifier (UUID), the provider’s name, and its service location URL. In addition, it mandates a security configuration that specifies the authentication type required for secure communication. Optional properties include a catalog of tools provided by the service, which further detail how to interact with external data and functionalities. This descriptor ensures that external providers are consistently and securely integrated, facilitating reliable interoperability across diverse systems.",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Name of the service provider."
+    },
+    "service_location_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL of the service provider's location."
+    },
+    "configuration": {
+      "$ref": "#/$defs/ExternalServiceProviderConfiguration"
+    },
+    "provided_toolkits": {
+      "type": "array",
+      "description": "Toolkits provided by the service provider.",
+      "items": {
+        "$ref": "#/$defs/ExternalToolkitDescriptor"
+      }
+    }
+  },
+  "required": [
+    "name",
+    "service_location_url",
+    "configuration",
+    "provided_toolkits"
+  ],
+  "$defs": {
+    "ExternalServiceProviderConfiguration": {
+      "type": "object",
+      "description": "The ExternalServiceProviderConfiguration object defines the settings required for interacting with an external service provider.",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "ToolkitParameterDescriptor": {
+      "type": "object",
+      "description": "The ToolkitParameterDescriptor defines a structured blueprint for a single parameter used in configuring an external integration.",
+      "properties": {
+        "_description": {
+          "type": "string",
+          "description": "Description of the parameter."
+        },
+        "_type": {
+          "type": "string",
+          "description": "Type of the parameter.",
+          "enum": [
+            "Integer",
+            "Float",
+            "String",
+            "Text",
+            "URL",
+            "Bool",
+            "Secret",
+            "UUID",
+            "JSON"
+          ]
+        },
+        "_required": {
+          "type": "boolean",
+          "description": "Whether the parameter is required.",
+          "default": false
+        },
+        "json_schema_extra": {
+          "type": "object",
+          "description": "Container for arbitrary JSON Schema extension fields to merge into generated parameter schema.",
+          "additionalProperties": true
+        },
+        "default": {
+          "description": "Default value for the parameter."
+        }
+      },
+      "required": [
+        "_type"
+      ]
+    },
+    "ToolkitConfigurationDescriptor": {
+      "type": "object",
+      "description": "The ToolkitConfigurationDescriptor defines a structured blueprint for setting up an external integration (Git, Confluence, Jira, etc.). It specifies the overall type of the integration (via the _type property), which categorizes the nature or protocol of the connection, and mandates a set of configuration parameters (listed under the parameters property) essential for the integration to function properly.\n\nEach parameter in the configuration is further detailed using the ToolkitParameterDescriptor, ensuring that every required setting is clearly identified, properly typed (such as Integer, Float, String, URL, Bool, or Secret), and documented with a descriptive explanation. This structured approach not only enforces consistency and validation across integrations but also helps developers and administrators quickly understand the purpose and requirements of each configuration element.\n\nAn optional _description property is provided to offer a human-readable overview of the integration’s purpose and functionality, further enhancing clarity and ease of implementation. Overall, this descriptor standardizes the integration setup process, ensuring reliable and robust connections between external service providers and the integration ecosystem.",
+      "properties": {
+        "_type": {
+          "type": "string",
+          "description": "Type of the Integration."
+        },
+        "_description": {
+          "type": "string"
+        },
+        "parameters": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/ToolkitParameterDescriptor"
+          }
+        },
+        "fields_order": {
+          "type": "array",
+          "description": "Order of fields in the UI",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "_type",
+        "parameters"
+      ]
+    },
+    "ExternalToolDescriptor": {
+      "type": "object",
+      "description": "The ExternalToolDescriptor provides a comprehensive blueprint for representing an external tool within an integration ecosystem. It standardizes the metadata required to integrate and interact with such tools by including the following key elements:\n\nUnique Identification and Naming: It mandates a unique tool identifier (in UUID format) and a clear name to ensure that each tool can be distinctly recognized.\nDescriptive Details: A dedicated field offers a human-readable explanation of the tool’s purpose, functionality, and context within the broader system.\nIntegration Configuration: Through the integration configuration property, it defines how the tool connects with external systems. This includes specifying the integration type and the parameters necessary for establishing a robust and secure connection.\nCustomizable Tool Configuration: The descriptor also includes a configuration section that allows for tailored settings, ensuring that the tool’s behavior can be adjusted as needed within various operational contexts.\nResult Type Specification: It defines the expected type of output from the tool—whether Integer, Float, String, Bytes, Bool, Json, or Yaml—ensuring consistency in how results are interpreted and processed.\nApplicability to Data Sources: Finally, it lists the identifiers of the applicable data source types (also in UUID format) that the tool is designed to work with, facilitating precise mapping between tools and the data they operate on.\nOverall, the ExternalToolDescriptor is designed to promote seamless interoperability and consistent configuration of external tools, thereby enhancing the integration framework’s reliability and ease of use.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the tool."
+        },
+        "_description": {
+          "type": "string",
+          "description": "Description of the tool."
+        },
+        "args_schema": {
+          "type": "object",
+          "description": "Tool signature definition.",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "tool_metadata": {
+          "type": "object",
+          "description": "Metadata of the tool.",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "tool_result_type": {
+          "type": "string",
+          "description": "Type of the result returned by the tool.",
+          "enum": [
+            "Any",
+            "Integer",
+            "Float",
+            "String",
+            "Bytes",
+            "Bool",
+            "Json",
+            "Yaml"
+          ],
+          "default": "Any"
+        },
+        "sync_invocation_supported": {
+          "type": "boolean",
+          "description": "Whether the tool supports synchronous invocation.",
+          "default": true
+        },
+        "async_invocation_supported": {
+          "type": "boolean",
+          "description": "Whether the tool supports asynchronous invocation.",
+          "default": true
+        }
+      },
+      "required": [
+        "name",
+        "args_schema"
+      ]
+    },
+    "ExternalToolkitDescriptor": {
+      "type": "object",
+      "description": "The ExternalToolKitDescriptor defines a structured blueprint for representing an external toolkit within an integration ecosystem. It captures essential metadata such as a unique toolkit identifier (UUID), the toolkit’s name, and a detailed description of its purpose and functionality. Additionally, it includes a list of tools provided by the toolkit, which further detail how to interact with external functionalities. This descriptor ensures that external toolkits are consistently and securely integrated, facilitating reliable interoperability across diverse systems.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the toolkit."
+        },
+        "_description": {
+          "type": "string",
+          "description": "Description of the toolkit."
+        },
+        "toolkit_config": {
+          "$ref": "#/$defs/ToolkitConfigurationDescriptor"
+        },
+        "provided_tools": {
+          "type": "array",
+          "description": "Tools provided by the toolkit.",
+          "items": {
+            "$ref": "#/$defs/ExternalToolDescriptor"
+          }
+        },
+        "toolkit_metadata": {
+          "type": "object",
+          "description": "Metadata of the toolkit.",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "name",
+        "provided_tools"
+      ]
+    }
+  }
+}

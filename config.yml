@@ -1,0 +1,19 @@
+nltk_data: /tmp/nltk_data
+
+ai_token: ""
+
+ai_project_id: 1
+ai_project_allowed_domains: "centry.user"
+
+public_messages_route: true
+
+add_admin_roles:
+- "public_admin"
+
+max_published_versions_per_agent: 3
+
+# Publish validation config references (defaults in code):
+# publish_validation_prompt        - custom validation prompt (default: built-in)
+# publish_validation_timeout       - LLM call timeout in seconds (default: 60)
+# publish_validation_token_ttl     - HMAC token expiry in seconds (default: 300)
+# publish_validation_secret        - HMAC signing key (default: auto-generated on init)

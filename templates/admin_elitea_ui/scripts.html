@@ -1,0 +1,30 @@
+<div class="container-fluid">
+
+        <div class="card mt-3 card-table-sm">
+            <div class="card-header">
+                <div class="row">
+                    <div class="col-4">
+                        <h4>EliteaUI</h4>
+                    </div>
+                    <div class="col-8">
+                        <div class="d-flex justify-content-end">
+                            <button id="btn-update" type="button" class="btn btn-secondary btn-sm mr-2"><i class="fas fa-arrow-circle-down"></i> &nbsp; Update UI</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body">
+            </div>
+        </div>
+
+</div>
+
+
+<script src="{{ url_for('admin.static', filename='js/vendor/jquery.serialize-object.min.js') }}"></script>
+<script src="{{ url_for('admin.static', filename='js/vendor/axios.min.js') }}"></script>
+
+<script>
+  var elitea_ui_api_url = "{{ tools.context.url_prefix }}/api/v2/elitea_core/elitea_ui_ci/administration";
+</script>
+
+<script src="{{ url_for('elitea_core.static', filename='js/admin_elitea_ui.js') }}"></script>

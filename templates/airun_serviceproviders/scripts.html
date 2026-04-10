@@ -1,0 +1,97 @@
+<div class="container-fluid">
+
+  <div class="card mt-3 card-table-sm">
+      <div class="card-header">
+          <div class="row">
+              <div class="col-2">
+                  <h4>Service Providers</h4>
+              </div>
+              <div class="col-8">
+              </div>
+              <div class="col-2">
+                  <div class="d-flex justify-content-end">
+                    <button type="button" class="btn btn-32 btn-secondary refresh-table-button" data-target="#table-serviceproviders">
+                      <i class="fas fa-refresh"></i>
+                    </button>
+                    <button type="button" class="btn btn-32 btn-secondary" data-toggle="modal" data-target="#modal-adddescriptor">
+                      <i class="fas fa-plus"></i>
+                    </button>
+                  </div>
+              </div>
+          </div>
+      </div>
+      <div class="card-body">
+          <table class="table table-borderless"
+              id="table-serviceproviders"
+              data-toggle="table"
+              data-url="{{ tools.context.url_prefix }}/api/v2/elitea_core/admin/administration"
+              data-pagination="false"
+              data-click-to-select="false"
+            >
+              <thead class="thead-light">
+                  <tr>
+                      <th scope="col" data-sortable="true" data-field="project_id">Project</th>
+                      <th scope="col" data-sortable="true" data-field="provider_name">Provider</th>
+                      <th scope="col" data-sortable="true" data-field="service_location_url">URL</th>
+                      <th scope="col" data-sortable="true" data-field="healthy">Healthy</th>
+                      <th scope="col" data-align="right" data-width="50" data-formatter="actions_formatter" data-events="actions_events">Actions</th>
+                  </tr>
+              </thead>
+              <tbody>
+              </tbody>
+          </table>
+      </div>
+  </div>
+
+</div>
+
+<div class="modal modal-small fixed-left fade shadow-sm" tabindex="-1" role="dialog" id="modal-adddescriptor">
+    <div class="modal-dialog modal-dialog-aside" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="row w-100">
+                    <div class="col">
+                        <h2>Register provider descriptor</h2>
+                    </div>
+                    <div class="col-xs">
+                        <button type="button" class="btn btn-secondary" data-dismiss="modal" aria-label="Close">
+                            Cancel
+                        </button>
+                        &nbsp;
+                        <button type="button" id="btn-register-submit" class="btn btn-basic">
+                            Register
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-body">
+                <div>
+                    <div class="row">
+                        <div class="form-group col">
+                            <p class="font-h5 font-semibold">Project ID</p>
+                            <p class="font-h6 font-weight-400 mb-1">Enter project ID</p>
+                            <input type="text" id="input-project-id" class="form-control form-control-alternative" placeholder="Project ID">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="form-group col">
+                            <p class="font-h5 font-semibold">Service provider descriptor</p>
+                            <p class="font-h6 font-weight-400 mb-1">Enter descriptor</p>
+                            <textarea class="col-12" rows="20" id="input-descriptor"></textarea>
+                        </div>
+                    </div>
+                </div>
+            </div> <!-- modal-body -->
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('admin.static', filename='js/vendor/jquery.serialize-object.min.js') }}"></script>
+<script src="{{ url_for('admin.static', filename='js/vendor/axios.min.js') }}"></script>
+
+<script>
+  var api_url = "{{ tools.context.url_prefix }}/api/v2/elitea_core/admin/administration";
+  var register_url = "{{ tools.context.url_prefix }}/api/v2/elitea_core/register_descriptor/";
+</script>
+
+<script src="{{ url_for('elitea_core.static', filename='js/serviceproviders.js') }}"></script>

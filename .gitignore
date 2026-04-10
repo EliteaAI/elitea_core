@@ -1,0 +1,5 @@
+venv/
+*.pyc
+*.md
+MIGRATION*
+/static/ui

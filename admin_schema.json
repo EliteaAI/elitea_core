@@ -1,0 +1,187 @@
+{
+  "$schema": "https://elitea.ai/admin-config-schema/v1",
+  "plugin": "elitea_core",
+  "properties": {
+    "blocked_toolkits": {
+      "type": "array",
+      "items": { "type": "string" },
+      "title": "Blocked Toolkits",
+      "description": "Toolkit types that are completely disabled platform-wide. Blocked toolkits will not be registered, listed, or creatable.",
+      "path": "toolkit_security.blocked_toolkits",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": true,
+      "enum_source": "toolkit_names",
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "toolkit_security.blocked_toolkits"
+        }
+      ]
+    },
+    "blocked_tools": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "title": "Blocked Tools",
+      "description": "Specific tools blocked within allowed toolkits. Map of toolkit type to list of blocked tool names.",
+      "path": "toolkit_security.blocked_tools",
+      "section": "guardrails",
+      "default": {},
+      "requires_restart": true,
+      "enum_source_keys": "toolkit_names",
+      "enum_source_values": "toolkit_tools",
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "toolkit_security.blocked_tools"
+        }
+      ]
+    },
+    "sensitive_tools": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "title": "Sensitive Action Tools",
+      "description": "Tools that require explicit user authorization before execution. Map of toolkit type to list of tool names that trigger an authorization dialog at runtime.",
+      "path": "toolkit_security.sensitive_tools",
+      "section": "guardrails",
+      "default": {},
+      "requires_restart": true,
+      "enum_source_keys": "toolkit_names",
+      "enum_source_values": "toolkit_tools",
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "toolkit_security.sensitive_tools"
+        }
+      ]
+    },
+    "sensitive_action_company_name": {
+      "type": "string",
+      "title": "Company Name for Policy Message",
+      "description": "Company name displayed in the sensitive action authorization dialog. Used in the policy message template.",
+      "path": "toolkit_security.sensitive_action_company_name",
+      "section": "guardrails",
+      "default": "",
+      "requires_restart": true,
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "toolkit_security.sensitive_action_company_name"
+        }
+      ]
+    },
+    "sensitive_action_message_template": {
+      "type": "string",
+      "title": "Authorization Message Template",
+      "description": "Message template shown in the authorization dialog. Supports placeholders: {company_name}, {action_name}, {tool_name}, {toolkit_name}.",
+      "path": "toolkit_security.sensitive_action_message_template",
+      "section": "guardrails",
+      "default": "",
+      "requires_restart": true,
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "toolkit_security.sensitive_action_message_template"
+        }
+      ]
+    },
+    "mcp_enabled": {
+      "type": "boolean",
+      "title": "Enable MCP",
+      "description": "Master switch for MCP (Model Context Protocol) exposure. When disabled, the MCP checkbox is hidden in toolkit UI and all MCP SSE endpoints return 403.",
+      "path": "mcp_exposure.enabled",
+      "section": "guardrails",
+      "default": true,
+      "requires_restart": true
+    },
+    "mcp_in_menu": {
+      "type": "boolean",
+      "title": "Show MCPs in Sidebar",
+      "description": "Controls whether the MCPs menu item is visible in sidebar navigation.",
+      "path": "mcp_exposure.in_menu",
+      "section": "guardrails",
+      "default": true,
+      "requires_restart": true,
+      "visible_when": { "field": "mcp_enabled", "value": true }
+    },
+    "ai_project_id": {
+      "type": "integer",
+      "title": "Public Project ID",
+      "description": "Database ID of the public (Agent Studio) project. Set during initial platform setup.",
+      "path": "ai_project_id",
+      "section": "runtime",
+      "default": 1,
+      "requires_restart": true
+    },
+    "ai_project_allowed_domains": {
+      "type": "string",
+      "title": "Allowed Email Domains",
+      "description": "Comma-separated email domains auto-added to the public project on first login. Use * for all domains.",
+      "path": "ai_project_allowed_domains",
+      "section": "runtime",
+      "default": "centry.user"
+    },
+    "analytics_enabled": {
+      "type": "boolean",
+      "title": "Show Analytics",
+      "description": "Controls whether the Analytics tab is visible in project Settings. When disabled, the Analytics page is hidden for all users.",
+      "path": "analytics.enabled",
+      "section": "observability",
+      "default": true,
+      "requires_restart": true
+    },
+    "banner_enabled": {
+      "type": "boolean",
+      "title": "Banner Enabled",
+      "description": "When enabled, a notification banner is displayed to all users environment-wide.",
+      "path": "extra_ui_config.vite_maintenance_banner.enabled",
+      "section": "dedicated_banner",
+      "default": false
+    },
+    "banner_dismissible": {
+      "type": "boolean",
+      "title": "Dismissible",
+      "description": "When enabled, users can close the banner. Dismissed state persists until a new banner is configured or the user logs out.",
+      "path": "extra_ui_config.vite_maintenance_banner.dismissible",
+      "section": "dedicated_banner",
+      "default": false
+    },
+    "banner_icon": {
+      "type": "string",
+      "title": "Icon",
+      "description": "Icon type displayed alongside the banner message.",
+      "path": "extra_ui_config.vite_maintenance_banner.icon",
+      "section": "dedicated_banner",
+      "default": "info",
+      "enum": ["info", "warning"]
+    },
+    "banner_style": {
+      "type": "string",
+      "title": "Banner Style",
+      "description": "Visual style of the banner.",
+      "path": "extra_ui_config.vite_maintenance_banner.style",
+      "section": "dedicated_banner",
+      "default": "info",
+      "enum": ["info", "warning"]
+    },
+    "banner_message": {
+      "type": "string",
+      "title": "Banner Message",
+      "description": "The message content displayed in the banner. Supports Markdown formatting.",
+      "path": "extra_ui_config.vite_maintenance_banner.message",
+      "section": "dedicated_banner",
+      "default": ""
+    }
+  }
+}
