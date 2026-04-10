@@ -83,12 +83,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     """
 
     @web.method()
-    def get_tool_schemas_provider_hub(self, project_id, user_id):  # pylint: disable=R
+    def get_tool_schemas_provider_hub(self, project_id, user_id, personal_project_id=None):  # pylint: disable=R
         # user_id should be provided directly as a parameter of this method to prevent out odf context execution errors when calling this method from other system plugins e.g. applications
         """ Method """
         try:
             #
-            projects = self.expand_project_ids(user_id, project_id)
+            projects = self.expand_project_ids(user_id, project_id, personal_project_id=personal_project_id)
             result = {}
             #
             for project in projects:

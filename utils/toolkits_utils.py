@@ -1,8 +1,9 @@
-from tools import this
-from copy import deepcopy
+from tools import this, context
+
+from pylon.core.tools import log
 
 from ..utils.application_tools import find_suggested_toolkit_name_field
-from ..utils.toolkit_security import filter_blocked_toolkits, filter_tools_in_schema
+from ..utils.toolkit_security import filter_blocked_toolkits, filter_tools_in_schema, get_toolkit_security_config
 
 
 def format_tool_call_as_user_input(tool_name: str, tool_params: dict) -> str:
@@ -56,20 +57,34 @@ def get_toolkit_schemas(project_id: int, user_id: int) -> dict:
        their corresponding configurations under 'tools_configuration'.
     :rtype: Dict
     """
-    toolkit_schemas = deepcopy(this.module.toolkit_schemas)
+    # Step 1: resolve personal project ID once — reused by both provider_hub and mcp_sse
+    personal_project_id = None
+    try:
+        personal_project_id = context.rpc_manager.timeout(15).projects_get_personal_project_id(user_id)
+    except Exception:
+        log.warning("Failed to resolve personal project ID for user %s", user_id)
 
-    # Provider Hub schemas are always available (migrated to elitea_core)
-    toolkit_schemas.update(this.module.get_tool_schemas_provider_hub(project_id, user_id))
+    # Step 2/3: static schemas are already filtered and have name_required pre-computed at
+    # startup (in toolkits_collected). Shallow-copy the outer dict — values are not mutated.
+    toolkit_schemas = dict(this.module.toolkit_schemas)
 
-    # MCP SSE schemas are always available (migrated to elitea_core)
-    toolkit_schemas.update(this.module.get_tool_schemas_mcp_sse(project_id, user_id))
+    # Step 1: pass the already-resolved personal_project_id to avoid duplicate RPC calls
+    provider_hub_schemas = this.module.get_tool_schemas_provider_hub(
+        project_id, user_id, personal_project_id=personal_project_id
+    )
+    mcp_schemas = this.module.get_tool_schemas_mcp_sse(
+        project_id, user_id, personal_project_id=personal_project_id
+    )
 
-    # Filter out blocked toolkits (security feature)
-    toolkit_schemas = filter_blocked_toolkits(toolkit_schemas)
+    # Step 4: read security config once for the whole request
+    security_config = get_toolkit_security_config()
 
-    # Filter blocked tools within each toolkit and set name_required
-    for k in list(toolkit_schemas.keys()):
-        toolkit_schemas[k] = filter_tools_in_schema(toolkit_schemas[k])
-        toolkit_schemas[k]['name_required'] = find_suggested_toolkit_name_field(k) is None
+    # Step 3: apply filtering and set name_required only for dynamic (non-static) schemas
+    dynamic_schemas = {**provider_hub_schemas, **mcp_schemas}
+    dynamic_schemas = filter_blocked_toolkits(dynamic_schemas, config=security_config)
+    for k in list(dynamic_schemas.keys()):
+        dynamic_schemas[k] = filter_tools_in_schema(dynamic_schemas[k], config=security_config)
+        dynamic_schemas[k]['name_required'] = find_suggested_toolkit_name_field(k) is None
 
+    toolkit_schemas.update(dynamic_schemas)
     return toolkit_schemas

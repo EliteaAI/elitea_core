@@ -39,9 +39,13 @@ class Method:
 
         filtered_payload = filter_blocked_toolkit_list(payload)
 
-        # Also filter blocked tools within each toolkit
+        # Also filter blocked tools within each toolkit and pre-compute name_required
         for schema in filtered_payload:
-            filtered_schema = filter_tools_in_schema(schema)
+            filtered_schema = filter_tools_in_schema(schema, config=config)
+            filtered_schema['name_required'] = not any(
+                v.get('toolkit_name') and isinstance(v['toolkit_name'], bool)
+                for v in filtered_schema.get('properties', {}).values()
+            )
             self.toolkit_schemas[filtered_schema['title']] = filtered_schema
 
         blocked_count = len(payload) - len(filtered_payload)
