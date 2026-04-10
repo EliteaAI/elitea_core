@@ -70,6 +70,7 @@ class Method:
                 sio_event=sio_event,
                 event_type='chat_predict_summary_started',
                 message_id=payload.get('message_id'),
+                question_id=payload.get('question_id'),
                 content=payload.get('content', {}),
             )
 
@@ -79,6 +80,7 @@ class Method:
                 sio_event=sio_event,
                 event_type='chat_predict_summary_finished',
                 message_id=payload.get('message_id'),
+                question_id=payload.get('question_id'),
                 content=payload.get('content', {}),
             )
 
@@ -216,6 +218,7 @@ class Method:
             sio_event: str,
             event_type: str,
             message_id: str,
+            question_id: str,
             content: dict,
     ):
         """
@@ -226,6 +229,7 @@ class Method:
             sio_event: Socket.IO event name
             event_type: 'chat_predict_summary_started' or 'chat_predict_summary_finished'
             message_id: Message ID
+            question_id: Question ID (links the event to the user's question turn)
             content: Event content with summarization details
         """
         room = get_event_room(sio_event, stream_id)
@@ -235,6 +239,7 @@ class Method:
                 'type': event_type,
                 'stream_id': stream_id,
                 'message_id': message_id,
+                'question_id': question_id,
                 'content': content,
                 'sio_event': sio_event,
             },
