@@ -169,16 +169,6 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
     settings = deepcopy(settings)
     errors = []
 
-    # Check if this is a team project (not personal project)
-    is_team_project = True
-    try:
-        personal_project_id = context.rpc_manager.timeout(5).projects_get_personal_project_id(user_id)
-        if personal_project_id and personal_project_id == project_id:
-            is_team_project = False
-    except Exception as e:
-        log.warning(f"Could not determine if project is personal: {e}")
-        # Default to team project behavior if we can't determine
-
     # expand configurations (credentials)
     for to_be_expanded_fieldname in to_be_expanded_configuration_fieldnames:
         try:
@@ -188,22 +178,11 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
                 user_id
             )
         except LookupError as ex:
-            import json as _json
-            cred_settings = settings.get(to_be_expanded_fieldname) or {}
-            # Only return private_credential_not_found error for team projects
-            if cred_settings.get('private') and cred_settings.get('elitea_title') and is_team_project:
-                errors.append({
-                    'loc': (to_be_expanded_fieldname, ),
-                    'msg': _json.dumps({
-                        'error_type': 'private_credential_not_found',
-                        'credential_id': cred_settings['elitea_title'],
-                    }),
-                })
-            else:
-                errors.append({
-                    'loc': (to_be_expanded_fieldname, ),
-                    'msg': str(ex)
-                })
+            # Pass through error from configurations (may be structured JSON)
+            errors.append({
+                'loc': (to_be_expanded_fieldname, ),
+                'msg': str(ex)
+            })
         except Exception as ex:
             errors.append({
                 'loc': (to_be_expanded_fieldname, ),
