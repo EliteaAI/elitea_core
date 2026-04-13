@@ -13,7 +13,7 @@ add_admin_roles:
 max_published_versions_per_agent: 3
 
 # Publish validation config references (defaults in code):
-# publish_validation_prompt        - custom validation prompt (default: built-in)
+# publishing_guardrail.publish_validation_rules - custom AI evaluation rules (default: built-in, via admin UI)
 # publish_validation_timeout       - LLM call timeout in seconds (default: 60)
 # publish_validation_token_ttl     - HMAC token expiry in seconds (default: 300)
 # publish_validation_secret        - HMAC signing key (default: auto-generated on init)

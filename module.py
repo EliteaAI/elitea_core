@@ -198,8 +198,12 @@ class Module(module.ModuleModel):
             int(x) for x in guardrail.get('whitelist_project_ids', [])
             if isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit())
         )
-        log.info("Publishing guardrail: blocked=%s, whitelist=%s",
-                 self.is_publish_blocked, self.publish_whitelist_project_ids)
+        self.publish_validation_rules = guardrail.get(
+            'publish_validation_rules', '',
+        )
+        log.info("Publishing guardrail: blocked=%s, whitelist=%s, custom_rules=%s",
+                 self.is_publish_blocked, self.publish_whitelist_project_ids,
+                 bool(self.publish_validation_rules))
 
     def preload(self):
         """Preload handler - download UI bundle if needed"""
