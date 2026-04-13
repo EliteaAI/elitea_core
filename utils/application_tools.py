@@ -177,12 +177,6 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
                 project_id,
                 user_id
             )
-        except LookupError as ex:
-            # Pass through error from configurations (may be structured JSON)
-            errors.append({
-                'loc': (to_be_expanded_fieldname, ),
-                'msg': str(ex)
-            })
         except Exception as ex:
             errors.append({
                 'loc': (to_be_expanded_fieldname, ),
