@@ -136,6 +136,16 @@
       "enum_source": "projects",
       "visible_when": { "field": "is_publish_blocked", "value": true }
     },
+    "publish_validation_rules": {
+      "type": "string",
+      "format": "textarea",
+      "title": "Publish Validation Rules",
+      "description": "Custom evaluation criteria for AI validation of agents before publishing. Leave empty to use built-in rules. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
+      "path": "publishing_guardrail.publish_validation_rules",
+      "section": "guardrails",
+      "default": "",
+      "requires_restart": true
+    },
     "ai_project_id": {
       "type": "integer",
       "title": "Public Project ID",
