@@ -31,6 +31,7 @@ from ..utils.application_tools import (
 from ..utils.application_utils import (
     get_application_details,
     get_application_version_details_expanded,
+    validate_and_resolve_llm_settings,
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
@@ -128,16 +129,25 @@ class RPC:
                         message_id=data.get("message_id")
                     )
 
-                if not application_version.llm_settings:  # TODO: Probably wrong check
-                    raise SioValidationError(
-                        sio=self.context.sio,
-                        sid=sid,
-                        event=sio_event,
-                        error={'error': f"Application version with id '{parsed.version_id}' "
-                                    f"was not found its settings, please provide it in request"},
-                        stream_id=data.get("stream_id"),
-                        message_id=data.get("message_id")
+                if not application_version.llm_settings:
+                    resolve_project_id = chat_project_id or parsed.project_id
+                    resolved = validate_and_resolve_llm_settings(
+                        resolve_project_id, application_version.llm_settings,
+                        application_id=parsed.application_id, version_id=parsed.version_id
                     )
+                    if resolved and resolved.get('model_name'):
+                        application_version.llm_settings = resolved
+                    else:
+                        raise SioValidationError(
+                            sio=self.context.sio,
+                            sid=sid,
+                            event=sio_event,
+                            error={'error': f"Application version with id '{parsed.version_id}' "
+                                        f"has no LLM settings and no default LLM model is configured "
+                                        f"for the project"},
+                            stream_id=data.get("stream_id"),
+                            message_id=data.get("message_id")
+                        )
 
                 application_version.project_id = parsed.project_id  # compatibility with pd model
                 parsed_db = ApplicationChatRequest.from_orm(

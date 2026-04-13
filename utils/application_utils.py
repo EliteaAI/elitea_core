@@ -1188,19 +1188,17 @@ def validate_and_resolve_llm_settings(
     version_id: Optional[int] = None,
 ) -> Optional[dict]:
     """Check if llm_settings.model_name is available; fall back to the project's default LLM if not."""
-    if not llm_settings or not llm_settings.get('model_name'):
-        return llm_settings
-
-    model_name = llm_settings['model_name']
-    model_project_id = llm_settings.get('model_project_id') or project_id
-
     try:
         available = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_available_models(
             project_id=project_id, section='llm', include_shared=True
         )
 
-        if (model_project_id, model_name) in available:
-            return llm_settings
+        if llm_settings and llm_settings.get('model_name'):
+            model_name = llm_settings['model_name']
+            model_project_id = llm_settings.get('model_project_id') or project_id
+
+            if (model_project_id, model_name) in available:
+                return llm_settings
 
         default = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_default_model(
             project_id=project_id, section='llm', include_shared=True
@@ -1215,7 +1213,7 @@ def validate_and_resolve_llm_settings(
             )
             return llm_settings
 
-        resolved = dict(llm_settings)
+        resolved = dict(llm_settings) if llm_settings else {}
         resolved['model_name'] = default_model_name
         resolved['model_project_id'] = default_model_project_id
 
