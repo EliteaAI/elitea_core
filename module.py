@@ -250,6 +250,9 @@ class Module(module.ModuleModel):
                 "migrate_application_description_size", self.migrate_application_description_size
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_toolkit_settings_alita_title", self.migrate_toolkit_settings_alita_title
+            )
+            this.for_module("admin").module.register_admin_task(
                 "chat_cleanup_dup_msgs", self.chat_cleanup_dup_msgs
             )
         except Exception as e:
@@ -499,6 +502,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_provider_hub_secrets", self.migrate_provider_hub_secrets
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_toolkit_settings_alita_title", self.migrate_toolkit_settings_alita_title
             )
             this.for_module("admin").module.unregister_admin_task(
                 "chat_cleanup_dup_msgs", self.chat_cleanup_dup_msgs

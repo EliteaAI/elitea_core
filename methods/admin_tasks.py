@@ -278,6 +278,119 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": total_migrated}
 
     @web.method()
+    def migrate_toolkit_settings_alita_title(self, *args, **kwargs):
+        """Admin task: rename 'alita_title' to 'elitea_title' inside toolkit settings JSON.
+
+        Credential reference objects in EliteATool.settings (e.g. gitlab_configuration,
+        pgvector_configuration) may still contain the legacy 'alita_title' key from
+        before the EliteaAI debranding. This migration renames them to 'elitea_title'.
+
+        Idempotent: safe to run multiple times — skips objects that already use
+        'elitea_title' or don't contain 'alita_title'.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+        """
+        from copy import deepcopy  # pylint: disable=C0415
+        from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import EliteATool  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_toolkit_settings_alita_title: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error("migrate_toolkit_settings_alita_title: project_id= is required. Format: project_id=<all|N>[;dry_run]")
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("Starting migrate_toolkit_settings_alita_title (dry_run=%s, project_id_filter=%s)", dry_run, project_id_filter)
+        start_ts = time.time()
+        total_migrated = 0
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_toolkit_settings_alita_title: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    toolkits = session.query(EliteATool).all()
+
+                    for toolkit in toolkits:
+                        settings = toolkit.settings
+                        if not settings:
+                            continue
+
+                        needs_update = False
+                        updated_settings = deepcopy(settings)
+
+                        for key, val in settings.items():
+                            if not isinstance(val, dict) or 'alita_title' not in val:
+                                continue
+
+                            new_val = dict(val)
+                            alita_value = new_val.pop('alita_title')
+                            if 'elitea_title' not in new_val:
+                                new_val['elitea_title'] = alita_value
+                            updated_settings[key] = new_val
+                            needs_update = True
+
+                            log.info(
+                                "%sproject %s, toolkit id=%s (%s): %s.alita_title -> elitea_title",
+                                prefix, project_id, toolkit.id, toolkit.type, key
+                            )
+
+                        if needs_update:
+                            total_migrated += 1
+                            if not dry_run:
+                                toolkit.settings = updated_settings
+                                flag_modified(toolkit, 'settings')
+
+                    if not dry_run:
+                        session.commit()
+
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "%smigrate_toolkit_settings_alita_title: error in project %s", prefix, project_id
+                )
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_toolkit_settings_alita_title — %s %s toolkit(s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated", total_migrated, round(end_ts - start_ts, 2)
+        )
+        return {"migrated": total_migrated, "dry_run": dry_run}
+
+    @web.method()
     def chat_cleanup_dup_msgs(self, *args, **kwargs):
         """Admin task: remove duplicate message groups from a single conversation.
 
