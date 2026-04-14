@@ -46,6 +46,7 @@ class NotificationEventTypes(StrEnum):
     index_data_changed = 'index_data_changed'
     agent_unpublished = 'agent_unpublished'
     bucket_expiration_warning = 'bucket_expiration_warning'
+    personal_access_token_expiring = 'personal_access_token_expiring'
 
 
 class IndexDataStatus(StrEnum):
