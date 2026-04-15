@@ -54,6 +54,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
             result.get_likes(project_id)
             result.check_is_liked(project_id)
 
+            if result.version_details and result.version_details.tools:
+                for tool in result.version_details.tools:
+                    tool.set_agent_type(project_id)
+                    tool.fix_name(project_id)
+                    tool.set_agent_meta_and_fields(project_id)
+                    tool.set_online(project_id)
+
         result_dict = result.model_dump(mode='json')
         for tool in result_dict.get('version_details', {}).get('tools', []):
             tool['project_id'] = project_id
