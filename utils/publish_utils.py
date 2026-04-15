@@ -49,6 +49,7 @@ _VERSION_ALLOWLIST = frozenset({
     'welcome_message',
     'conversation_starters',
     'tags',
+    'llm_settings',
 })
 
 # Keys preserved from version.meta (everything else is stripped)
@@ -863,7 +864,7 @@ def _build_base_version_dict(ver_info: dict, user_id: int, project_id: int) -> d
         'user_id': user_id,
         'instructions': ver_info.get('instructions', ''),
         'agent_type': ver_info.get('agent_type', 'openai'),
-        'llm_settings': {'model_name': '', 'integration_uid': ''},
+        'llm_settings': {'model_name': ''},
         'meta': {},
         'status': PublishStatus.draft.value,
     }
@@ -896,6 +897,7 @@ def _build_published_version_dict(
         'tags': ver_info.get('tags', []),
         'welcome_message': ver_info.get('welcome_message', ''),
         'conversation_starters': ver_info.get('conversation_starters', []),
+        'llm_settings': ver_info.get('llm_settings') or {},
         'meta': meta,
         'status': PublishStatus.published.value,
     }
@@ -942,6 +944,7 @@ def create_embedded_agent(
         'instructions': ver_info.get('instructions', ''),
         'agent_type': ver_info.get('agent_type', 'openai'),
         'variables': ver_info.get('variables', []),
+        'llm_settings': ver_info.get('llm_settings') or {},
         'meta': meta,
         'status': PublishStatus.embedded.value,
     }
@@ -1186,6 +1189,89 @@ def cascade_delete_sub_agents(
 # High-level orchestration (called by API handlers)
 # ---------------------------------------------------------------------------
 
+def _check_shared_llm(
+    llm_settings: dict,
+    public_project_id: int,
+    label: str = 'agent',
+) -> Optional[Tuple[dict, int]]:
+    """Return an error tuple if llm_settings does not reference a shared model.
+
+    Returns ``None`` when the model is valid (shared).
+    """
+    model_name = (llm_settings.get('model_name') or '').strip()
+    model_project_id = llm_settings.get('model_project_id')
+
+    if not model_name:
+        return {
+            "error": "llm_not_shared",
+            "msg": f"No LLM model configured for {label}. "
+                   f"Select an LLM model before publishing.",
+        }, 400
+
+    if model_project_id is None:
+        return {
+            "error": "llm_not_shared",
+            "msg": f"LLM model settings are incomplete for {label} "
+                   f"(missing model_project_id). Re-select the LLM model "
+                   f"in the agent editor.",
+        }, 400
+
+    if int(model_project_id) != int(public_project_id):
+        return {
+            "error": "llm_not_shared",
+            "msg": f"Model '{model_name}' used by {label} is project-specific "
+                   f"(not a shared model). Only shared models from the Public "
+                   f"project are allowed for publishing.",
+        }, 400
+
+    return None
+
+
+def _check_shared_llm_tree(
+    session,
+    version_id: int,
+    sub_agent_tree: list,
+    public_project_id: int,
+) -> Optional[Tuple[dict, int]]:
+    """Verify the parent and all sub-agents use shared LLM models.
+
+    Reads ``llm_settings`` directly from ORM objects via the provided
+    *session* (read-only, no mutations).  Collects violations from the
+    parent and every sub-agent, returning them all in a single error
+    response so the user can fix everything in one pass.
+    Returns ``None`` when everything is valid.
+    """
+    errors: list[str] = []
+
+    parent_ver = session.query(ApplicationVersion).get(version_id)
+    if parent_ver:
+        parent_llm = parent_ver.llm_settings if isinstance(parent_ver.llm_settings, dict) else {}
+        err = _check_shared_llm(parent_llm, public_project_id, label='parent agent')
+        if err:
+            errors.append(err[0]['msg'])
+
+    for node in _flatten_tree(sub_agent_tree):
+        sub_ver = session.query(ApplicationVersion).get(node.version_id)
+        if not sub_ver:
+            continue
+        sub_llm = sub_ver.llm_settings if isinstance(sub_ver.llm_settings, dict) else {}
+        err = _check_shared_llm(
+            sub_llm, public_project_id,
+            label=f"sub-agent '{node.tool_name}'",
+        )
+        if err:
+            errors.append(err[0]['msg'])
+
+    if not errors:
+        return None
+
+    return {
+        "error": "llm_not_shared",
+        "msg": " | ".join(errors),
+        "details": errors,
+    }, 400
+
+
 def admin_publish(
     project_id: int,
     version_id: int,
@@ -1257,6 +1343,13 @@ def _publish_impl(
             return {"error": exc.error_code, "msg": str(exc)}, 400
         except ValueError as exc:
             return {"error": "sub_agent_validation", "msg": str(exc)}, 400
+
+        # 0b. Guard: require shared LLM model — parent + all sub-agents
+        llm_err = _check_shared_llm_tree(
+            source_session, version_id, sub_agent_tree, public_project_id,
+        )
+        if llm_err:
+            return llm_err
 
         # 1. Reject if version_name already taken (clone only)
         if clone_source and version_name_exists(
@@ -1454,10 +1547,12 @@ def compute_content_hash(snapshot: dict, sub_snapshots: list) -> str:
     payload = {
         'instructions': snapshot.get('version', {}).get('instructions', ''),
         'variables': snapshot.get('version', {}).get('variables', []),
+        'llm_settings': snapshot.get('version', {}).get('llm_settings', {}),
         'sub_agents': [
             {
                 'tool_name': s.get('tool_name', ''),
                 'instructions': s.get('instructions', ''),
+                'llm_settings': s.get('llm_settings', {}),
             }
             for s in sub_snapshots
         ],
@@ -1570,6 +1665,7 @@ def build_validation_input(
             'tags': sub_snap['version'].get('tags', []),
             'welcome_message': sub_snap['version'].get('welcome_message', ''),
             'conversation_starters': sub_snap['version'].get('conversation_starters', []),
+            'llm_settings': sub_snap['version'].get('llm_settings', {}),
         })
 
     validation_input = {
@@ -1846,6 +1942,51 @@ class VariablesChecker(BaseChecker):
                 )
 
 
+class LLMSharedModelChecker(BaseChecker):
+    """Ensures the agent uses a shared LLM model from the public project."""
+
+    def check(self, data, result, *, context=None):
+        llm_settings = data.get('llm_settings') or {}
+        model_name = (llm_settings.get('model_name') or '').strip()
+        model_project_id = llm_settings.get('model_project_id')
+
+        ctx = context if isinstance(context, dict) else {}
+        public_project_id = ctx.get('public_project_id')
+
+        if not model_name:
+            result.issue(
+                'critical', 'llm_settings',
+                'No LLM model configured',
+                'Select an LLM model before publishing',
+                context,
+            )
+            return
+
+        if model_project_id is None:
+            result.issue(
+                'critical', 'llm_settings',
+                'LLM model settings are incomplete (missing model_project_id)',
+                'Re-select the LLM model in the agent editor to update '
+                'model settings before publishing',
+                context,
+            )
+            return
+
+        if public_project_id is None:
+            return  # Cannot verify without public project id — skip
+
+        if int(model_project_id) != int(public_project_id):
+            result.issue(
+                'critical', 'llm_settings',
+                f"Model '{model_name}' is project-specific "
+                f"(not a shared model)",
+                'Only shared models from the Public project are allowed '
+                'for publishing. Switch to a shared model in the agent '
+                'editor',
+                context,
+            )
+
+
 class VersionNameChecker(BaseChecker):
     """Version name format, uniqueness, and quality.
 
@@ -1914,6 +2055,7 @@ _PARENT_CHAIN = ValidationChain([
     TagsChecker(),
     InstructionsChecker(),
     VariablesChecker(),
+    LLMSharedModelChecker(),
     VersionNameChecker(),
 ])
 
@@ -1923,6 +2065,7 @@ _SUB_AGENT_CHAIN = ValidationChain([
         min_length=30, short_severity='warnings', check_verbs=False,
     ),
     InstructionsChecker(),
+    LLMSharedModelChecker(),
 ])
 
 
@@ -1948,6 +2091,7 @@ def run_deterministic_checks(
         'tags': ver.get('tags'),
         'instructions': ver.get('instructions'),
         'variables': ver.get('variables'),
+        'llm_settings': ver.get('llm_settings', {}),
         'version_name': version_name,
     }
     parent_ctx = {
@@ -1965,11 +2109,16 @@ def run_deterministic_checks(
     for sub in sub_agent_snapshots:
         tool = sub.get('tool_name', 'unknown')
         name = sub.get('name', '')
-        ctx = f"sub-agent: {name} ({tool})" if name else f"sub-agent: {tool}"
+        label = f"sub-agent: {name} ({tool})" if name else f"sub-agent: {tool}"
+        ctx = {
+            'label': label,
+            'public_project_id': public_project_id,
+        }
         sub_data = {
             'name': sub.get('name'),
             'description': sub.get('description'),
             'instructions': sub.get('instructions'),
+            'llm_settings': sub.get('llm_settings', {}),
             '_all_sub_agent_names': all_sub_names,
         }
         _SUB_AGENT_CHAIN.run(sub_data, result, context=ctx)
@@ -2285,6 +2434,9 @@ def verify_token_for_publish(
             'tool_name': node.tool_name,
             'instructions': (
                 sub_snap['version'].get('instructions', '')
+            ),
+            'llm_settings': (
+                sub_snap['version'].get('llm_settings', {})
             ),
         })
 
