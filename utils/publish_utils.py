@@ -55,6 +55,7 @@ _VERSION_ALLOWLIST = frozenset({
 _META_ALLOWLIST = frozenset({
     'internal_tools',
     'step_limit',
+    'icon_meta',
 })
 
 
