@@ -8,6 +8,7 @@ import uuid
 import zipfile
 
 import yaml
+from pydantic import ValidationError
 
 from ..models.all import Application, ApplicationVersion
 from ..models.elitea_tools import EliteATool
@@ -20,7 +21,7 @@ from ..models.pd.application import (
     ApplicationExportModel,
 )
 from ..models.pd.export_import import ApplicationForkModel
-from ..models.pd.tool import ToolExportDetails, ToolForkDetails
+from ..models.pd.tool import ToolExportDetails, ToolForkDetails, ToolValidatedDetails
 
 
 def _export_compound_application_tools(
@@ -210,7 +211,28 @@ def _toolkits_deduplicate_by_import_uuid(toolkits):
     return res
 
 
-def export_application(project_id: int, user_id: int, application_ids: List[int] = None, forked: bool = False, follow_version_ids: list = None):
+def export_application(
+    project_id: int,
+    user_id: int,
+    application_ids: List[int] = None,
+    forked: bool = False,
+    follow_version_ids: list = None,
+    validate_toolkits: bool = False
+):
+    """
+    Export applications with optional toolkit validation.
+
+    Args:
+        project_id: Project ID
+        user_id: User ID
+        application_ids: List of application IDs to export
+        forked: Whether this is a fork operation
+        follow_version_ids: Optional list of specific version IDs to export
+        validate_toolkits: If True, validate all extracted toolkits (including nested)
+
+    Returns:
+        Dict with export data or validation results
+    """
     # maps id/version ids to import uuid/import version uuids of already processed entities
     data_done = defaultdict(dict)
     if follow_version_ids is not None:
@@ -228,12 +250,42 @@ def export_application(project_id: int, user_id: int, application_ids: List[int]
         else:
             app['original_exported'] = False
 
-    return _post_export(
+    result = _post_export(
         project_id-project_id,
         result=result,
         data_done=data_done,
         forked=forked
     )
+
+    # Validate all extracted toolkits if requested
+    if validate_toolkits and result.get('ok'):
+        validation_errors = []
+        for tool in result.get('toolkits', []):
+            # Skip application-type toolkits as they were already recursively exported/validated
+            if tool.get('type') == 'application':
+                continue
+
+            try:
+                # Add required fields for validation
+                tool['project_id'] = project_id
+                tool['user_id'] = user_id
+                ToolValidatedDetails.model_validate(tool)
+            except ValidationError as e:
+                for err in e.errors():
+                    validation_errors.append({
+                        'toolkit_name': tool.get('name', 'Unknown'),
+                        'toolkit_type': tool.get('type', 'Unknown'),
+                        'error': err
+                    })
+
+        if validation_errors:
+            return {
+                'ok': False,
+                'msg': 'Toolkit validation errors found',
+                'validation_errors': validation_errors
+            }
+
+    return result
 
 
 def _post_export(project_id: int, result: dict, data_done: dict, forked: bool = False):

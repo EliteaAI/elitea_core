@@ -940,30 +940,74 @@ def _check_configurations_connection_from_expanded_settings(
 
 
 
-def _validate_toolkit_type_application(session, tool: dict, project_id: int, user_id: int) -> bool:
+def _validate_toolkit_type_application(
+    session,
+    tool: dict,
+    project_id: int,
+    user_id: int
+) -> bool:
+    """
+    Validate application (agent/pipeline) toolkit by exporting it with validation.
+
+    Uses export_application() with validate_toolkits=True to recursively validate
+    all nested toolkits at any depth. The export function already handles recursive
+    traversal and circular reference protection.
+
+    Args:
+        session: Database session
+        tool: Application toolkit dict with settings.application_id and settings.application_version_id
+        project_id: Project ID
+        user_id: User ID
+
+    Returns:
+        True if validation passes
+
+    Raises:
+        ValueError: If application or any of its nested toolkits is misconfigured
+    """
     try:
         application_id = tool.get('settings', {}).get('application_id')
         application_version_id = tool.get('settings', {}).get('application_version_id')
+
+        if not application_id or not application_version_id:
+            raise ValueError("Application toolkit missing application_id or application_version_id")
+
+        # Use export_application with validation to check all nested toolkits
+        # This leverages the existing recursive traversal logic
         validated_recursive = export_application(
             project_id=project_id,
             user_id=user_id,
-            application_ids=[application_id,],
+            application_ids=[application_id],
             forked=False,
-            follow_version_ids=[application_version_id,]
+            follow_version_ids=[application_version_id],
+            validate_toolkits=True  # Enable validation of all extracted toolkits
         )
-        if not validated_recursive['ok']:
-            agent_name, version_name = application_ids_to_names(
-                session, application_id, application_version_id
-            )
-            log.warning(f"{application_id=} {application_version_id=}: {validated_recursive}")
-            raise ValueError(f"Application misconfiguration error for {agent_name=} {version_name=}")
 
+        if not validated_recursive.get('ok'):
+            # Build a readable error message from validation errors
+            error_msg = validated_recursive.get('msg', 'Application validation failed')
+            validation_errors = validated_recursive.get('validation_errors', [])
+
+            if validation_errors:
+                error_details = []
+                for ve in validation_errors:
+                    toolkit_name = ve.get('toolkit_name', 'Unknown')
+                    toolkit_type = ve.get('toolkit_type', 'Unknown')
+                    error = ve.get('error', {})
+                    error_details.append(f"{toolkit_name} ({toolkit_type}): {error.get('msg', str(error))}")
+
+                error_msg = f"{error_msg}: {'; '.join(error_details)}"
+
+            raise ValueError(error_msg)
+
+    except (ValueError, ValidationError):
+        # Already a validation error, re-raise as-is
+        raise
     except Exception as ex:
-        agent_name, version_name = application_ids_to_names(
-            session, application_id, application_version_id
-        )
-        log.warning(f"{application_id=} {application_version_id=}: {ex}")
-        raise ValueError(f"Application misconfiguration error for {agent_name=} {version_name=}") from None
+        application_id = tool.get('settings', {}).get('application_id', 'Unknown')
+        app_name = tool.get('name', f'Application {application_id}')
+        log.warning(f"Application validation error for {app_name}: {ex}")
+        raise ValueError(f"Application misconfiguration error for {app_name}") from None
 
     return True
 
