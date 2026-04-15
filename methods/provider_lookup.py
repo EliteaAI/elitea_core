@@ -59,15 +59,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return None
 
     @web.method()
-    def expand_project_ids(self, user_id, project_id):  # pylint: disable=R
+    def expand_project_ids(self, user_id, project_id, personal_project_id=None):  # pylint: disable=R
         """ Method """
         try:
-            try:
-                personal_project_id = context.rpc_manager.timeout(
-                    15
-                ).projects_get_personal_project_id(user_id)
-            except:  # pylint: disable=W0702
-                personal_project_id = None
+            if personal_project_id is None:
+                try:
+                    personal_project_id = context.rpc_manager.timeout(
+                        15
+                    ).projects_get_personal_project_id(user_id)
+                except:  # pylint: disable=W0702
+                    personal_project_id = None
             #
             try:
                 public_project_id = get_public_project_id()

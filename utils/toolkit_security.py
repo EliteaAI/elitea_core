@@ -82,17 +82,19 @@ def is_tool_blocked(toolkit_type: str, tool_name: str) -> bool:
     return False
 
 
-def get_blocked_tools_for_toolkit(toolkit_type: str) -> list:
+def get_blocked_tools_for_toolkit(toolkit_type: str, config: dict = None) -> list:
     """
     Get the list of blocked tools for a specific toolkit.
 
     Args:
         toolkit_type: The type/name of the toolkit
+        config: Optional pre-fetched security config to avoid re-reading on every call
 
     Returns:
         List of blocked tool names for this toolkit
     """
-    config = get_toolkit_security_config()
+    if config is None:
+        config = get_toolkit_security_config()
     blocked_tools = config['blocked_tools']
 
     toolkit_lower = toolkit_type.lower()
@@ -103,17 +105,19 @@ def get_blocked_tools_for_toolkit(toolkit_type: str) -> list:
     return []
 
 
-def filter_blocked_toolkits(toolkit_schemas: dict) -> dict:
+def filter_blocked_toolkits(toolkit_schemas: dict, config: dict = None) -> dict:
     """
     Filter out blocked toolkits from a dictionary of toolkit schemas.
 
     Args:
         toolkit_schemas: Dict mapping toolkit type to schema
+        config: Optional pre-fetched security config to avoid re-reading on every call
 
     Returns:
         Filtered dict with blocked toolkits removed
     """
-    config = get_toolkit_security_config()
+    if config is None:
+        config = get_toolkit_security_config()
     blocked = [t.lower() for t in config['blocked_toolkits']]
 
     filtered = {}
@@ -151,7 +155,7 @@ def filter_blocked_toolkit_list(toolkit_list: list) -> list:
     return filtered
 
 
-def filter_tools_in_schema(schema: dict) -> dict:
+def filter_tools_in_schema(schema: dict, config: dict = None) -> dict:
     """
     Filter out blocked tools from a toolkit schema.
 
@@ -162,6 +166,7 @@ def filter_tools_in_schema(schema: dict) -> dict:
 
     Args:
         schema: Toolkit schema dict
+        config: Optional pre-fetched security config to avoid re-reading on every call
 
     Returns:
         Schema with blocked tools filtered out
@@ -169,7 +174,7 @@ def filter_tools_in_schema(schema: dict) -> dict:
     from copy import deepcopy
 
     toolkit_type = schema.get('title', '')
-    blocked_tools = get_blocked_tools_for_toolkit(toolkit_type)
+    blocked_tools = get_blocked_tools_for_toolkit(toolkit_type, config=config)
 
     if not blocked_tools:
         return schema

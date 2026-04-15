@@ -33,23 +33,26 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     """
 
     @web.method()
-    def get_tool_schemas_mcp_sse(self, project_id: int, user_id: int):
+    def get_tool_schemas_mcp_sse(self, project_id: int, user_id: int, personal_project_id=None):
         """Get MCP server tool schemas for project/user"""
-        mcp_servers = self.get_registered_servers_private_and_current(project_id, user_id)
+        mcp_servers = self.get_registered_servers_private_and_current(
+            project_id, user_id, personal_project_id=personal_project_id
+        )
         return {
             server.name: _mcp_server_to_toolkit(server) for server in mcp_servers
         }
 
     @web.method()
-    def get_registered_servers_private_and_current(self, project_id: int, user_id: int = None):
+    def get_registered_servers_private_and_current(self, project_id: int, user_id: int = None, personal_project_id=None):
         """Get MCP servers for both private and current project"""
-        private_project_id = context.rpc_manager.call.projects_get_personal_project_id(user_id)
-        private_servers = self.servers_storage.get_servers_dict(private_project_id)
+        if personal_project_id is None:
+            personal_project_id = context.rpc_manager.call.projects_get_personal_project_id(user_id)
+        private_servers = self.servers_storage.get_servers_dict(personal_project_id)
         current_servers = self.servers_storage.get_servers_dict(project_id)
         result = list({**current_servers, **private_servers}.values())
         #
         log.debug(f"[MCP_CLIENT] All Mcp Servers {self.servers_storage.status()}:")
-        log.debug(f"[MCP_CLIENT] Collect Mcp Servers for private {private_project_id} ({user_id}) and current {project_id}:")
+        log.debug(f"[MCP_CLIENT] Collect Mcp Servers for private {personal_project_id} ({user_id}) and current {project_id}:")
         log.debug(f"[MCP_CLIENT] Mcp Servers for private :\n{_str_servers(private_servers.values())}")
         log.debug(f"[MCP_CLIENT] Mcp Servers for current :\n{_str_servers(current_servers.values())}")
         log.debug(f"[MCP_CLIENT] Mcp Servers joined :\n{_str_servers(result)}")

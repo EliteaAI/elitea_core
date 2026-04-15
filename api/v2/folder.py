@@ -12,6 +12,7 @@ from ...models.all import SelectedConversations
 from ...models.conversation import Conversation
 from ...models.enums.all import ParticipantTypes
 from ...models.folder import ConversationFolder
+from ...models.message_group import ConversationMessageGroup
 from ...models.participants import Participant, ParticipantMapping
 from ...models.pd.conversation import ConversationList
 from ...models.pd.folder import FolderCreate, FolderUpdate, FolderDetails, FolderList
@@ -149,20 +150,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 for conv in all_conversations:
                     conv_by_folder[conv.folder_id].append(conv)
 
-                # Folders already sorted by position DESC from database query
+                folder_conv_ids = [conv.id for conv in all_conversations]
+                mg_counts_folder = dict(
+                    session.query(
+                        ConversationMessageGroup.conversation_id,
+                        func.count(ConversationMessageGroup.id)
+                    ).filter(
+                        ConversationMessageGroup.conversation_id.in_(folder_conv_ids)
+                    ).group_by(ConversationMessageGroup.conversation_id).all()
+                ) if folder_conv_ids else {}
+
                 for folder in folders:
                     conversations = conv_by_folder.get(folder.id, [])
                     if q:
                         conversations = [c for c in conversations if q.lower() in c.name.lower()]
 
                     folder_item = serialize(FolderList.model_validate(folder))
-                    # Add folder_id to each conversation within the folder
                     folder_item["conversations"] = [
                        {
                            "folder_id": folder.id,
                            "participants_count": len(conversation.participants),
-                           # TODO rename to message_groups_count
-                           "messages_count": conversation.message_groups.count(),
+                           "messages_count": mg_counts_folder.get(conversation.id, 0),
                            "users_count": sum(1 for p in conversation.participants if p.entity_name == ParticipantTypes.user.value),
                            **serialize(ConversationList.from_orm(conversation)),
                        } for conversation in conversations
@@ -176,19 +184,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if existing_selection:
                 selected_conversation_id = existing_selection.conversation_id
 
+            ungrouped_ids = [conv.id for conv in result]
+            mg_counts_ungrouped = dict(
+                session.query(
+                    ConversationMessageGroup.conversation_id,
+                    func.count(ConversationMessageGroup.id)
+                ).filter(
+                    ConversationMessageGroup.conversation_id.in_(ungrouped_ids)
+                ).group_by(ConversationMessageGroup.conversation_id).all()
+            ) if ungrouped_ids else {}
+
             return {
                 "total_folders": total_folders,
                 "folders": folder_data,
                 "total_ungrouped": total,
                 "selected_conversation_id": selected_conversation_id,
-                # Set folder_id to null for ungrouped conversations
                 "ungrouped_conversations": [
                     {
                         "folder_id": None,
                         **serialize(ConversationList.from_orm(i)),
                         "participants_count": len(i.participants),
-                        # TODO rename to message_groups_count
-                        "messages_count": i.message_groups.count(),
+                        "messages_count": mg_counts_ungrouped.get(i.id, 0),
                         "users_count": sum(1 for p in i.participants if p.entity_name == ParticipantTypes.user.value),
                     } for i in result
                 ],
