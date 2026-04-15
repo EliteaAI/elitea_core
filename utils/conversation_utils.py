@@ -52,8 +52,13 @@ def calculate_conversation_duration(conversation: Conversation, session: Session
         ),
         # Case 2: Toolkit-only execution (uses execution_time_seconds from SDK response)
         # This handles standalone toolkit testing where there's no LLM/thinking_steps
+        # Check both JSONB key existence (->  IS NOT NULL) and text value (-->> IS NOT NULL)
+        # to avoid matching JSON null values which would return SQL NULL after cast
         (
-            ConversationMessageGroup.meta['execution_time_seconds'].isnot(None),
+            and_(
+                ConversationMessageGroup.meta['execution_time_seconds'].isnot(None),
+                ConversationMessageGroup.meta['execution_time_seconds'].astext.isnot(None)
+            ),
             cast(ConversationMessageGroup.meta['execution_time_seconds'].astext, Float)
         ),
         # Case 3: Fallback to updated_at - created_at

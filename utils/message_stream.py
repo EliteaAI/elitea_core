@@ -36,15 +36,16 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
     thread_id_value = payload['response_metadata'].get(
         'thread_id'
     ) if payload['response_metadata'].get('thread_id') else old_meta.get('thread_id')
-    new_meta.update(
-        {
-            'thread_id': thread_id_value,
-            'references': payload.get('references', []),
-            'is_error': payload['response_metadata'].get('is_error', False),
-            'error': payload['response_metadata'].get('error', ''),
-            'execution_time_seconds': payload['response_metadata'].get('execution_time_seconds'),
-        }
-    )
+    meta_update = {
+        'thread_id': thread_id_value,
+        'references': payload.get('references', []),
+        'is_error': payload['response_metadata'].get('is_error', False),
+        'error': payload['response_metadata'].get('error', ''),
+    }
+    exec_time = payload['response_metadata'].get('execution_time_seconds')
+    if exec_time is not None:
+        meta_update['execution_time_seconds'] = exec_time
+    new_meta.update(meta_update)
     response_meta = payload['response_metadata']
     should_continue = payload['response_metadata'].get("should_continue")
 
