@@ -1046,7 +1046,14 @@ class RPC:
 
         if sid and not auth.is_sio_user_in_project(sid, project_id):
             log.warning("Sid %s is not in project %s", sid, project_id)
-            return  # FIXME: need some proper error?
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=sio_event,
+                error='User is not authorized for this project',
+                stream_id=data.get("stream_id"),
+                message_id=data.get("message_id")
+            )
 
         # Ensure tool_params is present (can be empty dict)
         if 'tool_params' not in data:

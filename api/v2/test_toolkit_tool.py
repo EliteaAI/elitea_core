@@ -78,6 +78,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.error(f"Error in test_toolkit_tool API: {str(e)}")
             return {'error': str(e)}, 500
         
+        if not result:
+            return {'error': 'No response from toolkit tool test'}, 500
+        
         task_id = result.get('task_id')
         if await_response:
             if not result.get('result'):
