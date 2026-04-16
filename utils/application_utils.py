@@ -996,13 +996,10 @@ def validate_application_version_details(
     if _visited is None:
         _visited = set()
 
-    # Check for circular reference BEFORE processing this application
+    # Skip if already validated in this chain (prevents circular references and duplicate work)
     key = (application_id, version_id)
     if key in _visited:
-        raise ValueError(
-            f"Circular reference detected: application {application_id}, version {version_id} "
-            f"is already being validated in this chain"
-        )
+        return True
     _visited.add(key)
 
     with db.get_session(project_id) as session:
