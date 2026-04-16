@@ -936,8 +936,13 @@ def create_embedded_agent(
     meta['parent_published_app_id'] = parent_pub_app_id
     meta['parent_published_version_id'] = parent_pub_ver_id
 
+    source_name = ver_info.get('name') or 'base_subagent'
+    # Avoid collision with the always-created base version
+    if source_name == 'base':
+        source_name = 'base_subagent'
+
     embedded_version = {
-        'name': 'embedded',
+        'name': source_name,
         'author_id': user_id,
         'project_id': public_project_id,
         'user_id': user_id,
@@ -968,7 +973,7 @@ def create_embedded_agent(
         session.flush()
 
         emb_ver = next(
-            (v for v in application.versions if v.name == 'embedded'),
+            (v for v in application.versions if v.name != 'base'),
             None,
         )
         if emb_ver is not None:
