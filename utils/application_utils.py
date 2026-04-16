@@ -954,7 +954,7 @@ def _validate_toolkit_type_application(
         tool: Application toolkit dict with settings.application_id and settings.application_version_id
         project_id: Project ID
         user_id: User ID
-        _visited: Set of (application_id, version_id) tuples for cycle detection
+        _visited: Set of (application_id, version_id) tuples for cycle detection (should not be None when called)
 
     Returns:
         True if validation passes
@@ -968,16 +968,14 @@ def _validate_toolkit_type_application(
     if not application_id or not application_version_id:
         raise ValueError("Application toolkit missing application_id or application_version_id")
 
-    # Cycle protection
+    # _visited should always be initialized by validate_application_version_details
+    # Keep backward compatibility just in case
     if _visited is None:
         _visited = set()
-    key = (application_id, application_version_id)
-    if key in _visited:
-        raise ValueError(f"Circular sub-agent reference: application {application_id}, version {application_version_id}")
-    _visited.add(key)
 
     agent_name, version_name = application_ids_to_names(session, application_id, application_version_id)
     try:
+        # Circular check is now done inside validate_application_version_details
         validate_application_version_details(project_id, application_id, application_version_id, user_id, _visited=_visited)
     except Exception as ex:
         raise ValueError(
@@ -994,6 +992,19 @@ def validate_application_version_details(
     user_id: int,
     _visited: set = None
 ) -> bool:
+    # Initialize _visited set at the top level to share across all sibling toolkits
+    if _visited is None:
+        _visited = set()
+
+    # Check for circular reference BEFORE processing this application
+    key = (application_id, version_id)
+    if key in _visited:
+        raise ValueError(
+            f"Circular reference detected: application {application_id}, version {version_id} "
+            f"is already being validated in this chain"
+        )
+    _visited.add(key)
+
     with db.get_session(project_id) as session:
         application_version = session.query(ApplicationVersion).filter(
             ApplicationVersion.id == version_id,
