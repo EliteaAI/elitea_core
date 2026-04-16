@@ -51,7 +51,6 @@ class ProjectAPI(api_tools.APIModeHandler):
         client_secret = data.client_secret
         scope = data.scope
 
-        log.debug(f"MCP OAuth proxy request: toolkit_id={data.toolkit_id}, has_client_secret={bool(client_secret)}, client_secret_preview={client_secret[:10] if client_secret else None}")
 
         # Helper function to detect masked secrets (e.g., "*****", "****6afP")
         def is_masked_secret(value):
