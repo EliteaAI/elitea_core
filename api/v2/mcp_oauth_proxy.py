@@ -24,6 +24,7 @@ from pylon.core.tools import log
 from ...models.elitea_tools import EliteATool
 from ...models.pd.mcp_oauth import McpOAuthTokenRequest
 from ...utils.mcp_oauth import exchange_token, refresh_token
+from ....configurations.utils import expand_configuration
 
 
 class ProjectAPI(api_tools.APIModeHandler):
@@ -50,6 +51,18 @@ class ProjectAPI(api_tools.APIModeHandler):
         client_secret = data.client_secret
         scope = data.scope
 
+
+        # Helper function to detect masked secrets (e.g., "*****", "****6afP")
+        def is_masked_secret(value):
+            """Detect if a value is a masked secret pattern."""
+            import re
+            return isinstance(value, str) and bool(re.match(r'^\*+', value))
+
+        # Treat masked secrets as None so we fetch from database
+        if is_masked_secret(client_secret):
+            log.debug(f"MCP OAuth proxy: detected masked client_secret, will fetch from database")
+            client_secret = None
+
         # Unsecret any vault references in the request data (e.g., {{secret.my_secret}})
         vault_client = VaultClient(project_id)
         if client_secret:
@@ -72,7 +85,7 @@ class ProjectAPI(api_tools.APIModeHandler):
                     # Unsecret the settings to resolve any vault secret references (e.g., {{secret.my_secret}})
                     try:
                         settings = vault_client.unsecret(settings)
-                        log.debug(f"MCP OAuth proxy: unsecreted toolkit settings")
+                        log.debug(f"MCP OAuth proxy: unsecreted toolkit settings, keys: {list(settings.keys())}")
                     except Exception as e:
                         log.warning(f"MCP OAuth proxy: failed to unsecret toolkit settings - {e}")
 
@@ -85,15 +98,33 @@ class ProjectAPI(api_tools.APIModeHandler):
                         settings = self.module.resolve_mcp_prebuilt_settings(settings)
 
                     # Use DB/resolved credentials if not provided in request (or if request value was just a vault reference)
+                    # For SharePoint toolkit, sharepoint_configuration may be a reference to a configuration
+                    sp_config = settings.get('sharepoint_configuration', {})
+                    log.debug(f"MCP OAuth proxy: sp_config keys: {list(sp_config.keys()) if sp_config else 'None'}")
+
+                    # If sharepoint_configuration only has reference fields (elitea_title, private), expand it
+                    config_title = sp_config.get('elitea_title')
+                    if config_title and not sp_config.get('client_id'):
+                        log.debug(f"MCP OAuth proxy: expanding configuration by title: {config_title}")
+                        try:
+                            # Get user_id from auth context for private configuration lookup
+                            user_id = auth.current_user().get('id') if sp_config.get('private') else None
+                            # expand_configuration modifies sp_config in place and unsecretes the data
+                            expand_configuration(sp_config, current_project_id=project_id, user_id=user_id, unsecret=True)
+                            log.debug(f"MCP OAuth proxy: expanded configuration data, keys: {list(sp_config.keys())}")
+                        except Exception as e:
+                            log.error(f"MCP OAuth proxy: failed to expand configuration '{config_title}' - {e}")
+
                     if not client_id:
-                        client_id = settings.get('client_id')
+                        client_id = settings.get('client_id') or sp_config.get('client_id')
                     if not client_secret:
-                        client_secret = settings.get('client_secret')
+                        client_secret = settings.get('client_secret') or sp_config.get('client_secret')
+                        log.debug(f"MCP OAuth proxy: extracted client_secret from DB: {bool(client_secret)}, preview: {client_secret[:8] if client_secret else 'None'}")
                     if not scope:
-                        scope = settings.get('scopes')
+                        scope = settings.get('scopes') or sp_config.get('scopes')
                         if isinstance(scope, list):
                             scope = ' '.join(scope)
-                    
+
                     log.debug(f"MCP OAuth proxy: using credentials from toolkit {data.toolkit_id} (type: {data.toolkit_type})")
             except Exception as e:
                 log.error(f"MCP OAuth proxy: error fetching toolkit - {e}")

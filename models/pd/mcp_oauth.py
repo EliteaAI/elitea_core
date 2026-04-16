@@ -44,6 +44,7 @@ class McpOAuthTokenRequest(BaseModel):
     scope: Optional[str] = Field(default=None, description="OAuth scope")
     toolkit_id: Optional[int] = Field(default=None, description="Toolkit ID to fetch credentials from DB")
     toolkit_type: Optional[str] = Field(default=None, description="Toolkit type for fetching credentials (e.g., mcp_github, etc.)")
+    configuration_uuid: Optional[str] = Field(default=None, description="Configuration UUID for token storage key (frontend use only)")
 
     @field_validator('client_secret')
     @classmethod
