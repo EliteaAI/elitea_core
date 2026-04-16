@@ -163,7 +163,7 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
             to_be_expanded_configuration_fieldnames.append(k)
         elif v.get('toolkit_types'):
             to_be_expanded_toolkit_fieldnames.append(k)
-        elif v.get('secret') is True and k.startswith('toolkit_configuration_'):
+        elif v.get('secret') is True:
             provider_hub_secret_fieldnames.append(k)
 
     settings = deepcopy(settings)
@@ -254,7 +254,7 @@ def wrap_provider_hub_secret_fields(type_: str, settings: dict, project_id: int)
 
     secret_fieldnames = [
         k for k, v in tk.get('properties', {}).items()
-        if v.get('secret') is True and k.startswith('toolkit_configuration_')
+        if v.get('secret') is True
     ]
     if not secret_fieldnames:
         return
