@@ -367,7 +367,9 @@ class PublishedApplicationDetailModel(ApplicationDetailLikesModel):
     @field_validator('versions')
     @classmethod
     def check_versions(cls, value: list) -> list:
-        return [version for version in value if version.status == PublishStatus.published]
+        return [version for version in value if version.status in (
+            PublishStatus.published, PublishStatus.embedded,
+        )]
 
 
 class PublishedApplicationListModel(ApplicationListModel):
