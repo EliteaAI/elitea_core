@@ -117,3 +117,13 @@ Run admin task migrate_application_description_size with param: project_id=all
 # Needed after the alita→elitea debranding — the table/column rename migration didn't cover JSON data
 Run admin task migrate_toolkit_settings_alita_title with param: project_id=all;dry_run
 Run admin task migrate_toolkit_settings_alita_title with param: project_id=all
+
+# Jira/Confluence cloud->hosting migration
+# Migrates the deprecated 'cloud' boolean from Jira/Confluence toolkit settings
+# to the 'hosting' field in the corresponding configuration:
+#   cloud: true  -> hosting: "Cloud"
+#   cloud: false -> hosting: "Server"
+# Also removes the 'cloud' field from toolkit settings after migration.
+# Run with dry_run first to see what would be changed.
+Run admin task migrate_jira_confluence_hosting with param: project_id=all;dry_run
+Run admin task migrate_jira_confluence_hosting with param: project_id=all

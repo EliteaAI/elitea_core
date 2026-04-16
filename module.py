@@ -255,6 +255,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "chat_cleanup_dup_msgs", self.chat_cleanup_dup_msgs
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_jira_confluence_hosting", self.migrate_jira_confluence_hosting
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -515,6 +518,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "chat_cleanup_dup_msgs", self.chat_cleanup_dup_msgs
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_jira_confluence_hosting", self.migrate_jira_confluence_hosting
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
