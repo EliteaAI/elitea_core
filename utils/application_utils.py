@@ -24,7 +24,6 @@ from ..models.pd.version import ApplicationVersionDetailToolValidatedModel
 from ..models.all import Tag
 from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
-from ..utils.export_import import export_application
 from ..models.pd.tool import ToolValidatedDetails
 
 
@@ -944,20 +943,18 @@ def _validate_toolkit_type_application(
     session,
     tool: dict,
     project_id: int,
-    user_id: int
+    user_id: int,
+    _visited: set = None
 ) -> bool:
     """
-    Validate application (agent/pipeline) toolkit by exporting it with validation.
-
-    Uses export_application() with validate_toolkits=True to recursively validate
-    all nested toolkits at any depth. The export function already handles recursive
-    traversal and circular reference protection.
+    Validate application (agent/pipeline) toolkit recursively.
 
     Args:
         session: Database session
         tool: Application toolkit dict with settings.application_id and settings.application_version_id
         project_id: Project ID
         user_id: User ID
+        _visited: Set of (application_id, version_id) tuples for cycle detection
 
     Returns:
         True if validation passes
@@ -965,49 +962,27 @@ def _validate_toolkit_type_application(
     Raises:
         ValueError: If application or any of its nested toolkits is misconfigured
     """
+    application_id = tool.get('settings', {}).get('application_id')
+    application_version_id = tool.get('settings', {}).get('application_version_id')
+
+    if not application_id or not application_version_id:
+        raise ValueError("Application toolkit missing application_id or application_version_id")
+
+    # Cycle protection
+    if _visited is None:
+        _visited = set()
+    key = (application_id, application_version_id)
+    if key in _visited:
+        raise ValueError(f"Circular sub-agent reference: application {application_id}, version {application_version_id}")
+    _visited.add(key)
+
+    agent_name, version_name = application_ids_to_names(session, application_id, application_version_id)
     try:
-        application_id = tool.get('settings', {}).get('application_id')
-        application_version_id = tool.get('settings', {}).get('application_version_id')
-
-        if not application_id or not application_version_id:
-            raise ValueError("Application toolkit missing application_id or application_version_id")
-
-        # Use export_application with validation to check all nested toolkits
-        # This leverages the existing recursive traversal logic
-        validated_recursive = export_application(
-            project_id=project_id,
-            user_id=user_id,
-            application_ids=[application_id],
-            forked=False,
-            follow_version_ids=[application_version_id],
-            validate_toolkits=True  # Enable validation of all extracted toolkits
-        )
-
-        if not validated_recursive.get('ok'):
-            # Build a readable error message from validation errors
-            error_msg = validated_recursive.get('msg', 'Application validation failed')
-            validation_errors = validated_recursive.get('validation_errors', [])
-
-            if validation_errors:
-                error_details = []
-                for ve in validation_errors:
-                    toolkit_name = ve.get('toolkit_name', 'Unknown')
-                    toolkit_type = ve.get('toolkit_type', 'Unknown')
-                    error = ve.get('error', {})
-                    error_details.append(f"{toolkit_name} ({toolkit_type}): {error.get('msg', str(error))}")
-
-                error_msg = f"{error_msg}: {'; '.join(error_details)}"
-
-            raise ValueError(error_msg)
-
-    except (ValueError, ValidationError):
-        # Already a validation error, re-raise as-is
-        raise
+        validate_application_version_details(project_id, application_id, application_version_id, user_id, _visited=_visited)
     except Exception as ex:
-        application_id = tool.get('settings', {}).get('application_id', 'Unknown')
-        app_name = tool.get('name', f'Application {application_id}')
-        log.warning(f"Application validation error for {app_name}: {ex}")
-        raise ValueError(f"Application misconfiguration error for {app_name}") from None
+        raise ValueError(
+            f"Application misconfiguration error for {agent_name=} {version_name=}: {ex}"
+        ) from None
 
     return True
 
@@ -1016,7 +991,8 @@ def validate_application_version_details(
     project_id: int,
     application_id: int,
     version_id: int,
-    user_id: int
+    user_id: int,
+    _visited: set = None
 ) -> bool:
     with db.get_session(project_id) as session:
         application_version = session.query(ApplicationVersion).filter(
@@ -1051,7 +1027,8 @@ def validate_application_version_details(
                         session=session,
                         tool=tool,
                         project_id=project_id,
-                        user_id=user_id
+                        user_id=user_id,
+                        _visited=_visited
                     )
                 except ValueError as ex:
                     application_toolkit_errors.append({
