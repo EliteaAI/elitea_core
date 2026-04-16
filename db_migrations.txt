@@ -124,13 +124,6 @@ Run admin task migrate_toolkit_settings_alita_title with param: project_id=all
 #   cloud: true  -> hosting: "Cloud"
 #   cloud: false -> hosting: "Server"
 # Also removes the 'cloud' field from toolkit settings after migration.
-# Run with dry_run=true first to see what would be changed.
-curl -X POST https://<url>/api/v2/elitea_core/jira_confluence_hosting_migration/administration \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"project_id": 0, "dry_run": true}'
-
-curl -X POST https://<url>/api/v2/elitea_core/jira_confluence_hosting_migration/administration \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"project_id": 0, "dry_run": false}'
+# Run with dry_run first to see what would be changed.
+Run admin task migrate_jira_confluence_hosting with param: project_id=all;dry_run
+Run admin task migrate_jira_confluence_hosting with param: project_id=all

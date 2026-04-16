@@ -391,6 +391,227 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": total_migrated, "dry_run": dry_run}
 
     @web.method()
+    def migrate_jira_confluence_hosting(self, *args, **kwargs):
+        """Admin task: migrate 'cloud' boolean from Jira/Confluence toolkit settings to 'hosting' field.
+
+        This migration:
+        1. Finds Jira/Confluence toolkits with 'cloud' field in settings
+        2. Maps cloud boolean to hosting string: true -> "Cloud", false -> "Server"
+        3. Updates the corresponding Configuration's data.hosting field
+        4. Removes the 'cloud' field from toolkit settings (only after config is updated)
+
+        Idempotent: safe to run multiple times — skips toolkits without 'cloud' field.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+        """
+        from copy import deepcopy  # pylint: disable=C0415
+        from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import EliteATool  # pylint: disable=C0415
+
+        # Import Configuration model
+        try:
+            from plugins.configurations.models.configuration import Configuration  # pylint: disable=C0415
+        except ImportError:
+            log.error("migrate_jira_confluence_hosting: configurations plugin not available")
+            return {"migrated": 0, "error": "configurations plugin not available"}
+
+        # Mapping of cloud boolean to hosting string
+        CLOUD_TO_HOSTING = {True: "Cloud", False: "Server"}
+
+        # Toolkit types and their corresponding configuration keys
+        TOOLKIT_CONFIG_MAPPING = {
+            "jira": "jira_configuration",
+            "confluence": "confluence_configuration",
+        }
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_jira_confluence_hosting: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error("migrate_jira_confluence_hosting: project_id= is required. Format: project_id=<all|N>[;dry_run]")
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("Starting migrate_jira_confluence_hosting (dry_run=%s, project_id_filter=%s)", dry_run, project_id_filter)
+        start_ts = time.time()
+
+        # Track migration results
+        results = {
+            "migrated_toolkits": 0,
+            "migrated_configurations": 0,
+            "skipped_toolkits": 0,
+            "failed_projects": 0,
+            "errors": []
+        }
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_jira_confluence_hosting: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    # Find all Jira/Confluence toolkits
+                    toolkits = session.query(EliteATool).filter(
+                        EliteATool.type.in_(TOOLKIT_CONFIG_MAPPING.keys())
+                    ).all()
+
+                    for toolkit in toolkits:
+                        settings = toolkit.settings or {}
+
+                        # Check if toolkit has 'cloud' field
+                        if 'cloud' not in settings:
+                            results["skipped_toolkits"] += 1
+                            continue
+
+                        cloud_value = settings.get('cloud')
+                        hosting_value = CLOUD_TO_HOSTING.get(cloud_value)
+
+                        if hosting_value is None:
+                            log.warning(
+                                "%sproject %s, toolkit id=%s (%s): invalid 'cloud' value %s, skipping",
+                                prefix, project_id, toolkit.id, toolkit.type, cloud_value
+                            )
+                            results["skipped_toolkits"] += 1
+                            continue
+
+                        # Get configuration key for this toolkit type
+                        config_key = TOOLKIT_CONFIG_MAPPING.get(toolkit.type)
+                        if not config_key:
+                            results["skipped_toolkits"] += 1
+                            continue
+
+                        # Get configuration reference from toolkit settings
+                        config_ref = settings.get(config_key)
+                        if not config_ref:
+                            results["skipped_toolkits"] += 1
+                            continue
+
+                        elitea_title = config_ref.get('elitea_title')
+                        is_private = config_ref.get('private', True)
+
+                        if not elitea_title:
+                            results["skipped_toolkits"] += 1
+                            continue
+
+                        # Determine which project's configuration to update
+                        config_project_id = project_id if is_private else project_id
+
+                        # Find and update the configuration
+                        config_updated = False
+                        try:
+                            with db.with_project_schema_session(config_project_id) as config_session:
+                                configuration = config_session.query(Configuration).filter(
+                                    Configuration.elitea_title == elitea_title
+                                ).first()
+
+                                if not configuration:
+                                    log.warning(
+                                        "%sproject %s, toolkit id=%s: configuration '%s' not found",
+                                        prefix, project_id, toolkit.id, elitea_title
+                                    )
+                                    results["skipped_toolkits"] += 1
+                                    continue
+
+                                config_data = configuration.data or {}
+                                old_hosting = config_data.get('hosting')
+
+                                log.info(
+                                    "%sproject %s, toolkit id=%s (%s): cloud=%s -> hosting=%s (config '%s': %s -> %s)",
+                                    prefix, project_id, toolkit.id, toolkit.type, cloud_value, hosting_value,
+                                    elitea_title, old_hosting, hosting_value
+                                )
+
+                                if not dry_run:
+                                    # Update configuration hosting
+                                    new_config_data = dict(config_data)
+                                    new_config_data['hosting'] = hosting_value
+                                    configuration.data = new_config_data
+                                    flag_modified(configuration, 'data')
+                                    config_session.commit()
+
+                                config_updated = True
+                                results["migrated_configurations"] += 1
+
+                        except Exception as e:  # pylint: disable=W0703
+                            log.exception(
+                                "%smigrate_jira_confluence_hosting: error updating config for toolkit %s",
+                                prefix, toolkit.id
+                            )
+                            results["errors"].append({
+                                "project_id": project_id,
+                                "toolkit_id": toolkit.id,
+                                "error": str(e)
+                            })
+                            continue
+
+                        if config_updated:
+                            if not dry_run:
+                                # Remove 'cloud' field from toolkit settings
+                                new_settings = deepcopy(settings)
+                                del new_settings['cloud']
+                                toolkit.settings = new_settings
+                                flag_modified(toolkit, 'settings')
+
+                            results["migrated_toolkits"] += 1
+
+                    if not dry_run:
+                        session.commit()
+
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "%smigrate_jira_confluence_hosting: error in project %s", prefix, project_id
+                )
+                results["failed_projects"] += 1
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_jira_confluence_hosting — %s %s toolkit(s), %s config(s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated",
+            results["migrated_toolkits"], results["migrated_configurations"],
+            round(end_ts - start_ts, 2)
+        )
+
+        return {
+            "migrated_toolkits": results["migrated_toolkits"],
+            "migrated_configurations": results["migrated_configurations"],
+            "skipped_toolkits": results["skipped_toolkits"],
+            "failed_projects": results["failed_projects"],
+            "errors": results["errors"],
+            "dry_run": dry_run
+        }
+
+    @web.method()
     def chat_cleanup_dup_msgs(self, *args, **kwargs):
         """Admin task: remove duplicate message groups from a single conversation.
 
