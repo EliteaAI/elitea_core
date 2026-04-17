@@ -1790,14 +1790,14 @@ class NameChecker(BaseChecker):
             count = all_sub_names.count(name_lower)
             if count > 1:
                 result.issue(
-                    'warnings', 'name',
+                    'critical', 'name',
                     f"Sub-agent name '{name}' is not unique "
                     f"({count} occurrences found)",
                     'Ensure all sub-agent names are different',
                     context,
                 )
                 # Remove all occurrences so the next sub-agent with the
-                # same name does not produce a duplicate warning
+                # same name does not produce a duplicate finding
                 while name_lower in all_sub_names:
                     all_sub_names.remove(name_lower)
 
