@@ -28,7 +28,7 @@ class Event:
             #
             ai_project_roles = ["viewer"]
             #
-            global_admin_role = "admin"
+            global_admin_roles = {"admin", "super_admin"}
             global_user_roles = context.rpc_manager.call.auth_get_user_roles(
                 payload['user_id']
             )
@@ -43,7 +43,7 @@ class Event:
                 if target_role not in user_role_names and target_role not in target_roles:
                     target_roles.append(target_role)
             #
-            if global_admin_role in global_user_roles:
+            if global_admin_roles & global_user_roles:
                 additional_roles = self.descriptor.config.get("add_admin_roles", [])
                 for target_role in additional_roles:
                     if target_role not in user_role_names and target_role not in target_roles:
