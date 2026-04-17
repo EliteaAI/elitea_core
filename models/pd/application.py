@@ -274,17 +274,16 @@ class ApplicationListModel(BaseModel):
         if not versions:
             return self
 
-        latest_version, oldest_version = None, None
+        published_version = None
 
         for version in versions:
-            if version.name == 'latest':
-                latest_version = version
+            # Prefer published version over base for Agent Studio icons
+            if version.status == PublishStatus.published:
+                published_version = version
                 break
 
-        if not latest_version:
-            oldest_version = min(versions, key=lambda version: version.created_at)
-
-        selected_version = latest_version or oldest_version
+        # Priority: published > oldest version (fallback)
+        selected_version = published_version or min(versions, key=lambda version: version.created_at)
 
         meta = selected_version.meta or {}
 
