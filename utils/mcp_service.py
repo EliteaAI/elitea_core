@@ -556,6 +556,10 @@ def _jrpc_server_response(id: str, inner_server_result) -> types.JSONRPCResponse
     if "_meta" in result_dict and result_dict["_meta"] is None:
         # _meta is expeted to be an object but not None/null
         del result_dict["_meta"]
+    # annotations in content blocks must be an object or absent, not null
+    for item in result_dict.get("content") or []:
+        if "annotations" in item and item["annotations"] is None:
+            del item["annotations"]
     return types.JSONRPCResponse(jsonrpc="2.0", id=id, result=result_dict)
 
 
