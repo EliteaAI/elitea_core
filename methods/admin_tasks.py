@@ -612,6 +612,148 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         }
 
     @web.method()
+    def migrate_mcp_client_secrets(self, *args, **kwargs):
+        """Admin task: vault-wrap plain-text client_secret in MCP toolkit settings.
+
+        Finds all MCP toolkits (type == 'mcp' or type starting with 'mcp_') whose
+        settings contain a plain-text client_secret value (not yet wrapped as a
+        {{secret.xxx}} Vault reference) and stores the value in Vault, replacing the
+        plain text with the reference.
+
+        Idempotent: safe to run multiple times — skips toolkits whose client_secret
+        is already a Vault reference or is absent.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - preview what would be migrated (no changes)
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+
+        Always run with dry_run first to verify expected changes.
+        """
+        from copy import deepcopy  # pylint: disable=C0415
+        from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+        from tools import db, SecretString, VaultClient  # pylint: disable=C0415
+        from ..models.all import EliteATool  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_mcp_client_secrets: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error(
+                "migrate_mcp_client_secrets: project_id= is required. "
+                "Format: project_id=<all|N>[;dry_run]"
+            )
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info(
+            "Starting migrate_mcp_client_secrets (dry_run=%s, project_id_filter=%s)",
+            dry_run, project_id_filter,
+        )
+        start_ts = time.time()
+        total_migrated = 0
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_mcp_client_secrets: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+            log.info("%smigrate_mcp_client_secrets: scanning project %s", prefix, project_id)
+
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    toolkits = session.query(EliteATool).filter(
+                        EliteATool.type.like('mcp%')
+                    ).all()
+
+                    if not toolkits:
+                        continue
+
+                    vault_client = None
+                    any_changed = False
+
+                    for toolkit in toolkits:
+                        # Only process types == 'mcp' or starting with 'mcp_'
+                        if toolkit.type != 'mcp' and not toolkit.type.startswith('mcp_'):
+                            continue
+
+                        settings = toolkit.settings or {}
+                        client_secret = settings.get('client_secret')
+
+                        if not client_secret or not isinstance(client_secret, str):
+                            continue
+
+                        if SecretString._secret_pattern.match(client_secret):
+                            log.info(
+                                "%smigrate_mcp_client_secrets: project %s, toolkit id=%s (%s): "
+                                "client_secret already vaulted, skipping",
+                                prefix, project_id, toolkit.id, toolkit.type,
+                            )
+                            continue
+
+                        log.info(
+                            "%smigrate_mcp_client_secrets: project %s, toolkit id=%s (%s) "
+                            "name='%s': wrapping plain-text client_secret into Vault",
+                            prefix, project_id, toolkit.id, toolkit.type, toolkit.name,
+                        )
+
+                        total_migrated += 1
+
+                        if not dry_run:
+                            if vault_client is None:
+                                vault_client = VaultClient(project=project_id)
+                            s = SecretString(client_secret)
+                            s.vault_client = vault_client
+                            vault_ref = s.store_secret()
+
+                            new_settings = deepcopy(settings)
+                            new_settings['client_secret'] = vault_ref
+                            toolkit.settings = new_settings
+                            flag_modified(toolkit, 'settings')
+                            any_changed = True
+
+                    if any_changed and not dry_run:
+                        session.commit()
+
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "%smigrate_mcp_client_secrets: error in project %s", prefix, project_id
+                )
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_mcp_client_secrets — %s %s MCP toolkit(s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated",
+            total_migrated, round(end_ts - start_ts, 2),
+        )
+        return {"migrated": total_migrated, "dry_run": dry_run}
+
+    @web.method()
     def chat_cleanup_dup_msgs(self, *args, **kwargs):
         """Admin task: remove duplicate message groups from a single conversation.
 
