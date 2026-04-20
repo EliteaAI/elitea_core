@@ -245,17 +245,36 @@ def wrap_provider_hub_secret_fields(type_: str, settings: dict, project_id: int)
     Idempotent: skips fields whose value is already a {{secret.xxx}} vault ref.
     """
     from tools import SecretString, VaultClient  # pylint: disable=C0415
+
+    # MCP toolkit types use a dynamic schema (only 'selected_tools' property) that
+    # does not declare OAuth credential fields with 'secret: true'. We track this
+    # so we can add client_secret to the wrap list even when the schema is absent.
+    is_mcp_type = (type_ == 'mcp' or type_.startswith('mcp_'))
+
     try:
         tk, _ = find_toolkit_schema_by_type_everywhere(type_, project_id, None)
     except Exception:
-        return
-    if tk is None:
+        tk = None
+        if not is_mcp_type:
+            return
+
+    if tk is None and not is_mcp_type:
         return
 
-    secret_fieldnames = [
-        k for k, v in tk.get('properties', {}).items()
-        if v.get('secret') is True
-    ]
+    secret_fieldnames = []
+    if tk is not None:
+        secret_fieldnames = [
+            k for k, v in tk.get('properties', {}).items()
+            if v.get('secret') is True
+        ]
+
+    # For MCP toolkit types also wrap OAuth credential fields that are not
+    # declared in the dynamic schema (schema only contains 'selected_tools').
+    if is_mcp_type:
+        for field in ('client_secret',):
+            if field not in secret_fieldnames:
+                secret_fieldnames.append(field)
+
     if not secret_fieldnames:
         return
 
