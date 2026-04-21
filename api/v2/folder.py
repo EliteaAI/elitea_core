@@ -60,7 +60,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, **kwargs):
         with db.get_session(project_id) as session:
             q = request.args.get('query')
-            sources = request.args.get('source', default='elitea')
+            sources = request.args.get('source')
             limit = request.args.get('limit', default=10, type=int)
             offset = request.args.get('offset', default=0, type=int)
             # For ungrouped conversations sorting
