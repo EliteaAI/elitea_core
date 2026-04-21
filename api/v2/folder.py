@@ -76,16 +76,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 Participant.entity_name == ParticipantTypes.user.value
             ).subquery()
 
-            distinct_conversation_subquery = session.query(Conversation.id).distinct().join(
+            distinct_conversation_subquery = session.query(Conversation.id).distinct().outerjoin(
                 ParticipantMapping,
                 Conversation.id == ParticipantMapping.conversation_id
-            ).join(
+            ).outerjoin(
                 Participant,
                 Participant.id == ParticipantMapping.participant_id
             ).filter(
                 or_(
                     Conversation.is_private == False,
-                    Participant.id.in_(participant_subquery)
+                    Participant.id.in_(participant_subquery),
+                    Conversation.author_id == user_id
                 )
             ).subquery()
 
@@ -127,7 +128,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     )
                 )
 
-            total_folders = folder_query.count()
+            total_folders = folder_query.distinct(ConversationFolder.id).count()
             # Sort at database level - highest position first, created_at as tiebreaker
             folders = folder_query.order_by(
                 desc(ConversationFolder.position),
