@@ -823,6 +823,95 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         log.info("%sExiting chat_cleanup_dup_msgs (duration = %ss)", prefix, round(end_ts - start_ts, 2))
         return result
 
+    @web.method()
+    def migrate_conversation_source_to_elitea(self, *args, **kwargs):
+        """Admin task: rename legacy conversation source values to 'elitea'.
+
+        Conversations created before the rebranding may have source='alita'.
+        This migration updates them to 'elitea'.
+
+        Idempotent: safe to run multiple times — only updates rows where source='alita'.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+        """
+        from tools import db
+        from ..models.conversation import Conversation
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_conversation_source_to_elitea: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error("migrate_conversation_source_to_elitea: project_id= is required. Format: project_id=<all|N>[;dry_run]")
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("Starting migrate_conversation_source_to_elitea (dry_run=%s, project_id_filter=%s)", dry_run, project_id_filter)
+        start_ts = time.time()
+        total_migrated = 0
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:
+            log.exception("migrate_conversation_source_to_elitea: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    count = session.query(Conversation).filter(
+                        Conversation.source == 'alita'
+                    ).count()
+
+                    if count > 0:
+                        log.info(
+                            "%sproject %s: %d conversation(s) with source='alita'",
+                            prefix, project_id, count
+                        )
+                        if not dry_run:
+                            session.query(Conversation).filter(
+                                Conversation.source == 'alita'
+                            ).update({'source': 'elitea'}, synchronize_session=False)
+                            session.commit()
+                        total_migrated += count
+
+            except Exception:
+                log.exception(
+                    "%smigrate_conversation_source_to_elitea: error in project %s", prefix, project_id
+                )
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_conversation_source_to_elitea — %s %s conversation(s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated", total_migrated, round(end_ts - start_ts, 2)
+        )
+        return {"migrated": total_migrated, "dry_run": dry_run}
+
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
     project_id, conversation_arg, dry_run, prefix,

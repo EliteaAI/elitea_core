@@ -60,7 +60,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, **kwargs):
         with db.get_session(project_id) as session:
             q = request.args.get('query')
-            sources = request.args.get('source')
+            sources = request.args.get('source', default='elitea')
             limit = request.args.get('limit', default=10, type=int)
             offset = request.args.get('offset', default=0, type=int)
             # For ungrouped conversations sorting
@@ -76,17 +76,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 Participant.entity_name == ParticipantTypes.user.value
             ).subquery()
 
-            distinct_conversation_subquery = session.query(Conversation.id).distinct().outerjoin(
+            distinct_conversation_subquery = session.query(Conversation.id).distinct().join(
                 ParticipantMapping,
                 Conversation.id == ParticipantMapping.conversation_id
-            ).outerjoin(
+            ).join(
                 Participant,
                 Participant.id == ParticipantMapping.participant_id
             ).filter(
                 or_(
                     Conversation.is_private == False,
-                    Participant.id.in_(participant_subquery),
-                    Conversation.author_id == user_id
+                    Participant.id.in_(participant_subquery)
                 )
             ).subquery()
 
@@ -128,7 +127,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     )
                 )
 
-            total_folders = folder_query.distinct(ConversationFolder.id).count()
+            total_folders = folder_query.count()
             # Sort at database level - highest position first, created_at as tiebreaker
             folders = folder_query.order_by(
                 desc(ConversationFolder.position),
