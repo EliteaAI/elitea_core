@@ -190,7 +190,10 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
             else:
                 errors.append({
                     'loc': (to_be_expanded_fieldname, ),
-                    'msg': str(ex)
+                    'msg': json.dumps({
+                        'error_type': 'credential_not_found',
+                        'credential_id': metadata.get('elitea_title', 'unknown'),
+                    }),
                 })
         except Exception as ex:
             errors.append({
