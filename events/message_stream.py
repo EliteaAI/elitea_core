@@ -57,11 +57,14 @@ class Event:
                         # Content was only tool_use blocks (swarm calls) - don't create message item
                         log.debug(f"Skipping message item creation - content only contained tool_use blocks")
                 else:
-                    # Traditional text content - create single TextMessageItem
+                    from ..models.message_items.base import MessageItem
+                    existing_count = session.query(MessageItem).filter(
+                        MessageItem.message_group_id == msg_group.id
+                    ).count()
                     msg: TextMessageItem = TextMessageItem(
                         content=str(content),
                         message_group=msg_group,
-                        order_index=0,
+                        order_index=existing_count,
                     )
                     session.add(msg)
 
