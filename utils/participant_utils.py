@@ -224,7 +224,12 @@ def notify_user_added_to_conversation(
             'meta': {
                 "conversation_id": conversation.id,
                 "conversation_name": conversation.name,
-                "initiator_name": initiator_name
+                "initiator_name": initiator_name,
+                "message": (
+                    f"{initiator_name} added you to [{conversation.name}](/chat?conversation={conversation.id})"
+                    if initiator_name
+                    else f"You were added to [{conversation.name}](/chat?conversation={conversation.id})"
+                ),
             },
             'event_type': NotificationEventTypes.chat_user_added
         }

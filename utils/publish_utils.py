@@ -1525,6 +1525,19 @@ def notify_author_unpublished(
         if source_application_id is not None:
             meta['source_application_id'] = source_application_id
 
+        reason_suffix = f' Reason: {reason}' if reason else ''
+        if source_application_id is not None and source_version_id is not None:
+            version_ref = (
+                f'[{source_version_id}](/agents/all/'
+                f'{source_application_id}/{source_version_id}?viewMode=owner)'
+            )
+        else:
+            version_ref = str(source_version_id)
+        meta['message'] = (
+            f'Unpublished agent version id: {version_ref} '
+            f'from project id: {source_project_id}.{reason_suffix}'
+        )
+
         event_manager = rpc_tools.EventManagerMixin().event_manager
         event_manager.fire_event(
             'notifications_stream',

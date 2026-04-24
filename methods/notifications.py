@@ -16,9 +16,35 @@
 #   limitations under the License.
 
 """ Notification routing for various events """
+from urllib.parse import quote
+
 from pylon.core.tools import web, log  # pylint: disable=E0611,E0401
 
 from ..models.enums.all import NotificationEventTypes, IndexDataStatus
+
+
+def _build_index_message(index_data_status, initiator):
+    index_name = index_data_status.get('index_name') or 'Index'
+    toolkit_id = index_data_status.get('toolkit_id')
+    error = (index_data_status.get('error') or '').strip()
+    reindex = index_data_status.get('reindex')
+    indexed = index_data_status.get('indexed') or 0
+    updated = index_data_status.get('updated') or 0
+
+    if toolkit_id:
+        encoded_name = quote(index_name, safe='')
+        link = f'[{index_name}](/toolkits/indexes/{toolkit_id}?index_name={encoded_name})'
+    else:
+        link = index_name
+
+    if error:
+        return f'Index {link} failed.'
+
+    if reindex:
+        scheduled_text = ' by schedule' if initiator == 'schedule' else ''
+        return f'Index {link} is successfully reindexed{scheduled_text}. {{"reindexed": {updated}, "indexed": {indexed}}}'
+
+    return f'Index {link} is successfully created: {{"indexed": {indexed}}}'
 
 
 class Method:
@@ -72,6 +98,7 @@ class Method:
                     'updated': index_data_status.get('updated'),
                     'toolkit_id': index_data_status.get('toolkit_id'),
                     'initiator': initiator,
+                    'message': _build_index_message(index_data_status, initiator),
                 },
                 'event_type': NotificationEventTypes.index_data_changed
             }
