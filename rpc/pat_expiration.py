@@ -51,7 +51,7 @@ class RPC:
                                 f'Your personal access token {token_name} will expire in 24 hours. '
                                 f'After expiration, it will no longer work. '
                                 f'You can delete and recreate a new token if needed. '
-                                f'[Manage Personal Access Tokens](/settings/tokens)'
+                                f'[Manage Personal Access Tokens]()'
                             ),
                         },
                     }

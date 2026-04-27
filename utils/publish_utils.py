@@ -1527,10 +1527,7 @@ def notify_author_unpublished(
 
         reason_suffix = f' Reason: {reason}' if reason else ''
         if source_application_id is not None and source_version_id is not None:
-            version_ref = (
-                f'[{source_version_id}](/agents/all/'
-                f'{source_application_id}/{source_version_id}?viewMode=owner)'
-            )
+            version_ref = f'[{source_version_id}]()'
         else:
             version_ref = str(source_version_id)
         meta['message'] = (
