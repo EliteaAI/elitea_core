@@ -28,6 +28,7 @@ from ..utils.chat_history import (
 )
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.llm_settings import DEFAULT_REASONING_MODEL_MAX_TOKENS, DEFAULT_MAX_TOKENS
+from ..utils.predict_utils import load_context_settings_from_conversation
 from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation
 from ..utils.sio_utils import get_chat_room
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
@@ -629,6 +630,19 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
 
     # Add steps limit parameter if any
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
+
+    # Load context_settings from conversation.meta if context_manager feature is enabled
+    if get_context_manager_feature_flag(predict_payload.project_id):
+        context_strategy = load_context_settings_from_conversation(
+            predict_payload.project_id,
+            msg_group.conversation.uuid
+        )
+        if context_strategy:
+            result['context_settings'] = context_strategy
+        else:
+            result['context_settings'] = {}
+    else:
+        result['context_settings'] = {}
 
     return result
 
