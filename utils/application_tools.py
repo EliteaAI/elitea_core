@@ -94,9 +94,9 @@ def _expand_toolkit_settings(credential_settings: dict, project_id: int, user_id
     if not credential_settings:
         return credential_settings
 
-    required_fields = {"elitea_title", "private"}
-    if set(credential_settings.keys()) != required_fields:
-        raise ValueError(f"Toolkit credential settings must contain only fields: {required_fields}")
+    allowed_fields = {"elitea_title", "private", "type"}
+    if not set(credential_settings.keys()).issubset(allowed_fields):
+        raise ValueError(f"Toolkit credential settings must contain only fields: {allowed_fields}")
 
     credential_settings_expanded = context.rpc_manager.timeout(RPC_CALL_TIMEOUT).configurations_expand(
         project_id=project_id,
@@ -155,12 +155,18 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
         raise ValidatorNotSupportedError(f"Toolkit schema not found for type: {type_}")
 
     to_be_expanded_configuration_fieldnames = []
+    # fieldname → configuration_types[0] from schema, used as fallback when the stored
+    # credential reference does not yet carry a 'type' field
+    credential_type_hints = {}
     to_be_expanded_toolkit_fieldnames = []
     provider_hub_secret_fieldnames = []
 
     for k, v in tk.get('properties', {}).items():
         if v.get('configuration_types') or v.get('configuration_sections'):
             to_be_expanded_configuration_fieldnames.append(k)
+            configuration_types = v.get('configuration_types')
+            if configuration_types:
+                credential_type_hints[k] = configuration_types[0]
         elif v.get('toolkit_types'):
             to_be_expanded_toolkit_fieldnames.append(k)
         elif v.get('secret') is True:
@@ -172,10 +178,17 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
     # expand configurations (credentials)
     for to_be_expanded_fieldname in to_be_expanded_configuration_fieldnames:
         try:
+            credential_settings = settings.get(to_be_expanded_fieldname)
+            # Ensure 'type' is present so expand_configuration can filter by credential type.
+            # Prefer a type already stored in the reference; fall back to the schema hint.
+            if credential_settings and 'type' not in credential_settings:
+                hint = credential_type_hints.get(to_be_expanded_fieldname)
+                if hint:
+                    credential_settings = {**credential_settings, 'type': hint}
             settings[to_be_expanded_fieldname] = _expand_toolkit_settings(
-                settings.get(to_be_expanded_fieldname),  # credential configuration might be Optional
+                credential_settings,
                 project_id,
-                user_id
+                user_id,
             )
         except LookupError as ex:
             metadata = ex.args[1] if len(ex.args) > 1 else {}
