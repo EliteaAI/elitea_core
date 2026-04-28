@@ -157,6 +157,7 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
     to_be_expanded_configuration_fieldnames = []
     to_be_expanded_toolkit_fieldnames = []
     provider_hub_secret_fieldnames = []
+    configuration_model_fieldnames = {}  # {fieldname: section} for configuration_model refs
 
     for k, v in tk.get('properties', {}).items():
         if v.get('configuration_types') or v.get('configuration_sections'):
@@ -165,6 +166,8 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
             to_be_expanded_toolkit_fieldnames.append(k)
         elif v.get('secret') is True:
             provider_hub_secret_fieldnames.append(k)
+        elif v.get('configuration_model'):
+            configuration_model_fieldnames[k] = v['configuration_model']
 
     settings = deepcopy(settings)
     errors = []
@@ -231,6 +234,37 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
                     settings[fieldname] = vault_client.unsecret(current_val, secrets=vault_secrets)
         except Exception as ex:
             log.warning("expand_toolkit_settings: failed to resolve vault refs for project %s: %s", project_id, ex)
+
+    # validate configuration_model references (embedding_model, etc.)
+    for fieldname, section in configuration_model_fieldnames.items():
+        model_name = settings.get(fieldname)
+        if not model_name:
+            continue  # Optional field, skip if empty
+        try:
+            available = context.rpc_manager.timeout(
+                RPC_CALL_TIMEOUT
+            ).configurations_get_available_models(
+                project_id=project_id,
+                section=section,
+                include_shared=True
+            )
+            # available is {(project_id, name): {...}, ...}
+            model_names = {k[1] for k in available}
+            if model_name not in model_names:
+                errors.append({
+                    'loc': (fieldname,),
+                    'msg': json.dumps({
+                        'error_type': 'configuration_model_not_found',
+                        'model_name': model_name,
+                        'section': section,
+                    }),
+                })
+        except Exception as ex:
+            log.warning(
+                "expand_toolkit_settings: failed to validate "
+                "%s model '%s' for project %s: %s",
+                section, model_name, project_id, ex
+            )
 
     if errors:
         raise ConfigurationExpandError(errors)
