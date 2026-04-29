@@ -47,6 +47,12 @@ class RPC:
                         'meta': {
                             'token_name': token_name,
                             'token_uuid': token_uuid,
+                            'message': (
+                                f'Your personal access token {token_name} will expire in 24 hours. '
+                                f'After expiration, it will no longer work. '
+                                f'You can delete and recreate a new token if needed. '
+                                f'[Manage Personal Access Tokens]()'
+                            ),
                         },
                     }
                 )
