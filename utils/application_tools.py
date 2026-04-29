@@ -155,12 +155,18 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
         raise ValidatorNotSupportedError(f"Toolkit schema not found for type: {type_}")
 
     to_be_expanded_configuration_fieldnames = []
+    # fieldname → configuration_types[0] from schema, used as fallback when the stored
+    # credential reference does not yet carry a 'type' field
+    credential_type_hints = {}
     to_be_expanded_toolkit_fieldnames = []
     provider_hub_secret_fieldnames = []
 
     for k, v in tk.get('properties', {}).items():
         if v.get('configuration_types') or v.get('configuration_sections'):
             to_be_expanded_configuration_fieldnames.append(k)
+            configuration_types = v.get('configuration_types')
+            if configuration_types:
+                credential_type_hints[k] = configuration_types[0]
         elif v.get('toolkit_types'):
             to_be_expanded_toolkit_fieldnames.append(k)
         elif v.get('secret') is True:
@@ -172,11 +178,30 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
     # expand configurations (credentials)
     for to_be_expanded_fieldname in to_be_expanded_configuration_fieldnames:
         try:
+            credential_ref = settings.get(to_be_expanded_fieldname)
             settings[to_be_expanded_fieldname] = _expand_toolkit_settings(
-                settings.get(to_be_expanded_fieldname),  # credential configuration might be Optional
+                credential_ref,
                 project_id,
-                user_id
+                user_id,
             )
+            # Post-expansion type validation: check the returned configuration_type against
+            # the expected type from the schema. Produces a clear mismatch error rather than
+            # silently using the wrong credential.
+            expanded = settings.get(to_be_expanded_fieldname)
+            if expanded:
+                expected_type = credential_type_hints.get(to_be_expanded_fieldname)
+                actual_type = expanded.get('configuration_type')
+                if expected_type and actual_type and expected_type != actual_type:
+                    errors.append({
+                        'loc': (to_be_expanded_fieldname,),
+                        'msg': json.dumps({
+                            'error_type': 'credential_type_mismatch',
+                            'credential_id': (credential_ref or {}).get('elitea_title', 'unknown'),
+                            'expected_type': expected_type,
+                            'actual_type': actual_type,
+                        }),
+                    })
+                    continue
         except LookupError as ex:
             metadata = ex.args[1] if len(ex.args) > 1 else {}
             if metadata.get('personal_project_lookup'):
