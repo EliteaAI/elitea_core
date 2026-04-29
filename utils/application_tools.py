@@ -94,9 +94,9 @@ def _expand_toolkit_settings(credential_settings: dict, project_id: int, user_id
     if not credential_settings:
         return credential_settings
 
-    allowed_fields = {"elitea_title", "private", "type"}
-    if not set(credential_settings.keys()).issubset(allowed_fields):
-        raise ValueError(f"Toolkit credential settings must contain only fields: {allowed_fields}")
+    required_fields = {"elitea_title", "private"}
+    if set(credential_settings.keys()) != required_fields:
+        raise ValueError(f"Toolkit credential settings must contain only fields: {required_fields}")
 
     credential_settings_expanded = context.rpc_manager.timeout(RPC_CALL_TIMEOUT).configurations_expand(
         project_id=project_id,
@@ -178,18 +178,30 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
     # expand configurations (credentials)
     for to_be_expanded_fieldname in to_be_expanded_configuration_fieldnames:
         try:
-            credential_settings = settings.get(to_be_expanded_fieldname)
-            # Ensure 'type' is present so expand_configuration can filter by credential type.
-            # Prefer a type already stored in the reference; fall back to the schema hint.
-            if credential_settings and 'type' not in credential_settings:
-                hint = credential_type_hints.get(to_be_expanded_fieldname)
-                if hint:
-                    credential_settings = {**credential_settings, 'type': hint}
+            credential_ref = settings.get(to_be_expanded_fieldname)
             settings[to_be_expanded_fieldname] = _expand_toolkit_settings(
-                credential_settings,
+                credential_ref,
                 project_id,
                 user_id,
             )
+            # Post-expansion type validation: check the returned configuration_type against
+            # the expected type from the schema. Produces a clear mismatch error rather than
+            # silently using the wrong credential.
+            expanded = settings.get(to_be_expanded_fieldname)
+            if expanded:
+                expected_type = credential_type_hints.get(to_be_expanded_fieldname)
+                actual_type = expanded.get('configuration_type')
+                if expected_type and actual_type and expected_type != actual_type:
+                    errors.append({
+                        'loc': (to_be_expanded_fieldname,),
+                        'msg': json.dumps({
+                            'error_type': 'credential_type_mismatch',
+                            'credential_id': (credential_ref or {}).get('elitea_title', 'unknown'),
+                            'expected_type': expected_type,
+                            'actual_type': actual_type,
+                        }),
+                    })
+                    continue
         except LookupError as ex:
             metadata = ex.args[1] if len(ex.args) > 1 else {}
             if metadata.get('personal_project_lookup'):
