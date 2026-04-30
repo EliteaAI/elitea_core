@@ -25,8 +25,8 @@ ATTACHMENT_DEFAULT_BUCKET = 'attachments'
 ATTACHMENT_INTERNAL_TOOL_KEY = 'attachments'
 # TODO: clarify correct set of default tools
 ATTACHMENT_DEFAULT_SELECTED_TOOLS = [
-    'listFiles',
-    'readFile',
+    'list_files',
+    'read_file',
     'read_multiple_files',
 ]
 
