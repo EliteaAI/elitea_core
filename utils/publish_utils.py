@@ -147,14 +147,14 @@ _DEFAULT_VALIDATION_RULES = """\
      "change_me", "your-key-here") AND no guidance is provided in welcome message or
      instructions indicating required configuration; likely template default not yet configured
 
-6. **Welcome Message**
+6. **Welcome Message** — check ONLY for the main agent; DO NOT validate sub-agents
    - warning: absent or too brief to explain what the agent does; agent instructions reference
      specific external toolkits or integrations but the welcome message does not mention them
      or guide the user to connect them — skip if agent has a clear fallback behavior or the
      message already addresses it
    - recommendation: tone is not welcoming or does not guide the user on how to get started
 
-7. **Conversation Starters**
+7. **Conversation Starters** — check ONLY for the main agent; DO NOT validate sub-agents
    - warning: no starters defined; fewer than 2 starters; starters are duplicates or
      near-duplicates; starters are not actionable (e.g., a single topic word); starters are
      unrelated to the agent's stated capabilities
