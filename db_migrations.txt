@@ -127,3 +127,8 @@ Run admin task migrate_toolkit_settings_alita_title with param: project_id=all
 # Run with dry_run first to see what would be changed.
 Run admin task migrate_jira_confluence_hosting with param: project_id=all;dry_run
 Run admin task migrate_jira_confluence_hosting with param: project_id=all
+
+# 2.0.2 -> 2.0.3
+
+Run admin task artifact;listFiles>list_files,createFile>create_file,readFile>read_file,deleteFile>delete_file,appendData>append_data,createNewBucket>create_new_bucket;project_id=all;dry_run
+Run admin task artifact;listFiles>list_files,createFile>create_file,readFile>read_file,deleteFile>delete_file,appendData>append_data,createNewBucket>create_new_bucket;project_id=all

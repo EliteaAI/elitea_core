@@ -15,8 +15,10 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""Utilities for migrating EliteATool.settings['selected_tools'] and EntityToolMapping.selected_tools."""
+"""Utilities for migrating EliteATool.settings['selected_tools'], EntityToolMapping.selected_tools,
+and pipeline YAML instructions tool name references."""
 
+import re
 from copy import deepcopy
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -25,6 +27,8 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 from tools import db, context  # pylint: disable=E0401
 
+from ..models.all import ApplicationVersion
+from ..models.enums.all import AgentTypes
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 
 
@@ -173,6 +177,110 @@ def apply_operations_to_selected_tools(selected_tools, operations):
     return result, changes, tools_removed, tools_renamed
 
 
+def apply_rename_to_instructions(instructions_text, operations):
+    """Apply rename operations to pipeline YAML instructions text using word-boundary regex.
+
+    Returns (new_text, changes_log, skipped_log).
+    Per-operation guard: if an operation's new name is already present, that
+    individual operation is skipped but remaining operations still apply.
+    """
+    text = instructions_text
+    changes = []
+    skipped = []
+    #
+    for op in operations:
+        if op["action"] != "rename":
+            continue
+        old_name = op["old_name"]
+        new_name = op["new_name"]
+        #
+        # Guard: skip this operation if new name already present
+        #
+        pattern_new = re.compile(r'\b' + re.escape(new_name) + r'\b')
+        if pattern_new.search(text):
+            skipped.append(
+                f"SKIP '{old_name}' -> '{new_name}': new name already present"
+            )
+            continue
+        #
+        # Apply rename
+        #
+        pattern_old = re.compile(r'\b' + re.escape(old_name) + r'\b')
+        new_text = pattern_old.sub(new_name, text)
+        if new_text != text:
+            count = len(pattern_old.findall(text))
+            changes.append(f"renamed '{old_name}' -> '{new_name}' ({count} occurrences)")
+            text = new_text
+    #
+    return text, changes, skipped
+
+
+def migrate_project_pipeline_instructions(project_id, operations, dry_run):
+    """Migrate tool names in pipeline YAML instructions for a project.
+
+    Scans all pipeline ApplicationVersions and applies word-boundary rename.
+    Returns summary dict.
+    """
+    prefix = "[DRY RUN] " if dry_run else ""
+    rename_ops = [op for op in operations if op["action"] == "rename"]
+    if not rename_ops:
+        return {"pipeline_versions_scanned": 0, "pipeline_versions_affected": 0}
+    #
+    summary = {
+        "pipeline_versions_scanned": 0,
+        "pipeline_versions_affected": 0,
+        "pipeline_details": [],
+    }
+    #
+    with db.get_session(project_id) as session:
+        pipeline_versions = session.query(ApplicationVersion).filter(
+            ApplicationVersion.agent_type == AgentTypes.pipeline,
+            ApplicationVersion.instructions.isnot(None),
+            ApplicationVersion.instructions != "",
+        ).all()
+        #
+        summary["pipeline_versions_scanned"] = len(pipeline_versions)
+        #
+        if not pipeline_versions:
+            return summary
+        #
+        any_changed = False
+        #
+        for version in pipeline_versions:
+            new_text, changes, skipped = apply_rename_to_instructions(
+                version.instructions, rename_ops
+            )
+            #
+            for skip_msg in skipped:
+                log.warning(
+                    "%sPipeline version id=%s (app_id=%s): %s",
+                    prefix, version.id, version.application_id, skip_msg
+                )
+            #
+            if changes:
+                changes_str = ", ".join(changes)
+                log.info(
+                    "%sPipeline version id=%s (app_id=%s): %s",
+                    prefix, version.id, version.application_id, changes_str
+                )
+                summary["pipeline_versions_affected"] += 1
+                summary["pipeline_details"].append({
+                    "version_id": version.id,
+                    "application_id": version.application_id,
+                    "changes": changes,
+                    "skipped": skipped,
+                })
+                #
+                if not dry_run:
+                    version.instructions = new_text
+                    any_changed = True
+        #
+        if any_changed and not dry_run:
+            session.commit()
+    #
+    return summary
+
+
 def migrate_project_toolkits(project_id, toolkit_type, operations, dry_run):
     """Migrate selected_tools for all toolkits of given type in a project.
 
@@ -190,6 +298,8 @@ def migrate_project_toolkits(project_id, toolkit_type, operations, dry_run):
         "tools_renamed": 0,
         "tool_mappings_removed": 0,
         "tool_mappings_renamed": 0,
+        "pipeline_versions_scanned": 0,
+        "pipeline_versions_affected": 0,
         "details": [],
     }
     #
@@ -278,6 +388,12 @@ def migrate_project_toolkits(project_id, toolkit_type, operations, dry_run):
         if any_changed and not dry_run:
             session.commit()
     #
+    # Step 3: Migrate pipeline YAML instructions
+    #
+    pipeline_result = migrate_project_pipeline_instructions(project_id, operations, dry_run)
+    summary["pipeline_versions_scanned"] = pipeline_result["pipeline_versions_scanned"]
+    summary["pipeline_versions_affected"] = pipeline_result["pipeline_versions_affected"]
+    #
     return summary
 
 
@@ -323,6 +439,8 @@ def run_selected_tools_migration(param):
         "tools_renamed": 0,
         "tool_mappings_removed": 0,
         "tool_mappings_renamed": 0,
+        "pipeline_versions_scanned": 0,
+        "pipeline_versions_affected": 0,
         "errors": 0,
     }
     #
@@ -334,14 +452,16 @@ def run_selected_tools_migration(param):
         try:
             result = migrate_project_toolkits(pid, toolkit_type, operations, dry_run)
             #
-            if result["toolkits_found"] == 0:
-                log.info("%sProject %s: no %s toolkits found, skipping", prefix, pid, toolkit_type)
+            if result["toolkits_found"] == 0 and result["pipeline_versions_scanned"] == 0:
+                log.info("%sProject %s: no %s toolkits found, no pipelines, skipping", prefix, pid, toolkit_type)
                 continue
             #
             log.info(
-                "%sProject %s summary: %s toolkits found, %s affected, %s entity_mappings affected",
+                "%sProject %s summary: %s toolkits found, %s affected, %s entity_mappings affected, "
+                "%s pipeline versions scanned, %s affected",
                 prefix, pid, result["toolkits_found"],
-                result["toolkits_affected"], result["entity_mappings_affected"]
+                result["toolkits_affected"], result["entity_mappings_affected"],
+                result["pipeline_versions_scanned"], result["pipeline_versions_affected"]
             )
             total_summary["toolkits_affected"] += result["toolkits_affected"]
             total_summary["entity_mappings_affected"] += result["entity_mappings_affected"]
@@ -349,6 +469,8 @@ def run_selected_tools_migration(param):
             total_summary["tools_renamed"] += result["tools_renamed"]
             total_summary["tool_mappings_removed"] += result["tool_mappings_removed"]
             total_summary["tool_mappings_renamed"] += result["tool_mappings_renamed"]
+            total_summary["pipeline_versions_scanned"] += result["pipeline_versions_scanned"]
+            total_summary["pipeline_versions_affected"] += result["pipeline_versions_affected"]
         except Exception:  # pylint: disable=W0703
             log.exception("%sError processing project %s, continuing", prefix, pid)
             total_summary["errors"] += 1
@@ -364,9 +486,13 @@ def run_selected_tools_migration(param):
         prefix, total_summary["tools_removed"], total_summary["tools_renamed"]
     )
     log.info(
-        "%sTool mappings removed: %s, Tool mappings renamed: %s, Errors: %s",
+        "%sTool mappings removed: %s, Tool mappings renamed: %s",
         prefix, total_summary["tool_mappings_removed"], total_summary["tool_mappings_renamed"],
-        total_summary["errors"]
     )
+    log.info(
+        "%sPipeline versions scanned: %s, Pipeline versions affected: %s",
+        prefix, total_summary["pipeline_versions_scanned"], total_summary["pipeline_versions_affected"]
+    )
+    log.info("%sErrors: %s", prefix, total_summary["errors"])
     #
     return total_summary

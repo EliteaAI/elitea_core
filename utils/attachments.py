@@ -173,7 +173,7 @@ class ImageToModelProcessor(BaseFileToAIProcessor):
             url = f"filepath:{context.filepath}"
             # The image will be embedded as base64 inline at invocation time if S3 download succeeds.
             # If inline image_url data is present, prefer it over making a tool call.
-            # If inline data is unavailable (download failed or history turn), readFile is the fallback.
+            # If inline data is unavailable (download failed or history turn), read_file is the fallback.
             description_parts.extend([
                 "",
                 "NOTE: This image will be embedded as base64 inline if successfully loaded.",
