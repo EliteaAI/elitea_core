@@ -264,6 +264,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_conversation_source_to_elitea", self.migrate_conversation_source_to_elitea
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_admin_shell_to_inplace", self.migrate_admin_shell_to_inplace
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -533,6 +536,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_conversation_source_to_elitea", self.migrate_conversation_source_to_elitea
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_admin_shell_to_inplace", self.migrate_admin_shell_to_inplace
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)

@@ -912,6 +912,291 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         )
         return {"migrated": total_migrated, "dry_run": dry_run}
 
+    @web.method()
+    def migrate_admin_shell_to_inplace(self, *args, **kwargs):
+        """Admin task (Bug #4643): merge legacy admin-publish "shell" applications
+        back into their original applications.
+
+        Background:
+            Before the in-place admin publish flow was introduced, publishing
+            an agent from inside the public project created a separate "shell"
+            Application (shared_id=original.id) that hosted the published
+            version.  This produced duplicate cards in the Admin agent listing.
+
+        What this task does (per shell):
+            1. Reassigns each ``published`` version's ``application_id`` from
+               the shell to the original application.  Version IDs are
+               preserved, so all references (sub-agent meta, AlitaTool
+               settings, EntityToolMapping, conversation participants by
+               version_id) keep working without changes.
+            2. Updates ``version.meta.source_application_id`` to the original
+               application id (was the shell id).
+            3. Repoints embedded sub-agent ``meta.parent_published_app_id``
+               from the shell to the original app id.
+               (``parent_published_version_id`` stays unchanged.)
+            4. Repoints ``Participant.entity_meta`` JSONB rows that reference
+               the shell ``application_id`` to the original app id, so existing
+               conversations keep their proper agent identity.
+            5. Merges ``application.meta.adoption`` from the shell into the
+               original (sum ``conversation_count``, union ``project_ids``,
+               recompute ``project_count``).
+            6. Deletes the shell application (cascades base version).
+
+        Skip-and-report on collisions:
+            If a published version's name already exists on the original app,
+            the shell is skipped and reported.  Admin must manually rename
+            either the shell version or the original draft, then rerun.
+
+        Idempotent: re-running on already-migrated data finds zero shells
+        matching the detection criteria.  Safe to run multiple times.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+        """
+        from copy import deepcopy  # pylint: disable=C0415
+        from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import Application, ApplicationVersion  # pylint: disable=C0415
+        from ..models.participants import Participant  # pylint: disable=C0415
+        from ..models.enums.all import PublishStatus, ParticipantTypes  # pylint: disable=C0415
+        from ..utils.utils import get_public_project_id  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error(
+                            "migrate_admin_shell_to_inplace: invalid project_id '%s'", value
+                        )
+                        return {
+                            "migrated": 0,
+                            "error": f"invalid project_id: '{value}'",
+                        }
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error(
+                "migrate_admin_shell_to_inplace: project_id= is required. "
+                "Format: project_id=<all|N>[;dry_run]"
+            )
+            return {
+                "migrated": 0,
+                "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]",
+            }
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        public_project_id = get_public_project_id()
+        log.info(
+            "%sStarting migrate_admin_shell_to_inplace "
+            "(dry_run=%s, project_id_filter=%s, public_project_id=%s)",
+            prefix, dry_run, project_id_filter, public_project_id,
+        )
+        start_ts = time.time()
+
+        # Admin shells live ONLY in the public project.
+        if project_id_filter is not None and project_id_filter != public_project_id:
+            log.info(
+                "migrate_admin_shell_to_inplace: project_id_filter=%s != public_project_id=%s, "
+                "nothing to migrate",
+                project_id_filter, public_project_id,
+            )
+            return {"migrated": 0, "skipped": 0, "dry_run": dry_run}
+
+        migrated_shells = 0
+        skipped_shells = 0
+        migrated_versions = 0
+
+        try:
+            with db.with_project_schema_session(public_project_id) as session:
+                # Detect admin shells: same-project owner+shared, shared_id set
+                shells = session.query(Application).filter(
+                    Application.owner_id == public_project_id,
+                    Application.shared_owner_id == public_project_id,
+                    Application.shared_id.isnot(None),
+                ).all()
+
+                log.info(
+                    "%sFound %d admin shell application(s) in public project %s",
+                    prefix, len(shells), public_project_id,
+                )
+
+                for shell in shells:
+                    shell_id = shell.id
+                    original_id = shell.shared_id
+                    shell_name = shell.name
+
+                    # Original may have been deleted manually — guard
+                    original = session.query(Application).get(original_id)
+                    if original is None:
+                        log.warning(
+                            "%sshell id=%s (%s): original app %s not found, skipping",
+                            prefix, shell_id, shell_name, original_id,
+                        )
+                        skipped_shells += 1
+                        continue
+
+                    # Find published versions on the shell
+                    pub_versions = session.query(ApplicationVersion).filter(
+                        ApplicationVersion.application_id == shell_id,
+                        ApplicationVersion.status == PublishStatus.published,
+                    ).all()
+
+                    if not pub_versions:
+                        log.info(
+                            "%sshell id=%s (%s): no published versions, deleting empty shell",
+                            prefix, shell_id, shell_name,
+                        )
+                        if not dry_run:
+                            session.delete(shell)
+                            session.flush()
+                        migrated_shells += 1
+                        continue
+
+                    # Collision check: any version name already used on original?
+                    original_names = {
+                        v.name for v in session.query(ApplicationVersion).filter(
+                            ApplicationVersion.application_id == original_id,
+                        ).all()
+                    }
+                    collisions = [v.name for v in pub_versions if v.name in original_names]
+                    if collisions:
+                        log.warning(
+                            "%sshell id=%s (%s): SKIP — version name collision(s) on "
+                            "original app id=%s: %s. Manual rename required.",
+                            prefix, shell_id, shell_name, original_id, collisions,
+                        )
+                        skipped_shells += 1
+                        continue
+
+                    # 1+2. Reassign FK + fix source meta
+                    for v in pub_versions:
+                        log.info(
+                            "%sshell id=%s ver id=%s '%s': reassign application_id %s -> %s",
+                            prefix, shell_id, v.id, v.name, shell_id, original_id,
+                        )
+                        if not dry_run:
+                            v.application_id = original_id
+                            new_meta = deepcopy(v.meta or {})
+                            new_meta['source_application_id'] = original_id
+                            v.meta = new_meta
+                            flag_modified(v, 'meta')
+                        migrated_versions += 1
+
+                    # 3. Repoint embedded sub-agents (parent_published_app_id)
+                    embedded_versions = session.query(ApplicationVersion).filter(
+                        ApplicationVersion.status == PublishStatus.embedded,
+                        ApplicationVersion.meta['parent_published_app_id'].astext
+                        == str(shell_id),
+                    ).all()
+                    for ev in embedded_versions:
+                        log.info(
+                            "%sshell id=%s: embedded sub-agent ver id=%s parent_app %s -> %s",
+                            prefix, shell_id, ev.id, shell_id, original_id,
+                        )
+                        if not dry_run:
+                            new_meta = deepcopy(ev.meta or {})
+                            new_meta['parent_published_app_id'] = original_id
+                            ev.meta = new_meta
+                            flag_modified(ev, 'meta')
+
+                    # 4. Repoint Participant.entity_meta references
+                    participants = session.query(Participant).filter(
+                        Participant.entity_name == ParticipantTypes.application,
+                        Participant.entity_meta['id'].astext == str(shell_id),
+                    ).all()
+                    for p in participants:
+                        log.info(
+                            "%sshell id=%s: participant id=%s entity_meta.id %s -> %s",
+                            prefix, shell_id, p.id, shell_id, original_id,
+                        )
+                        if not dry_run:
+                            new_em = deepcopy(p.entity_meta or {})
+                            new_em['id'] = original_id
+                            p.entity_meta = new_em
+                            flag_modified(p, 'entity_meta')
+
+                    # 5. Merge adoption counter
+                    shell_adoption = (shell.meta or {}).get('adoption') or {}
+                    if shell_adoption:
+                        orig_meta = deepcopy(original.meta or {})
+                        orig_adoption = orig_meta.get('adoption') or {
+                            'conversation_count': 0,
+                            'project_count': 0,
+                            'project_ids': [],
+                        }
+                        merged_ids = list({
+                            *(orig_adoption.get('project_ids') or []),
+                            *(shell_adoption.get('project_ids') or []),
+                        })
+                        merged = {
+                            'conversation_count': int(orig_adoption.get('conversation_count', 0))
+                            + int(shell_adoption.get('conversation_count', 0)),
+                            'project_count': len(merged_ids),
+                            'project_ids': merged_ids,
+                        }
+                        log.info(
+                            "%sshell id=%s: merge adoption %s + %s = %s into original id=%s",
+                            prefix, shell_id, orig_adoption, shell_adoption, merged, original_id,
+                        )
+                        if not dry_run:
+                            orig_meta['adoption'] = merged
+                            original.meta = orig_meta
+                            flag_modified(original, 'meta')
+
+                    # 6. Delete the shell (cascades base version row)
+                    log.info(
+                        "%sshell id=%s (%s): deleting shell application",
+                        prefix, shell_id, shell_name,
+                    )
+                    if not dry_run:
+                        session.delete(shell)
+                        session.flush()
+
+                    migrated_shells += 1
+
+                if not dry_run:
+                    session.commit()
+
+        except Exception:  # pylint: disable=W0703
+            log.exception(
+                "%smigrate_admin_shell_to_inplace: error in public project %s",
+                prefix, public_project_id,
+            )
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_admin_shell_to_inplace — "
+            "%s %s shell(s), %s version(s); skipped %s shell(s) (duration = %ss)",
+            prefix,
+            "would migrate" if dry_run else "migrated",
+            migrated_shells,
+            migrated_versions,
+            skipped_shells,
+            round(end_ts - start_ts, 2),
+        )
+        return {
+            "migrated_shells": migrated_shells,
+            "migrated_versions": migrated_versions,
+            "skipped_shells": skipped_shells,
+            "dry_run": dry_run,
+        }
+
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
     project_id, conversation_arg, dry_run, prefix,

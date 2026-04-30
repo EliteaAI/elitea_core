@@ -725,6 +725,42 @@ def delete_public_version(
     return {'not_published': False, **source_meta}
 
 
+def delete_inplace_admin_version(
+    public_project_id: int,
+    public_version_id: int,
+) -> dict:
+    """Delete an in-place admin-published version (Bug #4643 flow).
+
+    Hard-deletes ONLY the published version row + cascades embedded
+    sub-agents.  Never touches the parent Application, the ``base``
+    version, or any non-published siblings (drafts).
+
+    Returns source linkage from ``version.meta`` so the caller can keep
+    parity with the legacy ``delete_public_version`` response shape.
+    """
+    cascade_delete_sub_agents(public_project_id, public_version_id)
+
+    with db.get_session(public_project_id) as session:
+        version = session.query(ApplicationVersion).get(public_version_id)
+        if version is None:
+            raise ValueError(f"Version {public_version_id} not found")
+        if version.status != PublishStatus.published:
+            return {'not_published': True}
+
+        source_meta = {
+            'source_project_id': (version.meta or {}).get('source_project_id'),
+            'source_version_id': (version.meta or {}).get('source_version_id'),
+            'source_application_id': (version.meta or {}).get('source_application_id'),
+            'source_author_id': (version.meta or {}).get('source_author_id'),
+        }
+
+        session.delete(version)
+        # Intentionally NOT touching the application, base, or drafts.
+        session.commit()
+
+    return {'not_published': False, **source_meta}
+
+
 # ---------------------------------------------------------------------------
 # Source version status sync
 # ---------------------------------------------------------------------------
@@ -1272,13 +1308,19 @@ def admin_publish(
     user_id: int,
     max_versions: int,
 ) -> Tuple[dict, int]:
-    """Snapshot the version directly into a shell — no clone created."""
-    return _publish_impl(
-        project_id, version_id, source_app_id,
-        version_name, user_id,
-        public_project_id=project_id,
+    """Admin in-place publish: append a sanitised published version to the original app.
+
+    The original draft version is **never modified** — neither status nor
+    content.  The new published version is a sibling on the same Application.
+    No shell application is created.
+    """
+    return _publish_impl_inplace(
+        project_id=project_id,
+        version_id=version_id,
+        source_app_id=source_app_id,
+        version_name=version_name,
+        user_id=user_id,
         max_versions=max_versions,
-        clone_source=False,
     )
 
 
@@ -1301,6 +1343,122 @@ def user_publish(
     )
 
 
+def _publish_impl_inplace(
+    project_id: int,
+    version_id: int,
+    source_app_id: int,
+    version_name: str,
+    user_id: int,
+    max_versions: int,
+) -> Tuple[dict, int]:
+    """Admin in-place publish: append a sanitised published version onto the
+    original Application that lives in the public project.
+
+    Bug #4643 fix: previously admin publish created a separate "shell"
+    Application that mirrored the original (via ``shared_id``), causing
+    duplicate cards in the Admin listing.  This flow keeps a single
+    Application entry and adds the published version as a sibling of the
+    existing draft.
+    """
+    public_project_id = project_id  # admin flow == same project
+
+    # Single source-project session for all read-only pre-checks
+    with db.get_session(project_id) as source_session:
+        pipeline_err = check_not_pipeline(version_id, source_session)
+        if pipeline_err is not None:
+            return pipeline_err
+
+        # 0. Pre-validate sub-agent tree
+        try:
+            sub_agent_tree = collect_sub_agent_tree(
+                project_id, version_id, session=source_session,
+            )
+        except SubAgentTreeError as exc:
+            return {"error": exc.error_code, "msg": str(exc)}, 400
+        except ValueError as exc:
+            return {"error": "sub_agent_validation", "msg": str(exc)}, 400
+
+        # 0b. Shared-LLM guard (parent + sub-agents must use shared models)
+        llm_err = _check_shared_llm_tree(
+            source_session, version_id, sub_agent_tree, public_project_id,
+        )
+        if llm_err:
+            return llm_err
+
+        # 1. Reject if version_name already used on the original Application
+        #    (covers collision with existing draft, base, or prior published)
+        if version_name_exists(
+            project_id, source_app_id, version_name,
+            session=source_session,
+        ):
+            return {
+                "error": "version_name_exists",
+                "msg": f"Version name '{version_name}' already exists on this agent",
+            }, 400
+
+    # 2. Publish-limit check (counts published versions on the original app)
+    allowed, current_count = check_publish_limit(
+        public_project_id, source_app_id, max_versions,
+    )
+    if not allowed:
+        return {
+            "error": "limit_reached",
+            "msg": f"Maximum {max_versions} published versions reached (current: {current_count})",
+        }, 400
+
+    # 3. Sanitised snapshot of the (untouched) original version
+    snapshot = create_publish_snapshot(project_id, version_id, user_id)
+
+    # 4. Append the sanitised published version to the original Application
+    result = publish_additional_version(
+        public_project_id, source_app_id, snapshot, version_name, user_id,
+    )
+
+    # 5. Initialise adoption counter on the original app (preserve other meta)
+    _ensure_adoption_meta(public_project_id, source_app_id)
+
+    # 6. Embed sub-agents (same primitive as user flow)
+    sub_err = publish_sub_agents(
+        source_project_id=project_id,
+        public_project_id=public_project_id,
+        source_version_id=version_id,
+        parent_pub_app_id=result['application_id'],
+        parent_pub_ver_id=result['version_id'],
+        user_id=user_id,
+        pre_validated_tree=sub_agent_tree,
+    )
+
+    response = {
+        "msg": "Successfully published",
+        "public_agent_id": result['application_id'],   # == source_app_id
+        "public_version_id": result['version_id'],
+        "version_name": version_name,
+        "source_version_id": version_id,               # original draft, untouched
+    }
+
+    if sub_err is not None:
+        return {**sub_err, **response}, 207
+
+    return response, 200
+
+
+def _ensure_adoption_meta(project_id: int, application_id: int) -> None:
+    """Initialise ``application.meta['adoption']`` if absent (preserve other keys)."""
+    with db.get_session(project_id) as session:
+        app = session.query(Application).get(application_id)
+        if app is None:
+            return
+        meta = dict(app.meta or {})
+        if 'adoption' not in meta:
+            meta['adoption'] = {
+                'conversation_count': 0,
+                'project_count': 0,
+                'project_ids': [],
+            }
+            app.meta = meta
+            session.commit()
+
+
 def _publish_impl(
     project_id: int,
     version_id: int,
@@ -1311,13 +1469,10 @@ def _publish_impl(
     max_versions: int,
     clone_source: bool,
 ) -> Tuple[dict, int]:
-    """Shared publish logic for both user and admin flows.
+    """Cross-project user publish: clone, snapshot, copy to public project.
 
-    When *clone_source* is True (user flow), clones the source version
-    first, then snapshots the clone.  The clone is marked ``published``.
-
-    When *clone_source* is False (admin flow), snapshots the source
-    version directly — no clone is created, the original stays ``draft``.
+    Always called with ``project_id != public_project_id`` (admin flow uses
+    ``_publish_impl_inplace`` instead).
     """
     # Single source-project session for all read-only pre-checks
     with db.get_session(project_id) as source_session:
@@ -1430,12 +1585,20 @@ def admin_unpublish(
     reason: Optional[str],
     actor_id: int,
 ) -> Tuple[dict, int]:
-    """Unpublish a version that lives in the public project (admin flow)."""
-    result = delete_public_version(project_id, version_id)
+    """Unpublish a version that lives in the public project (admin flow).
+
+    For the in-place flow (Bug #4643): hard-deletes ONLY the published
+    version row and cascade-deletes its embedded sub-agents.  The original
+    Application, its base version, and the editor draft version are left
+    untouched.
+    """
+    result = delete_inplace_admin_version(project_id, version_id)
     if result.get('not_published'):
         return {"error": "not_published", "msg": "Version is not currently published"}, 409
 
-    # Sync source version back to draft and notify the original author
+    # Cross-project notification path is only meaningful when source != public.
+    # For in-place admin publishes the source IS the public project, so the
+    # author-notification step is skipped (admin published their own work).
     source_project_id = result.get('source_project_id')
     source_version_id = result.get('source_version_id')
     source_application_id = result.get('source_application_id')
