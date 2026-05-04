@@ -214,6 +214,194 @@
       "section": "dedicated_banner",
       "default": ""
     },
+    "resources_information_enabled": {
+      "type": "boolean",
+      "title": "Information Card Enabled",
+      "description": "When disabled, the Information card is hidden from the Resources page for all users.",
+      "path": "extra_ui_config.resources.information.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_information_title": {
+      "type": "string",
+      "title": "Information Card Title",
+      "description": "Title displayed in the Information card header.",
+      "path": "extra_ui_config.resources.information.title",
+      "section": "resources",
+      "default": "Information"
+    },
+    "resources_information_description": {
+      "type": "string",
+      "title": "Information Card Description",
+      "description": "Subtitle shown below the title in the Information card.",
+      "path": "extra_ui_config.resources.information.description",
+      "section": "resources",
+      "default": ""
+    },
+    "resources_information_version_label": {
+      "type": "string",
+      "title": "Information Card - ELITEA Version Label",
+      "description": "Label shown next to the ELITEA version value in the Information card.",
+      "path": "extra_ui_config.resources.information.version_label",
+      "section": "resources",
+      "default": "ELITEA VERSION"
+    },
+    "resources_documentation_enabled": {
+      "type": "boolean",
+      "title": "Documentation Card Enabled",
+      "description": "When disabled, the Documentation card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.documentation.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_documentation_title": {
+      "type": "string",
+      "title": "Documentation Card Title",
+      "description": "Title displayed in the Documentation card header.",
+      "path": "extra_ui_config.resources.documentation.title",
+      "section": "resources",
+      "default": "Documentation"
+    },
+    "resources_documentation_description": {
+      "type": "string",
+      "title": "Documentation Card Description",
+      "description": "Subtitle shown below the title in the Documentation card.",
+      "path": "extra_ui_config.resources.documentation.description",
+      "section": "resources",
+      "default": "API reference, guides, and platform concepts"
+    },
+    "resources_documentation_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Documentation Links",
+      "description": "Links displayed inside the Documentation card.",
+      "path": "extra_ui_config.resources.documentation.links",
+      "section": "resources",
+      "default": []
+    },
+    "resources_release_notes_enabled": {
+      "type": "boolean",
+      "title": "Release Notes Card Enabled",
+      "description": "When disabled, the Release Notes card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.release_notes.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_release_notes_title": {
+      "type": "string",
+      "title": "Release Notes Card Title",
+      "description": "Title displayed in the Release Notes card header.",
+      "path": "extra_ui_config.resources.release_notes.title",
+      "section": "resources",
+      "default": "Release Notes"
+    },
+    "resources_release_notes_description": {
+      "type": "string",
+      "title": "Release Notes Card Description",
+      "description": "Subtitle shown below the title in the Release Notes card.",
+      "path": "extra_ui_config.resources.release_notes.description",
+      "section": "resources",
+      "default": "Product updates, improvements, and fixes"
+    },
+    "resources_release_notes_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Release Notes Links",
+      "description": "Links displayed inside the Release Notes card.",
+      "path": "extra_ui_config.resources.release_notes.links",
+      "section": "resources",
+      "default": []
+    },
+    "resources_video_library_enabled": {
+      "type": "boolean",
+      "title": "Video Library Card Enabled",
+      "description": "When disabled, the Video Library card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.video_library.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_video_library_title": {
+      "type": "string",
+      "title": "Video Library Card Title",
+      "description": "Title displayed in the Video Library card header.",
+      "path": "extra_ui_config.resources.video_library.title",
+      "section": "resources",
+      "default": "Video Library"
+    },
+    "resources_video_library_description": {
+      "type": "string",
+      "title": "Video Library Card Description",
+      "description": "Subtitle shown below the title in the Video Library card.",
+      "path": "extra_ui_config.resources.video_library.description",
+      "section": "resources",
+      "default": "Product walkthroughs and recorded sessions"
+    },
+    "resources_video_library_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Video Library Links",
+      "description": "Links displayed inside the Video Library card.",
+      "path": "extra_ui_config.resources.video_library.links",
+      "section": "resources",
+      "default": []
+    },
+    "resources_tutorials_enabled": {
+      "type": "boolean",
+      "title": "Tutorials Card Enabled",
+      "description": "When disabled, the Tutorials card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.tutorials.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_tutorials_title": {
+      "type": "string",
+      "title": "Tutorials Card Title",
+      "description": "Title displayed in the Tutorials card header.",
+      "path": "extra_ui_config.resources.tutorials.title",
+      "section": "resources",
+      "default": "Tutorials"
+    },
+    "resources_tutorials_description": {
+      "type": "string",
+      "title": "Tutorials Card Description",
+      "description": "Subtitle shown below the title in the Tutorials card.",
+      "path": "extra_ui_config.resources.tutorials.description",
+      "section": "resources",
+      "default": "Step-by-step guides and use cases"
+    },
+    "resources_tutorials_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Tutorials Links",
+      "description": "Links displayed inside the Tutorials card.",
+      "path": "extra_ui_config.resources.tutorials.links",
+      "section": "resources",
+      "default": []
+    },
     "vite_elitea_assistant": {
       "type": "string",
       "title": "Assistant Enabled",
