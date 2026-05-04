@@ -18,6 +18,7 @@ from ..models.enums.all import ParticipantTypes, ChatHistoryTemplates, PublishSt
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
 from ..models.participants import ParticipantMapping, Participant
+from ..models.application import ApplicationVersion
 from ..models.pd.message import MessageGroupDetail
 from ..models.pd.participant import ParticipantEntityUser, ParticipantEntityDummy, ParticipantBase, entity_meta_mapping, ParticipantCreate
 from ..models.pd.participant_settings import EntitySettingsApplication, EntitySettingsUser
@@ -110,6 +111,18 @@ def generate_toolkit_payload(
             app_id = app_participant.entity_meta['id']
             app_version_id = participant_mapping.entity_settings.get('version_id')
 
+            # Get agent_type from meta, fallback to DB if missing (for old participants)
+            agent_type = app_participant.meta.get('agent_type')
+            if not agent_type and app_version_id:
+                try:
+                    version_row = session.query(ApplicationVersion.agent_type).filter(
+                        ApplicationVersion.id == app_version_id
+                    ).first()
+                    if version_row:
+                        agent_type = version_row[0]
+                except Exception:
+                    log.debug(f"Could not fetch agent_type for version {app_version_id}")
+
             # Include all application participants - SDK will handle:
             # - Whether to create handoff tools (based on internal_tools having 'swarm')
             # - Self-handoff prevention (using participant_id)
@@ -129,7 +142,7 @@ def generate_toolkit_payload(
                 },
                 "id": None,
                 "toolkit_name": app_participant.meta['name'],
-                "agent_type": app_participant.meta.get('agent_type'),
+                "agent_type": agent_type,
                 "created_at": datetime.now(tz=timezone.utc).isoformat(),
             }
             tools.append(app_toolkit_details)

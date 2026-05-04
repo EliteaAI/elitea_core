@@ -84,7 +84,10 @@ def get_or_create_one(
             case ParticipantTypes.datasource:
                 meta = {'name': entity_details.get('name')}
             case ParticipantTypes.application:
-                meta = {'name': entity_details.get('name')}
+                meta = {
+                    'name': entity_details.get('name'),
+                    'agent_type': entity_details.get('version_details', {}).get('agent_type')
+                    }
             case ParticipantTypes.llm:
                 meta = {'name': entity_meta['model_name']}
             case ParticipantTypes.dummy:
