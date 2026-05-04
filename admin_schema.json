@@ -213,6 +213,14 @@
       "path": "extra_ui_config.vite_maintenance_banner.message",
       "section": "dedicated_banner",
       "default": ""
+    },
+    "vite_elitea_assistant": {
+      "type": "string",
+      "title": "Assistant Enabled",
+      "description": "When enabled, the support assistant widget is available to all users environment-wide.",
+      "path": "extra_ui_config.vite_elitea_assistant",
+      "section": "support_assistant",
+      "default": "0"
     }
   }
 }
