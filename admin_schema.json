@@ -238,13 +238,21 @@
       "section": "resources",
       "default": ""
     },
-    "resources_information_version_label": {
+    "resources_information_version": {
       "type": "string",
-      "title": "Information Card - ELITEA Version Label",
-      "description": "Label shown next to the ELITEA version value in the Information card.",
-      "path": "extra_ui_config.resources.information.version_label",
+      "title": "Information Card - ELITEA Version Value",
+      "description": "Version string displayed in the Information card (e.g. 1.2.3).",
+      "path": "extra_ui_config.resources.information.version",
       "section": "resources",
-      "default": "ELITEA VERSION"
+      "default": ""
+    },
+    "resources_information_upgrade_date": {
+      "type": "string",
+      "title": "Information Card - Last Upgrade Date Value",
+      "description": "Date string displayed as the last upgrade date in the Information card.",
+      "path": "extra_ui_config.resources.information.upgrade_date",
+      "section": "resources",
+      "default": ""
     },
     "resources_documentation_enabled": {
       "type": "boolean",
