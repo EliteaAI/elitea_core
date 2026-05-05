@@ -298,6 +298,13 @@ class Module(module.ModuleModel):
                 'cron': '0 * * * *',
                 'active': True
             })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                'rpc_func': 'pipelines_check_scheduling',
+                'rpc_kwargs': {},
+                'name': 'pipeline_scheduling',
+                'cron': '* * * * *',
+                'active': True
+            })
         except Empty:
             log.warning('No scheduling plugin found')
 
