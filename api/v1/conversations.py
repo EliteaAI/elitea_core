@@ -1,5 +1,5 @@
 from flask import request
-from tools import api_tools, auth, db, config as c, MinioClient, rpc_tools
+from tools import api_tools, auth, db, config as c, rpc_tools
 from tools import serialize
 
 from pydantic import ValidationError
@@ -8,12 +8,8 @@ from sqlalchemy import desc, asc, Integer, or_
 from ...models.conversation import Conversation
 from ...models.enums.all import ParticipantTypes
 from ...models.participants import Participant, ParticipantMapping
-from ...models.pd.conversation import ConversationListExtended, ConversationCreate, ConversationDetails
-from ...models.pd.participant import ParticipantCreate, ParticipantEntityUser
-from ...utils.conversation_utils import get_conversation_details, calculate_conversation_duration
-from ...utils.participant_utils import add_participant_to_conversation
-from ...utils.chat_feature_flags import get_context_manager_feature_flag
-from ...utils.context_analytics import set_context_strategy
+from ...models.pd.conversation import ConversationListExtended, ConversationCreate
+from ...utils.conversation_utils import calculate_conversation_duration
 from ...utils.constants import PROMPT_LIB_MODE
 
 
@@ -140,7 +136,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def post(self, project_id: int, **kwargs):
         raw = dict(request.json)
         user_id = auth.current_user().get("id")
-        raw['author_id'] = user_id
 
         try:
             parsed = ConversationCreate.model_validate(raw)
@@ -152,54 +147,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not parsed.is_private and public_project_id == project_id:
             return {"error": "Public conversation can not exist in public project"}, 400
 
-        user_participant_data = ParticipantCreate(
-            entity_name=ParticipantTypes.user,
-            entity_meta=ParticipantEntityUser(id=user_id)
+        result = self.create_conversation_rpc(
+            project_id=project_id,
+            user_id=user_id,
+            name=parsed.name,
+            source=parsed.source,
+            is_private=parsed.is_private,
+            meta=parsed.meta,
+            instructions=parsed.instructions,
+            add_dummy_participant=True,
+            apply_user_personalization=True,
+            apply_context_strategy=True,
         )
-        dummy_participant_data = ParticipantCreate(
-            entity_name=ParticipantTypes.dummy,
-            entity_meta={}
-        )
-        parsed.participants.append(user_participant_data)
-        parsed.participants.append(dummy_participant_data)
 
-        with db.get_session(project_id) as session:
-            conversation_dict = parsed.model_dump(exclude={'participants'})
-            new_conversation = Conversation(**conversation_dict)
-            session.add(new_conversation)
-            session.flush()
-            for p_data in parsed.participants:
-                add_participant_to_conversation(
-                    project_id=project_id,
-                    session=session,
-                    participant=p_data,
-                    conversation=new_conversation,
-                    initiator_id=user_id
-                )
-                session.flush()
-
-            if get_context_manager_feature_flag(
-                project_id,
-                session=session
-            ):
-                rpc_tools.RpcMixin().rpc.timeout(3).context_manager_set_strategy(
-                    project_id=project_id,
-                    conversation_id=new_conversation.id,
-                )
-
-            session.commit()
-            conversation: ConversationDetails = get_conversation_details(
-                session, new_conversation.id, project_id, user_id
-            )
-            serialized = serialize(conversation)
-
-            # room = get_chat_room(new_conversation.uuid)
-            # self.module.context.sio.emit(
-            #     event=SioEvents.chat_conversation_create,
-            #     data=serialized,
-            #     room=room,
-            # )
-            return serialized, 201
+        return result, 201
 
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversations.delete"],
@@ -209,29 +170,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, conversation_id: int):
-        with db.get_session(project_id) as session:
-            conversation = session.query(Conversation).filter(
-                Conversation.id == conversation_id
-            ).first()
-            if conversation is None:
-                return {"error": "Conversation not found"}, 404
+        result = self.delete_conversation_rpc(
+            project_id=project_id,
+            conversation_id=conversation_id,
+            check_ownership=False,
+        )
 
-            try:
-                mc = MinioClient.from_project_id(project_id)
-                bucket_name = f'conversation_{conversation.uuid}'
-                mc.remove_bucket(bucket_name)
-            except Exception:
-                pass
+        if not result.get('success'):
+            return {"error": result.get('error', 'Delete failed')}, 404
 
-            session.delete(conversation)
-            session.commit()
-            # room = get_chat_room(conversation.uuid)
-            # self.module.context.sio.emit(
-            #     event=SioEvents.chat_conversation_create,
-            #     data=serialized,
-            #     room=room,
-            # )
-            return {}, 204
+        return {}, 204
 
 
 class API(api_tools.APIBase):
