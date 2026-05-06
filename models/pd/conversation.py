@@ -12,6 +12,7 @@ from ...utils.chat_constants import CONVERSATION_NAME_MAX_LENGTH
 class ConversationBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: Optional[int] = None
+    uuid: Optional[str | UUID] = None
     name: str
     is_private: bool
     author_id: int
@@ -38,7 +39,6 @@ class ConversationDetailsOrm(ConversationBase):
     model_config = ConfigDict(from_attributes=True)
 
     participants: List[ParticipantBase]
-    uuid: Optional[str | UUID] = None
 
 
 class ConversationDetails(ConversationDetailsOrm):
