@@ -490,12 +490,18 @@ def generate_application_version_payload(
 
 
 def generate_payload(session, msg_group: ConversationMessageGroup, predict_payload: SioPredictModel) -> dict:
-    participant_chat_settings: ParticipantMapping = session.query(
+    participant_chat_settings = session.query(
         ParticipantMapping.entity_settings
     ).where(
         ParticipantMapping.participant_id == msg_group.sent_to_id,
         ParticipantMapping.conversation_id == msg_group.conversation_id
     ).first()
+
+    if not participant_chat_settings:
+        raise ValueError(
+            f"No participant mapping found for participant_id={msg_group.sent_to_id} "
+            f"in conversation_id={msg_group.conversation_id}"
+        )
 
     participant: Participant = msg_group.sent_to
 

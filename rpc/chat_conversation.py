@@ -119,6 +119,99 @@ class RPC:
                 log.error(f"Error updating conversation meta: {str(e)}")
                 raise Exception(f"Failed to update conversation meta")
 
+    @web.rpc("chat_update_conversation_rpc", "update_conversation_rpc")
+    def update_conversation_rpc(
+        self,
+        project_id: int,
+        conversation_id: int,
+        name: str = None,
+        instructions: str = None,
+        is_private: bool = None,
+        is_hidden: bool = None,
+        meta: dict = None,
+        attachment_participant_id: int = None,
+    ) -> dict:
+        """
+        Update conversation fields.
+
+        Returns dict with success status and updated conversation.
+        """
+        from sqlalchemy.orm.attributes import flag_modified
+        from ..models.enums.all import ParticipantTypes
+        from ..models.participants import Participant, ParticipantMapping
+        from tools import this
+
+        with db.get_session(project_id) as session:
+            try:
+                conversation = session.query(Conversation).filter(
+                    Conversation.id == conversation_id
+                ).first()
+
+                if not conversation:
+                    return {'success': False, 'error': 'Conversation not found'}
+
+                if is_private is not None:
+                    if is_private and not conversation.is_private:
+                        return {'success': False, 'error': 'Public conversation cannot be changed to private'}
+
+                    from ..utils.utils import get_public_project_id
+                    public_project_id = get_public_project_id()
+                    if not is_private and conversation.is_private and public_project_id == project_id:
+                        return {'success': False, 'error': 'Public conversation cannot exist in public project'}
+                    conversation.is_private = is_private
+
+                if attachment_participant_id is not None:
+                    participant_mapping = session.query(ParticipantMapping).filter(
+                        ParticipantMapping.conversation_id == conversation_id,
+                        ParticipantMapping.participant_id == attachment_participant_id
+                    ).first()
+                    if not participant_mapping:
+                        return {'success': False, 'error': f'Attachment participant {attachment_participant_id} is not in conversation'}
+
+                    participant = session.query(Participant).filter(
+                        Participant.id == attachment_participant_id,
+                    ).first()
+                    if not participant or participant.entity_name != ParticipantTypes.toolkit.value:
+                        return {'success': False, 'error': f'Participant {attachment_participant_id} is not a toolkit participant'}
+
+                    toolkit_details = this.module.get_toolkit_by_id(
+                        project_id=participant.entity_meta['project_id'],
+                        toolkit_id=participant.entity_meta['id']
+                    )
+                    if toolkit_details.get('type') != 'artifact':
+                        return {'success': False, 'error': f'Participant {attachment_participant_id} is not an artifact participant'}
+
+                    conversation.attachment_participant_id = attachment_participant_id
+
+                if name is not None:
+                    conversation.name = name
+
+                if instructions is not None:
+                    conversation.instructions = instructions
+
+                if meta is not None:
+                    conversation.meta = conversation.meta or {}
+                    conversation.meta.update(meta)
+                    flag_modified(conversation, 'meta')
+
+                if is_hidden is not None:
+                    conversation.meta = conversation.meta or {}
+                    conversation.meta['is_hidden'] = is_hidden
+                    flag_modified(conversation, 'meta')
+
+                session.commit()
+                session.refresh(conversation)
+
+                return {
+                    'success': True,
+                    'conversation': serialize(conversation),
+                }
+
+            except Exception as e:
+                session.rollback()
+                log.error(f"Error updating conversation: {str(e)}")
+                return {'success': False, 'error': 'Failed to update conversation'}
+
     @web.rpc("chat_create_conversation_rpc", "create_conversation_rpc")
     def create_conversation_rpc(
         self,
@@ -517,3 +610,201 @@ class RPC:
             except Exception as e:
                 log.error(f"Failed to add application participant: {e}")
                 return None
+
+    @web.rpc("chat_delete_all_messages_rpc", "delete_all_messages_rpc")
+    def delete_all_messages_rpc(
+        self,
+        project_id: int,
+        conversation_id: int,
+        user_id: int,
+    ) -> dict:
+        """
+        Delete all messages from a conversation.
+        Only the conversation author can delete all messages.
+        """
+        from ..models.message_group import ConversationMessageGroup
+        from ..models.message_items.base import MessageItem
+        from ..utils.sio_utils import get_chat_room, SioEvents
+        from ..utils.context_analytics import update_conversation_meta
+
+        with db.get_session(project_id) as session:
+            conversation = session.query(Conversation).filter(
+                Conversation.id == conversation_id
+            ).first()
+
+            if not conversation:
+                return {'success': False, 'error': f'No such conversation with id {conversation_id}'}
+
+            if conversation.author_id != user_id:
+                return {'success': False, 'error': 'Only conversation author can delete all messages'}
+
+            thread_ids = set()
+            agent_messages = session.query(ConversationMessageGroup.meta).filter(
+                ConversationMessageGroup.conversation_id == conversation_id,
+                ConversationMessageGroup.meta.isnot(None)
+            ).all()
+            for (meta,) in agent_messages:
+                if isinstance(meta, dict) and meta.get('thread_id'):
+                    thread_ids.add(meta['thread_id'])
+            thread_ids.add(str(conversation.uuid))
+
+            session.query(MessageItem).filter(
+                MessageItem.message_group_id.in_(
+                    session.query(ConversationMessageGroup.id).filter(
+                        ConversationMessageGroup.conversation_id == conversation_id
+                    )
+                )
+            ).delete()
+
+            session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.conversation_id == conversation_id
+            ).delete()
+
+            session.commit()
+
+            try:
+                update_conversation_meta(project_id, conversation_id, {'context_analytics': None})
+            except Exception as e:
+                log.error(f"Failed to reset context analytics for conversation {conversation_id}: {e}")
+
+            if thread_ids:
+                try:
+                    from ..utils.vectorstore import get_pgvector_connection_string
+                    from tools import this
+                    pgvector_connstr = get_pgvector_connection_string(project_id)
+                    this.module.event_node.emit('indexer_delete_checkpoint', {
+                        'thread_ids': list(thread_ids),
+                        'pgvector_connstr': pgvector_connstr,
+                    })
+                except Exception as e:
+                    log.error(f"Failed to delete checkpoints for conversation {conversation_id}: {str(e)}")
+
+            room = get_chat_room(conversation.uuid)
+            from tools import this
+            this.module.context.sio.emit(
+                event=SioEvents.chat_message_delete_all,
+                data={'conversation_id': conversation_id},
+                room=room,
+            )
+
+            return {'success': True}
+
+    @web.rpc("chat_send_message_rpc", "send_message_rpc")
+    def send_message_rpc(
+        self,
+        project_id: int,
+        conversation_uuid: str,
+        user_input: str = None,
+        participant_id: int = None,
+        llm_settings: dict = None,
+        attachments_info: list = None,
+        user_ids: list = None,
+        await_task_timeout: int = 0,
+        return_task_id: bool = False,
+        return_message_ids: bool = True,
+    ) -> dict:
+        """
+        Send a message to a conversation and optionally wait for AI response.
+        """
+        import time
+        from pydantic import ValidationError
+        from ..models.pd.message import MessagePostPayload, MessageGroupDetail
+        from ..utils.sio_utils import SioValidationError
+        from tools import this, rpc_tools
+
+        raw = {
+            'conversation_uuid': conversation_uuid,
+            'user_input': user_input,
+            'participant_id': participant_id,
+            'llm_settings': llm_settings,
+            'attachments_info': attachments_info or [],
+            'user_ids': user_ids,
+            'await_task_timeout': await_task_timeout,
+            'return_task_id': return_task_id,
+        }
+
+        if llm_settings is None and participant_id:
+            with db.get_session(project_id) as session:
+                mapping = session.query(ParticipantMapping).join(
+                    Participant, Participant.id == ParticipantMapping.participant_id
+                ).join(
+                    Conversation, Conversation.id == ParticipantMapping.conversation_id
+                ).filter(
+                    ParticipantMapping.participant_id == participant_id,
+                    Participant.entity_name == ParticipantTypes.application,
+                    Conversation.uuid == conversation_uuid,
+                ).first()
+                if not mapping:
+                    models_data = rpc_tools.RpcMixin().rpc.timeout(2).configurations_get_default_model(
+                        project_id=project_id, section="llm", include_shared=True
+                    )
+                    raw['llm_settings'] = models_data
+
+        if llm_settings is None and not participant_id:
+            models_data = rpc_tools.RpcMixin().rpc.timeout(2).configurations_get_default_model(
+                project_id=project_id, section="llm", include_shared=True
+            )
+            raw['llm_settings'] = models_data
+
+        try:
+            request_data = MessagePostPayload.model_validate(raw)
+        except ValidationError as e:
+            return {'success': False, 'error': f'Validation failed: {e.errors()}'}
+
+        message_payload = {
+            "project_id": project_id,
+            **serialize(request_data.model_dump(exclude={"await_task_timeout"})),
+        }
+
+        if request_data.await_task_timeout > 0 and request_data.return_task_id:
+            return {'success': False, 'error': 'Cannot return task id and wait for task completion simultaneously'}
+
+        try:
+            result = this.module.chat_predict_sio(
+                sid=None,
+                data=message_payload,
+                await_task_timeout=request_data.await_task_timeout,
+                return_message_ids=return_message_ids
+            )
+        except SioValidationError as e:
+            return {'success': False, 'error': f'Wrong input data: {e.error}'}
+        except Exception as ex:
+            log.error(f"Error in chat_predict_sio: {ex}")
+            return {'success': False, 'error': 'Cannot create message'}
+
+        if not isinstance(result, dict):
+            return {'success': False, 'error': f'Unexpected result type: {str(result)}'}
+
+        if "error" in result:
+            error_value = result["error"]
+            if not isinstance(error_value, str):
+                error_value = str(error_value)
+            return {'success': False, 'error': error_value}
+
+        if request_data.await_task_timeout <= 0 and request_data.return_task_id:
+            sanitized_result = {}
+            for k, v in result.items():
+                sanitized_result[k] = str(v) if isinstance(v, Exception) else v
+            return {'success': True, 'data': sanitized_result, 'status_code': 200}
+
+        status_code = 201
+        with db.get_session(project_id) as session:
+            message_groups = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.id.in_(result.values())
+            ).order_by(
+                ConversationMessageGroup.created_at.asc()
+            ).all()
+            if len(message_groups) != 2:
+                return {'success': False, 'error': 'Invalid number of message groups: expected to be 2'}
+            reply_message = message_groups[-1]
+            if not reply_message.message_items:
+                for poll_timeout in range(1, 4):
+                    session.refresh(reply_message)
+                    if not reply_message.is_streaming:
+                        break
+                    time.sleep(poll_timeout)
+                else:
+                    status_code = 202
+            rows = [serialize(MessageGroupDetail.from_orm(i)) for i in message_groups]
+
+        return {'success': True, 'data': {'message_groups': rows}, 'status_code': status_code}
