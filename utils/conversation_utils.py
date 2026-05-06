@@ -1,4 +1,4 @@
-from sqlalchemy import and_, or_, desc, Integer, Float, func, case, cast, TIMESTAMP
+from sqlalchemy import and_, or_, asc, desc, Integer, Float, func, case, cast, TIMESTAMP
 from sqlalchemy.orm import joinedload, Session
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -138,7 +138,7 @@ def get_conversation_details(session, conversation_id: int, project_id: int, use
     )
     conversation_dict['message_groups_count'] = message_groups.count()
     conversation_dict['message_groups'] = message_groups.order_by(
-        desc(ConversationMessageGroup.created_at)
+        asc(ConversationMessageGroup.created_at)
     ).limit(
         MESSAGES_DISPLAY_COUNT
     ).all()
