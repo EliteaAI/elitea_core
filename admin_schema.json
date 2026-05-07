@@ -222,22 +222,6 @@
       "section": "resources",
       "default": true
     },
-    "resources_information_title": {
-      "type": "string",
-      "title": "Information Card Title",
-      "description": "Title displayed in the Information card header.",
-      "path": "extra_ui_config.resources.information.title",
-      "section": "resources",
-      "default": "Information"
-    },
-    "resources_information_description": {
-      "type": "string",
-      "title": "Information Card Description",
-      "description": "Subtitle shown below the title in the Information card.",
-      "path": "extra_ui_config.resources.information.description",
-      "section": "resources",
-      "default": ""
-    },
     "resources_information_version": {
       "type": "string",
       "title": "Information Card - ELITEA Version Value",
