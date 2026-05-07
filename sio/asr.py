@@ -2,7 +2,7 @@ import json
 import threading
 
 from pylon.core.tools import log, web
-from tools import rpc_tools
+from tools import auth, rpc_tools
 
 from ..utils.sio_utils import SioEvents
 
@@ -18,6 +18,11 @@ class SIO:
         model_name = data.get("model_name")
         model_project_id = data.get("model_project_id") or project_id
         language = data.get("language") or "en"
+
+        if not auth.is_sio_user_in_project(sid, project_id):
+            log.warning("Sid %s is not in project %s", sid, project_id)
+            self.context.sio.emit(SioEvents.asr_error, {"error": "Access denied"}, to=sid)
+            return
 
         try:
             creds = _resolve_asr_credentials(model_project_id, model_name)
