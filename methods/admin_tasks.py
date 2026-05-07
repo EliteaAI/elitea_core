@@ -920,14 +920,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         when the field expects a string type. This migration updates NULL to empty string ''.
 
         Idempotent: safe to run multiple times — only updates rows where instructions IS NULL.
+        Defaults to all projects if no project_id is specified.
 
-        Param format:
-            "project_id=<all|N>[;dry_run]"
+        Param format (optional):
+            "[project_id=<all|N>][;dry_run]"
 
         Examples:
-            "project_id=all;dry_run"  - dry run across all projects
-            "project_id=all"          - migrate all projects
+            ""                        - migrate all projects (default)
+            "dry_run"                 - dry run across all projects
             "project_id=3"            - migrate project 3 only
+            "project_id=3;dry_run"    - dry run for project 3
         """
         from tools import db
         from ..models.all import ApplicationVersion
@@ -935,12 +937,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         param = kwargs.get("param", "") or ""
         dry_run = False
         project_id_filter = None
-        project_id_found = False
 
         for seg in [s.strip() for s in param.split(";")]:
             seg_lower = seg.lower()
             if seg_lower.startswith("project_id="):
-                project_id_found = True
                 value = seg[len("project_id="):].strip()
                 if value.lower() != "all":
                     try:
@@ -950,10 +950,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
             elif seg_lower == "dry_run":
                 dry_run = True
-
-        if not project_id_found:
-            log.error("migrate_agent_version_null_instructions: project_id= is required. Format: project_id=<all|N>[;dry_run]")
-            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
 
         prefix = "[DRY RUN] " if dry_run else ""
         log.info("Starting migrate_agent_version_null_instructions (dry_run=%s, project_id_filter=%s)", dry_run, project_id_filter)
