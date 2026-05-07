@@ -912,6 +912,95 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         )
         return {"migrated": total_migrated, "dry_run": dry_run}
 
+    @web.method()
+    def migrate_agent_version_null_instructions(self, *args, **kwargs):
+        """Admin task: fix agent versions where instructions is NULL instead of empty string.
+
+        Some agent versions have instructions=NULL which causes Pydantic validation errors
+        when the field expects a string type. This migration updates NULL to empty string ''.
+
+        Idempotent: safe to run multiple times — only updates rows where instructions IS NULL.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+        """
+        from tools import db
+        from ..models.all import ApplicationVersion
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_agent_version_null_instructions: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error("migrate_agent_version_null_instructions: project_id= is required. Format: project_id=<all|N>[;dry_run]")
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("Starting migrate_agent_version_null_instructions (dry_run=%s, project_id_filter=%s)", dry_run, project_id_filter)
+        start_ts = time.time()
+        total_migrated = 0
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:
+            log.exception("migrate_agent_version_null_instructions: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    count = session.query(ApplicationVersion).filter(
+                        ApplicationVersion.instructions.is_(None)
+                    ).count()
+
+                    if count > 0:
+                        log.info(
+                            "%sproject %s: %d agent version(s) with instructions=NULL",
+                            prefix, project_id, count
+                        )
+                        if not dry_run:
+                            session.query(ApplicationVersion).filter(
+                                ApplicationVersion.instructions.is_(None)
+                            ).update({'instructions': ''}, synchronize_session=False)
+                            session.commit()
+                        total_migrated += count
+
+            except Exception:
+                log.exception(
+                    "%smigrate_agent_version_null_instructions: error in project %s", prefix, project_id
+                )
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_agent_version_null_instructions — %s %s version(s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated", total_migrated, round(end_ts - start_ts, 2)
+        )
+        return {"migrated": total_migrated, "dry_run": dry_run}
+
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
     project_id, conversation_arg, dry_run, prefix,
