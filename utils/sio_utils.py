@@ -56,6 +56,13 @@ class SioEvents(StrEnum):
     chat_canvas_editors_change = 'chat_canvas_editors_change'
     chat_canvas_content_change = 'chat_canvas_content_change'
 
+    asr_start = 'asr_start'
+    asr_audio_chunk = 'asr_audio_chunk'
+    asr_stop = 'asr_stop'
+    asr_transcript_delta = 'asr_transcript_delta'
+    asr_transcript_done = 'asr_transcript_done'
+    asr_error = 'asr_error'
+
 
 class SioValidationError(Exception):
     def __init__(self, sio, sid: str | None, event: str, error, stream_id: str, message_id: str | None = None):
