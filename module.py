@@ -270,6 +270,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_agent_version_null_instructions", self.migrate_agent_version_null_instructions
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_ado_project_to_toolkit", self.migrate_ado_project_to_toolkit
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -545,6 +548,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_agent_version_null_instructions", self.migrate_agent_version_null_instructions
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_ado_project_to_toolkit", self.migrate_ado_project_to_toolkit
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
