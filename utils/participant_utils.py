@@ -236,6 +236,45 @@ def notify_user_added_to_conversation(
     )
 
 
+def notify_user_mentioned_in_conversation(
+        project_id: int,
+        user_id: int,
+        conversation: Conversation,
+        initiator_id: Optional[int] = None,
+        message_id: Optional[str] = None
+):
+    if user_id == initiator_id:
+        return
+
+    event_manager = rpc_tools.EventManagerMixin().event_manager
+
+    initiator_name = None
+    if initiator_id is not None:
+        try:
+            initiator_name = auth.get_user(user_id=initiator_id)['name']
+        except Exception as ex:
+            log.warning(ex)
+
+    event_manager.fire_event(
+        'notifications_stream', {
+            'project_id': project_id,
+            'user_id': user_id,
+            'meta': {
+                "conversation_id": conversation.id,
+                "conversation_name": conversation.name,
+                "initiator_name": initiator_name,
+                "message_id": message_id,
+                "message": (
+                    f"{initiator_name} mentioned you in [{conversation.name}]()"
+                    if initiator_name
+                    else f"You were mentioned in [{conversation.name}]()"
+                ),
+            },
+            'event_type': NotificationEventTypes.chat_user_mentioned
+        }
+    )
+
+
 def get_entity_details(
         entity_name: ParticipantTypes,
         entity_meta: EntityMetaType
