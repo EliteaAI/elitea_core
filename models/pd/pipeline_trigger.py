@@ -21,7 +21,14 @@ class TriggerType(str, Enum):
     """Pipeline trigger type enumeration."""
     chat_message = "chat_message"
     schedule = "schedule"
-    # webhook = "webhook"  # Phase 2
+    webhook = "webhook"
+
+
+class WebhookType(str, Enum):
+    """Webhook authentication type enumeration."""
+    github = "github"
+    gitlab = "gitlab"
+    custom = "custom"
 
 
 class PipelineTriggerSchedule(BaseModel):
@@ -82,17 +89,44 @@ class PipelineTriggerChatMessage(BaseModel):
     type: TriggerType = Field(default=TriggerType.chat_message)
 
 
+class PipelineTriggerWebhook(BaseModel):
+    """
+    Webhook trigger configuration for pipelines.
+
+    Allows external systems (GitHub, GitLab, custom) to trigger pipeline execution
+    via HTTP POST requests with signature-based authentication.
+
+    The webhook secret is stored in Application.webhook_secret (not in this model).
+    """
+    type: TriggerType = Field(default=TriggerType.webhook)
+    webhook_type: WebhookType = Field(..., description="Type of webhook authentication")
+    created_by: int = Field(..., gt=0, description="User ID who created the webhook trigger")
+
+    @validator('webhook_type', pre=True)
+    def normalize_webhook_type(cls, v):
+        """Allow string input and normalize to WebhookType enum."""
+        if isinstance(v, str):
+            return WebhookType(v)
+        return v
+
+    class Config:
+        use_enum_values = True
+
+
 class UpdatePipelineTrigger(BaseModel):
     """
     Input model for updating pipeline trigger via API.
 
     Used by PUT /api/v2/applications/{project_id}/pipeline/{version_id}/trigger
     """
-    type: TriggerType = Field(..., description="Trigger type: 'chat_message' or 'schedule'")
+    type: TriggerType = Field(..., description="Trigger type: 'chat_message', 'schedule', or 'webhook'")
 
     # Schedule-specific fields (required when type='schedule')
     cron: Optional[str] = Field(None, description="Cron expression (required for schedule type)")
     timezone: Optional[str] = Field(None, description="IANA timezone (required for schedule type)")
+
+    # Webhook-specific fields (required when type='webhook')
+    webhook_type: Optional[str] = Field(None, description="Webhook type: 'github', 'gitlab', or 'custom'")
 
     @validator('timezone')
     def validate_timezone(cls, v):
@@ -125,6 +159,14 @@ class UpdatePipelineTrigger(BaseModel):
             if not self.timezone:
                 raise ValueError("timezone is required when trigger type is 'schedule'")
 
+    def validate_webhook_fields(self):
+        """Validate that webhook-specific fields are present when type is webhook."""
+        if self.type == TriggerType.webhook:
+            if not self.webhook_type:
+                raise ValueError("webhook_type is required when trigger type is 'webhook'")
+            if self.webhook_type not in [wt.value for wt in WebhookType]:
+                raise ValueError(f"webhook_type must be one of: {[wt.value for wt in WebhookType]}")
+
     class Config:
         use_enum_values = True
 
@@ -140,6 +182,13 @@ class PipelineTriggerResponse(BaseModel):
     timezone: Optional[str] = None
     last_run: Optional[str] = None
     created_by: Optional[int] = None
+    webhook_type: Optional[str] = None
+    webhook_url: Optional[str] = None
+    # Webhook secret info (only present when type=webhook)
+    secret_configured: Optional[bool] = None
+    secret_header: Optional[str] = None
+    secret_value: Optional[str] = None
+    secret_instructions: Optional[str] = None
 
     class Config:
         use_enum_values = True
@@ -195,5 +244,11 @@ def build_trigger_for_storage(update_data: UpdatePipelineTrigger, user_id: int) 
             "created_by": user_id,
         }
 
-    # Future: webhook type
+    elif trigger_type == TriggerType.webhook.value:
+        return {
+            "type": TriggerType.webhook.value,
+            "webhook_type": update_data.webhook_type,
+            "created_by": user_id,
+        }
+
     return {"type": trigger_type}

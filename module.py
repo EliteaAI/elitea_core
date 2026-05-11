@@ -324,6 +324,15 @@ class Module(module.ModuleModel):
         # Load providers and register RPC method
         self.load_providers()
 
+        # Register webhook endpoint as public (authenticated via signature, not session)
+        try:
+            auth.add_public_rule({
+                "uri": r"/api/v2/prompt_lib/\d+/\d+/(github|gitlab|custom)"
+            })
+            log.info("Registered webhook endpoint as public")
+        except Exception as e:
+            log.warning('Failed to register webhook public rule: %s', e)
+
         # Register provider RPC method on worker client
         try:
             worker_client = this.for_module("worker_client").module
