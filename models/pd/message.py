@@ -2,7 +2,7 @@ from uuid import UUID
 from typing import Optional, List, Union, Literal
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, model_validator, Field, conint
+from pydantic import BaseModel, ConfigDict, model_validator, field_validator, Field, conint
 
 from .canvas import CanvasItemDetail
 from .participant import ParticipantDetails
@@ -57,6 +57,11 @@ class MessageGroupDetail(MessageGroupBase):
     sent_to: Optional[ParticipantDetails]
     is_streaming: bool
     task_id: Optional[str]
+
+    @field_validator('message_items', mode='before')
+    @classmethod
+    def exclude_context_items(cls, v):
+        return [i for i in (v or []) if getattr(i, 'item_type', None) != 'context_message']
 
 
 class MessagePostPayload(BaseModel):

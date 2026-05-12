@@ -46,6 +46,7 @@ class SioPredictModel(BaseModel):
     ignored_mcp_servers: Optional[List[str]] = Field(default_factory=list, description="List of MCP server URLs to ignore (user chose to continue without auth)")
     # Keep for backwards compatibility - not used in normal flow, always False
     should_continue: Optional[bool] = Field(default=False, description="Deprecated: Use chat_continue_predict event instead")
+    runtime_context: Optional[Dict[str, Any]] = None
     thread_id: Optional[str] = Field(default=None, description="Thread ID for execution")
     persona: Optional[str] = Field(default="generic", description="Default persona for chat: 'generic' or 'qa'")
 

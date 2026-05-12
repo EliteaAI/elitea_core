@@ -857,6 +857,18 @@ class RPC:
             )
             session.add(msg_group)
             session.add(msg)
+
+            if parsed.runtime_context:
+                from ..models.message_items.context import ContextMessageItem
+                context_msg = ContextMessageItem(
+                    message_group=msg_group,
+                    item_type=ContextMessageItem.__mapper_args__['polymorphic_identity'],
+                    order_index=-1,
+                    context_data=parsed.runtime_context,
+                    context_type='support_assistant_context',
+                )
+                session.add(context_msg)
+
             session.flush()
 
             response_msg = None
