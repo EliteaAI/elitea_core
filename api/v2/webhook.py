@@ -105,10 +105,10 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                     if webhook_signature != secret_value:
                         raise VerifySignatureError({"error": "x-gitlab-token token mismatch!"})
                 elif webhook_type == "custom":
-                    if ":" not in secret:
-                        raise VerifySignatureError({"error": "format mismatch!"})
-                    secret_header, secret_value = secret.split(":", 1)
-                    if webhook_signature.get(secret_header) != secret_value:
+                    # Custom webhook uses raw token, always checked against X-Webhook-Token header
+                    # Strip header prefix if present (legacy data)
+                    secret_value = secret.split(":", 1)[1] if ":" in secret else secret
+                    if webhook_signature.get("X-Webhook-Token") != secret_value:
                         raise VerifySignatureError({"error": "token mismatch!"})
             except VerifySignatureError as e:
                 return False, (e.value, 400)

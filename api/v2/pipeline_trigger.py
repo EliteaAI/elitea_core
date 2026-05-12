@@ -29,13 +29,9 @@ def _generate_webhook_secret(webhook_type: str) -> str:
     """
     Generate a webhook secret appropriate for the webhook type.
 
-    For GitHub/GitLab: Generate a random token
-    For Custom: Generate in format 'X-Webhook-Token:random_token'
+    All webhook types use a raw token (no header prefix).
     """
-    token = secrets.token_urlsafe(32)
-    if webhook_type == WebhookType.custom.value:
-        return f"X-Webhook-Token:{token}"
-    return token
+    return secrets.token_urlsafe(32)
 
 
 def _get_webhook_secret_for_display(project_id: int, trigger_data: dict, webhook_type: str) -> dict:
@@ -69,18 +65,14 @@ def _get_webhook_secret_for_display(project_id: int, trigger_data: dict, webhook
         }
 
     if webhook_type == WebhookType.custom.value:
-        # Custom webhook expects header:value format
-        if ":" in secret:
-            header, value = secret.split(":", 1)
-        else:
-            # Legacy secret without header - use default header
-            header = "X-Webhook-Token"
-            value = secret
+        # Custom webhook uses raw token with fixed X-Webhook-Token header
+        # Strip header prefix if present (legacy data)
+        value = secret.split(":", 1)[1] if ":" in secret else secret
         return {
             "secret_configured": True,
-            "secret_header": header,
+            "secret_header": "X-Webhook-Token",
             "secret_value": value,
-            "secret_instructions": f"Add header '{header}' with value '{value}' to your webhook request",
+            "secret_instructions": f"Add header 'X-Webhook-Token' with value '{value}' to your webhook request",
         }
     elif webhook_type == WebhookType.github.value:
         # GitHub uses raw secret - strip header prefix if present (legacy data)
@@ -257,11 +249,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     secret_key = f"webhook_secret_v{version_id}"
 
                     if new_secret_from_ui:
-                        # User regenerated secret in UI - format it appropriately and save
-                        if webhook_type == WebhookType.custom.value:
-                            new_secret = f"X-Webhook-Token:{new_secret_from_ui}"
-                        else:
-                            new_secret = new_secret_from_ui
+                        # User regenerated secret in UI - use raw token
+                        new_secret = new_secret_from_ui
                         # Merge with existing project secrets to preserve other webhook secrets
                         vault_client = VaultClient(project_id)
                         project_secrets = vault_client.get_secrets() or {}
