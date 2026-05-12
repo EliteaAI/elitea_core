@@ -358,9 +358,11 @@ def _resolve_asr_credentials(project_id: int, model_name: str) -> dict:
     )
 
     config_data = None
+    config_project_id = project_id
     for cfg in configs:
         if cfg.get("data", {}).get("name") == model_name:
             config_data = dict(cfg["data"])
+            config_project_id = cfg.get("project_id", project_id)
             break
 
     if config_data is None:
@@ -368,11 +370,13 @@ def _resolve_asr_credentials(project_id: int, model_name: str) -> dict:
             f"No ASR configuration found for model '{model_name}' in project {project_id}"
         )
 
-    # Expand the ai_credentials reference (resolves elitea_title reference + unsecrets)
+    # Expand the ai_credentials reference using the config's owning project so that
+    # credentials belonging to a shared public model are found in that project directly,
+    # matching the pattern used by image generation and LLM shared model credential lookup.
     ai_creds_ref = config_data.get("ai_credentials")
     if ai_creds_ref:
         expanded = rpc_tools.RpcMixin().rpc.timeout(5).configurations_expand(
-            project_id=project_id,
+            project_id=config_project_id,
             settings=ai_creds_ref,
             user_id=None,
             unsecret=True,
