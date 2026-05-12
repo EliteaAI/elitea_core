@@ -27,6 +27,7 @@ class RPC:
         user_id: int = None,
         include_participants: bool = True,
         include_message_groups: bool = True,
+        check_ownership: bool = True,
     ) -> dict | None:
         """
         Get full conversation details with participants and message groups.
@@ -54,7 +55,8 @@ class RPC:
                     session=session,
                     conversation_id=conversation_id,
                     project_id=project_id,
-                    user_id=user_id
+                    user_id=user_id,
+                    check_ownership=check_ownership,
                 )
 
                 if not result:

@@ -78,7 +78,7 @@ def calculate_conversation_duration(conversation: Conversation, session: Session
     return round(float(result or 0.0), 2)
 
 
-def get_conversation_details(session, conversation_id: int, project_id: int, user_id: int = None) -> ConversationDetails | None:
+def get_conversation_details(session, conversation_id: int, project_id: int, user_id: int = None, check_ownership: bool = True) -> ConversationDetails | None:
     # filter participants based on entity_meta['id']
     conversation = session.query(Conversation).filter(
         Conversation.id == conversation_id
@@ -99,27 +99,34 @@ def get_conversation_details(session, conversation_id: int, project_id: int, use
         *participant_subquery_filters
     ).subquery()
 
-    # filter conversations that are private and authored
-    # by the user (based on participant metadata)
-    private_conversation_subquery = session.query(Conversation.id).join(
-        ParticipantMapping,
-        Conversation.id == ParticipantMapping.conversation_id
-    ).filter(
-        and_(
-            Conversation.is_private == True,
-            ParticipantMapping.participant_id.in_(participant_subquery)
-        )
-    ).subquery()
+    if check_ownership:
+        # filter conversations that are private and authored
+        # by the user (based on participant metadata)
+        private_conversation_subquery = session.query(Conversation.id).join(
+            ParticipantMapping,
+            Conversation.id == ParticipantMapping.conversation_id
+        ).filter(
+            and_(
+                Conversation.is_private == True,
+                ParticipantMapping.participant_id.in_(participant_subquery)
+            )
+        ).subquery()
 
-    conversation = session.query(Conversation).options(
-        joinedload(Conversation.participants)
-    ).filter(
-        Conversation.id == conversation_id,
-        or_(
-            Conversation.is_private == False,
-            Conversation.id.in_(private_conversation_subquery)
-        )
-    ).first()
+        conversation = session.query(Conversation).options(
+            joinedload(Conversation.participants)
+        ).filter(
+            Conversation.id == conversation_id,
+            or_(
+                Conversation.is_private == False,
+                Conversation.id.in_(private_conversation_subquery)
+            )
+        ).first()
+    else:
+        conversation = session.query(Conversation).options(
+            joinedload(Conversation.participants)
+        ).filter(
+            Conversation.id == conversation_id
+        ).first()
 
     if not conversation:
         return None

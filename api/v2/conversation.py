@@ -22,10 +22,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_id = auth.current_user().get("id")
         rpc = rpc_tools.RpcMixin().rpc
 
+        support_config = rpc.timeout(3).support_assistant_get_config()
+        is_support_project = support_config.get('project_id') == project_id
+
         result = rpc.timeout(5).chat_get_conversation_details(
             project_id=project_id,
             conversation_id=conversation_id,
             user_id=user_id,
+            check_ownership=not is_support_project,
         )
 
         if not result:
