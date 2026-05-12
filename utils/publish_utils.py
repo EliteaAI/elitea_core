@@ -738,14 +738,18 @@ def delete_inplace_admin_version(
     Returns source linkage from ``version.meta`` so the caller can keep
     parity with the legacy ``delete_public_version`` response shape.
     """
-    cascade_delete_sub_agents(public_project_id, public_version_id)
-
+    # Validate version exists and is published BEFORE cascade-deleting sub-agents
     with db.get_session(public_project_id) as session:
         version = session.query(ApplicationVersion).get(public_version_id)
         if version is None:
             raise ValueError(f"Version {public_version_id} not found")
         if version.status != PublishStatus.published:
             return {'not_published': True}
+
+    cascade_delete_sub_agents(public_project_id, public_version_id)
+
+    with db.get_session(public_project_id) as session:
+        version = session.query(ApplicationVersion).get(public_version_id)
 
         source_meta = {
             'source_project_id': (version.meta or {}).get('source_project_id'),
