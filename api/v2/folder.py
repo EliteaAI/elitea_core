@@ -3,7 +3,7 @@ import logging
 from flask import request
 from pydantic import ValidationError
 from sqlalchemy import desc, asc, or_, and_, Integer, func
-from tools import api_tools, auth, db, config as c
+from tools import api_tools, auth, db, config as c, rpc_tools
 from tools import serialize
 
 log = logging.getLogger(__name__)
@@ -60,7 +60,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, **kwargs):
         with db.get_session(project_id) as session:
             q = request.args.get('query')
-            sources = request.args.get('source', default='elitea')
             limit = request.args.get('limit', default=10, type=int)
             offset = request.args.get('offset', default=0, type=int)
             # For ungrouped conversations sorting
@@ -70,24 +69,36 @@ class PromptLibAPI(api_tools.APIModeHandler):
             sorting = desc if sort_order == 'desc' else asc
 
             user_id = auth.current_user().get("id")
+            rpc = rpc_tools.RpcMixin().rpc
 
-            participant_subquery = session.query(Participant.id).filter(
-                Participant.entity_meta['id'].astext.cast(Integer) == user_id,
-                Participant.entity_name == ParticipantTypes.user.value
-            ).subquery()
+            support_config = rpc.timeout(3).support_assistant_get_config()
+            is_support_project = support_config.get('project_id') == project_id
 
-            distinct_conversation_subquery = session.query(Conversation.id).distinct().join(
-                ParticipantMapping,
-                Conversation.id == ParticipantMapping.conversation_id
-            ).join(
-                Participant,
-                Participant.id == ParticipantMapping.participant_id
-            ).filter(
-                or_(
-                    Conversation.is_private == False,
-                    Participant.id.in_(participant_subquery)
-                )
-            ).subquery()
+            if is_support_project:
+                sources = ['support']
+                distinct_conversation_subquery = session.query(Conversation.id).distinct().filter(
+                    Conversation.source == 'support'
+                ).subquery()
+            else:
+                sources = list(set(
+                    i.strip().lower() for i in request.args.get('source', default='elitea').split(',')
+                ))
+                participant_subquery = session.query(Participant.id).filter(
+                    Participant.entity_meta['id'].astext.cast(Integer) == user_id,
+                    Participant.entity_name == ParticipantTypes.user.value
+                ).subquery()
+                distinct_conversation_subquery = session.query(Conversation.id).distinct().join(
+                    ParticipantMapping,
+                    Conversation.id == ParticipantMapping.conversation_id
+                ).join(
+                    Participant,
+                    Participant.id == ParticipantMapping.participant_id
+                ).filter(
+                    or_(
+                        Conversation.is_private == False,
+                        Participant.id.in_(participant_subquery)
+                    )
+                ).subquery()
 
             query = session.query(Conversation).where(
                 Conversation.folder_id.is_(None),
@@ -98,7 +109,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 query = query.where(Conversation.name.ilike(f'%{q}%'))
 
             if sources:
-                sources = list(set(i.strip().lower() for i in sources.split(',')))
                 query = query.where(Conversation.source.in_(sources))
 
             query = query.order_by(sorting(sorting_by))
