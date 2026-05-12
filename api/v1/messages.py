@@ -1,4 +1,3 @@
-import json
 import time
 
 from flask import request
@@ -8,12 +7,9 @@ from tools import api_tools, auth, db, config as c
 from tools import serialize
 from pylon.core.tools import log
 
-from sqlalchemy import desc, asc
-
 from ...models.conversation import Conversation
 from ...models.message_group import ConversationMessageGroup
 from ...models.message_items.base import MessageItem
-from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail, MessagePostPayload
 from ...utils.sio_utils import get_chat_room
 
@@ -31,39 +27,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
     })
     @api_tools.endpoint_metrics
     def get(self, project_id: int, conversation_id: int, **kwargs):
-        with db.get_session(project_id) as session:
-            q = request.args.get('query')
-            limit = request.args.get('limit', default=10, type=int)
-            offset = request.args.get('offset', default=0, type=int)
-            sort_by = request.args.get('sort_by', default='created_at')
-            sorting_by = getattr(ConversationMessageGroup, sort_by)
-            sort_order = request.args.get('sort_order', default='desc')
-            sorting = desc if sort_order == 'desc' else asc
+        result = self.list_messages_rpc(
+            project_id=project_id,
+            conversation_id=conversation_id,
+            query=request.args.get('query'),
+            limit=request.args.get('limit', default=10, type=int),
+            offset=request.args.get('offset', default=0, type=int),
+            sort_by=request.args.get('sort_by', default='created_at'),
+            sort_order=request.args.get('sort_order', default='desc'),
+        )
 
-            query = session.query(
-                ConversationMessageGroup
-            ).filter(
-                ConversationMessageGroup.conversation_id == conversation_id
-            )
-
-            if q:
-                # todo: search in different message types?
-                query = query.join(
-                    TextMessageItem,
-                    ConversationMessageGroup.message_items
-                ).filter(TextMessageItem.content.ilike(f'%{q}%'))
-
-            total = query.count()
-            result = query.order_by(sorting(sorting_by)).limit(limit).offset(offset).all()
-
-            rows = [{
-                **serialize(MessageGroupDetail.from_orm(i)),
-            } for i in result]
-
-            return {
-                'total': total,
-                'rows': rows
-            }, 200
+        return result, 200
 
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.delete"],

@@ -28,7 +28,7 @@ from ..utils.chat_history import (
 )
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.llm_settings import DEFAULT_REASONING_MODEL_MAX_TOKENS, DEFAULT_MAX_TOKENS
-from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation
+from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation, notify_user_mentioned_in_conversation
 from ..utils.sio_utils import get_chat_room
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
@@ -497,6 +497,12 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
         ParticipantMapping.conversation_id == msg_group.conversation_id
     ).first()
 
+    if not participant_chat_settings:
+        raise ValueError(
+            f"No participant mapping found for participant_id={msg_group.sent_to_id} "
+            f"in conversation_id={msg_group.conversation_id}"
+        )
+
     participant: Participant = msg_group.sent_to
 
     result = {
@@ -851,6 +857,18 @@ class RPC:
             )
             session.add(msg_group)
             session.add(msg)
+
+            if parsed.runtime_context:
+                from ..models.message_items.context import ContextMessageItem
+                context_msg = ContextMessageItem(
+                    message_group=msg_group,
+                    item_type=ContextMessageItem.__mapper_args__['polymorphic_identity'],
+                    order_index=-1,
+                    context_data=parsed.runtime_context,
+                    context_type='support_assistant_context',
+                )
+                session.add(context_msg)
+
             session.flush()
 
             response_msg = None
@@ -909,6 +927,26 @@ class RPC:
                 room=room,
                 skip_sid=sid
             )
+
+            if parsed.user_ids:
+                mentioned_participants = session.query(Participant).filter(
+                    Participant.id.in_(parsed.user_ids),
+                    Participant.entity_name == ParticipantTypes.user
+                ).all()
+                for participant in mentioned_participants:
+                    auth_user_id = participant.entity_meta.get('id')
+                    if not auth_user_id:
+                        continue
+                    try:
+                        notify_user_mentioned_in_conversation(
+                            project_id=parsed.project_id,
+                            user_id=auth_user_id,
+                            conversation=conversation,
+                            initiator_id=current_user['id'],
+                            message_id=parsed.question_id
+                        )
+                    except Exception as e:
+                        log.warning(f'Failed to notify mentioned user (participant {participant.id}): {e}')
 
             if msg_group.sent_to_id:
                 # here we need to generate payload

@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 class EnterRoomPayload(BaseModel):
     project_id: int
-    conversation_id: int
+    conversation_id: int | UUID | str
 
 
 class LeaveRoomPayload(BaseModel):

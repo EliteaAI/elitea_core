@@ -213,6 +213,233 @@
       "path": "extra_ui_config.vite_maintenance_banner.message",
       "section": "dedicated_banner",
       "default": ""
+    },
+    "resources_information_enabled": {
+      "type": "boolean",
+      "title": "Information Card Enabled",
+      "description": "When disabled, the Information card is hidden from the Resources page for all users.",
+      "path": "extra_ui_config.resources.information.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_information_version": {
+      "type": "string",
+      "title": "Information Card - ELITEA Version Value",
+      "description": "Version string displayed in the Information card (e.g. 1.2.3).",
+      "path": "extra_ui_config.resources.information.version",
+      "section": "resources",
+      "default": ""
+    },
+    "resources_information_upgrade_date": {
+      "type": "string",
+      "title": "Information Card - Last Upgrade Date Value",
+      "description": "Date string displayed as the last upgrade date in the Information card.",
+      "path": "extra_ui_config.resources.information.upgrade_date",
+      "section": "resources",
+      "default": ""
+    },
+    "resources_documentation_enabled": {
+      "type": "boolean",
+      "title": "Documentation Card Enabled",
+      "description": "When disabled, the Documentation card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.documentation.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_documentation_title": {
+      "type": "string",
+      "title": "Documentation Card Title",
+      "description": "Title displayed in the Documentation card header.",
+      "path": "extra_ui_config.resources.documentation.title",
+      "section": "resources",
+      "default": "Documentation"
+    },
+    "resources_documentation_description": {
+      "type": "string",
+      "title": "Documentation Card Description",
+      "description": "Subtitle shown below the title in the Documentation card.",
+      "path": "extra_ui_config.resources.documentation.description",
+      "section": "resources",
+      "default": "API reference, guides, and platform concepts"
+    },
+    "resources_documentation_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Documentation Links",
+      "description": "Links displayed inside the Documentation card.",
+      "path": "extra_ui_config.resources.documentation.links",
+      "section": "resources",
+      "default": []
+    },
+    "resources_release_notes_enabled": {
+      "type": "boolean",
+      "title": "Release Notes Card Enabled",
+      "description": "When disabled, the Release Notes card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.release_notes.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_release_notes_title": {
+      "type": "string",
+      "title": "Release Notes Card Title",
+      "description": "Title displayed in the Release Notes card header.",
+      "path": "extra_ui_config.resources.release_notes.title",
+      "section": "resources",
+      "default": "Release Notes"
+    },
+    "resources_release_notes_description": {
+      "type": "string",
+      "title": "Release Notes Card Description",
+      "description": "Subtitle shown below the title in the Release Notes card.",
+      "path": "extra_ui_config.resources.release_notes.description",
+      "section": "resources",
+      "default": "Product updates, improvements, and fixes"
+    },
+    "resources_release_notes_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Release Notes Links",
+      "description": "Links displayed inside the Release Notes card.",
+      "path": "extra_ui_config.resources.release_notes.links",
+      "section": "resources",
+      "default": []
+    },
+    "resources_video_library_enabled": {
+      "type": "boolean",
+      "title": "Video Library Card Enabled",
+      "description": "When disabled, the Video Library card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.video_library.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_video_library_title": {
+      "type": "string",
+      "title": "Video Library Card Title",
+      "description": "Title displayed in the Video Library card header.",
+      "path": "extra_ui_config.resources.video_library.title",
+      "section": "resources",
+      "default": "Video Library"
+    },
+    "resources_video_library_description": {
+      "type": "string",
+      "title": "Video Library Card Description",
+      "description": "Subtitle shown below the title in the Video Library card.",
+      "path": "extra_ui_config.resources.video_library.description",
+      "section": "resources",
+      "default": "Product walkthroughs and recorded sessions"
+    },
+    "resources_video_library_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Video Library Links",
+      "description": "Links displayed inside the Video Library card.",
+      "path": "extra_ui_config.resources.video_library.links",
+      "section": "resources",
+      "default": []
+    },
+    "resources_tutorials_enabled": {
+      "type": "boolean",
+      "title": "Tutorials Card Enabled",
+      "description": "When disabled, the Tutorials card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.tutorials.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_tutorials_title": {
+      "type": "string",
+      "title": "Tutorials Card Title",
+      "description": "Title displayed in the Tutorials card header.",
+      "path": "extra_ui_config.resources.tutorials.title",
+      "section": "resources",
+      "default": "Tutorials"
+    },
+    "resources_tutorials_description": {
+      "type": "string",
+      "title": "Tutorials Card Description",
+      "description": "Subtitle shown below the title in the Tutorials card.",
+      "path": "extra_ui_config.resources.tutorials.description",
+      "section": "resources",
+      "default": "Step-by-step guides and use cases"
+    },
+    "resources_tutorials_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Tutorials Links",
+      "description": "Links displayed inside the Tutorials card.",
+      "path": "extra_ui_config.resources.tutorials.links",
+      "section": "resources",
+      "default": []
+    },
+    "resources_interactive_tours_enabled": {
+      "type": "boolean",
+      "title": "Interactive Tours Card Enabled",
+      "description": "When disabled, the Interactive Tours card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.interactive_tours.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_interactive_tours_title": {
+      "type": "string",
+      "title": "Interactive Tours Card Title",
+      "description": "Title displayed in the Interactive Tours card header.",
+      "path": "extra_ui_config.resources.interactive_tours.title",
+      "section": "resources",
+      "default": "Interactive Tours"
+    },
+    "resources_interactive_tours_description": {
+      "type": "string",
+      "title": "Interactive Tours Card Description",
+      "description": "Subtitle shown below the title in the Interactive Tours card.",
+      "path": "extra_ui_config.resources.interactive_tours.description",
+      "section": "resources",
+      "default": "Guided tours to explore key features and workflows"
+    },
+    "resources_interactive_tours_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Interactive Tours Links",
+      "description": "Links displayed inside the Interactive Tours card.",
+      "path": "extra_ui_config.resources.interactive_tours.links",
+      "section": "resources",
+      "default": []
+    },
+    "vite_elitea_assistant": {
+      "type": "string",
+      "title": "Assistant Enabled",
+      "description": "When enabled, the support assistant widget is available to all users environment-wide.",
+      "path": "extra_ui_config.vite_elitea_assistant",
+      "section": "support_assistant",
+      "default": "0"
     }
   }
 }
