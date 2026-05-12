@@ -63,6 +63,13 @@ class SioEvents(StrEnum):
     asr_transcript_done = 'asr_transcript_done'
     asr_error = 'asr_error'
 
+    tts_start = 'tts_start'
+    tts_stop = 'tts_stop'
+    tts_audio_chunk = 'tts_audio_chunk'
+    tts_done = 'tts_done'
+    tts_error = 'tts_error'
+    tts_word_timings = 'tts_word_timings'
+
 
 class SioValidationError(Exception):
     def __init__(self, sio, sid: str | None, event: str, error, stream_id: str, message_id: str | None = None):
