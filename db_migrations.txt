@@ -132,3 +132,7 @@ Run admin task migrate_jira_confluence_hosting with param: project_id=all
 
 Run admin task migrate_toolkit_selected_tools with params: artifact;listFiles>list_files,createFile>create_file,readFile>read_file,deleteFile>delete_file,appendData>append_data,createNewBucket>create_new_bucket;project_id=all;dry_run
 Run admin task migrate_toolkit_selected_tools with params: artifact;listFiles>list_files,createFile>create_file,readFile>read_file,deleteFile>delete_file,appendData>append_data,createNewBucket>create_new_bucket;project_id=all
+
+# Merge legacy admin-publish "shell" applications back into their originals (Bug #4643)
+Run admin task migrate_admin_shell_to_inplace with param: project_id=all;dry_run
+Run admin task migrate_admin_shell_to_inplace with param: project_id=all
