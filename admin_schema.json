@@ -394,6 +394,45 @@
       "section": "resources",
       "default": []
     },
+    "resources_interactive_tours_enabled": {
+      "type": "boolean",
+      "title": "Interactive Tours Card Enabled",
+      "description": "When disabled, the Interactive Tours card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.interactive_tours.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_interactive_tours_title": {
+      "type": "string",
+      "title": "Interactive Tours Card Title",
+      "description": "Title displayed in the Interactive Tours card header.",
+      "path": "extra_ui_config.resources.interactive_tours.title",
+      "section": "resources",
+      "default": "Interactive Tours"
+    },
+    "resources_interactive_tours_description": {
+      "type": "string",
+      "title": "Interactive Tours Card Description",
+      "description": "Subtitle shown below the title in the Interactive Tours card.",
+      "path": "extra_ui_config.resources.interactive_tours.description",
+      "section": "resources",
+      "default": "Guided tours to explore key features and workflows"
+    },
+    "resources_interactive_tours_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Interactive Tours Links",
+      "description": "Links displayed inside the Interactive Tours card.",
+      "path": "extra_ui_config.resources.interactive_tours.links",
+      "section": "resources",
+      "default": []
+    },
     "vite_elitea_assistant": {
       "type": "string",
       "title": "Assistant Enabled",
