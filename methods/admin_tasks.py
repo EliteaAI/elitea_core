@@ -934,18 +934,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             3. Repoints embedded sub-agent ``meta.parent_published_app_id``
                from the shell to the original app id.
                (``parent_published_version_id`` stays unchanged.)
-            4. Repoints ``Participant.entity_meta`` JSONB rows that reference
-               the shell ``application_id`` to the original app id, so existing
-               conversations keep their proper agent identity.
+            4. Repoints ``Participant.entity_meta`` JSONB rows **across all
+               project schemas** that reference the shell ``application_id`` to
+               the original app id, so existing conversations in every project
+               keep their proper agent identity.
             5. Merges ``application.meta.adoption`` from the shell into the
                original (sum ``conversation_count``, union ``project_ids``,
                recompute ``project_count``).
             6. Deletes the shell application (cascades base version).
 
-        Skip-and-report on collisions:
+        Version name collision handling:
             If a published version's name already exists on the original app,
-            the shell is skipped and reported.  Admin must manually rename
-            either the shell version or the original draft, then rerun.
+            the migrating version is auto-renamed by appending
+            ``_migrated_<unix_ts>`` to avoid the UniqueConstraint.
 
         Idempotent: re-running on already-migrated data finds zero shells
         matching the detection criteria.  Safe to run multiple times.
@@ -1068,19 +1069,43 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         migrated_shells += 1
                         continue
 
-                    # Collision check: any version name already used on original?
+                    # Collision check: auto-rename colliding version names
+                    VERSION_NAME_MAX = ApplicationVersion.__table__.c.name.type.length
                     original_names = {
                         v.name for v in session.query(ApplicationVersion).filter(
                             ApplicationVersion.application_id == original_id,
                         ).all()
                     }
-                    collisions = [v.name for v in pub_versions if v.name in original_names]
-                    if collisions:
-                        log.warning(
-                            "%sshell id=%s (%s): SKIP — version name collision(s) on "
-                            "original app id=%s: %s. Manual rename required.",
-                            prefix, shell_id, shell_name, original_id, collisions,
-                        )
+                    ts_suffix = f"_migrated_{int(start_ts)}"
+                    rename_failed = False
+                    for v in pub_versions:
+                        if v.name in original_names:
+                            new_name = f"{v.name}{ts_suffix}"
+                            if len(new_name) > VERSION_NAME_MAX:
+                                log.warning(
+                                    "%sshell id=%s ver id=%s: SKIP — renamed '%s' "
+                                    "would be %d chars (max %d)",
+                                    prefix, shell_id, v.id, v.name,
+                                    len(new_name), VERSION_NAME_MAX,
+                                )
+                                rename_failed = True
+                                break
+                            if new_name in original_names:
+                                log.warning(
+                                    "%sshell id=%s ver id=%s: SKIP — renamed '%s' "
+                                    "also collides on original app id=%s",
+                                    prefix, shell_id, v.id, new_name, original_id,
+                                )
+                                rename_failed = True
+                                break
+                            log.info(
+                                "%sshell id=%s ver id=%s: rename '%s' -> '%s' "
+                                "(collision with original app id=%s)",
+                                prefix, shell_id, v.id, v.name, new_name, original_id,
+                            )
+                            if not dry_run:
+                                v.name = new_name
+                    if rename_failed:
                         skipped_shells += 1
                         continue
 
@@ -1115,21 +1140,42 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                             ev.meta = new_meta
                             flag_modified(ev, 'meta')
 
-                    # 4. Repoint Participant.entity_meta references
-                    participants = session.query(Participant).filter(
-                        Participant.entity_name == ParticipantTypes.application,
-                        Participant.entity_meta['id'].astext == str(shell_id),
-                    ).all()
-                    for p in participants:
-                        log.info(
-                            "%sshell id=%s: participant id=%s entity_meta.id %s -> %s",
-                            prefix, shell_id, p.id, shell_id, original_id,
+                    # 4. Repoint Participant.entity_meta across ALL projects
+                    try:
+                        all_projects = self.context.rpc_manager.call.project_list() or []
+                    except Exception:  # pylint: disable=W0703
+                        log.exception(
+                            "%sshell id=%s: failed to list projects for participant fix",
+                            prefix, shell_id,
                         )
-                        if not dry_run:
-                            new_em = deepcopy(p.entity_meta or {})
-                            new_em['id'] = original_id
-                            p.entity_meta = new_em
-                            flag_modified(p, 'entity_meta')
+                        all_projects = []
+
+                    for proj in all_projects:
+                        pid = proj['id']
+                        try:
+                            with db.with_project_schema_session(pid) as p_session:
+                                participants = p_session.query(Participant).filter(
+                                    Participant.entity_name == ParticipantTypes.application,
+                                    Participant.entity_meta['id'].astext == str(shell_id),
+                                ).all()
+                                for p in participants:
+                                    log.info(
+                                        "%sshell id=%s: project %s participant id=%s "
+                                        "entity_meta.id %s -> %s",
+                                        prefix, shell_id, pid, p.id, shell_id, original_id,
+                                    )
+                                    if not dry_run:
+                                        new_em = deepcopy(p.entity_meta or {})
+                                        new_em['id'] = original_id
+                                        p.entity_meta = new_em
+                                        flag_modified(p, 'entity_meta')
+                                if not dry_run:
+                                    p_session.commit()
+                        except Exception:  # pylint: disable=W0703
+                            log.exception(
+                                "%sshell id=%s: error fixing participants in project %s",
+                                prefix, shell_id, pid,
+                            )
 
                     # 5. Merge adoption counter
                     shell_adoption = (shell.meta or {}).get('adoption') or {}
