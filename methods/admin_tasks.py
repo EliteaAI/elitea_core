@@ -1244,6 +1244,129 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         }
 
     @web.method()
+    def migrate_ado_project_to_toolkit(self, *args, **kwargs):
+        """Admin task: migrate 'project' from ADO configuration to toolkit settings.
+
+        Migration #3620: Move ADO project from configuration (credentials) to toolkit level.
+
+        This migration:
+        1. Finds ADO toolkits (ado_boards, ado_repos, ado_wiki, ado_plans)
+        2. For each toolkit without 'project' in settings:
+           - Looks up the referenced ADO configuration by elitea_title
+           - Copies 'project' from configuration.data to toolkit.settings
+        3. After ALL toolkits are updated, removes 'project' from ADO configurations
+
+        Transactional: if any toolkit fails to update, the entire project rolls back
+        and configurations are not modified (prevents data loss).
+
+        Idempotent: safe to run multiple times — skips toolkits that already have 'project'.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+
+        Always run with dry_run first to verify expected changes.
+        """
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import EliteATool  # pylint: disable=C0415
+
+        # Import Configuration model
+        try:
+            from plugins.configurations.models.configuration import Configuration  # pylint: disable=C0415
+        except ImportError:
+            log.error("migrate_ado_project_to_toolkit: configurations plugin not available")
+            return {"migrated": 0, "error": "configurations plugin not available"}
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_ado_project_to_toolkit: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error("migrate_ado_project_to_toolkit: project_id= is required. Format: project_id=<all|N>[;dry_run]")
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("Starting migrate_ado_project_to_toolkit (dry_run=%s, project_id_filter=%s)", dry_run, project_id_filter)
+        start_ts = time.time()
+
+        # Track migration results
+        total_results = {
+            "toolkits_migrated": 0,
+            "toolkits_skipped": 0,
+            "configurations_cleaned": 0,
+            "failed_projects": 0,
+            "errors": []
+        }
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_ado_project_to_toolkit: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+
+            try:
+                results = _run_ado_project_migration(
+                    project_id, dry_run, prefix,
+                    db, EliteATool, Configuration,
+                )
+                total_results["toolkits_migrated"] += results["toolkits_migrated"]
+                total_results["toolkits_skipped"] += results["toolkits_skipped"]
+                total_results["configurations_cleaned"] += results["configurations_cleaned"]
+                total_results["errors"].extend(results.get("errors", []))
+
+            except Exception as e:  # pylint: disable=W0703
+                log.exception(
+                    "%smigrate_ado_project_to_toolkit: error in project %s", prefix, project_id
+                )
+                total_results["failed_projects"] += 1
+                total_results["errors"].append({
+                    "project_id": project_id,
+                    "error": str(e)
+                })
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_ado_project_to_toolkit — %s %s toolkit(s), cleaned %s config(s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated",
+            total_results["toolkits_migrated"], total_results["configurations_cleaned"],
+            round(end_ts - start_ts, 2)
+        )
+
+        return {
+            "toolkits_migrated": total_results["toolkits_migrated"],
+            "toolkits_skipped": total_results["toolkits_skipped"],
+            "configurations_cleaned": total_results["configurations_cleaned"],
+            "failed_projects": total_results["failed_projects"],
+            "errors": total_results["errors"],
+            "dry_run": dry_run
+        }
+
+    @web.method()
     def migrate_agent_version_null_instructions(self, *args, **kwargs):
         """Admin task: fix agent versions where instructions is NULL instead of empty string.
 
@@ -1506,3 +1629,142 @@ def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
             "messages_before": len(groups),
             "messages_after": len(groups) - len(remove_ids),
         }
+
+
+def _run_ado_project_migration(  # pylint: disable=R0913,R0914
+    project_id, dry_run, prefix,
+    db, EliteATool, Configuration,
+):
+    """Core logic for migrate_ado_project_to_toolkit, separated for readability.
+
+    Migration #3620: Move 'project' from ADO configuration to toolkit level.
+
+    This migration:
+    1. Finds ADO toolkits (ado_boards, ado_repos, ado_wiki, ado_plans, etc.)
+    2. For each toolkit without 'project' in settings:
+       - Looks up the referenced ADO configuration by elitea_title
+       - Copies 'project' from configuration.data to toolkit.settings
+    3. After ALL toolkits are updated, removes 'project' from ADO configurations
+
+    The migration is transactional per-project: if any toolkit fails to update,
+    the entire project is rolled back and configurations are not modified.
+    """
+    from copy import deepcopy  # pylint: disable=C0415
+    from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+
+    # ADO toolkit types that need project at toolkit level
+    ADO_TOOLKIT_TYPES = (
+        'ado_boards', 'ado_repos', 'ado_wiki', 'ado_plans',
+        'azure_devops_plans', 'azure_devops_wiki'
+    )
+
+    results = {
+        "toolkits_migrated": 0,
+        "toolkits_skipped": 0,
+        "configurations_cleaned": 0,
+        "errors": []
+    }
+
+    with db.with_project_schema_session(project_id) as session:
+        # Step 1: Find all ADO toolkits
+        toolkits = session.query(EliteATool).filter(
+            EliteATool.type.in_(ADO_TOOLKIT_TYPES)
+        ).all()
+
+        if not toolkits:
+            return results
+
+        # Track which configurations need cleanup (only after all toolkits succeed)
+        configs_to_clean = set()
+
+        # Step 2: Copy project from configuration to toolkit
+        for toolkit in toolkits:
+            settings = toolkit.settings or {}
+
+            # Skip if toolkit already has project
+            if settings.get('project'):
+                results["toolkits_skipped"] += 1
+                continue
+
+            # Get ADO configuration reference
+            ado_config_ref = settings.get('ado_configuration')
+            if not ado_config_ref:
+                log.warning(
+                    "%sproject %s, toolkit id=%s (%s): no ado_configuration reference, skipping",
+                    prefix, project_id, toolkit.id, toolkit.type
+                )
+                results["toolkits_skipped"] += 1
+                continue
+
+            elitea_title = ado_config_ref.get('elitea_title')
+            if not elitea_title:
+                log.warning(
+                    "%sproject %s, toolkit id=%s (%s): no elitea_title in ado_configuration, skipping",
+                    prefix, project_id, toolkit.id, toolkit.type
+                )
+                results["toolkits_skipped"] += 1
+                continue
+
+            # Find the configuration
+            configuration = session.query(Configuration).filter(
+                Configuration.elitea_title == elitea_title
+            ).first()
+
+            if not configuration:
+                log.warning(
+                    "%sproject %s, toolkit id=%s (%s): configuration '%s' not found, skipping",
+                    prefix, project_id, toolkit.id, toolkit.type, elitea_title
+                )
+                results["toolkits_skipped"] += 1
+                continue
+
+            config_data = configuration.data or {}
+            project_value = config_data.get('project')
+
+            if not project_value:
+                log.warning(
+                    "%sproject %s, toolkit id=%s (%s): configuration '%s' has no 'project' field, skipping",
+                    prefix, project_id, toolkit.id, toolkit.type, elitea_title
+                )
+                results["toolkits_skipped"] += 1
+                continue
+
+            log.info(
+                "%sproject %s, toolkit id=%s (%s): copying project='%s' from config '%s'",
+                prefix, project_id, toolkit.id, toolkit.type, project_value, elitea_title
+            )
+
+            if not dry_run:
+                new_settings = deepcopy(settings)
+                new_settings['project'] = project_value
+                toolkit.settings = new_settings
+                flag_modified(toolkit, 'settings')
+
+            results["toolkits_migrated"] += 1
+            configs_to_clean.add(configuration.id)
+
+        # Step 3: Remove 'project' from ADO configurations (only if all toolkits succeeded)
+        if configs_to_clean:
+            for config_id in configs_to_clean:
+                configuration = session.query(Configuration).filter(
+                    Configuration.id == config_id
+                ).first()
+
+                if configuration and configuration.data and 'project' in configuration.data:
+                    log.info(
+                        "%sproject %s, config id=%s ('%s'): removing 'project' field",
+                        prefix, project_id, configuration.id, configuration.elitea_title
+                    )
+
+                    if not dry_run:
+                        new_data = deepcopy(configuration.data)
+                        del new_data['project']
+                        configuration.data = new_data
+                        flag_modified(configuration, 'data')
+
+                    results["configurations_cleaned"] += 1
+
+        if not dry_run:
+            session.commit()
+
+    return results
