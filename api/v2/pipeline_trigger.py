@@ -166,28 +166,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 secret_info = {}
                 webhook_type = trigger_config.get("webhook_type")
                 if trigger_config.get("type") == TriggerType.webhook.value and webhook_type:
-                    # Check if user provided a new secret value (regenerated in UI)
                     new_secret_from_ui = payload.get("webhook_secret_value")
-
-                    # Check current trigger for existing secret
                     current_trigger = get_trigger_from_pipeline_settings(version.pipeline_settings or {})
                     existing_secret_ref = current_trigger.get("webhook_secret")
 
-                    if new_secret_from_ui:
-                        # User regenerated secret in UI - store it
+                    # Generate new secret if UI provided one or none exists yet
+                    if new_secret_from_ui or not existing_secret_ref:
+                        secret_value = new_secret_from_ui or generate_webhook_secret()
                         trigger_config["webhook_secret"] = store_webhook_secret(
-                            project_id, version_id, new_secret_from_ui
+                            project_id, version_id, secret_value
                         )
-                        log.info(f"Saved user-provided webhook secret for version {version_id} (type: {webhook_type})")
-                    elif not existing_secret_ref:
-                        # No secret exists - generate one for the first time
-                        new_secret = generate_webhook_secret()
-                        trigger_config["webhook_secret"] = store_webhook_secret(
-                            project_id, version_id, new_secret
-                        )
-                        log.info(f"Generated initial webhook secret for version {version_id} (type: {webhook_type})")
                     else:
-                        # Keep existing secret reference
                         trigger_config["webhook_secret"] = existing_secret_ref
 
                 # Update pipeline_settings

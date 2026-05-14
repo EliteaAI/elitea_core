@@ -151,22 +151,6 @@ class UpdatePipelineTrigger(BaseModel):
             return TriggerType(v)
         return v
 
-    def validate_schedule_fields(self):
-        """Validate that schedule-specific fields are present when type is schedule."""
-        if self.type == TriggerType.schedule:
-            if not self.cron:
-                raise ValueError("cron is required when trigger type is 'schedule'")
-            if not self.timezone:
-                raise ValueError("timezone is required when trigger type is 'schedule'")
-
-    def validate_webhook_fields(self):
-        """Validate that webhook-specific fields are present when type is webhook."""
-        if self.type == TriggerType.webhook:
-            if not self.webhook_type:
-                raise ValueError("webhook_type is required when trigger type is 'webhook'")
-            if self.webhook_type not in [wt.value for wt in WebhookType]:
-                raise ValueError(f"webhook_type must be one of: {[wt.value for wt in WebhookType]}")
-
     class Config:
         use_enum_values = True
 

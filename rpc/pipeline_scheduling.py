@@ -19,7 +19,6 @@ from ..utils.pipeline_execution import (
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
 )
-from ..utils.predict_utils import get_system_user_token
 
 
 def _check_project_pipelines(project_id: int):
@@ -106,19 +105,12 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
         f"version_id={version.id}, cron={schedule.cron}"
     )
 
-    # Get system user token for execution
-    user_token = get_system_user_token(project_id)
-    if not user_token:
-        log.error(f"Cannot get system user token for project {project_id}")
-        return
-
     # Execute the pipeline
     try:
         _execute_pipeline(
             project_id=project_id,
             version=version,
             creator_id=schedule.created_by,
-            user_token=user_token,
         )
 
         # Update last_run timestamp
@@ -144,7 +136,6 @@ def _execute_pipeline(
     project_id: int,
     version: ApplicationVersion,
     creator_id: int,
-    user_token: str,
 ):
     """
     Execute a scheduled pipeline.
@@ -156,7 +147,6 @@ def _execute_pipeline(
         project_id: Project ID
         version: ApplicationVersion instance
         creator_id: User ID who created the schedule
-        user_token: System user token for API access (unused, kept for API compatibility)
     """
     # Get application name for conversation
     with db.get_session(project_id) as session:
@@ -197,6 +187,10 @@ class RPC:
         This function is called by the scheduling plugin every minute.
         It iterates through all projects, finds pipelines with schedule triggers,
         checks if they should run based on their cron expression, and executes them.
+
+        Note: There is no distributed locking, so if processing takes >1 minute,
+        a second instance may run concurrently. This is accepted for V1 since
+        last_run is updated after execution starts, minimizing duplicate runs.
         """
         # Get all active projects
         all_project_ids = [

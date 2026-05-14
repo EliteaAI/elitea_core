@@ -18,6 +18,8 @@
 
 """ API """
 
+import json
+
 from flask import request  # pylint: disable=E0401
 
 from pydantic.v1 import ValidationError  # pylint: disable=E0401
@@ -142,7 +144,6 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
 
                 # Parse JSON payload
                 try:
-                    import json
                     payload = json.loads(payload_str) if payload_str.strip() else {}
                 except json.JSONDecodeError:
                     # If not valid JSON, wrap in a simple object
@@ -162,7 +163,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                     if "error" in result:
                         return result, 400
                     return result, 200
-                except BaseException as exc:  # pylint: disable=W0718
+                except Exception as exc:
                     log.exception(f"Pipeline webhook execution failed: {exc}")
                     return {"error": "Pipeline execution failed", "status": "error"}, 500
 
@@ -200,7 +201,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
         except VerifySignatureError as e:
             return e.value, 400
-        except BaseException as exc:  # pylint: disable=W0718
+        except Exception as exc:
             log.error(exc)
             return {"error": "Can not do predict"}, 500
 
