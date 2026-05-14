@@ -26,6 +26,22 @@ class Event:
                 log.critical('"ai_project_id" is not set in config')
                 return
             #
+            # Guard: never auto-enroll users into Support Assistant.
+            try:
+                project_info = context.rpc_manager.call.project_get_by_id(int(ai_project_id))
+                if project_info and project_info.get('name') == 'Support Assistant':
+                    log.warning(
+                        'Skipping auto-enrollment: ai_project_id %s points to Support Assistant',
+                        ai_project_id,
+                    )
+                    return
+            except Exception:
+                log.exception(
+                    'Failed to verify project for ai_project_id %s, skipping enrollment',
+                    ai_project_id,
+                )
+                return
+            #
             ai_project_roles = ["viewer"]
             #
             global_admin_roles = {"admin", "super_admin"}
