@@ -33,7 +33,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     """API handler for pipeline trigger configuration."""
 
     @auth.decorators.check_api({
-        "permissions": ["models.applications.pipeline_trigger.details"],
+        "permissions": ["models.applications.version.details"],
         "recommended_roles": {
             c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
@@ -54,7 +54,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # If they don't have edit permission, mask the secret
             user_permissions = auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id)
             can_edit = bool(
-                {"models.applications.pipeline_trigger.edit"}.intersection(user_permissions)
+                {"models.applications.version.update"}.intersection(user_permissions)
             )
             should_mask = not can_edit
 
@@ -103,7 +103,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"ok": False, "error": "Error fetching pipeline trigger"}, 500
 
     @auth.decorators.check_api({
-        "permissions": ["models.applications.pipeline_trigger.edit"],
+        "permissions": ["models.applications.version.update"],
         "recommended_roles": {
             c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
@@ -219,7 +219,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"ok": False, "error": "Error updating pipeline trigger"}, 500
 
     @auth.decorators.check_api({
-        "permissions": ["models.applications.pipeline_trigger.edit"],
+        "permissions": ["models.applications.version.update"],
         "recommended_roles": {
             c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
