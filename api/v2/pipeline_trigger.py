@@ -39,16 +39,37 @@ def _generate_webhook_secret(webhook_type: str) -> str:
     return secrets.token_urlsafe(32)
 
 
-def _get_webhook_secret_for_display(project_id: int, trigger_data: dict, webhook_type: str) -> dict:
+def _mask_secret(secret: str) -> str:
+    """
+    Mask a secret value for display to viewers.
+    Shows first 3 and last 3 characters with asterisks in between.
+    """
+    if not secret or len(secret) <= 8:
+        return "***"
+    return f"{secret[:3]}{'*' * min(len(secret) - 6, 20)}{secret[-3:]}"
+
+
+def _get_webhook_secret_for_display(
+    project_id: int,
+    trigger_data: dict,
+    webhook_type: str,
+    mask_secret: bool = False,
+) -> dict:
     """
     Get webhook secret from vault and format for display.
 
     Secret is stored per-version in trigger_data['webhook_secret'] (vault reference).
 
+    Args:
+        project_id: Project ID for vault access
+        trigger_data: Trigger configuration dict
+        webhook_type: Type of webhook (github, gitlab, custom)
+        mask_secret: If True, mask the secret value (for viewers)
+
     Returns dict with:
     - secret_configured: bool - whether secret is set
     - secret_header: str - header name for custom webhook (e.g., 'X-Webhook-Token')
-    - secret_value: str - the actual secret value (masked or full depending on context)
+    - secret_value: str - the actual secret value (masked if mask_secret=True)
     - secret_instructions: str - instructions for configuring in external system
     """
     webhook_secret_ref = trigger_data.get("webhook_secret") if trigger_data else None
@@ -73,35 +94,54 @@ def _get_webhook_secret_for_display(project_id: int, trigger_data: dict, webhook
         # Custom webhook uses raw token with fixed X-Webhook-Token header
         # Strip header prefix if present (legacy data)
         value = secret.split(":", 1)[1] if ":" in secret else secret
+        display_value = _mask_secret(value) if mask_secret else value
+        instructions = (
+            "Secret is masked for viewers. Editors can view the full secret."
+            if mask_secret
+            else f"Add header 'X-Webhook-Token' with value '{value}' to your webhook request"
+        )
         return {
             "secret_configured": True,
             "secret_header": "X-Webhook-Token",
-            "secret_value": value,
-            "secret_instructions": f"Add header 'X-Webhook-Token' with value '{value}' to your webhook request",
+            "secret_value": display_value,
+            "secret_instructions": instructions,
         }
     elif webhook_type == WebhookType.github.value:
         # GitHub uses raw secret - strip header prefix if present (legacy data)
         secret_value = secret.split(":", 1)[1] if ":" in secret else secret
+        display_value = _mask_secret(secret_value) if mask_secret else secret_value
+        instructions = (
+            "Secret is masked for viewers. Editors can view the full secret."
+            if mask_secret
+            else "Enter this secret in your GitHub webhook configuration under 'Secret'"
+        )
         return {
             "secret_configured": True,
             "secret_header": None,
-            "secret_value": secret_value,
-            "secret_instructions": "Enter this secret in your GitHub webhook configuration under 'Secret'",
+            "secret_value": display_value,
+            "secret_instructions": instructions,
         }
     elif webhook_type == WebhookType.gitlab.value:
         # GitLab uses raw token - strip header prefix if present (legacy data)
         secret_value = secret.split(":", 1)[1] if ":" in secret else secret
+        display_value = _mask_secret(secret_value) if mask_secret else secret_value
+        instructions = (
+            "Secret is masked for viewers. Editors can view the full secret."
+            if mask_secret
+            else "Enter this token in your GitLab webhook configuration under 'Secret token'"
+        )
         return {
             "secret_configured": True,
             "secret_header": None,
-            "secret_value": secret_value,
-            "secret_instructions": "Enter this token in your GitLab webhook configuration under 'Secret token'",
+            "secret_value": display_value,
+            "secret_instructions": instructions,
         }
 
+    display_value = _mask_secret(secret) if mask_secret else secret
     return {
         "secret_configured": True,
         "secret_header": None,
-        "secret_value": secret,
+        "secret_value": display_value,
         "secret_instructions": None,
     }
 
@@ -135,8 +175,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         Returns the trigger type and schedule details (if applicable).
         Defaults to 'chat_message' for legacy pipelines without trigger config.
+
+        Note: Webhook secrets are masked for viewers (users without edit permission).
         """
         try:
+            # Check if user has edit permission (viewers don't)
+            # If they don't have edit permission, mask the secret
+            user_permissions = auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id)
+            can_edit = bool(
+                {"models.applications.pipeline_trigger.edit"}.intersection(user_permissions)
+            )
+            mask_secret = not can_edit
+
             with db.get_session(project_id) as session:
                 version = session.query(ApplicationVersion).options(
                     joinedload(ApplicationVersion.application)
@@ -159,7 +209,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 if trigger_type == TriggerType.webhook.value and webhook_type:
                     webhook_url = _build_webhook_url(project_id, version_id, webhook_type)
                     secret_info = _get_webhook_secret_for_display(
-                        project_id, trigger_data, webhook_type
+                        project_id, trigger_data, webhook_type, mask_secret=mask_secret
                     )
 
                 # Build response model
