@@ -1,161 +1,32 @@
 """
 API endpoint for Pipeline Trigger configuration.
 
-Provides GET/PUT operations to read and update pipeline trigger settings
+Provides GET/PUT/POST operations to read and update pipeline trigger settings
 stored in ApplicationVersion.pipeline_settings['trigger'].
 """
-import secrets
 from flask import request
 from pydantic import ValidationError
 from pylon.core.tools import log
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import flag_modified
 
-from tools import api_tools, auth, config as c, context, db, serialize, this, VaultClient
+from tools import api_tools, auth, config as c, db, serialize
 
-from ...models.all import ApplicationVersion, Application
+from ...models.all import ApplicationVersion
 from ...models.pd.pipeline_trigger import (
     UpdatePipelineTrigger,
     PipelineTriggerResponse,
     TriggerType,
-    WebhookType,
+)
+from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.pipeline_trigger import (
+    generate_webhook_secret,
+    store_webhook_secret,
+    get_webhook_secret_for_display,
+    build_webhook_url,
     get_trigger_from_pipeline_settings,
     build_trigger_for_storage,
 )
-from ...utils.constants import PROMPT_LIB_MODE
-
-
-# Webhook URL components - derived from routing configuration
-# Full URL pattern: {url_prefix}/{module_name}/webhook/{mode}/{project_id}/{version_id}/{webhook_type}
-WEBHOOK_API_PATH = "webhook"
-
-
-def _generate_webhook_secret(webhook_type: str) -> str:
-    """
-    Generate a webhook secret appropriate for the webhook type.
-
-    All webhook types use a raw token (no header prefix).
-    """
-    return secrets.token_urlsafe(32)
-
-
-def _mask_secret(secret: str) -> str:
-    """
-    Mask a secret value for display to viewers.
-    Shows first 3 and last 3 characters with asterisks in between.
-    """
-    if not secret or len(secret) <= 8:
-        return "***"
-    return f"{secret[:3]}{'*' * min(len(secret) - 6, 20)}{secret[-3:]}"
-
-
-def _get_webhook_secret_for_display(
-    project_id: int,
-    trigger_data: dict,
-    webhook_type: str,
-    mask_secret: bool = False,
-) -> dict:
-    """
-    Get webhook secret from vault and format for display.
-
-    Secret is stored per-version in trigger_data['webhook_secret'] (vault reference).
-
-    Args:
-        project_id: Project ID for vault access
-        trigger_data: Trigger configuration dict
-        webhook_type: Type of webhook (github, gitlab, custom)
-        mask_secret: If True, mask the secret value (for viewers)
-
-    Returns dict with:
-    - secret_configured: bool - whether secret is set
-    - secret_header: str - header name for custom webhook (e.g., 'X-Webhook-Token')
-    - secret_value: str - the actual secret value (masked if mask_secret=True)
-    - secret_instructions: str - instructions for configuring in external system
-    """
-    webhook_secret_ref = trigger_data.get("webhook_secret") if trigger_data else None
-    if not webhook_secret_ref:
-        return {
-            "secret_configured": False,
-            "secret_header": None,
-            "secret_value": None,
-            "secret_instructions": None,
-        }
-
-    secret = VaultClient(project_id).unsecret(webhook_secret_ref)
-    if not secret:
-        return {
-            "secret_configured": False,
-            "secret_header": None,
-            "secret_value": None,
-            "secret_instructions": None,
-        }
-
-    if webhook_type == WebhookType.custom.value:
-        # Custom webhook uses raw token with fixed X-Webhook-Token header
-        # Strip header prefix if present (legacy data)
-        value = secret.split(":", 1)[1] if ":" in secret else secret
-        display_value = _mask_secret(value) if mask_secret else value
-        instructions = (
-            "Secret is masked for viewers. Editors can view the full secret."
-            if mask_secret
-            else f"Add header 'X-Webhook-Token' with value '{value}' to your webhook request"
-        )
-        return {
-            "secret_configured": True,
-            "secret_header": "X-Webhook-Token",
-            "secret_value": display_value,
-            "secret_instructions": instructions,
-        }
-    elif webhook_type == WebhookType.github.value:
-        # GitHub uses raw secret - strip header prefix if present (legacy data)
-        secret_value = secret.split(":", 1)[1] if ":" in secret else secret
-        display_value = _mask_secret(secret_value) if mask_secret else secret_value
-        instructions = (
-            "Secret is masked for viewers. Editors can view the full secret."
-            if mask_secret
-            else "Enter this secret in your GitHub webhook configuration under 'Secret'"
-        )
-        return {
-            "secret_configured": True,
-            "secret_header": None,
-            "secret_value": display_value,
-            "secret_instructions": instructions,
-        }
-    elif webhook_type == WebhookType.gitlab.value:
-        # GitLab uses raw token - strip header prefix if present (legacy data)
-        secret_value = secret.split(":", 1)[1] if ":" in secret else secret
-        display_value = _mask_secret(secret_value) if mask_secret else secret_value
-        instructions = (
-            "Secret is masked for viewers. Editors can view the full secret."
-            if mask_secret
-            else "Enter this token in your GitLab webhook configuration under 'Secret token'"
-        )
-        return {
-            "secret_configured": True,
-            "secret_header": None,
-            "secret_value": display_value,
-            "secret_instructions": instructions,
-        }
-
-    display_value = _mask_secret(secret) if mask_secret else secret
-    return {
-        "secret_configured": True,
-        "secret_header": None,
-        "secret_value": display_value,
-        "secret_instructions": None,
-    }
-
-
-def _build_webhook_url(project_id: int, version_id: int, webhook_type: str) -> str:
-    """
-    Build the webhook URL for a pipeline trigger.
-
-    URL pattern: /api/v2/{module_name}/webhook/{mode}/{project_id}/{version_id}/{webhook_type}
-    Example: /api/v2/elitea_core/webhook/prompt_lib/1/42/custom
-
-    Note: Hardcoding /api/v2 because context.url_prefix may be empty in some contexts.
-    """
-    return f"/api/v2/{this.module_name}/{WEBHOOK_API_PATH}/{PROMPT_LIB_MODE}/{project_id}/{version_id}/{webhook_type}"
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -185,7 +56,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             can_edit = bool(
                 {"models.applications.pipeline_trigger.edit"}.intersection(user_permissions)
             )
-            mask_secret = not can_edit
+            should_mask = not can_edit
 
             with db.get_session(project_id) as session:
                 version = session.query(ApplicationVersion).options(
@@ -207,9 +78,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 trigger_type = trigger_data.get("type", TriggerType.chat_message.value)
                 webhook_type = trigger_data.get("webhook_type")
                 if trigger_type == TriggerType.webhook.value and webhook_type:
-                    webhook_url = _build_webhook_url(project_id, version_id, webhook_type)
-                    secret_info = _get_webhook_secret_for_display(
-                        project_id, trigger_data, webhook_type, mask_secret=mask_secret
+                    webhook_url = build_webhook_url(project_id, version_id, webhook_type)
+                    secret_info = get_webhook_secret_for_display(
+                        project_id, trigger_data, webhook_type, should_mask=should_mask
                     )
 
                 # Build response model
@@ -260,7 +131,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
             }, 400
 
         # Additional validation for schedule type
-        # Note: type is a string due to use_enum_values=True in Config
         if update_data.type == TriggerType.schedule.value:
             if not update_data.cron:
                 return {"ok": False, "error": "cron is required for schedule trigger"}, 400
@@ -286,19 +156,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 if not version:
                     return {"ok": False, "error": f"Version {version_id} not found"}, 404
 
-                application = version.application
-
                 # Get current user ID
                 current_user_id = auth.current_user().get("id")
 
                 # Build trigger config for storage
                 trigger_config = build_trigger_for_storage(update_data, current_user_id)
 
-                # Handle webhook secret:
-                # 1. If webhook_secret_value provided in payload - use it (user regenerated in UI)
-                # 2. If no secret exists - generate one for the first time
-                # 3. Otherwise keep existing secret
-                # NOTE: We must merge with existing secrets to avoid overwriting other webhook secrets
+                # Handle webhook secret using shared helper
                 secret_info = {}
                 webhook_type = trigger_config.get("webhook_type")
                 if trigger_config.get("type") == TriggerType.webhook.value and webhook_type:
@@ -308,27 +172,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     # Check current trigger for existing secret
                     current_trigger = get_trigger_from_pipeline_settings(version.pipeline_settings or {})
                     existing_secret_ref = current_trigger.get("webhook_secret")
-                    secret_key = f"webhook_secret_v{version_id}"
 
                     if new_secret_from_ui:
-                        # User regenerated secret in UI - use raw token
-                        new_secret = new_secret_from_ui
-                        # Merge with existing project secrets to preserve other webhook secrets
-                        vault_client = VaultClient(project_id)
-                        project_secrets = vault_client.get_secrets() or {}
-                        project_secrets[secret_key] = new_secret
-                        vault_client.set_secrets(project_secrets)
-                        trigger_config["webhook_secret"] = f"{{{{secret.{secret_key}}}}}"
+                        # User regenerated secret in UI - store it
+                        trigger_config["webhook_secret"] = store_webhook_secret(
+                            project_id, version_id, new_secret_from_ui
+                        )
                         log.info(f"Saved user-provided webhook secret for version {version_id} (type: {webhook_type})")
                     elif not existing_secret_ref:
                         # No secret exists - generate one for the first time
-                        new_secret = _generate_webhook_secret(webhook_type)
-                        # Merge with existing project secrets to preserve other webhook secrets
-                        vault_client = VaultClient(project_id)
-                        project_secrets = vault_client.get_secrets() or {}
-                        project_secrets[secret_key] = new_secret
-                        vault_client.set_secrets(project_secrets)
-                        trigger_config["webhook_secret"] = f"{{{{secret.{secret_key}}}}}"
+                        new_secret = generate_webhook_secret()
+                        trigger_config["webhook_secret"] = store_webhook_secret(
+                            project_id, version_id, new_secret
+                        )
                         log.info(f"Generated initial webhook secret for version {version_id} (type: {webhook_type})")
                     else:
                         # Keep existing secret reference
@@ -350,8 +206,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 # Build webhook URL and get secret info if applicable
                 webhook_url = None
                 if trigger_config.get("type") == TriggerType.webhook.value and webhook_type:
-                    webhook_url = _build_webhook_url(project_id, version_id, webhook_type)
-                    secret_info = _get_webhook_secret_for_display(
+                    webhook_url = build_webhook_url(project_id, version_id, webhook_type)
+                    secret_info = get_webhook_secret_for_display(
                         project_id, trigger_config, webhook_type
                     )
 
@@ -417,18 +273,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         "error": "Cannot regenerate secret: webhook_type not configured"
                     }, 400
 
-                # Generate new secret
-                new_secret = _generate_webhook_secret(webhook_type)
-                secret_key = f"webhook_secret_v{version_id}"
+                # Generate and store new secret using shared helper
+                new_secret = generate_webhook_secret()
+                trigger_data["webhook_secret"] = store_webhook_secret(
+                    project_id, version_id, new_secret
+                )
 
-                # Merge with existing project secrets to preserve other webhook secrets
-                vault_client = VaultClient(project_id)
-                project_secrets = vault_client.get_secrets() or {}
-                project_secrets[secret_key] = new_secret
-                vault_client.set_secrets(project_secrets)
-
-                # Update trigger config with new secret reference
-                trigger_data["webhook_secret"] = f"{{{{secret.{secret_key}}}}}"
+                # Update trigger config
                 pipeline_settings["trigger"] = trigger_data
                 version.pipeline_settings = pipeline_settings
                 flag_modified(version, "pipeline_settings")
@@ -437,10 +288,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 log.info(f"Regenerated webhook secret for version {version_id}")
 
                 # Get updated secret info
-                secret_info = _get_webhook_secret_for_display(
+                secret_info = get_webhook_secret_for_display(
                     project_id, trigger_data, webhook_type
                 )
-                webhook_url = _build_webhook_url(project_id, version_id, webhook_type)
+                webhook_url = build_webhook_url(project_id, version_id, webhook_type)
 
                 # Return the updated trigger config with new secret
                 response = PipelineTriggerResponse(

@@ -30,7 +30,12 @@ from ...models.enums.all import AgentTypes
 from ...models.pd.pipeline_trigger import TriggerType
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.exceptions import VerifySignatureError  # pylint: disable=E0402
-from ...utils.utils import verify_signature
+from ...utils.pipeline_trigger import (
+    WEBHOOK_TYPE_CONFIG,
+    normalize_secret_value,
+    validate_webhook_secret,
+    get_webhook_creator_id,
+)
 from ...rpc.pipeline_webhook import execute_pipeline_webhook
 
 
@@ -56,23 +61,22 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         Returns:
             Tuple of (is_valid, error_response or None)
         """
-        # Get signature from headers
-        if webhook_type == "github":
-            webhook_signature = request.headers.get("x-hub-signature-256")
-            if webhook_signature is None:
-                return False, ({"error": "Missing request header x-hub-signature-256"}, 400)
-        elif webhook_type == "gitlab":
-            webhook_signature = request.headers.get("x-gitlab-token")
-            if webhook_signature is None:
-                return False, ({"error": "Missing request header x-gitlab-token"}, 400)
-        elif webhook_type == "custom":
+        # Get webhook config for this type
+        webhook_config = WEBHOOK_TYPE_CONFIG.get(webhook_type)
+        if not webhook_config:
+            return False, ({"error": "Bad signature type"}, 400)
+
+        # Get signature from headers based on webhook type
+        signature_header = webhook_config["signature_header"]
+        if webhook_type == "custom":
             webhook_signature = request.headers
         else:
-            return False, ({"error": "Bad signature type"}, 400)
+            webhook_signature = request.headers.get(signature_header)
+            if webhook_signature is None:
+                return False, ({"error": f"Missing request header {signature_header}"}, 400)
 
         # Get secret and validate
         with db.get_session(project_id) as session:
-            from ...models.all import Application
             from sqlalchemy.orm import joinedload
 
             version = session.query(ApplicationVersion).options(
@@ -94,40 +98,19 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             if not secret:
                 return False, ({"error": "Webhook secret not configured"}, 400)
 
-            try:
-                if webhook_type == "github":
-                    # Strip header prefix if present (legacy data)
-                    secret_value = secret.split(":", 1)[1] if ":" in secret else secret
-                    verify_signature(raw_data, secret_value, webhook_signature)
-                elif webhook_type == "gitlab":
-                    # Strip header prefix if present (legacy data)
-                    secret_value = secret.split(":", 1)[1] if ":" in secret else secret
-                    if webhook_signature != secret_value:
-                        raise VerifySignatureError({"error": "x-gitlab-token token mismatch!"})
-                elif webhook_type == "custom":
-                    # Custom webhook uses raw token, always checked against X-Webhook-Token header
-                    # Strip header prefix if present (legacy data)
-                    secret_value = secret.split(":", 1)[1] if ":" in secret else secret
-                    if webhook_signature.get("X-Webhook-Token") != secret_value:
-                        raise VerifySignatureError({"error": "token mismatch!"})
-            except VerifySignatureError as e:
-                return False, (e.value, 400)
+            # Normalize secret and validate using shared helper
+            secret_value = normalize_secret_value(secret)
+            is_valid, error_msg = validate_webhook_secret(
+                webhook_type=webhook_type,
+                secret_value=secret_value,
+                signature=webhook_signature,
+                raw_data=raw_data,
+            )
+
+            if not is_valid:
+                return False, ({"error": error_msg}, 400)
 
             return True, (version, version.application)
-
-    def _get_webhook_creator_id(self, trigger: dict, application: Application) -> int:
-        """
-        Get the user ID to use for webhook execution.
-        Uses the trigger creator (who set up the webhook) to ensure runs appear in their History.
-        Falls back to application owner if trigger creator is not available.
-        """
-        # Prefer the user who created the webhook trigger
-        if trigger and trigger.get("created_by"):
-            return trigger["created_by"]
-        # Fallback to application owner
-        if application and application.owner_id:
-            return application.owner_id
-        return 1  # Fallback to system user ID 1
 
     @api_tools.endpoint_metrics
     def post(self, project_id: int, version_id: int, webhook_type: str):  # pylint: disable=R0911
@@ -167,7 +150,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
 
                 # Execute pipeline with History tracking
                 # Use trigger creator as execution context so runs appear in their History
-                user_id = self._get_webhook_creator_id(trigger, application)
+                user_id = get_webhook_creator_id(trigger, application)
                 try:
                     result = execute_pipeline_webhook(
                         project_id=project_id,

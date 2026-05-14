@@ -194,61 +194,9 @@ class PipelineTriggerResponse(BaseModel):
         use_enum_values = True
 
 
-def get_trigger_from_pipeline_settings(pipeline_settings: dict) -> dict:
-    """
-    Extract trigger configuration from pipeline_settings with fallback.
-
-    If no trigger is configured (legacy pipelines), defaults to chat_message.
-
-    Args:
-        pipeline_settings: The pipeline_settings dict from ApplicationVersion
-
-    Returns:
-        Trigger configuration dict
-    """
-    if not pipeline_settings:
-        return {"type": TriggerType.chat_message.value}
-
-    trigger = pipeline_settings.get("trigger")
-    if not trigger:
-        return {"type": TriggerType.chat_message.value}
-
-    return trigger
-
-
-def build_trigger_for_storage(update_data: UpdatePipelineTrigger, user_id: int) -> dict:
-    """
-    Build trigger configuration dict for storage in pipeline_settings.
-
-    Args:
-        update_data: Validated update request
-        user_id: ID of the user making the update
-
-    Returns:
-        Trigger configuration dict ready for storage
-    """
-    # Note: update_data.type is a string due to use_enum_values=True in Config
-    trigger_type = update_data.type
-
-    if trigger_type == TriggerType.chat_message.value:
-        return {"type": TriggerType.chat_message.value}
-
-    elif trigger_type == TriggerType.schedule.value:
-        # Set last_run to current time so scheduler waits for next cron match
-        # (same pattern as index scheduling)
-        return {
-            "type": TriggerType.schedule.value,
-            "cron": update_data.cron,
-            "timezone": update_data.timezone,
-            "last_run": datetime.now(timezone.utc).isoformat(),
-            "created_by": user_id,
-        }
-
-    elif trigger_type == TriggerType.webhook.value:
-        return {
-            "type": TriggerType.webhook.value,
-            "webhook_type": update_data.webhook_type,
-            "created_by": user_id,
-        }
-
-    return {"type": trigger_type}
+# Re-export utility functions from utils.pipeline_trigger for backward compatibility
+# These are the canonical implementations; imports that reference pd.pipeline_trigger still work.
+from ...utils.pipeline_trigger import (
+    get_trigger_from_pipeline_settings,
+    build_trigger_for_storage,
+)
