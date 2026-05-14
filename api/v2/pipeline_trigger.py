@@ -11,7 +11,7 @@ from pylon.core.tools import log
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import flag_modified
 
-from tools import api_tools, auth, config as c, db, serialize, VaultClient
+from tools import api_tools, auth, config as c, context, db, serialize, this, VaultClient
 
 from ...models.all import ApplicationVersion, Application
 from ...models.pd.pipeline_trigger import (
@@ -23,6 +23,11 @@ from ...models.pd.pipeline_trigger import (
     build_trigger_for_storage,
 )
 from ...utils.constants import PROMPT_LIB_MODE
+
+
+# Webhook URL components - derived from routing configuration
+# Full URL pattern: {url_prefix}/{module_name}/webhook/{mode}/{project_id}/{version_id}/{webhook_type}
+WEBHOOK_API_PATH = "webhook"
 
 
 def _generate_webhook_secret(webhook_type: str) -> str:
@@ -102,8 +107,15 @@ def _get_webhook_secret_for_display(project_id: int, trigger_data: dict, webhook
 
 
 def _build_webhook_url(project_id: int, version_id: int, webhook_type: str) -> str:
-    """Build the webhook URL for a pipeline trigger."""
-    return f"/api/v2/elitea_core/webhook/prompt_lib/{project_id}/{version_id}/{webhook_type}"
+    """
+    Build the webhook URL for a pipeline trigger.
+
+    URL pattern: /api/v2/{module_name}/webhook/{mode}/{project_id}/{version_id}/{webhook_type}
+    Example: /api/v2/elitea_core/webhook/prompt_lib/1/42/custom
+
+    Note: Hardcoding /api/v2 because context.url_prefix may be empty in some contexts.
+    """
+    return f"/api/v2/{this.module_name}/{WEBHOOK_API_PATH}/{PROMPT_LIB_MODE}/{project_id}/{version_id}/{webhook_type}"
 
 
 class PromptLibAPI(api_tools.APIModeHandler):

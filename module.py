@@ -324,14 +324,10 @@ class Module(module.ModuleModel):
         # Load providers and register RPC method
         self.load_providers()
 
-        # Register webhook endpoint as public (authenticated via signature, not session)
-        try:
-            auth.add_public_rule({
-                "uri": r"/api/v2/prompt_lib/\d+/\d+/(github|gitlab|custom)"
-            })
-            log.info("Registered webhook endpoint as public")
-        except Exception as e:
-            log.warning('Failed to register webhook public rule: %s', e)
+        # Task callback state (used by task_status_changed in methods/task_callbacks.py)
+        self.callback_tasks = {}
+        self.not_starting_task_event = Event()
+        self.not_starting_task_event.set()
 
         # Register provider RPC method on worker client
         try:
@@ -443,6 +439,13 @@ class Module(module.ModuleModel):
 
         # MCP SSE initialization
         self.mcp_sse_init()
+
+        # Webhook public URL registration
+        # URL pattern: /api/v2/{module_name}/webhook/prompt_lib/{project_id}/{version_id}/{webhook_type}
+        self.webhook_api_url_re = \
+            f"/api/v2/{this.module_name}/webhook/prompt_lib/[0-9]+/[0-9]+/(github|gitlab|custom)"
+        log.info(f"Making webhook API url public: {self.webhook_api_url_re}")
+        auth.add_public_rule({"uri": self.webhook_api_url_re})
 
         # Provider Hub initialization
         self.provider_hub_init()
