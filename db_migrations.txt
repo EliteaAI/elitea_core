@@ -142,3 +142,8 @@ Run admin task migrate_admin_shell_to_inplace with param: project_id=all
 # Run with dry_run first to verify expected changes.
 Run admin task migrate_ado_project_to_toolkit with param: project_id=all;dry_run
 Run admin task migrate_ado_project_to_toolkit with param: project_id=all
+
+# Deprecate heavy Figma TOON/analysis tools (Issue #4132)
+# These tools are replaced by the official Figma MCP server (get_design_context, get_screenshot)
+# and consume excessive Tier-1 API rate-limit budget.
+Run admin task migrate_toolkit_selected_tools with param: figma;analyze_file,get_file_structure_toon,get_page_flows_toon;project_id=all
