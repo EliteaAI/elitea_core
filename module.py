@@ -307,6 +307,13 @@ class Module(module.ModuleModel):
                 'cron': '0 * * * *',
                 'active': True
             })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                'rpc_func': 'pipelines_check_scheduling',
+                'rpc_kwargs': {},
+                'name': 'pipeline_scheduling',
+                'cron': '* * * * *',
+                'active': True
+            })
         except Empty:
             log.warning('No scheduling plugin found')
 
@@ -325,6 +332,11 @@ class Module(module.ModuleModel):
 
         # Load providers and register RPC method
         self.load_providers()
+
+        # Task callback state (used by task_status_changed in methods/task_callbacks.py)
+        self.callback_tasks = {}
+        self.not_starting_task_event = Event()
+        self.not_starting_task_event.set()
 
         # Register provider RPC method on worker client
         try:
@@ -436,6 +448,13 @@ class Module(module.ModuleModel):
 
         # MCP SSE initialization
         self.mcp_sse_init()
+
+        # Webhook public URL registration
+        # URL pattern: /api/v2/{module_name}/webhook/prompt_lib/{project_id}/{version_id}/{webhook_type}
+        self.webhook_api_url_re = \
+            f"/api/v2/{this.module_name}/webhook/prompt_lib/[0-9]+/[0-9]+/(github|gitlab|custom)"
+        log.info(f"Making webhook API url public: {self.webhook_api_url_re}")
+        auth.add_public_rule({"uri": self.webhook_api_url_re})
 
         # Provider Hub initialization
         self.provider_hub_init()

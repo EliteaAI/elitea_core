@@ -18,38 +18,13 @@
 
 """ Method """
 
-import threading
-
 import requests  # pylint: disable=E0401
 
 from pylon.core.tools import web, log  # pylint: disable=E0401,E0611,W0611
-from tools import context, this, auth  # pylint: disable=E0401
 
 
 class Method:
     """ Method """
-
-    @web.init()
-    def task_status_init(self):
-        """ Init """
-        self.callback_tasks = {}
-        #
-        self.not_starting_task_event = threading.Event()
-        self.not_starting_task_event.set()
-        #
-        re_prefix = context.url_prefix
-        re_name = this.module_name
-        self.webhook_api_url_re = \
-            f"{re_prefix}/api/v2/{re_name}/webhook/prompt_lib/[0-9]+/[0-9]+/[a-z]+"
-        #
-        log.info("Making webhook API url public")
-        auth.add_public_rule({"uri": self.webhook_api_url_re})
-
-    @web.deinit()
-    def task_status_deinit(self):
-        """ De-init """
-        log.info("Un-making webhook API url public")
-        auth.remove_public_rule({"uri": self.webhook_api_url_re})
 
     @web.method()
     def task_status_changed(self, _, payload):
