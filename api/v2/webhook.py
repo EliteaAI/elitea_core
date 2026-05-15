@@ -70,12 +70,9 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
 
         # Get signature from headers based on webhook type
         signature_header = webhook_config["signature_header"]
-        if webhook_type == "custom":
-            webhook_signature = request.headers
-        else:
-            webhook_signature = request.headers.get(signature_header)
-            if webhook_signature is None:
-                return False, ({"error": f"Missing request header {signature_header}"}, 400)
+        webhook_signature = request.headers.get(signature_header)
+        if webhook_signature is None:
+            return False, ({"error": f"Missing request header {signature_header}"}, 400)
 
         # Get secret and validate
         with db.get_session(project_id) as session:
@@ -174,12 +171,9 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         }
 
         # Re-extract signature for do_predict (it does its own validation)
-        if webhook_type == "github":
-            webhook_signature = request.headers.get("x-hub-signature-256")
-        elif webhook_type == "gitlab":
-            webhook_signature = request.headers.get("x-gitlab-token")
-        elif webhook_type == "custom":
-            webhook_signature = request.headers
+        webhook_config = WEBHOOK_TYPE_CONFIG.get(webhook_type)
+        if webhook_config:
+            webhook_signature = request.headers.get(webhook_config["signature_header"])
         else:
             webhook_signature = None
 

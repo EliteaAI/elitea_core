@@ -342,19 +342,10 @@ def validate_webhook_secret(
             return True, None
 
         elif validation_method == "token_match":
-            # For gitlab: signature is the token value directly
-            # For custom: signature is the headers dict, check X-Webhook-Token
-            if webhook_type == "custom":
-                if isinstance(signature, dict):
-                    token = signature.get("X-Webhook-Token")
-                else:
-                    token = signature
-                if token != secret_value:
-                    return False, "token mismatch!"
-            else:
-                if signature != secret_value:
-                    header_name = config["signature_header"]
-                    return False, f"{header_name} token mismatch!"
+            # Direct token comparison (gitlab, custom)
+            if signature != secret_value:
+                header_name = config["signature_header"]
+                return False, f"{header_name} token mismatch!"
             return True, None
 
         else:
