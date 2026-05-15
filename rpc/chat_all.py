@@ -13,8 +13,9 @@ from sqlalchemy import asc, desc, String
 
 from ..utils.chat_constants import SUMMARIZATION_LOCKING_TTL
 from ..utils.conversation_utils import get_conversation_locked_key
+from ..models.all import ApplicationVersion
 from ..models.conversation import Conversation
-from ..models.enums.all import ParticipantTypes, ChatHistoryTemplates, PublishStatus
+from ..models.enums.all import AgentTypes, ParticipantTypes, ChatHistoryTemplates, PublishStatus
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
 from ..models.participants import ParticipantMapping, Participant
@@ -186,7 +187,8 @@ def process_attachment_message_items(
     user_id=None,
     sid=None,
     collection_suffix="attach",
-    llm_settings=None
+    llm_settings=None,
+    simple_attachment_format: bool = False,
 ):
     if not attachments_info:
         return message_group
@@ -210,6 +212,7 @@ def process_attachment_message_items(
                 order_index=order_index,
                 user_id=user_id,
                 collection_suffix=collection_suffix,
+                simple_attachment_format=simple_attachment_format,
             )
             
             session.add(attachment_msg)
@@ -240,7 +243,7 @@ def process_attachment_message_items(
         log.warning(f"{len(failed_attachments)} attachment(s) failed to process: {failed_attachments}")
 
     # Content extraction: read file content and enrich attachment messages
-    if items_needing_content:
+    if items_needing_content and not simple_attachment_format:
         log.debug(f"Starting content extraction for {len(items_needing_content)} documents in message group {message_group.uuid}")
         try:
             if not llm_settings:
@@ -885,6 +888,18 @@ class RPC:
 
             if parsed.attachments_info:
                 try:
+                    is_pipeline = False
+                    sent_to = msg_group.sent_to
+                    if (
+                        sent_to is not None
+                        and str(sent_to.entity_name) == ParticipantTypes.application.value
+                    ):
+                        app_id = sent_to.entity_meta.get('id')
+                        if app_id:
+                            is_pipeline = session.query(ApplicationVersion).filter(
+                                ApplicationVersion.application_id == app_id,
+                                ApplicationVersion.agent_type == AgentTypes.pipeline.value,
+                            ).first() is not None
                     msg_group = process_attachment_message_items(
                         session,
                         parsed.project_id,
@@ -894,7 +909,8 @@ class RPC:
                         message_id=str(response_msg.uuid) if response_msg else None,
                         user_id=current_user['id'],
                         sid=sid,
-                        llm_settings=parsed.llm_settings.dict() if parsed.llm_settings else None
+                        llm_settings=parsed.llm_settings.dict() if parsed.llm_settings else None,
+                        simple_attachment_format=is_pipeline,
                     )
                 except Exception as e:
                     log.error(e)

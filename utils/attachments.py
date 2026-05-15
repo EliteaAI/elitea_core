@@ -48,6 +48,7 @@ def process_single_attachment_file(
     user_id: int = None,
     collection_suffix: str | None = "attach",
     prompt: str = None,
+    simple_attachment_format: bool = False,
     **kwargs,
 ) -> tuple['AttachmentMessageItem', bool]:
     """Process a single attachment file and create an AttachmentMessageItem.
@@ -67,6 +68,7 @@ def process_single_attachment_file(
             collection_suffix=collection_suffix,
             filepath=filepath,
             prompt=prompt,
+            simple_attachment_format=simple_attachment_format,
             **kwargs,
         )
 
@@ -105,6 +107,7 @@ class ProcessorContext:
         collection_suffix: str = "attach",
         filepath: str = None,
         prompt: str = None,
+        simple_attachment_format: bool = False,
         **kwargs
     ):
         self.bucket_name = bucket_name
@@ -116,6 +119,7 @@ class ProcessorContext:
         self.collection_suffix = collection_suffix
         self.filepath = filepath
         self.prompt = prompt
+        self.simple_attachment_format = simple_attachment_format
         self.additional_params = kwargs
 
 
@@ -241,6 +245,20 @@ class TextToModelProcessor(BaseFileToAIProcessor):
 class DocumentToModelProcessor(BaseFileToAIProcessor):
     def process(self, context: ProcessorContext) -> dict:
         description_parts = []
+
+        # Pipeline mode: just emit the filepath, skip content extraction
+        if getattr(context, 'simple_attachment_format', False):
+            relative_path = (context.filepath or '').lstrip('/')
+            return {
+                "type": "text",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f'attached file path "{relative_path}"',
+                    }
+                ],
+                "needs_content_extraction": False,
+            }
 
         if context.filepath:
             try:
