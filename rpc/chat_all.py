@@ -37,6 +37,7 @@ from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY
 )
+from ..utils.utils import get_public_project_id
 
 
 CHAT_PREDICT_MAPPER = {
@@ -489,6 +490,43 @@ def generate_application_version_payload(
     return app_version_details
 
 
+def _resolve_application_llm_settings(
+    version_details: dict,
+    entity_settings: 'EntitySettingsApplication',
+    predict_payload: 'SioPredictModel',
+    agent_project_id: int | None,
+) -> dict:
+    """Resolve llm_settings for an application participant with clear precedence.
+
+    Precedence (highest wins):
+      1. predict_payload.llm_settings — one-shot transient override from the request
+      2. entity_settings.llm_settings — per-conversation stored override (published public agents only)
+      3. version_details.llm_settings — agent version baseline (source of truth)
+    """
+    # Start from version baseline
+    llm_settings = version_details.get('llm_settings', {})
+    if llm_settings:
+        llm_settings = dict(llm_settings)
+
+    # Per-conversation override for published agents from public project (whole-object replacement)
+    version_status = version_details.get('status', '')
+    if (
+        version_status == PublishStatus.published
+        and agent_project_id is not None
+        and agent_project_id == get_public_project_id()
+        and entity_settings.llm_settings
+    ):
+        override = entity_settings.llm_settings.dict(exclude_none=True)
+        if override:
+            llm_settings = override
+
+    # One-shot transient override from predict request (merge, not replace)
+    if predict_payload.llm_settings and predict_payload.llm_settings.model_name:
+        llm_settings.update(predict_payload.llm_settings.dict(exclude_unset=True))
+
+    return llm_settings
+
+
 def generate_payload(session, msg_group: ConversationMessageGroup, predict_payload: SioPredictModel) -> dict:
     participant_chat_settings: ParticipantMapping = session.query(
         ParticipantMapping.entity_settings
@@ -529,10 +567,12 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             result['application_id'] = participant.entity_meta.get('id')
             result['entity_name'] = (participant.meta or {}).get('name', '')
 
-            # Merge entity_settings (now WITHOUT llm_settings for new participants)
-            result = deep_update(result, entity_settings.dict())
+            # Merge entity_settings into result, excluding llm_settings
+            # (llm_settings resolution is handled separately below)
+            es_dict = entity_settings.dict()
+            es_dict.pop('llm_settings', None)
+            result = deep_update(result, es_dict)
 
-            # Generate version payload which contains the source-of-truth llm_settings
             result['version_details'] = generate_application_version_payload(
                 session=session,
                 msg_group=msg_group,
@@ -540,10 +580,13 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 entity_settings=entity_settings
             )
 
-            # CRITICAL: Extract llm_settings from version_details (single source of truth)
-            # This handles both old participants (with cached llm_settings) and new ones (without)
-            if 'llm_settings' in result.get('version_details', {}):
-                result['llm_settings'] = result['version_details']['llm_settings'].copy()
+            # Resolve llm_settings with clear precedence in a single place
+            result['llm_settings'] = _resolve_application_llm_settings(
+                version_details=result.get('version_details', {}),
+                entity_settings=entity_settings,
+                predict_payload=predict_payload,
+                agent_project_id=participant.entity_meta.get('project_id'),
+            )
 
             # IMPORTANT: Use offset(1) to retrieve the previous agent message, skipping the newly created response
             last_agent_message: ConversationMessageGroup = session.query(ConversationMessageGroup).where(
@@ -553,12 +596,6 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             log.debug(f'{serialize(last_agent_message)=}')
             if last_agent_message:
                 result['thread_id'] = last_agent_message.meta.get('thread_id')
-
-            # Apply user override if provided (e.g., from UI temporary override)
-            if predict_payload.llm_settings and predict_payload.llm_settings.model_name:
-                if 'llm_settings' not in result:
-                    result['llm_settings'] = {}
-                result['llm_settings'].update(predict_payload.llm_settings.dict(exclude_unset=True))
 
             # Merge internal_tools from conversation (UI toggle) and agent version (stored config)
             conversation_internal_tools = msg_group.conversation.meta.get('internal_tools', []) if msg_group.conversation.meta else []

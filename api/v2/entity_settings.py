@@ -14,16 +14,12 @@ from ...utils.participant_utils import make_query_filter_for_entity
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.sio_utils import SioEvents
+from ...utils.utils import get_public_project_id
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
     def _put(self, project_id: int, conversation_id: int, participant_id: int, **kwargs):
-        """
-        Update entity_settings for a participant in a conversation.
-
-        Note: llm_settings cannot be updated for application/pipeline participants.
-        They must be changed at the version level.
-        """
+        """Update entity_settings for a participant in a conversation."""
         with db.get_session(project_id) as session:
             data = dict(request.json)
 
@@ -33,9 +29,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if participant is None:
                 return {"error": "Participant was not found"}, 400
 
-            # Validate llm_settings for non-application participants
-            if participant.entity_name != ParticipantTypes.application:
-                if llm_settings_data := data.get('llm_settings'):
+            # Validate llm_settings based on participant type
+            if llm_settings_data := data.get('llm_settings'):
+                if participant.entity_name == ParticipantTypes.application:
+                    # Only allow llm_settings override for published agents from the public project
+                    agent_project_id = (participant.entity_meta or {}).get('project_id')
+                    public_project_id = get_public_project_id()
+                    if agent_project_id != public_project_id:
+                        return {
+                            "error": "LLM settings override is only allowed for published agents from agent studio"
+                        }, 400
+                    try:
+                        validated_settings = EntitySettingsLlm.model_validate(llm_settings_data)
+                        data['llm_settings'] = validated_settings.model_dump()
+                    except ValidationError as e:
+                        return {"error": f"Invalid LLM settings: {str(e)}"}, 400
+                else:
                     try:
                         validated_settings = EntitySettingsLlm.model_validate(llm_settings_data)
                         data['llm_settings'] = validated_settings.model_dump()
