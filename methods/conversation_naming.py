@@ -141,6 +141,9 @@ class Method:
                     Conversation.id == conversation_id
                 ).first()
                 if conversation:
+                    if conversation.source == 'support':
+                        generated_name = f"User ID {conversation.author_id} - {generated_name}"
+
                     conversation.name = generated_name
                     session.commit()
 
