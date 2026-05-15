@@ -1,16 +1,19 @@
 from typing import Optional
 
 from flask import request
+from pydantic import ValidationError
 from tools import api_tools, auth, db, config as c
 
 from ...models.conversation import Conversation
 from ...models.enums.all import ParticipantTypes
 from ...models.participants import Participant, ParticipantMapping
 from ...models.pd.participant import ParticipantBase, ParticipantEntityUser
+from ...models.pd.participant_settings import EntitySettingsLlm
 from ...utils.participant_utils import make_query_filter_for_entity
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.sio_utils import SioEvents
+from ...utils.utils import get_public_project_id
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -23,6 +26,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).first()
             if participant is None:
                 return {"error": "Participant was not found"}, 400
+
+            # Validate llm_settings based on participant type
+            if llm_settings_data := data.get('llm_settings'):
+                if participant.entity_name == ParticipantTypes.application:
+                    agent_project_id = (participant.entity_meta or {}).get('project_id')
+                    public_project_id = get_public_project_id()
+                    if agent_project_id != public_project_id:
+                        return {
+                            "error": "LLM settings override is only allowed for published agents from agent studio"
+                        }, 400
+                    try:
+                        validated_settings = EntitySettingsLlm.model_validate(llm_settings_data)
+                        data['llm_settings'] = validated_settings.model_dump()
+                    except ValidationError as e:
+                        return {"error": f"Invalid LLM settings: {str(e)}"}, 400
+                else:
+                    try:
+                        validated_settings = EntitySettingsLlm.model_validate(llm_settings_data)
+                        data['llm_settings'] = validated_settings.model_dump()
+                    except ValidationError as e:
+                        return {"error": f"Invalid LLM settings: {str(e)}"}, 400
 
             session.query(ParticipantMapping).filter(
                 ParticipantMapping.conversation_id == conversation_id,
