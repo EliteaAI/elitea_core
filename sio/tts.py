@@ -1,13 +1,10 @@
-import base64
-import threading
-
 from pylon.core.tools import log, web
-from tools import auth, rpc_tools
+from tools import auth, VaultClient
 
 from ..utils.sio_utils import SioEvents
 
-# Per-sid sessions: { sid: { "cancel": threading.Event } }
-_sessions: dict = {}
+# Cancel channel prefix — pylon_main emits voice_tts_cancel_{sid} to abort the indexer task
+_EN_TTS_CANCEL_PREFIX = "voice_tts_cancel_"
 
 
 class SIO:
@@ -19,6 +16,7 @@ class SIO:
         text = data.get("text", "")
         voice = data.get("voice", "alloy")
         speed = float(data.get("speed") or 1.0)
+        voice_instructions = data.get("voice_instructions", "")
 
         if not auth.is_sio_user_in_project(sid, project_id):
             log.warning("Sid %s is not in project %s", sid, project_id)
@@ -29,146 +27,28 @@ class SIO:
             self.context.sio.emit(SioEvents.tts_error, {"error": "No text provided"}, to=sid)
             return
 
-        # Cancel any running session for this sid
-        _cancel_session(sid)
+        # Cancel any running TTS session for this sid before starting a new one
+        self.event_node.emit(_EN_TTS_CANCEL_PREFIX + sid, {})
 
-        cancel_event = threading.Event()
-        _sessions[sid] = {"cancel": cancel_event}
+        project_secrets = VaultClient(project_id).get_secrets()
+        project_llm_key = project_secrets.get("project_llm_key", "")
 
-        t = threading.Thread(
-            target=_stream_tts,
-            args=(self, sid, project_id, model_name, text, voice, speed, cancel_event),
-            daemon=True,
+        self.task_node.start_task(
+            "indexer_tts",
+            kwargs={
+                "sid": sid,
+                "project_id": project_id,
+                "project_llm_key": project_llm_key,
+                "model_name": model_name,
+                "text": text,
+                "voice": voice,
+                "speed": speed,
+                "voice_instructions": voice_instructions,
+            },
+            pool="indexer",
+            meta={},
         )
-        t.start()
 
     @web.sio(SioEvents.tts_stop)
     def tts_stop(self, sid: str, data: dict) -> None:
-        _cancel_session(sid)
-
-
-def _cancel_session(sid: str) -> None:
-    session = _sessions.pop(sid, None)
-    if session:
-        session["cancel"].set()
-
-
-def _stream_tts(
-    sio_handler,
-    sid: str,
-    project_id: int,
-    model_name: str,
-    text: str,
-    voice: str,
-    speed: float,
-    cancel_event: threading.Event,
-) -> None:
-    import requests
-
-    try:
-        creds = _resolve_tts_credentials(project_id, model_name)
-    except Exception as e:
-        log.error(f"tts_start credential error for sid={sid}: {e}")
-        sio_handler.context.sio.emit(SioEvents.tts_error, {"error": str(e)}, to=sid)
-        _sessions.pop(sid, None)
-        return
-
-    api_base: str = creds["api_base"].rstrip("/")
-    api_key: str = creds["api_key"]
-    api_version: str = creds.get("api_version", "")
-
-    if api_version:
-        # Azure OpenAI
-        url = (
-            f"{api_base}/openai/deployments/{model_name}"
-            f"/audio/speech?api-version={api_version}"
-        )
-        headers = {"api-key": api_key, "Content-Type": "application/json"}
-    else:
-        base = api_base if api_base else "https://api.openai.com/v1"
-        url = f"{base}/audio/speech"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-    payload = {
-        "model": model_name,
-        "input": text,
-        "voice": voice,
-        "speed": speed,
-        "response_format": "pcm",
-    }
-
-    try:
-        with requests.post(url, headers=headers, json=payload, stream=True, timeout=60) as resp:
-            resp.raise_for_status()
-            for chunk in resp.iter_content(chunk_size=4096):
-                if cancel_event.is_set():
-                    break
-                if chunk:
-                    sio_handler.context.sio.emit(
-                        SioEvents.tts_audio_chunk,
-                        {
-                            "audio_base64": base64.b64encode(chunk).decode("ascii"),
-                            "sample_rate": 24000,
-                        },
-                        to=sid,
-                    )
-    except Exception as e:
-        if not cancel_event.is_set():
-            log.error(f"TTS streaming error for sid={sid}: {e}")
-            sio_handler.context.sio.emit(SioEvents.tts_error, {"error": str(e)}, to=sid)
-        _sessions.pop(sid, None)
-        return
-
-    if not cancel_event.is_set():
-        sio_handler.context.sio.emit(SioEvents.tts_done, {}, to=sid)
-
-    _sessions.pop(sid, None)
-
-
-def _resolve_tts_credentials(project_id: int, model_name: str) -> dict:
-    """
-    Fetch the TTS configuration row via RPC, expand its ai_credentials reference,
-    and return a flat dict with api_base, api_key, api_version.
-    """
-    configs: list[dict] = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_filtered_project(
-        project_id=project_id,
-        include_shared=True,
-        filter_fields={"section": "tts", "status_ok": True},
-    )
-
-    config_data = None
-    config_project_id = project_id
-    for cfg in configs:
-        if cfg.get("data", {}).get("name") == model_name:
-            config_data = dict(cfg["data"])
-            config_project_id = cfg.get("project_id", project_id)
-            break
-
-    if config_data is None:
-        raise LookupError(
-            f"No TTS configuration found for model '{model_name}' in project {project_id}"
-        )
-
-    # Expand credentials using the config's owning project so that shared public
-    # models resolve their credentials directly in that project, matching the
-    # pattern used by ASR and image generation shared model credential lookup.
-    ai_creds_ref = config_data.get("ai_credentials")
-    if ai_creds_ref:
-        expanded = rpc_tools.RpcMixin().rpc.timeout(5).configurations_expand(
-            project_id=config_project_id,
-            settings=ai_creds_ref,
-            user_id=None,
-            unsecret=True,
-        )
-        ai_creds = expanded
-    else:
-        ai_creds = config_data
-
-    return {
-        "api_base": ai_creds.get("api_base") or ai_creds.get("url") or "",
-        "api_key": ai_creds.get("api_key") or ai_creds.get("key") or "",
-        "api_version": ai_creds.get("api_version") or "",
-    }
+        self.event_node.emit(_EN_TTS_CANCEL_PREFIX + sid, {})
