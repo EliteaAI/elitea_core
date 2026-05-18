@@ -13,8 +13,9 @@ from sqlalchemy import asc, desc, String
 
 from ..utils.chat_constants import SUMMARIZATION_LOCKING_TTL
 from ..utils.conversation_utils import get_conversation_locked_key
+from ..models.all import ApplicationVersion
 from ..models.conversation import Conversation
-from ..models.enums.all import ParticipantTypes, ChatHistoryTemplates, PublishStatus
+from ..models.enums.all import AgentTypes, ParticipantTypes, ChatHistoryTemplates, PublishStatus
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
 from ..models.participants import ParticipantMapping, Participant
@@ -30,6 +31,7 @@ from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.llm_settings import DEFAULT_REASONING_MODEL_MAX_TOKENS, DEFAULT_MAX_TOKENS
 from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation, notify_user_mentioned_in_conversation
 from ..utils.sio_utils import get_chat_room
+from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.authors import get_authors_data
@@ -187,7 +189,8 @@ def process_attachment_message_items(
     user_id=None,
     sid=None,
     collection_suffix="attach",
-    llm_settings=None
+    llm_settings=None,
+    pipeline_mode: bool = False,
 ):
     if not attachments_info:
         return message_group
@@ -211,6 +214,7 @@ def process_attachment_message_items(
                 order_index=order_index,
                 user_id=user_id,
                 collection_suffix=collection_suffix,
+                pipeline_mode=pipeline_mode,
             )
             
             session.add(attachment_msg)
@@ -241,7 +245,7 @@ def process_attachment_message_items(
         log.warning(f"{len(failed_attachments)} attachment(s) failed to process: {failed_attachments}")
 
     # Content extraction: read file content and enrich attachment messages
-    if items_needing_content:
+    if items_needing_content and not pipeline_mode:
         log.debug(f"Starting content extraction for {len(items_needing_content)} documents in message group {message_group.uuid}")
         try:
             if not llm_settings:
@@ -920,8 +924,22 @@ class RPC:
                 session.add(response_msg)
                 session.flush()
 
+            is_pipeline = False
+            pipeline_attachment_filepaths = []
+
             if parsed.attachments_info:
                 try:
+                    sent_to = msg_group.sent_to
+                    if (
+                        sent_to is not None
+                        and str(sent_to.entity_name) == ParticipantTypes.application.value
+                    ):
+                        app_id = sent_to.entity_meta.get('id')
+                        if app_id:
+                            is_pipeline = session.query(ApplicationVersion).filter(
+                                ApplicationVersion.application_id == app_id,
+                                ApplicationVersion.agent_type == AgentTypes.pipeline.value,
+                            ).first() is not None
                     msg_group = process_attachment_message_items(
                         session,
                         parsed.project_id,
@@ -931,8 +949,16 @@ class RPC:
                         message_id=str(response_msg.uuid) if response_msg else None,
                         user_id=current_user['id'],
                         sid=sid,
-                        llm_settings=parsed.llm_settings.dict() if parsed.llm_settings else None
+                        llm_settings=parsed.llm_settings.dict() if parsed.llm_settings else None,
+                        pipeline_mode=is_pipeline,
                     )
+                    # Collect attachment filepaths from pipeline text chunks for graph state injection
+                    if is_pipeline:
+                        for item in msg_group.message_items:
+                            if isinstance(item, AttachmentMessageItem):
+                                for chunk in (item.content or []):
+                                    if isinstance(chunk, dict) and 'attachment_filepath' in chunk:
+                                        pipeline_attachment_filepaths.append(chunk['attachment_filepath'])
                 except Exception as e:
                     log.error(e)
                     room = get_chat_room(parsed.conversation_uuid)
@@ -1014,6 +1040,10 @@ class RPC:
                         )
                         return {"error": str(e)}
                     # log.info(f'{payload=}')
+
+                    # Pass pipeline attachment filepaths so the indexer can inject them into graph state
+                    if pipeline_attachment_filepaths:
+                        payload['input_attachments'] = pipeline_attachment_filepaths
 
                     chat_history_groups, summaries, preserve_instructions = prepare_conversation_history(
                         session, self.context.sio,
