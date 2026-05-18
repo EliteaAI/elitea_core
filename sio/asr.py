@@ -14,10 +14,6 @@ _sessions: dict = {}
 _MAX_SESSIONS = 200
 _SESSION_TIMEOUT_S = 60
 
-# Cleanup timer state
-_cleanup_lock = threading.Lock()
-_cleanup_timer: threading.Timer | None = None
-
 # --- Whisper VAD constants ---
 # Peak amplitude (0–32767) below which a frame is considered silence
 _VAD_SPEECH_THRESHOLD = 500
@@ -52,25 +48,14 @@ def _frame_is_speech(pcm_bytes: bytes) -> bool:
 # Session limit helpers
 # ---------------------------------------------------------------------------
 
-def _schedule_cleanup_if_needed() -> None:
-    """Start the periodic stale-session cleanup timer if it isn't already running."""
-    global _cleanup_timer  # pylint: disable=W0603
-    with _cleanup_lock:
-        if _cleanup_timer is None:
-            _cleanup_timer = threading.Timer(_SESSION_TIMEOUT_S, _run_cleanup)
-            _cleanup_timer.daemon = True
-            _cleanup_timer.start()
-
-
-def _run_cleanup() -> None:
-    """Evict sessions that have received no audio for _SESSION_TIMEOUT_S seconds."""
-    global _cleanup_timer  # pylint: disable=W0603
+def _evict_stale_sessions() -> None:
+    """Evict sessions idle for longer than _SESSION_TIMEOUT_S. Called lazily at asr_start."""
     now = time.monotonic()
-    stale_sids = [
+    stale = [
         sid for sid, s in list(_sessions.items())
         if now - s.get("last_active", now) > _SESSION_TIMEOUT_S
     ]
-    for sid in stale_sids:
+    for sid in stale:
         log.info("ASR: evicting stale session %s (idle > %ds)", sid, _SESSION_TIMEOUT_S)
         session = _sessions.pop(sid, None)
         if session is None:
@@ -81,14 +66,6 @@ def _run_cleanup() -> None:
             event_node = session.get("event_node")
             if event_node is not None:
                 event_node.emit(_VOICE_EVENTS_CHANNEL, {"type": "asr_stop", "sid": sid})
-    # Reschedule only while there are still active sessions
-    with _cleanup_lock:
-        if _sessions:
-            _cleanup_timer = threading.Timer(_SESSION_TIMEOUT_S, _run_cleanup)
-            _cleanup_timer.daemon = True
-            _cleanup_timer.start()
-        else:
-            _cleanup_timer = None
 
 
 class SIO:
@@ -102,6 +79,8 @@ class SIO:
             log.warning("Sid %s is not in project %s", sid, project_id)
             self.context.sio.emit(SioEvents.asr_error, {"error": "Access denied"}, to=sid)
             return
+
+        _evict_stale_sessions()
 
         if len(_sessions) >= _MAX_SESSIONS:
             log.warning("ASR: session limit reached (%d), rejecting sid %s", _MAX_SESSIONS, sid)
@@ -152,8 +131,6 @@ class SIO:
                 pool="indexer",
                 meta={},
             )
-
-        _schedule_cleanup_if_needed()
 
     @web.sio(SioEvents.asr_audio_chunk)
     def asr_audio_chunk(self, sid: str, data) -> None:
