@@ -22,6 +22,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_id = auth.current_user().get("id")
         rpc = rpc_tools.RpcMixin().rpc
 
+        messages_limit = request.args.get('limit', 100, type=int)
+        messages_offset = request.args.get('offset', 0, type=int)
+
         support_config = rpc.timeout(3).support_assistant_get_config()
         is_support_project = support_config.get('project_id') == project_id
 
@@ -30,6 +33,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             conversation_id=conversation_id,
             user_id=user_id,
             check_ownership=not is_support_project,
+            messages_limit=messages_limit,
+            messages_offset=messages_offset,
         )
 
         if not result:

@@ -2,7 +2,6 @@ from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
 from sqlalchemy import desc, asc, Integer, or_
-from sqlalchemy.orm import joinedload
 
 from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes
@@ -28,6 +27,8 @@ class RPC:
         include_participants: bool = True,
         include_message_groups: bool = True,
         check_ownership: bool = True,
+        messages_limit: int = 100,
+        messages_offset: int = 0,
     ) -> dict | None:
         """
         Get full conversation details with participants and message groups.
@@ -45,6 +46,8 @@ class RPC:
             user_id: Optional user ID for access control (if None, no user-specific filtering)
             include_participants: Whether to include participant details (default True)
             include_message_groups: Whether to include message groups (default True)
+            messages_limit: Maximum number of message groups to return (default 15)
+            messages_offset: Number of message groups to skip (default 0)
 
         Returns:
             Dict containing full conversation details or None if not found/unauthorized
@@ -57,6 +60,8 @@ class RPC:
                     project_id=project_id,
                     user_id=user_id,
                     check_ownership=check_ownership,
+                    messages_limit=messages_limit,
+                    messages_offset=messages_offset,
                 )
 
                 if not result:

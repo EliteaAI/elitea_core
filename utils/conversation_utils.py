@@ -78,7 +78,15 @@ def calculate_conversation_duration(conversation: Conversation, session: Session
     return round(float(result or 0.0), 2)
 
 
-def get_conversation_details(session, conversation_id: int, project_id: int, user_id: int = None, check_ownership: bool = True) -> ConversationDetails | None:
+def get_conversation_details(
+    session,
+    conversation_id: int,
+    project_id: int,
+    user_id: int = None,
+    check_ownership: bool = True,
+    messages_limit: int = MESSAGES_DISPLAY_COUNT,
+    messages_offset: int = 0,
+) -> ConversationDetails | None:
     # filter participants based on entity_meta['id']
     conversation = session.query(Conversation).filter(
         Conversation.id == conversation_id
@@ -146,9 +154,7 @@ def get_conversation_details(session, conversation_id: int, project_id: int, use
     conversation_dict['message_groups_count'] = message_groups.count()
     conversation_dict['message_groups'] = message_groups.order_by(
         asc(ConversationMessageGroup.created_at)
-    ).limit(
-        MESSAGES_DISPLAY_COUNT
-    ).all()
+    ).offset(messages_offset).limit(messages_limit).all()
 
     for participant in conversation_dict['participants']:
         # todo: add project_id to every participant
