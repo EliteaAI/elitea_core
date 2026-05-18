@@ -2312,10 +2312,27 @@ def get_validation_llm_settings(
 ) -> dict | None:
     """Resolve full LLM settings for the validation pipeline.
 
-    Version llm_settings -> validate & resolve -> project default.
+    Project low-tier model -> version llm_settings (fallback).
     """
     from .application_utils import validate_and_resolve_llm_settings
 
+    # Primary: project low-tier model (#4526)
+    models_data = rpc_tools.RpcMixin().rpc.timeout(3) \
+        .configurations_get_models(
+            project_id=project_id,
+            section='llm',
+            include_shared=True,
+        )
+    if models_data:
+        low_tier_name = models_data.get('low_tier_default_model_name')
+        low_tier_project_id = models_data.get('low_tier_default_model_project_id')
+        if low_tier_name:
+            return {
+                'model_name': low_tier_name,
+                'model_project_id': low_tier_project_id,
+            }
+
+    # Fallback: version's own LLM settings
     llm_settings = None
     with db.get_session(project_id) as session:
         version = session.query(ApplicationVersion).get(version_id)
@@ -2328,16 +2345,6 @@ def get_validation_llm_settings(
         )
         if resolved and resolved.get('model_name'):
             return resolved
-
-    # Fallback: project default model
-    default = rpc_tools.RpcMixin().rpc.timeout(3) \
-        .configurations_get_default_model(
-            project_id=project_id,
-            section='llm',
-            include_shared=True,
-        )
-    if default and default.get('model_name'):
-        return default
 
     return None
 
