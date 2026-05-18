@@ -84,6 +84,31 @@ class ApplicationVersionBaseModel(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise ValueError('conversation_starters must be a list')
+
+        validated = []
+        for i, item in enumerate(value):
+            if item is None:
+                continue
+            if not isinstance(item, str):
+                raise ValueError(
+                    f'conversation_starters[{i}] must be a string, got {type(item).__name__}'
+                )
+            item = item.strip()
+            if not item:
+                raise ValueError(
+                    f'conversation_starters[{i}] cannot be empty or whitespace-only'
+                )
+            validated.append(item)
+
+        return validated or None
+
 
 class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
     tools: Optional[List[ToolCreateModel]] = None
