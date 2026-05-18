@@ -4,6 +4,7 @@ from flask import request
 from pydantic import ValidationError
 from tools import api_tools, auth, db, config as c
 
+from ...models.all import ApplicationVersion
 from ...models.conversation import Conversation
 from ...models.enums.all import ParticipantTypes
 from ...models.participants import Participant, ParticipantMapping
@@ -33,14 +34,41 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     agent_project_id = (participant.entity_meta or {}).get('project_id')
                     public_project_id = get_public_project_id()
                     if agent_project_id != public_project_id:
-                        return {
-                            "error": "LLM settings override is only allowed for published agents from agent studio"
-                        }, 400
-                    try:
-                        validated_settings = EntitySettingsLlm.model_validate(llm_settings_data)
-                        data['llm_settings'] = validated_settings.model_dump()
-                    except ValidationError as e:
-                        return {"error": f"Invalid LLM settings: {str(e)}"}, 400
+                        # Non-published agent: only reject if llm_settings actually
+                        # differs from the target version baseline.
+                        try:
+                            validated_request = EntitySettingsLlm.model_validate(llm_settings_data)
+                            request_llm = validated_request.model_dump(exclude_none=True)
+                        except ValidationError as e:
+                            return {"error": f"Invalid LLM settings: {str(e)}"}, 400
+
+                        version_id = data.get('version_id') or data.get('id')
+                        version_llm_raw = {}
+                        if version_id:
+                            version = session.query(ApplicationVersion).filter(
+                                ApplicationVersion.id == version_id
+                            ).first()
+                            if version:
+                                version_llm_raw = version.llm_settings or {}
+
+                        baseline = (
+                            EntitySettingsLlm.model_validate(version_llm_raw).model_dump(exclude_none=True)
+                            if version_llm_raw else {}
+                        )
+
+                        if request_llm and request_llm != baseline:
+                            return {
+                                "error": "LLM settings override is only allowed for published agents from agent studio"
+                            }, 400
+                        # Same as baseline or empty -> strip (not a real override)
+                        data.pop('llm_settings', None)
+                    else:
+                        # Published agent from public project -> validate and store
+                        try:
+                            validated_settings = EntitySettingsLlm.model_validate(llm_settings_data)
+                            data['llm_settings'] = validated_settings.model_dump()
+                        except ValidationError as e:
+                            return {"error": f"Invalid LLM settings: {str(e)}"}, 400
                 else:
                     try:
                         validated_settings = EntitySettingsLlm.model_validate(llm_settings_data)
