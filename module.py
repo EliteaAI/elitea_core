@@ -695,7 +695,7 @@ class Module(module.ModuleModel):
 
     @auth.decorators.sio_disconnect()
     def sio_disconnect(self, sid, *args, **kwargs):
-        """Handle SocketIO disconnect for MCP servers"""
+        """Handle SocketIO disconnect for MCP servers, ASR and TTS"""
         removed_servers = self.servers_storage.remove_servers(sid)
         for server in removed_servers:
             log.debug(f"[MCP_CLIENT] Server {server['name']} disconnected")
@@ -703,6 +703,10 @@ class Module(module.ModuleModel):
                 event=SioEvents.mcp_status,
                 data={"connected": False, "project_id": server['project_id'], "type": server['name']},
             )
+        # Cancel any in-progress ASR / TTS tasks for the disconnected sid
+        from .sio.asr import _close_session as _asr_close_session
+        _asr_close_session(self, sid)
+        self.event_node.emit("voice_events", {"type": "tts_cancel", "sid": sid})
 
     def schedule_mcp_servers_handler(self):
         """Schedule periodic MCP server validation task"""
