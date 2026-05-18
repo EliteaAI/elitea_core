@@ -1,13 +1,22 @@
 import struct
 import threading
+import time
 
 from pylon.core.tools import log, web
 from tools import auth, VaultClient
 
 from ..utils.sio_utils import SioEvents
 
-# Per-sid sessions: { sid: { ... } }
+# Per-sid sessions: { sid: { "type": ..., "last_active": float, ... } }
 _sessions: dict = {}
+
+# Session limits
+_MAX_SESSIONS = 200
+_SESSION_TIMEOUT_S = 60
+
+# Cleanup timer state
+_cleanup_lock = threading.Lock()
+_cleanup_timer: threading.Timer | None = None
 
 # --- Whisper VAD constants ---
 # Peak amplitude (0–32767) below which a frame is considered silence
@@ -40,6 +49,49 @@ def _frame_is_speech(pcm_bytes: bytes) -> bool:
     return max(abs(s) for s in samples) > _VAD_SPEECH_THRESHOLD
 
 
+# ---------------------------------------------------------------------------
+# Session limit helpers
+# ---------------------------------------------------------------------------
+
+def _schedule_cleanup_if_needed() -> None:
+    """Start the periodic stale-session cleanup timer if it isn't already running."""
+    global _cleanup_timer  # pylint: disable=W0603
+    with _cleanup_lock:
+        if _cleanup_timer is None:
+            _cleanup_timer = threading.Timer(_SESSION_TIMEOUT_S, _run_cleanup)
+            _cleanup_timer.daemon = True
+            _cleanup_timer.start()
+
+
+def _run_cleanup() -> None:
+    """Evict sessions that have received no audio for _SESSION_TIMEOUT_S seconds."""
+    global _cleanup_timer  # pylint: disable=W0603
+    now = time.monotonic()
+    stale_sids = [
+        sid for sid, s in list(_sessions.items())
+        if now - s.get("last_active", now) > _SESSION_TIMEOUT_S
+    ]
+    for sid in stale_sids:
+        log.info("ASR: evicting stale session %s (idle > %ds)", sid, _SESSION_TIMEOUT_S)
+        session = _sessions.pop(sid, None)
+        if session is None:
+            continue
+        if session.get("type") == "whisper":
+            _cancel_flush_timer(session)
+        else:
+            event_node = session.get("event_node")
+            if event_node is not None:
+                event_node.emit(_EN_ASR_STOP_PREFIX + sid, {})
+    # Reschedule only while there are still active sessions
+    with _cleanup_lock:
+        if _sessions:
+            _cleanup_timer = threading.Timer(_SESSION_TIMEOUT_S, _run_cleanup)
+            _cleanup_timer.daemon = True
+            _cleanup_timer.start()
+        else:
+            _cleanup_timer = None
+
+
 class SIO:
 
     @web.sio(SioEvents.asr_start)
@@ -52,6 +104,15 @@ class SIO:
             self.context.sio.emit(SioEvents.asr_error, {"error": "Access denied"}, to=sid)
             return
 
+        if len(_sessions) >= _MAX_SESSIONS:
+            log.warning("ASR: session limit reached (%d), rejecting sid %s", _MAX_SESSIONS, sid)
+            self.context.sio.emit(
+                SioEvents.asr_error,
+                {"error": "Voice capacity reached, try again later"},
+                to=sid,
+            )
+            return
+
         project_secrets = VaultClient(project_id).get_secrets()
         project_llm_key = project_secrets.get("project_llm_key", "")
 
@@ -59,6 +120,8 @@ class SIO:
             # Whisper: VAD buffering stays in pylon_main; dispatch an indexer task per flush
             _sessions[sid] = {
                 "type": "whisper",
+                "last_active": time.monotonic(),
+                "event_node": self.event_node,
                 "lock": threading.Lock(),
                 "buffer": bytearray(),
                 "speech_detected": False,
@@ -72,7 +135,11 @@ class SIO:
             }
         else:
             # Realtime: dispatch long-lived indexer task, forward audio via event_node
-            _sessions[sid] = {"type": "realtime"}
+            _sessions[sid] = {
+                "type": "realtime",
+                "last_active": time.monotonic(),
+                "event_node": self.event_node,
+            }
 
             self.task_node.start_task(
                 "indexer_asr_realtime",
@@ -87,11 +154,15 @@ class SIO:
                 meta={},
             )
 
+        _schedule_cleanup_if_needed()
+
     @web.sio(SioEvents.asr_audio_chunk)
     def asr_audio_chunk(self, sid: str, data) -> None:
         session = _sessions.get(sid)
         if not session:
             return
+
+        session["last_active"] = time.monotonic()
 
         # Accept raw bytes (binary Socket.IO frame) or dict with "audio" key
         if isinstance(data, (bytes, bytearray)):
