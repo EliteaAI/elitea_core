@@ -142,3 +142,9 @@ Run admin task migrate_admin_shell_to_inplace with param: project_id=all
 # Run with dry_run first to verify expected changes.
 Run admin task migrate_ado_project_to_toolkit with param: project_id=all;dry_run
 Run admin task migrate_ado_project_to_toolkit with param: project_id=all
+
+# EL-4389: Rename get_file_type -> get_file_metadata in artifact toolkit
+# The tool was replaced by get_file_metadata (adds per-type read_file hints).
+# Run dry_run first to verify expected changes.
+Run admin task migrate_toolkit_selected_tools with params: artifact;get_file_type>get_file_metadata;project_id=all;dry_run
+Run admin task migrate_toolkit_selected_tools with params: artifact;get_file_type>get_file_metadata;project_id=all
