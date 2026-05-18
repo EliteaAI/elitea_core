@@ -398,6 +398,14 @@ class Module(module.ModuleModel):
         self.event_node.subscribe("application_full_response", self.conversation_message_proxy)
         self.event_node.subscribe("application_partial_response", self.conversation_partial_message_proxy)
         self.event_node.subscribe("application_child_message", self.child_message_proxy)
+        # Voice TTS events (indexer → pylon_main → browser)
+        self.event_node.subscribe("voice_tts_audio_chunk", self.voice_tts_audio_chunk)
+        self.event_node.subscribe("voice_tts_done", self.voice_tts_done)
+        self.event_node.subscribe("voice_tts_error", self.voice_tts_error)
+        # Voice ASR events (indexer → pylon_main → browser)
+        self.event_node.subscribe("voice_asr_transcript_delta", self.voice_asr_transcript_delta)
+        self.event_node.subscribe("voice_asr_transcript_done", self.voice_asr_transcript_done)
+        self.event_node.subscribe("voice_asr_error", self.voice_asr_error)
         # self.event_node.subscribe("log_data", self.log_data)
         # configurations
         self.event_node.subscribe("application_toolkit_configurations_collected", self.toolkit_configurations_collected)
@@ -513,6 +521,55 @@ class Module(module.ModuleModel):
         if payload.get('sio_event') == SioEvents.chat_predict.value:
             self.context.event_manager.fire_event('chat_child_message_save', payload)
 
+    # ------------------------------------------------------------------
+    # Voice TTS/ASR event_node handlers (indexer → pylon_main → browser)
+    # ------------------------------------------------------------------
+
+    def voice_tts_audio_chunk(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        audio = payload.get("audio")
+        sample_rate = payload.get("sample_rate", 24000)
+        if not sid or not audio:
+            return
+        self.context.sio.emit(
+            SioEvents.tts_audio_chunk,
+            {"audio": audio, "sample_rate": sample_rate},
+            to=sid,
+        )
+
+    def voice_tts_done(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        if sid:
+            data = {}
+            char_end = payload.get("char_end")
+            if char_end is not None:
+                data["char_end"] = char_end
+            self.context.sio.emit(SioEvents.tts_done, data, to=sid)
+
+    def voice_tts_error(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        error = payload.get("error", "TTS error")
+        if sid:
+            self.context.sio.emit(SioEvents.tts_error, {"error": error}, to=sid)
+
+    def voice_asr_transcript_delta(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        delta = payload.get("delta", "")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_transcript_delta, {"delta": delta}, to=sid)
+
+    def voice_asr_transcript_done(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        transcript = payload.get("transcript", "")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_transcript_done, {"transcript": transcript}, to=sid)
+
+    def voice_asr_error(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        error = payload.get("error", "ASR error")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_error, {"error": error}, to=sid)
+
     def deinit(self):
         log.info('De-initializing')
         self.thread._stop()
@@ -533,6 +590,13 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("application_toolkits_collected", self.toolkits_collected)
         self.event_node.unsubscribe("application_file_loaders_collected", self.index_types_collected)
         self.event_node.unsubscribe("application_mcp_prebuilt_config_collected", self.mcp_prebuilt_config_collected)
+        # Voice TTS/ASR events
+        self.event_node.unsubscribe("voice_tts_audio_chunk", self.voice_tts_audio_chunk)
+        self.event_node.unsubscribe("voice_tts_done", self.voice_tts_done)
+        self.event_node.unsubscribe("voice_tts_error", self.voice_tts_error)
+        self.event_node.unsubscribe("voice_asr_transcript_delta", self.voice_asr_transcript_delta)
+        self.event_node.unsubscribe("voice_asr_transcript_done", self.voice_asr_transcript_done)
+        self.event_node.unsubscribe("voice_asr_error", self.voice_asr_error)
 
         # TaskNode
         self.task_node.stop()
