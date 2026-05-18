@@ -1,12 +1,37 @@
 import logging
+from datetime import datetime, timedelta
 
 from flask import request
 from pydantic import ValidationError
-from sqlalchemy import desc, asc, or_, and_, Integer, func
+from sqlalchemy import desc, asc, or_, and_, Integer, func, case
 from tools import api_tools, auth, db, config as c, rpc_tools
 from tools import serialize
 
 log = logging.getLogger(__name__)
+
+
+DATE_GROUP_ORDER = ['today', 'this_week', 'older']
+
+
+def get_date_boundaries():
+    """Calculate date boundaries for grouping conversations."""
+    now = datetime.utcnow()
+    today_start = datetime(now.year, now.month, now.day)
+    week_ago_start = today_start - timedelta(days=7)
+    return today_start, week_ago_start
+
+
+def build_date_group_filter(model_field, group_name: str):
+    """Build SQLAlchemy filter for a specific date group."""
+    today_start, week_ago_start = get_date_boundaries()
+
+    if group_name == 'today':
+        return model_field >= today_start
+    elif group_name == 'this_week':
+        return and_(model_field >= week_ago_start, model_field < today_start)
+    elif group_name == 'older':
+        return model_field < week_ago_start
+    return None
 
 from ...models.all import SelectedConversations
 from ...models.conversation import Conversation
@@ -62,7 +87,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             q = request.args.get('query')
             limit = request.args.get('limit', default=10, type=int)
             offset = request.args.get('offset', default=0, type=int)
-            # For ungrouped conversations sorting
+            # today, this_week, older
+            date_group = request.args.get('date_group')
             sort_by = request.args.get('sort_by', default='created_at')
             sorting_by = getattr(Conversation, sort_by)
             sort_order = request.args.get('sort_order', default='desc')
@@ -73,12 +99,31 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             support_config = rpc.timeout(3).support_assistant_get_config()
             is_support_project = support_config.get('project_id') == project_id
+            user_is_admin = rpc.timeout(3).admin_check_user_is_admin(
+                project_id, user_id
+            ) if is_support_project else False
 
             if is_support_project:
                 sources = ['support']
-                distinct_conversation_subquery = session.query(Conversation.id).distinct().filter(
-                    Conversation.source == 'support'
-                ).subquery()
+                if user_is_admin:
+                    distinct_conversation_subquery = session.query(Conversation.id).distinct().filter(
+                        Conversation.source == 'support'
+                    ).subquery()
+                else:
+                    participant_subquery = session.query(Participant.id).filter(
+                        Participant.entity_meta['id'].astext.cast(Integer) == user_id,
+                        Participant.entity_name == ParticipantTypes.user.value
+                    ).subquery()
+                    distinct_conversation_subquery = session.query(Conversation.id).distinct().join(
+                        ParticipantMapping,
+                        Conversation.id == ParticipantMapping.conversation_id
+                    ).join(
+                        Participant,
+                        Participant.id == ParticipantMapping.participant_id
+                    ).filter(
+                        Conversation.source == 'support',
+                        Participant.id.in_(participant_subquery)
+                    ).subquery()
             else:
                 sources = list(set(
                     i.strip().lower() for i in request.args.get('source', default='elitea').split(',')
@@ -100,19 +145,72 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     )
                 ).subquery()
 
-            query = session.query(Conversation).where(
+            base_query = session.query(Conversation).where(
                 Conversation.folder_id.is_(None),
                 Conversation.id.in_(distinct_conversation_subquery)
             )
 
             if q:
-                query = query.where(Conversation.name.ilike(f'%{q}%'))
+                base_query = base_query.where(Conversation.name.ilike(f'%{q}%'))
 
             if sources:
-                query = query.where(Conversation.source.in_(sources))
+                base_query = base_query.where(Conversation.source.in_(sources))
 
-            query = query.order_by(sorting(sorting_by))
+            date_field = func.coalesce(Conversation.updated_at, Conversation.created_at)
 
+            if date_group:
+                date_filter = build_date_group_filter(date_field, date_group.lower())
+                if date_filter is not None:
+                    query = base_query.where(date_filter)
+                else:
+                    query = base_query
+                query = query.order_by(sorting(sorting_by))
+                total = query.count()
+                query = query.limit(limit).offset(offset)
+                result = query.all()
+
+                ungrouped_ids = [conv.id for conv in result]
+                mg_counts_ungrouped = dict(
+                    session.query(
+                        ConversationMessageGroup.conversation_id,
+                        func.count(ConversationMessageGroup.id)
+                    ).filter(
+                        ConversationMessageGroup.conversation_id.in_(ungrouped_ids)
+                    ).group_by(ConversationMessageGroup.conversation_id).all()
+                ) if ungrouped_ids else {}
+
+                selected_conversation_id = None
+                existing_selection = session.query(SelectedConversations).filter(
+                    SelectedConversations.user_id == user_id
+                ).first()
+                if existing_selection:
+                    selected_conversation_id = existing_selection.conversation_id
+
+                return {
+                    "date_group": date_group.lower(),
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                    "selected_conversation_id": selected_conversation_id,
+                    "conversations": [
+                        {
+                            "folder_id": None,
+                            **serialize(ConversationList.from_orm(i)),
+                            "participants_count": len(i.participants),
+                            "messages_count": mg_counts_ungrouped.get(i.id, 0),
+                            "users_count": sum(1 for p in i.participants if p.entity_name == ParticipantTypes.user.value),
+                        } for i in result
+                    ],
+                }, 200
+
+            date_groups_counts = {}
+            for group_name in DATE_GROUP_ORDER:
+                group_filter = build_date_group_filter(date_field, group_name)
+                if group_filter is not None:
+                    count = base_query.where(group_filter).count()
+                    date_groups_counts[group_name] = count
+
+            query = base_query.order_by(sorting(sorting_by))
             total = query.count()
             query = query.limit(limit).offset(offset)
             result = query.all()
@@ -128,17 +226,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 q = f"%{q.lower()}%"
                 folder_query = folder_query.filter(
                     or_(
-                        ConversationFolder.name.ilike(q),  # Filter by folder name
+                        ConversationFolder.name.ilike(q),
                         Conversation.id.in_(
                             session.query(Conversation.id).filter(
-                                Conversation.name.ilike(q)  # Filter by conversation name
+                                Conversation.name.ilike(q)
                             )
                         )
                     )
                 )
 
             total_folders = folder_query.count()
-            # Sort at database level - highest position first, created_at as tiebreaker
             folders = folder_query.order_by(
                 desc(ConversationFolder.position),
                 ConversationFolder.created_at
@@ -147,14 +244,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             folder_data = []
 
             if folders:
-                # Fetch all conversations at once to avoid N+1 query problem
                 folder_ids = [f.id for f in folders]
                 all_conversations = session.query(Conversation).filter(
                     Conversation.folder_id.in_(folder_ids),
                     Conversation.id.in_(distinct_conversation_subquery)
                 ).all()
 
-                # Group conversations by folder_id
                 from collections import defaultdict
                 conv_by_folder = defaultdict(list)
                 for conv in all_conversations:
@@ -208,6 +303,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "total_folders": total_folders,
                 "folders": folder_data,
                 "total_ungrouped": total,
+                "date_groups": date_groups_counts,
                 "selected_conversation_id": selected_conversation_id,
                 "ungrouped_conversations": [
                     {
