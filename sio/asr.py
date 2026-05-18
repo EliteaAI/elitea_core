@@ -29,9 +29,8 @@ _WHISPER_MIN_BYTES = 4800
 # Hard-limit flush timer (seconds) — guards against very long pauses
 _WHISPER_MAX_BUFFER_SECS = 30
 
-# Internal event-node channel prefixes (pylon_main → indexer)
-_EN_ASR_AUDIO_INPUT_PREFIX = "voice_asr_audio_input_"
-_EN_ASR_STOP_PREFIX = "voice_asr_stop_"
+# Single global voice events channel (pylon_main → indexer)
+_VOICE_EVENTS_CHANNEL = "voice_events"
 
 
 def _is_whisper_model(model_name: str) -> bool:
@@ -81,7 +80,7 @@ def _run_cleanup() -> None:
         else:
             event_node = session.get("event_node")
             if event_node is not None:
-                event_node.emit(_EN_ASR_STOP_PREFIX + sid, {})
+                event_node.emit(_VOICE_EVENTS_CHANNEL, {"type": "asr_stop", "sid": sid})
     # Reschedule only while there are still active sessions
     with _cleanup_lock:
         if _sessions:
@@ -179,8 +178,8 @@ class SIO:
 
         # Realtime: forward raw PCM bytes to the indexer task via event_node
         self.event_node.emit(
-            _EN_ASR_AUDIO_INPUT_PREFIX + sid,
-            {"audio": pcm_bytes},
+            _VOICE_EVENTS_CHANNEL,
+            {"type": "asr_audio_input", "sid": sid, "audio": pcm_bytes},
         )
 
     @web.sio(SioEvents.asr_stop)
@@ -283,6 +282,6 @@ def _close_session(sio_handler, sid: str) -> None:
         _cancel_flush_timer(session)
     else:
         # Signal the indexer task to stop
-        sio_handler.event_node.emit(_EN_ASR_STOP_PREFIX + sid, {})
+        sio_handler.event_node.emit(_VOICE_EVENTS_CHANNEL, {"type": "asr_stop", "sid": sid})
 
 

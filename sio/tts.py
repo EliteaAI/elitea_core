@@ -3,8 +3,8 @@ from tools import auth, VaultClient
 
 from ..utils.sio_utils import SioEvents
 
-# Cancel channel prefix — pylon_main emits voice_tts_cancel_{sid} to abort the indexer task
-_EN_TTS_CANCEL_PREFIX = "voice_tts_cancel_"
+# Single global voice events channel
+_VOICE_EVENTS_CHANNEL = "voice_events"
 
 
 class SIO:
@@ -28,7 +28,7 @@ class SIO:
             return
 
         # Cancel any running TTS session for this sid before starting a new one
-        self.event_node.emit(_EN_TTS_CANCEL_PREFIX + sid, {})
+        self.event_node.emit(_VOICE_EVENTS_CHANNEL, {"type": "tts_cancel", "sid": sid})
 
         project_secrets = VaultClient(project_id).get_secrets()
         project_llm_key = project_secrets.get("project_llm_key", "")
@@ -51,4 +51,4 @@ class SIO:
 
     @web.sio(SioEvents.tts_stop)
     def tts_stop(self, sid: str, data: dict) -> None:
-        self.event_node.emit(_EN_TTS_CANCEL_PREFIX + sid, {})
+        self.event_node.emit(_VOICE_EVENTS_CHANNEL, {"type": "tts_cancel", "sid": sid})
