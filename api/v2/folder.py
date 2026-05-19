@@ -330,6 +330,35 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     folder_data.append(folder_item)
 
             if grouped:
+                Pin = rpc.timeout(2).social_get_pin_model()
+                pinned_conv_ids_query = session.query(Pin.entity_id).filter(
+                    Pin.entity == 'conversation',
+                    Pin.project_id == project_id
+                ).order_by(desc(Pin.updated_at))
+
+                pinned_conv_ids = [row[0] for row in pinned_conv_ids_query.all()]
+
+                pinned_data = {"name": "pinned", "total": 0, "conversations": []}
+                if pinned_conv_ids:
+                    pinned_query = session.query(Conversation).where(
+                        Conversation.id.in_(pinned_conv_ids),
+                        Conversation.id.in_(distinct_conversation_subquery)
+                    )
+                    if q:
+                        pinned_query = pinned_query.where(Conversation.name.ilike(f'%{q}%'))
+                    if sources:
+                        pinned_query = pinned_query.where(Conversation.source.in_(sources))
+
+                    pinned_conversations_all = pinned_query.all()
+                    pinned_conv_map = {c.id: c for c in pinned_conversations_all}
+                    pinned_conversations_ordered = [
+                        pinned_conv_map[cid] for cid in pinned_conv_ids
+                        if cid in pinned_conv_map
+                    ]
+
+                    pinned_data["total"] = len(pinned_conversations_ordered)
+                    pinned_data["conversations"] = pinned_conversations_ordered[:limit]
+
                 date_groups_data = []
                 all_date_group_conv_ids = []
 
@@ -348,29 +377,38 @@ class PromptLibAPI(api_tools.APIModeHandler):
                             "conversations": group_conversations,
                         })
 
-                mg_counts_date_groups = dict(
+                all_conv_ids = all_date_group_conv_ids + [c.id for c in pinned_data["conversations"]]
+                mg_counts = dict(
                     session.query(
                         ConversationMessageGroup.conversation_id,
                         func.count(ConversationMessageGroup.id)
                     ).filter(
-                        ConversationMessageGroup.conversation_id.in_(all_date_group_conv_ids)
+                        ConversationMessageGroup.conversation_id.in_(all_conv_ids)
                     ).group_by(ConversationMessageGroup.conversation_id).all()
-                ) if all_date_group_conv_ids else {}
+                ) if all_conv_ids else {}
+
+                def serialize_conversation(conv, folder_id=None):
+                    return {
+                        "folder_id": folder_id,
+                        **serialize(ConversationList.from_orm(conv)),
+                        "participants_count": len(conv.participants),
+                        "messages_count": mg_counts.get(conv.id, 0),
+                        "users_count": sum(1 for p in conv.participants if p.entity_name == ParticipantTypes.user.value),
+                    }
+
+                pinned_data["conversations"] = [
+                    serialize_conversation(c) for c in pinned_data["conversations"]
+                ]
 
                 for group_data in date_groups_data:
                     group_data["conversations"] = [
-                        {
-                            "folder_id": None,
-                            **serialize(ConversationList.from_orm(i)),
-                            "participants_count": len(i.participants),
-                            "messages_count": mg_counts_date_groups.get(i.id, 0),
-                            "users_count": sum(1 for p in i.participants if p.entity_name == ParticipantTypes.user.value),
-                        } for i in group_data["conversations"]
+                        serialize_conversation(c) for c in group_data["conversations"]
                     ]
 
                 return {
                     "total_folders": total_folders,
                     "folders": folder_data,
+                    "pinned": pinned_data,
                     "date_groups": date_groups_data,
                     "selected_conversation_id": selected_conversation_id,
                 }, 200
