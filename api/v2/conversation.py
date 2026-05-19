@@ -22,8 +22,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_id = auth.current_user().get("id")
         rpc = rpc_tools.RpcMixin().rpc
 
-        messages_limit = request.args.get('limit', 100, type=int)
-        messages_offset = request.args.get('offset', 0, type=int)
+        messages_limit = request.args.get('messages_limit', 100, type=int)
+        messages_offset = request.args.get('messages_offset', 0, type=int)
 
         support_config = rpc.timeout(3).support_assistant_get_config()
         is_support_project = support_config.get('project_id') == project_id
