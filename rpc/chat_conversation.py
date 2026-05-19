@@ -140,6 +140,7 @@ class RPC:
         is_hidden: bool = None,
         meta: dict = None,
         attachment_participant_id: int = None,
+        folder_id: int = None,
     ) -> dict:
         """
         Update conversation fields.
@@ -208,6 +209,9 @@ class RPC:
                     conversation.meta = conversation.meta or {}
                     conversation.meta['is_hidden'] = is_hidden
                     flag_modified(conversation, 'meta')
+
+                if folder_id is not None:
+                    conversation.folder_id = folder_id
 
                 session.commit()
                 session.refresh(conversation)
