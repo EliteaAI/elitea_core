@@ -52,6 +52,20 @@ CHAT_PREDICT_MAPPER = {
 }
 
 
+def _get_agent_type(session, app_participant, app_version_id) -> str | None:
+    agent_type = app_participant.meta.get('agent_type')
+    if not agent_type and app_version_id:
+        try:
+            version_row = session.query(ApplicationVersion.agent_type).filter(
+                ApplicationVersion.id == app_version_id
+            ).first()
+            if version_row:
+                agent_type = version_row[0]
+        except Exception:
+            log.debug(f"Could not fetch agent_type for version {app_version_id}")
+    return agent_type
+
+
 def generate_toolkit_payload(
     session,
     conversation_uuid: str,
@@ -132,7 +146,7 @@ def generate_toolkit_payload(
                 },
                 "id": None,
                 "toolkit_name": app_participant.meta['name'],
-                "agent_type": app_participant.meta.get('agent_type'),
+                "agent_type": _get_agent_type(session, app_participant, app_version_id),
                 "created_at": datetime.now(tz=timezone.utc).isoformat(),
             }
             tools.append(app_toolkit_details)
