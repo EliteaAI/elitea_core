@@ -86,6 +86,7 @@ def get_conversation_details(
     check_ownership: bool = True,
     messages_limit: int = MESSAGES_DISPLAY_COUNT,
     messages_offset: int = 0,
+    sort_order: str = 'acs',
 ) -> ConversationDetails | None:
     # filter participants based on entity_meta['id']
     conversation = session.query(Conversation).filter(
@@ -152,8 +153,9 @@ def get_conversation_details(
         joinedload(ConversationMessageGroup.message_items)
     )
     conversation_dict['message_groups_count'] = message_groups.count()
+    order_func = desc if sort_order == 'desc' else asc
     conversation_dict['message_groups'] = message_groups.order_by(
-        asc(ConversationMessageGroup.created_at)
+        order_func(ConversationMessageGroup.created_at)
     ).offset(messages_offset).limit(messages_limit).all()
 
     for participant in conversation_dict['participants']:

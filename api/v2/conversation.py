@@ -25,6 +25,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         messages_limit = request.args.get('messages_limit', 100, type=int)
         messages_offset = request.args.get('messages_offset', 0, type=int)
 
+        sort_order = request.args.get('sort_order', 'acs')
+
         support_config = rpc.timeout(3).support_assistant_get_config()
         is_support_project = support_config.get('project_id') == project_id
 
@@ -35,6 +37,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             check_ownership=not is_support_project,
             messages_limit=messages_limit,
             messages_offset=messages_offset,
+            sort_order=sort_order,
         )
 
         if not result:

@@ -29,6 +29,7 @@ class RPC:
         check_ownership: bool = True,
         messages_limit: int = 100,
         messages_offset: int = 0,
+        sort_order: str = 'acs',
     ) -> dict | None:
         """
         Get full conversation details with participants and message groups.
@@ -48,6 +49,7 @@ class RPC:
             include_message_groups: Whether to include message groups (default True)
             messages_limit: Maximum number of message groups to return (default 15)
             messages_offset: Number of message groups to skip (default 0)
+            sort_order: Sort order (default 'acs')
 
         Returns:
             Dict containing full conversation details or None if not found/unauthorized
@@ -62,6 +64,7 @@ class RPC:
                     check_ownership=check_ownership,
                     messages_limit=messages_limit,
                     messages_offset=messages_offset,
+                    sort_order=sort_order,
                 )
 
                 if not result:
