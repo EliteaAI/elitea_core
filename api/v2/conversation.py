@@ -57,17 +57,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
         log.debug(f"Update conversation {conversation_id} with data: {data}")
         rpc = rpc_tools.RpcMixin().rpc
 
-        result = rpc.timeout(5).chat_update_conversation_rpc(
-            project_id=project_id,
-            conversation_id=conversation_id,
-            name=data.get('name'),
-            instructions=data.get('instructions'),
-            is_private=data.get('is_private'),
-            is_hidden=data.get('is_hidden'),
-            meta=data.get('meta'),
-            attachment_participant_id=data.get('attachment_participant_id'),
-            folder_id=data.get('folder_id'),
-        )
+        kwargs = {
+            'project_id': project_id,
+            'conversation_id': conversation_id,
+            'name': data.get('name'),
+            'instructions': data.get('instructions'),
+            'is_private': data.get('is_private'),
+            'is_hidden': data.get('is_hidden'),
+            'meta': data.get('meta'),
+            'attachment_participant_id': data.get('attachment_participant_id'),
+        }
+
+        if 'folder_id' in data:
+            kwargs['folder_id'] = data['folder_id']
+            kwargs['update_folder'] = True
+
+        result = rpc.timeout(5).chat_update_conversation_rpc(**kwargs)
 
         if not result.get('success'):
             error = result.get('error', 'Failed to update conversation')

@@ -357,7 +357,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     ]
 
                     pinned_data["total"] = len(pinned_conversations_ordered)
-                    pinned_data["conversations"] = pinned_conversations_ordered[:limit]
+                    pinned_data["conversations"] = pinned_conversations_ordered
 
                 date_groups_data = []
                 all_date_group_conv_ids = []
