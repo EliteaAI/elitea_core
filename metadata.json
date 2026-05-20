@@ -1,6 +1,6 @@
 {
   "name": "elitea_core",
-  "version": "0.399",
+  "version": "0.400",
   "description": "Unified core plugin for Elitea core functionality",
   "depends_on": [
     "admin",
