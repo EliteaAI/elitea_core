@@ -38,6 +38,30 @@ def agent_root_pipeline_validator(values: dict):
     return values
 
 
+def conversation_starters_validator(value):
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError('conversation_starters must be a list')
+
+    validated = []
+    for i, item in enumerate(value):
+        if item is None:
+            continue
+        if not isinstance(item, str):
+            raise ValueError(
+                f'conversation_starters[{i}] must be a string, got {type(item).__name__}'
+            )
+        item = item.strip()
+        if not item:
+            raise ValueError(
+                f'conversation_starters[{i}] cannot be empty or whitespace-only'
+            )
+        validated.append(item)
+
+    return validated or None
+
+
 class TagListModel(TagBaseModel):
     id: int
 
@@ -89,6 +113,11 @@ class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVers
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
 
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
+
     @model_validator(mode='before')
     @classmethod
     def validate_diagram_yaml(cls, values: dict):
@@ -120,12 +149,22 @@ class ApplicationVersionForkCreateModel(ApplicationVersionBaseModel, Application
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
 
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
+
 
 class ApplicationVersionBaseCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
     name: Literal['base'] = 'base'
     llm_settings: LLMSettingsModel
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
+
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod
@@ -271,6 +310,11 @@ class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, Application
     project_id: int = Field(..., exclude=True)
     user_id: int = Field(..., exclude=True)
 
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
+
     @model_validator(mode='before')
     @classmethod
     def validate_diagram_yaml(cls, values: dict):
@@ -317,6 +361,11 @@ class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
     meta: Optional[dict] = Field(default_factory=dict)
 
     project_id: int = Field(..., exclude=True)
+
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod
