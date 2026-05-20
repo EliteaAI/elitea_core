@@ -84,35 +84,39 @@ class ApplicationVersionBaseModel(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    @field_validator('conversation_starters', mode='before')
-    @classmethod
-    def validate_conversation_starters(cls, value):
-        if value is None:
-            return None
-        if not isinstance(value, list):
-            raise ValueError('conversation_starters must be a list')
 
-        validated = []
-        for i, item in enumerate(value):
-            if item is None:
-                continue
-            if not isinstance(item, str):
-                raise ValueError(
-                    f'conversation_starters[{i}] must be a string, got {type(item).__name__}'
-                )
-            item = item.strip()
-            if not item:
-                raise ValueError(
-                    f'conversation_starters[{i}] cannot be empty or whitespace-only'
-                )
-            validated.append(item)
+def validate_conversation_starters(value):
+    """Validate conversation_starters field - only used by write models."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError('conversation_starters must be a list')
 
-        return validated or None
+    validated = []
+    for i, item in enumerate(value):
+        if item is None:
+            continue
+        if not isinstance(item, str):
+            raise ValueError(
+                f'conversation_starters[{i}] must be a string, got {type(item).__name__}'
+            )
+        item = item.strip()
+        if not item:
+            raise ValueError(
+                f'conversation_starters[{i}] cannot be empty or whitespace-only'
+            )
+        validated.append(item)
+
+    return validated or None
 
 
 class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
+
+    _validate_conversation_starters = field_validator(
+        'conversation_starters', mode='before'
+    )(lambda cls, v: validate_conversation_starters(v))
 
     @model_validator(mode='before')
     @classmethod
@@ -145,12 +149,20 @@ class ApplicationVersionForkCreateModel(ApplicationVersionBaseModel, Application
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
 
+    _validate_conversation_starters = field_validator(
+        'conversation_starters', mode='before'
+    )(lambda cls, v: validate_conversation_starters(v))
+
 
 class ApplicationVersionBaseCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
     name: Literal['base'] = 'base'
     llm_settings: LLMSettingsModel
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
+
+    _validate_conversation_starters = field_validator(
+        'conversation_starters', mode='before'
+    )(lambda cls, v: validate_conversation_starters(v))
 
     @model_validator(mode='before')
     @classmethod
@@ -296,6 +308,10 @@ class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, Application
     project_id: int = Field(..., exclude=True)
     user_id: int = Field(..., exclude=True)
 
+    _validate_conversation_starters = field_validator(
+        'conversation_starters', mode='before'
+    )(lambda cls, v: validate_conversation_starters(v))
+
     @model_validator(mode='before')
     @classmethod
     def validate_diagram_yaml(cls, values: dict):
@@ -342,6 +358,10 @@ class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
     meta: Optional[dict] = Field(default_factory=dict)
 
     project_id: int = Field(..., exclude=True)
+
+    _validate_conversation_starters = field_validator(
+        'conversation_starters', mode='before'
+    )(lambda cls, v: validate_conversation_starters(v))
 
     @model_validator(mode='before')
     @classmethod
