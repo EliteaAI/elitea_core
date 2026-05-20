@@ -33,7 +33,7 @@ class ToolkitChangeRelationError(Exception):
 
 class ConfigurationExpandError(Exception):
     def __init__(self, errors):
-        super().__init__()
+        super().__init__(str(errors))
         self.errors = errors
 
 
