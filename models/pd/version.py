@@ -38,6 +38,30 @@ def agent_root_pipeline_validator(values: dict):
     return values
 
 
+def conversation_starters_validator(value):
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError('conversation_starters must be a list')
+
+    validated = []
+    for i, item in enumerate(value):
+        if item is None:
+            continue
+        if not isinstance(item, str):
+            raise ValueError(
+                f'conversation_starters[{i}] must be a string, got {type(item).__name__}'
+            )
+        item = item.strip()
+        if not item:
+            raise ValueError(
+                f'conversation_starters[{i}] cannot be empty or whitespace-only'
+            )
+        validated.append(item)
+
+    return validated or None
+
+
 class TagListModel(TagBaseModel):
     id: int
 
@@ -85,38 +109,14 @@ class ApplicationVersionBaseModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-def validate_conversation_starters(value):
-    """Validate conversation_starters field - only used by write models."""
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        raise ValueError('conversation_starters must be a list')
-
-    validated = []
-    for i, item in enumerate(value):
-        if item is None:
-            continue
-        if not isinstance(item, str):
-            raise ValueError(
-                f'conversation_starters[{i}] must be a string, got {type(item).__name__}'
-            )
-        item = item.strip()
-        if not item:
-            raise ValueError(
-                f'conversation_starters[{i}] cannot be empty or whitespace-only'
-            )
-        validated.append(item)
-
-    return validated or None
-
-
 class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
 
-    _validate_conversation_starters = field_validator(
-        'conversation_starters', mode='before'
-    )(lambda cls, v: validate_conversation_starters(v))
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod
@@ -149,9 +149,10 @@ class ApplicationVersionForkCreateModel(ApplicationVersionBaseModel, Application
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
 
-    _validate_conversation_starters = field_validator(
-        'conversation_starters', mode='before'
-    )(lambda cls, v: validate_conversation_starters(v))
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
 
 class ApplicationVersionBaseCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
@@ -160,9 +161,10 @@ class ApplicationVersionBaseCreateModel(ApplicationVersionBaseModel, Application
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
 
-    _validate_conversation_starters = field_validator(
-        'conversation_starters', mode='before'
-    )(lambda cls, v: validate_conversation_starters(v))
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod
@@ -308,9 +310,10 @@ class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, Application
     project_id: int = Field(..., exclude=True)
     user_id: int = Field(..., exclude=True)
 
-    _validate_conversation_starters = field_validator(
-        'conversation_starters', mode='before'
-    )(lambda cls, v: validate_conversation_starters(v))
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod
@@ -359,9 +362,10 @@ class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
 
     project_id: int = Field(..., exclude=True)
 
-    _validate_conversation_starters = field_validator(
-        'conversation_starters', mode='before'
-    )(lambda cls, v: validate_conversation_starters(v))
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod
