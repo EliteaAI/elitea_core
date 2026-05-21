@@ -1,6 +1,5 @@
 from pylon.core.tools import log
 from flask import request
-from sqlalchemy import text
 from sqlalchemy.orm.attributes import flag_modified
 from tools import api_tools, auth, config as c, db
 
