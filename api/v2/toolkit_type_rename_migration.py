@@ -254,7 +254,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
                                 results["summary_by_type"][old_type]["tools_migrated"] += 1
                                 tool_info["updated"] = True
 
-                            results["migrated_tools"].append(tool_info)
+                            # Skip already-clean rows (matched by type-IN filter for
+                            # idempotent re-run, but nothing to report). summary_by_type
+                            # still reflects the full match count via tools_found.
+                            if changes:
+                                results["migrated_tools"].append(tool_info)
 
                     if not dry_run:
                         session.commit()
