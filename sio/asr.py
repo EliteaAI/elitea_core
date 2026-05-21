@@ -3,7 +3,7 @@ import threading
 import time
 
 from pylon.core.tools import log, web
-from tools import auth, VaultClient
+from tools import auth
 
 from ..utils.sio_utils import SioEvents
 
@@ -91,8 +91,16 @@ class SIO:
             )
             return
 
-        project_secrets = VaultClient(project_id).get_secrets()
-        project_llm_key = project_secrets.get("project_llm_key", "")
+        try:
+            resolved = self.context.rpc_manager.timeout(10).litellm_resolve_model(
+                project_id=project_id, model_name=model_name, section="asr"
+            )
+            config_project_id = resolved["config_project_id"]
+            project_llm_key = resolved["project_llm_key"]
+        except Exception:
+            log.exception("ASR: failed to resolve model config for project=%s model=%s", project_id, model_name)
+            self.context.sio.emit(SioEvents.asr_error, {"error": "Failed to resolve model configuration"}, to=sid)
+            return
 
         if _is_whisper_model(model_name):
             # Whisper: VAD buffering stays in pylon_main; dispatch an indexer task per flush
@@ -105,7 +113,7 @@ class SIO:
                 "speech_detected": False,
                 "silent_frames": 0,
                 "flush_timer": None,
-                "project_id": project_id,
+                "project_id": config_project_id,
                 "project_llm_key": project_llm_key,
                 "model_name": model_name,
                 "language": language,
@@ -123,7 +131,7 @@ class SIO:
                 "indexer_asr_realtime",
                 kwargs={
                     "sid": sid,
-                    "project_id": project_id,
+                    "project_id": config_project_id,
                     "project_llm_key": project_llm_key,
                     "model_name": model_name,
                     "language": language,
