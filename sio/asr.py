@@ -3,7 +3,7 @@ import threading
 import time
 
 from pylon.core.tools import log, web
-from tools import auth, VaultClient
+from tools import auth
 
 from ..utils.sio_utils import SioEvents
 
@@ -33,25 +33,6 @@ def _is_whisper_model(model_name: str) -> bool:
     """True for batch HTTP transcription models (whisper-1, gpt-4o-transcribe, etc.)."""
     lower = model_name.lower() if model_name else ""
     return bool(lower and ("whisper" in lower or "transcribe" in lower))
-
-
-def _resolve_asr_config_project_id(rpc_manager, project_id: int, model_name: str) -> int:
-    """Return the config owner's project_id for the given ASR model name.
-
-    ASR configs are registered in LiteLLM under the owner's project_id (e.g. ``1_whisper``).
-    When a user in project 2 uses a shared config owned by project 1, the model key must
-    be built with project 1's id, not 2.  Falls back to the session project_id on error.
-    """
-    try:
-        response = rpc_manager.call.configurations_get_models(
-            project_id=project_id, section="asr", include_shared=True
-        )
-        for item in response.get("items", []):
-            if item.get("name") == model_name:
-                return item["project_id"]
-    except Exception as exc:
-        log.warning("ASR: could not resolve config project_id for model %s: %s", model_name, exc)
-    return project_id
 
 
 def _frame_is_speech(pcm_bytes: bytes) -> bool:
@@ -110,15 +91,16 @@ class SIO:
             )
             return
 
-        # Resolve the config owner's project_id so the LiteLLM model key (e.g. "1_whisper")
-        # is built against the project that actually owns the configuration.  A user in
-        # project 2 using a shared config from project 1 must send "1_whisper", not "2_whisper".
-        config_project_id = _resolve_asr_config_project_id(
-            self.context.rpc_manager, project_id, model_name
-        )
-
-        config_secrets = VaultClient(config_project_id).get_secrets()
-        project_llm_key = config_secrets.get("project_llm_key", "")
+        try:
+            resolved = self.context.rpc_manager.timeout(10).litellm_resolve_model(
+                project_id=project_id, model_name=model_name, section="asr"
+            )
+            config_project_id = resolved["config_project_id"]
+            project_llm_key = resolved["project_llm_key"]
+        except Exception:
+            log.exception("ASR: failed to resolve model config for project=%s model=%s", project_id, model_name)
+            self.context.sio.emit(SioEvents.asr_error, {"error": "Failed to resolve model configuration"}, to=sid)
+            return
 
         if _is_whisper_model(model_name):
             # Whisper: VAD buffering stays in pylon_main; dispatch an indexer task per flush
