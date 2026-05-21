@@ -35,6 +35,25 @@ def _is_whisper_model(model_name: str) -> bool:
     return bool(lower and ("whisper" in lower or "transcribe" in lower))
 
 
+def _resolve_asr_config_project_id(rpc_manager, project_id: int, model_name: str) -> int:
+    """Return the config owner's project_id for the given ASR model name.
+
+    ASR configs are registered in LiteLLM under the owner's project_id (e.g. ``1_whisper``).
+    When a user in project 2 uses a shared config owned by project 1, the model key must
+    be built with project 1's id, not 2.  Falls back to the session project_id on error.
+    """
+    try:
+        response = rpc_manager.call.configurations_get_models(
+            project_id=project_id, section="asr", include_shared=True
+        )
+        for item in response.get("items", []):
+            if item.get("name") == model_name:
+                return item["project_id"]
+    except Exception as exc:
+        log.warning("ASR: could not resolve config project_id for model %s: %s", model_name, exc)
+    return project_id
+
+
 def _frame_is_speech(pcm_bytes: bytes) -> bool:
     """True if the peak amplitude in this PCM16 frame exceeds the speech threshold."""
     n = len(pcm_bytes) // 2
@@ -91,8 +110,15 @@ class SIO:
             )
             return
 
-        project_secrets = VaultClient(project_id).get_secrets()
-        project_llm_key = project_secrets.get("project_llm_key", "")
+        # Resolve the config owner's project_id so the LiteLLM model key (e.g. "1_whisper")
+        # is built against the project that actually owns the configuration.  A user in
+        # project 2 using a shared config from project 1 must send "1_whisper", not "2_whisper".
+        config_project_id = _resolve_asr_config_project_id(
+            self.context.rpc_manager, project_id, model_name
+        )
+
+        config_secrets = VaultClient(config_project_id).get_secrets()
+        project_llm_key = config_secrets.get("project_llm_key", "")
 
         if _is_whisper_model(model_name):
             # Whisper: VAD buffering stays in pylon_main; dispatch an indexer task per flush
@@ -105,7 +131,7 @@ class SIO:
                 "speech_detected": False,
                 "silent_frames": 0,
                 "flush_timer": None,
-                "project_id": project_id,
+                "project_id": config_project_id,
                 "project_llm_key": project_llm_key,
                 "model_name": model_name,
                 "language": language,
@@ -123,7 +149,7 @@ class SIO:
                 "indexer_asr_realtime",
                 kwargs={
                     "sid": sid,
-                    "project_id": project_id,
+                    "project_id": config_project_id,
                     "project_llm_key": project_llm_key,
                     "model_name": model_name,
                     "language": language,
