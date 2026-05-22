@@ -348,6 +348,8 @@ class RPC:
         sort_order: str = 'desc',
         include_hidden: bool = False,
         is_admin: bool = False,
+        participant_id: int = None,
+        entity_name: str = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -355,6 +357,9 @@ class RPC:
         Shared RPC for conversation listing used by:
         - elitea_core conversations API
         - support_assistant plugin (with source='support', include_hidden=True)
+
+        Args:
+            participant_id: Optional participant ID to filter by single_participant in conversation meta
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -401,6 +406,17 @@ class RPC:
                         Conversation.meta['is_hidden'].astext.is_(None)
                     )
                 )
+
+            if participant_id is not None:
+                filters = [
+                    Conversation.meta.has_key('single_participant'),
+                    Conversation.meta['single_participant']['entity_meta']['id'].astext.cast(Integer) == participant_id,
+                ]
+                if entity_name:
+                    filters.append(
+                        Conversation.meta['single_participant']['entity_name'].astext == entity_name,
+                    )
+                base_query = base_query.filter(*filters)
 
             base_query = base_query.order_by(sorting(sorting_by))
 

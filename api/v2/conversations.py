@@ -38,6 +38,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         user_is_admin: bool = rpc.timeout(3).admin_check_user_is_admin(project_id, user_id)
 
+        entity_meta_id = request.args.get('entity_meta_id', type=int) or request.args.get('participant_id', type=int)
+
         result = rpc.timeout(10).chat_list_conversations_rpc(
             project_id=project_id,
             user_id=user_id,
@@ -49,6 +51,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             sort_order=request.args.get('sort_order', default='desc'),
             include_hidden=False,
             is_admin=user_is_admin,
+            participant_id=entity_meta_id,
+            entity_name=request.args.get('entity_name'),
         )
 
         return result, 200
