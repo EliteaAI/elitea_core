@@ -276,16 +276,14 @@ class ToolValidatedDetails(ToolDetails):
             raise_validation_error_if_any(ex.errors, ToolValidatedDetails)
         except Exception as e:
             raise ValueError(f"Error validating settings: {e}")
-
-        # Skip strict SDK validation if flag is set (e.g., during export)
-        # Exports should serialize existing data without validating against SDK schemas
-        # which may be out of sync with the stored data.
-        # Note: this runs for both successful expansion and ValidatorNotSupportedError cases;
-        # ConfigurationExpandError and general exceptions raise before reaching here.
-        if not cls._skip_toolkit_validation:
-            validation_result = this.module.toolkit_settings_validator(values['settings'], type_=type_, project_id=project_id, user_id=user_id)
-            if not validation_result['ok']:
-                raise_validation_error_if_any(validation_result['error'], ToolValidatedDetails)
+        else:
+            # Skip strict SDK validation if flag is set (e.g., during export)
+            # Exports should serialize existing data without validating against SDK schemas
+            # which may be out of sync with the stored data
+            if not cls._skip_toolkit_validation:
+                validation_result = this.module.toolkit_settings_validator(values['settings'], type_=type_, project_id=project_id, user_id=user_id)
+                if not validation_result['ok']:
+                    raise_validation_error_if_any(validation_result['error'], ToolValidatedDetails)
 
         return values
 
