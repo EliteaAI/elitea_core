@@ -1049,17 +1049,35 @@ def validate_application_version_details(
                 log.debug(f"Validating regular toolkit: {tool.get('id')}")
                 tool['project_id'] = project_id
                 tool['user_id'] = user_id
+                is_mcp = (
+                    tool.get('type') == 'mcp'
+                    or (isinstance(tool.get('meta'), dict) and tool['meta'].get('mcp') is True)
+                )
+                validation_context = {'check_connection': not is_mcp, 'mcp_tokens': {}}
                 try:
-                    ToolValidatedDetails.model_validate(tool)
+                    ToolValidatedDetails.model_validate(tool, context=validation_context)
                 except ValidationError as e:
-                    # re-wrap with new location
                     for err in e.errors():
-                        application_toolkit_errors.append({
-                            'type': err['type'],
-                            'loc': ('tools', tool['id'], '__root__'),
-                            'input': err.get('input'),
-                            'ctx': err.get('ctx', {'error': err.get('msg', 'Validation error')}),
-                        })
+                        # Intercept connection errors carried via the sentinel key
+                        if (
+                            err.get('type') == 'value_error'
+                            and isinstance(err.get('ctx', {}).get('error'), dict)
+                            and ToolValidatedDetails.CONNECTION_ERROR_SENTINEL
+                                in err['ctx']['error']
+                        ):
+                            application_toolkit_errors.append({
+                                'type': 'connection_error',
+                                'loc': ('tools', tool['id'], '__root__'),
+                                'input': err.get('input'),
+                                'ctx': err['ctx']['error'][ToolValidatedDetails.CONNECTION_ERROR_SENTINEL],
+                            })
+                        else:
+                            application_toolkit_errors.append({
+                                'type': err['type'],
+                                'loc': ('tools', tool['id'], '__root__'),
+                                'input': err.get('input'),
+                                'ctx': err.get('ctx', {'error': err.get('msg', 'Validation error')}),
+                            })
                 except Exception as ex:
                     application_toolkit_errors.append({
                         'type': 'value_error',
