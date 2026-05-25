@@ -17,15 +17,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, application_id: int, version_id: int, **kwargs):
         user_id = auth.current_user().get('id')
 
-        result = {'error': [], 'toolkit_errors': []}
+        result = {'error': [], 'toolkit_errors': [], 'connection_errors': []}
         try:
             validate_application_version_details(project_id, application_id, version_id, user_id)
         except ValidationError as e:
-            result['toolkit_errors'] = e.errors(
-                include_url=False,
-                include_context=False,
-                include_input=False
-            )
+            for err in e.errors(include_url=False, include_context=False, include_input=False):
+                if err.get('type') == 'connection_error':
+                    result['connection_errors'].append(err)
+                else:
+                    result['toolkit_errors'].append(err)
             return result, 400
         except Exception as e:
             result['error'] = str(e)
