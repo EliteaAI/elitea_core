@@ -899,6 +899,16 @@ def _check_configurations_connection_from_expanded_settings(
             log.debug(f"Configuration type {config_type} does not support check_connection, skipping")
             continue
 
+        # Skip delegated OAuth configurations (e.g. SharePoint with oauth_discovery_endpoint):
+        # an access token is not available at validation time, so connection check would always
+        # fail with McpAuthorizationRequired — same skip pattern as MCP toolkits.
+        if config_data.get('oauth_discovery_endpoint') and not config_data.get('access_token'):
+            log.debug(
+                f"Skipping connection check for {config_type}/{config_title}: "
+                f"delegated OAuth configured, no token available at validation time"
+            )
+            continue
+
         # Inject OAuth tokens for configurations that need them
         config_data = _inject_oauth_tokens(config_data, mcp_tokens)
         log.info(f"{config_data=} for connection check of {config_type}/{config_title}")
