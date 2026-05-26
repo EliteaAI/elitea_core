@@ -7,7 +7,7 @@ Returns distinct users with activity in a project based on audit_events.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c
+    from tools import api_tools, auth, config as c, register_openapi
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -20,6 +20,67 @@ if _API_AVAILABLE:
     class AdminAPI(api_tools.APIModeHandler):
         """Admin API for per-project user activity."""
 
+        @register_openapi(
+            name="Get Project User Activity (Admin)",
+            description=(
+                "Admin-only endpoint. Returns distinct users with event counts "
+                "for a given project, optionally filtered by date range."
+            ),
+            tags=["Analytics"],
+            parameters=[
+                {
+                    "name": "project_id",
+                    "in": "query",
+                    "required": True,
+                    "schema": {"type": "integer"},
+                    "description": "Project ID to query.",
+                    "example": 2,
+                },
+                {
+                    "name": "date_from",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "Start datetime (ISO 8601).",
+                    "example": "2025-01-01T00:00:00",
+                },
+                {
+                    "name": "date_to",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "End datetime (ISO 8601).",
+                    "example": "2025-01-31T23:59:59",
+                },
+            ],
+            responses={
+                "200": {
+                    "description": "User activity for the project",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "rows": [
+                                    {
+                                        "user_id": 42,
+                                        "user_email": "alice@example.com",
+                                        "event_count": 320,
+                                    },
+                                    {
+                                        "user_id": 55,
+                                        "user_email": "bob@example.com",
+                                        "event_count": 180,
+                                    },
+                                ]
+                            }
+                        }
+                    },
+                },
+                "400": {"description": "project_id is required or invalid"},
+                "401": {"description": "Unauthorized"},
+                "403": {"description": "Admin permission required"},
+                "500": {"description": "Internal server error"},
+            },
+        )
         @auth.decorators.check_api({
             "permissions": ["models.admin.audit_trail.view"],
             "recommended_roles": {

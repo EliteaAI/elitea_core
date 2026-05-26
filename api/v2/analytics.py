@@ -8,7 +8,7 @@ for the AI Adoption Analytics dashboard.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c
+    from tools import api_tools, auth, config as c, register_openapi
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -55,6 +55,126 @@ if _API_AVAILABLE:
     class PromptLibAPI(api_tools.APIModeHandler):
         """Project-level analytics for AI adoption dashboard."""
 
+        @register_openapi(
+            name="Get Project Analytics Overview",
+            description=(
+                "Returns project-level AI adoption KPIs, event type breakdown, "
+                "top active users, daily activity trend, tool usage, model usage, "
+                "agent activity, chat session stats, and per-event-type health metrics."
+            ),
+            tags=["Analytics"],
+            parameters=[
+                {
+                    "name": "date_from",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "Start datetime (ISO 8601). Defaults to 7 days ago.",
+                    "example": "2025-01-01T00:00:00",
+                },
+                {
+                    "name": "date_to",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "End datetime (ISO 8601). Defaults to now.",
+                    "example": "2025-01-31T23:59:59",
+                },
+            ],
+            responses={
+                "200": {
+                    "description": "Project analytics overview",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "kpis": {
+                                    "total_events": 1250,
+                                    "unique_users": 18,
+                                    "total_project_users": 25,
+                                    "ai_active_users": 15,
+                                    "adoption_rate": 60.0,
+                                    "avg_duration_ms": 432.5,
+                                    "error_rate": 2.4,
+                                    "error_count": 30,
+                                    "unique_tools": 12,
+                                    "unique_models": 4,
+                                    "llm_calls": 780,
+                                    "tool_runs": 340,
+                                    "chat_msgs": 210,
+                                    "agent_runs": 95,
+                                },
+                                "event_type_breakdown": [
+                                    {"event_type": "llm", "count": 780},
+                                    {"event_type": "tool", "count": 340},
+                                    {"event_type": "socketio", "count": 130},
+                                ],
+                                "top_ai_users": [
+                                    {
+                                        "user_id": 42,
+                                        "user_email": "alice@example.com",
+                                        "ai_events": 320,
+                                        "llm_calls": 200,
+                                        "tool_runs": 90,
+                                        "agent_runs": 30,
+                                    }
+                                ],
+                                "daily_activity": [
+                                    {"date": "2025-01-15", "events": 85, "users": 8, "errors": 2},
+                                    {"date": "2025-01-16", "events": 110, "users": 11, "errors": 1},
+                                ],
+                                "tools": [
+                                    {
+                                        "tool_name": "jira_create_issue",
+                                        "calls": 120,
+                                        "users": 6,
+                                        "avg_duration_ms": 310.0,
+                                        "errors": 3,
+                                    }
+                                ],
+                                "models": [
+                                    {
+                                        "model_name": "gpt-4o",
+                                        "display_name": "GPT-4o",
+                                        "calls": 450,
+                                        "users": 12,
+                                        "avg_duration_ms": 520.0,
+                                    }
+                                ],
+                                "agents": [
+                                    {
+                                        "entity_name": "Code Review Bot",
+                                        "entity_id": 7,
+                                        "events": 95,
+                                        "users": 5,
+                                        "avg_duration_ms": 1200.0,
+                                        "errors": 4,
+                                    }
+                                ],
+                                "chat_sessions": [
+                                    {
+                                        "action": "SIO chat_predict",
+                                        "sessions": 210,
+                                        "users": 14,
+                                        "avg_duration_ms": 850.0,
+                                    }
+                                ],
+                                "health": [
+                                    {
+                                        "event_type": "llm",
+                                        "total": 780,
+                                        "errors": 18,
+                                        "error_rate": 2.31,
+                                        "avg_duration_ms": 520.0,
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                },
+                "401": {"description": "Unauthorized"},
+                "500": {"description": "Internal server error"},
+            },
+        )
         @auth.decorators.check_api({
             "permissions": ["models.monitoring.tracing.view"],
             "recommended_roles": {
