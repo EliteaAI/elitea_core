@@ -7,7 +7,7 @@ Provides server-side pagination, search, and sorting for user activity data.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c
+    from tools import api_tools, auth, config as c, register_openapi
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -42,6 +42,113 @@ if _API_AVAILABLE:
     class PromptLibAPI(api_tools.APIModeHandler):
         """Paginated user activity for analytics."""
 
+        @register_openapi(
+            name="List User Analytics",
+            description=(
+                "Returns paginated user activity statistics broken down by LLM calls, "
+                "tool runs, agent interactions, and chat events, with sorting and search."
+            ),
+            tags=["Analytics"],
+            parameters=[
+                {
+                    "name": "date_from",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "Start datetime (ISO 8601). Defaults to 7 days ago.",
+                    "example": "2025-01-01T00:00:00",
+                },
+                {
+                    "name": "date_to",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "End datetime (ISO 8601). Defaults to now.",
+                    "example": "2025-01-31T23:59:59",
+                },
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                    "description": "Page size (max 100).",
+                },
+                {
+                    "name": "offset",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "default": 0, "minimum": 0},
+                    "description": "Pagination offset.",
+                },
+                {
+                    "name": "search",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": "Filter by user email (case-insensitive partial match).",
+                },
+                {
+                    "name": "sort_by",
+                    "in": "query",
+                    "required": False,
+                    "schema": {
+                        "type": "string",
+                        "enum": [
+                            "total_events", "active_days", "llm_events",
+                            "tool_events", "agent_events", "chat_events",
+                            "errors", "user_email",
+                        ],
+                        "default": "total_events",
+                    },
+                    "description": "Column to sort by.",
+                },
+                {
+                    "name": "sort_order",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
+                    "description": "Sort direction.",
+                },
+            ],
+            responses={
+                "200": {
+                    "description": "Paginated user analytics",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "total": 18,
+                                "rows": [
+                                    {
+                                        "user_id": 42,
+                                        "user_email": "alice@example.com",
+                                        "total_events": 320,
+                                        "active_days": 14,
+                                        "llm_events": 200,
+                                        "tool_events": 90,
+                                        "agent_events": 60,
+                                        "chat_events": 45,
+                                        "errors": 5,
+                                    },
+                                    {
+                                        "user_id": 55,
+                                        "user_email": "bob@example.com",
+                                        "total_events": 180,
+                                        "active_days": 10,
+                                        "llm_events": 120,
+                                        "tool_events": 40,
+                                        "agent_events": 30,
+                                        "chat_events": 25,
+                                        "errors": 2,
+                                    },
+                                ],
+                            }
+                        }
+                    },
+                },
+                "401": {"description": "Unauthorized"},
+                "500": {"description": "Internal server error"},
+            },
+        )
         @auth.decorators.check_api({
             "permissions": ["models.monitoring.tracing.view"],
             "recommended_roles": {

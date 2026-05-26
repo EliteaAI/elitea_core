@@ -178,6 +178,19 @@ class Module(module.ModuleModel):
             plugin_name="elitea_core",
             version=self.descriptor.metadata.get("version", "1.0.0"),
             description="Elitea core API endpoints",
+            tags=[
+                {
+                    "name": "elitea_core",
+                    "description": "Elitea core — agents, toolkits, conversations, and platform utilities.",
+                },
+                {
+                    "name": "Analytics",
+                    "description": (
+                        "AI Adoption Analytics — project-level KPIs, user activity, "
+                        "agent and tool metrics, and context utilisation insights."
+                    ),
+                },
+            ],
             api_module=api_v2,
         )
 
