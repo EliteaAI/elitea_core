@@ -9,7 +9,15 @@ from tools import db, VaultClient
 from ...models.participants import Participant
 from ...utils.toolkits_utils import format_tool_call_as_user_input
 from .attachment import AttachmentMessageItemPredict
+from .chat import ApplicationChatRequest
 from .participant_settings import EntitySettingsLlm
+
+
+class ApplicationPredictRequest(ApplicationChatRequest):
+    project_id: Optional[int] = None
+    callback_url: Optional[str] = None
+    callback_headers: Optional[Dict[str, str]] = None
+    async_mode: Optional[bool] = False
 
 
 class PredictPayload(BaseModel):

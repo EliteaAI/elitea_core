@@ -20,11 +20,13 @@
 
 from flask import request  # pylint: disable=E0401
 
-from pydantic.v1 import ValidationError  # pylint: disable=E0401
+from pydantic import ValidationError  # pylint: disable=E0401
+from pydantic.v1 import ValidationError as ValidationErrorV1  # pylint: disable=E0401
 
 from pylon.core.tools import log  # pylint: disable=E0401,E0611
 from tools import api_tools, auth, config as c, register_openapi  # pylint: disable=E0401
 
+from ...models.pd.predict import ApplicationPredictRequest  # pylint: disable=E0402
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.predict_utils import PredictPayloadError
 
@@ -37,6 +39,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         description="Execute an agent (application version) with provided inputs and get predictions.",
         mcp_tool=True,
         tags=["elitea_core/applications"],
+        request_body=ApplicationPredictRequest,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.predict.post"],
@@ -47,14 +50,22 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
     @api_tools.endpoint_metrics
     def post(self, project_id: int, version_id: int):
         """ Get task result """
-        request_json = dict(request.json)
+        try:
+            payload = ApplicationPredictRequest.model_validate(request.json)
+        except ValidationError as e:
+            return e.errors(), 400
         #
-        callback_url = request_json.pop("callback_url", None)
-        callback_headers = request_json.pop("callback_headers", None)
-        async_mode = request_json.pop("async_mode", False)
+        callback_url = payload.callback_url
+        callback_headers = payload.callback_headers
+        async_mode = payload.async_mode or False
         #
         is_async = callback_url is not None or async_mode or \
             request.args.get("async", "no").lower().strip() in ["yes", "true"]
+        #
+        payload_dict = payload.model_dump(
+            exclude={"callback_url", "callback_headers", "async_mode"},
+            exclude_unset=False,
+        )
         #
         self.module.not_starting_task_event.clear()
         #
@@ -63,7 +74,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                 project_id=project_id,
                 user_id=auth.current_user()["id"],
                 version_id=version_id,
-                payload_in=request_json,
+                payload_in=payload_dict,
                 raw=request.data,
                 webhook_signature=None,
                 predict_wait=not is_async,
@@ -74,7 +85,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                     "callback_url": callback_url,
                     "callback_headers": callback_headers,
                 }
-        except ValidationError as e:
+        except ValidationErrorV1 as e:
             return e.errors(), 400
         except PredictPayloadError as e:
             return {"error": str(e)}, 400
