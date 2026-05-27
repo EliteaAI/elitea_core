@@ -7,6 +7,12 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get Participant",
+        description="Get details of a specific participant.",
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.participant.get"],
         "recommended_roles": {
@@ -26,7 +32,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Remove Participant",
         description="Remove a participant from a conversation.",
-        mcp_tool=True
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.participant.delete"],

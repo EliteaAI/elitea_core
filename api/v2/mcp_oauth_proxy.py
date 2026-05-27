@@ -17,7 +17,7 @@
 
 """ API for MCP OAuth Token Exchange Proxy """
 from flask import request
-from tools import api_tools, auth, config as c, db, VaultClient
+from tools import api_tools, auth, config as c, db, VaultClient, register_openapi
 
 from pylon.core.tools import log
 
@@ -28,6 +28,15 @@ from ....configurations.utils import expand_configuration
 
 
 class ProjectAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="MCP OAuth Token Proxy",
+        description="Proxy OAuth token exchange (authorization_code or refresh_token grant) to avoid CORS issues. Optionally fetches credentials from a stored toolkit.",
+        tags=["elitea_core/mcp"],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
+        ],
+        request_body=McpOAuthTokenRequest,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.patch"],
         "recommended_roles": {

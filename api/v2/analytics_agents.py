@@ -47,7 +47,7 @@ if _API_AVAILABLE:
                 "Returns paginated agent/application usage statistics with optional "
                 "date filtering, search by name, sorting, and a daily chat-message trend."
             ),
-            tags=["elitea_core"],
+            tags=["elitea_core/analytics"],
             parameters=[
                 {
                     "name": "date_from",

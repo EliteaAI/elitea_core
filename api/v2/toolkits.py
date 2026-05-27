@@ -19,6 +19,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "description": "Filter to show only MCP toolkits when set to 'true'",
             }
         ],
+        tags=["elitea_core/toolkits"],
         mcp_tool=True
     )
     @auth.decorators.check_api({

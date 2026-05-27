@@ -20,7 +20,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Agent",
         description="Get agent (application) details including version information.",
-        mcp_tool=True
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.application.details"],
@@ -46,6 +47,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Delete Agent",
         description="Delete an agent (application) and all its versions.",
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.application.delete"],
@@ -66,6 +68,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Update Agent",
         description="Update an agent (application) and its version details.",
         request_body=ApplicationUpdateModel,
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api(
         {

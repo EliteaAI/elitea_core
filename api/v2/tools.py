@@ -16,6 +16,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="List Toolkits",
         description="Get project toolkits with tools, supporting filtering and pagination.",
+        tags=["elitea_core/toolkits"],
         mcp_tool=True
     )
     @auth.decorators.check_api(

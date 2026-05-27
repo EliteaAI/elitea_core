@@ -20,7 +20,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Add Participants",
         description="Add participants (users, agents, toolkits) to a conversation.",
-        mcp_tool=True
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.participants.create"],

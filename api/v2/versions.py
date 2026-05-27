@@ -40,6 +40,7 @@ class ProjectAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Create Agent Version",
         description="Create a new version for an existing agent (application).",
+        tags=["elitea_core/applications"],
         mcp_tool=True
     )
     @auth.decorators.check_api({

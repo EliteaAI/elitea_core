@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from tools import serialize
-from tools import api_tools, auth, db, config as c
+from tools import api_tools, auth, db, config as c, register_openapi
 
 from ...models.enums.all import ParticipantTypes
 from ...models.pd.message import MessageGroupDetail
@@ -17,6 +17,11 @@ from pylon.core.tools import log
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Stop Task",
+        description="Stop a running chat task for a message group.",
+        tags=["elitea_core/runtime"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.task.delete"],
         "recommended_roles": {

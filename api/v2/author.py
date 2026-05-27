@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pylon.core.tools import log
 
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.utils import add_public_project_id
 from ...utils.constants import PROMPT_LIB_MODE
@@ -11,6 +11,14 @@ from ...utils.authors import get_stats, get_author_data
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get Author Profile",
+        description="Return author profile details and aggregated stats.",
+        tags=["elitea_core/authors"],
+        parameters=[
+            {"name": "author_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Author ID."},
+        ],
+    )
     @add_public_project_id
     @auth.decorators.check_api(
         {

@@ -9,7 +9,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Conversation",
         description="Get detailed information about a specific conversation.",
-        mcp_tool=True
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.details"],
@@ -45,6 +46,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return result, 200
 
+    @register_openapi(
+        name="Update Conversation",
+        description="Update a conversation's name, instructions, or other properties.",
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.update"],
         "recommended_roles": {

@@ -21,6 +21,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Unpublish Agent Version",
         description="Unpublish an agent version from Agent Studio. Admin unpublish from public project; user unpublish from private project.",
         request_body=UnpublishRequest,
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.unpublish.post"],

@@ -30,6 +30,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Publish Agent Version",
         description="Publish an agent version to Agent Studio. User publish copies to public project; admin publish toggles status in-place.",
         request_body=PublishRequest,
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.publish.post"],

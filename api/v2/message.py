@@ -17,6 +17,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Message",
         description="Get single message details by UUID.",
+        tags=["elitea_core/chat"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.details"],
@@ -45,6 +46,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Delete Message",
         description="Delete a single message by UUID.",
+        tags=["elitea_core/chat"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.delete"],

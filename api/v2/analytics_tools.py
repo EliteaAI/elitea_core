@@ -47,7 +47,7 @@ if _API_AVAILABLE:
                 "Returns paginated tool usage statistics with optional date filtering, "
                 "search by tool name, and sorting."
             ),
-            tags=["elitea_core"],
+            tags=["elitea_core/analytics"],
             parameters=[
                 {
                     "name": "date_from",

@@ -6,7 +6,7 @@ from typing import Tuple
 from flask import request, send_file
 from pydantic.v1 import ValidationError
 
-from tools import api_tools, rpc_tools, db, auth, config as c
+from tools import api_tools, rpc_tools, db, auth, config as c, register_openapi
 
 from ...models.pd.fork import ForkToolInput
 from ...utils.constants import PROMPT_LIB_MODE
@@ -14,6 +14,14 @@ from ...utils.permissions import ProjectPermissionChecker
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Fork Toolkit",
+        description="Fork one or more toolkits into the current project.",
+        tags=["elitea_core/toolkits"],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Target project ID."},
+        ],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.fork.post"],
         "recommended_roles": {
