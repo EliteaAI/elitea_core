@@ -1,5 +1,5 @@
 from flask import request
-from tools import api_tools, auth, config as c, register_openapi
+from tools import api_tools, auth, config as c
 from pylon.core.tools import log
 
 from ...utils.constants import PROMPT_LIB_MODE
@@ -7,14 +7,6 @@ from ...utils.export_import import generate_repeatable_uuid
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
-    @register_openapi(
-        name="Convert Export Format",
-        description="Transform legacy export data by generating stable import UUIDs for toolkits.",
-        tags=["elitea_core/import_export"],
-        parameters=[
-            {"name": "mode", "in": "path", "required": True, "schema": {"type": "string"}, "description": "API mode (e.g. prompt_lib)."},
-        ],
-    )
     def post(self, **kwargs):
         export_data = request.json
         toolkits = {}

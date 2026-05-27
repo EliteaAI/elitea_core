@@ -14,7 +14,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Run Pipeline",
         description="Execute pipeline with optional async mode and callback URL.",
-        tags=["elitea_core/pipelines"],
+        tags=["elitea_core/applications"],
         parameters=[
             {"name": "async", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Run asynchronously."},
         ],

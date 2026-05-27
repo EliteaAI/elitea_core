@@ -25,8 +25,8 @@ from pylon.core.tools import log
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
-        name="Get Agents",
-        description="Get agents (applications) with filtering, sorting, and pagination.",
+        name="List agents and pipelines",
+        description="Returns a paginated list of agents and pipelines in the project. Supports filtering by tags, author, status, type, and free-text search.",
         mcp_tool=True,
         tags=["elitea_core/applications"],
     )
@@ -81,8 +81,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             }, 400
 
     @register_openapi(
-        name="Create Agent",
-        description="Create a new agent (application) with initial version and configuration.",
+        name="Create an agent or pipeline",
+        description="Creates a new agent or pipeline with an initial (base) version. The request must include agent or pipeline metadata and at least one version definition.",
         mcp_tool=True,
         tags=["elitea_core/applications"],
     )

@@ -36,7 +36,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         name="Execute Agent",
         description="Execute an agent (application version) with provided inputs and get predictions.",
         mcp_tool=True,
-        tags=["elitea_core/predicts"],
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.predict.post"],

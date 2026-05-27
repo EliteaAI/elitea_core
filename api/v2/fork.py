@@ -1,21 +1,13 @@
 import copy
 from flask import request
 
-from tools import api_tools, auth, config as c, register_openapi
+from tools import api_tools, auth, config as c
 from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
-    @register_openapi(
-        name="Fork Agent",
-        description="Fork one or more agents into the current project. Sets fork parent metadata on all agent versions.",
-        tags=["elitea_core/applications"],
-        parameters=[
-            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Target project ID."},
-        ],
-    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.fork.post"],
         "recommended_roles": {
