@@ -180,8 +180,48 @@ class Module(module.ModuleModel):
             description="Elitea core API endpoints",
             tags=[
                 {
-                    "name": "elitea_core",
-                    "description": "Elitea core — agents, toolkits, conversations, and platform utilities.",
+                    "name": "elitea_core/applications",
+                    "description": "Applications and versions management.",
+                },
+                {
+                    "name": "elitea_core/analytics",
+                    "description": "Usage and activity analytics endpoints.",
+                },
+                {
+                    "name": "elitea_core/authors",
+                    "description": "Author profile and author-related metadata endpoints.",
+                },
+                {
+                    "name": "elitea_core/chat",
+                    "description": "Conversations, messages, canvas, attachments, and participant settings.",
+                },
+                {
+                    "name": "elitea_core/discovery",
+                    "description": "Search options and tags discovery endpoints.",
+                },
+                {
+                    "name": "elitea_core/import_export",
+                    "description": "Import/export and conversion endpoints.",
+                },
+                {
+                    "name": "elitea_core/mcp",
+                    "description": "MCP tools sync and OAuth integration endpoints.",
+                },
+                {
+                    "name": "elitea_core/pipelines",
+                    "description": "Pipeline run, trigger, and webhook endpoints.",
+                },
+                {
+                    "name": "elitea_core/predicts",
+                    "description": "Prediction and execution endpoints.",
+                },
+                {
+                    "name": "elitea_core/runtime",
+                    "description": "Runtime and infrastructure utility endpoints.",
+                },
+                {
+                    "name": "elitea_core/toolkits",
+                    "description": "Toolkits and tools catalog and relation management.",
                 },
             ],
             api_module=api_v2,
