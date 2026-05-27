@@ -182,27 +182,39 @@ class Module(module.ModuleModel):
             tags=[
                 {
                     "name": "elitea_core/applications",
-                    "description": "Create, manage, execute, export, import, fork, and publish agents/pipelines and their versions within a project.",
+                    "description": "Applications and versions management.",
                 },
                 {
                     "name": "elitea_core/analytics",
-                    "description": "Project-level analytics for AI adoption: LLM usage, agent/pipelines runs, tools/toolkits runs, user engagement, and daily trends.",
+                    "description": "Usage and activity analytics endpoints.",
                 },
                 {
                     "name": "elitea_core/authors",
-                    "description": "Author profile and aggregated contribution statistics (agents, pipelines, toolkits, conversations).",
+                    "description": "Author profile and author-related metadata endpoints.",
                 },
                 {
                     "name": "elitea_core/chat",
-                    "description": "Manage conversations, send messages, upload attachments, edit canvases, and manage conversation participants.",
+                    "description": "Conversations, messages, canvas, attachments, and participant settings.",
                 },
                 {
                     "name": "elitea_core/discovery",
-                    "description": "Discover available tags and search filter options across agents, pipelines, toolkits, and credentials.",
+                    "description": "Search options and tags discovery endpoints.",
+                },
+                {
+                    "name": "elitea_core/import_export",
+                    "description": "Import/export and conversion endpoints.",
                 },
                 {
                     "name": "elitea_core/mcp",
-                    "description": "Sync tools from remote MCP servers and proxy OAuth token exchange for MCP integrations.",
+                    "description": "MCP tools sync and OAuth integration endpoints.",
+                },
+                {
+                    "name": "elitea_core/pipelines",
+                    "description": "Pipeline run, trigger, and webhook endpoints.",
+                },
+                {
+                    "name": "elitea_core/predicts",
+                    "description": "Prediction and execution endpoints.",
                 },
                 {
                     "name": "elitea_core/runtime",
@@ -210,7 +222,7 @@ class Module(module.ModuleModel):
                 },
                 {
                     "name": "elitea_core/toolkits",
-                    "description": "Browse available toolkit types and manage installed toolkit instances within a project.",
+                    "description": "Toolkits and tools catalog and relation management.",
                 },
             ],
             api_module=api_v2,
