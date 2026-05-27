@@ -43,7 +43,7 @@ if _API_AVAILABLE:
                 "Returns KPIs, per-user breakdown, tool usage, and daily activity "
                 "for a single agent (application) identified by entity_id."
             ),
-            tags=["Analytics"],
+            tags=["elitea_core"],
             parameters=[
                 {
                     "name": "entity_id",

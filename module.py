@@ -184,13 +184,6 @@ class Module(module.ModuleModel):
                     "name": "elitea_core",
                     "description": "Elitea core — agents, toolkits, conversations, and platform utilities.",
                 },
-                {
-                    "name": "Analytics",
-                    "description": (
-                        "AI Adoption Analytics — project-level KPIs, user activity, "
-                        "agent and tool metrics, and context utilisation insights."
-                    ),
-                },
             ],
             api_module=api_v2,
         )

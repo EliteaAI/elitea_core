@@ -1,6 +1,6 @@
 from flask import request
 
-from tools import api_tools, auth, db, config as c, MinioClient, serialize
+from tools import api_tools, auth, db, config as c, MinioClient, serialize, register_openapi
 from pylon.core.tools import log
 
 from ...models.enums.all import ParticipantTypes
@@ -14,6 +14,10 @@ from ...models.message_items.attachment import AttachmentMessageItem
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get Message",
+        description="Get single message details by UUID.",
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.details"],
         "recommended_roles": {
@@ -38,6 +42,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 }, 400
             return result, 200
 
+    @register_openapi(
+        name="Delete Message",
+        description="Delete a single message by UUID.",
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.delete"],
         "recommended_roles": {
