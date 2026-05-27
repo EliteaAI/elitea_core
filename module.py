@@ -14,6 +14,7 @@ import arbiter  # pylint: disable=E0401
 from .utils.sio_utils import SioEvents
 from .scripts.tool_icons import download_github_repo_zip, unzip_file
 from .utils.prompt_eliminate_utils import prompt_2_agent_migration
+from .sio.asr import on_whisper_call_done
 
 
 LEGACY_CONFIG_MODULES = ("elitea_ui", "promptlib_shared", "applications")
@@ -409,6 +410,8 @@ class Module(module.ModuleModel):
         self.event_node.subscribe("voice_asr_transcript_delta", self.voice_asr_transcript_delta)
         self.event_node.subscribe("voice_asr_transcript_done", self.voice_asr_transcript_done)
         self.event_node.subscribe("voice_asr_error", self.voice_asr_error)
+        self.event_node.subscribe("voice_asr_speech_started", self.voice_asr_speech_started)
+        self.event_node.subscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
         # self.event_node.subscribe("log_data", self.log_data)
         # configurations
         self.event_node.subscribe("application_toolkit_configurations_collected", self.toolkit_configurations_collected)
@@ -566,12 +569,23 @@ class Module(module.ModuleModel):
         transcript = payload.get("transcript", "")
         if sid:
             self.context.sio.emit(SioEvents.asr_transcript_done, {"transcript": transcript}, to=sid)
+            on_whisper_call_done(sid)
 
     def voice_asr_error(self, event: str, payload: dict, *args):
         sid = payload.get("sid")
         error = payload.get("error", "ASR error")
         if sid:
             self.context.sio.emit(SioEvents.asr_error, {"error": error}, to=sid)
+
+    def voice_asr_speech_started(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_speech_started, {}, to=sid)
+
+    def voice_asr_vad_flush(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_vad_flush, {}, to=sid)
 
     def deinit(self):
         log.info('De-initializing')
@@ -600,6 +614,8 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("voice_asr_transcript_delta", self.voice_asr_transcript_delta)
         self.event_node.unsubscribe("voice_asr_transcript_done", self.voice_asr_transcript_done)
         self.event_node.unsubscribe("voice_asr_error", self.voice_asr_error)
+        self.event_node.unsubscribe("voice_asr_speech_started", self.voice_asr_speech_started)
+        self.event_node.unsubscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
 
         # TaskNode
         self.task_node.stop()
