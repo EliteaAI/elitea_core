@@ -19,8 +19,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     """Pre-publish validation: deterministic + AI checks."""
 
     @register_openapi(
-        name="Validate Agent for Publishing",
-        description="Run deterministic + AI pre-publish validation checks on an agent version.",
+        name="Validate an agent version before publishing",
+        description="Runs pre-publish checks on the agent version before it is submitted to Agent Studio. Returns a validation_token on success that can be passed to /publish to skip re-validation. Applicable to agents only.",
         request_body=PublishValidateRequest,
         tags=["elitea_core/applications"],
     )

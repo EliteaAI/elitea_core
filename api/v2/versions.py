@@ -17,6 +17,12 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 
 class ProjectAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="List versions of an agent or pipeline",
+        description="Returns all versions for the specified agent or pipeline, ordered by creation date.",
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.versions.get"],
         "recommended_roles": {
