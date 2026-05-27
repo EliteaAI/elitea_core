@@ -14,7 +14,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "Returns context utilisation analytics for a conversation: token counts, "
             "context window usage percentage, active context strategy, and message breakdown."
         ),
-        tags=["Analytics"],
+        tags=["elitea_core"],
         responses={
             "200": {
                 "description": "Conversation context analytics",

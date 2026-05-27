@@ -43,6 +43,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {'error': result['msg']}, 400
         return result['data'], 200
 
+    @register_openapi(
+        name="Delete Agent",
+        description="Delete an agent (application) and all its versions.",
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.application.delete"],
         "recommended_roles": {
@@ -58,6 +62,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return '', 204
         return {"ok": False, "error": "Application is not found"}, 400
 
+    @register_openapi(
+        name="Update Agent",
+        description="Update an agent (application) and its version details.",
+        request_body=ApplicationUpdateModel,
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.applications.application.update"],

@@ -48,7 +48,7 @@ if _API_AVAILABLE:
                 "Returns paginated user activity statistics broken down by LLM calls, "
                 "tool runs, agent interactions, and chat events, with sorting and search."
             ),
-            tags=["Analytics"],
+            tags=["elitea_core"],
             parameters=[
                 {
                     "name": "date_from",

@@ -28,6 +28,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Messages",
         description="Get messages from a conversation with filtering and pagination.",
+        parameters=[
+            {"name": "query", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Search query for filtering messages"},
+            {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 10}},
+            {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer", "default": 0}},
+            {"name": "sort_by", "in": "query", "required": False, "schema": {"type": "string", "default": "created_at"}},
+            {"name": "sort_order", "in": "query", "required": False, "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"}},
+        ],
         mcp_tool=True
     )
     @auth.decorators.check_api({
@@ -73,6 +80,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 'rows': rows
             }, 200
 
+    @register_openapi(
+        name="Delete All Messages",
+        description="Delete all messages from a conversation.",
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.delete"],
         "recommended_roles": {

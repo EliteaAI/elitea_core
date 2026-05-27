@@ -43,7 +43,7 @@ if _API_AVAILABLE:
                 "Returns KPIs, per-user breakdown, associated agents, and daily usage trend "
                 "for a single tool identified by tool_name."
             ),
-            tags=["Analytics"],
+            tags=["elitea_core"],
             parameters=[
                 {
                     "name": "tool_name",

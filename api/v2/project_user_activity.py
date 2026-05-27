@@ -26,7 +26,7 @@ if _API_AVAILABLE:
                 "Admin-only endpoint. Returns distinct users with event counts "
                 "for a given project, optionally filtered by date range."
             ),
-            tags=["Analytics"],
+            tags=["elitea_core"],
             parameters=[
                 {
                     "name": "project_id",

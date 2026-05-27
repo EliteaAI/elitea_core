@@ -3,7 +3,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from pylon.core.tools import log
-from tools import api_tools, auth, db, config as c
+from tools import api_tools, auth, db, config as c, register_openapi
 from tools import serialize
 
 from ...models.message_items.canvas import CanvasMessageItem
@@ -15,6 +15,10 @@ from ...models.pd.canvas import CanvasItemEditPayload, CanvasItemDetail
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get Canvas",
+        description="Get canvas details including versions and content.",
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.chat.canvas.details"],
@@ -41,6 +45,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             return serialize(CanvasItemDetail.from_orm(canvas)), 200
 
+    @register_openapi(
+        name="Update Canvas",
+        description="Update canvas name and content.",
+        request_body=CanvasItemEditPayload,
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.chat.canvas.update"],
