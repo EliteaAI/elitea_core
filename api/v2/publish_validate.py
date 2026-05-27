@@ -22,6 +22,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Validate Agent for Publishing",
         description="Run deterministic + AI pre-publish validation checks on an agent version.",
         request_body=PublishValidateRequest,
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.publish.post"],

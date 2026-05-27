@@ -5,7 +5,7 @@ from datetime import date
 from flask import request, send_file, Response
 from pydantic.v1 import ValidationError
 from pylon.core.tools import log
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.export_import import (
@@ -75,6 +75,19 @@ def _generate_export_filename(result, file_extension="zip"):
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Export Applications",
+        description="Export one or more applications (agents) to JSON or Markdown format. Returns a file download.",
+        tags=["elitea_core/import_export"],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
+            {"name": "application_ids", "in": "path", "required": True, "schema": {"type": "string"}, "description": "Comma-separated application IDs to export."},
+            {"name": "format", "in": "query", "required": False, "schema": {"type": "string", "enum": ["json", "md"]}, "description": "Export format: json (default) or md (Markdown)."},
+            {"name": "fork", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Include fork parent metadata."},
+            {"name": "as_file", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Return result as a downloadable file."},
+            {"name": "follow_version_ids", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Comma-separated version IDs to follow during export."},
+        ],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.export_import.export"],
         "recommended_roles": {

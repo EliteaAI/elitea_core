@@ -1,12 +1,17 @@
 from flask import request
 
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.tags import list_tags
 
 class PromptLibAPI(api_tools.APIModeHandler):
 
+    @register_openapi(
+        name="List Tags",
+        description="List available tags with optional filters.",
+        tags=["elitea_core/discovery"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.promptlib_shared.tags.list"],
         "recommended_roles": {

@@ -18,7 +18,7 @@
 """API for Syncing/Fetching Tools from Remote MCP Server (v2)"""
 from flask import request
 from pydantic import ValidationError
-from tools import api_tools, auth, config as c, serialize
+from tools import api_tools, auth, config as c, serialize, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.sio_utils import SioValidationError
@@ -29,6 +29,17 @@ from pylon.core.tools import log
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="MCP Sync Tools",
+        description="Discover and sync available tools from a remote MCP server. Supports async mode via Socket.IO.",
+        tags=["elitea_core/mcp"],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
+            {"name": "await_response", "in": "query", "required": False, "schema": {"type": "boolean", "default": True}, "description": "Wait for the result synchronously (default: true)."},
+            {"name": "timeout", "in": "query", "required": False, "schema": {"type": "integer", "default": 120}, "description": "Timeout in seconds (default: 120 for sync, -1 for async)."},
+        ],
+        request_body=McpSyncToolsInputModel,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.patch"],
         "recommended_roles": {

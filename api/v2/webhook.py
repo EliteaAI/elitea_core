@@ -25,7 +25,7 @@ from flask import request  # pylint: disable=E0401
 from pydantic.v1 import ValidationError  # pylint: disable=E0401
 
 from pylon.core.tools import log  # pylint: disable=E0401,E0611
-from tools import api_tools, auth, db, VaultClient, rpc_tools  # pylint: disable=E0401
+from tools import api_tools, auth, db, VaultClient, rpc_tools, register_openapi  # pylint: disable=E0401
 
 from ...models.all import ApplicationVersion, Application
 from ...models.enums.all import AgentTypes
@@ -111,6 +111,11 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
 
             return True, (version, version.application)
 
+    @register_openapi(
+        name="Webhook Trigger",
+        description="Trigger application or pipeline execution via signed webhook payload.",
+        tags=["elitea_core/pipelines"],
+    )
     @api_tools.endpoint_metrics
     def post(self, project_id: int, version_id: int, webhook_type: str):  # pylint: disable=R0911
         """ POST """

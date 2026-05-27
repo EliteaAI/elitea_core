@@ -3,7 +3,7 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import flag_modified
 from pydantic import ValidationError
 
-from tools import api_tools, auth, db, config as c, serialize
+from tools import api_tools, auth, db, config as c, serialize, register_openapi
 
 from ...models.message_group import ConversationMessageGroup
 from ...models.pd.message import MessageGroupDetail
@@ -16,6 +16,12 @@ from ...utils.sio_utils import SioEvents
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Regenerate Message",
+        description="Regenerate assistant response for a message group.",
+        tags=["elitea_core/chat"],
+        request_body=SioRegenerateModel,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversations.regenerate"],
         "recommended_roles": {

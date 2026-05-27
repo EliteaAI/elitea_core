@@ -3,7 +3,7 @@ from flask import request
 from pydantic import ValidationError
 
 from pylon.core.tools import log
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import PredictPayloadError
@@ -11,6 +11,14 @@ from ...utils.predict_utils import PredictPayloadError
 
 class PromptLibAPI(api_tools.APIModeHandler):
 
+    @register_openapi(
+        name="Run Pipeline",
+        description="Execute pipeline with optional async mode and callback URL.",
+        tags=["elitea_core/pipelines"],
+        parameters=[
+            {"name": "async", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Run asynchronously."},
+        ],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.predict.post"],
         "recommended_roles": {

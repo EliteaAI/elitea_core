@@ -101,6 +101,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Update Agent Version",
         description="Update an existing agent version configuration.",
+        tags=["elitea_core/applications"],
         mcp_tool=True
     )
     @auth.decorators.check_api({

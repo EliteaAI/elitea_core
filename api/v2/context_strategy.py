@@ -3,7 +3,7 @@
 from flask import request
 from pydantic import ValidationError
 
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 from pylon.core.tools import log
 
 from ...models.pd.context import ContextStrategyUpdate
@@ -12,6 +12,12 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Update Context Strategy",
+        description="Update context strategy settings for a conversation.",
+        tags=["elitea_core/chat"],
+        request_body=ContextStrategyUpdate,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.edit"],
         "recommended_roles": {

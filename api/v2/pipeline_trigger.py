@@ -10,7 +10,7 @@ from pylon.core.tools import log
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import flag_modified
 
-from tools import api_tools, auth, config as c, db, serialize
+from tools import api_tools, auth, config as c, db, serialize, register_openapi
 
 from ...models.all import ApplicationVersion
 from ...models.pd.pipeline_trigger import (
@@ -32,6 +32,11 @@ from ...utils.pipeline_trigger import (
 class PromptLibAPI(api_tools.APIModeHandler):
     """API handler for pipeline trigger configuration."""
 
+    @register_openapi(
+        name="Get Pipeline Trigger",
+        description="Get current trigger configuration for a pipeline version.",
+        tags=["elitea_core/pipelines"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.details"],
         "recommended_roles": {
@@ -102,6 +107,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.exception(f"Error fetching pipeline trigger for version {version_id}: {e}")
             return {"ok": False, "error": "Error fetching pipeline trigger"}, 500
 
+    @register_openapi(
+        name="Update Pipeline Trigger",
+        description="Update trigger configuration for a pipeline version.",
+        tags=["elitea_core/pipelines"],
+        request_body=UpdatePipelineTrigger,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.update"],
         "recommended_roles": {
@@ -218,6 +229,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.exception(f"Error updating pipeline trigger for version {version_id}: {e}")
             return {"ok": False, "error": "Error updating pipeline trigger"}, 500
 
+    @register_openapi(
+        name="Regenerate Pipeline Webhook Secret",
+        description="Regenerate webhook secret for a pipeline version configured with webhook trigger.",
+        tags=["elitea_core/pipelines"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.update"],
         "recommended_roles": {

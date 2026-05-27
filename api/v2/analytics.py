@@ -62,7 +62,7 @@ if _API_AVAILABLE:
                 "top active users, daily activity trend, tool usage, model usage, "
                 "agent activity, chat session stats, and per-event-type health metrics."
             ),
-            tags=["elitea_core"],
+            tags=["elitea_core/analytics"],
             parameters=[
                 {
                     "name": "date_from",

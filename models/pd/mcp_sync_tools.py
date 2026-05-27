@@ -17,7 +17,7 @@
 
 """Pydantic models for MCP sync tools API"""
 from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class McpSyncToolsInputModel(BaseModel):
@@ -39,24 +39,30 @@ class McpSyncToolsInputModel(BaseModel):
         default=None,
         description="MCP OAuth tokens for authentication (keyed by server URL)"
     )
-
-    # Communication
     sid: Optional[str] = Field(
         None,
         description="Socket ID for real-time communication"
     )
-
-    # Project context (will be set from URL parameter)
     project_id: Optional[int] = Field(
         None,
         description="Project ID (set from URL parameter)"
     )
-
     ssl_verify: bool = True
-
     toolkit_type: Optional[str] = Field(
         None,
         description="Type of the toolkit (used for pre-built MCP)"
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "url": "https://my-mcp-server.example.com/mcp",
+                    "timeout": 60,
+                    "ssl_verify": True,
+                }
+            ]
+        }
     )
 
 

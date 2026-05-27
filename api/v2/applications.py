@@ -27,7 +27,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Agents",
         description="Get agents (applications) with filtering, sorting, and pagination.",
-        mcp_tool=True
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api(
         {
@@ -82,7 +83,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Create Agent",
         description="Create a new agent (application) with initial version and configuration.",
-        mcp_tool=True
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api(
         {

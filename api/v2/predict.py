@@ -35,7 +35,8 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
     @register_openapi(
         name="Execute Agent",
         description="Execute an agent (application version) with provided inputs and get predictions.",
-        mcp_tool=True
+        mcp_tool=True,
+        tags=["elitea_core/predicts"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.predict.post"],

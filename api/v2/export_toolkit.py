@@ -4,13 +4,24 @@ from datetime import date
 
 from flask import request, send_file
 from pydantic.v1 import ValidationError
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.export_import import export_toolkits
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Export Toolkits",
+        description="Export one or more toolkits to JSON format. Returns raw JSON or a downloadable file.",
+        tags=["elitea_core/import_export"],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
+            {"name": "toolkit_ids", "in": "path", "required": True, "schema": {"type": "string"}, "description": "Comma-separated toolkit IDs to export."},
+            {"name": "fork", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Include fork parent metadata."},
+            {"name": "as_file", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Return result as a downloadable file."},
+        ],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.export_toolkit.export"],
         "recommended_roles": {

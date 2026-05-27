@@ -118,6 +118,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Configure Participant",
         description="Configure participant settings (LLM settings, etc.) in a conversation.",
+        tags=["elitea_core/chat"],
         mcp_tool=True
     )
     @auth.decorators.check_api({

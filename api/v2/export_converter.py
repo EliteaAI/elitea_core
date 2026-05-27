@@ -1,6 +1,5 @@
 from flask import request
-# from pydantic.v1 import ValidationError
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 from pylon.core.tools import log
 
 from ...utils.constants import PROMPT_LIB_MODE
@@ -8,13 +7,14 @@ from ...utils.export_import import generate_repeatable_uuid
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
-#    @auth.decorators.check_api({
-#        "permissions": ["models.applications.export_converter.transform"],
-#        "recommended_roles": {
-#            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
-#            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
-#        }})
-#    @api_tools.endpoint_metrics
+    @register_openapi(
+        name="Convert Export Format",
+        description="Transform legacy export data by generating stable import UUIDs for toolkits.",
+        tags=["elitea_core/import_export"],
+        parameters=[
+            {"name": "mode", "in": "path", "required": True, "schema": {"type": "string"}, "description": "API mode (e.g. prompt_lib)."},
+        ],
+    )
     def post(self, **kwargs):
         export_data = request.json
         toolkits = {}
