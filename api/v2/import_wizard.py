@@ -11,7 +11,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Import Wizard",
         description="Import one or more agents/toolkits into the current project from exported JSON payload.",
-        tags=["elitea_core/import_export"],
+        tags=["elitea_core/applications"],
         parameters=[
             {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Target project ID."},
         ],

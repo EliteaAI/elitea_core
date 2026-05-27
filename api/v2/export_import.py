@@ -78,7 +78,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Export Applications",
         description="Export one or more applications (agents) to JSON or Markdown format. Returns a file download.",
-        tags=["elitea_core/import_export"],
+        tags=["elitea_core/applications"],
         parameters=[
             {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
             {"name": "application_ids", "in": "path", "required": True, "schema": {"type": "string"}, "description": "Comma-separated application IDs to export."},
