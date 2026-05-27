@@ -118,6 +118,11 @@ class SIO:
                 "model_name": model_name,
                 "language": language,
                 "task_node": self.task_node,
+                # Serialisation: at most one Whisper call in flight per session.
+                # Audio that arrives while a call is in flight is accumulated here
+                # and dispatched when the current call completes.
+                "call_in_flight": False,
+                "pending_buffer": bytearray(),
             }
         else:
             # Realtime: dispatch long-lived indexer task, forward audio via event_node
@@ -192,6 +197,10 @@ def _handle_whisper_audio(sid: str, session: dict, pcm_bytes: bytes) -> None:
 
     with session["lock"]:
         if is_speech:
+            if not session["speech_detected"]:
+                # Transition from silence → speech: notify frontend so it can
+                # cancel any pending auto-send timer before the transcript arrives.
+                session["event_node"].emit("voice_asr_speech_started", {"sid": sid})
             session["buffer"].extend(pcm_bytes)
             session["speech_detected"] = True
             session["silent_frames"] = 0
@@ -233,29 +242,50 @@ def _flush_whisper_buffer(sid: str, session: dict) -> None:
 
 
 def _do_flush(sid: str, session: dict) -> None:
-    """Flush current buffer as an indexer_asr_whisper task (lock must be held)."""
+    """Flush current buffer (lock must be held).
+
+    If a Whisper call is already in flight the audio is accumulated in
+    ``pending_buffer`` instead of being dispatched immediately.  This
+    serialises calls to one-at-a-time per session, preventing RPM exhaustion
+    on Azure Whisper (10 RPM) which would cause 30-second LiteLLM retry
+    delays and late transcript_done events.
+    """
     pcm_data = bytes(session["buffer"])
     session["buffer"] = bytearray()
     session["speech_detected"] = False
     session["silent_frames"] = 0
 
     if len(pcm_data) < _WHISPER_MIN_BYTES:
+        # No Whisper call, but speech_started was already emitted — balance the
+        # counter on the frontend by sending an empty transcript_done.
+        session["event_node"].emit("voice_asr_transcript_done", {"sid": sid, "transcript": ""})
         return
 
-    project_id = session["project_id"]
-    project_llm_key = session["project_llm_key"]
-    model_name = session["model_name"]
-    language = session["language"]
-    task_node = session["task_node"]
+    # Notify frontend that this speech segment has ended so it can start the
+    # silence timer relative to when the user actually stopped speaking (not
+    # when the transcript arrives, which may be delayed by serialisation).
+    session["event_node"].emit("voice_asr_vad_flush", {"sid": sid})
 
-    task_node.start_task(
+    if session["call_in_flight"]:
+        # Accumulate audio; it will be dispatched by on_whisper_call_done once
+        # the current call completes.
+        session["pending_buffer"].extend(pcm_data)
+        return
+
+    session["call_in_flight"] = True
+    _dispatch_whisper_call(sid, session, pcm_data)
+
+
+def _dispatch_whisper_call(sid: str, session: dict, pcm_data: bytes) -> None:
+    """Submit a Whisper indexer task (call_in_flight must already be True)."""
+    session["task_node"].start_task(
         "indexer_asr_whisper",
         kwargs={
             "sid": sid,
-            "project_id": project_id,
-            "project_llm_key": project_llm_key,
-            "model_name": model_name,
-            "language": language,
+            "project_id": session["project_id"],
+            "project_llm_key": session["project_llm_key"],
+            "model_name": session["model_name"],
+            "language": session["language"],
             "audio_bytes": pcm_data,
         },
         pool="indexer",
@@ -265,6 +295,25 @@ def _do_flush(sid: str, session: dict) -> None:
             "model_name": model_name,
         },
     )
+
+
+def on_whisper_call_done(sid: str) -> None:
+    """Called from module.py after voice_asr_transcript_done is forwarded to the SIO client.
+
+    Dispatches buffered audio (if any) or clears the in-flight flag so the
+    next VAD flush is sent immediately.
+    """
+    session = _sessions.get(sid)
+    if not session or session.get("type") != "whisper":
+        return
+
+    with session["lock"]:
+        pending = bytes(session["pending_buffer"])
+        session["pending_buffer"] = bytearray()
+        if pending:
+            _dispatch_whisper_call(sid, session, pending)
+        else:
+            session["call_in_flight"] = False
 
 
 def _close_session(sio_handler, sid: str) -> None:
