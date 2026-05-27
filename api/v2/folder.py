@@ -182,7 +182,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 if sources:
                     folder_conv_query = folder_conv_query.where(Conversation.source.in_(sources))
 
-                folder_conv_query = folder_conv_query.order_by(sorting(sorting_by))
+                folder_conv_query = folder_conv_query.order_by(sorting(sorting_by), Conversation.id.desc())
                 total = folder_conv_query.count()
                 folder_conv_query = folder_conv_query.limit(limit).offset(offset)
                 result = folder_conv_query.all()
@@ -231,7 +231,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     query = base_query.where(date_filter)
                 else:
                     query = base_query
-                query = query.order_by(sorting(sorting_by))
+                query = query.order_by(sorting(sorting_by), Conversation.id.desc())
                 total = query.count()
                 query = query.limit(limit).offset(offset)
                 result = query.all()
@@ -382,7 +382,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 for group_name in DATE_GROUP_ORDER:
                     group_filter = build_date_group_filter(date_field, group_name)
                     if group_filter is not None:
-                        group_query = base_query.where(group_filter).order_by(sorting(sorting_by))
+                        group_query = base_query.where(group_filter)
+                        if pinned_conv_ids:
+                            group_query = group_query.where(~Conversation.id.in_(pinned_conv_ids))
+                        group_query = group_query.order_by(sorting(sorting_by), Conversation.id.desc())
                         group_total = group_query.count()
                         group_conversations = group_query.limit(limit).all()
 
@@ -438,7 +441,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     count = base_query.where(group_filter).count()
                     date_groups_counts[group_name] = count
 
-            query = base_query.order_by(sorting(sorting_by))
+            query = base_query.order_by(sorting(sorting_by), Conversation.id.desc())
             total = query.count()
             query = query.limit(limit).offset(offset)
             result = query.all()
