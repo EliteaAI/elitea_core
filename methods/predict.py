@@ -115,6 +115,19 @@ class Method:
                 'user_context': serialize(user_context),
             }
         )
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                parsed.project_id
+            )
+            return {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": 5,
+            }
+
         if webhook_signature is not None or not predict_wait:
             result = {
                 "message": "Task started",
