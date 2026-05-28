@@ -244,13 +244,13 @@ class RPC:
         # This is critical because embedded toolkits may reference OTHER agents via application_import_uuid
         all_embedded_toolkits = []  # List of (model, embedded_toolkit) tuples
         for item_index, item in enumerate(import_data):
-            log.info(f"[IMPORT DEBUG] Processing item {item_index}: entity={item.get('entity')}")
-            log.info(f"[IMPORT DEBUG] Item keys: {item.keys()}")
+            log.debug(f"[IMPORT DEBUG] Processing item {item_index}: entity={item.get('entity')}")
+            log.debug(f"[IMPORT DEBUG] Item keys: {item.keys()}")
             if 'versions' in item and item['versions']:
                 for v_idx, version in enumerate(item['versions']):
-                    log.info(f"[IMPORT DEBUG] Version {v_idx}: tools count = {len(version.get('tools', []))}")
+                    log.debug(f"[IMPORT DEBUG] Version {v_idx}: tools count = {len(version.get('tools', []))}")
                     if version.get('tools'):
-                        log.info(f"[IMPORT DEBUG] First tool: {version['tools'][0] if version['tools'] else 'N/A'}")
+                        log.debug(f"[IMPORT DEBUG] First tool: {version['tools'][0] if version['tools'] else 'N/A'}")
             has_postponed_toolkits = False
             entity = item['entity']
             if entity in DEPRECATED_ENTITIES:
@@ -295,10 +295,10 @@ class RPC:
                     if entity == 'agents':
                         has_postponed_toolkits = model.has_postponed_toolkits()
                         has_embedded_toolkits = model.has_embedded_toolkits()
-                        log.info(f"[IMPORT DEBUG] Agent imported: has_postponed_toolkits={has_postponed_toolkits}, has_embedded_toolkits={has_embedded_toolkits}")
-                        log.info(f"[IMPORT DEBUG] Model versions count: {len(model.versions)}")
+                        log.debug(f"[IMPORT DEBUG] Agent imported: has_postponed_toolkits={has_postponed_toolkits}, has_embedded_toolkits={has_embedded_toolkits}")
+                        log.debug(f"[IMPORT DEBUG] Model versions count: {len(model.versions)}")
                         for v in model.versions:
-                            log.info(f"[IMPORT DEBUG] Version '{v.name}': postponed_tools={len(v.postponed_tools)}, embedded_toolkits={len(v.embedded_toolkits)}")
+                            log.debug(f"[IMPORT DEBUG] Version '{v.name}': postponed_tools={len(v.postponed_tools)}, embedded_toolkits={len(v.embedded_toolkits)}")
 
                         # Collect embedded toolkits for deferred processing (after ALL agents are imported)
                         # This is critical because embedded toolkits may reference OTHER agents via application_import_uuid

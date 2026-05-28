@@ -33,6 +33,6 @@ class Event:  # pylint: disable=E1101,R0903,W0201
     @web.event("configuration_deleted")
     def on_configuration_deleted(self, _context, _event, configuration, *_args, **_kwargs):  # pylint: disable=R0914
         """ Event """
-        log.info("Got configuration_deleted: %s", configuration)
+        log.debug("Got configuration_deleted: %s", configuration)
         #
         self.delete_configuration_settings(configuration)
