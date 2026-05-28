@@ -160,6 +160,12 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                     if "error" in result:
                         return result, 400
                     return result, 200
+                except PoolSaturationError as e:
+                    return {
+                        "error": "temporarily_unavailable",
+                        "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                        "retry_after": e.retry_after,
+                    }, 503
                 except Exception as exc:
                     log.exception(f"Pipeline webhook execution failed: {exc}")
                     return {"error": "Pipeline execution failed", "status": "error"}, 500

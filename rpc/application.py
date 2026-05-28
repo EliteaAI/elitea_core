@@ -35,6 +35,7 @@ from ..utils.application_utils import (
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
+from ..utils.exceptions import PoolSaturationError
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
@@ -240,6 +241,15 @@ class RPC:
                 'user_context': serialize(user_context)
             }),
         )
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                parsed.project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
+
         if sio_event == SioEvents.chat_predict.value:
             self.context.event_manager.fire_event('applications_predict_task_id', {
                 "task_id": task_id,
