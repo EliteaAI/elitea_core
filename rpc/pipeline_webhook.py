@@ -10,13 +10,28 @@ from pylon.core.tools import web, log
 from tools import db
 
 from ..models.all import Application, ApplicationVersion
+from ..models.conversations import ConversationMessageGroup
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType
+from ..utils.exceptions import PoolSaturationError
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
 )
+
+
+def _mark_response_failed(project_id: int, message_uuid: str) -> None:
+    """Mark response placeholder as not streaming on task start failure.
+
+    Follows the existing pattern in rpc/chat_all.py for error handling.
+    """
+    with db.get_session(project_id) as session:
+        msg = session.query(ConversationMessageGroup).filter_by(uuid=message_uuid).first()
+        if msg:
+            msg.is_streaming = False
+            session.commit()
+            log.debug(f"Marked response {message_uuid} as not streaming due to task start failure")
 
 
 def execute_pipeline_webhook(
@@ -65,14 +80,19 @@ def execute_pipeline_webhook(
     )
 
     # Execute using shared utility
-    result = execute_pipeline_via_predict_sio(
-        project_id=project_id,
-        version=version,
-        user_id=user_id,
-        conversation_uuid=conversation_uuid,
-        response_message_id=response_message_id,
-        user_input=payload_str,  # Full payload as input for webhook
-    )
+    try:
+        result = execute_pipeline_via_predict_sio(
+            project_id=project_id,
+            version=version,
+            user_id=user_id,
+            conversation_uuid=conversation_uuid,
+            response_message_id=response_message_id,
+            user_input=payload_str,  # Full payload as input for webhook
+        )
+    except PoolSaturationError:
+        # Mark the response placeholder as not streaming to avoid stuck History entry
+        _mark_response_failed(project_id, response_message_id)
+        raise
 
     log.info(
         f"Webhook pipeline execution started: project={project_id}, "
