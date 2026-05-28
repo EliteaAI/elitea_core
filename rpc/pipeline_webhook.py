@@ -10,7 +10,7 @@ from pylon.core.tools import web, log
 from tools import db
 
 from ..models.all import Application, ApplicationVersion
-from ..models.conversations import ConversationMessageGroup
+from ..models.message_group import ConversationMessageGroup
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType
 from ..utils.exceptions import PoolSaturationError
