@@ -10,7 +10,7 @@ from ..models.pd.chat import ApplicationChatRequest, ContextStrategyModel
 from ..utils.predict_utils import generate_predict_payload, load_context_settings_from_conversation
 from ..models.all import ApplicationVersion
 from ..utils.utils import verify_signature
-from ..utils.exceptions import VerifySignatureError
+from ..utils.exceptions import VerifySignatureError, PoolSaturationError
 from ..utils.sio_utils import SioEvents
 
 class Method:
@@ -122,11 +122,7 @@ class Method:
                 "Pool 'agents' saturated - no workers available for project_id=%s",
                 parsed.project_id
             )
-            return {
-                "error": "temporarily_unavailable",
-                "message": "The service is busy processing other requests. Please try again in a few seconds.",
-                "retry_after": 5,
-            }
+            raise PoolSaturationError(pool="agents", retry_after=5)
 
         if webhook_signature is not None or not predict_wait:
             result = {

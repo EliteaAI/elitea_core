@@ -3,6 +3,7 @@ from pylon.core.tools import log, web
 from sqlalchemy.orm import joinedload
 
 from ..utils.predict_utils import generate_test_tool_payload
+from ..utils.exceptions import PoolSaturationError
 
 
 class Method:
@@ -35,11 +36,7 @@ class Method:
                 "Pool 'agents' saturated - no workers available for project_id=%s",
                 project_id
             )
-            return {
-                "error": "temporarily_unavailable",
-                "message": "The service is busy processing other requests. Please try again in a few seconds.",
-                "retry_after": 5,
-            }
+            raise PoolSaturationError(pool="agents", retry_after=5)
 
         if webhook_signature is not None or not predict_wait:
             result = {

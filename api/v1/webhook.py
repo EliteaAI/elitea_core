@@ -26,7 +26,7 @@ from pylon.core.tools import log  # pylint: disable=E0401,E0611
 from tools import api_tools, auth  # pylint: disable=E0401
 
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
-from ...utils.exceptions import VerifySignatureError  # pylint: disable=E0402
+from ...utils.exceptions import VerifySignatureError, PoolSaturationError  # pylint: disable=E0402
 
 
 class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
@@ -72,6 +72,12 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
         except VerifySignatureError as e:
             return e.value, 400
+        except PoolSaturationError as e:
+            return {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": e.retry_after,
+            }, 503
         except BaseException as exc:  # pylint: disable=W0718
             log.error(exc)
             return {"error": "Can not do predict"}, 500
