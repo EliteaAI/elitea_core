@@ -1242,10 +1242,23 @@ def validate_and_resolve_llm_settings(
 
         if llm_settings and llm_settings.get('model_name'):
             model_name = llm_settings['model_name']
-            model_project_id = llm_settings.get('model_project_id') or project_id
+            model_project_id = llm_settings.get('model_project_id')
 
-            if (model_project_id, model_name) in available:
-                return llm_settings
+            if model_project_id is not None:
+                if (model_project_id, model_name) in available:
+                    return llm_settings
+            else:
+                # null model_project_id: find the actual project that owns this model.
+                # Private project is checked before public because fetch_private_configurations
+                # inserts its keys first, so next() naturally prefers it.
+                resolved_project_id = next(
+                    (proj_id for (proj_id, mn) in available if mn == model_name),
+                    None,
+                )
+                if resolved_project_id is not None:
+                    stamped = dict(llm_settings)
+                    stamped['model_project_id'] = resolved_project_id
+                    return stamped
 
         default = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_default_model(
             project_id=project_id, section='llm', include_shared=True

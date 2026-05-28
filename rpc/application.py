@@ -634,6 +634,17 @@ class RPC:
             except Exception as e:
                 errors.append(str(e))
 
+            # Stamp resolved model_project_id for versions that arrived with null.
+            # validate_and_resolve_llm_settings returns a copy with model_project_id
+            # filled in when the model is found; persisting it here fixes the
+            # publish-time shared-LLM check for newly imported agents.
+            for version in application.versions:
+                ls = version.llm_settings
+                if ls and isinstance(ls, dict) and ls.get('model_name') and ls.get('model_project_id') is None:
+                    resolved = validate_and_resolve_llm_settings(project_id, ls)
+                    if resolved and resolved.get('model_project_id') is not None:
+                        version.llm_settings = resolved
+
             session.commit()
 
             # Explicitly load relationships for the first version since they are now lazy
