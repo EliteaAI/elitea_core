@@ -1100,9 +1100,9 @@ class RPC:
                 log.debug(f"No SID provided and no current user session available")
 
         user_id = data.get('user_id')
-        log.info(f"About to expand toolkit configurations: user_id={user_id}, project_id={project_id}")
+        log.debug(f"About to expand toolkit configurations: user_id={user_id}, project_id={project_id}")
         try:
-            log.info(f"Starting toolkit configuration expansion for user {user_id} in project {project_id}")
+            log.debug(f"Starting toolkit configuration expansion for user {user_id} in project {project_id}")
             log.debug(f"Original toolkit_config: {data.get('toolkit_config', {})}")
 
             toolkit_config = data.get('toolkit_config', {})
@@ -1122,7 +1122,7 @@ class RPC:
                 'settings': toolkit_settings_expanded
             }
 
-            log.info(f"Expanded toolkit configuration for user {user_id} in project {project_id}")
+            log.debug(f"Expanded toolkit configuration for user {user_id} in project {project_id}")
             log.debug(f"Expanded toolkit_config: {data['toolkit_config']}")
         except Exception as e:
             log.error(f"Error expanding toolkit configurations: {str(e)}")
@@ -1148,7 +1148,7 @@ class RPC:
             self.context.sio.enter_room(sid, room)
 
         # Log the parameters being passed to indexer for debugging
-        log.info(f"Testing toolkit tool: {tool_name} with toolkit_config keys: {list(data.get('toolkit_config', {}).keys())} and tool_params: {data.get('tool_params', {})}")
+        log.debug(f"Testing toolkit tool: {tool_name} with toolkit_config keys: {list(data.get('toolkit_config', {}).keys())} and tool_params: {data.get('tool_params', {})}")
 
         # Prepare kwargs without stream_id and message_id since they're passed as args
         task_kwargs = {k: v for k, v in data.items() if k not in ['stream_id', 'message_id']}
@@ -1462,7 +1462,7 @@ class RPC:
         if sid:
             self.context.sio.enter_room(sid, room)
 
-        log.info(f"MCP sync tools request: url={data.get('url')}, project_id={project_id}")
+        log.debug(f"MCP sync tools request: url={data.get('url')}, project_id={project_id}")
 
         # Prepare kwargs without stream_id and message_id since they're passed as args
         task_kwargs = {k: v for k, v in data.items() if k not in ['stream_id', 'message_id']}
