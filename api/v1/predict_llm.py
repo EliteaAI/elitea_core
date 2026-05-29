@@ -27,6 +27,7 @@ from tools import api_tools, auth, config as c  # pylint: disable=E0401
 
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.predict_utils import PredictPayloadError
+from ...utils.exceptions import PoolSaturationError
 
 
 class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
@@ -61,6 +62,12 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
         except PredictPayloadError as e:
             return {"error": str(e)}, 400
+        except PoolSaturationError as e:
+            return {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": e.retry_after,
+            }, 503
         except BaseException as exc:  # pylint: disable=W0718
             log.exception("LLM Predict error: %s", exc)
             return {"error": "Can not do LLM predict"}, 500
