@@ -86,7 +86,8 @@ class ProjectAPI(api_tools.APIModeHandler):
             ).options(
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
 
             result = ApplicationVersionDetailModel.from_orm(version)

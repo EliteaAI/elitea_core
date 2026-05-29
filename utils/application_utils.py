@@ -11,7 +11,7 @@ from pylon.core.tools import log
 
 from .utils import get_public_project_id
 from ..models.enums.all import AgentTypes
-from ..models.all import Application, ApplicationVersion, ApplicationVariable, ApplicationVersionTagAssociation
+from ..models.all import Application, ApplicationVersion, ApplicationVariable
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.enums.events import ApplicationEvents
 from ..models.pd.application import (
@@ -487,48 +487,24 @@ def list_applications(
     # Extract application IDs
     application_ids = [app.id for app in applications_with_attrs]
 
-    # Step 3: Load versions for these applications in a separate query
+    # Step 3: Load versions with their tags in one batched query.
+    # selectinload issues a single follow-up SELECT against the tag association
+    # joined to tags, which is far cheaper than the historical lazy='joined' that
+    # multiplied version rows by tag count and required a redundant manual fetch.
     versions_query = (
         session.query(ApplicationVersion)
         .filter(ApplicationVersion.application_id.in_(application_ids))
+        .options(selectinload(ApplicationVersion.tags))
         .order_by(ApplicationVersion.application_id, ApplicationVersion.created_at.desc())
     )
     all_versions = versions_query.all()
 
     # Step 4: Build a mapping of application_id -> versions
     versions_by_app_id = {}
-    version_ids = []
     for version in all_versions:
-        if version.application_id not in versions_by_app_id:
-            versions_by_app_id[version.application_id] = []
-        versions_by_app_id[version.application_id].append(version)
-        version_ids.append(version.id)
+        versions_by_app_id.setdefault(version.application_id, []).append(version)
 
-    # Step 5: Load tags for these versions in a separate query
-    if version_ids:
-        # Query the association table to get version_id -> tag relationships
-        tags_query = (
-            session.query(
-                ApplicationVersionTagAssociation.c.version_id,
-                Tag
-            )
-            .join(Tag, Tag.id == ApplicationVersionTagAssociation.c.tag_id)
-            .filter(ApplicationVersionTagAssociation.c.version_id.in_(version_ids))
-        )
-        tag_associations = tags_query.all()
-
-        # Build a mapping of version_id -> tags
-        tags_by_version_id = {}
-        for version_id, tag in tag_associations:
-            if version_id not in tags_by_version_id:
-                tags_by_version_id[version_id] = []
-            tags_by_version_id[version_id].append(tag)
-
-        # Step 6: Assign tags to versions
-        for version in all_versions:
-            version.tags = tags_by_version_id.get(version.id, [])
-
-    # Step 7: Assign versions to applications
+    # Step 5: Assign versions to applications
     for app in applications_with_attrs:
         app.versions = versions_by_app_id.get(app.id, [])
 
@@ -564,7 +540,8 @@ def get_application_details(project_id: int, application_id: int,
                         joinedload(ApplicationVersion.application),
                         selectinload(ApplicationVersion.tools),
                         selectinload(ApplicationVersion.tool_mappings),
-                        selectinload(ApplicationVersion.variables)
+                        selectinload(ApplicationVersion.variables),
+                        selectinload(ApplicationVersion.tags)
                     ).first()
                 else:
                     application_version = None
@@ -582,7 +559,8 @@ def get_application_details(project_id: int, application_id: int,
                 joinedload(ApplicationVersion.application),
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
 
         # Fallback to first existing version if needed
@@ -594,7 +572,8 @@ def get_application_details(project_id: int, application_id: int,
                     joinedload(ApplicationVersion.application),
                     selectinload(ApplicationVersion.tools),
                     selectinload(ApplicationVersion.tool_mappings),
-                    selectinload(ApplicationVersion.variables)
+                    selectinload(ApplicationVersion.variables),
+                    selectinload(ApplicationVersion.tags)
                 )
                 .order_by(ApplicationVersion.created_at.desc())
             ).first()
@@ -903,6 +882,16 @@ def _check_configurations_connection_from_expanded_settings(
             log.debug(f"Configuration type {config_type} does not support check_connection, skipping")
             continue
 
+        # Skip delegated OAuth configurations (e.g. SharePoint with oauth_discovery_endpoint):
+        # an access token is not available at validation time, so connection check would always
+        # fail with McpAuthorizationRequired — same skip pattern as MCP toolkits.
+        if config_data.get('oauth_discovery_endpoint') and not config_data.get('access_token'):
+            log.debug(
+                f"Skipping connection check for {config_type}/{config_title}: "
+                f"delegated OAuth configured, no token available at validation time"
+            )
+            continue
+
         # Inject OAuth tokens for configurations that need them
         config_data = _inject_oauth_tokens(config_data, mcp_tokens)
         log.debug(f"{config_data=} for connection check of {config_type}/{config_title}")
@@ -1013,7 +1002,8 @@ def validate_application_version_details(
         ).options(
             selectinload(ApplicationVersion.tools),
             selectinload(ApplicationVersion.tool_mappings),
-            selectinload(ApplicationVersion.variables)
+            selectinload(ApplicationVersion.variables),
+            selectinload(ApplicationVersion.tags)
         ).first()
         if not application_version:
             raise ApplicationVersionNonFoundError(application_id, version_id)
@@ -1332,7 +1322,8 @@ def get_application_version_details_expanded(
         ).options(
             selectinload(ApplicationVersion.tools),
             selectinload(ApplicationVersion.tool_mappings),
-            selectinload(ApplicationVersion.variables)
+            selectinload(ApplicationVersion.variables),
+            selectinload(ApplicationVersion.tags)
         ).first()
         if not application_version:
             raise ApplicationVersionNonFoundError(application_id, version_id)

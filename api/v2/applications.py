@@ -123,7 +123,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).options(
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
 
             result = ApplicationDetailModel.from_orm(application)
