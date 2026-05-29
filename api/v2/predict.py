@@ -98,6 +98,8 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         response_code = 200
         if "error" in result and result["error"] is not None:
             response_code = 400
+            if not isinstance(result["error"], (str, list, dict)):
+                result["error"] = str(result["error"])
         #
         return result, response_code
 
