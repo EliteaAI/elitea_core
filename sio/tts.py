@@ -46,7 +46,11 @@ class SIO:
                 "voice_instructions": voice_instructions,
             },
             pool="indexer",
-            meta={},
+            meta={
+                "task_name": "indexer_tts",
+                "project_id": project_id,
+                "model_name": model_name,
+            },
         )
 
     @web.sio(SioEvents.tts_stop)
