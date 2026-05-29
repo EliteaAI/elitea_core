@@ -361,7 +361,7 @@ def list_applications(
                     )
                     author_name_map[author['id']] = display.lower()
             except Exception as e:  # noqa: BLE001
-                log.warning(f"[sort_by=author] Failed to resolve author names: {e}")
+                log.debug(f"[sort_by=author] Failed to resolve author names: {e}")
 
         # Pinned items always first (sorted by pin_updated_at DESC among themselves),
         # then all non-pinned items sorted by author name.
@@ -894,7 +894,7 @@ def _check_configurations_connection_from_expanded_settings(
 
         # Inject OAuth tokens for configurations that need them
         config_data = _inject_oauth_tokens(config_data, mcp_tokens)
-        log.info(f"{config_data=} for connection check of {config_type}/{config_title}")
+        log.debug(f"{config_data=} for connection check of {config_type}/{config_title}")
         try:
             # Call check_connection via RPC to indexer
             result = context.rpc_manager.timeout(30).applications_configuration_check_connection(

@@ -767,7 +767,6 @@ class RPC:
         else:
             current_user = auth.current_user()
         
-        # log.info(f'chat {parsed=}')
         with db.get_session(parsed.project_id) as session:
             conversation: Conversation = session.query(Conversation).where(
                 Conversation.uuid == parsed.conversation_uuid
@@ -1028,7 +1027,6 @@ class RPC:
             if msg_group.sent_to_id:
                 # here we need to generate payload
                 if rpc_func := CHAT_PREDICT_MAPPER.get(msg_group.sent_to.entity_name):
-                    # log.info(f'{msg=} {parsed=}')
                     try:
                         payload: dict = generate_payload(session, msg_group=msg_group, predict_payload=parsed)
                     except PayloadGenerationError as e:
@@ -1053,7 +1051,6 @@ class RPC:
                             room=room
                         )
                         return {"error": str(e)}
-                    # log.info(f'{payload=}')
 
                     # Pass pipeline attachment filepaths so the indexer can inject them into graph state
                     if pipeline_attachment_filepaths:
@@ -1086,8 +1083,6 @@ class RPC:
                     session.commit()
 
                     payload['message_id'] = str(response_msg.uuid)
-
-                    # log.info(f'chat2 {payload=}')
 
                     # returns result only for applications
                     result = getattr(self.context.rpc_manager.call, rpc_func)(

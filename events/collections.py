@@ -24,7 +24,7 @@ from pylon.core.tools import log, web
 class Event:
     @web.event("public_collection_status_change")
     def handle_collection_status_change(self, context, event, payload: dict):
-        log.info(f'Event {payload}')
+        log.debug(f'Event {payload}')
         private_project_id = payload['private_project_id']
         private_collection_id = payload['private_collection_id']
         status = payload['status']
