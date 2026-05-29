@@ -34,6 +34,7 @@ from ..utils.sio_utils import get_chat_room
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
+from ..utils.exceptions import PoolSaturationError
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
@@ -1090,16 +1091,22 @@ class RPC:
                     # log.info(f'chat2 {payload=}')
 
                     # returns result only for applications
-                    result = getattr(self.context.rpc_manager.call, rpc_func)(
-                        sid, payload, SioEvents.chat_predict.value,
-                        start_event_content={
-                            'participant_id': msg_group.sent_to_id,
-                            'question_id': str(msg_group.uuid),
-                        },
-                        chat_project_id=parsed.project_id,
-                        await_task_timeout=await_task_timeout,
-                        user_id=current_user['id']
-                    )
+                    try:
+                        result = getattr(self.context.rpc_manager.call, rpc_func)(
+                            sid, payload, SioEvents.chat_predict.value,
+                            start_event_content={
+                                'participant_id': msg_group.sent_to_id,
+                                'question_id': str(msg_group.uuid),
+                            },
+                            chat_project_id=parsed.project_id,
+                            await_task_timeout=await_task_timeout,
+                            user_id=current_user['id']
+                        )
+                    except PoolSaturationError:
+                        # Mark the response placeholder as not streaming to avoid stuck chat entry
+                        response_msg.is_streaming = False
+                        session.commit()
+                        raise
 
                     if return_message_ids:
                         session.refresh(msg_group)

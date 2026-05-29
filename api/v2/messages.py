@@ -22,6 +22,7 @@ from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.context_analytics import update_conversation_meta
 from ...utils.sio_utils import SioEvents, SioValidationError
+from ...utils.exceptions import PoolSaturationError
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -226,6 +227,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "detail": "SioValidationError",
                 "error": f"Wrong input data: {e.error}",
             }, 400
+        except PoolSaturationError as e:
+            return {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": e.retry_after,
+            }, 503
         except Exception as ex:
             import traceback
             log.error(

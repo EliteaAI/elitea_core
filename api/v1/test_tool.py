@@ -18,6 +18,7 @@ from ...models.pd.llm import LLMSettingsModel
 from ...utils.constants import PROMPT_LIB_MODE
 from ...models.enums.all import ToolEntityTypes
 from ...utils.sio_utils import SioEvents, SioValidationError
+from ...utils.exceptions import PoolSaturationError
 
 from pylon.core.tools import log
 
@@ -173,6 +174,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
         except SioValidationError as e:
             return {'error': str(e.error)}, 400
+        except PoolSaturationError as e:
+            return {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": e.retry_after,
+            }, 503
 
         task_id = result.get('task_id')
         if await_response:
