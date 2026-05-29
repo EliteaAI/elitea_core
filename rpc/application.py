@@ -409,6 +409,14 @@ class RPC:
             }),
         )
 
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                parsed.project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
+
         # Send SIO events only for SIO calls
         if sid:
             if sio_event == SioEvents.chat_predict.value:
@@ -1188,6 +1196,14 @@ class RPC:
                 },
             )
 
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
+
         # Send start event
         self.stream_response(sio_event, {
             "type": "start_task",
@@ -1362,6 +1378,14 @@ class RPC:
             },
         )
 
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
+
         # Send start event
         self.stream_response(sio_event, {
             "type": "start_task",
@@ -1492,6 +1516,14 @@ class RPC:
                 },
             },
         )
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
 
         # Send start event
         self.stream_response(sio_event, {

@@ -13,6 +13,7 @@ from ..models.all import EliteATool, EntityToolMapping, ApplicationVersion
 from ..models.indexer import EmbeddingStore
 from ..models.enums.all import ToolEntityTypes
 from ..models.enums.all import InitiatorType
+from ..utils.exceptions import PoolSaturationError
 
 RPC_CALL_TIMEOUT = 3
 
@@ -1080,6 +1081,15 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
             },
         },
     )
+
+    # Handle pool saturation: start_task returns None when no workers available
+    if task_id is None:
+        log.warning(
+            "Pool 'agents' saturated - no workers available for project_id=%s",
+            project_id
+        )
+        raise PoolSaturationError(pool="agents", retry_after=5)
+
     #
     # Save index_meta data for index_data tool
     index_name = tool_params.get('index_name')
