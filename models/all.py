@@ -112,7 +112,6 @@ class ApplicationVersion(db_tools.AbstractBaseMixin, db.Base):
     __table_args__ = (
         UniqueConstraint('shared_owner_id', 'shared_id', name='application_version_shared_origin'),
         UniqueConstraint('application_id', 'name', name='_application_version_name_uc'),
-        Index('ix_application_versions_app_id_agent_type', 'application_id', 'agent_type'),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
