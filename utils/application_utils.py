@@ -161,6 +161,10 @@ def applications_update_version(version_data, session) -> dict:
                 session.commit()
 
     for key, value in version_data.model_dump(exclude={'tags', 'variables', 'tools'}).items():
+        if key == 'pipeline_settings' and isinstance(value, dict) and 'trigger' not in value:
+            existing_trigger = (version.pipeline_settings or {}).get('trigger')
+            if existing_trigger:
+                value = {**value, 'trigger': existing_trigger}
         setattr(version, key, value)
 
     try:
