@@ -20,11 +20,12 @@
 
 from flask import request  # pylint: disable=E0401
 
-from pydantic.v1 import ValidationError  # pylint: disable=E0401
+from pydantic import ValidationError  # pylint: disable=E0401
 
 from pylon.core.tools import log  # pylint: disable=E0401,E0611
-from tools import api_tools, auth, config as c  # pylint: disable=E0401
+from tools import api_tools, auth, config as c, register_openapi  # pylint: disable=E0401
 
+from ...models.pd.predict_llm import LLMPredictRequest  # pylint: disable=E0402
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.predict_utils import PredictPayloadError
 
@@ -32,6 +33,15 @@ from ...utils.predict_utils import PredictPayloadError
 class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
     """ API """
 
+    @register_openapi(
+        name="LLM Predict",
+        description="Send a message to an LLM model and get a prediction. "
+                    "Automatically uses project's default model if not specified. "
+                    "Supports both nested (llm_settings) and flat (model_name at top-level) payload formats.",
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
+        request_body=LLMPredictRequest,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.predict.post"],
         "recommended_roles": {
@@ -40,14 +50,37 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         }})
     @api_tools.endpoint_metrics
     def post(self, project_id: int):
-        """ LLM predict endpoint """
-        request_json = dict(request.json)
-        #
-        await_task_timeout = request_json.pop("await_task_timeout", 30)  # Default 30 seconds
-        sid = request_json.pop("sid", None)  # Extract sid for streaming support
+        """ 
+        Execute LLM prediction with a chat message.
+        
+        Supports two payload formats:
+        - Nested: llm_settings object with model_name, temperature, max_tokens, etc.
+        - Flat: model_name, temperature, max_tokens at top level (auto-converted to llm_settings)
+        
+        If llm_settings.model_name is not provided, uses the project's default model.
+        
+        Args:
+            project_id: Project ID
+            
+        Returns:
+            - 200: Task started or completed
+            - 400: Validation error or missing llm_settings without default
+            - 500: Internal error
+        """
+        try:
+            # Validate request against schema
+            predict_request = LLMPredictRequest.model_validate(request.json)
+        except ValidationError as e:
+            return e.errors(), 400
 
-        # Set project_id in payload
+        # Convert to dict for RPC call
+        request_json = predict_request.model_dump(exclude_unset=False)
         request_json['project_id'] = project_id
+
+        # Extract for RPC call
+        await_task_timeout = request_json.get("await_task_timeout", 30)
+        sid = request_json.get("sid")
+
         #
         self.module.not_starting_task_event.clear()
         #

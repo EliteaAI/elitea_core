@@ -140,6 +140,8 @@ def generate_predict_payload(
 
     # Get model configuration
     llm_project_id = getattr(parsed.llm_settings, 'model_project_id', None) or parsed.project_id
+    if parsed.llm_settings is None or not parsed.llm_settings.model_name:
+        raise PredictPayloadError("llm_settings with model_name is required")
     llm_model_configuration = rpc_tools.RpcMixin().rpc.call.configurations_get_configuration_model(
         llm_project_id, parsed.llm_settings.model_name
     )

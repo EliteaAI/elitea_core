@@ -9,15 +9,27 @@ from tools import db, VaultClient
 from ...models.participants import Participant
 from ...utils.toolkits_utils import format_tool_call_as_user_input
 from .attachment import AttachmentMessageItemPredict
-from .chat import ApplicationChatRequest
 from .participant_settings import EntitySettingsLlm
 
 
-class ApplicationPredictRequest(ApplicationChatRequest):
+class ApplicationPredictRequest(BaseModel):
     project_id: Optional[int] = None
     callback_url: Optional[str] = None
     callback_headers: Optional[Dict[str, str]] = None
     async_mode: Optional[bool] = False
+    user_input: Optional[str] = None
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "project_id": 1,
+                "user_input": "Hello world!",
+                "callback_url": "https://example.com/callback",
+                "callback_headers": {"Authorization": "Bearer <token>"},
+                "async_mode": False,
+            }
+        }
+    )
 
 
 class PredictPayload(BaseModel):
