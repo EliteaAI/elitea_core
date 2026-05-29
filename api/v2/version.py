@@ -59,7 +59,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).options(
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
             if not application_version:
                 return {'error': f'Application[{application_id}] version[{version_id}] not found'}, 400
