@@ -894,7 +894,9 @@ def _check_configurations_connection_from_expanded_settings(
 
         # Inject OAuth tokens for configurations that need them
         config_data = _inject_oauth_tokens(config_data, mcp_tokens)
-        log.info(f"{config_data=} for connection check of {config_type}/{config_title}")
+        _SENSITIVE_KEYS = {"client_secret", "access_token", "refresh_token", "password", "token"}
+        safe_config_data = {k: "***" if k in _SENSITIVE_KEYS else v for k, v in config_data.items()}
+        log.info(f"config_data={safe_config_data} for connection check of {config_type}/{config_title}")
         try:
             # Call check_connection via RPC to indexer
             result = context.rpc_manager.timeout(30).applications_configuration_check_connection(
