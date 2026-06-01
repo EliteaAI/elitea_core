@@ -216,14 +216,26 @@ def get_conversation_details(
         order_func(ConversationMessageGroup.created_at)
     ).offset(messages_offset).limit(messages_limit).all()
 
+    # Batch author lookups for all user participants in one call instead of
+    # one get_authors_data() round-trip per participant (audit #10).
+    user_author_ids = [
+        participant['entity_meta']['id']
+        for participant in conversation_dict['participants']
+        if participant['entity_name'] == ParticipantTypes.user.value
+    ]
+    authors_by_id = {
+        author['id']: author
+        for author in (get_authors_data(user_author_ids) if user_author_ids else [])
+    }
+
     for participant in conversation_dict['participants']:
         # todo: add project_id to every participant
         participant['entity_settings'] = entity_settings_dict.get(participant['id'], {})
         if participant['entity_name'] == ParticipantTypes.user.value:
-            authors_data = get_authors_data([participant['entity_meta']['id']])
-            if authors_data:
-                participant['meta']['user_name'] = authors_data[0].get('name')
-                participant['meta']['user_avatar'] = authors_data[0].get('avatar')
+            author = authors_by_id.get(participant['entity_meta']['id'])
+            if author:
+                participant['meta']['user_name'] = author.get('name')
+                participant['meta']['user_avatar'] = author.get('avatar')
         if participant['entity_name'] == ParticipantTypes.toolkit.value:
             # For MCP toolkit participants, fetch the server URL if not present
             toolkit_type = participant['entity_settings'].get('toolkit_type')
