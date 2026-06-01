@@ -62,6 +62,8 @@ class SioEvents(StrEnum):
     asr_transcript_delta = 'asr_transcript_delta'
     asr_transcript_done = 'asr_transcript_done'
     asr_error = 'asr_error'
+    asr_speech_started = 'asr_speech_started'
+    asr_vad_flush = 'asr_vad_flush'
 
     tts_start = 'tts_start'
     tts_stop = 'tts_stop'
