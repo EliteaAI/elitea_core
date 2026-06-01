@@ -901,7 +901,10 @@ class RPC:
                 "settings": settings
             },
             pool="indexer",
-            meta={}
+            meta={
+                "task_name": "indexer_configuration_check_connection",
+                "configuration_type": type_,
+            },
         )
         return self.task_node.join_task(task_id, timeout=60)
 
@@ -919,7 +922,11 @@ class RPC:
                     "settings": settings
                 },
                 pool="indexer",
-                meta={}
+                meta={
+                    "task_name": "indexer_validator",
+                    "toolkit_type": type_,
+                    "project_id": project_id,
+                },
             )
             task_result = self.task_node.join_task(task_id, timeout=60)
             if "error" in task_result:
@@ -939,7 +946,10 @@ class RPC:
                 "settings": settings
             },
             pool="indexer",
-            meta={}
+            meta={
+                "task_name": "indexer_configuration_validator",
+                "configuration_type": type_,
+            },
         )
         task_result = self.task_node.join_task(task_id, timeout=60)
         if "error" in task_result:
@@ -972,7 +982,10 @@ class RPC:
                 "settings": settings,
             },
             pool="indexer",
-            meta={},
+            meta={
+                "task_name": "indexer_toolkit_available_tools",
+                "toolkit_type": toolkit_type,
+            },
         )
         return self.task_node.join_task(task_id, timeout=60)
 
@@ -1003,7 +1016,10 @@ class RPC:
                 "settings": settings,
             },
             pool="indexer",
-            meta={},
+            meta={
+                "task_name": "indexer_configuration_check_connection",
+                "toolkit_type": toolkit_type,
+            },
         )
         return self.task_node.join_task(task_id, timeout=60)
 

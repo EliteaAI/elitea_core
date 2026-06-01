@@ -137,7 +137,11 @@ class SIO:
                     "language": language,
                 },
                 pool="indexer",
-                meta={},
+                meta={
+                    "task_name": "indexer_asr_realtime",
+                    "project_id": project_id,
+                    "model_name": model_name,
+                },
             )
 
     @web.sio(SioEvents.asr_audio_chunk)
@@ -255,7 +259,11 @@ def _do_flush(sid: str, session: dict) -> None:
             "audio_bytes": pcm_data,
         },
         pool="indexer",
-        meta={},
+        meta={
+            "task_name": "indexer_asr_whisper",
+            "project_id": project_id,
+            "model_name": model_name,
+        },
     )
 
 
