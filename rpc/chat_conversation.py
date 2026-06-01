@@ -19,6 +19,7 @@ from ..utils.conversation_utils import (
 from ..utils.participant_utils import add_participant_to_conversation
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import set_context_strategy
+from ..utils.exceptions import PoolSaturationError
 
 # Hard cap on page size: defence-in-depth against unbounded IN(...) lists in
 # the per-page aggregation queries below. UI default is 10; support_assistant
@@ -857,6 +858,13 @@ class RPC:
             )
         except SioValidationError as e:
             return {'success': False, 'error': f'Wrong input data: {e.error}'}
+        except PoolSaturationError as e:
+            return {
+                'success': False,
+                'error': 'temporarily_unavailable',
+                'message': 'The service is busy processing other requests. Please try again in a few seconds.',
+                'retry_after': e.retry_after,
+            }
         except Exception as ex:
             log.error(f"Error in chat_predict_sio: {ex}")
             return {'success': False, 'error': 'Cannot create message'}

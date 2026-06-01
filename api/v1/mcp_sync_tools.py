@@ -22,6 +22,7 @@ from tools import api_tools, auth, config as c, serialize
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.sio_utils import SioValidationError
+from ...utils.exceptions import PoolSaturationError
 
 from ...models.pd.mcp_sync_tools import McpSyncToolsInputModel
 
@@ -57,7 +58,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         
         # Add project_id to the request data from URL parameter
         raw['project_id'] = project_id
-        
+
+        try:
+            sync_data = McpSyncToolsInputModel.model_validate(raw)
+        except ValidationError as e:
+            return {"error": e.errors()}, 400
 
         # SID is optional for async calls - it's only needed for Socket.IO streaming
         # If not provided, the caller will need to poll the task status
@@ -72,6 +77,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
         except SioValidationError as e:
             return {'error': str(e.error)}, 400
+        except PoolSaturationError as e:
+            return {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": e.retry_after,
+            }, 503
         except Exception as e:
             log.error(f"Error in mcp_sync_tools API: {str(e)}")
             return {'error': str(e)}, 500

@@ -41,3 +41,12 @@ class NotFound(Exception):
     "Raised when nothing found by the query when it was required"
     def __def__(self, message):
         self.message = message
+
+
+class PoolSaturationError(Exception):
+    "Raised when task pool is saturated and no workers are available"
+
+    def __init__(self, pool: str, retry_after: int = 5):
+        self.pool = pool
+        self.retry_after = retry_after
+        super().__init__(f"Pool '{pool}' saturated - no workers available")

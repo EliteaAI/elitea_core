@@ -10,7 +10,7 @@ from ..models.pd.chat import ApplicationChatRequest, ContextStrategyModel
 from ..utils.predict_utils import generate_predict_payload, load_context_settings_from_conversation
 from ..models.all import ApplicationVersion
 from ..utils.utils import verify_signature
-from ..utils.exceptions import VerifySignatureError
+from ..utils.exceptions import VerifySignatureError, PoolSaturationError
 from ..utils.sio_utils import SioEvents
 
 class Method:
@@ -115,6 +115,15 @@ class Method:
                 'user_context': serialize(user_context),
             }
         )
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                parsed.project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
+
         if webhook_signature is not None or not predict_wait:
             result = {
                 "message": "Task started",

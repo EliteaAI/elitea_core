@@ -31,7 +31,7 @@ from ...models.all import ApplicationVersion, Application
 from ...models.enums.all import AgentTypes
 from ...models.pd.pipeline_trigger import TriggerType
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
-from ...utils.exceptions import VerifySignatureError  # pylint: disable=E0402
+from ...utils.exceptions import VerifySignatureError, PoolSaturationError  # pylint: disable=E0402
 from ...utils.pipeline_trigger import (
     WEBHOOK_TYPE_CONFIG,
     normalize_secret_value,
@@ -165,6 +165,12 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                     if "error" in result:
                         return result, 400
                     return result, 200
+                except PoolSaturationError as e:
+                    return {
+                        "error": "temporarily_unavailable",
+                        "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                        "retry_after": e.retry_after,
+                    }, 503
                 except Exception as exc:
                     log.exception(f"Pipeline webhook execution failed: {exc}")
                     return {"error": "Pipeline execution failed", "status": "error"}, 500
@@ -200,6 +206,12 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
         except VerifySignatureError as e:
             return e.value, 400
+        except PoolSaturationError as e:
+            return {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": e.retry_after,
+            }, 503
         except Exception as exc:
             log.error(exc)
             return {"error": "Can not do predict"}, 500

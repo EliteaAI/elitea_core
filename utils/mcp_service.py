@@ -11,6 +11,7 @@ from ..models.all import Application, ApplicationVersion
 from ..utils.application_tools import toolkits_listing
 from ..utils.application_utils import list_applications_api
 from ..utils.toolkits_utils import get_toolkit_schemas
+from ..utils.exceptions import PoolSaturationError
 from .mcp_session import SseSession
 
 
@@ -269,6 +270,13 @@ class McpService:
                     response_content = json.dumps(result["result"])
             else:
                 result = {"error": f"Version matching failure for {request.params.name}"}
+        except PoolSaturationError as e:
+            log.warning("Pool saturation in MCP tool call: %s", e)
+            result = {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": e.retry_after,
+            }
         except Exception as exc:
             log.info(f"Error in do_predict: {exc}")
             log.error("Exception stack trace:")
