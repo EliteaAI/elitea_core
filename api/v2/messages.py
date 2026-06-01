@@ -9,6 +9,7 @@ from tools import serialize
 from pylon.core.tools import log
 
 from sqlalchemy import desc, asc
+from sqlalchemy.orm import selectinload
 
 from ...models.conversation import Conversation
 from ...models.message_group import ConversationMessageGroup
@@ -58,6 +59,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             query = session.query(
                 ConversationMessageGroup
+            ).options(
+                selectinload(ConversationMessageGroup.message_items)
             ).filter(
                 ConversationMessageGroup.conversation_id == conversation_id
             )
@@ -277,7 +280,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         status_code = 201
         with db.get_session(project_id) as session:
-            message_groups = session.query(ConversationMessageGroup).filter(
+            message_groups = session.query(ConversationMessageGroup).options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).filter(
                 ConversationMessageGroup.id.in_(result.values())
             ).order_by(
                 ConversationMessageGroup.created_at.asc()
