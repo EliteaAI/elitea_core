@@ -1,5 +1,5 @@
 from sqlalchemy import and_, or_, asc, desc, Integer, Float, func, case, cast, TIMESTAMP
-from sqlalchemy.orm import joinedload, Session
+from sqlalchemy.orm import joinedload, selectinload, Session
 from sqlalchemy.dialects.postgresql import JSONB
 
 from tools import rpc_tools, this
@@ -180,7 +180,7 @@ def get_conversation_details(
         ).subquery()
 
         conversation = session.query(Conversation).options(
-            joinedload(Conversation.participants)
+            selectinload(Conversation.participants)
         ).filter(
             Conversation.id == conversation_id,
             or_(
@@ -190,7 +190,7 @@ def get_conversation_details(
         ).first()
     else:
         conversation = session.query(Conversation).options(
-            joinedload(Conversation.participants)
+            selectinload(Conversation.participants)
         ).filter(
             Conversation.id == conversation_id
         ).first()
