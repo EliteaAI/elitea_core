@@ -630,7 +630,7 @@ class RPC:
             total = base_query.count()
             messages = base_query.order_by(sorting(sorting_by)).limit(limit).offset(offset).all()
 
-            rows = [serialize(MessageGroupDetail.from_orm(m)) for m in messages]
+            rows = [MessageGroupDetail.from_orm(m).model_dump(mode='json') for m in messages]
 
             return {'total': total, 'rows': rows}
 
@@ -896,6 +896,6 @@ class RPC:
                     time.sleep(poll_timeout)
                 else:
                     status_code = 202
-            rows = [serialize(MessageGroupDetail.from_orm(i)) for i in message_groups]
+            rows = [MessageGroupDetail.from_orm(i).model_dump(mode='json') for i in message_groups]
 
         return {'success': True, 'data': {'message_groups': rows}, 'status_code': status_code}
