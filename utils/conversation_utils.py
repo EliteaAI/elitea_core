@@ -208,7 +208,7 @@ def get_conversation_details(
     }
     conversation_dict = ConversationDetailsOrm.model_validate(conversation).model_dump()
     message_groups = conversation.message_groups.options(
-        joinedload(ConversationMessageGroup.message_items)
+        selectinload(ConversationMessageGroup.message_items)
     )
     conversation_dict['message_groups_count'] = message_groups.count()
     order_func = desc if sort_order == 'desc' else asc

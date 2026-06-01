@@ -45,7 +45,7 @@ class ConversationMessageGroup(db.Base):
     message_items: Mapped[List[MessageItem]] = relationship(
         'MessageItem',
         back_populates='message_group',
-        lazy='joined',
+        lazy='select',
         cascade='all, delete',
         uselist=True,
         order_by='asc(MessageItem.order_index)'

@@ -1,7 +1,7 @@
 from flask import request
 from tools import api_tools, auth, db, config as c, serialize
 
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 from ...models.message_group import ConversationMessageGroup
 from ...models.pd.message import MessageGroupDetail
@@ -34,7 +34,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ConversationMessageGroup.uuid == message_group_uuid
             ).first()
 
-            message_groups = session.query(ConversationMessageGroup).filter(
+            message_groups = session.query(ConversationMessageGroup).options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).filter(
                 ConversationMessageGroup.conversation_id == msg_group.conversation_id,
                 ConversationMessageGroup.created_at < msg_group.created_at,
             ).order_by(

@@ -1,6 +1,7 @@
 import time
 
 from flask import request
+from sqlalchemy.orm import selectinload
 
 from pydantic import ValidationError
 from tools import api_tools, auth, db, config as c
@@ -151,7 +152,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         status_code = 201
         with db.get_session(project_id) as session:
-            message_groups = session.query(ConversationMessageGroup).filter(
+            message_groups = session.query(ConversationMessageGroup).options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).filter(
                 ConversationMessageGroup.id.in_(result.values())
             ).order_by(
                 ConversationMessageGroup.created_at.asc()

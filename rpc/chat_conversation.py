@@ -2,6 +2,7 @@ from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
 from sqlalchemy import desc, asc, Integer, or_, func
+from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes
@@ -614,7 +615,9 @@ class RPC:
             sorting_by = getattr(ConversationMessageGroup, sort_by, ConversationMessageGroup.created_at)
             sorting = desc if sort_order == 'desc' else asc
 
-            base_query = session.query(ConversationMessageGroup).filter(
+            base_query = session.query(ConversationMessageGroup).options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).filter(
                 ConversationMessageGroup.conversation_id == conversation_id
             )
 
@@ -875,7 +878,9 @@ class RPC:
 
         status_code = 201
         with db.get_session(project_id) as session:
-            message_groups = session.query(ConversationMessageGroup).filter(
+            message_groups = session.query(ConversationMessageGroup).options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).filter(
                 ConversationMessageGroup.id.in_(result.values())
             ).order_by(
                 ConversationMessageGroup.created_at.asc()

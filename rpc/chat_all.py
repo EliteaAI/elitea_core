@@ -3,7 +3,7 @@ from typing import Optional
 
 from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 from tools import db, auth, serialize, this, VaultClient, rpc_tools, config as c
 
 import redis
@@ -717,7 +717,9 @@ def prepare_conversation_history(
     )
 
     if last_summarized_group_id and last_summarization.get('summary_content'):
-        chat_history_groups = conversation.message_groups.where(
+        chat_history_groups = conversation.message_groups.options(
+            selectinload(ConversationMessageGroup.message_items)
+        ).where(
             ConversationMessageGroup.id > last_summarized_group_id,
             ConversationMessageGroup.created_at < msg_group.created_at,
         ).order_by(
@@ -728,13 +730,17 @@ def prepare_conversation_history(
         chat_history_template = ChatHistoryTemplates.all.value
         try:
             chat_history_template = int(chat_history_template)
-            chat_history_groups = list(reversed(conversation.message_groups.where(
+            chat_history_groups = list(reversed(conversation.message_groups.options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).where(
                 ConversationMessageGroup.created_at < msg_group.created_at,
             ).order_by(
                 desc(ConversationMessageGroup.created_at)
             ).limit(chat_history_template).all()))
         except ValueError:
-            chat_history_groups = conversation.message_groups.where(
+            chat_history_groups = conversation.message_groups.options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).where(
                 ConversationMessageGroup.created_at < msg_group.created_at
             ).order_by(
                 asc(ConversationMessageGroup.created_at)
