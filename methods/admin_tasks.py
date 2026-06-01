@@ -19,12 +19,23 @@
 
 import shutil
 import time
+from functools import partial
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401,W0611
 from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
 
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
 from ..utils.toolkit_migration import run_selected_tools_migration
+from ..utils.llm_migration_utils import (
+    parse_migration_params,
+    resolve_target_project_ids,
+    validate_target_model,
+    lookup_source_model_capabilities,
+    build_new_llm_settings,
+    migrate_application_versions,
+    migrate_participant_mappings,
+)
+from ..utils.utils import get_public_project_id
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -1454,6 +1465,129 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             prefix, "would migrate" if dry_run else "migrated", total_migrated, round(end_ts - start_ts, 2)
         )
         return {"migrated": total_migrated, "dry_run": dry_run}
+
+    # pylint: disable=R,W0613
+    @web.method()
+    def migrate_llm_model(self, *args, **kwargs):
+        """Migrate stale LLM model_name references in ApplicationVersions and ParticipantMappings.
+
+        LLM section only. Idempotent — safe to re-run after interruption.
+        Dry-run is OFF by default — pass dry_run=true to preview changes without mutating.
+
+        Params (semicolon-separated):
+            from=<deprecated_model_name>  (required)
+            to=<new_model_name>           (required, must exist as shared LLM in public project)
+            project_id=<int|X-Y|all>      (optional, default: all)
+            dry_run=<true|false>           (optional, default: false)
+
+        Examples:
+            from=gpt-4;to=gpt-4o                   - live run (all projects)
+            from=gpt-4;to=gpt-4o;dry_run=true      - dry run to preview changes
+            from=claude-2;to=claude-3-5-sonnet;project_id=1-1000;dry_run=true  - dry run on projects 1-1000
+            from=o1-preview;to=gpt-4o;project_id=42  - live run on project 42 only
+        """
+        from tools import db  # pylint: disable=C0415
+
+        start_ts = time.time()
+
+        # ── 1. Parse and validate params ──────────────────────────────────
+        raw_param = kwargs.get("param", "")
+        try:
+            params = parse_migration_params(raw_param)
+        except ValueError as exc:
+            log.error("Invalid params: %s", exc)
+            return
+
+        from_model = params['from_model']
+        to_model = params['to_model']
+        dry_run = params['dry_run']
+
+        log.info(
+            "Params: from=%s  to=%s  project_id=%s  dry_run=%s",
+            from_model, to_model, params['project_id_spec'], dry_run,
+        )
+
+        # ── 2. Pre-flight: validate target model exists ───────────────────
+        try:
+            target_config = validate_target_model(to_model)
+        except ValueError as exc:
+            log.error("Pre-flight failed: %s", exc)
+            return
+
+        target_supports_reasoning = bool(target_config.get('supports_reasoning', False))
+        public_project_id = get_public_project_id()
+
+        # ── 3. Look up source model capabilities (best-effort) ────────────
+        source_supports_reasoning = lookup_source_model_capabilities(from_model)
+        if source_supports_reasoning is None:
+            log.info(
+                "Source model %s not found in available models (likely deleted). "
+                "Cross-family defaults will be applied.",
+                from_model,
+            )
+        else:
+            log.info(
+                "Source model %s: supports_reasoning=%s",
+                from_model, source_supports_reasoning,
+            )
+
+        # ── 4. Build settings factory closure ─────────────────────────────
+        settings_factory = partial(
+            build_new_llm_settings,
+            new_model_name=to_model,
+            new_model_project_id=public_project_id,
+            target_supports_reasoning=target_supports_reasoning,
+            source_supports_reasoning=source_supports_reasoning,
+        )
+
+        # ── 5. Resolve target projects ────────────────────────────────────
+        try:
+            project_ids = resolve_target_project_ids(params['project_id_spec'])
+        except ValueError as exc:
+            log.error("Project resolution failed: %s", exc)
+            return
+
+        # ── 6. Per-project migration ──────────────────────────────────────
+        total_projects = len(project_ids)
+        total_versions = 0
+        total_mappings = 0
+        projects_touched = 0
+
+        for idx, project_id in enumerate(project_ids, 1):
+            try:
+                with db.get_session(project_id) as session:
+                    v_count = migrate_application_versions(
+                        session, from_model, settings_factory, dry_run,
+                    )
+                    m_count = migrate_participant_mappings(
+                        session, from_model, settings_factory, dry_run,
+                    )
+
+                    if v_count or m_count:
+                        if not dry_run:
+                            session.commit()
+                        projects_touched += 1
+                        total_versions += v_count
+                        total_mappings += m_count
+                        log.info(
+                            "Project %s (%s/%s): %s versions, %s mappings %s",
+                            project_id, idx, total_projects,
+                            v_count, m_count,
+                            "[dry_run]" if dry_run else "[committed]",
+                        )
+            except Exception:  # pylint: disable=W0702
+                log.exception("Error processing project %s, skipping", project_id)
+
+        # ── 7. Summary ───────────────────────────────────────────────────
+        duration = time.time() - start_ts
+        log.info(
+            "Done%s. Projects scanned: %s, touched: %s. "
+            "ApplicationVersions: %s, ParticipantMappings: %s. Duration: %.1fs",
+            " [DRY RUN]" if dry_run else "",
+            total_projects, projects_touched,
+            total_versions, total_mappings,
+            duration,
+        )
 
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914

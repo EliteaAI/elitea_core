@@ -27,7 +27,12 @@ class Method:
             args=[None, None],
             kwargs=payload,
             pool="agents",
-            meta={},
+            meta={
+                "task_name": "indexer_test_toolkit_tool",
+                "toolkit_id": toolkit_id,
+                "tool_name": tool_name,
+                "project_id": project_id,
+            },
         )
 
         # Handle pool saturation: start_task returns None when no workers available

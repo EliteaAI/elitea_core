@@ -36,12 +36,23 @@ ALTER TABLE {pid}.application_version_tag_association ADD PRIMARY KEY (version_i
 
 
 # Toolkit type rename migration (for provider toolkit renames like SyngenToolkit -> Syngen)
-# Run with dry_run=true first to see what would be changed
-# There is a possibility to run a migration in DRY_RUN mode. For this pass in the payload dry_run=True. For all projects just left project_id value as 0.
+# Run with dry_run=true first to see what would be changed.
+# Pass project_id=0 to apply across all projects.
+# Updates per tool: type, settings.toolkit, settings.provider, meta.label,
+# meta.interface.app_url, meta.interface.create_url.
+# Idempotent: re-running matches both old and new type and only touches stale fields.
 curl -X POST https://<url>/api/v2/elitea_core/toolkit_type_rename_migration/administration \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"project_id": 0, "dry_run": true}'
+
+# Provider-slug rename (e.g. deepwiki -> wikis): pass old_provider/new_provider so
+# settings.provider and the slug inside meta.interface.{app_url,create_url} get rewritten too.
+# Already covered by defaults in TOOLKIT_TYPE_RENAMES, shown here as an explicit override example.
+curl -X POST https://<url>/api/v2/elitea_core/toolkit_type_rename_migration/administration \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": 0, "dry_run": false, "renames": {"deepwiki_Deepwiki": {"new_type": "wikis_Wikis", "old_toolkit": "Deepwiki", "new_toolkit": "Wikis", "old_provider": "deepwiki", "new_provider": "wikis"}}}'
 
 curl -X POST https://<url>/api/v2/elitea_core/index_features_migration/administration \
   -H "Authorization: Bearer <token>" \

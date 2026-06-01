@@ -18,9 +18,10 @@ from pylon.core.tools import log
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
-        name="Get Agent",
-        description="Get agent (application) details including version information.",
-        mcp_tool=True
+        name="Get agent or pipeline details",
+        description="Returns the full details of the specified agent or pipeline. If version_name is provided, that specific version is returned. If omitted, the active default version is returned.",
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.application.details"],
@@ -43,6 +44,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {'error': result['msg']}, 400
         return result['data'], 200
 
+    @register_openapi(
+        name="Delete an agent or pipeline",
+        description="Permanently deletes the agent or pipeline and all its versions. This action is irreversible.",
+        tags=["elitea_core/applications"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.application.delete"],
         "recommended_roles": {
@@ -58,6 +64,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return '', 204
         return {"ok": False, "error": "Application is not found"}, 400
 
+    @register_openapi(
+        name="Update an agent or pipeline",
+        description="Updates the agent or pipeline metadata and its active version in a single request. The version referenced in the request body must match the agent or pipeline in the path.",
+        request_body=ApplicationUpdateModel,
+        tags=["elitea_core/applications"],
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.applications.application.update"],

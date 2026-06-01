@@ -78,6 +78,64 @@ def calculate_conversation_duration(conversation: Conversation, session: Session
     return round(float(result or 0.0), 2)
 
 
+def calculate_conversation_durations_batch(
+    conversation_ids: list[int],
+    session: Session,
+) -> dict[int, float]:
+    """
+    Batched variant of calculate_conversation_duration: returns
+    {conversation_id: duration_seconds} in a single GROUP BY query.
+
+    Used by chat_list_conversations_rpc to avoid one query per row.
+    """
+    if not conversation_ids or session is None:
+        return {}
+
+    duration_expression = case(
+        (
+            and_(
+                ConversationMessageGroup.meta['first_tool_timestamp_start'].isnot(None),
+                func.jsonb_array_length(
+                    func.coalesce(ConversationMessageGroup.meta['thinking_steps'], cast('[]', JSONB))
+                ) > 0
+            ),
+            func.extract(
+                'epoch',
+                cast(
+                    (ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish']).astext,
+                    TIMESTAMP
+                ) - cast(
+                    ConversationMessageGroup.meta['first_tool_timestamp_start'].astext,
+                    TIMESTAMP
+                )
+            )
+        ),
+        (
+            and_(
+                ConversationMessageGroup.meta['execution_time_seconds'].isnot(None),
+                ConversationMessageGroup.meta['execution_time_seconds'].astext.isnot(None)
+            ),
+            cast(ConversationMessageGroup.meta['execution_time_seconds'].astext, Float)
+        ),
+        else_=func.extract(
+            'epoch',
+            func.coalesce(ConversationMessageGroup.updated_at, ConversationMessageGroup.created_at) - ConversationMessageGroup.created_at
+        )
+    )
+
+    rows = session.query(
+        ConversationMessageGroup.conversation_id,
+        func.coalesce(func.sum(duration_expression), 0.0),
+    ).filter(
+        ConversationMessageGroup.conversation_id.in_(conversation_ids),
+        ConversationMessageGroup.reply_to_id.isnot(None),
+    ).group_by(
+        ConversationMessageGroup.conversation_id,
+    ).all()
+
+    return {cid: round(float(d or 0.0), 2) for cid, d in rows}
+
+
 def get_conversation_details(
     session,
     conversation_id: int,

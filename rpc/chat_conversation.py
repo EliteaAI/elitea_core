@@ -1,7 +1,7 @@
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, or_
+from sqlalchemy import desc, asc, Integer, or_, func
 
 from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes
@@ -11,11 +11,20 @@ from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
-from ..utils.conversation_utils import get_conversation_details, calculate_conversation_duration
+from ..utils.conversation_utils import (
+    get_conversation_details,
+    calculate_conversation_durations_batch,
+)
 from ..utils.participant_utils import add_participant_to_conversation
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import set_context_strategy
 from ..utils.exceptions import PoolSaturationError
+
+# Hard cap on page size: defence-in-depth against unbounded IN(...) lists in
+# the per-page aggregation queries below. UI default is 10; support_assistant
+# and CLI tools may pass larger values, but anything above this is rejected
+# silently rather than fanning into a heavy GROUP BY.
+LIST_CONVERSATIONS_MAX_LIMIT = 100
 
 
 class RPC:
@@ -349,6 +358,8 @@ class RPC:
         sort_order: str = 'desc',
         include_hidden: bool = False,
         is_admin: bool = False,
+        participant_id: int = None,
+        entity_name: str = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -356,6 +367,9 @@ class RPC:
         Shared RPC for conversation listing used by:
         - elitea_core conversations API
         - support_assistant plugin (with source='support', include_hidden=True)
+
+        Args:
+            participant_id: Optional participant ID to filter by single_participant in conversation meta
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -403,20 +417,77 @@ class RPC:
                     )
                 )
 
+            if participant_id is not None:
+                filters = [
+                    Conversation.meta.has_key('single_participant'),
+                    Conversation.meta['single_participant']['entity_meta']['id'].astext.cast(Integer) == participant_id,
+                ]
+                if entity_name:
+                    filters.append(
+                        Conversation.meta['single_participant']['entity_name'].astext == entity_name,
+                    )
+                base_query = base_query.filter(*filters)
+
             base_query = base_query.order_by(sorting(sorting_by))
+
+            # Cap page size: keeps the IN(...) lists in the aggregation queries
+            # below tightly bounded regardless of caller (audit issue #1).
+            limit = min(max(int(limit or 0), 1), LIST_CONVERSATIONS_MAX_LIMIT)
+            offset = max(int(offset or 0), 0)
 
             total = base_query.count()
             conversations = base_query.limit(limit).offset(offset).all()
 
+            if not conversations:
+                return {'total': total, 'rows': []}
+
+            conv_ids = [c.id for c in conversations]
+            skip_duration = bool(source and 'elitea' in source)
+
+            # Pre-aggregate per-conversation counts in two scalar GROUP BY queries
+            # instead of N per-row .count()/list accesses (audit issue #1).
+            # Both queries are bounded by len(conv_ids) <= LIST_CONVERSATIONS_MAX_LIMIT
+            # and project to scalar columns only — no ORM hydration.
+            mg_counts: dict[int, int] = dict(
+                session.query(
+                    ConversationMessageGroup.conversation_id,
+                    func.count(ConversationMessageGroup.id),
+                )
+                .filter(ConversationMessageGroup.conversation_id.in_(conv_ids))
+                .group_by(ConversationMessageGroup.conversation_id)
+                .all()
+            )
+
+            participants_count: dict[int, int] = {}
+            users_count: dict[int, int] = {}
+            for cid, ename, n in (
+                session.query(
+                    ParticipantMapping.conversation_id,
+                    Participant.entity_name,
+                    func.count(Participant.id),
+                )
+                .join(Participant, Participant.id == ParticipantMapping.participant_id)
+                .filter(ParticipantMapping.conversation_id.in_(conv_ids))
+                .group_by(ParticipantMapping.conversation_id, Participant.entity_name)
+                .all()
+            ):
+                participants_count[cid] = participants_count.get(cid, 0) + n
+                if ename == ParticipantTypes.user.value:
+                    users_count[cid] = n
+
+            durations = (
+                {} if skip_duration
+                else calculate_conversation_durations_batch(conv_ids, session)
+            )
+
             rows = []
             for conv in conversations:
-                duration = -1 if source and 'elitea' in source else calculate_conversation_duration(conv, session)
                 conv_dict = {
                     **serialize(conv),
-                    "duration": duration,
-                    "participants_count": len(conv.participants),
-                    "message_groups_count": conv.message_groups.count(),
-                    "users_count": sum(1 for p in conv.participants if p.entity_name == ParticipantTypes.user.value),
+                    "duration": -1 if skip_duration else durations.get(conv.id, 0.0),
+                    "participants_count": participants_count.get(conv.id, 0),
+                    "message_groups_count": mg_counts.get(conv.id, 0),
+                    "users_count": users_count.get(conv.id, 0),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 

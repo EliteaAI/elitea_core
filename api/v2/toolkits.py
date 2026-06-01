@@ -1,5 +1,5 @@
 from flask import request
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 from pylon.core.tools import log
 
 from ...utils.toolkits_utils import get_toolkit_schemas, get_mcp_schemas
@@ -7,6 +7,21 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="List Toolkits",
+        description="Get list of available toolkits (SDK toolkits and MCP servers) for agent configuration.",
+        parameters=[
+            {
+                "name": "mcp",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "enum": ["true", "false"], "default": "false"},
+                "description": "Filter to show only MCP toolkits when set to 'true'",
+            }
+        ],
+        tags=["elitea_core/toolkits"],
+        mcp_tool=True
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.toolkits.details"],
         "recommended_roles": {

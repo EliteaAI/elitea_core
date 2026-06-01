@@ -6,7 +6,7 @@ from flask import request
 from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 
 
 def _merge_search_options_results(search_results):
@@ -37,6 +37,14 @@ def _merge_search_options_results(search_results):
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get Search Options",
+        description="Get search option values for selected entities.",
+        tags=["elitea_core/discovery"],
+        parameters=[
+            {"name": "entities[]", "in": "query", "required": True, "schema": {"type": "array", "items": {"type": "string"}}, "description": "Entities to include (application, pipeline, toolkit, credential)."},
+        ],
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.promptlib_shared.search"],

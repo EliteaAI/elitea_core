@@ -14,6 +14,7 @@ import arbiter  # pylint: disable=E0401
 from .utils.sio_utils import SioEvents
 from .scripts.tool_icons import download_github_repo_zip, unzip_file
 from .utils.prompt_eliminate_utils import prompt_2_agent_migration
+from .sio.asr import on_whisper_call_done
 
 
 LEGACY_CONFIG_MODULES = ("elitea_ui", "promptlib_shared", "applications")
@@ -178,6 +179,40 @@ class Module(module.ModuleModel):
             plugin_name="elitea_core",
             version=self.descriptor.metadata.get("version", "1.0.0"),
             description="Elitea core API endpoints",
+            tags=[
+                {
+                    "name": "elitea_core/applications",
+                    "description": "Create, manage, execute, export, import, fork, and publish agents/pipelines and their versions within a project.",
+                },
+                {
+                    "name": "elitea_core/analytics",
+                    "description": "Project-level analytics for AI adoption: LLM usage, agent/pipelines runs, tools/toolkits runs, user engagement, and daily trends.",
+                },
+                {
+                    "name": "elitea_core/authors",
+                    "description": "Author profile and aggregated contribution statistics (agents, pipelines, toolkits, conversations).",
+                },
+                {
+                    "name": "elitea_core/chat",
+                    "description": "Manage conversations, send messages, upload attachments, edit canvases, and manage conversation participants.",
+                },
+                {
+                    "name": "elitea_core/discovery",
+                    "description": "Discover available tags and search filter options across agents, pipelines, toolkits, and credentials.",
+                },
+                {
+                    "name": "elitea_core/mcp",
+                    "description": "Sync tools from remote MCP servers and proxy OAuth token exchange for MCP integrations.",
+                },
+                {
+                    "name": "elitea_core/runtime",
+                    "description": "Runtime and infrastructure utility endpoints.",
+                },
+                {
+                    "name": "elitea_core/toolkits",
+                    "description": "Browse available toolkit types and manage installed toolkit instances within a project.",
+                },
+            ],
             api_module=api_v2,
         )
 
@@ -272,6 +307,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_ado_project_to_toolkit", self.migrate_ado_project_to_toolkit
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_llm_model", self.migrate_llm_model
             )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
@@ -406,6 +444,8 @@ class Module(module.ModuleModel):
         self.event_node.subscribe("voice_asr_transcript_delta", self.voice_asr_transcript_delta)
         self.event_node.subscribe("voice_asr_transcript_done", self.voice_asr_transcript_done)
         self.event_node.subscribe("voice_asr_error", self.voice_asr_error)
+        self.event_node.subscribe("voice_asr_speech_started", self.voice_asr_speech_started)
+        self.event_node.subscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
         # self.event_node.subscribe("log_data", self.log_data)
         # configurations
         self.event_node.subscribe("application_toolkit_configurations_collected", self.toolkit_configurations_collected)
@@ -563,12 +603,23 @@ class Module(module.ModuleModel):
         transcript = payload.get("transcript", "")
         if sid:
             self.context.sio.emit(SioEvents.asr_transcript_done, {"transcript": transcript}, to=sid)
+            on_whisper_call_done(sid)
 
     def voice_asr_error(self, event: str, payload: dict, *args):
         sid = payload.get("sid")
         error = payload.get("error", "ASR error")
         if sid:
             self.context.sio.emit(SioEvents.asr_error, {"error": error}, to=sid)
+
+    def voice_asr_speech_started(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_speech_started, {}, to=sid)
+
+    def voice_asr_vad_flush(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_vad_flush, {}, to=sid)
 
     def deinit(self):
         log.info('De-initializing')
@@ -597,6 +648,8 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("voice_asr_transcript_delta", self.voice_asr_transcript_delta)
         self.event_node.unsubscribe("voice_asr_transcript_done", self.voice_asr_transcript_done)
         self.event_node.unsubscribe("voice_asr_error", self.voice_asr_error)
+        self.event_node.unsubscribe("voice_asr_speech_started", self.voice_asr_speech_started)
+        self.event_node.unsubscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
 
         # TaskNode
         self.task_node.stop()
@@ -634,6 +687,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_ado_project_to_toolkit", self.migrate_ado_project_to_toolkit
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_llm_model", self.migrate_llm_model
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)

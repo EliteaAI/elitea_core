@@ -7,7 +7,7 @@ Returns per-user KPIs, model/tool/agent breakdown, and recent activity.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c
+    from tools import api_tools, auth, config as c, register_openapi
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -37,6 +37,99 @@ if _API_AVAILABLE:
     class PromptLibAPI(api_tools.APIModeHandler):
         """Per-user detail analytics."""
 
+        @register_openapi(
+            name="Get User Analytics Detail",
+            description=(
+                "Returns KPIs, model usage, tool usage, agent usage, and daily activity "
+                "breakdown for a single user identified by user_id."
+            ),
+            tags=["elitea_core/analytics"],
+            parameters=[
+                {
+                    "name": "user_id",
+                    "in": "query",
+                    "required": True,
+                    "schema": {"type": "integer"},
+                    "description": "User ID to inspect.",
+                    "example": 42,
+                },
+                {
+                    "name": "date_from",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "Start datetime (ISO 8601). Defaults to 7 days ago.",
+                    "example": "2025-01-01T00:00:00",
+                },
+                {
+                    "name": "date_to",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "End datetime (ISO 8601). Defaults to now.",
+                    "example": "2025-01-31T23:59:59",
+                },
+            ],
+            responses={
+                "200": {
+                    "description": "User detail analytics",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "user_id": 42,
+                                "user_email": "alice@example.com",
+                                "kpis": {
+                                    "total_events": 320,
+                                    "active_days": 14,
+                                    "llm_events": 200,
+                                    "tool_events": 90,
+                                    "agent_events": 60,
+                                    "chat_events": 45,
+                                    "errors": 5,
+                                },
+                                "models": [
+                                    {
+                                        "model_name": "gpt-4o",
+                                        "display_name": "GPT-4o",
+                                        "calls": 150,
+                                    },
+                                    {
+                                        "model_name": "claude-3-sonnet",
+                                        "display_name": "Claude 3 Sonnet",
+                                        "calls": 50,
+                                    },
+                                ],
+                                "tools": [
+                                    {"tool_name": "jira_create_issue", "calls": 55},
+                                    {"tool_name": "github_create_pr", "calls": 35},
+                                ],
+                                "agents": [
+                                    {
+                                        "entity_name": "Code Review Bot",
+                                        "entity_id": 7,
+                                        "runs": 40,
+                                    }
+                                ],
+                                "daily_activity": [
+                                    {
+                                        "date": "2025-01-15",
+                                        "llm": 18,
+                                        "tool": 8,
+                                        "chat": 5,
+                                        "agent": 4,
+                                        "total": 35,
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                },
+                "400": {"description": "user_id is required or invalid"},
+                "401": {"description": "Unauthorized"},
+                "404": {"description": "No data found for this user"},
+                "500": {"description": "Internal server error"},
+            },
+        )
         @auth.decorators.check_api({
             "permissions": ["models.monitoring.tracing.view"],
             "recommended_roles": {

@@ -1,5 +1,4 @@
 from flask import request
-# from pydantic.v1 import ValidationError
 from tools import api_tools, auth, config as c
 from pylon.core.tools import log
 
@@ -8,13 +7,6 @@ from ...utils.export_import import generate_repeatable_uuid
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
-#    @auth.decorators.check_api({
-#        "permissions": ["models.applications.export_converter.transform"],
-#        "recommended_roles": {
-#            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
-#            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
-#        }})
-#    @api_tools.endpoint_metrics
     def post(self, **kwargs):
         export_data = request.json
         toolkits = {}

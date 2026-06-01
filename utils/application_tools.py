@@ -416,13 +416,13 @@ def toolkits_listing(
 
         if filter_application is True:
             # Filter for application toolkits: meta['application'] is True
-            log.info(f"Filtering FOR applications (application=true)")
+            log.debug(f"Filtering FOR applications (application=true)")
             q = q.filter(
                 EliteATool.meta['application'].astext.cast(Boolean) == True
             )
         elif filter_application is False:
             # Filter out application toolkits: meta['application'] must be False/None
-            log.info(f"Filtering OUT applications (showing non-applications)")
+            log.debug(f"Filtering OUT applications (showing non-applications)")
             q = q.filter(
                 (EliteATool.meta['application'].astext.cast(Boolean) == False) |
                 (EliteATool.meta['application'].astext.is_(None))

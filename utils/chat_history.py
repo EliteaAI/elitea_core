@@ -87,12 +87,18 @@ def format_context_for_llm(context_data: dict) -> str:
         return ""
 
     parts = []
+    if context_data.get('project_id'):
+        parts.append(f"  <project_id>{context_data['project_id']}</project_id>")
     if context_data.get('assistant_name'):
         parts.append(f"  <assistant>{context_data['assistant_name']}</assistant>")
+    if context_data.get('assistant_version'):
+        parts.append(f"  <assistant_version>{context_data['assistant_version']}</assistant_version>")
     if context_data.get('project_name'):
         parts.append(f"  <project>{context_data['project_name']}</project>")
     if context_data.get('current_page'):
         parts.append(f"  <current_page>{context_data['current_page']}</current_page>")
+    if context_data.get('current_entity_id'):
+        parts.append(f"  <current_entity_id>{context_data['current_entity_id']}</current_entity_id>")
     if context_data.get('current_entity_type'):
         entity = context_data['current_entity_type']
         if context_data.get('current_entity_name'):

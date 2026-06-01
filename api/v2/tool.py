@@ -105,6 +105,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Link Agent to Toolkit",
         description="Link an agent (application) to a toolkit.",
+        tags=["elitea_core/toolkits"],
         mcp_tool=True
     )
     @auth.decorators.check_api({

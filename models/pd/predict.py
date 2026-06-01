@@ -12,6 +12,26 @@ from .attachment import AttachmentMessageItemPredict
 from .participant_settings import EntitySettingsLlm
 
 
+class ApplicationPredictRequest(BaseModel):
+    project_id: Optional[int] = None
+    callback_url: Optional[str] = None
+    callback_headers: Optional[Dict[str, str]] = None
+    async_mode: Optional[bool] = False
+    user_input: Optional[str] = None
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "project_id": 1,
+                "user_input": "Hello world!",
+                "callback_url": "https://example.com/callback",
+                "callback_headers": {"Authorization": "Bearer <token>"},
+                "async_mode": False,
+            }
+        }
+    )
+
+
 class PredictPayload(BaseModel):
     stream_id: str
 

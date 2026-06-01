@@ -11,7 +11,7 @@ class Event:
         #
         user_allowed = "*" in allowed_domains or user_email_domain in allowed_domains
         #
-        log.info(
+        log.debug(
             'Checking if user eligible to join special project. %s with domain |%s| in allowed domains |%s| and result is |%s|',
             payload.get('user_email'),
             user_email_domain,
@@ -20,7 +20,7 @@ class Event:
         )
         #
         if user_allowed:
-            log.info('Adding AI user to project %s', payload)
+            log.debug('Adding AI user to project %s', payload)
             ai_project_id = self.descriptor.config.get('ai_project_id')
             if not ai_project_id:
                 log.critical('"ai_project_id" is not set in config')
@@ -49,7 +49,7 @@ class Event:
                     if target_role not in user_role_names and target_role not in target_roles:
                         target_roles.append(target_role)
             #
-            log.info(
+            log.debug(
                 'Adding AI user %s to project %s with new roles %s',
                 payload, ai_project_id, target_roles,
             )

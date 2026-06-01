@@ -7,7 +7,7 @@ Returns per-agent KPIs, user breakdown, and tool breakdown.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c
+    from tools import api_tools, auth, config as c, register_openapi
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -37,6 +37,81 @@ if _API_AVAILABLE:
     class PromptLibAPI(api_tools.APIModeHandler):
         """Per-agent detail analytics."""
 
+        @register_openapi(
+            name="Get Agent Analytics Detail",
+            description=(
+                "Returns KPIs, per-user breakdown, tool usage, and daily activity "
+                "for a single agent (application) identified by entity_id."
+            ),
+            tags=["elitea_core/analytics"],
+            parameters=[
+                {
+                    "name": "entity_id",
+                    "in": "query",
+                    "required": True,
+                    "schema": {"type": "integer"},
+                    "description": "Application entity ID.",
+                    "example": 7,
+                },
+                {
+                    "name": "date_from",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "Start datetime (ISO 8601). Defaults to 7 days ago.",
+                    "example": "2025-01-01T00:00:00",
+                },
+                {
+                    "name": "date_to",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "End datetime (ISO 8601). Defaults to now.",
+                    "example": "2025-01-31T23:59:59",
+                },
+            ],
+            responses={
+                "200": {
+                    "description": "Agent detail analytics",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "entity_name": "Code Review Bot",
+                                "entity_id": 7,
+                                "kpis": {
+                                    "total_events": 95,
+                                    "unique_users": 5,
+                                    "avg_duration_ms": 1200.0,
+                                    "errors": 4,
+                                    "error_rate": 4.21,
+                                },
+                                "users": [
+                                    {
+                                        "user_id": 42,
+                                        "user_email": "alice@example.com",
+                                        "events": 40,
+                                        "avg_duration_ms": 1100.0,
+                                        "errors": 2,
+                                    }
+                                ],
+                                "tools": [
+                                    {"tool_name": "github_create_pr", "calls": 25},
+                                    {"tool_name": "jira_create_issue", "calls": 18},
+                                ],
+                                "daily_usage": [
+                                    {"date": "2025-01-15", "events": 12, "errors": 1},
+                                    {"date": "2025-01-16", "events": 18, "errors": 0},
+                                ],
+                            }
+                        }
+                    },
+                },
+                "400": {"description": "entity_id is required or invalid"},
+                "401": {"description": "Unauthorized"},
+                "404": {"description": "No data found for this agent"},
+                "500": {"description": "Internal server error"},
+            },
+        )
         @auth.decorators.check_api({
             "permissions": ["models.monitoring.tracing.view"],
             "recommended_roles": {

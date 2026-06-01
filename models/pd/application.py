@@ -227,8 +227,20 @@ class ApplicationListModel(BaseModel):
 
         selected_version = latest_version or versions[-1]
 
+        # Only pipeline agents can have interrupts/subgraphs; skip the YAML parse
+        # for every other agent type (the dominant case in list responses).
+        if selected_version.agent_type != AgentTypes.pipeline.value:
+            return self
+
         instructions = selected_version.instructions
         if not instructions:
+            return self
+
+        # Cheap pre-filter: if none of the keywords we look for appear anywhere
+        # in the raw text, parsing the YAML cannot produce a positive match.
+        if ('interrupt_' not in instructions
+                and 'pipeline' not in instructions
+                and 'subgraph' not in instructions):
             return self
 
         try:
@@ -306,9 +318,15 @@ class MultipleApplicationListModel(BaseModel):
 
     @model_validator(mode='after')
     def parse_authors_data(self):
+        if not self.applications:
+            return self
+
         all_authors = set()
         for i in self.applications:
             all_authors.update(i.author_ids)
+
+        if not all_authors:
+            return self
 
         users = get_authors_data(list(all_authors))
 
@@ -316,6 +334,8 @@ class MultipleApplicationListModel(BaseModel):
 
         for i in self.applications:
             i.set_authors(user_map)
+
+        return self
 
         return self
 

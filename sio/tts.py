@@ -1,5 +1,5 @@
 from pylon.core.tools import log, web
-from tools import auth, VaultClient
+from tools import auth
 
 from ..utils.sio_utils import SioEvents
 
@@ -30,14 +30,22 @@ class SIO:
         # Cancel any running TTS session for this sid before starting a new one
         self.event_node.emit(_VOICE_EVENTS_CHANNEL, {"type": "tts_cancel", "sid": sid})
 
-        project_secrets = VaultClient(project_id).get_secrets()
-        project_llm_key = project_secrets.get("project_llm_key", "")
+        try:
+            resolved = self.context.rpc_manager.timeout(10).litellm_resolve_model(
+                project_id=project_id, model_name=model_name, section="tts"
+            )
+            config_project_id = resolved["config_project_id"]
+            project_llm_key = resolved["project_llm_key"]
+        except Exception:
+            log.exception("TTS: failed to resolve model config for project=%s model=%s", project_id, model_name)
+            self.context.sio.emit(SioEvents.tts_error, {"error": "Failed to resolve model configuration"}, to=sid)
+            return
 
         self.task_node.start_task(
             "indexer_tts",
             kwargs={
                 "sid": sid,
-                "project_id": project_id,
+                "project_id": config_project_id,
                 "project_llm_key": project_llm_key,
                 "model_name": model_name,
                 "text": text,
@@ -46,7 +54,11 @@ class SIO:
                 "voice_instructions": voice_instructions,
             },
             pool="indexer",
-            meta={},
+            meta={
+                "task_name": "indexer_tts",
+                "project_id": project_id,
+                "model_name": model_name,
+            },
         )
 
     @web.sio(SioEvents.tts_stop)

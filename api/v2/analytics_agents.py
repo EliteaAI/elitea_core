@@ -7,7 +7,7 @@ Provides server-side pagination, search, and sorting for agent/application usage
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c
+    from tools import api_tools, auth, config as c, register_openapi
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -41,6 +41,107 @@ if _API_AVAILABLE:
     class PromptLibAPI(api_tools.APIModeHandler):
         """Paginated agent/application usage for analytics."""
 
+        @register_openapi(
+            name="List Agent Analytics",
+            description=(
+                "Returns paginated agent/application usage statistics with optional "
+                "date filtering, search by name, sorting, and a daily chat-message trend."
+            ),
+            tags=["elitea_core/analytics"],
+            parameters=[
+                {
+                    "name": "date_from",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "Start datetime (ISO 8601). Defaults to 7 days ago.",
+                    "example": "2025-01-01T00:00:00",
+                },
+                {
+                    "name": "date_to",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "End datetime (ISO 8601). Defaults to now.",
+                    "example": "2025-01-31T23:59:59",
+                },
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                    "description": "Page size (max 100).",
+                },
+                {
+                    "name": "offset",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "default": 0, "minimum": 0},
+                    "description": "Pagination offset.",
+                },
+                {
+                    "name": "search",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": "Filter by agent name (case-insensitive partial match).",
+                },
+                {
+                    "name": "sort_by",
+                    "in": "query",
+                    "required": False,
+                    "schema": {
+                        "type": "string",
+                        "enum": ["events", "users", "avg_duration_ms", "errors", "entity_name"],
+                        "default": "events",
+                    },
+                    "description": "Column to sort by.",
+                },
+                {
+                    "name": "sort_order",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
+                    "description": "Sort direction.",
+                },
+            ],
+            responses={
+                "200": {
+                    "description": "Paginated agent analytics",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "total": 5,
+                                "rows": [
+                                    {
+                                        "entity_name": "Code Review Bot",
+                                        "entity_id": 7,
+                                        "events": 95,
+                                        "users": 5,
+                                        "avg_duration_ms": 1200.0,
+                                        "errors": 4,
+                                    },
+                                    {
+                                        "entity_name": "SQL Assistant",
+                                        "entity_id": 12,
+                                        "events": 60,
+                                        "users": 3,
+                                        "avg_duration_ms": 740.0,
+                                        "errors": 1,
+                                    },
+                                ],
+                                "chat_daily": [
+                                    {"date": "2025-01-15", "messages": 32},
+                                    {"date": "2025-01-16", "messages": 45},
+                                ],
+                            }
+                        }
+                    },
+                },
+                "401": {"description": "Unauthorized"},
+                "500": {"description": "Internal server error"},
+            },
+        )
         @auth.decorators.check_api({
             "permissions": ["models.monitoring.tracing.view"],
             "recommended_roles": {

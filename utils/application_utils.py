@@ -11,7 +11,7 @@ from pylon.core.tools import log
 
 from .utils import get_public_project_id
 from ..models.enums.all import AgentTypes
-from ..models.all import Application, ApplicationVersion, ApplicationVariable, ApplicationVersionTagAssociation
+from ..models.all import Application, ApplicationVersion, ApplicationVariable
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.enums.events import ApplicationEvents
 from ..models.pd.application import (
@@ -161,6 +161,10 @@ def applications_update_version(version_data, session) -> dict:
                 session.commit()
 
     for key, value in version_data.model_dump(exclude={'tags', 'variables', 'tools'}).items():
+        if key == 'pipeline_settings' and isinstance(value, dict) and 'trigger' not in value:
+            existing_trigger = (version.pipeline_settings or {}).get('trigger')
+            if existing_trigger:
+                value = {**value, 'trigger': existing_trigger}
         setattr(version, key, value)
 
     try:
@@ -357,7 +361,7 @@ def list_applications(
                     )
                     author_name_map[author['id']] = display.lower()
             except Exception as e:  # noqa: BLE001
-                log.warning(f"[sort_by=author] Failed to resolve author names: {e}")
+                log.debug(f"[sort_by=author] Failed to resolve author names: {e}")
 
         # Pinned items always first (sorted by pin_updated_at DESC among themselves),
         # then all non-pinned items sorted by author name.
@@ -483,48 +487,24 @@ def list_applications(
     # Extract application IDs
     application_ids = [app.id for app in applications_with_attrs]
 
-    # Step 3: Load versions for these applications in a separate query
+    # Step 3: Load versions with their tags in one batched query.
+    # selectinload issues a single follow-up SELECT against the tag association
+    # joined to tags, which is far cheaper than the historical lazy='joined' that
+    # multiplied version rows by tag count and required a redundant manual fetch.
     versions_query = (
         session.query(ApplicationVersion)
         .filter(ApplicationVersion.application_id.in_(application_ids))
+        .options(selectinload(ApplicationVersion.tags))
         .order_by(ApplicationVersion.application_id, ApplicationVersion.created_at.desc())
     )
     all_versions = versions_query.all()
 
     # Step 4: Build a mapping of application_id -> versions
     versions_by_app_id = {}
-    version_ids = []
     for version in all_versions:
-        if version.application_id not in versions_by_app_id:
-            versions_by_app_id[version.application_id] = []
-        versions_by_app_id[version.application_id].append(version)
-        version_ids.append(version.id)
+        versions_by_app_id.setdefault(version.application_id, []).append(version)
 
-    # Step 5: Load tags for these versions in a separate query
-    if version_ids:
-        # Query the association table to get version_id -> tag relationships
-        tags_query = (
-            session.query(
-                ApplicationVersionTagAssociation.c.version_id,
-                Tag
-            )
-            .join(Tag, Tag.id == ApplicationVersionTagAssociation.c.tag_id)
-            .filter(ApplicationVersionTagAssociation.c.version_id.in_(version_ids))
-        )
-        tag_associations = tags_query.all()
-
-        # Build a mapping of version_id -> tags
-        tags_by_version_id = {}
-        for version_id, tag in tag_associations:
-            if version_id not in tags_by_version_id:
-                tags_by_version_id[version_id] = []
-            tags_by_version_id[version_id].append(tag)
-
-        # Step 6: Assign tags to versions
-        for version in all_versions:
-            version.tags = tags_by_version_id.get(version.id, [])
-
-    # Step 7: Assign versions to applications
+    # Step 5: Assign versions to applications
     for app in applications_with_attrs:
         app.versions = versions_by_app_id.get(app.id, [])
 
@@ -560,7 +540,8 @@ def get_application_details(project_id: int, application_id: int,
                         joinedload(ApplicationVersion.application),
                         selectinload(ApplicationVersion.tools),
                         selectinload(ApplicationVersion.tool_mappings),
-                        selectinload(ApplicationVersion.variables)
+                        selectinload(ApplicationVersion.variables),
+                        selectinload(ApplicationVersion.tags)
                     ).first()
                 else:
                     application_version = None
@@ -578,7 +559,8 @@ def get_application_details(project_id: int, application_id: int,
                 joinedload(ApplicationVersion.application),
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
 
         # Fallback to first existing version if needed
@@ -590,7 +572,8 @@ def get_application_details(project_id: int, application_id: int,
                     joinedload(ApplicationVersion.application),
                     selectinload(ApplicationVersion.tools),
                     selectinload(ApplicationVersion.tool_mappings),
-                    selectinload(ApplicationVersion.variables)
+                    selectinload(ApplicationVersion.variables),
+                    selectinload(ApplicationVersion.tags)
                 )
                 .order_by(ApplicationVersion.created_at.desc())
             ).first()
@@ -899,9 +882,21 @@ def _check_configurations_connection_from_expanded_settings(
             log.debug(f"Configuration type {config_type} does not support check_connection, skipping")
             continue
 
+        # Skip delegated OAuth configurations (e.g. SharePoint with oauth_discovery_endpoint):
+        # an access token is not available at validation time, so connection check would always
+        # fail with McpAuthorizationRequired — same skip pattern as MCP toolkits.
+        if config_data.get('oauth_discovery_endpoint') and not config_data.get('access_token'):
+            log.debug(
+                f"Skipping connection check for {config_type}/{config_title}: "
+                f"delegated OAuth configured, no token available at validation time"
+            )
+            continue
+
         # Inject OAuth tokens for configurations that need them
         config_data = _inject_oauth_tokens(config_data, mcp_tokens)
-        log.info(f"{config_data=} for connection check of {config_type}/{config_title}")
+        _SENSITIVE_KEYS = {"client_secret", "access_token", "refresh_token", "password", "token"}
+        safe_config_data = {k: "***" if k in _SENSITIVE_KEYS else v for k, v in config_data.items()}
+        log.info(f"config_data={safe_config_data} for connection check of {config_type}/{config_title}")
         try:
             # Call check_connection via RPC to indexer
             result = context.rpc_manager.timeout(30).applications_configuration_check_connection(
@@ -1009,7 +1004,8 @@ def validate_application_version_details(
         ).options(
             selectinload(ApplicationVersion.tools),
             selectinload(ApplicationVersion.tool_mappings),
-            selectinload(ApplicationVersion.variables)
+            selectinload(ApplicationVersion.variables),
+            selectinload(ApplicationVersion.tags)
         ).first()
         if not application_version:
             raise ApplicationVersionNonFoundError(application_id, version_id)
@@ -1049,17 +1045,35 @@ def validate_application_version_details(
                 log.debug(f"Validating regular toolkit: {tool.get('id')}")
                 tool['project_id'] = project_id
                 tool['user_id'] = user_id
+                is_mcp = (
+                    tool.get('type') == 'mcp'
+                    or (isinstance(tool.get('meta'), dict) and tool['meta'].get('mcp') is True)
+                )
+                validation_context = {'check_connection': not is_mcp, 'mcp_tokens': {}}
                 try:
-                    ToolValidatedDetails.model_validate(tool)
+                    ToolValidatedDetails.model_validate(tool, context=validation_context)
                 except ValidationError as e:
-                    # re-wrap with new location
                     for err in e.errors():
-                        application_toolkit_errors.append({
-                            'type': err['type'],
-                            'loc': ('tools', tool['id'], '__root__'),
-                            'input': err.get('input'),
-                            'ctx': err.get('ctx', {'error': err.get('msg', 'Validation error')}),
-                        })
+                        # Intercept connection errors carried via the sentinel key
+                        if (
+                            err.get('type') == 'value_error'
+                            and isinstance(err.get('ctx', {}).get('error'), dict)
+                            and ToolValidatedDetails.CONNECTION_ERROR_SENTINEL
+                                in err['ctx']['error']
+                        ):
+                            application_toolkit_errors.append({
+                                'type': 'connection_error',
+                                'loc': ('tools', tool['id'], '__root__'),
+                                'input': err.get('input'),
+                                'ctx': err['ctx']['error'][ToolValidatedDetails.CONNECTION_ERROR_SENTINEL],
+                            })
+                        else:
+                            application_toolkit_errors.append({
+                                'type': err['type'],
+                                'loc': ('tools', tool['id'], '__root__'),
+                                'input': err.get('input'),
+                                'ctx': err.get('ctx', {'error': err.get('msg', 'Validation error')}),
+                            })
                 except Exception as ex:
                     application_toolkit_errors.append({
                         'type': 'value_error',
@@ -1224,10 +1238,23 @@ def validate_and_resolve_llm_settings(
 
         if llm_settings and llm_settings.get('model_name'):
             model_name = llm_settings['model_name']
-            model_project_id = llm_settings.get('model_project_id') or project_id
+            model_project_id = llm_settings.get('model_project_id')
 
-            if (model_project_id, model_name) in available:
-                return llm_settings
+            if model_project_id is not None:
+                if (model_project_id, model_name) in available:
+                    return llm_settings
+            else:
+                # null model_project_id: find the actual project that owns this model.
+                # Private project is checked before public because fetch_private_configurations
+                # inserts its keys first, so next() naturally prefers it.
+                resolved_project_id = next(
+                    (proj_id for (proj_id, mn) in available if mn == model_name),
+                    None,
+                )
+                if resolved_project_id is not None:
+                    stamped = dict(llm_settings)
+                    stamped['model_project_id'] = resolved_project_id
+                    return stamped
 
         default = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_default_model(
             project_id=project_id, section='llm', include_shared=True
@@ -1297,7 +1324,8 @@ def get_application_version_details_expanded(
         ).options(
             selectinload(ApplicationVersion.tools),
             selectinload(ApplicationVersion.tool_mappings),
-            selectinload(ApplicationVersion.variables)
+            selectinload(ApplicationVersion.variables),
+            selectinload(ApplicationVersion.tags)
         ).first()
         if not application_version:
             raise ApplicationVersionNonFoundError(application_id, version_id)

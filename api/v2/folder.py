@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from flask import request
 from pydantic import ValidationError
 from sqlalchemy import desc, asc, or_, and_, Integer, func
-from tools import api_tools, auth, db, config as c, rpc_tools
+from tools import api_tools, auth, db, config as c, rpc_tools, register_openapi
 from tools import serialize
 
 log = logging.getLogger(__name__)
@@ -73,6 +73,23 @@ def check_needs_recalculation(pos_above: int | None, pos_below: int | None) -> b
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+
+    @register_openapi(
+        name="List Folders and Conversations",
+        description="List folders and conversations with filtering/grouping options.",
+        tags=["elitea_core/chat"],
+        parameters=[
+            {"name": "query", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Search query."},
+            {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Pagination limit."},
+            {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Pagination offset."},
+            {"name": "grouped", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Return grouped response format."},
+            {"name": "folder_id", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Return conversations for a specific folder."},
+            {"name": "date_group", "in": "query", "required": False, "schema": {"type": "string", "enum": ["today", "this_week", "older"]}, "description": "Return conversations for a specific date group."},
+            {"name": "source", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Comma-separated conversation sources."},
+            {"name": "sort_by", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Sort field."},
+            {"name": "sort_order", "in": "query", "required": False, "schema": {"type": "string", "enum": ["asc", "desc"]}, "description": "Sort order."},
+        ],
+    )
 
     @auth.decorators.check_api({
         "permissions": ["models.chat.folders.get"],
@@ -165,7 +182,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 if sources:
                     folder_conv_query = folder_conv_query.where(Conversation.source.in_(sources))
 
-                folder_conv_query = folder_conv_query.order_by(sorting(sorting_by))
+                folder_conv_query = folder_conv_query.order_by(sorting(sorting_by), Conversation.id.desc())
                 total = folder_conv_query.count()
                 folder_conv_query = folder_conv_query.limit(limit).offset(offset)
                 result = folder_conv_query.all()
@@ -214,7 +231,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     query = base_query.where(date_filter)
                 else:
                     query = base_query
-                query = query.order_by(sorting(sorting_by))
+                query = query.order_by(sorting(sorting_by), Conversation.id.desc())
                 total = query.count()
                 query = query.limit(limit).offset(offset)
                 result = query.all()
@@ -365,7 +382,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 for group_name in DATE_GROUP_ORDER:
                     group_filter = build_date_group_filter(date_field, group_name)
                     if group_filter is not None:
-                        group_query = base_query.where(group_filter).order_by(sorting(sorting_by))
+                        group_query = base_query.where(group_filter)
+                        if pinned_conv_ids:
+                            group_query = group_query.where(~Conversation.id.in_(pinned_conv_ids))
+                        group_query = group_query.order_by(sorting(sorting_by), Conversation.id.desc())
                         group_total = group_query.count()
                         group_conversations = group_query.limit(limit).all()
 
@@ -421,7 +441,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     count = base_query.where(group_filter).count()
                     date_groups_counts[group_name] = count
 
-            query = base_query.order_by(sorting(sorting_by))
+            query = base_query.order_by(sorting(sorting_by), Conversation.id.desc())
             total = query.count()
             query = query.limit(limit).offset(offset)
             result = query.all()
@@ -491,6 +511,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
     #             'rows': [serialize(FolderList.model_validate(folder)) for folder in folders]
     #         }, 200
 
+    @register_openapi(
+        name="Create Folder",
+        description="Create a new conversation folder.",
+        tags=["elitea_core/chat"],
+        request_body=FolderCreate,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.folders.create"],
         "recommended_roles": {
@@ -529,6 +555,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.info(f"Created folder {new_folder.id} with position {new_folder.position} for user {user_id}")
             return serialize(FolderDetails.from_orm(new_folder)), 201
 
+    @register_openapi(
+        name="Update Folder",
+        description="Update folder data including position.",
+        tags=["elitea_core/chat"],
+        request_body=FolderUpdate,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.folders.update"],
         "recommended_roles": {
@@ -678,6 +710,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
             session.commit()
             return serialize(FolderDetails.from_orm(folder)), 200
 
+    @register_openapi(
+        name="Patch Folder",
+        description="Update folder pin status.",
+        tags=["elitea_core/chat"],
+        parameters=[
+            {"name": "folder_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Folder ID."},
+        ],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.folders.update"],
         "recommended_roles": {
@@ -716,6 +756,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
             session.commit()
             return serialize(FolderDetails.from_orm(folder)), 200
 
+    @register_openapi(
+        name="Delete Folder",
+        description="Delete a folder and unassign conversations from it.",
+        tags=["elitea_core/chat"],
+        parameters=[
+            {"name": "folder_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Folder ID."},
+        ],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.folders.delete"],
         "recommended_roles": {

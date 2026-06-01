@@ -652,6 +652,17 @@ class RPC:
             except Exception as e:
                 errors.append(str(e))
 
+            # Stamp resolved model_project_id for versions that arrived with null.
+            # validate_and_resolve_llm_settings returns a copy with model_project_id
+            # filled in when the model is found; persisting it here fixes the
+            # publish-time shared-LLM check for newly imported agents.
+            for version in application.versions:
+                ls = version.llm_settings
+                if ls and isinstance(ls, dict) and ls.get('model_name') and ls.get('model_project_id') is None:
+                    resolved = validate_and_resolve_llm_settings(project_id, ls)
+                    if resolved and resolved.get('model_project_id') is not None:
+                        version.llm_settings = resolved
+
             session.commit()
 
             # Explicitly load relationships for the first version since they are now lazy
@@ -660,7 +671,8 @@ class RPC:
             ).options(
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
 
             result = ApplicationDetailModel.from_orm(application)
@@ -907,7 +919,10 @@ class RPC:
                 "settings": settings
             },
             pool="indexer",
-            meta={}
+            meta={
+                "task_name": "indexer_configuration_check_connection",
+                "configuration_type": type_,
+            },
         )
         return self.task_node.join_task(task_id, timeout=60)
 
@@ -925,7 +940,11 @@ class RPC:
                     "settings": settings
                 },
                 pool="indexer",
-                meta={}
+                meta={
+                    "task_name": "indexer_validator",
+                    "toolkit_type": type_,
+                    "project_id": project_id,
+                },
             )
             task_result = self.task_node.join_task(task_id, timeout=60)
             if "error" in task_result:
@@ -945,7 +964,10 @@ class RPC:
                 "settings": settings
             },
             pool="indexer",
-            meta={}
+            meta={
+                "task_name": "indexer_configuration_validator",
+                "configuration_type": type_,
+            },
         )
         task_result = self.task_node.join_task(task_id, timeout=60)
         if "error" in task_result:
@@ -978,7 +1000,10 @@ class RPC:
                 "settings": settings,
             },
             pool="indexer",
-            meta={},
+            meta={
+                "task_name": "indexer_toolkit_available_tools",
+                "toolkit_type": toolkit_type,
+            },
         )
         return self.task_node.join_task(task_id, timeout=60)
 
@@ -1009,7 +1034,10 @@ class RPC:
                 "settings": settings,
             },
             pool="indexer",
-            meta={},
+            meta={
+                "task_name": "indexer_configuration_check_connection",
+                "toolkit_type": toolkit_type,
+            },
         )
         return self.task_node.join_task(task_id, timeout=60)
 
@@ -1107,9 +1135,9 @@ class RPC:
                 log.debug(f"No SID provided and no current user session available")
 
         user_id = data.get('user_id')
-        log.info(f"About to expand toolkit configurations: user_id={user_id}, project_id={project_id}")
+        log.debug(f"About to expand toolkit configurations: user_id={user_id}, project_id={project_id}")
         try:
-            log.info(f"Starting toolkit configuration expansion for user {user_id} in project {project_id}")
+            log.debug(f"Starting toolkit configuration expansion for user {user_id} in project {project_id}")
             log.debug(f"Original toolkit_config: {data.get('toolkit_config', {})}")
 
             toolkit_config = data.get('toolkit_config', {})
@@ -1129,7 +1157,7 @@ class RPC:
                 'settings': toolkit_settings_expanded
             }
 
-            log.info(f"Expanded toolkit configuration for user {user_id} in project {project_id}")
+            log.debug(f"Expanded toolkit configuration for user {user_id} in project {project_id}")
             log.debug(f"Expanded toolkit_config: {data['toolkit_config']}")
         except Exception as e:
             log.error(f"Error expanding toolkit configurations: {str(e)}")
@@ -1155,7 +1183,7 @@ class RPC:
             self.context.sio.enter_room(sid, room)
 
         # Log the parameters being passed to indexer for debugging
-        log.info(f"Testing toolkit tool: {tool_name} with toolkit_config keys: {list(data.get('toolkit_config', {}).keys())} and tool_params: {data.get('tool_params', {})}")
+        log.debug(f"Testing toolkit tool: {tool_name} with toolkit_config keys: {list(data.get('toolkit_config', {}).keys())} and tool_params: {data.get('tool_params', {})}")
 
         # Prepare kwargs without stream_id and message_id since they're passed as args
         task_kwargs = {k: v for k, v in data.items() if k not in ['stream_id', 'message_id']}
@@ -1485,7 +1513,7 @@ class RPC:
         if sid:
             self.context.sio.enter_room(sid, room)
 
-        log.info(f"MCP sync tools request: url={data.get('url')}, project_id={project_id}")
+        log.debug(f"MCP sync tools request: url={data.get('url')}, project_id={project_id}")
 
         # Prepare kwargs without stream_id and message_id since they're passed as args
         task_kwargs = {k: v for k, v in data.items() if k not in ['stream_id', 'message_id']}
@@ -1586,7 +1614,8 @@ class RPC:
                 ).options(
                     selectinload(ApplicationVersion.tools),
                     selectinload(ApplicationVersion.tool_mappings),
-                    selectinload(ApplicationVersion.variables)
+                    selectinload(ApplicationVersion.variables),
+                    selectinload(ApplicationVersion.tags)
                 ).first()
 
                 result = ApplicationVersionDetailModel.from_orm(version)

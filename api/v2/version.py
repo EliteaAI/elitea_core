@@ -38,6 +38,12 @@ def extract_user_id(received_auth_session: Optional[str]) -> int:
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get agent or pipeline version details",
+        description="Returns the full configuration of a specific agent or pipeline version, including toolkits, tools, tool mappings, and variables.",
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.details"],
         "recommended_roles": {
@@ -53,7 +59,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).options(
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
             if not application_version:
                 return {'error': f'Application[{application_id}] version[{version_id}] not found'}, 400
@@ -99,8 +106,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         return version_details, 200
 
     @register_openapi(
-        name="Update Agent Version",
-        description="Update an existing agent version configuration.",
+        name="Update an agent or pipeline version",
+        description="Updates the configuration of an existing agent or pipeline version. Only versions that are not published state can be updated.",
+        tags=["elitea_core/applications"],
         mcp_tool=True
     )
     @auth.decorators.check_api({

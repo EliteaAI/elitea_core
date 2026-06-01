@@ -17,6 +17,12 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 
 class ProjectAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="List versions of an agent or pipeline",
+        description="Returns all versions for the specified agent or pipeline, ordered by creation date.",
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.versions.get"],
         "recommended_roles": {
@@ -40,6 +46,7 @@ class ProjectAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Create Agent Version",
         description="Create a new version for an existing agent (application).",
+        tags=["elitea_core/applications"],
         mcp_tool=True
     )
     @auth.decorators.check_api({
@@ -79,7 +86,8 @@ class ProjectAPI(api_tools.APIModeHandler):
             ).options(
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
 
             result = ApplicationVersionDetailModel.from_orm(version)
