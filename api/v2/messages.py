@@ -76,7 +76,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             result = query.order_by(sorting(sorting_by)).limit(limit).offset(offset).all()
 
             rows = [{
-                **serialize(MessageGroupDetail.from_orm(i)),
+                **MessageGroupDetail.from_orm(i).model_dump(mode='json'),
             } for i in result]
 
             return {
@@ -301,7 +301,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 else:
                     status_code = 202
             result = [{
-                **serialize(MessageGroupDetail.from_orm(i)),
+                **MessageGroupDetail.from_orm(i).model_dump(mode='json'),
             } for i in message_groups]
 
         return {"message_groups": result}, status_code
