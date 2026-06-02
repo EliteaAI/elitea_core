@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from tools import api_tools, auth, db, config as c, serialize, register_openapi
 
 from ...models.message_group import ConversationMessageGroup
+from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
 from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload
@@ -49,6 +50,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).first()
 
             msg_entity_meta = msg_group.author_participant.entity_meta
+
+            if parsed.updated_items:
+                for update in parsed.updated_items:
+                    item = next(
+                        (i for i in reply_msg.message_items if str(i.uuid) == update.get('uuid')),
+                        None,
+                    )
+                    if item and isinstance(item, TextMessageItem):
+                        item.content = update['content']
+                    # canvas and other item types: reserved for future support
+                session.commit()
+                session.refresh(reply_msg)
 
             raw_predict_payload = {**parsed.model_dump(), **parsed.payload}
             try:

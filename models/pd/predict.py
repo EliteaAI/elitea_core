@@ -173,6 +173,9 @@ class SioRegenerateModel(BaseModel):
     sid: str
     question_id: str
     conversation_uuid: Optional[str]
+    updated_items: Optional[List[dict]] = None
+    # Each entry: {"uuid": "<item uuid>", "content": "<new text content>"}
+    # Only TextMessageItem is supported for now;
 
 
 class SioPredictContinueModel(BaseModel):
