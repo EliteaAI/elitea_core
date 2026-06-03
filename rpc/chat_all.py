@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -261,7 +262,7 @@ def process_attachment_message_items(
 
     # Content extraction: read file content and enrich attachment messages
     if items_needing_content and not pipeline_mode:
-        log.debug(f"Starting content extraction for {len(items_needing_content)} documents in message group {message_group.uuid}")
+        log.debug("Starting content extraction for %d documents in message group %s", len(items_needing_content), message_group.uuid)
         try:
             if not llm_settings:
                 raise RuntimeError("LLM settings must be provided for reading attachment content")
@@ -295,13 +296,13 @@ def process_attachment_message_items(
                 else:
                     log.warning(f"No content returned for file {item.name}")
 
-            log.debug(f"Successfully enriched content for {len(items_needing_content)} documents")
+            log.debug("Successfully enriched content for %d documents", len(items_needing_content))
 
         except Exception as e:
             log.error(f"Content extraction failed for message group {message_group.uuid}: {e}")
             raise RuntimeError(f"Failed to read document content: {str(e)}") from None
 
-    log.debug(f"Processed {len(attachment_message_items)} attachment items for message group {message_group.uuid}")
+    log.debug("Processed %d attachment items for message group %s", len(attachment_message_items), message_group.uuid)
     return message_group
 
 
@@ -357,7 +358,7 @@ def generate_summary_payload(
             "variables": None,  # No variables needed
         }
 
-        log.debug(f"Chat history contains {len(chat_history)} messages")
+        log.debug("Chat history contains %d messages", len(chat_history))
         return payload
 
     except Exception as e:
@@ -612,7 +613,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 ConversationMessageGroup.author_participant_id == msg_group.sent_to_id,
                 ConversationMessageGroup.conversation_id == msg_group.conversation_id
             ).order_by(desc(ConversationMessageGroup.created_at)).offset(1).first()
-            log.debug(f'{serialize(last_agent_message)=}')
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("last_agent_message=%s", serialize(last_agent_message))
             if last_agent_message:
                 result['thread_id'] = last_agent_message.meta.get('thread_id')
 
@@ -1130,10 +1132,10 @@ class RPC:
         - Has different validation requirements (message_id required, user_input not needed)
         - Shares minimal logic with the normal predict flow
         """
-        log.debug(f'Continue predict: received data: user_input={data.get("user_input")}')
+        log.debug("Continue predict: message_id=%s conversation_uuid=%s sid=%s user_input=%s",
+                  data.get("message_id"), data.get("conversation_uuid"), sid, data.get("user_input"))
         try:
             parsed = SioContinuePredictModel.model_validate(data)
-            log.debug(f'Continue predict: parsed model: user_input={parsed.user_input}')
         except ValidationError as e:
             raise SioValidationError(
                 sio=self.context.sio,
@@ -1164,8 +1166,6 @@ class RPC:
                     message_id=parsed.message_id,
                 )
 
-            log.debug(f'Continue: Looking up message with id {parsed.message_id}')
-            
             # Find the existing response message that was paused
             response_msg: ConversationMessageGroup = session.query(ConversationMessageGroup).options(
                 joinedload(ConversationMessageGroup.author_participant)
@@ -1184,8 +1184,6 @@ class RPC:
                     message_id=parsed.message_id,
                 )
 
-            log.debug(f'Continue: Found message {response_msg.uuid}, reply_to_id={response_msg.reply_to_id}, author_participant_id={response_msg.author_participant_id}')
-
             # Get the question message (reply_to)
             msg_group = None
             if response_msg.reply_to_id:
@@ -1203,7 +1201,6 @@ class RPC:
                 ).first()
 
                 if actual_response:
-                    log.debug(f'Continue: Found actual response message {actual_response.uuid}')
                     msg_group = response_msg  # The "response_msg" is actually the question
                     response_msg = actual_response
                 else:
@@ -1339,7 +1336,8 @@ class RPC:
                 raise Exception(f"No message groups found for summary generation")
 
             # Make the LLM prediction call
-            log.debug(f'chat generate_summary_payload {payload=}')
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("chat generate_summary_payload payload=%s", payload)
 
             try:
                 client = self.get_redis_client()

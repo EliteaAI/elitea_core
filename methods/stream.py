@@ -30,7 +30,7 @@ from ..utils.application_tools import handle_index_data_failure, ensure_index_da
 class Method:
     @web.method()
     def stream_response(self, event, payload):
-        log.debug(f"Application stream_response:\n{prettify(payload)}")
+        log.debug("stream_response type=%s stream_id=%s", payload.get('type'), payload.get('stream_id'))
         stream_id = payload['stream_id']
         sio_event = payload.get('sio_event', SioEvents.application_predict) or SioEvents.application_predict
 
