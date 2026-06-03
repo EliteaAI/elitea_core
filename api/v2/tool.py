@@ -106,7 +106,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Link Agent to Toolkit",
         description="Link an agent (application) to a toolkit.",
         tags=["elitea_core/toolkits"],
-        mcp_tool=True
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.patch"],

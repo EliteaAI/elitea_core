@@ -111,6 +111,7 @@ if _API_AVAILABLE:
                 "404": {"description": "No data found for this agent"},
                 "500": {"description": "Internal server error"},
             },
+            available_to_users=True,
         )
         @auth.decorators.check_api({
             "permissions": ["models.monitoring.tracing.view"],

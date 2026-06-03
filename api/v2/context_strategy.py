@@ -17,6 +17,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Update context strategy settings for a conversation.",
         tags=["elitea_core/chat"],
         request_body=ContextStrategyUpdate,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.edit"],

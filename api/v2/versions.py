@@ -22,6 +22,7 @@ class ProjectAPI(api_tools.APIModeHandler):
         description="Returns all versions for the specified agent or pipeline, ordered by creation date.",
         mcp_tool=True,
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.versions.get"],
@@ -47,7 +48,8 @@ class ProjectAPI(api_tools.APIModeHandler):
         name="Create Agent Version",
         description="Create a new version for an existing agent (application).",
         tags=["elitea_core/applications"],
-        mcp_tool=True
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.versions.create"],

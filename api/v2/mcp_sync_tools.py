@@ -40,6 +40,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "timeout", "in": "query", "required": False, "schema": {"type": "integer", "default": 120}, "description": "Timeout in seconds (default: 120 for sync, -1 for async)."},
         ],
         request_body=McpSyncToolsInputModel,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.patch"],

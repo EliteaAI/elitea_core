@@ -119,7 +119,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Configure Participant",
         description="Configure participant settings (LLM settings, etc.) in a conversation.",
         tags=["elitea_core/chat"],
-        mcp_tool=True
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.entity_settings.update"],

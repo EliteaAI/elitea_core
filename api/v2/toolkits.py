@@ -20,7 +20,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             }
         ],
         tags=["elitea_core/toolkits"],
-        mcp_tool=True
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.toolkits.details"],

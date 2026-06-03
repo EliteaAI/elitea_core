@@ -12,6 +12,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Get details of a specific participant.",
         mcp_tool=True,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.participant.get"],
@@ -34,6 +35,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Remove a participant from a conversation.",
         mcp_tool=True,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.participant.delete"],

@@ -22,6 +22,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Returns the full details of the specified agent or pipeline. If version_name is provided, that specific version is returned. If omitted, the active default version is returned.",
         mcp_tool=True,
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.application.details"],
@@ -48,6 +49,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Delete an agent or pipeline",
         description="Permanently deletes the agent or pipeline and all its versions. This action is irreversible.",
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.application.delete"],
@@ -69,6 +71,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Updates the agent or pipeline metadata and its active version in a single request. The version referenced in the request body must match the agent or pipeline in the path.",
         request_body=ApplicationUpdateModel,
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {

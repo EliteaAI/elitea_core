@@ -11,6 +11,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Get detailed information about a specific conversation.",
         mcp_tool=True,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.details"],
@@ -51,6 +52,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Update a conversation's name, instructions, or other properties.",
         mcp_tool=True,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.update"],

@@ -37,6 +37,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "401": {"description": "Unauthorized"},
             "500": {"description": "Internal server error"},
         },
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.details"],

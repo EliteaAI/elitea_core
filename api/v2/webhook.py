@@ -115,6 +115,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         name="Webhook Trigger",
         description="Trigger application or pipeline execution via signed webhook payload.",
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @api_tools.endpoint_metrics
     def post(self, project_id: int, version_id: int, webhook_type: str):  # pylint: disable=R0911

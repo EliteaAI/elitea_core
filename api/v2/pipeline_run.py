@@ -18,6 +18,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "async", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Run asynchronously."},
         ],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.predict.post"],

@@ -21,6 +21,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Get list of conversations with filtering, sorting, and pagination.",
         mcp_tool=True,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": [
@@ -63,6 +64,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Create a new conversation for chat interactions.",
         mcp_tool=True,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversations.create"],
@@ -174,6 +176,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Delete a conversation by ID.",
         mcp_tool=True,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversations.delete"],

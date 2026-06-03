@@ -31,6 +31,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Publishes an agent version to Agent Studio, making it available to the broader community. Requires the version to pass pre-publish validation. Run /publish_validate first to check readiness and receive a validation_token that skips re-validation on publish. Applicable to agents only - pipelines cannot be published.",
         request_body=PublishRequest,
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.publish.post"],

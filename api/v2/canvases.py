@@ -30,6 +30,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "sort_order", "in": "query", "required": False, "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"}},
         ],
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {
@@ -70,6 +71,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Create a new canvas from a message item.",
         request_body=CanvasItemCreatePayload,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {

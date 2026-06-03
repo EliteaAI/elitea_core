@@ -36,6 +36,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Get Pipeline Trigger",
         description="Get current trigger configuration for a pipeline version.",
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.details"],
@@ -112,6 +113,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Update trigger configuration for a pipeline version.",
         tags=["elitea_core/applications"],
         request_body=UpdatePipelineTrigger,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.update"],
@@ -233,6 +235,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Regenerate Pipeline Webhook Secret",
         description="Regenerate webhook secret for a pipeline version configured with webhook trigger.",
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.update"],

@@ -29,6 +29,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Returns a paginated list of agents and pipelines in the project. Supports filtering by tags, author, status, type, and free-text search.",
         mcp_tool=True,
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {
@@ -85,6 +86,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Creates a new agent or pipeline with an initial (base) version. The request must include agent or pipeline metadata and at least one version definition.",
         mcp_tool=True,
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {

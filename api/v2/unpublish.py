@@ -22,6 +22,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Removes the published agent version from Agent Studio. Must be called from the same project the agent was originally published from. An optional reason can be provided. Applicable to agents only.",
         request_body=UnpublishRequest,
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.unpublish.post"],

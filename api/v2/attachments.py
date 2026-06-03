@@ -44,7 +44,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Create Attachments",
         description="Upload file attachments to a conversation.",
         tags=["elitea_core/chat"],
-        mcp_tool=True
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.attachments.create"],
@@ -102,6 +103,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "filename", "in": "query", "required": True, "schema": {"type": "string"}, "description": "Filename or filepath to delete. Can be provided multiple times."},
             {"name": "keep_in_storage", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "If true, keep files in bucket and remove only DB attachment records."},
         ],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.attachments.delete"],

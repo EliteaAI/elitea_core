@@ -89,6 +89,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "sort_by", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Sort field."},
             {"name": "sort_order", "in": "query", "required": False, "schema": {"type": "string", "enum": ["asc", "desc"]}, "description": "Sort order."},
         ],
+        available_to_users=True,
     )
 
     @auth.decorators.check_api({
@@ -516,6 +517,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Create a new conversation folder.",
         tags=["elitea_core/chat"],
         request_body=FolderCreate,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.folders.create"],
@@ -560,6 +562,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Update folder data including position.",
         tags=["elitea_core/chat"],
         request_body=FolderUpdate,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.folders.update"],
@@ -717,6 +720,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "folder_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Folder ID."},
         ],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.folders.update"],
@@ -763,6 +767,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "folder_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Folder ID."},
         ],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.folders.delete"],

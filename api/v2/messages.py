@@ -39,6 +39,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         ],
         mcp_tool=True,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.list"],
@@ -89,6 +90,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Delete All Messages",
         description="Delete all messages from a conversation.",
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.delete"],
@@ -173,6 +175,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Send a message to a conversation and get AI response.",
         mcp_tool=True,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {

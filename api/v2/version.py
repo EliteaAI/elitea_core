@@ -43,6 +43,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Returns the full configuration of a specific agent or pipeline version, including toolkits, tools, tool mappings, and variables.",
         mcp_tool=True,
         tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.details"],
@@ -109,7 +110,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Update an agent or pipeline version",
         description="Updates the configuration of an existing agent or pipeline version. Only versions that are not published state can be updated.",
         tags=["elitea_core/applications"],
-        mcp_tool=True
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.update"],

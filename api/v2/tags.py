@@ -11,6 +11,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="List Tags",
         description="List available tags with optional filters.",
         tags=["elitea_core/discovery"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.promptlib_shared.tags.list"],

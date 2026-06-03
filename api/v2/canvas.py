@@ -19,6 +19,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Get Canvas",
         description="Get canvas details including versions and content.",
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {
@@ -51,6 +52,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Update canvas name and content.",
         request_body=CanvasItemEditPayload,
         tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {

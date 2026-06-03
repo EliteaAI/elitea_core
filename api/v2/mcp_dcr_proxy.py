@@ -34,6 +34,7 @@ class ProjectAPI(api_tools.APIModeHandler):
             {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
         ],
         request_body=McpDynamicClientRegistrationRequest,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.patch"],

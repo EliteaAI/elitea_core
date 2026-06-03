@@ -87,6 +87,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "as_file", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Return result as a downloadable file."},
             {"name": "follow_version_ids", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Comma-separated version IDs to follow during export."},
         ],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.export_import.export"],

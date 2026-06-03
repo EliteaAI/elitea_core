@@ -41,6 +41,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         mcp_tool=True,
         tags=["elitea_core/applications"],
         request_body=ApplicationPredictRequest,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.predict.post"],

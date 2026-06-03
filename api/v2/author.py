@@ -18,6 +18,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "author_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Author ID."},
         ],
+        available_to_users=True,
     )
     @add_public_project_id
     @auth.decorators.check_api(

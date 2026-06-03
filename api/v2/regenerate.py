@@ -22,6 +22,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Regenerate assistant response for a message group.",
         tags=["elitea_core/chat"],
         request_body=SioRegenerateModel,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversations.regenerate"],
