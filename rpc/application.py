@@ -214,7 +214,6 @@ class RPC:
                 stream_id=data.get("stream_id"),
                 message_id=data.get("message_id")
             )
-        log.debug(f'{payload=}')
 
         if not user_context:
             user_context = {
@@ -383,8 +382,6 @@ class RPC:
                 )
             else:
                 raise PredictPayloadError(str(e))
-
-        log.debug(f'{payload=}')
 
         # TODO probably better move to toolkits expand, check OpenAPI
         vc = VaultClient(parsed.project_id)
