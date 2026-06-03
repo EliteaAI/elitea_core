@@ -5,6 +5,11 @@ from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, rpc_tools, this
 
+try:
+    import gevent  # pylint: disable=C0413
+except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
+    gevent = None
+
 from ..models.elitea_tools import EliteATool
 from ..models.indexer import EmbeddingStore
 from ..models.enums import InitiatorType
@@ -18,6 +23,14 @@ from ..utils.index_scheduling import resolve_credentials, handle_failed_index_sc
 class RPC:
     @web.rpc("applications_check_index_scheduling")
     def check_index_scheduling(self, **kwargs):
+        # Cooperative yield only when gevent is the actual web runtime;
+        # under flask/waitress/hypercorn this is a no-op.
+        yield_to_hub = (
+            (lambda: gevent.sleep(0))
+            if (gevent is not None and self.context.web_runtime == "gevent")
+            else (lambda: None)
+        )
+
         all_project_ids = [
             project_['id'] for project_ in rpc_tools.RpcMixin().rpc.timeout(3).project_list(
                 filter_={'create_success': True}
@@ -25,10 +38,17 @@ class RPC:
         ]
 
         for project_id in all_project_ids:
+            # Yield between projects so a long scheduler tick does not starve
+            # the gevent hub and stall request greenlets / EventNode.
+            yield_to_hub()
             with db.get_session(project_id) as project_session:
                 for toolkit in project_session.query(EliteATool).filter(
                     EliteATool.meta['indexes_meta'].isnot(None)
                 ).all():
+                    # Cooperative yield per toolkit: parse_obj + local-inline
+                    # scheduling_time_to_run RPC are pure Python and accumulate
+                    # CPU time between the outer DB I/O yields.
+                    yield_to_hub()
                     indexes_meta = toolkit.meta['indexes_meta']
                     log.debug(f'Indexes meta: {indexes_meta}')
                     for index_meta_id, index_entry in indexes_meta.items():

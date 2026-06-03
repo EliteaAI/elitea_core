@@ -11,6 +11,11 @@ from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, rpc_tools
 
+try:
+    import gevent  # pylint: disable=C0413
+except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
+    gevent = None
+
 from ..models.all import Application, ApplicationVersion
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
@@ -21,12 +26,15 @@ from ..utils.pipeline_execution import (
 )
 
 
-def _check_project_pipelines(project_id: int):
+def _check_project_pipelines(project_id: int, yield_to_hub=lambda: None):
     """
     Check and execute scheduled pipelines for a specific project.
 
     Args:
         project_id: The project ID to check
+        yield_to_hub: Callable invoked once per version to cooperatively
+            hand control back to the gevent hub. No-op when gevent is
+            not the active runtime.
     """
     with db.get_session(project_id) as session:
         # Query all pipeline versions that have pipeline_settings with trigger
@@ -37,6 +45,10 @@ def _check_project_pipelines(project_id: int):
         ).all()
 
         for version in pipeline_versions:
+            # Cooperative yield per version: parse_obj + local-inline
+            # scheduling_time_to_run RPC are pure Python and accumulate
+            # CPU between the outer DB I/O yields.
+            yield_to_hub()
             try:
                 _process_pipeline_version(project_id, version, session)
             except Exception as e:
@@ -192,6 +204,14 @@ class RPC:
         a second instance may run concurrently. This is accepted for V1 since
         last_run is updated after execution starts, minimizing duplicate runs.
         """
+        # Cooperative yield only when gevent is the actual web runtime;
+        # under flask/waitress/hypercorn this is a no-op.
+        yield_to_hub = (
+            (lambda: gevent.sleep(0))
+            if (gevent is not None and self.context.web_runtime == "gevent")
+            else (lambda: None)
+        )
+
         # Get all active projects
         all_project_ids = [
             project_['id'] for project_ in rpc_tools.RpcMixin().rpc.timeout(3).project_list(
@@ -200,8 +220,11 @@ class RPC:
         ]
 
         for project_id in all_project_ids:
+            # Yield between projects so a long scheduler tick does not starve
+            # the gevent hub and stall request greenlets / EventNode.
+            yield_to_hub()
             try:
-                _check_project_pipelines(project_id)
+                _check_project_pipelines(project_id, yield_to_hub=yield_to_hub)
             except Exception as e:
                 log.error(f"Error checking pipeline schedules for project {project_id}: {e}")
 
