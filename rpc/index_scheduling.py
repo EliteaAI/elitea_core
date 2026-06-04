@@ -32,9 +32,11 @@ class RPC:
                     indexes_meta = toolkit.meta['indexes_meta']
                     log.debug(f'Indexes meta: {indexes_meta}')
                     for index_meta_id, index_entry in indexes_meta.items():
+                        yield_to_hub()
                         schedules = index_entry.get('schedules', {})
                         log.debug(f'Schedules: {schedules}')
                         for user_id, user_config in schedules.items():
+                            yield_to_hub()
                             init_issue = None
 
                             # Convert stored dict to ToolkitIndexingSchedule model
