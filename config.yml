@@ -12,6 +12,14 @@ add_admin_roles:
 
 max_published_versions_per_agent: 3
 
+scheduler:
+  pipeline_scheduling:
+    enabled: true
+    cron: "* * * * *"
+  index_scheduling:
+    enabled: true
+    cron: "* * * * *"
+
 # Publish validation config references (defaults in code):
 # publishing_guardrail.publish_validation_rules - custom AI evaluation rules (default: built-in, via admin UI)
 # publish_validation_timeout       - LLM call timeout in seconds (default: 60)
