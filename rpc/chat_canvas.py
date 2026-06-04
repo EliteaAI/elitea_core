@@ -4,6 +4,11 @@ import redis
 from tools import db, config as c
 from pylon.core.tools import web, log
 
+try:
+    import gevent  # pylint: disable=C0413
+except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
+    gevent = None
+
 from ..models.enums.all import ParticipantTypes
 from ..models.message_items.canvas import CanvasMessageItem, CanvasVersionItem
 from ..utils.canvas_utils import (get_list_canvas_details, get_canvas_details,
@@ -46,6 +51,14 @@ class RPC:
     @web.rpc("chat_canvas_save_versions")
     def chat_canvas_save_versions(self, **kwargs):
         # TODO keep the last N versions instead of all?
+        # Cooperative yield only when gevent is the actual web runtime;
+        # under flask/waitress/hypercorn this is a no-op.
+        yield_to_hub = (
+            (lambda: gevent.sleep(0))
+            if (gevent is not None and self.context.web_runtime == "gevent")
+            else (lambda: None)
+        )
+
         redis_client = self.get_redis_client()
         in_memory_canvas_keys: list[str] = redis_client.keys('canvas:*')
         parsed_in_memory_canvas_keys: list[dict] = get_list_canvas_details(in_memory_canvas_keys, shadow=False)
@@ -58,10 +71,16 @@ class RPC:
             })
 
         for project_id, canvas_details_list in grouped_canvases.items():
+            # Yield between projects so a heavy canvas-save tick does not
+            # starve the gevent hub and stall other greenlets.
+            yield_to_hub()
             with db.get_session(project_id) as session:
                 new_canvas_versions: list[CanvasVersionItem] = []
 
                 for canvas_details in canvas_details_list:
+                    # Cooperative yield per canvas; emit + content compare are
+                    # CPU-bound between DB lookups.
+                    yield_to_hub()
                     canvas: CanvasMessageItem = session.query(CanvasMessageItem).filter(
                         CanvasMessageItem.uuid == canvas_details["canvas_uuid"]
                     ).first()
