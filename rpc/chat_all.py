@@ -613,8 +613,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 ConversationMessageGroup.author_participant_id == msg_group.sent_to_id,
                 ConversationMessageGroup.conversation_id == msg_group.conversation_id
             ).order_by(desc(ConversationMessageGroup.created_at)).offset(1).first()
-            if log.isEnabledFor(logging.DEBUG):
-                log.debug("last_agent_message=%s", serialize(last_agent_message))
+            log.debug("last_agent_message=%s", serialize(last_agent_message))
             if last_agent_message:
                 result['thread_id'] = last_agent_message.meta.get('thread_id')
 
@@ -1336,8 +1335,7 @@ class RPC:
                 raise Exception(f"No message groups found for summary generation")
 
             # Make the LLM prediction call
-            if log.isEnabledFor(logging.DEBUG):
-                log.debug("chat generate_summary_payload payload=%s", payload)
+            log.debug("chat generate_summary_payload payload=%s", payload)
 
             try:
                 client = self.get_redis_client()
