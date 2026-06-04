@@ -163,6 +163,40 @@
       "section": "runtime",
       "default": "centry.user"
     },
+    "pipeline_scheduling_enabled": {
+      "type": "boolean",
+      "title": "Pipeline Scheduling Enabled",
+      "description": "Master switch for the per-tick check that triggers scheduled pipeline runs. Disable to pause all pipeline schedules platform-wide without losing their configuration.",
+      "path": "scheduler.pipeline_scheduling.enabled",
+      "section": "runtime",
+      "default": true
+    },
+    "pipeline_scheduling_cron": {
+      "type": "string",
+      "title": "Pipeline Scheduling Cron",
+      "description": "How often the pipeline scheduling tick fires. Standard 5-field cron expression (e.g. '* * * * *' = every minute, '*/15 * * * *' = every 15 minutes). Slowing this down reduces baseline platform load but delays scheduled pipeline starts by up to that interval.",
+      "path": "scheduler.pipeline_scheduling.cron",
+      "section": "runtime",
+      "default": "* * * * *",
+      "visible_when": { "field": "pipeline_scheduling_enabled", "value": true }
+    },
+    "index_scheduling_enabled": {
+      "type": "boolean",
+      "title": "Index Scheduling Enabled",
+      "description": "Master switch for the per-tick check that triggers scheduled toolkit index re-builds. Disable to pause all index schedules platform-wide without losing their configuration.",
+      "path": "scheduler.index_scheduling.enabled",
+      "section": "runtime",
+      "default": true
+    },
+    "index_scheduling_cron": {
+      "type": "string",
+      "title": "Index Scheduling Cron",
+      "description": "How often the index scheduling tick fires. Standard 5-field cron expression (e.g. '* * * * *' = every minute, '*/15 * * * *' = every 15 minutes). Slowing this down reduces baseline platform load but delays scheduled re-indexing by up to that interval.",
+      "path": "scheduler.index_scheduling.cron",
+      "section": "runtime",
+      "default": "* * * * *",
+      "visible_when": { "field": "index_scheduling_enabled", "value": true }
+    },
     "analytics_enabled": {
       "type": "boolean",
       "title": "Show Analytics",

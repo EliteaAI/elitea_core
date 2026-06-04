@@ -317,6 +317,10 @@ class Module(module.ModuleModel):
         self.handle_pylon_modules_initialized()
 
         try:
+            scheduler_cfg = self.descriptor.config.get('scheduler', {}) or {}
+            idx_cfg = scheduler_cfg.get('index_scheduling', {}) or {}
+            pipe_cfg = scheduler_cfg.get('pipeline_scheduling', {}) or {}
+
             self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
                 'rpc_func': 'applications_empty_state',
                 'rpc_kwargs': {'days_to_retain': 1},
@@ -328,8 +332,8 @@ class Module(module.ModuleModel):
                 'rpc_func': 'applications_check_index_scheduling',
                 'rpc_kwargs': {},
                 'name': 'index_scheduling',
-                'cron': '* * * * *',
-                'active': True
+                'cron': idx_cfg.get('cron', '* * * * *'),
+                'active': bool(idx_cfg.get('enabled', True)),
             })
             self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
                 'rpc_func': 'elitea_core_cleanup_stale_chunks',
@@ -349,9 +353,12 @@ class Module(module.ModuleModel):
                 'rpc_func': 'pipelines_check_scheduling',
                 'rpc_kwargs': {},
                 'name': 'pipeline_scheduling',
-                'cron': '* * * * *',
-                'active': True
+                'cron': pipe_cfg.get('cron', '* * * * *'),
+                'active': bool(pipe_cfg.get('enabled', True)),
             })
+            # Reconcile existing rows with current config (handles the case
+            # where YAML was edited while pylon was down).
+            self._apply_scheduler_runtime_config()
         except Empty:
             log.warning('No scheduling plugin found')
 
@@ -701,6 +708,37 @@ class Module(module.ModuleModel):
         """Re-config"""
         # Reconfigure elitea_ui settings
         self._configure_elitea_ui()
+        # Push admin-configured cron / enabled flag to the scheduling plugin
+        # so cadence and disable changes apply without a pylon restart.
+        self._apply_scheduler_runtime_config()
+
+    def _apply_scheduler_runtime_config(self):
+        """Push admin-configured scheduler cron/enabled flags into DB rows.
+
+        Scheduler reads cron/active live from the schedule table on each
+        poll.
+        """
+        scheduler_cfg = self.descriptor.config.get('scheduler', {}) or {}
+        targets = (
+            ('index_scheduling', scheduler_cfg.get('index_scheduling', {}) or {}),
+            ('pipeline_scheduling', scheduler_cfg.get('pipeline_scheduling', {}) or {}),
+        )
+        for name, sub in targets:
+            cron = sub.get('cron')
+            enabled = sub.get('enabled')
+            if cron is None and enabled is None:
+                continue
+            try:
+                self.context.rpc_manager.timeout(5).scheduling_update_schedule(
+                    name=name,
+                    cron=cron,
+                    active=bool(enabled) if enabled is not None else None,
+                )
+            except Exception as e:
+                log.error(
+                    "scheduling_update_schedule failed: name=%s error=%r",
+                    name, e,
+                )
 
     def create_scheduling(self):
         schedule1_data = {
