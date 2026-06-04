@@ -119,7 +119,8 @@ def load_context_settings_from_conversation(project_id: int, conversation_id: st
 def generate_predict_payload(
     parsed: Union[LLMChatRequest, ApplicationChatRequest],
     user_id: int, sid: str = None, is_system_user: bool = False,
-    eligible_for_autoapproval: bool = False
+    eligible_for_autoapproval: bool = False,
+    return_chat_history: bool = False,
 ) -> dict:
     """
     :param parsed: payload
@@ -222,6 +223,7 @@ def generate_predict_payload(
         'persona': getattr(parsed, 'persona', 'generic'),  # Default persona for chat
         'context_settings': parsed.context_settings.dict() if parsed.context_settings else {},
         'supports_vision': supports_vision,
+        'return_chat_history': return_chat_history,
     }
 
     # Auto-approve sensitive actions for API requests when project secret is set.

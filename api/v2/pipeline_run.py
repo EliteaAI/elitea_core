@@ -33,6 +33,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         callback_url = request_json.pop("callback_url", None)
         callback_headers = request_json.pop("callback_headers", None)
         async_mode = request_json.pop("async_mode", False)
+        return_chat_history = request_json.pop("return_chat_history", False)
 
         is_async = callback_url is not None or async_mode or \
             request.args.get("async", "no").lower().strip() in ["yes", "true"]
@@ -43,6 +44,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 user_id=auth.current_user()["id"],
                 payload_in=request_json,
                 predict_wait=not is_async,
+                return_chat_history=return_chat_history,
             )
 
             if callback_url is not None and "task_id" in result and result["task_id"]:

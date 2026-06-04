@@ -95,7 +95,8 @@ class RPC:
                     chat_project_id: Optional[int] = None,
                     await_task_timeout: int = -1,
                     user_id: int = None,
-                    is_system_user: bool = False
+                    is_system_user: bool = False,
+                    return_chat_history: bool = False,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -204,7 +205,7 @@ class RPC:
                     parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history)
         except PredictPayloadError as e:
             raise SioValidationError(
                 sio=self.context.sio,
@@ -280,7 +281,8 @@ class RPC:
                         chat_project_id: Optional[int] = None,
                         await_task_timeout: int = -1,
                         user_id: Optional[int] = None,
-                        is_system_user: bool = False
+                        is_system_user: bool = False,
+                        return_chat_history: bool = False,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
@@ -369,7 +371,7 @@ class RPC:
                     parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history)
         except PredictPayloadError as e:
             if sid:
                 raise SioValidationError(

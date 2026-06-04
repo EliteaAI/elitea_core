@@ -754,7 +754,8 @@ def prepare_conversation_history(
 class RPC:
     @web.rpc("chat_predict_sio", "chat_predict_sio")
     def predict_sio(
-        self, sid: str | None, data: dict, await_task_timeout: int = -1, return_message_ids: bool = False
+        self, sid: str | None, data: dict, await_task_timeout: int = -1, return_message_ids: bool = False,
+        return_chat_history: bool = False,
     ) -> Optional[str | dict]:
         try:
             parsed = SioPredictModel.model_validate(data)
@@ -1102,7 +1103,8 @@ class RPC:
                             },
                             chat_project_id=parsed.project_id,
                             await_task_timeout=await_task_timeout,
-                            user_id=current_user['id']
+                            user_id=current_user['id'],
+                            return_chat_history=return_chat_history,
                         )
                     except PoolSaturationError:
                         # Mark the response placeholder as not streaming to avoid stuck chat entry

@@ -73,6 +73,7 @@ class MessagePostPayload(BaseModel):
     attachments_info: Optional[List[AttachmentMessageItemPredict]] = None
     llm_settings: Optional[dict] = None
     return_task_id: bool = False
+    return_chat_history: bool = False
 
     @model_validator(mode='after')
     def user_input_from_tool_call_input(self):
