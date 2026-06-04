@@ -5,6 +5,7 @@ Provides the scheduled execution checker for pipelines configured with
 schedule triggers. This RPC is called periodically (every minute) by the
 scheduling plugin to check if any pipelines need to be executed.
 """
+import threading
 from datetime import datetime, UTC
 
 from pylon.core.tools import web, log
@@ -19,11 +20,18 @@ except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
 from ..models.all import Application, ApplicationVersion
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
+from ..utils.cron_utils import is_cron_due
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
 )
+
+
+# Re-entrancy guard: if a previous tick is still running (took >60s) we skip
+# this tick instead of letting the work overlap. The scheduler thread fires
+# every minute regardless of whether the prior RPC handler has returned.
+_check_pipeline_scheduling_lock = threading.Lock()
 
 
 def _check_project_pipelines(project_id: int, yield_to_hub=lambda: None):
@@ -37,11 +45,15 @@ def _check_project_pipelines(project_id: int, yield_to_hub=lambda: None):
             not the active runtime.
     """
     with db.get_session(project_id) as session:
-        # Query all pipeline versions that have pipeline_settings with trigger
-        # We need to filter for pipeline type agents
+        # Push the trigger-type filter down to Postgres so we don't haul back
+        # every pipeline's JSONB blob just to discard non-schedule triggers in
+        # Python. Chained ->/->>: matches the pattern used in
+        # utils/llm_migration_utils.py:249.
         pipeline_versions = session.query(ApplicationVersion).filter(
             ApplicationVersion.agent_type == AgentTypes.pipeline.value,
             ApplicationVersion.pipeline_settings.isnot(None),
+            ApplicationVersion.pipeline_settings.op('->')('trigger').op('->>')('type')
+            == TriggerType.schedule.value,
         ).all()
 
         for version in pipeline_versions:
@@ -99,11 +111,10 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
         session.commit()
         return  # Wait for next cron match
 
-    should_run = rpc_tools.RpcMixin().rpc.timeout(3).scheduling_time_to_run(
-        schedule.cron,
-        schedule.last_run,
-        schedule.timezone,
-    )
+    # Inline cron evaluation: avoids a cross-plugin RPC round-trip per
+    # scheduled pipeline every minute. Same algorithm as the
+    # scheduling_time_to_run RPC (kept available for other callers).
+    should_run = is_cron_due(schedule.cron, schedule.last_run, schedule.timezone)
 
     if not should_run:
         log.debug(
@@ -200,32 +211,41 @@ class RPC:
         It iterates through all projects, finds pipelines with schedule triggers,
         checks if they should run based on their cron expression, and executes them.
 
-        Note: There is no distributed locking, so if processing takes >1 minute,
-        a second instance may run concurrently. This is accepted for V1 since
-        last_run is updated after execution starts, minimizing duplicate runs.
+        Re-entrancy: an in-process lock prevents a slow tick from overlapping
+        with the next minute's tick on the same pylon_main instance. For
+        multi-replica deployments a Postgres advisory lock would be needed.
         """
-        # Cooperative yield only when gevent is the actual web runtime;
-        # under flask/waitress/hypercorn this is a no-op.
-        yield_to_hub = (
-            (lambda: gevent.sleep(0))
-            if (gevent is not None and self.context.web_runtime == "gevent")
-            else (lambda: None)
-        )
-
-        # Get all active projects
-        all_project_ids = [
-            project_['id'] for project_ in rpc_tools.RpcMixin().rpc.timeout(3).project_list(
-                filter_={'create_success': True}
+        if not _check_pipeline_scheduling_lock.acquire(blocking=False):
+            log.warning(
+                "check_pipeline_scheduling: previous tick still running, "
+                "skipping this minute"
             )
-        ]
+            return None
 
-        for project_id in all_project_ids:
-            # Yield between projects so a long scheduler tick does not starve
-            # the gevent hub and stall request greenlets / EventNode.
-            yield_to_hub()
-            try:
-                _check_project_pipelines(project_id, yield_to_hub=yield_to_hub)
-            except Exception as e:
-                log.error(f"Error checking pipeline schedules for project {project_id}: {e}")
+        try:
+            # Cooperative yield only when gevent is the actual web runtime;
+            # under flask/waitress/hypercorn this is a no-op.
+            yield_to_hub = (
+                (lambda: gevent.sleep(0))
+                if (gevent is not None and self.context.web_runtime == "gevent")
+                else (lambda: None)
+            )
 
-        return None
+            all_project_ids = [
+                project_['id'] for project_ in rpc_tools.RpcMixin().rpc.timeout(3).project_list(
+                    filter_={'create_success': True}
+                )
+            ]
+
+            for project_id in all_project_ids:
+                # Yield between projects so a long scheduler tick does not starve
+                # the gevent hub and stall request greenlets / EventNode.
+                yield_to_hub()
+                try:
+                    _check_project_pipelines(project_id, yield_to_hub=yield_to_hub)
+                except Exception as e:
+                    log.error(f"Error checking pipeline schedules for project {project_id}: {e}")
+
+            return None
+        finally:
+            _check_pipeline_scheduling_lock.release()
