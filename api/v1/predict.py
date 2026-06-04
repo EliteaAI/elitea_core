@@ -46,6 +46,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         callback_url = request_json.pop("callback_url", None)
         callback_headers = request_json.pop("callback_headers", None)
         async_mode = request_json.pop("async_mode", False)
+        return_chat_history = request_json.pop("return_chat_history", False)
         #
         is_async = callback_url is not None or async_mode or \
             request.args.get("async", "no").lower().strip() in ["yes", "true"]
@@ -61,6 +62,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                 raw=request.data,
                 webhook_signature=None,
                 predict_wait=not is_async,
+                return_chat_history=return_chat_history,
             )
             #
             if callback_url is not None and "task_id" in result and result["task_id"]:

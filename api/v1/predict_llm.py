@@ -45,6 +45,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         #
         await_task_timeout = request_json.pop("await_task_timeout", 30)  # Default 30 seconds
         sid = request_json.pop("sid", None)  # Extract sid for streaming support
+        return_chat_history = request_json.pop("return_chat_history", False)
 
         # Set project_id in payload
         request_json['project_id'] = project_id
@@ -57,6 +58,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                 data=request_json,
                 await_task_timeout=await_task_timeout,
                 user_id=auth.current_user().get("id"),
+                return_chat_history=return_chat_history,
             )
         except ValidationError as e:
             return e.errors(), 400

@@ -20,6 +20,7 @@ class Method:
         payload_in: dict,
         predict_wait=True,
         predict_timeout=float(60 * 60),
+        return_chat_history: bool = False,
     ):
         raw_yaml = payload_in.get("yaml")
         if not raw_yaml:
@@ -81,7 +82,7 @@ class Method:
             return {"error": f"Validation error: {e}"}
 
         try:
-            payload = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True)
+            payload = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
         except PredictPayloadError as e:
             return {"error": str(e)}
 

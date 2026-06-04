@@ -27,6 +27,7 @@ class Method:
         webhook_type="github",
         predict_wait=True,
         predict_timeout=float(60*60),  # 1 hour
+        return_chat_history: bool = False,
     ):
         with db.get_session(project_id) as session:
             application_version = session.query(ApplicationVersion).options(
@@ -97,7 +98,7 @@ class Method:
             if context_strategy:
                 parsed.context_settings = ContextStrategyModel(**context_strategy)
 
-        payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True)
+        payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
 
         user_context = {
             'user_id': user_id,

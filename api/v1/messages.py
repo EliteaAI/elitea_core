@@ -114,7 +114,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         message_payload = {
             "project_id": project_id,
-            **serialize(request_data.model_dump(exclude={"await_task_timeout"})),
+            **serialize(request_data.model_dump(exclude={"await_task_timeout", "return_chat_history"})),
         }
 
         if request_data.await_task_timeout > 0 and request_data.return_task_id:
@@ -128,7 +128,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 sid=None,
                 data=message_payload,
                 await_task_timeout=request_data.await_task_timeout,
-                return_message_ids=True
+                return_message_ids=True,
+                return_chat_history=request_data.return_chat_history,
             )
         except SioValidationError as e:
             return {
