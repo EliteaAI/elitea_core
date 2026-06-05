@@ -168,6 +168,7 @@ def generate_predict_payload(
     user_input = parsed.user_input or 'continue'
 
     supports_vision = llm_model_configuration.get('supports_vision', True)
+    openai_compatible = llm_model_configuration.get('openai_compatible', False)
 
     # try:
     #     from tools import worker_client  # pylint: disable=E0401,C0415
@@ -191,6 +192,7 @@ def generate_predict_payload(
                 "model": parsed.llm_settings.model_name,
                 "api_key": token,
                 "project_id": parsed.project_id,
+                "openai_compatible": openai_compatible,
                 **model_parameters,
                 #
                 "stream": True,  # hardcoded
