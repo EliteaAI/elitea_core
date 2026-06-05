@@ -485,7 +485,7 @@
     },
     "vite_voice_features_temporarily_disabled": {
       "type": "boolean",
-      "title": "Temporarily Disable Voice Features",
+      "title": "Disable Voice Controls but Keep Them Visible",
       "description": "When enabled, voice buttons remain visible but are non-interactive with an admin tooltip.",
       "path": "extra_ui_config.vite_voice_features_temporarily_disabled",
       "section": "voice_features",
