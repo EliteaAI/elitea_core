@@ -99,3 +99,7 @@ class LLMPredictRequest(BaseModel):
         default=None,
         description="Checkpoint ID for resuming from a specific point"
     )
+    return_chat_history: bool = Field(
+        default=False,
+        description="Include chat_history in response (only needed for blocking callers that read the result)"
+    )

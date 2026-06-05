@@ -76,7 +76,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
 
         # Convert to dict for RPC call
-        request_json = predict_request.model_dump(exclude_unset=False)
+        request_json = predict_request.model_dump(exclude_unset=False, exclude={"return_chat_history"})
         request_json['project_id'] = project_id
 
         # Extract for RPC call
@@ -92,6 +92,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                 data=request_json,
                 await_task_timeout=await_task_timeout,
                 user_id=auth.current_user().get("id"),
+                return_chat_history=predict_request.return_chat_history,
             )
         except ValidationError as e:
             return e.errors(), 400
