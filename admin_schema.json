@@ -474,6 +474,22 @@
       "path": "extra_ui_config.vite_elitea_assistant",
       "section": "support_assistant",
       "default": "0"
+    },
+    "vite_voice_features_enabled": {
+      "type": "boolean",
+      "title": "Voice Features Enabled",
+      "description": "When disabled, all voice features (V2V, T2V, V2T) are completely hidden for all users.",
+      "path": "extra_ui_config.vite_voice_features_enabled",
+      "section": "voice_features",
+      "default": true
+    },
+    "vite_voice_features_temporarily_disabled": {
+      "type": "boolean",
+      "title": "Temporarily Disable Voice Features",
+      "description": "When enabled, voice buttons remain visible but are non-interactive with an admin tooltip.",
+      "path": "extra_ui_config.vite_voice_features_temporarily_disabled",
+      "section": "voice_features",
+      "default": false
     }
   }
 }
