@@ -18,6 +18,7 @@ class ApplicationPredictRequest(BaseModel):
     callback_headers: Optional[Dict[str, str]] = None
     async_mode: Optional[bool] = False
     user_input: Optional[str] = None
+    return_chat_history: bool = False
 
     model_config = ConfigDict(
         json_schema_extra={
