@@ -1239,7 +1239,15 @@ def validate_and_resolve_llm_settings(
 
             if model_project_id is not None:
                 if (model_project_id, model_name) in available:
-                    return llm_settings
+                    # Stamp the model's openai_compatible flag so downstream consumers
+                    # (notably the SDK building sub-agents) route Claude models through the
+                    # correct client. It is a model-config property, not a stored agent
+                    # setting, so it must be resolved here from the config registry.
+                    stamped = dict(llm_settings)
+                    stamped['openai_compatible'] = bool(
+                        available[(model_project_id, model_name)].get('openai_compatible', False)
+                    )
+                    return stamped
             else:
                 # null model_project_id: find the actual project that owns this model.
                 # Private project is checked before public because fetch_private_configurations
@@ -1251,6 +1259,9 @@ def validate_and_resolve_llm_settings(
                 if resolved_project_id is not None:
                     stamped = dict(llm_settings)
                     stamped['model_project_id'] = resolved_project_id
+                    stamped['openai_compatible'] = bool(
+                        available[(resolved_project_id, model_name)].get('openai_compatible', False)
+                    )
                     return stamped
 
         default = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_default_model(
@@ -1274,6 +1285,7 @@ def validate_and_resolve_llm_settings(
         # — avoids an extra RPC call.
         default_model_config = available.get((default_model_project_id, default_model_name), {})
         supports_reasoning = bool(default_model_config.get('supports_reasoning', False))
+        resolved['openai_compatible'] = bool(default_model_config.get('openai_compatible', False))
 
         if supports_reasoning:
             # Reasoning models ignore temperature; promote to reasoning_effort if not already set.
