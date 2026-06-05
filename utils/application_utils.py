@@ -1226,8 +1226,16 @@ def validate_and_resolve_llm_settings(
     llm_settings: Optional[dict],
     application_id: Optional[int] = None,
     version_id: Optional[int] = None,
+    include_openai_compatible: bool = False,
 ) -> Optional[dict]:
-    """Check if llm_settings.model_name is available; fall back to the project's default LLM if not."""
+    """Check if llm_settings.model_name is available; fall back to the project's default LLM if not.
+
+    openai_compatible is a derived model-config property, added to the result only when
+    include_openai_compatible is True (response paths such as the SDK building sub-agents).
+    It is omitted by default so the callers that persist this result back onto
+    ApplicationVersion.llm_settings do not store a value that goes stale when the model
+    configuration changes later.
+    """
     try:
         available = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_available_models(
             project_id=project_id, section='llm', include_shared=True
@@ -1239,7 +1247,16 @@ def validate_and_resolve_llm_settings(
 
             if model_project_id is not None:
                 if (model_project_id, model_name) in available:
-                    return llm_settings
+                    if not include_openai_compatible:
+                        return llm_settings
+                    # Response-only: surface the model's openai_compatible flag so the SDK
+                    # routes a sub-agent's Claude model through the correct client. Resolved
+                    # from the config registry, never persisted (see docstring).
+                    stamped = dict(llm_settings)
+                    stamped['openai_compatible'] = bool(
+                        available[(model_project_id, model_name)].get('openai_compatible', False)
+                    )
+                    return stamped
             else:
                 # null model_project_id: find the actual project that owns this model.
                 # Private project is checked before public because fetch_private_configurations
@@ -1251,6 +1268,10 @@ def validate_and_resolve_llm_settings(
                 if resolved_project_id is not None:
                     stamped = dict(llm_settings)
                     stamped['model_project_id'] = resolved_project_id
+                    if include_openai_compatible:
+                        stamped['openai_compatible'] = bool(
+                            available[(resolved_project_id, model_name)].get('openai_compatible', False)
+                        )
                     return stamped
 
         default = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_default_model(
@@ -1274,6 +1295,8 @@ def validate_and_resolve_llm_settings(
         # — avoids an extra RPC call.
         default_model_config = available.get((default_model_project_id, default_model_name), {})
         supports_reasoning = bool(default_model_config.get('supports_reasoning', False))
+        if include_openai_compatible:
+            resolved['openai_compatible'] = bool(default_model_config.get('openai_compatible', False))
 
         if supports_reasoning:
             # Reasoning models ignore temperature; promote to reasoning_effort if not already set.
@@ -1339,9 +1362,12 @@ def get_application_version_details_expanded(
         result = version_details.model_dump(mode='json', exclude={'author_id'})
 
         if result.get('llm_settings'):
+            # Response-only path (never persisted): include openai_compatible so the SDK
+            # building sub-agents routes Claude models through the correct client.
             result['llm_settings'] = validate_and_resolve_llm_settings(
                 project_id, result['llm_settings'],
-                application_id=application_id, version_id=version_id
+                application_id=application_id, version_id=version_id,
+                include_openai_compatible=True,
             )
 
         log.debug(f"{result=}")
