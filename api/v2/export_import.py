@@ -76,8 +76,23 @@ def _generate_export_filename(result, file_extension="zip"):
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
-        name="Export Applications",
-        description="Export one or more applications (agents) to JSON or Markdown format. Returns a file download.",
+        name="Export one or more agents or pipelines to a JSON bundle or Markdown file — all version data included, returns a file download",
+        description="Export one or more agents or pipelines to a JSON bundle or Markdown file — all version data included, returns a file download.",
+        mcp_description="""
+        USE to back up agents/pipelines before changes, migrate to another project, or get human-readable pipeline documentation.
+        
+        DO NOT USE to execute an agent → use execute_agent. To get metadata without a file → use get_agent_details.
+        
+        Format choice:
+        - Agent/pipeline backup for re-import → format=json
+        - Human-readable pipeline graph review → format=md
+        
+        Examples:
+        1. Export agent as inline JSON: GET .../export_import/prompt_lib/42/7
+        2. Export as downloadable JSON file: GET .../7?as_file=true
+        3. Export pipeline as Markdown: GET .../15?format=md → downloads my-pipeline.pipeline.md
+        4. Export multiple (mixed types) as Markdown: GET .../7,15,22?format=md → downloads .zip with individual .md files
+        5. Export specific version only: GET .../15?follow_version_ids=101""",
         tags=["elitea_core/applications"],
         parameters=[
             {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},

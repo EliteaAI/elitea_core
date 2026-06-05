@@ -110,6 +110,32 @@ class ApplicationVersionBaseModel(BaseModel):
 
 
 class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "summary": "New agent version",
+                    "value": {
+                        "name": "v2-strict",
+                        "agent_type": "openai",
+                        "llm_settings": {"model_name": "gpt-5-mini", "temperature": 0.0},
+                        "instructions": "Strict mode: respond with bullet points only."
+                    }
+                },
+                {
+                    "summary": "New pipeline version",
+                    "value": {
+                        "name": "v2-parallel",
+                        "agent_type": "pipeline",
+                        "llm_settings": {"model_name": "gpt-5-mini"},
+                        "instructions": "nodes:\n  - id: fetch\n    type: llm\n  - id: analyze\n    type: llm\nedges:\n  - from: fetch\n    to: analyze"
+                    }
+                }
+            ]
+        }
+    )
+
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
 
@@ -354,6 +380,33 @@ class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, Application
 
 
 class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "summary": "Update agent system prompt",
+                    "value": {
+                        "id": 101,
+                        "application_id": 7,
+                        "agent_type": "openai",
+                        "instructions": "Updated system prompt: respond concisely.",
+                        "llm_settings": {"model_name": "gpt-5-mini", "temperature": 0.1}
+                    }
+                },
+                {
+                    "summary": "Update pipeline YAML graph",
+                    "value": {
+                        "id": 202,
+                        "application_id": 15,
+                        "agent_type": "pipeline",
+                        "instructions": "nodes:\n  - id: start\n    type: llm\nedges:\n  - from: start\n    to: END"
+                    }
+                }
+            ]
+        }
+    )
+
     id: int
     application_id: int
     tags: Optional[List[PromptTagUpdateModel]] = []

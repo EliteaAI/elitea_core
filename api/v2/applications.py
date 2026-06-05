@@ -25,8 +25,27 @@ from pylon.core.tools import log
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
-        name="List agents and pipelines",
+        name="List and search agents and pipelines in a project — paginated, filterable by type (agent vs. pipeline), tags, author, status, and free text",
         description="Returns a paginated list of agents and pipelines in the project. Supports filtering by tags, author, status, type, and free-text search.",
+        mcp_description="""
+        USE to discover, search, or browse agents and pipelines, and to find application_id before calling other tools.
+        DO NOT USE when:
+        - Already have application_id and need full config → use get_agent_details
+        - Need tool or instruction details → use get_version_details
+        - Want to execute an agent → use execute_agent
+        
+        Filter guidance:
+        - All agents + pipelines: omit agents_type
+        - Only classic agents: agents_type=classic
+        - Only pipelines: agents_type=pipeline
+        - Only pipelines with interrupts: agents_type=pipeline then filter rows where has_interrupt == true
+        
+        Examples:
+        1. List all: GET .../applications/prompt_lib/42
+        2. Pipelines only: GET ...?agents_type=pipeline
+        3. Search by name: GET ...?query=code+review
+        4. Published agents only: GET ...?statuses=published
+        5. Page 2, 20 per page: GET ...?limit=20&offset=20""",
         mcp_tool=True,
         tags=["elitea_core/applications"],
         available_to_users=True,
@@ -82,8 +101,26 @@ class PromptLibAPI(api_tools.APIModeHandler):
             }, 400
 
     @register_openapi(
-        name="Create an agent or pipeline",
+        name="Create a new agent or pipeline with a mandatory initial 'base' version — agent type is set by agent_type inside the version definition",
         description="Creates a new agent or pipeline with an initial (base) version. The request must include agent or pipeline metadata and at least one version definition.",
+        request_body=ApplicationCreateModel,
+        mcp_description="""
+        USE to create a brand-new agent or pipeline from scratch.
+        DO NOT USE when:
+        - Adding a version to existing app → use create_version
+        - Forking an existing agent → use the fork endpoint
+        - Importing from JSON → use the import endpoint
+        
+        Classic agent payload:
+        { 'name': 'Code Reviewer', 'owner_id': 42, 'versions': [{ 'name': 'base', 'agent_type': 'openai', 'llm_settings': { 'model_name': 'gpt-5-mini' }, 'instructions': 'You are a senior engineer...' }] }
+        
+        Pipeline payload:
+        { 'name': 'CI Pipeline', 'owner_id': 42, 'versions': [{ 'name': 'base', 'agent_type': 'pipeline', 'llm_settings': { 'model_name': 'gpt-5-mini' }, 'instructions': 'nodes:\n  - id: start\n    type: llm\nedges:\n  ...' }] }
+        
+        Key errors:
+        - versions[0].name != 'base' → HTTP 400
+        - len(versions) > 1 → HTTP 400
+        - Invalid YAML in pipeline instructions → HTTP 400""",
         mcp_tool=True,
         tags=["elitea_core/applications"],
         available_to_users=True,

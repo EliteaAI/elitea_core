@@ -39,8 +39,27 @@ def extract_user_id(received_auth_session: Optional[str]) -> int:
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
-        name="Get agent or pipeline version details",
+        name="Retrieve the complete configuration of a specific agent or pipeline version by numeric version ID — includes resolved tool metadata, LLM settings, and pipeline YAML graph",
         description="Returns the full configuration of a specific agent or pipeline version, including toolkits, tools, tool mappings, and variables.",
+        mcp_description="""
+        USE when you have a numeric version_id and need full tool, configuration, or instruction details.
+        DO NOT USE when:
+        - You only know the version name → use get_agent_details with version_name
+        - You need application metadata (name, description) → use get_agent_details
+        - You need a list of all versions → use list_versions
+        
+        Reading the response by type:
+        Agent: response.instructions = system prompt text; response.llm_settings = model config.
+        Pipeline: response.instructions = YAML string → parse to understand graph nodes and edges.
+        
+        Examples:
+        1. Read agent system prompt: GET .../version/prompt_lib/42/7/101
+        → response.instructions = 'You are a code review expert...'
+        
+        2. Inspect pipeline graph: GET .../15/202
+        → response.agent_type = 'pipeline' → parse response.instructions as YAML.
+        
+        3. Check available tools: response.tools[].settings.selected_tools = restricted tool list for this version.""",
         mcp_tool=True,
         tags=["elitea_core/applications"],
         available_to_users=True,
@@ -107,8 +126,24 @@ class PromptLibAPI(api_tools.APIModeHandler):
         return version_details, 200
 
     @register_openapi(
-        name="Update an agent or pipeline version",
+        name="Update the configuration of an existing draft agent or pipeline version — for agents updates LLM settings and system prompt, for pipelines updates the YAML graph",
         description="Updates the configuration of an existing agent or pipeline version. Only versions that are not published state can be updated.",
+        request_body=ApplicationVersionUpdateModel,
+        mcp_description="""
+        USE to modify the configuration of an existing draft agent or pipeline version.
+        DO NOT USE when:
+        - Renaming application or changing description → use update_agent
+        - Version is published or embedded → will fail; unpublish first or use create_version
+        - Creating a new version → use create_version
+        
+        Agent update example:
+        { 'id': 101, 'application_id': 7, 'instructions': 'New system prompt...', 'llm_settings': { 'model_name': 'gpt-5-mini', 'temperature': 0.1 } }
+        
+        Pipeline update example:
+        { 'id': 202, 'application_id': 15, 'agent_type': 'pipeline', 'instructions': 'nodes:\n  - id: start\n    type: llm\n...' }
+        → Omit pipeline_settings entirely to preserve the existing trigger.
+        
+        Error: HTTP 400 'Version is published' → unpublish first, then update.""",
         tags=["elitea_core/applications"],
         mcp_tool=True,
         available_to_users=True,

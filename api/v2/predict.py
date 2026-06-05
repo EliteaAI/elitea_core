@@ -36,8 +36,26 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
     """ API """
 
     @register_openapi(
-        name="Execute Agent",
-        description="Execute an agent (application version) with provided inputs and get predictions.",
+        name="Execute a specific version of an agent or pipeline with user input — supports synchronous and asynchronous modes, returns prediction result",
+        description="Execute a specific version of an agent or pipeline with user input — supports synchronous and asynchronous modes, returns prediction result.",
+        mcp_description="""
+        USE to run an agent or pipeline and get a response to user input. Primary 'invoke' tool.     
+        DO NOT USE when:
+        - Direct LLM call without any agent → use predict_llm_direct
+        - Listing or reading agent config → use list_agents or get_agent_details
+        
+        CRITICAL: version_id is a numeric integer. Always call list_versions first to get it.
+        
+        Classic agent (sync):
+        Body: { 'user_input': 'Summarize this document.' }
+        → Waits and returns agent response.
+        
+        Pipeline with interrupts (async):
+        Body: { 'user_input': 'Process ticket JIRA-123', 'callback_url': 'https://my-service.com/hook', 'callback_headers': { 'Authorization': 'Bearer token' } }
+        → Returns { 'task_id': 'abc-123' } immediately.
+        
+        Error in HTTP 200: response.error != null → treat as logical failure.
+        HTTP 503: { 'retry_after': 5 } → wait 5 seconds then retry.""",
         mcp_tool=True,
         tags=["elitea_core/applications"],
         request_body=ApplicationPredictRequest,

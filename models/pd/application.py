@@ -348,6 +348,40 @@ class ApplicationUpdateModel(ApplicationArgsForwardingModel):
 
 
 class ApplicationCreateModel(ApplicationBaseModel, ApplicationArgsForwardingModel):
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "summary": "Create classic agent",
+                    "value": {
+                        "name": "Code Reviewer",
+                        "owner_id": 42,
+                        "versions": [{
+                            "name": "base",
+                            "agent_type": "openai",
+                            "llm_settings": {"model_name": "gpt-5-mini", "temperature": 0.2},
+                            "instructions": "You are a senior code review engineer."
+                        }]
+                    }
+                },
+                {
+                    "summary": "Create pipeline",
+                    "value": {
+                        "name": "CI Pipeline",
+                        "owner_id": 42,
+                        "versions": [{
+                            "name": "base",
+                            "agent_type": "pipeline",
+                            "llm_settings": {"model_name": "gpt-5-mini"},
+                            "instructions": "nodes:\n  - id: start\n    type: llm\nedges:\n  - from: start\n    to: END"
+                        }]
+                    }
+                }
+            ]
+        }
+    )
+
     name: Optional[str] = Field(None, min_length=1, max_length=32)
     versions: List[ApplicationVersionBaseCreateModel]
 

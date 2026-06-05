@@ -35,10 +35,25 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
     """ API """
 
     @register_openapi(
-        name="LLM Predict",
-        description="Send a message to an LLM model and get a prediction. "
-                    "Automatically uses project's default model if not specified. "
-                    "Supports both nested (llm_settings) and flat (model_name at top-level) payload formats.",
+        name="Send a message directly to an LLM model without invoking any agent or pipeline — stateless, no tools, no version ID required, uses project default model if none specified",
+        description="Send a message directly to an LLM model without invoking any agent or pipeline — stateless, no tools, no version ID required, uses project default model if none specified.",
+        mcp_description="""
+        USE for raw, stateless LLM inference: testing prompts, simple Q&A, translation, formatting. Use when no agent tools, memory, or pipeline execution are needed.
+        DO NOT USE when you need tools, memory, or pipeline execution → use execute_agent (POST /predict/{version_id}).
+        
+        Key difference from execute_agent: no version_id, no tools, no graph, stateless.
+        
+        Examples:
+        1. Simple call (project default model):
+        { 'user_input': 'What is the capital of France?' }
+        
+        2. Specific model + system prompt:
+        { 'user_input': 'Translate: Hello', 'instructions': 'Return translation only.', 'llm_settings': { 'model_name': 'gpt-4o', 'temperature': 0.0 } }
+        
+        3. Multi-turn with history:
+        { 'user_input': 'What was my last question?', 'chat_history': [{ 'role': 'user', 'content': 'What is 2+2?' }, { 'role': 'assistant', 'content': '4' }] }
+        
+        4. Async call: { 'user_input': 'Write a long essay...', 'await_task_timeout': 0 }""",
         mcp_tool=True,
         tags=["elitea_core/applications"],
         request_body=LLMPredictRequest,
