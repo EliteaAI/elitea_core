@@ -218,6 +218,11 @@ def execute_pipeline_via_predict_sio(
         await_task_timeout=-1,  # Don't wait for completion
         user_id=user_id,
         is_system_user=True,
+        # Scheduled & webhook-triggered runs have no live UI consumer; suppress
+        # streaming/UI-only events. DB persistence (full/partial_message) and
+        # index/HITL/error state events are preserved. Redundant with the
+        # sid-is-None auto-derive (sid=None here), but kept to document intent.
+        non_interactive=True,
     )
 
     log.debug(

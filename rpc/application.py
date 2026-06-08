@@ -97,9 +97,16 @@ class RPC:
                     user_id: int = None,
                     is_system_user: bool = False,
                     return_chat_history: bool = False,
+                    non_interactive: Optional[bool] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
+        # A live UI consumer only exists when a socket joined the event room,
+        # which requires a real sid. No sid => nobody is listening => suppress
+        # UI-only events regardless of whether the caller blocks for the result.
+        # Callers may still force the flag either way.
+        if non_interactive is None:
+            non_interactive = sid is None
         data['message_id'] = data.get('message_id', str(uuid4()))
         data['stream_id'] = data.get('stream_id', data['message_id'])
         try:
@@ -238,7 +245,8 @@ class RPC:
                 "question_id": start_event_content.get('question_id') if start_event_content else None,
                 "sio_event": f'{sio_event}',  # enums like this
                 'chat_project_id': chat_project_id,
-                'user_context': serialize(user_context)
+                'user_context': serialize(user_context),
+                'non_interactive': non_interactive,
             }),
         )
 
@@ -283,6 +291,7 @@ class RPC:
                         user_id: Optional[int] = None,
                         is_system_user: bool = False,
                         return_chat_history: bool = False,
+                        non_interactive: Optional[bool] = None,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
@@ -311,6 +320,11 @@ class RPC:
 
         # Determine call type and validate arguments
         is_blocking = await_task_timeout > 0
+        # A live UI consumer only exists when a socket joined the event room,
+        # which requires a real sid. No sid => nobody is listening => suppress
+        # UI-only events regardless of whether the caller blocks for the result.
+        if non_interactive is None:
+            non_interactive = sid is None
 
         # Validate argument combinations
         if is_blocking and sid:
@@ -405,6 +419,7 @@ class RPC:
                     "user_id": user_id,
                     "project_id": parsed.project_id,
                 },  # NOTE: needed for external providers to work!
+                'non_interactive': non_interactive,
             }),
         )
 
