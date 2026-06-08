@@ -300,6 +300,8 @@ class McpService:
         # Check if this is a resource-scoped request
         if self.session.resource_type and self.session.resource_id:
             tools = self.__get_scoped_tools()
+        elif self.session.entity_category:
+            tools = self.__get_category_tools(self.session.entity_category)
         else:
             tools = self.__get_all_tools()
         #
@@ -323,6 +325,31 @@ class McpService:
             tools = self.__get_toolkit_tools(self.session.resource_id)
         elif self.session.resource_type == "application":
             tools = self.__get_application_tools(self.session.resource_id)
+
+        return tools
+
+    def __get_category_tools(self, openapi_tag: str) -> list[types.Tool]:
+        """Get tools filtered by swagger section tag (e.g. elitea_core/applications).
+        For elitea_core/applications, also includes agents tagged with 'mcp'.
+        For elitea_core/toolkits, also includes toolkit instance tools marked available_by_mcp.
+        """
+        tools = []
+        known_tool_names = set()
+
+        if openapi_tag:
+            for api_tool in openapi_registry.get_mcp_api_tools(filter_tags=[openapi_tag]):
+                tool_name = _build_agent_identifier(api_tool.get("value", api_tool.get("label", "")))
+                if tool_name in known_tool_names:
+                    log.warning("Skipping API tool with colliding name: %s -> %s", api_tool.get("label"), tool_name)
+                    continue
+                known_tool_names.add(tool_name)
+                tools.append(
+                    types.Tool(
+                        name=tool_name,
+                        description=api_tool.get("description", ""),
+                        inputSchema=api_tool.get("args_schema", {})
+                    )
+                )
 
         return tools
 

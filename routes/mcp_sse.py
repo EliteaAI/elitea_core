@@ -4,7 +4,7 @@ import flask
 from flask import Response
 from pylon.core.tools import web, log
 
-from tools import context, auth, this
+from tools import context, auth, this, openapi_registry
 
 from ..models.enums.mappings import ENTITY_TYPE_MAP
 from ..utils.mcp_handler import CommunicationsHandler
@@ -33,15 +33,17 @@ def _check_project_access(project_id: int) -> tuple[dict, int] | None:
 
 
 def _handle_mcp_request(
-        project_id: int, resource_type: str = None, resource_id: int = None
+        project_id: int, resource_type: str = None, resource_id: int = None,
+        entity_category: str = None
 ) -> Response:
     """
-    Common handler for MCP requests (both scoped and global).
+    Common handler for MCP requests (global, category-filtered, and resource-scoped).
 
     Args:
         project_id: Project ID
         resource_type: Optional resource type ('toolkit', 'application', etc.)
         resource_id: Optional resource ID (version_id for applications, id for toolkits)
+        entity_category: Optional category filter ('applications', 'toolkits', 'api')
     """
     # Check if MCP exposure is enabled
     mcp_error = _check_mcp_enabled()
@@ -65,7 +67,8 @@ def _handle_mcp_request(
         log.debug("Starting tool call in SSE mode")
         stream, error_response, session = handler.create_session_and_stream(
             project_id, return_session=True, one_time=True,
-            resource_type=resource_type, resource_id=resource_id
+            resource_type=resource_type, resource_id=resource_id,
+            entity_category=entity_category
         )
         if error_response:
             return error_response
@@ -84,7 +87,8 @@ def _handle_mcp_request(
     else:
         # HTTP mode
         session, error_response = handler.create_http_session(
-            project_id, resource_type=resource_type, resource_id=resource_id
+            project_id, resource_type=resource_type, resource_id=resource_id,
+            entity_category=entity_category
         )
         if error_response:
             return error_response
@@ -96,6 +100,14 @@ class Route:
     def client_streamable_http(self, project_id: int) -> Response:
         """Global MCP endpoint - returns all available tools"""
         return _handle_mcp_request(project_id)
+
+    @web.route('/<int:project_id>/mcp/<path:openapi_tag>', methods=['GET', 'POST'])
+    def client_tag_filtered_streamable_http(self, project_id: int, openapi_tag: str) -> Response:
+        """Tag-filtered MCP endpoint — openapi_tag is the swagger section name (e.g. elitea_core/applications)."""
+        known_tags = openapi_registry.get_known_mcp_tags()
+        if openapi_tag not in known_tags:
+            return {"error": f"Unknown tag: '{openapi_tag}'. Valid tags: {sorted(known_tags)}"}, 400
+        return _handle_mcp_request(project_id, entity_category=openapi_tag)
 
     @web.route('/<int:project_id>/mcp/<string:entity>/<int:entity_version_id>', methods=['GET', 'POST'])
     def client_parametrized_streamable_http(self, project_id: int, entity: str, entity_version_id: int) -> Response:
