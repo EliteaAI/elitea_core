@@ -150,7 +150,7 @@ class Event:
                     if reply_to:
                         response_payload['reply_to_uuid'] = str(reply_to.uuid)
                         if reply_to.message_items:
-                            response_payload['reply_to_first_message_item_uuid'] = reply_to.message_items[0].uuid
+                            response_payload['reply_to_first_message_item_uuid'] = str(reply_to.message_items[0].uuid)
                 if msg_group.conversation and msg_group.conversation.meta:
                     context_analytics = msg_group.conversation.meta.get('context_analytics')
                     if context_analytics:
