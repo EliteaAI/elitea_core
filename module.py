@@ -76,6 +76,12 @@ class Module(module.ModuleModel):
             query_wait=5,
             watcher_max_wait=3,
         )
+        # Task callback state (used by task_status_changed in methods/task_callbacks.py).
+        # Must be initialized here in __init__ — the callback is registered in init() via
+        # task_node.subscribe_to_task_statuses, which can fire before ready() runs.
+        self.callback_tasks = {}
+        self.not_starting_task_event = Event()
+        self.not_starting_task_event.set()
         # logs in-memory cache
         self.task_logs = {}
         #
@@ -377,11 +383,6 @@ class Module(module.ModuleModel):
 
         # Load providers and register RPC method
         self.load_providers()
-
-        # Task callback state (used by task_status_changed in methods/task_callbacks.py)
-        self.callback_tasks = {}
-        self.not_starting_task_event = Event()
-        self.not_starting_task_event.set()
 
         # Register provider RPC method on worker client
         try:
