@@ -29,7 +29,22 @@ from ...utils.exceptions import PoolSaturationError
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Messages",
-        description="Get messages from a conversation with filtering and pagination.",
+        description="Retrieve a paginated list of message groups from a conversation with optional full-text search",
+        mcp_description="""
+        USE to retrieve the message history of a conversation for display, analysis, or context-building.
+
+        DO NOT USE to get a single known message by UUID → use get_message.
+        DO NOT USE to get conversation metadata alongside messages → use get_conversation for a combined response.
+
+        Pagination guidance: use sort_order=asc + paginate with offset to read messages chronologically. Use
+        sort_order=desc to get the most recent messages first.
+
+        Examples:
+        1. Get latest 10 messages: GET .../messages/prompt_lib/42/7 (defaults apply)
+        2. Get chronological history page 2: GET ...?sort_order=asc&limit=20&offset=20
+        3. Search for a term: GET ...?query=authentication+error
+        4. Check for streaming messages: filter response rows where is_streaming == true.
+        """,
         parameters=[
             {"name": "query", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Search query for filtering messages"},
             {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 10}},

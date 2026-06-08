@@ -18,7 +18,20 @@ from ...utils.constants import PROMPT_LIB_MODE
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="List Conversations",
-        description="Get list of conversations with filtering, sorting, and pagination.",
+        description="List conversations in a project with filtering by source, participant, entity name, and free-text search — paginated",
+        mcp_description="""
+        USE to browse or search conversations in a project, and to find a conversation_id or conversation_uuid
+        before calling other endpoints.
+
+        DO NOT USE for folder-organized conversation browsing → use list_folders_and_conversations instead.
+        DO NOT USE to get a single conversation with its messages → use get_conversation.
+
+        Examples:
+        1. List user's recent conversations: GET .../conversations/prompt_lib/42?limit=20
+        2. Search by name: GET ...?query=sprint+review
+        3. Filter by participant (agent): GET ...?participant_id=15
+        4. Support conversations: GET ...?source=support
+        """,
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,
@@ -61,7 +74,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create Conversation",
-        description="Create a new conversation for chat interactions.",
+        description="Create a new chat conversation with optional initial participants, instructions, and metadata",
+        mcp_description="""
+        USE to start a new chat session — either a blank conversation or one pre-configured with specific agents,
+        toolkits, or LLMs.
+
+        DO NOT USE if a conversation already exists and you want to add a participant → use add_participants.
+        DO NOT USE to send a message → use send_message after creating the conversation.
+
+        Participant types you can add:
+        - Agent/pipeline: { 'entity_name': 'application', 'entity_meta': { 'id': 7, 'project_id': 42 } }
+        - LLM: { 'entity_name': 'llm', 'entity_meta': { 'model_name': 'gpt-4o' } }
+        - Toolkit: { 'entity_name': 'toolkit', 'entity_meta': { 'id': 5, 'project_id': 42 } }
+
+        Examples:
+        1. Blank conversation: { 'name': 'My Chat', 'is_private': true }
+        2. With agent pre-added: { 'name': 'Agent Chat', 'is_private': true, 'participants': [{ 'entity_name': 'application', 'entity_meta': { 'id': 7, 'project_id': 42 } }] }
+        """,
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,

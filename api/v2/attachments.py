@@ -42,7 +42,24 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create Attachments",
-        description="Upload file attachments to a conversation.",
+        description="Upload one or more file attachments to a conversation — supports both single upload and resumable chunked upload",
+        mcp_description="""
+        USE to attach files (documents, images, code) to a conversation before or during a chat session, so the
+        AI participant can reference them in its response.
+
+        DO NOT USE when you only want to send a text message → use send_message instead. Files must be attached
+        to a conversation before referencing them in a message.
+
+        Upload modes:
+        - Small files: send file in multipart/form-data directly.
+        - Large files: split into chunks and send each chunk with file_id, chunk_index, total_chunks, file_name.
+          All chunks must share the same file_id.
+
+        Examples:
+        1. Upload a single file: multipart POST with file=<file_data> → returns file metadata.
+        2. Resume large file upload: send 3 chunks with file_id='abc', chunk_index=0/1/2, total_chunks=3. Last chunk triggers assembly.
+        3. Overwrite existing: add overwrite_attachments=1 to form data.
+        """,
         tags=["elitea_core/chat"],
         mcp_tool=True,
         available_to_users=True,

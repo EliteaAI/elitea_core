@@ -16,7 +16,22 @@ from ...models.message_items.attachment import AttachmentMessageItem
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Message",
-        description="Get single message details by UUID.",
+        description="Retrieve the full details of a single message group by its string UUID — includes all message items (text, canvases, attachments)",
+        mcp_description="""
+        USE when you have a specific message uuid and need its full content and metadata — e.g., to check if
+        streaming is complete or to read message items.
+
+        DO NOT USE to list all messages in a conversation → use get_messages.
+        DO NOT USE with a numeric ID — this endpoint requires the string UUID of the message group.
+
+        Key field: is_streaming: true means the AI response is still being generated. Poll this endpoint until
+        is_streaming: false for complete content.
+
+        Examples:
+        1. Get message by UUID: GET .../message/prompt_lib/42/550e8400-e29b-41d4-a716-446655440000
+        2. Check streaming status: if response.is_streaming == true → wait and retry.
+        """,
+        mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,
     )

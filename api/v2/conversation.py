@@ -8,7 +8,20 @@ from ...utils.constants import PROMPT_LIB_MODE
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Conversation",
-        description="Get detailed information about a specific conversation.",
+        description="Retrieve full details of a specific conversation including participants and paginated message history",
+        mcp_description="""
+        USE to retrieve the full conversation record including its participants and recent messages in a single call.
+
+        DO NOT USE when you only need the message list without conversation metadata → use get_messages.
+        DO NOT USE to list all conversations → use list_conversations.
+
+        Key distinction: this returns both the conversation record AND messages. get_messages returns only the
+        message list with richer filtering.
+
+        Examples:
+        1. Get conversation 42 with last 20 messages: GET .../conversation/prompt_lib/1/42?messages_limit=20&sort_order=desc
+        2. Get conversation with messages in chronological order: ?sort_order=acs (default).
+        """,
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,
@@ -49,7 +62,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Update Conversation",
-        description="Update a conversation's name, instructions, or other properties.",
+        description="Update a conversation's name, instructions, privacy, folder assignment, or metadata",
+        mcp_description="""
+        USE to rename a conversation, add/change its system instructions, move it into a folder, or change its
+        privacy setting.
+
+        DO NOT USE to send messages → use send_message.
+        DO NOT USE to change participant-level LLM settings → use configure_participant.
+
+        Folder movement: to move a conversation into folder 5: { 'folder_id': 5 }. To remove from folder:
+        { 'folder_id': null }.
+
+        Examples:
+        1. Rename: { 'name': 'Sprint 12 Review' }
+        2. Set system instructions: { 'instructions': 'Always respond in bullet points.' }
+        3. Make public: { 'is_private': false } (not allowed in public project).
+        4. Move to folder: { 'folder_id': 3 }
+        """,
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,

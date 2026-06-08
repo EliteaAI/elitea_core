@@ -117,7 +117,24 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Configure Participant",
-        description="Configure participant settings (LLM settings, etc.) in a conversation.",
+        description="Configure per-conversation settings for a participant — LLM model override, agent version, variables, and chat history mode",
+        mcp_description="""
+        USE to change which version of an agent is active in a conversation, override LLM model parameters for a
+        participant, or switch chat history mode.
+
+        DO NOT USE to add a new participant → use add_participants.
+        DO NOT USE to change application-level agent configuration → use update_version.
+
+        Critical restriction: LLM settings override only works for published agents from agent studio. Attempting
+        to override LLM settings for a private project agent returns HTTP 400.
+
+        Examples:
+        1. Switch agent to version 202: { 'version_id': 202 }
+        2. Override LLM temperature for an LLM participant: { 'llm_settings': { 'model_name': 'gpt-4o', 'temperature': 0.1 } }
+        3. Set chat history to context-managed mode: { 'chat_history_template': 'context_managed' }
+        4. Override agent variables: { 'version_id': 101, 'variables': [{ 'name': 'lang', 'value': 'en' }] }
+        5. Error: overriding LLM on private agent → HTTP 400 'LLM settings override is only allowed for published agents from agent studio'
+        """,
         tags=["elitea_core/chat"],
         mcp_tool=True,
         available_to_users=True,

@@ -76,8 +76,28 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="List Folders and Conversations",
-        description="List folders and conversations with filtering/grouping options.",
+        description="List conversation folders and their conversations with date-group filtering, folder-level pagination, and optional grouped sidebar view",
+        mcp_description="""
+        USE to render the conversation sidebar (grouped mode), to list conversations inside a specific folder, or
+        to paginate conversations by date group.
+
+        DO NOT USE for a flat conversation list without folder structure → use list_conversations instead.
+        DO NOT USE to get folder details only without conversations — this endpoint always returns conversations too.
+
+        Mode selection guide:
+        - UI sidebar rendering: add grouped=true
+        - Folder contents: add folder_id=<N>
+        - Date-filtered view: add date_group=today / this_week / older
+        - Simple flat list: omit all special params
+
+        Examples:
+        1. Full sidebar view: GET .../folder/prompt_lib/42?grouped=true
+        2. Contents of folder 5: GET .../folder/prompt_lib/42?folder_id=5&limit=20
+        3. Only today's conversations: GET .../folder/prompt_lib/42?date_group=today
+        4. Search conversations in all folders: GET .../folder/prompt_lib/42?query=sprint
+        """,
         tags=["elitea_core/chat"],
+        mcp_tool=True,
         parameters=[
             {"name": "query", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Search query."},
             {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Pagination limit."},
@@ -514,8 +534,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create Folder",
-        description="Create a new conversation folder.",
+        description="Create a new named folder to organize conversations in the sidebar",
+        mcp_description="""
+        USE to create a new folder for organizing conversations.
+
+        DO NOT USE to move a conversation into a folder → use update_conversation with folder_id.
+        DO NOT USE to rename or reorder an existing folder → use update_folder.
+
+        Examples:
+        1. Create folder at top: { 'name': 'Sprint 12' } → placed at top automatically.
+        2. Create folder at specific position: { 'name': 'Archive', 'position': 1000 } → placed at position 1000.
+        """,
         tags=["elitea_core/chat"],
+        mcp_tool=True,
         request_body=FolderCreate,
         available_to_users=True,
     )
@@ -559,8 +590,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Update Folder",
-        description="Update folder data including position.",
+        description="Update a folder's name or reorder it in the sidebar using position with automatic collision detection and rebalancing",
+        mcp_description="""
+        USE to rename a folder or reorder it in the sidebar (e.g., after a drag-and-drop operation in the UI).
+
+        DO NOT USE to delete a folder → use the folder DELETE endpoint.
+        DO NOT USE to move conversations between folders → use update_conversation with folder_id.
+
+        Reorder guidance: provide both position and neighbor_above_id/neighbor_below_id when available for most
+        accurate placement. The backend will rebalance all positions automatically if needed.
+
+        Examples:
+        1. Rename: { 'name': 'Q3 Reviews' }
+        2. Move to top (drag-and-drop): { 'position': 9999999, 'neighbor_above_id': null, 'neighbor_below_id': 3 }
+        3. Move between two folders: { 'position': 500, 'neighbor_above_id': 7, 'neighbor_below_id': 2 }
+        """,
         tags=["elitea_core/chat"],
+        mcp_tool=True,
         request_body=FolderUpdate,
         available_to_users=True,
     )

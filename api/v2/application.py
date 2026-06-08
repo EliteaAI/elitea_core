@@ -21,21 +21,24 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Retrieve full metadata and active-version configuration of a specific agent or pipeline by name-based version lookup",
         description="Returns the full details of the specified agent or pipeline. If version_name is provided, that specific version is returned. If omitted, the active default version is returned.",
         mcp_description="""
-        USE when you know the application_id and want full metadata + configuration. Primary 'read one' tool for agents and pipelines.
+        USE when you know the application_id and want full metadata + configuration. Primary 'read one' tool for
+        agents and pipelines.
+
         DO NOT USE when:
         - You only have a numeric version_id → use get_version_details
         - You need a list of agents → use list_agents
         - You want to run an agent → use execute_agent
-        
+
         Agent vs. Pipeline in response:
         Check version_details.agent_type.
         'pipeline' → parse instructions as YAML to see graph.
         Other values → instructions is a system prompt.
-        
+
         Examples:
         1. Get default version of agent 7: { project_id: 42, application_id: 7 } → returns default version config.
         2. Get named version of pipeline 15: { project_id: 42, application_id: 15, version_name: 'v2' } → returns version 'v2' with YAML graph.
-        3. Detect type: if response.version_details.agent_type == 'pipeline' → parse instructions as YAML.""",
+        3. Detect type: if response.version_details.agent_type == 'pipeline' → parse instructions as YAML.
+        """,
         mcp_tool=True,
         tags=["elitea_core/applications"],
         available_to_users=True,
@@ -85,23 +88,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Update an agent's or pipeline's top-level metadata and optionally its active version configuration in a single atomic operation",
         description="Updates the agent or pipeline metadata and its active version in a single request. The version referenced in the request body must match the agent or pipeline in the path.",
-        mcp_description="""USE when you want to rename an agent/pipeline, change description, or update application + version together in one call.
+        mcp_description="""
+        USE when you want to rename an agent/pipeline, change description, or update application + version
+        together in one call.
+
         DO NOT USE when:
         - Only updating version config → use update_version
         - Target version is published or embedded → will fail
         - Creating a new version → use create_version
-        
+
         Agent update example:
         { 'version': { 'id': 101, 'application_id': 7, 'instructions': 'New system prompt...', 'llm_settings': { 'model_name': 'gpt-4o', 'temperature': 0.2 } } }
-        
+
         Pipeline update example:
         { 'version': { 'id': 202, 'application_id': 15, 'agent_type': 'pipeline', 'instructions': 'nodes:\n  - id: start\n    type: llm\n...' } }
         Omit pipeline_settings entirely if not changing the trigger.
-        
+
         Rename only:
         { 'name': 'My Renamed Agent' } (no version field needed)
-        
-        Error: HTTP 400 'Version is published' → unpublish first, then update.""",
+
+        Error: HTTP 400 'Version is published' → unpublish first, then update.
+        """,
         request_body=ApplicationUpdateModel,
         tags=["elitea_core/applications"],
         available_to_users=True,

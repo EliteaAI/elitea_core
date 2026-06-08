@@ -10,6 +10,25 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Participant",
         description="Get details of a specific participant.",
+        mcp_description="""
+        USE to inspect a participant's current configuration in a conversation — including which agent version is 
+        active, LLM settings overrides, and entity metadata.
+        
+        DO NOT USE to list all participants in a conversation → that information is included in get_conversation. 
+        DO NOT USE to update participant settings → use configure_participant.
+        
+        Participant type guide (entity_name):
+        - 'application' → an agent or pipeline; entity_meta.id = application_id
+        - 'llm' → a bare LLM; entity_meta.model_name = model identifier
+        - 'user' → a human user; entity_meta.id = user_id
+        - 'toolkit' → a toolkit; entity_meta.id = toolkit_id
+        - 'datasource' → a datasource; entity_meta.id = datasource_id
+        
+        Examples:
+        1. Get agent participant details: GET .../participant/prompt_lib/42/7/15 → check entity_settings.version_id 
+        to see which version is active.
+        2. Check LLM override in use: inspect entity_settings.llm_settings in the response.
+        """,
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,
