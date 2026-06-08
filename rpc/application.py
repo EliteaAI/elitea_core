@@ -162,6 +162,7 @@ class RPC:
                 parsed_db = ApplicationChatRequest.from_orm(
                     application_version
                 )
+                parsed_db.application_name = application_version.application.name if application_version.application else None
 
             parsed: ApplicationChatRequest = parsed_db.merge_update(parsed)
 

@@ -38,6 +38,8 @@ class ContextStrategyModel(BaseModel):
 
 class ApplicationChatRequest(MergeUpdateBase):
     application_id: Optional[int] = None
+    name: Optional[str] = None
+    application_name: Optional[str] = None
     user_input: Optional[str | list] = None
     hitl_resume: Optional[bool] = False
     hitl_action: Optional[str] = None

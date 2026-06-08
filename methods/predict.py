@@ -88,6 +88,7 @@ class Method:
             application_version_pd = ApplicationChatRequest.from_orm(
                 application_version
             )
+            application_version_pd.application_name = application_version.application.name if application_version.application else None
 
         parsed = application_version_pd.merge_update(parsed)
 
