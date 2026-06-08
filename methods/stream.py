@@ -85,6 +85,11 @@ class Method:
             )
 
         room = get_event_room(sio_event, stream_id)
+        # Skip the emit if no client has joined this room — avoids serializing and
+        # pushing the payload for non-interactive flows (scheduled pipelines,
+        # webhooks, blocking REST calls) where the room always has zero subscribers.
+        if not any(self.context.sio.manager.get_participants('/', room)):
+            return
         self.context.sio.emit(
             event=sio_event,
             data=payload,
