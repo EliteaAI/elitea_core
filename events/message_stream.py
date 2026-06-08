@@ -143,8 +143,12 @@ class Event:
 
                 room = get_chat_room(msg_group.conversation.uuid)
                 response_payload = serialize(MessageGroupDetail.model_validate(msg_group))
-                if msg_group.reply_to:
-                    response_payload['reply_to_uuid'] = str(msg_group.reply_to.uuid)
+                if msg_group.reply_to_id:
+                    reply_to = session.query(ConversationMessageGroup).filter(
+                        ConversationMessageGroup.id == msg_group.reply_to_id
+                    ).first()
+                    if reply_to:
+                        response_payload['reply_to_uuid'] = str(reply_to.uuid)
                 if msg_group.conversation and msg_group.conversation.meta:
                     context_analytics = msg_group.conversation.meta.get('context_analytics')
                     if context_analytics:
