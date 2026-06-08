@@ -9,6 +9,7 @@ from typing import Optional, Union
 from .llm_settings import get_default_max_tokens
 from ..models.elitea_tools import EliteATool
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
+from ..models.project_context import ProjectContext
 from ..models.pd.tool import ToolDetails
 from ..utils.application_tools import expand_toolkit_settings
 
@@ -292,6 +293,26 @@ def generate_predict_payload(
                 llm_settings['temperature'] = None
             if llm_settings['max_tokens'] == -1:
                 llm_settings['max_tokens'] = get_default_max_tokens(supports_reasoning)
+
+    # Inject project context into instructions (runtime-only, never persisted)
+    try:
+        with db.get_session(parsed.project_id) as _ctx_session:
+            _ctx = _ctx_session.query(ProjectContext).first()
+        if _ctx and _ctx.enabled and _ctx.content:
+            if isinstance(parsed, ApplicationChatRequest):
+                _vd = payload['application'].get('version_details') or {}
+                _ignore = (_vd.get('meta') or {}).get('ignore_project_context', False)
+                if not _ignore:
+                    _vd['instructions'] = (
+                        f"# Project Context\n\n{_ctx.content}\n\n---\n\n{_vd.get('instructions') or ''}"
+                    )
+            else:
+                _existing = payload['application'].get('instructions') or ''
+                payload['application']['instructions'] = (
+                    f"# Project Context\n\n{_ctx.content}\n\n---\n\n{_existing}"
+                )
+    except Exception:
+        log.exception('Failed to inject project context')
 
     return serialize(payload)
 

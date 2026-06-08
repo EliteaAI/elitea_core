@@ -521,7 +521,7 @@ class Module(module.ModuleModel):
         # Publishing guardrail (environment-wide block)
         self._init_publishing_guardrail()
 
-        from .models import all, folder, message_group, participants
+        from .models import all, folder, message_group, participants, project_context
         from .models.message_items import base, text, canvas, context
 
         self.thread = Thread(
