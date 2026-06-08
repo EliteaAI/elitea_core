@@ -114,6 +114,9 @@ class Method:
                 "task_name": "indexer_agent",
                 "project_id": parsed.project_id,
                 'user_context': serialize(user_context),
+                # Pure REST predict (webhook / async / blocking API) — never has a
+                # Socket.IO consumer, so suppress streaming/UI-only events.
+                'non_interactive': True,
             }
         )
 
