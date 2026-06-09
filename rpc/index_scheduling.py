@@ -204,7 +204,7 @@ def _launch_due_index(task_node, item: dict, yield_to_hub=lambda: None):
                 running_state = index.cmetadata.get('state')
 
                 if running_state and running_state.lower() != 'in_progress':
-                    log.debug(
+                    log.info(
                         f"Triggering scheduled indexing for project {project_id}, "
                         f"toolkit {toolkit.id}, index {index_meta_id}, "
                         f"user {user_id} with cron '{user_config.get('cron')}'"
@@ -243,11 +243,11 @@ def _launch_due_index(task_node, item: dict, yield_to_hub=lambda: None):
                     project_session.commit()
 
                     launch_elapsed_ms = int((time.monotonic() - launch_start) * 1000)
-                    log.debug(
-                        f"Updated last_run for project {project_id}, "
-                        f"toolkit {toolkit.id}, index {index_meta_id}, "
-                        f"user {user_id} to {current_time}, "
-                        f"took={launch_elapsed_ms}ms"
+                    log.info(
+                        f"Successfully triggered scheduled indexing: "
+                        f"project={project_id}, toolkit={toolkit.id}, "
+                        f"index={index_meta_id}, user={user_id}, "
+                        f"last_run={current_time}, took={launch_elapsed_ms}ms"
                     )
     except Exception as e:
         launch_elapsed_ms = int((time.monotonic() - launch_start) * 1000)
