@@ -94,6 +94,9 @@ class Method:
             "project_id": project_id,
         }
 
+        project = self.context.rpc_manager.call.project_get_by_id(project_id=project_id)
+        project_name = project.get("name") if project else None
+
         task_id = self.task_node.start_task(
             "indexer_agent",
             args=[None, None],
@@ -102,6 +105,7 @@ class Method:
             meta={
                 "task_name": "indexer_agent",
                 "project_id": project_id,
+                "project_name": project_name,
                 "user_context": serialize(user_context),
             }
         )

@@ -238,6 +238,9 @@ class RPC:
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
+        project = self.context.rpc_manager.call.project_get_by_id(project_id=parsed.project_id)
+        project_name = project.get("name") if project else None
+
         task_id = self.task_node.start_task(
             "indexer_agent",
             args=[parsed.stream_id, parsed.message_id],
@@ -246,6 +249,7 @@ class RPC:
             meta=add_trace_context_to_meta({
                 "task_name": "indexer_agent",
                 "project_id": parsed.project_id,
+                "project_name": project_name,
                 "message_id": parsed.message_id,
                 "question_id": start_event_content.get('question_id') if start_event_content else None,
                 "sio_event": f'{sio_event}',  # enums like this
