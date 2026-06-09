@@ -126,6 +126,7 @@ class RPC:
             return  # FIXME: need some proper error?
 
         if parsed.version_id:
+            application_name = None
             with db.get_session(parsed.project_id) as session:
                 application_version: ApplicationVersion = session.query(ApplicationVersion).get(parsed.version_id)
                 if not application_version:
@@ -162,9 +163,12 @@ class RPC:
                 parsed_db = ApplicationChatRequest.from_orm(
                     application_version
                 )
-                parsed_db.application_name = application_version.application.name if application_version.application else None
+                application_name = application_version.application.name if application_version.application else None
 
             parsed: ApplicationChatRequest = parsed_db.merge_update(parsed)
+
+            # Set application_name AFTER merge to prevent client override (security)
+            parsed.application_name = application_name
 
         # TODO: fragile code: app itself and toolkits may be in different projects
         # in generated version_details payload
