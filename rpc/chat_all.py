@@ -471,9 +471,7 @@ def generate_application_version_payload(
         unsecret=True
     )
     if 'error' in app_version_details:
-        raise PayloadGenerationError(
-            f"Failed to get application version={entity_settings.version_id} details expanded: {app_version_details['error']}"
-        )
+        raise PayloadGenerationError(app_version_details['error'])
 
     # Block prediction for unpublished or embedded-only versions
     version_status = app_version_details.get('status', '')
