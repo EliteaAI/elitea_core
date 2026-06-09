@@ -38,6 +38,8 @@ class ContextStrategyModel(BaseModel):
 
 class ApplicationChatRequest(MergeUpdateBase):
     application_id: Optional[int] = None
+    version_name: Optional[str] = Field(default=None, alias="name", description="Version name (e.g., 'v1.0', 'base')")
+    application_name: Optional[str] = Field(default=None, description="Agent/Application display name for observability traces")
     user_input: Optional[str | list] = None
     hitl_resume: Optional[bool] = False
     hitl_action: Optional[str] = None

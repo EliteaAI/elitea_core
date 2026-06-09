@@ -18,6 +18,21 @@ class PredictPayloadError(Exception):
     pass
 
 
+def resolve_application_name(parsed: ApplicationChatRequest) -> Optional[str]:
+    """Resolve application display name for downstream observability payloads.
+
+    Returns formatted string: "Agent Name (version)" if both present,
+    otherwise returns whichever is available.
+    """
+    application_name = parsed.application_name
+    version_name = parsed.version_name
+
+    if application_name and version_name:
+        return f'{application_name} ({version_name})'
+
+    return application_name or version_name
+
+
 def get_system_user_token(project_id: int, name: str = 'api', create_if_not_exists: bool = True) -> Optional[str]:
     system_user = rpc_tools.RpcMixin().rpc.timeout(
         2
@@ -255,6 +270,7 @@ def generate_predict_payload(
         #
         payload['application'] = {
             "id": parsed.application_id,
+            "name": resolve_application_name(parsed),
             "version_id": parsed.version_id,
             "variables": payload_variables,
             "version_details": parsed.version_details,
