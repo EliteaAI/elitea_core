@@ -9,7 +9,7 @@ from ...models.message_group import ConversationMessageGroup
 from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
-from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload
+from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError
 from ...utils.chat_history import generate_chat_history
 from ...models.enums.all import ChatHistoryRole
 from ...utils.constants import PROMPT_LIB_MODE
@@ -69,7 +69,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 predict_payload = SioPredictModel.model_validate(raw_predict_payload)
             except ValidationError as e:
                 return {'error': 'Invalid prediction payload', 'details': e.errors()}, 400
-            regenerate_payload: dict = generate_payload(session, msg_group=reply_msg, predict_payload=predict_payload)
+
+            try:
+                regenerate_payload: dict = generate_payload(session, msg_group=reply_msg, predict_payload=predict_payload)
+            except PayloadGenerationError as e:
+                return {'error': str(e)}, 400
+
             regenerate_payload['is_regenerate'] = True
 
             chat_history_groups, summaries, preserve_instructions = prepare_conversation_history(
