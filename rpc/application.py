@@ -350,7 +350,7 @@ class RPC:
                     message_id=data.get("message_id")
                 )
             else:
-                raise ValidationError(e.errors())
+                raise
 
         if sid and not auth.is_sio_user_in_project(sid, parsed.project_id):
             log.warning("Sid %s is not in project %s", sid, parsed.project_id)

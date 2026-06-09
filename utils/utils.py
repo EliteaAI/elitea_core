@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import re
 from functools import wraps
 from typing import Callable, List, Set, Generator, Optional
 
@@ -227,3 +228,14 @@ def mask_secret(secret: str, visible_chars: int = 4) -> str:
     if len(secret) >= visible_chars:
         return '*' * (len(secret) - visible_chars) + secret[-visible_chars:]
     return '*' * len(secret)
+
+def extract_json_from_text(text: str) -> str:
+    """Extract a JSON object from text, stripping markdown fences if present."""
+    match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if match:
+        return match.group(1)
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start != -1 and end > start:
+        return text[start:end]
+    return text
