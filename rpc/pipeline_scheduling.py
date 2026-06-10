@@ -6,6 +6,7 @@ schedule triggers. This RPC is called periodically (every minute) by the
 scheduling plugin to check if any pipelines need to be executed.
 """
 import threading
+import time
 from datetime import datetime, UTC
 
 from pylon.core.tools import web, log
@@ -123,9 +124,10 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
         )
         return
 
+    trigger_started = time.monotonic()
     log.info(
-        f"Triggering scheduled pipeline: project={project_id}, "
-        f"version_id={version.id}, cron={schedule.cron}"
+        f"Pipeline trigger started at {datetime.now(UTC).isoformat()}: "
+        f"project={project_id}, version_id={version.id}, cron={schedule.cron}"
     )
 
     # Execute the pipeline
@@ -143,8 +145,9 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
         session.commit()
 
         log.info(
-            f"Successfully triggered scheduled pipeline: project={project_id}, "
-            f"version_id={version.id}, last_run={current_time}"
+            f"Pipeline trigger finished at {current_time}: "
+            f"project={project_id}, version_id={version.id}, "
+            f"last_run={current_time} (dispatched in {time.monotonic() - trigger_started:.3f}s)"
         )
 
     except Exception as e:
@@ -222,6 +225,10 @@ class RPC:
             )
             return None
 
+        tick_started = time.monotonic()
+        log.info(
+            f"check_pipeline_scheduling tick started at {datetime.now(UTC).isoformat()}"
+        )
         try:
             # Cooperative yield only when gevent is the actual web runtime;
             # under flask/waitress/hypercorn this is a no-op.
@@ -248,4 +255,8 @@ class RPC:
 
             return None
         finally:
+            log.info(
+                f"check_pipeline_scheduling tick finished at {datetime.now(UTC).isoformat()} "
+                f"(total {time.monotonic() - tick_started:.3f}s)"
+            )
             _check_pipeline_scheduling_lock.release()
