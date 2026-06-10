@@ -522,7 +522,7 @@ class Module(module.ModuleModel):
         self._init_publishing_guardrail()
 
         from .models import all, folder, message_group, participants
-        from .models.message_items import base, text, canvas
+        from .models.message_items import base, text, canvas, context
 
         self.thread = Thread(
             target=self.listen_in_memory_event
