@@ -5,10 +5,11 @@ Handles dynamic injection of internal tools (like image generation, attachments)
 into predict payloads based on conversation settings.
 """
 
+from datetime import datetime
 from typing import Optional
 
 from pylon.core.tools import log
-from tools import VaultClient, rpc_tools, this
+from tools import VaultClient, rpc_tools, this, config as c, auth
 
 
 # ImageGen Constants
@@ -28,6 +29,14 @@ ATTACHMENT_DEFAULT_SELECTED_TOOLS = [
     'list_files',
     'read_file',
     'read_multiple_files',
+]
+
+# MCP Internal Tool Constants
+MCP_INTERNAL_TOOL_KEY = 'internal_mcp'
+MCP_ENDPOINT_CONFIGS = [
+    {"suffix": "elitea_core/applications", "name": "Elitea Applications"},
+    {"suffix": "elitea_core/chat", "name": "Elitea Chat"},
+    {"suffix": "elitea_core/toolkits", "name": "Elitea Toolkits"},
 ]
 
 
@@ -442,4 +451,93 @@ def inject_internal_attachment_tool(
         f"pgvector={pgvector_config.get('elitea_title')}, embedding={embedding_model}"
     )
     return attachment_tool
+
+
+# =============================================================================
+# MCP Toolkit Injection
+# =============================================================================
+
+def _get_user_token(user_id: int) -> str | None:
+    """Get the first non-expired access token for the user."""
+    all_tokens = auth.list_tokens(user_id)
+    for token in all_tokens:
+        expires = token.get('expires')
+        if not expires or expires > datetime.now():
+            return auth.encode_token(token['id'])
+    log.warning(f"[MCP Injection] No valid (non-expired) token found for user {user_id}")
+    return None
+
+
+def _get_internal_base_url() -> str:
+    """Get internal base URL for container-to-container communication."""
+    base_url = c.APP_HOST
+    if not base_url or base_url in ('http://localhost', 'http://127.0.0.1'):
+        base_url = 'http://pylon_main:8080'
+    return base_url
+
+
+def inject_mcp_toolkits(
+    user_id: int,
+    internal_tools: list[str] = None,
+) -> list[dict]:
+    """
+    Dynamically compute and inject MCP toolkits at runtime. No DB records created.
+
+    This function follows the same pattern as inject_internal_attachment_tool:
+    - Checks if MCP injection is enabled via internal_tools
+    - Computes MCP endpoints dynamically from user context
+    - Returns toolkit payloads with id=None
+
+    Args:
+        user_id: User ID for auth and project lookup
+        internal_tools: List of enabled internal tools from conversation/agent meta
+
+    Returns:
+        List of MCP toolkit payloads with id=None, or empty list if not enabled
+    """
+    log.info(f"[MCP Injection] Checking internal_tools={internal_tools}, looking for key={MCP_INTERNAL_TOOL_KEY}")
+    if MCP_INTERNAL_TOOL_KEY not in (internal_tools or []):
+        log.debug("MCP internal tool not enabled, skipping auto-injection")
+        return []
+
+    user_project = rpc_tools.RpcMixin().rpc.timeout(5).admin_get_user_private_project(user_id)
+    if not user_project:
+        log.debug(f"[MCP Injection] Private project not found for user {user_id} — skipping MCP injection")
+        return []
+
+    system_token = _get_user_token(user_id)
+    if not system_token:
+        log.debug(f"[MCP Injection] No valid token for user {user_id} — skipping MCP injection")
+        return []
+
+    base_url = _get_internal_base_url()
+
+    tools = []
+    for ep in MCP_ENDPOINT_CONFIGS:
+        url = f"{base_url}/app/{user_project.id}/mcp/{ep['suffix']}"
+        tool = {
+            'type': 'mcp',
+            'name': f'{ep["name"]} - {user_id}',
+            'toolkit_name': f'{ep["name"]} - {user_id}',
+            'description': f"Elitea platform MCP — {ep['suffix']}",
+            'settings': {
+                'url': url,
+                'headers': {'Authorization': f'Bearer {system_token}'},
+                'timeout': 300,
+                'cache_ttl': 300,
+            },
+            'id': None,
+            'agent_type': None,
+            'variables': [],
+            'meta': {
+                'mcp': True,
+                'support_auto': True,
+                'categories': ['other'],
+                'extra_categories': ['remote tools', 'sse', 'http'],
+            },
+        }
+        tools.append(tool)
+
+    log.info(f"[MCP Injection] Auto-injecting {len(tools)} MCP toolkits for user {user_id}")
+    return tools
 

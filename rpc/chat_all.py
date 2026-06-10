@@ -39,7 +39,8 @@ from ..utils.exceptions import PoolSaturationError
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
-    inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY
+    inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
+    inject_mcp_toolkits, MCP_INTERNAL_TOOL_KEY
 )
 from ..utils.utils import get_public_project_id
 
@@ -191,7 +192,17 @@ def generate_toolkit_payload(
     except Exception as e:
         # Log but don't fail the entire payload generation for optional feature
         log.warning(f"Failed to inject internal attachment tool: {e}")
-    
+
+    # Inject MCP toolkits if enabled via internal_tools
+    try:
+        mcp_tools = inject_mcp_toolkits(
+            user_id=user_id,
+            internal_tools=internal_tools or [],
+        )
+        tools.extend(mcp_tools)
+    except Exception as e:
+        log.warning(f"Failed to inject internal MCP toolkits: {e}")
+
     return tools
 
 
@@ -482,7 +493,13 @@ def generate_application_version_payload(
     
     # Get internal_tools from agent version meta for attachment injection decision
     agent_internal_tools = app_version_details.get('meta', {}).get('internal_tools', [])
-    
+
+    # Also get internal_tools from conversation meta and merge with agent's
+    # This allows conversation-level settings (like 'internal_mcp' from support assistant)
+    # to be applied even when chatting with agents
+    conversation_internal_tools = msg_group.conversation.meta.get('internal_tools', []) if msg_group.conversation.meta else []
+    merged_internal_tools = list(set(agent_internal_tools + conversation_internal_tools))
+
     # Get conversation participants as tools - SDK handles all filtering logic:
     # - Swarm mode detection (checks internal_tools for 'swarm')
     # - Self-handoff prevention (uses current_participant_id)
@@ -494,7 +511,7 @@ def generate_application_version_payload(
         user_id=msg_group.author_participant.entity_meta['id'],
         conversation_project_id=predict_payload.project_id,
         current_participant_id=msg_group.sent_to_id,
-        internal_tools=agent_internal_tools,
+        internal_tools=merged_internal_tools,
         is_llm_chat=False
     )
     if participants_toolkits:
@@ -647,6 +664,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             ).first()
             author_settings = EntitySettingsUser.parse_obj(author_participant_settings.entity_settings)
             result['llm_settings'] = author_settings.dict().get('llm_settings', {})
+            # Get internal_tools from conversation meta for LLM chats
+            llm_chat_internal_tools = msg_group.conversation.meta.get('internal_tools', []) if msg_group.conversation.meta else []
             # For LLM chats, always inject attachment toolkit (is_llm_chat=True)
             result['tools'] = generate_toolkit_payload(
                 session=session,
@@ -654,6 +673,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 user_id=msg_group.author_participant.entity_meta['id'],
                 conversation_project_id=predict_payload.project_id,
                 current_participant_id=msg_group.sent_to_id,
+                internal_tools=llm_chat_internal_tools,
                 is_llm_chat=True
             )
             # Pass current participant ID so SDK can identify self for loop prevention
@@ -670,7 +690,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
 
             if predict_payload.llm_settings:
                 result['llm_settings'].update(predict_payload.llm_settings.dict(exclude_none=True))
-            result['internal_tools'] = msg_group.conversation.meta.get('internal_tools', [])
+            result['internal_tools'] = llm_chat_internal_tools
             # Get persona from conversation settings (user's saved preference), default to 'generic'
             result['persona'] = msg_group.conversation.meta.get('persona', 'generic')
 
