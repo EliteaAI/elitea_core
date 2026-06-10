@@ -3,6 +3,7 @@ from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 from pylon.core.tools import log
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.support_utils import get_support_config
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -28,7 +29,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         sort_order = request.args.get('sort_order', 'acs')
 
-        support_config = rpc.timeout(3).support_assistant_get_config()
+        support_config = get_support_config()
         is_support_project = support_config.get('project_id') == project_id
 
         result = rpc.timeout(5).chat_get_conversation_details(
