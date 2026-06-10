@@ -6,9 +6,11 @@ schedule triggers. This RPC is called periodically (every minute) by the
 scheduling plugin to check if any pipelines need to be executed.
 """
 import threading
+import time
 from datetime import datetime, UTC
 
 from pylon.core.tools import web, log
+from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, rpc_tools
 
@@ -17,7 +19,7 @@ try:
 except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
     gevent = None
 
-from ..models.all import Application, ApplicationVersion
+from ..models.all import ApplicationVersion
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
 from ..utils.cron_utils import is_cron_due
@@ -34,16 +36,24 @@ from ..utils.pipeline_execution import (
 _check_pipeline_scheduling_lock = threading.Lock()
 
 
-def _check_project_pipelines(project_id: int, yield_to_hub=lambda: None):
+def _collect_due_pipelines_for_project(project_id: int, yield_to_hub=lambda: None):
     """
-    Check and execute scheduled pipelines for a specific project.
+    Phase 1 (read-mostly): enumerate schedule-triggered pipeline versions in
+    this project, decide which are cron-due right now, and return both the
+    candidate count and the due plan.
 
-    Args:
-        project_id: The project ID to check
-        yield_to_hub: Callable invoked once per version to cooperatively
-            hand control back to the gevent hub. No-op when gevent is
-            not the active runtime.
+    Returns:
+        (candidates, due) where:
+          - candidates: total number of versions examined (incl. invalid /
+            not-due / legacy)
+          - due: list of plan dicts ready for the launch phase
+
+    Side effect: legacy schedules missing last_run are initialized to current
+    time (one DB commit per legacy row) and excluded from `due` so they wait
+    for the next cron match — matching the prior single-pass behavior.
     """
+    candidates = 0
+    due = []
     with db.get_session(project_id) as session:
         # Push the trigger-type filter down to Postgres so we don't haul back
         # every pipeline's JSONB blob just to discard non-schedule triggers in
@@ -61,104 +71,141 @@ def _check_project_pipelines(project_id: int, yield_to_hub=lambda: None):
             # scheduling_time_to_run RPC are pure Python and accumulate
             # CPU between the outer DB I/O yields.
             yield_to_hub()
+            candidates += 1
             try:
-                _process_pipeline_version(project_id, version, session)
+                pipeline_settings = version.pipeline_settings or {}
+                trigger = pipeline_settings.get("trigger") or {}
+
+                if trigger.get("type") != TriggerType.schedule.value:
+                    continue
+
+                try:
+                    schedule = PipelineTriggerSchedule.parse_obj(trigger)
+                except Exception as e:
+                    log.warning(
+                        f"Invalid pipeline schedule config: "
+                        f"project={project_id}, version_id={version.id}: {e}"
+                    )
+                    continue
+
+                if not schedule.last_run:
+                    # Legacy data: initialize last_run and wait for next match.
+                    log.warning(
+                        f"Pipeline schedule missing last_run (legacy data): "
+                        f"project={project_id}, version_id={version.id}. "
+                        f"Initializing to current time."
+                    )
+                    version.pipeline_settings["trigger"]["last_run"] = (
+                        datetime.now(UTC).isoformat()
+                    )
+                    flag_modified(version, "pipeline_settings")
+                    session.commit()
+                    continue
+
+                # Inline cron evaluation: avoids a cross-plugin RPC round-trip
+                # per scheduled pipeline every minute.
+                if not is_cron_due(
+                    schedule.cron, schedule.last_run, schedule.timezone
+                ):
+                    log.debug(
+                        f"Pipeline not due: project={project_id}, "
+                        f"version_id={version.id}, cron={schedule.cron}, "
+                        f"last_run={schedule.last_run}"
+                    )
+                    continue
+
+                due.append({
+                    "project_id": project_id,
+                    "version_id": version.id,
+                    "application_id": version.application_id,
+                    "creator_id": schedule.created_by,
+                    "cron": schedule.cron,
+                    "timezone": schedule.timezone,
+                    "last_run": schedule.last_run,
+                })
             except Exception as e:
                 log.error(
-                    f"Error processing pipeline schedule: project={project_id}, "
-                    f"version_id={version.id}: {e}"
+                    f"Error evaluating pipeline schedule: "
+                    f"project={project_id}, version_id={version.id}: {e}"
                 )
 
+    return candidates, due
 
-def _process_pipeline_version(project_id: int, version: ApplicationVersion, session):
+
+def _launch_due_pipeline(item: dict, yield_to_hub=lambda: None):
     """
-    Process a single pipeline version and execute if scheduled to run.
+    Phase 2: execute one planned pipeline launch and update last_run.
 
-    Args:
-        project_id: Project ID
-        version: ApplicationVersion instance
-        session: Database session
+    Re-reads the version row in a fresh session to pick up any concurrent
+    edits and to keep the write isolated from the collection-phase session.
+
+    Cooperative yields are placed around the two heaviest operations
+    (`_execute_pipeline`, which fans out to predict_sio, and the post-run
+    DB commit) to keep the gevent hub responsive — same granularity as the
+    original single-pass loop.
     """
-    pipeline_settings = version.pipeline_settings or {}
-    trigger = pipeline_settings.get("trigger")
-
-    # Skip if no trigger configured or not a schedule trigger
-    if not trigger or trigger.get("type") != TriggerType.schedule.value:
-        return
-
-    # Validate the schedule configuration
-    try:
-        schedule = PipelineTriggerSchedule.parse_obj(trigger)
-    except Exception as e:
-        log.warning(
-            f"Invalid pipeline schedule config: project={project_id}, "
-            f"version_id={version.id}: {e}"
-        )
-        return
-
-    # Check if it's time to run using the scheduling plugin's time_to_run RPC
-    # Note: last_run is set to current time when schedule is created,
-    # so new schedules wait for the next cron match (same as index scheduling)
-    # For backward compatibility, handle legacy schedules where last_run might be None
-    if not schedule.last_run:
-        log.warning(
-            f"Pipeline schedule missing last_run (legacy data): project={project_id}, "
-            f"version_id={version.id}. Initializing to current time."
-        )
-        current_time = datetime.now(UTC).isoformat()
-        version.pipeline_settings["trigger"]["last_run"] = current_time
-        flag_modified(version, "pipeline_settings")
-        session.commit()
-        return  # Wait for next cron match
-
-    # Inline cron evaluation: avoids a cross-plugin RPC round-trip per
-    # scheduled pipeline every minute. Same algorithm as the
-    # scheduling_time_to_run RPC (kept available for other callers).
-    should_run = is_cron_due(schedule.cron, schedule.last_run, schedule.timezone)
-
-    if not should_run:
-        log.debug(
-            f"Pipeline not due: project={project_id}, version_id={version.id}, "
-            f"cron={schedule.cron}, last_run={schedule.last_run}"
-        )
-        return
+    project_id = item["project_id"]
+    version_id = item["version_id"]
 
     log.info(
         f"Triggering scheduled pipeline: project={project_id}, "
-        f"version_id={version.id}, cron={schedule.cron}"
+        f"version_id={version_id}, cron={item['cron']}"
     )
 
-    # Execute the pipeline
+    launch_start = time.monotonic()
     try:
-        _execute_pipeline(
-            project_id=project_id,
-            version=version,
-            creator_id=schedule.created_by,
-        )
+        with db.get_session(project_id) as session:
+            # Eager-load `application` so _execute_pipeline can read the name
+            # without opening a second session for a one-column lookup.
+            version = session.query(ApplicationVersion).options(
+                joinedload(ApplicationVersion.application)
+            ).get(version_id)
+            if not version:
+                log.warning(
+                    f"Scheduled pipeline disappeared before launch: "
+                    f"project={project_id}, version_id={version_id}"
+                )
+                return
 
-        # Update last_run timestamp
-        current_time = datetime.now(UTC).isoformat()
-        version.pipeline_settings["trigger"]["last_run"] = current_time
-        flag_modified(version, "pipeline_settings")
-        session.commit()
+            pipeline_name = (
+                version.application.name
+                if version.application
+                else f"Pipeline {version.application_id}"
+            )
 
-        log.info(
-            f"Successfully triggered scheduled pipeline: project={project_id}, "
-            f"version_id={version.id}, last_run={current_time}"
-        )
+            yield_to_hub()
+            _execute_pipeline(
+                project_id=project_id,
+                version=version,
+                creator_id=item["creator_id"],
+                pipeline_name=pipeline_name,
+            )
+            yield_to_hub()
 
+            current_time = datetime.now(UTC).isoformat()
+            version.pipeline_settings["trigger"]["last_run"] = current_time
+            flag_modified(version, "pipeline_settings")
+            session.commit()
+
+            launch_elapsed_ms = int((time.monotonic() - launch_start) * 1000)
+            log.info(
+                f"Successfully triggered scheduled pipeline: "
+                f"project={project_id}, version_id={version_id}, "
+                f"last_run={current_time}, took={launch_elapsed_ms}ms"
+            )
     except Exception as e:
+        launch_elapsed_ms = int((time.monotonic() - launch_start) * 1000)
         log.error(
             f"Failed to execute scheduled pipeline: project={project_id}, "
-            f"version_id={version.id}: {e}"
+            f"version_id={version_id}, took={launch_elapsed_ms}ms: {e}"
         )
-        session.rollback()
 
 
 def _execute_pipeline(
     project_id: int,
     version: ApplicationVersion,
     creator_id: int,
+    pipeline_name: str,
 ):
     """
     Execute a scheduled pipeline.
@@ -170,12 +217,10 @@ def _execute_pipeline(
         project_id: Project ID
         version: ApplicationVersion instance
         creator_id: User ID who created the schedule
+        pipeline_name: Display name for the conversation, resolved by the
+            caller from the same session that owns `version` so we don't
+            open a second session here for a one-column lookup.
     """
-    # Get application name for conversation
-    with db.get_session(project_id) as session:
-        application = session.query(Application).get(version.application_id)
-        pipeline_name = application.name if application else f"Pipeline {version.application_id}"
-
     # Create conversation using shared utility
     conversation_uuid, participant_id, response_message_id = create_trigger_run_conversation(
         project_id=project_id,
@@ -237,14 +282,59 @@ class RPC:
                 )
             ]
 
+            # Phase 1 — collect all cron-due pipeline schedules across projects,
+            # timed end-to-end so we can spot scheduler-side slowdowns.
+            collection_start = time.monotonic()
+            total_candidates = 0
+            due_plan: list[dict] = []
             for project_id in all_project_ids:
                 # Yield between projects so a long scheduler tick does not starve
                 # the gevent hub and stall request greenlets / EventNode.
                 yield_to_hub()
                 try:
-                    _check_project_pipelines(project_id, yield_to_hub=yield_to_hub)
+                    candidates, due = _collect_due_pipelines_for_project(
+                        project_id, yield_to_hub=yield_to_hub
+                    )
+                    total_candidates += candidates
+                    due_plan.extend(due)
                 except Exception as e:
-                    log.error(f"Error checking pipeline schedules for project {project_id}: {e}")
+                    log.error(
+                        f"Error collecting pipeline schedules for project "
+                        f"{project_id}: {e}"
+                    )
+            collection_elapsed_ms = int((time.monotonic() - collection_start) * 1000)
+
+            # Compact summaries keep the launch plan readable in a single line.
+            launch_plan_summary = [
+                {
+                    "project_id": item["project_id"],
+                    "application_id": item["application_id"],
+                    "version_id": item["version_id"],
+                    "cron": item["cron"],
+                    "timezone": item["timezone"],
+                    "last_run": item["last_run"],
+                }
+                for item in due_plan
+            ]
+            log.info(
+                f"check_pipeline_scheduling: collection took "
+                f"{collection_elapsed_ms}ms, examined {total_candidates} "
+                f"candidate(s) across {len(all_project_ids)} project(s); "
+                f"{len(due_plan)} schedule(s) will launch this tick: "
+                f"{launch_plan_summary}"
+            )
+
+            # Phase 2 — execute each planned launch.
+            launch_start = time.monotonic()
+            for item in due_plan:
+                yield_to_hub()
+                _launch_due_pipeline(item, yield_to_hub=yield_to_hub)
+            if due_plan:
+                launch_elapsed_ms = int((time.monotonic() - launch_start) * 1000)
+                log.info(
+                    f"check_pipeline_scheduling: launch phase completed in "
+                    f"{launch_elapsed_ms}ms for {len(due_plan)} schedule(s)"
+                )
 
             return None
         finally:
