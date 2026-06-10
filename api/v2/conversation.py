@@ -2,6 +2,7 @@ from flask import request
 from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 from pylon.core.tools import log
 
+
 from ...utils.constants import PROMPT_LIB_MODE
 
 
@@ -117,6 +118,32 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"error": error}, 400
 
         return result.get('conversation'), 200
+
+    @register_openapi(
+        name="Delete Conversation",
+        description="Delete a conversation by ID.",
+        tags=["elitea_core/chat"],
+        available_to_users=True,
+    )
+    @auth.decorators.check_api({
+        "permissions": ["models.chat.conversations.delete"],
+        "recommended_roles": {
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
+        }})
+    @api_tools.endpoint_metrics
+    def delete(self, project_id: int, conversation_id: int):
+        rpc = rpc_tools.RpcMixin().rpc
+
+        result = rpc.timeout(5).chat_delete_conversation_rpc(
+            project_id=project_id,
+            conversation_id=conversation_id,
+        )
+
+        if not result.get('success'):
+            return {"error": result.get('error', 'Conversation not found')}, 404
+
+        return {}, 204
 
 
 class API(api_tools.APIBase):

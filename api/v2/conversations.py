@@ -200,40 +200,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # )
             return serialized, 201
 
-    @register_openapi(
-        name="Delete Conversation",
-        description="Delete a conversation by ID.",
-        mcp_tool=True,
-        tags=["elitea_core/chat"],
-        available_to_users=True,
-    )
-    @auth.decorators.check_api({
-        "permissions": ["models.chat.conversations.delete"],
-        "recommended_roles": {
-            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
-            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
-        }})
-    @api_tools.endpoint_metrics
-    def delete(self, project_id: int, conversation_id: int):
-        rpc = rpc_tools.RpcMixin().rpc
-
-        result = rpc.timeout(5).chat_delete_conversation_rpc(
-            project_id=project_id,
-            conversation_id=conversation_id,
-        )
-
-        if not result.get('success'):
-            return {"error": result.get('error', 'Conversation not found')}, 404
-
-        return {}, 204
-
-
 class API(api_tools.APIBase):
     url_params = api_tools.with_modes([
         '<int:project_id>',
-        '<int:project_id>/<int:conversation_id>',
     ])
 
     mode_handlers = {
         PROMPT_LIB_MODE: PromptLibAPI
     }
+
