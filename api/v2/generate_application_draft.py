@@ -33,42 +33,20 @@ from ...utils.exceptions import PoolSaturationError
 from ...utils.generate_application_utils import fetch_project_resources, build_system_prompt
 from ...utils.utils import extract_json_from_text
 
+_SERVICE_PROMPT_KEY = "generate_application_draft"
 
-SYSTEM_PROMPT_TEMPLATE = """
-You are an AI agent configuration assistant for the Elitea platform.
 
-The user will describe the agent they want in plain text.
-Your job is to produce a complete agent configuration as a single JSON object — no prose, no markdown fences, no extra keys.
-
-Rules:
-- "name" must be ≤ 32 characters.
-- "instructions" should be a detailed system prompt for the agent.
-- "conversation_starters" is a list of short example questions (3–5 items, or null).
-- "suggested_toolkits" must use ONLY ids/types/names from the Available Toolkits list below.
-- "suggested_applications" must use ONLY application_ids from the Available Agents list below.
-- If no toolkits or agents are relevant, return empty lists [].
-
-JSON schema (return exactly this structure):
-{{
-  "name": "<string, max 32 chars>",
-  "description": "<string or null>",
-  "instructions": "<string>",
-  "welcome_message": "<string or null>",
-  "conversation_starters": ["<string>", ...] or null,
-  "suggested_toolkits": [
-    {{"id": <int>, "type": "<toolkit_type>", "name": "<toolkit_name>", "description": "<string or null>"}}
-  ],
-  "suggested_applications": [
-    {{"application_id": <int>, "name": "<string>", "description": "<string or null>", "type": "<agent|pipeline>"}}
-  ]
-}}
-
-Available Toolkits:
-{toolkits}
-
-Available Agents:
-{agents}
-"""
+def _get_system_prompt_template() -> str:
+    try:
+        configs = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_filtered_public(
+            filter_fields={"type": "service_prompt"}
+        )
+        for cfg in configs or []:
+            if cfg.get("data", {}).get("key") == _SERVICE_PROMPT_KEY:
+                return cfg["data"].get("prompt", "")
+    except Exception:
+        log.warning("generate_application_draft: failed to fetch service prompt from configurations")
+    return ""
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -126,7 +104,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.warning("generate_application_draft: failed to fetch project resources")
             toolkits, agents = [], []
 
-        system_prompt = build_system_prompt(SYSTEM_PROMPT_TEMPLATE, toolkits, agents)
+        template = _get_system_prompt_template()
+        if not template:
+            return {"error": "Service prompt 'generate_application_draft' is not configured"}, 500
+        system_prompt = build_system_prompt(template, toolkits, agents)
 
         try:
             result = self.module.predict_sio_llm(
