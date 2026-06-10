@@ -19,6 +19,8 @@ class RPC:
         conversation_id: int,
         mcp_endpoints: list,
         auth_headers: dict = None,
+        metadata: dict = None,
+        settings: dict = None,
     ) -> None:
         """
         Create remote MCP EliteATool records in the support project and
@@ -32,15 +34,6 @@ class RPC:
         from ..models.pd.participant import ParticipantCreate, ParticipantEntityToolkit
         from ..utils.participant_utils import add_participant_to_conversation
 
-        metadata = {
-            "categories": ["other"],
-            "extra_categories": ["remote tools", "sse", "http"],
-            "has_function_validators": False,
-            "check_connection_supported": False,
-            "mcp": True,
-            "support_auto": True,
-        }
-
         with db.get_session(support_project_id) as session:
             conversation = session.query(Conversation).filter(
                 Conversation.id == conversation_id
@@ -53,7 +46,8 @@ class RPC:
             for endpoint in mcp_endpoints:
                 try:
                     url = endpoint["url"]
-                    settings = {"url": url}
+                    if url:
+                        settings["url"] = url
                     if auth_headers:
                         settings["headers"] = auth_headers
 
