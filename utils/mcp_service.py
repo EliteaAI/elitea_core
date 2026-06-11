@@ -143,7 +143,17 @@ class McpApiToolExecutor:
         from io import BytesIO
 
         if method in ("POST", "PUT", "PATCH") and body_params:
-            body_json = json.dumps(body_params)
+            # MCP clients may send nested objects as JSON strings; decode them back.
+            decoded = {}
+            for k, v in body_params.items():
+                if isinstance(v, str) and len(v) > 1 and v[0] in ('{', '['):
+                    try:
+                        decoded[k] = json.loads(v)
+                    except (ValueError, TypeError):
+                        decoded[k] = v
+                else:
+                    decoded[k] = v
+            body_json = json.dumps(decoded)
             body_bytes = body_json.encode('utf-8')
             environ['CONTENT_TYPE'] = 'application/json'
             environ['CONTENT_LENGTH'] = str(len(body_bytes))

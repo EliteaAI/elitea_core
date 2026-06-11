@@ -188,6 +188,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Send Message",
         description="Send a message to a conversation and get AI response.",
+        mcp_description="""
+        Send a message to a conversation and get AI response.
+
+        CRITICAL: `conversation_uuid` is a required string UUID (e.g. "550e8400-e29b-41d4-a716-446655440000"),
+        NOT the integer conversation_id. Get it from list_conversations or get_conversation response.
+
+        `await_task_timeout` controls blocking behaviour:
+        - 30 (default) — wait up to 30 s for the AI response; returns completed message_groups.
+        - -1 — async: returns immediately with task_id, use get_message to poll.
+        - 0 to 300 — custom timeout in seconds.
+
+        Examples:
+        1. Simple message: { 'conversation_uuid': '550e...', 'user_input': 'Hello' }
+        2. Direct to a specific participant: { 'conversation_uuid': '550e...', 'user_input': 'Hello', 'participant_id': 15 }
+        3. Async: { 'conversation_uuid': '550e...', 'user_input': 'Write a long essay...', 'await_task_timeout': 0 }
+        """,
         request_body=MessagePostPayload,
         mcp_tool=True,
         tags=["elitea_core/chat"],
