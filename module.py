@@ -318,7 +318,7 @@ class Module(module.ModuleModel):
                 "migrate_llm_model", self.migrate_llm_model
             )
             this.for_module("admin").module.register_admin_task(
-                "collections_removal_migration", self.collections_removal_migration
+                "collections_removal_migration", self.collections_removal_migration, group="R-2.0.4"
             )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
