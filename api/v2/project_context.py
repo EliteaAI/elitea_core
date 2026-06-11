@@ -1,39 +1,9 @@
-from datetime import datetime
-from typing import Optional
-
 from flask import request
-from pydantic import BaseModel, ConfigDict, ValidationError, Field
+from pydantic import ValidationError
 from tools import api_tools, auth, config as c, rpc_tools
 
+from ...models.pd.project_context import ProjectContextDetail, ProjectContextUpdate
 from ...utils.constants import PROMPT_LIB_MODE
-
-
-PROJECT_CONTEXT_MAX_LEN = 2500
-
-
-class ProjectContextUpdate(BaseModel):
-    content: str = Field('', max_length=PROJECT_CONTEXT_MAX_LEN)
-    enabled: bool = True
-
-
-class ProjectContextDetail(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: Optional[int] = None
-    content: str = ''
-    enabled: bool = True
-    updated_at: Optional[datetime] = None
-
-    @classmethod
-    def from_config(cls, config: Optional[dict]) -> 'ProjectContextDetail':
-        if config is None:
-            return cls()
-        return cls(
-            id=config.get('id'),
-            content=config.get('data', {}).get('content', ''),
-            enabled=config.get('data', {}).get('enabled', True),
-            updated_at=config.get('updated_at'),
-        )
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
