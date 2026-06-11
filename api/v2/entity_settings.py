@@ -10,7 +10,7 @@ from ...models.conversation import Conversation
 from ...models.enums.all import ParticipantTypes
 from ...models.participants import Participant, ParticipantMapping
 from ...models.pd.participant import ParticipantBase, ParticipantEntityUser
-from ...models.pd.participant_settings import EntitySettingsLlm
+from ...models.pd.participant_settings import EntitySettingsLlm, EntitySettingsApplication
 from ...utils.participant_utils import make_query_filter_for_entity
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
@@ -135,6 +135,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         4. Override agent variables: { 'version_id': 101, 'variables': [{ 'name': 'lang', 'value': 'en' }] }
         5. Error: overriding LLM on private agent → HTTP 400 'LLM settings override is only allowed for published agents from agent studio'
         """,
+        request_body=EntitySettingsApplication,
         tags=["elitea_core/chat"],
         mcp_tool=True,
         available_to_users=True,

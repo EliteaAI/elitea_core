@@ -135,14 +135,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - Renaming application or changing description → use update_agent
         - Version is published or embedded → will fail; unpublish first or use create_version
         - Creating a new version → use create_version
-        
+
+        REQUIRED path params: project_id, application_id, version_id (the numeric version ID).
+        REQUIRED body fields: `id` (must equal version_id), `application_id`, `name`, `author_id`.
+        Only pass fields you want to change — unset fields are NOT overwritten.
+
         Agent update example:
-        { 'id': 101, 'application_id': 7, 'instructions': 'New system prompt...', 'llm_settings': { 'model_name': 'gpt-5-mini', 'temperature': 0.1 } }
-        
+        { 'id': 101, 'application_id': 7, 'name': 'base', 'instructions': 'New system prompt...', 'llm_settings': { 'model_name': 'gpt-5-mini', 'temperature': 0.1 } }
+
         Pipeline update example:
-        { 'id': 202, 'application_id': 15, 'agent_type': 'pipeline', 'instructions': 'nodes:\n  - id: start\n    type: llm\n...' }
+        { 'id': 202, 'application_id': 15, 'name': 'base', 'agent_type': 'pipeline', 'instructions': 'nodes:\n  - id: start\n    type: llm\n...' }
         → Omit pipeline_settings entirely to preserve the existing trigger.
-        
+
         Error: HTTP 400 'Version is published' → unpublish first, then update.""",
         tags=["elitea_core/applications"],
         mcp_tool=True,

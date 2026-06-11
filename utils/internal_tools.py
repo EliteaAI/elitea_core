@@ -517,8 +517,8 @@ def inject_mcp_toolkits(
         url = f"{base_url}/app/{user_project.id}/mcp/{ep['suffix']}"
         tool = {
             'type': 'mcp',
-            'name': f'{ep["name"]} - {user_id}',
-            'toolkit_name': f'{ep["name"]} - {user_id}',
+            'name': f'{ep["name"]}',
+            'toolkit_name': f'{ep["name"]}',
             'description': f"Elitea platform MCP — {ep['suffix']}",
             'settings': {
                 'url': url,

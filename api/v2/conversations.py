@@ -91,6 +91,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         1. Blank conversation: { 'name': 'My Chat', 'is_private': true }
         2. With agent pre-added: { 'name': 'Agent Chat', 'is_private': true, 'participants': [{ 'entity_name': 'application', 'entity_meta': { 'id': 7, 'project_id': 42 } }] }
         """,
+        request_body=ConversationCreate,
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,
