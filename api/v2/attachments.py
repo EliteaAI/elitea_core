@@ -61,7 +61,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         3. Overwrite existing: add overwrite_attachments=1 to form data.
         """,
         tags=["elitea_core/chat"],
-        mcp_tool=True,
         available_to_users=True,
     )
     @auth.decorators.check_api({
