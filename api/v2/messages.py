@@ -188,6 +188,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Send Message",
         description="Send a message to a conversation and get AI response.",
+        request_body=MessagePostPayload,
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,

@@ -3,6 +3,7 @@ from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 from pylon.core.tools import log
 
 
+from ...models.pd.conversation import ConversationUpdate
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.support_utils import get_support_config
 
@@ -81,6 +82,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         3. Make public: { 'is_private': false } (not allowed in public project).
         4. Move to folder: { 'folder_id': 3 }
         """,
+        request_body=ConversationUpdate,
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,

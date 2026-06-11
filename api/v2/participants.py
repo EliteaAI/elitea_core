@@ -37,6 +37,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         3. Add multiple participants: send array with multiple objects in one call.
         4. Add a toolkit: [{ 'entity_name': 'toolkit', 'entity_meta': { 'id': 3, 'project_id': 42 } }]
         """,
+        request_body=ParticipantCreate,
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,

@@ -9,7 +9,7 @@ from pylon.core.tools import log
 from ...models.all import ApplicationVersion
 from ...models.enums.events import ApplicationEvents
 from ...models.elitea_tools import EliteATool, EntityToolMapping
-from ...models.pd.tool import ToolDetails, ToolAPIUpdateModel
+from ...models.pd.tool import ToolDetails, ToolAPIUpdateModel, ToolUpdateRelationModel
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...models.enums.all import ToolEntityTypes
@@ -105,6 +105,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Link Agent to Toolkit",
         description="Link an agent (application) to a toolkit.",
+        request_body=ToolUpdateRelationModel,
         tags=["elitea_core/toolkits"],
         mcp_tool=True,
         available_to_users=True,

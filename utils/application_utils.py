@@ -168,7 +168,11 @@ def applications_update_version(version_data, session) -> dict:
         setattr(version, key, value)
 
     try:
+        # Explicitly delete tag associations first to avoid unique constraint violations
+        session.flush()
         version.tags.clear()
+        session.flush()
+
         if version_data.tags:
             existing_tags = session.query(Tag).filter(
                 Tag.name.in_({i.name for i in version_data.tags})
