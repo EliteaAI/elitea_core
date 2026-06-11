@@ -1589,6 +1589,119 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             duration,
         )
 
+    @web.method("collections_removal_migration")
+    def collections_removal_migration(self, *args, **kwargs):
+        """Drop prompt_collections table and applications.collections column for all or specific projects.
+
+        Param / payload fields:
+            project_ids (list[int], optional): projects to migrate; empty/omitted runs all projects.
+            dry_run (bool, optional): inspect without making changes. Default false.
+
+        Admin UI usage (param string):
+            {"dry_run": true}
+            {"project_ids": [1, 2], "dry_run": true}
+        """
+        import json
+        from typing import Optional, List
+        from pydantic import BaseModel
+        from plugins.admin.tasks.logs import make_logger
+        from sqlalchemy import text
+        from tools import db, rpc_tools, serialize
+
+        class CollectionsRemovalPayload(BaseModel):
+            project_ids: Optional[List[int]] = []
+            dry_run: Optional[bool] = False
+
+        with make_logger() as log:
+            raw_param = kwargs.get("param", "") or ""
+            payload = None
+            if raw_param.strip():
+                try:
+                    payload = json.loads(raw_param)
+                except (json.JSONDecodeError, ValueError):
+                    log.warning(
+                        "[collections_removal_migration] Could not parse param as JSON: %r",
+                        raw_param,
+                    )
+
+            if payload is None:
+                migration_payload = CollectionsRemovalPayload.model_construct()
+            else:
+                migration_payload = CollectionsRemovalPayload.model_validate(payload)
+
+            dry_run = migration_payload.dry_run
+            mode = "DRY RUN" if dry_run else "LIVE"
+            log.info("[collections_removal_migration] [%s] Starting. Payload: %s", mode, migration_payload)
+
+            rpc = rpc_tools.RpcMixin().rpc.call
+
+            def get_all_project_ids():
+                return [i['id'] for i in rpc.project_list(filter_={'create_success': True})]
+
+            project_ids = migration_payload.project_ids or get_all_project_ids()
+            project_ids = sorted(set(project_ids))
+
+            results = []
+            errors = []
+
+            for pid in project_ids:
+                try:
+                    with db.get_session(pid) as session:
+                        has_collections_table = session.execute(text(
+                            "SELECT EXISTS ("
+                            "  SELECT 1 FROM information_schema.tables"
+                            f"  WHERE table_schema = 'p_{pid}'"
+                            "  AND table_name = 'prompt_collections'"
+                            ")"
+                        )).scalar()
+
+                        has_collections_column = session.execute(text(
+                            "SELECT EXISTS ("
+                            "  SELECT 1 FROM information_schema.columns"
+                            f"  WHERE table_schema = 'p_{pid}'"
+                            "  AND table_name = 'applications'"
+                            "  AND column_name = 'collections'"
+                            ")"
+                        )).scalar()
+
+                        entry = {
+                            "project_id": pid,
+                            "prompt_collections_table_exists": has_collections_table,
+                            "applications_collections_column_exists": has_collections_column,
+                        }
+
+                        if not dry_run:
+                            if has_collections_table:
+                                session.execute(text(
+                                    f"DROP TABLE p_{pid}.prompt_collections"
+                                ))
+                            if has_collections_column:
+                                session.execute(text(
+                                    f"ALTER TABLE p_{pid}.applications DROP COLUMN collections"
+                                ))
+                            session.commit()
+                            entry["status"] = "migrated"
+                        else:
+                            entry["status"] = "dry_run"
+
+                    log.info("[collections_removal_migration] [%s] project_id=%s: %s", mode, pid, entry)
+                    results.append(entry)
+
+                except Exception as e:
+                    log.error("[collections_removal_migration] [%s] project_id=%s failed: %s", mode, pid, e)
+                    errors.append({"project_id": pid, "error": str(e)})
+
+            log.info(
+                "[collections_removal_migration] [%s] Finished: results=%s, errors=%s",
+                mode, results, errors,
+            )
+
+            return serialize({
+                "dry_run": dry_run,
+                "results": results,
+                "errors": errors,
+            })
+
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
     project_id, conversation_arg, dry_run, prefix,

@@ -1118,7 +1118,6 @@ def list_applications_api(
         trend_start_period: str | None = None,
         trend_end_period: str | None = None,
         with_likes: bool = True,
-        collection: Optional[dict[str, int]] = None,
         agents_type: str = 'all',
         without_tags: bool = False,
         session=None,
@@ -1169,13 +1168,6 @@ def list_applications_api(
                 Application.description.ilike(f"%{q}%")
             )
         )
-
-    if collection and collection.get('id') and collection.get('owner_id'):
-        collection_value = {
-            "id": collection['id'],
-            "owner_id": collection['owner_id']
-        }
-        filters.append(Application.collections.contains([collection_value]))
 
     if agents_type:
         agents_type = agents_type.strip().lower()
