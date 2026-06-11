@@ -1,4 +1,5 @@
 import threading
+import time
 from copy import deepcopy
 from datetime import datetime, UTC
 
@@ -37,6 +38,10 @@ class RPC:
             )
             return None
 
+        tick_started = time.monotonic()
+        log.info(
+            f"check_index_scheduling tick started at {datetime.now(UTC).isoformat()}"
+        )
         try:
             # Cooperative yield only when gevent is the actual web runtime;
             # under flask/waitress/hypercorn this is a no-op.
@@ -160,10 +165,12 @@ class RPC:
                                         running_state = index.cmetadata.get('state')
 
                                         if running_state and running_state.lower() != 'in_progress':
-                                            log.debug(
-                                                f"Triggering scheduled indexing for toolkit {toolkit.id}, "
-                                                f"index {index_meta_id}, user {user_id} "
-                                                f"with cron '{user_config.get('cron')}'"
+                                            trigger_started = time.monotonic()
+                                            log.info(
+                                                f"Index trigger started at {datetime.now(UTC).isoformat()} "
+                                                f"for toolkit {toolkit.id}, index {index_meta_id}, "
+                                                f"user {user_id}, project {project_id}, "
+                                                f"cron '{user_config.get('cron')}'"
                                             )
 
                                             toolkit_config = {
@@ -196,9 +203,18 @@ class RPC:
                                             flag_modified(toolkit, 'meta')
                                             project_session.commit()
 
-                                            log.debug(f"Updated last_run for user {user_id} to {current_time}")
+                                            log.info(
+                                                f"Index trigger finished at {current_time} "
+                                                f"for toolkit {toolkit.id}, index {index_meta_id}, "
+                                                f"user {user_id}, project {project_id} "
+                                                f"(dispatched in {time.monotonic() - trigger_started:.3f}s)"
+                                            )
                                 except Exception as e:
                                     log.error(f"Error occurred while scheduled indexing for user {user_id}: {e}")
             return None
         finally:
+            log.info(
+                f"check_index_scheduling tick finished at {datetime.now(UTC).isoformat()} "
+                f"(total {time.monotonic() - tick_started:.3f}s)"
+            )
             _check_index_scheduling_lock.release()
