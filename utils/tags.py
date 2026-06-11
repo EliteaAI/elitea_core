@@ -8,7 +8,6 @@ from tools import db
 from pylon.core.tools import log
 
 from .like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
-from ..models.all import Collection
 from ..models.all import Tag
 from ..models.all import Application, ApplicationVersion, ApplicationVersionTagAssociation
 
@@ -32,8 +31,6 @@ class TagList(metaclass=TagListABC):
         # trending period
         self._set_trending_info()
         self.session = db.get_project_schema_session(project_id)
-        self._is_collection = False
-
     def _set_general_query_info(self):
         self.limit = self.args.get("limit", 0)
         self.offset = self.args.get("offset", 0)
@@ -119,12 +116,6 @@ class TagList(metaclass=TagListABC):
         tag_filters = [getattr(self.Version, self.foriegn_key).in_(entity_subquery)]
         if search := self.args.get("search"):
             tag_filters.append(Tag.name.ilike(f"%{search}%"))
-        if self._is_collection:
-            all_prompt_ids = [
-                prompt['id'] for collection in self.session.query(Collection.prompts).all()
-                for prompt in next(iter(collection))
-            ]
-            tag_filters.append(getattr(self.Version, self.foriegn_key).in_(all_prompt_ids))
         return tag_filters
 
     def execute_main_query(self, tag_filters):

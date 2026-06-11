@@ -1,10 +1,8 @@
 from queue import Empty
 from typing import List
 
-from tools import auth, rpc_tools, db
+from tools import auth, rpc_tools
 
-from ..models.all import Collection
-from ..models.enums.all import PublishStatus
 from ..models.pd.collection_base import AuthorDetailModel
 
 
@@ -39,12 +37,3 @@ def get_author_data(author_id: int) -> dict:
     social_data.update(author_data)
     return AuthorDetailModel(**social_data).model_dump()
 
-
-def get_stats(project_id: int, author_id: int):
-    result = {}
-    with db.with_project_schema_session(project_id) as session:
-        query = session.query(Collection).filter(Collection.author_id == author_id)
-        result['total_collections'] = query.count()
-        query = query.filter(Collection.status == PublishStatus.published)
-        result['public_collections'] = query.count()
-    return result

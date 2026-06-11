@@ -61,10 +61,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int | None = None, **kwargs):
-        collection = {
-            "id": request.args.get('collection_id', type=int),
-            "owner_id": request.args.get('collection_owner_id', type=int)
-        }
         with db.get_session(project_id) as session:
             some_result = list_applications_api(
                 project_id=project_id,
@@ -79,7 +75,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 trend_start_period=request.args.get('trend_start_period'),
                 trend_end_period=request.args.get('trend_end_period'),
                 statuses=request.args.get('statuses'),
-                collection=collection,
                 agents_type=request.args.get('agents_type'),
                 without_tags=request.args.get('without_tags', False),
                 session=session

@@ -71,11 +71,6 @@ class InitiatorType(StrEnum):
     schedule = 'schedule'  # Schedule-initiated (cron jobs)
 
 
-class CollectionPatchOperations(StrEnum):
-    add = 'add'
-    remove = 'remove'
-
-
 class ToolTypes(StrEnum):
     prompt = 'prompt'
     datasource = 'datasource'

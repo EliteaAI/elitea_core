@@ -5,7 +5,6 @@ from .all import (
     NotificationEventTypes,
     ChatHistoryRole,
     ToolEntityTypes,
-    CollectionPatchOperations,
     EntityTypes,
     InitiatorType,
     # Merged from chat

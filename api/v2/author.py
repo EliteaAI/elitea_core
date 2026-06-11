@@ -7,7 +7,7 @@ from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.utils import add_public_project_id
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.authors import get_stats, get_author_data
+from ...utils.authors import get_author_data
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -38,9 +38,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         try:
             author_project_id = self.module.context.rpc_manager.timeout(1).projects_get_personal_project_id(
                 author['id'])
-            stats = get_stats(author_project_id, author['id'])
-            author.update(stats)
-
             # Parallel stats fetching to reduce latency
             module = self.module
 

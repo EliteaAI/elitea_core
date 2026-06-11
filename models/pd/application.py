@@ -74,7 +74,6 @@ class ApplicationDetailModel(ApplicationBaseModel):
     versions: List[ApplicationVersionListModel]
     version_details: Optional[ApplicationVersionDetailModel] = None
     created_at: datetime
-    collections: Optional[list] = None
     is_pinned: bool = False
 
     def check_is_pinned(self, project_id: int):
