@@ -318,6 +318,24 @@ def get_toolkit_config(project_id: int, user_id: int, toolkit_id: int):
     return toolkit_config
 
 
+def get_project_context(project_id: int) -> tuple[str, bool]:
+    try:
+        config = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_first_filtered_project(
+            project_id=project_id,
+            filter_fields={'type': 'project_context'},
+        )
+        if config:
+            data = config.get('data') or {}
+            return data.get('content', ''), data.get('enabled', True)
+    except Exception:
+        log.exception('Failed to fetch project context')
+    return '', False
+
+
+def prepend_project_context(instructions: str, ctx_content: str) -> str:
+    return f"# Project Context\n\n{ctx_content}\n\n---\n\n{instructions}"
+
+
 def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, tool_name: str, tool_params: dict, sid: str = None) -> dict:
     vault_client = VaultClient(project_id)
     token, auth_session = get_predict_token_and_session(project_id, user_id, sid)
