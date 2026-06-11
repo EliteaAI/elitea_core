@@ -2,9 +2,16 @@ from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, validator, ValidationError
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from croniter import croniter
+
+
+_DAILY_FLOOR = timedelta(hours=24)
+# Number of consecutive firings to inspect when verifying the minimum gap.
+# 32 covers monthly patterns (28-31 day gaps) and weekly multi-day patterns
+# without making validation expensive.
+_GAP_PROBE_FIRINGS = 32
 
 
 def _validate_cron_expression(v: str) -> str:
@@ -21,6 +28,28 @@ def _validate_cron_expression(v: str) -> str:
         raise ValueError(f'invalid cron expression: {e}')
 
     return v
+
+
+def _validate_daily_floor(cron_expr: str) -> str:
+    """Reject cron expressions that fire more than once per 24 hours.
+
+    Mirrors the daily-frequency floor enforced by the index scheduling UI
+    (validateMinimumDailyFrequency in indexSchedule.helpers.js). Direct API
+    callers bypass the UI gate, so the same constraint is enforced here.
+
+    Probes the next several firings and asserts every consecutive gap is
+    >= 24h. This catches all sub-daily patterns (every-N-minutes, multiple
+    hours per day, hour ranges) without re-implementing cron field parsing.
+    """
+    base = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    itr = croniter(cron_expr, base)
+    prev = itr.get_next(datetime)
+    for _ in range(_GAP_PROBE_FIRINGS):
+        nxt = itr.get_next(datetime)
+        if nxt - prev < _DAILY_FLOOR:
+            raise ValueError('Frequency cannot be more than once per day')
+        prev = nxt
+    return cron_expr
 
 
 class Credentials(BaseModel):
@@ -47,7 +76,8 @@ class UpdateIndexingSchedule(BaseModel):
 
     @validator('cron')
     def validate_cron(cls, v: str) -> str:
-        return _validate_cron_expression(v)
+        v = _validate_cron_expression(v)
+        return _validate_daily_floor(v)
 
 
 class ToolkitIndexingSchedule(BaseModel):
