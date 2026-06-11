@@ -43,6 +43,7 @@ from ..utils.internal_tools import (
     inject_mcp_toolkits, MCP_INTERNAL_TOOL_KEY
 )
 from ..utils.utils import get_public_project_id
+from ..utils.predict_utils import get_project_context, prepend_project_context
 
 
 CHAT_PREDICT_MAPPER = {
@@ -623,6 +624,15 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 agent_project_id=participant.entity_meta.get('project_id'),
             )
 
+            # Inject project context into agent instructions
+            _ctx_content, _ctx_enabled = get_project_context(predict_payload.project_id)
+            if _ctx_enabled and _ctx_content:
+                _vd = result.get('version_details') or {}
+                _ignore = (_vd.get('meta') or {}).get('ignore_project_context', False)
+                if not _ignore:
+                    _vd['instructions'] = prepend_project_context(_vd.get('instructions') or '', _ctx_content)
+                result['version_details'] = _vd
+
             # IMPORTANT: Use offset(1) to retrieve the previous agent message, skipping the newly created response
             last_agent_message: ConversationMessageGroup = session.query(ConversationMessageGroup).where(
                 ConversationMessageGroup.author_participant_id == msg_group.sent_to_id,
@@ -687,6 +697,11 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 result['instructions'] = user_default_instructions
             else:
                 result['instructions'] = base_instructions
+
+            # Inject project context into LLM chat instructions
+            _ctx_content, _ctx_enabled = get_project_context(predict_payload.project_id)
+            if _ctx_enabled and _ctx_content:
+                result['instructions'] = prepend_project_context(result.get('instructions') or '', _ctx_content)
 
             if predict_payload.llm_settings:
                 result['llm_settings'].update(predict_payload.llm_settings.dict(exclude_none=True))
