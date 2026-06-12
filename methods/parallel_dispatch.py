@@ -182,6 +182,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 'child_index': spec.get('index', i),
                 'reconcile_epoch': epoch,
             }
+            # Stash the child's launch payload + linkage meta so a HITL pause on
+            # this child can be resumed (replayed with hitl_resume) without
+            # re-resolving the sub-agent. Keyed by child_thread_id; TTL covers
+            # human-think-time. Cleared when the epoch reconciles. The
+            # stream/message ids are the parent's — a resumed child emits on the
+            # same stream so its card renders in the parent conversation.
+            self._parallel_child_stash(
+                child_thread_id, child_payload, child_meta,
+                parent_stream_id, parent_message_id,
+            )
             try:
                 child_task_id = self.task_node.start_task(  # pylint: disable=E1101
                     "indexer_agent",
@@ -399,4 +409,48 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return json.loads(raw)
         except Exception:  # pylint: disable=W0703
             log.exception("[PARALLEL] reconcile unstash failed")
+            return None
+
+    def _parallel_child_stash(
+        self, child_thread_id, child_payload, child_meta,
+        parent_stream_id=None, parent_message_id=None,
+    ):
+        """Stash a child's launch payload + linkage for HITL resume."""
+        key = f"parallel_child_launch:{child_thread_id}"
+        try:
+            client = self.get_redis_client()  # pylint: disable=E1101
+            client.set(
+                key,
+                json.dumps({
+                    'child_payload': child_payload,
+                    'child_meta': child_meta,
+                    'parent_stream_id': parent_stream_id,
+                    'parent_message_id': parent_message_id,
+                }),
+                ex=_RECONCILE_PAYLOAD_TTL,
+            )
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] child stash failed (%s)", child_thread_id)
+
+    @web.method()
+    def parallel_dispatch_lookup_child(self, child_thread_id):
+        """Return the stashed launch payload + meta for a child, or None.
+
+        Used by the continue/HITL-resume path to detect that an incoming
+        thread_id belongs to a parked-fan-out child and to replay that child
+        (with hitl_resume) instead of regenerating the parent's payload. The
+        stash is left in place — the child resumes on the SAME thread and may
+        pause again before it finally completes; the epoch reconcile clears it.
+        """
+        if not child_thread_id:
+            return None
+        key = f"parallel_child_launch:{child_thread_id}"
+        try:
+            client = self.get_redis_client()  # pylint: disable=E1101
+            raw = client.get(key)
+            if raw is None:
+                return None
+            return json.loads(raw)
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] child lookup failed (%s)", child_thread_id)
             return None
