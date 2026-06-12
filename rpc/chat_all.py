@@ -593,6 +593,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
         'hitl_resume': bool(getattr(predict_payload, 'hitl_resume', False)),
         'hitl_action': getattr(predict_payload, 'hitl_action', None),
         'hitl_value': getattr(predict_payload, 'hitl_value', None),
+        'hitl_decisions': getattr(predict_payload, 'hitl_decisions', None),
         'thread_id': predict_payload.thread_id,
     }
 
