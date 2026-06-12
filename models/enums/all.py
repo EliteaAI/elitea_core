@@ -64,6 +64,11 @@ class ToolEntityTypes(StrEnum):
     datasource = 'datasource'
 
 
+class SkillEntityTypes(StrEnum):
+    """Entity types that can have skills attached."""
+    agent = 'agent'
+
+
 class InitiatorType(StrEnum):
     """Enum representing the initiator of an operation"""
     user = 'user'      # User-initiated (UI, API calls)

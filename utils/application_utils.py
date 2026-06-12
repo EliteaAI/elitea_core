@@ -79,6 +79,19 @@ def apply_selected_tools_intersection(tools, tool_mappings):
             settings['selected_tools'] = tool_selected_from_mapping
 
 
+def build_skill_mappings_list(skill_mappings) -> list:
+    return [
+        {
+            'skill_id': mapping.skill_id,
+            'skill_version_id': mapping.skill_version_id,
+            'name': mapping.skill.name if mapping.skill else None,
+            'description': mapping.skill.description if mapping.skill else None,
+            'version_name': mapping.skill_version.name if mapping.skill_version else None,
+        }
+        for mapping in skill_mappings
+    ]
+
+
 class ApplicationVersionNonFoundError(Exception):
     def __init__(self, application_id: int, version_id: int):
         super().__init__(f"Application with id {application_id} and version {version_id} not found")
