@@ -255,6 +255,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     # -- Re-invoke ------------------------------------------------------------
 
+    @web.method()
     def _parallel_reinvoke_parent(self, parent_thread_id, epoch):
         """Re-invoke the parked parent as a FRESH task with parallel_reconcile.
 
@@ -304,6 +305,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     # -- Side-table (raw SQL, global schema, no ORM) --------------------------
 
+    @web.method()
     def _parallel_rows_insert(self, rows):
         if not rows:
             return
@@ -323,6 +325,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         except Exception:  # pylint: disable=W0703
             log.exception("[PARALLEL] side-table insert failed")
 
+    @web.method()
     def _parallel_mark_child(self, parent_thread_id, epoch, child_thread_id, status):
         stmt = text(
             f"""
@@ -345,6 +348,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         except Exception:  # pylint: disable=W0703
             log.exception("[PARALLEL] side-table mark child failed")
 
+    @web.method()
     def _parallel_epoch_pending(self, parent_thread_id, epoch):
         """True if any child for this epoch is still non-terminal (gate closed)."""
         stmt = text(
@@ -369,6 +373,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Fail closed: better to wait than to reconcile with a missing child.
             return True
 
+    @web.method()
     def _parallel_rows_delete(self, parent_thread_id, epoch):
         stmt = text(
             f"""
@@ -386,6 +391,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     # -- Redis (lease + reconcile-payload stash) ------------------------------
 
+    @web.method()
     def _parallel_acquire_lease(self, parent_thread_id, epoch):
         """SETNX single-winner lease keyed by (parent_thread_id, epoch)."""
         key = f"parallel_reconcile_lease:{parent_thread_id}:{epoch}"
@@ -398,6 +404,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # the re-invoke is idempotent enough (parent checkpoint is the source).
             return True
 
+    @web.method()
     def _parallel_reconcile_stash(self, parent_thread_id, epoch, value):
         key = f"parallel_reconcile_payload:{parent_thread_id}:{epoch}"
         try:
@@ -406,6 +413,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         except Exception:  # pylint: disable=W0703
             log.exception("[PARALLEL] reconcile stash failed")
 
+    @web.method()
     def _parallel_reconcile_unstash(self, parent_thread_id, epoch):
         key = f"parallel_reconcile_payload:{parent_thread_id}:{epoch}"
         try:
@@ -419,6 +427,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.exception("[PARALLEL] reconcile unstash failed")
             return None
 
+    @web.method()
     def _parallel_child_stash(
         self, child_thread_id, child_payload, child_meta,
         parent_stream_id=None, parent_message_id=None,

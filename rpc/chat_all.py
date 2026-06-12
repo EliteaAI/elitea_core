@@ -1345,6 +1345,7 @@ class RPC:
                     message_id=parsed.message_id,
                 )
 
+    @web.method()
     def _continue_child_resume(self, sid, parsed, current_user):
         """Resume a parked-fan-out child on its own thread, or None if N/A.
 

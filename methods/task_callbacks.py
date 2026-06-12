@@ -79,6 +79,7 @@ class Method:
         except:  # pylint: disable=W0702
             log.exception("Error in callback sender (task_id=%s)", task_id)
 
+    @web.method()
     def _maybe_handle_parallel_dispatch(self, task_id):
         """Route a stopped task into parked-parent launch or child reconcile.
 
