@@ -46,7 +46,7 @@ class SkillArgsForwardingModel(BaseModel):
         return values
 
 
-class SkillCreateModel(BaseModel, SkillArgsForwardingModel):
+class SkillCreateModel(SkillArgsForwardingModel):
     """Model for creating a new skill with initial version."""
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
@@ -140,14 +140,14 @@ class SkillDetailModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class SkillUpdateModel(BaseModel, SkillArgsForwardingModel):
+class SkillUpdateModel(SkillArgsForwardingModel):
     name: Optional[str] = Field(None, min_length=1, max_length=128)
     description: Optional[str] = Field(None, min_length=1)
     version: Optional[SkillVersionUpdateModel] = None
     meta: Optional[dict] = None
 
 
-class SkillExportModel(BaseModel, SkillArgsForwardingModel):
+class SkillExportModel(SkillArgsForwardingModel):
     id: int
     import_uuid: Optional[str] = None
     name: str
@@ -166,7 +166,7 @@ class SkillExportModel(BaseModel, SkillArgsForwardingModel):
         return self
 
 
-class SkillImportModel(BaseModel, SkillArgsForwardingModel):
+class SkillImportModel(SkillArgsForwardingModel):
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
     versions: List[SkillVersionImportModel]

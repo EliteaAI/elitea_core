@@ -17,6 +17,7 @@ from ...utils.authors import get_authors_data
 class SkillVersionCreateModel(BaseModel):
     name: str = Field(default='base', min_length=1)
     instructions: str = Field(min_length=1)
+    author_id: Optional[int] = Field(None, exclude=True)
     tags: Optional[List[TagBaseModel]] = None
     meta: Optional[dict] = None
 
