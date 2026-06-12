@@ -64,3 +64,12 @@ class SIO:
     @web.sio(SioEvents.tts_stop)
     def tts_stop(self, sid: str, data: dict) -> None:
         self.event_node.emit(_VOICE_EVENTS_CHANNEL, {"type": "tts_cancel", "sid": sid})
+
+    @web.sio(SioEvents.tts_next)
+    def tts_next(self, sid: str, data: dict) -> None:
+        self.event_node.emit(_VOICE_EVENTS_CHANNEL, {
+            "type": "tts_next",
+            "sid": sid,
+            "voice": data.get("voice"),
+            "speed": data.get("speed"),
+        })
