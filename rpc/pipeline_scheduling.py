@@ -46,16 +46,24 @@ def _check_project_pipelines(project_id: int, yield_to_hub=lambda: None):
             not the active runtime.
     """
     with db.get_session(project_id) as session:
-        # Push the trigger-type filter down to Postgres so we don't haul back
-        # every pipeline's JSONB blob just to discard non-schedule triggers in
-        # Python. Chained ->/->>: matches the pattern used in
-        # utils/llm_migration_utils.py:249.
-        pipeline_versions = session.query(ApplicationVersion).filter(
-            ApplicationVersion.agent_type == AgentTypes.pipeline.value,
-            ApplicationVersion.pipeline_settings.isnot(None),
-            ApplicationVersion.pipeline_settings.op('->')('trigger').op('->>')('type')
-            == TriggerType.schedule.value,
-        ).all()
+        try:
+            # Push the trigger-type filter down to Postgres so we don't haul back
+            # every pipeline's JSONB blob just to discard non-schedule triggers in
+            # Python. Chained ->/->>: matches the pattern used in
+            # utils/llm_migration_utils.py:249.
+            pipeline_versions = session.query(ApplicationVersion).filter(
+                ApplicationVersion.agent_type == AgentTypes.pipeline.value,
+                ApplicationVersion.pipeline_settings.isnot(None),
+                ApplicationVersion.pipeline_settings.op('->')('trigger').op('->>')('type')
+                == TriggerType.schedule.value,
+            ).all()
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception(
+                "check_pipeline_scheduling: failed to load scheduled pipelines: "
+                "project_id=%s exc_type=%s exc=%r",
+                project_id, type(exc).__name__, exc,
+            )
+            return
 
         for version in pipeline_versions:
             # Cooperative yield per version: parse_obj + local-inline
@@ -64,10 +72,17 @@ def _check_project_pipelines(project_id: int, yield_to_hub=lambda: None):
             yield_to_hub()
             try:
                 _process_pipeline_version(project_id, version, session)
-            except Exception as e:
-                log.error(
-                    f"Error processing pipeline schedule: project={project_id}, "
-                    f"version_id={version.id}: {e}"
+            except Exception as exc:  # pylint: disable=W0703
+                # Aborted tx must not poison the next iteration's commit.
+                try:
+                    session.rollback()
+                except Exception:  # pylint: disable=W0703
+                    pass
+                log.exception(
+                    "check_pipeline_scheduling: skipped pipeline due to error: "
+                    "project_id=%s version_id=%s exc_type=%s exc=%r",
+                    project_id, getattr(version, 'id', '?'),
+                    type(exc).__name__, exc,
                 )
 
 
@@ -90,7 +105,7 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
     # Validate the schedule configuration
     try:
         schedule = PipelineTriggerSchedule.parse_obj(trigger)
-    except Exception as e:
+    except Exception as e:  # pylint: disable=W0703
         log.warning(
             f"Invalid pipeline schedule config: project={project_id}, "
             f"version_id={version.id}: {e}"
@@ -106,10 +121,21 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
             f"Pipeline schedule missing last_run (legacy data): project={project_id}, "
             f"version_id={version.id}. Initializing to current time."
         )
-        current_time = datetime.now(UTC).isoformat()
-        version.pipeline_settings["trigger"]["last_run"] = current_time
-        flag_modified(version, "pipeline_settings")
-        session.commit()
+        try:
+            current_time = datetime.now(UTC).isoformat()
+            version.pipeline_settings["trigger"]["last_run"] = current_time
+            flag_modified(version, "pipeline_settings")
+            session.commit()
+        except Exception as exc:  # pylint: disable=W0703
+            try:
+                session.rollback()
+            except Exception:  # pylint: disable=W0703
+                pass
+            log.exception(
+                "Failed to initialize last_run for legacy pipeline schedule: "
+                "project_id=%s version_id=%s exc_type=%s exc=%r",
+                project_id, version.id, type(exc).__name__, exc,
+            )
         return  # Wait for next cron match
 
     # Inline cron evaluation: avoids a cross-plugin RPC round-trip per
@@ -118,44 +144,59 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
     should_run = is_cron_due(schedule.cron, schedule.last_run, schedule.timezone)
 
     if not should_run:
-        log.debug(
-            f"Pipeline not due: project={project_id}, version_id={version.id}, "
-            f"cron={schedule.cron}, last_run={schedule.last_run}"
-        )
         return
 
     trigger_started = time.monotonic()
     log.info(
         f"Pipeline trigger started at {datetime.now(UTC).isoformat()}: "
-        f"project={project_id}, version_id={version.id}, cron={schedule.cron}"
+        f"project={project_id}, version_id={version.id}, cron={schedule.cron}, "
+        f"last_run={schedule.last_run}, user_id={schedule.created_by}"
     )
 
-    # Execute the pipeline
+    # Execute the pipeline. Failures here must not prevent last_run update
+    # nor poison the session for the next pipeline in this tick.
     try:
         _execute_pipeline(
             project_id=project_id,
             version=version,
             creator_id=schedule.created_by,
         )
+    except Exception as exc:  # pylint: disable=W0703
+        try:
+            session.rollback()
+        except Exception:  # pylint: disable=W0703
+            pass
+        log.exception(
+            "Failed to execute scheduled pipeline: project_id=%s "
+            "version_id=%s cron=%s exc_type=%s exc=%r",
+            project_id, version.id, schedule.cron,
+            type(exc).__name__, exc,
+        )
+        return
 
-        # Update last_run timestamp
+    # Update last_run timestamp
+    try:
         current_time = datetime.now(UTC).isoformat()
         version.pipeline_settings["trigger"]["last_run"] = current_time
         flag_modified(version, "pipeline_settings")
         session.commit()
-
-        log.info(
-            f"Pipeline trigger finished at {current_time}: "
-            f"project={project_id}, version_id={version.id}, "
-            f"last_run={current_time} (dispatched in {time.monotonic() - trigger_started:.3f}s)"
+    except Exception as exc:  # pylint: disable=W0703
+        try:
+            session.rollback()
+        except Exception:  # pylint: disable=W0703
+            pass
+        log.exception(
+            "Failed to persist last_run after pipeline dispatch: project_id=%s "
+            "version_id=%s exc_type=%s exc=%r",
+            project_id, version.id, type(exc).__name__, exc,
         )
+        return
 
-    except Exception as e:
-        log.error(
-            f"Failed to execute scheduled pipeline: project={project_id}, "
-            f"version_id={version.id}: {e}"
-        )
-        session.rollback()
+    log.info(
+        f"Pipeline trigger finished at {current_time}: "
+        f"project={project_id}, version_id={version.id}, "
+        f"last_run={current_time} (dispatched in {time.monotonic() - trigger_started:.3f}s)"
+    )
 
 
 def _execute_pipeline(
@@ -238,11 +279,19 @@ class RPC:
                 else (lambda: None)
             )
 
-            all_project_ids = [
-                project_['id'] for project_ in rpc_tools.RpcMixin().rpc.timeout(3).project_list(
-                    filter_={'create_success': True}
+            try:
+                all_project_ids = [
+                    project_['id'] for project_ in rpc_tools.RpcMixin().rpc.timeout(3).project_list(
+                        filter_={'create_success': True}
+                    )
+                ]
+            except Exception as exc:  # pylint: disable=W0703
+                log.exception(
+                    "check_pipeline_scheduling: failed to enumerate projects: "
+                    "exc_type=%s exc=%r",
+                    type(exc).__name__, exc,
                 )
-            ]
+                return None
 
             for project_id in all_project_ids:
                 # Yield between projects so a long scheduler tick does not starve
@@ -250,8 +299,12 @@ class RPC:
                 yield_to_hub()
                 try:
                     _check_project_pipelines(project_id, yield_to_hub=yield_to_hub)
-                except Exception as e:
-                    log.error(f"Error checking pipeline schedules for project {project_id}: {e}")
+                except Exception as exc:  # pylint: disable=W0703
+                    log.exception(
+                        "check_pipeline_scheduling: skipped project due to error: "
+                        "project_id=%s exc_type=%s exc=%r",
+                        project_id, type(exc).__name__, exc,
+                    )
 
             return None
         finally:
