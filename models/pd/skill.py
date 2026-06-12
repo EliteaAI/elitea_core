@@ -11,6 +11,7 @@ from pydantic import (
 )
 
 from .collection_base import TagBaseModel, AuthorBaseModel
+from ...models.enums.all import SkillEntityTypes
 from ...utils.authors import get_authors_data
 from ...utils.constants import ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API
 
@@ -171,3 +172,22 @@ class SkillImportModel(SkillArgsForwardingModel):
     description: str = Field(min_length=1)
     versions: List[SkillVersionImportModel]
     meta: Optional[dict] = None
+
+
+class SkillUpdateRelationModel(BaseModel):
+    """Toggle the relation between a skill and an agent (application) version.
+
+    Mirrors ``ToolUpdateRelationModel`` (Link Agent to Toolkit), except there is
+    no ``entity_id``: the ``entity_skill_mapping`` table is keyed by
+    ``entity_version_id`` alone. ``skill_version_id`` is required when attaching.
+    """
+    entity_version_id: int
+    entity_type: SkillEntityTypes = SkillEntityTypes.agent
+    has_relation: bool = False
+    skill_version_id: Optional[int] = None
+
+    @model_validator(mode='after')
+    def check_skill_version_id(self):
+        if self.has_relation and self.skill_version_id is None:
+            raise ValueError('skill_version_id is required when has_relation is True')
+        return self
