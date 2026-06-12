@@ -181,6 +181,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 'child_thread_id': child_thread_id,
                 'child_index': spec.get('index', i),
                 'reconcile_epoch': epoch,
+                # Child identity for the indexer to stamp onto every event this
+                # child emits (so the UI attributes the child's live chips +
+                # HITL card to its own sub-agent accordion) and for HITL-resume
+                # decision matching by tool_call_id. The display name mirrors
+                # the chip parenthetical the in-process path stamps as
+                # parent_agent_name (#4993 Track 2).
+                'tool_call_id': spec.get('tool_call_id'),
+                'subagent_name': spec.get('display_name') or spec.get('name'),
             }
             # Stash the child's launch payload + linkage meta so a HITL pause on
             # this child can be resumed (replayed with hitl_resume) without
