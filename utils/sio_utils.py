@@ -67,6 +67,7 @@ class SioEvents(StrEnum):
 
     tts_start = 'tts_start'
     tts_stop = 'tts_stop'
+    tts_next = 'tts_next'
     tts_audio_chunk = 'tts_audio_chunk'
     tts_done = 'tts_done'
     tts_error = 'tts_error'
