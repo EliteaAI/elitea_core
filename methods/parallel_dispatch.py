@@ -125,6 +125,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # The parent's original task type (indexer_agent | indexer_predict_agent)
         # so the reconcile re-invoke targets the same runner.
         parent_task_name = parent_meta.get('task_name', 'indexer_agent')
+        # The sio_event/question_id the live UI subscribed to. The browser joined
+        # room_{sio_event}_{stream_id} (chat_predict) via chat_enter_room; the
+        # indexer routes each emitted event to that room from task_meta['sio_event']
+        # (defaulting to application_predict when absent). Children inherit BOTH so
+        # their live chunks, tool chips, and HITL cards land in the SAME room the
+        # parent's events do — without this a child emits into an unsubscribed
+        # application_predict room and the UI sees nothing (#4993 Track 2 stall).
+        parent_sio_event = parent_meta.get('sio_event')
+        parent_question_id = parent_meta.get('question_id')
 
         epoch = uuid4().hex
 
@@ -174,6 +183,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 'project_id': project_id,
                 'user_context': parent_meta.get('user_context'),
                 'chat_project_id': parent_meta.get('chat_project_id'),
+                # Route the child's live events to the SAME sio room the browser
+                # joined for the parent (chat_predict / parent stream). Without
+                # these the indexer defaults to application_predict and the
+                # child's chunks + HITL card emit into an unsubscribed room.
+                'sio_event': parent_sio_event,
+                'question_id': parent_question_id,
                 # Parent linkage — presence of reconcile_epoch is how
                 # task_status_changed recognizes a child terminal event.
                 'parent_task_id': parent_task_id,
