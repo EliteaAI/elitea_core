@@ -134,6 +134,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # application_predict room and the UI sees nothing (#4993 Track 2 stall).
         parent_sio_event = parent_meta.get('sio_event')
         parent_question_id = parent_meta.get('question_id')
+        # The tenant the chat lives in. chat_message_stream_end opens its DB
+        # session with response_metadata['chat_project_id'] (stamped from
+        # task_meta['chat_project_id']); without it the session resolves the
+        # literal 'tenant' placeholder schema and the finalize INSERT throws
+        # UndefinedTable, so the reconciled parent's message is never persisted
+        # (stays is_streaming=true, no content/items) — the final answer + child
+        # attribution vanish on reload (#4993 Track 2). user_context is carried
+        # for parity with the child meta so the re-invoked run authenticates the
+        # same way.
+        parent_chat_project_id = parent_meta.get('chat_project_id')
+        parent_user_context = parent_meta.get('user_context')
 
         epoch = uuid4().hex
 
@@ -148,6 +159,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 'parent_stream_id': parent_stream_id,
                 'parent_message_id': parent_message_id,
                 'project_id': project_id,
+                # The reconcile re-invoke synthesizes the FINAL answer and streams
+                # it on the parent stream — it must emit into the SAME sio room the
+                # browser joined, exactly like the children. Without these the
+                # re-invoked parent defaults to application_predict (unsubscribed)
+                # and the orchestrator's final answer never reaches the UI (#4993).
+                'sio_event': parent_sio_event,
+                'question_id': parent_question_id,
+                # Tenant + auth for the reconcile run's DB finalize (see above).
+                'chat_project_id': parent_chat_project_id,
+                'user_context': parent_user_context,
             },
         )
 
@@ -295,6 +316,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         meta = {
             'task_name': parent_task_name,
             'project_id': project_id,
+            # Route the re-invoked parent's live events (the synthesized final
+            # answer chunks + agent_response) to the SAME sio room the browser
+            # joined. create_node_interface derives the room from these; absent
+            # them the indexer defaults to application_predict (unsubscribed) and
+            # the orchestrator's final answer never reaches the UI (#4993).
+            'sio_event': stash.get('sio_event'),
+            'question_id': stash.get('question_id'),
+            # Tenant + auth so the reconcile run's chat_message_stream_end opens
+            # the project schema (not the 'tenant' placeholder) and persists the
+            # finalized parent message — without chat_project_id the finalize
+            # INSERT throws UndefinedTable and the answer is never stored (#4993).
+            'chat_project_id': stash.get('chat_project_id'),
+            'user_context': stash.get('user_context'),
             # Reconcile re-invoke is a normal parent run again — if it parks
             # AGAIN (nested fan-out) the parked-parent branch handles it; it is
             # NOT itself a child, so no reconcile_epoch in meta.
