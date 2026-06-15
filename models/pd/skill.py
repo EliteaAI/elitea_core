@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import (
     BaseModel,
@@ -23,6 +23,25 @@ from .skill_version import (
     SkillVersionExportModel,
     SkillVersionImportModel,
 )
+
+
+class SkillImportResultModel(BaseModel):
+    """Outcome of importing a single skill via the ``import_skill`` primitive."""
+    id: int
+    versions: Dict[str, int] = Field(default_factory=dict)
+    reused: bool = False
+
+
+class InvokedSkillModel(BaseModel):
+    """
+    Per-turn carrier for a skill explicitly invoked via ``~skill-name`` in the
+    current user message.
+    """
+    skill_id: int
+    skill_version_id: int
+    name: str = Field(..., min_length=1)
+    version_name: str
+    instructions: str = Field(..., min_length=1)
 
 
 class SkillArgsForwardingModel(BaseModel):
@@ -49,8 +68,8 @@ class SkillArgsForwardingModel(BaseModel):
 
 class SkillCreateModel(SkillArgsForwardingModel):
     """Model for creating a new skill with initial version."""
-    name: str = Field(min_length=1)
-    description: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=32)
+    description: str = Field(min_length=1, max_length=2304)
     owner_id: int
     versions: List[SkillVersionCreateModel]
     meta: Optional[dict] = None
@@ -142,8 +161,8 @@ class SkillDetailModel(BaseModel):
 
 
 class SkillUpdateModel(SkillArgsForwardingModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=128)
-    description: Optional[str] = Field(None, min_length=1)
+    name: Optional[str] = Field(None, min_length=1, max_length=32)
+    description: Optional[str] = Field(None, min_length=1, max_length=2304)
     version: Optional[SkillVersionUpdateModel] = None
     meta: Optional[dict] = None
 
@@ -168,8 +187,8 @@ class SkillExportModel(SkillArgsForwardingModel):
 
 
 class SkillImportModel(SkillArgsForwardingModel):
-    name: str = Field(min_length=1)
-    description: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=32)
+    description: str = Field(min_length=1, max_length=2304)
     versions: List[SkillVersionImportModel]
     meta: Optional[dict] = None
 

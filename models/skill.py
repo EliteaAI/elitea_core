@@ -53,7 +53,8 @@ class Skill(db_tools.AbstractBaseMixin, db.Base):
     versions: Mapped[List['SkillVersion']] = relationship(
         back_populates='skill',
         lazy=True,
-        cascade='all, delete'
+        cascade='all, delete',
+        passive_deletes=True
     )
 
     def get_default_version(self) -> Optional['SkillVersion']:

@@ -24,12 +24,6 @@ applications_roles = [
     "models.applications.toolkits.details",
     "models.applications.versions.get",
     "models.applications.versions.create",
-    "models.applications.skills.list",
-    "models.applications.skills.details",
-    "models.applications.skills.create",
-    "models.applications.skills.update",
-    "models.applications.skills.delete",
-    "models.applications.skills.export",
 ]
 
 

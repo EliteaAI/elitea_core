@@ -18,6 +18,7 @@ from ...utils.skill_utils import (
     get_skill_version_by_name,
     attach_skill_to_agent,
     detach_skill_from_agent,
+    SkillError,
 )
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -32,6 +33,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "version_name", "in": "path", "required": False, "schema": {"type": "string"}, "description": "Optional version name to load details for"},
         ],
         tags=["elitea_core/skills"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.skills.details"],
@@ -71,6 +73,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
         ],
         tags=["elitea_core/skills"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.skills.create"],
@@ -95,18 +98,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if version_data.name == 'base':
             return {"error": "Version name 'base' is reserved; use a different name"}, 400
 
-        result = create_skill_version(
-            project_id=project_id,
-            skill_id=skill_id,
-            version_data=version_data,
-        )
+        try:
+            detail = create_skill_version(
+                project_id=project_id,
+                skill_id=skill_id,
+                version_data=version_data,
+            )
+        except SkillError as exc:
+            return {"error": str(exc)}, exc.http_status
 
-        if not result.get('ok'):
-            msg = result.get('msg', '')
-            status = 404 if 'not found' in msg.lower() else 400
-            return {"error": msg}, status
-
-        return result['data'], 201
+        return detail, 201
 
     @register_openapi(
         name="Update a skill's metadata or a specific skill version",
@@ -118,6 +119,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "version_name", "in": "path", "required": False, "schema": {"type": "string"}, "description": "Optional version name to update a specific version"},
         ],
         tags=["elitea_core/skills"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.skills.update"],
@@ -146,19 +148,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     include_input=False,
                 ), 400
 
-            result = update_skill_version(
-                project_id=project_id,
-                skill_id=skill_id,
-                version_id=version.id,
-                update_data=update_data,
-            )
+            try:
+                detail = update_skill_version(
+                    project_id=project_id,
+                    skill_id=skill_id,
+                    version_id=version.id,
+                    update_data=update_data,
+                )
+            except SkillError as exc:
+                return {"error": str(exc)}, exc.http_status
 
-            if not result.get('ok'):
-                msg = result.get('msg', '')
-                status = 404 if 'not found' in msg.lower() else 400
-                return {"error": msg}, status
-
-            return result['data'], 200
+            return detail, 200
 
         # Update skill metadata (and optionally the default version).
         payload = dict(request.json)
@@ -174,18 +174,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 include_input=False,
             ), 400
 
-        result = update_skill(
-            project_id=project_id,
-            skill_id=skill_id,
-            update_data=update_data,
-        )
+        try:
+            detail = update_skill(
+                project_id=project_id,
+                skill_id=skill_id,
+                update_data=update_data,
+            )
+        except SkillError as exc:
+            return {"error": str(exc)}, exc.http_status
 
-        if not result.get('ok'):
-            msg = result.get('msg', '')
-            status = 404 if 'not found' in msg.lower() else 400
-            return {"error": msg}, status
-
-        return result['data'], 200
+        return detail, 200
 
     @register_openapi(
         name="Link or unlink a skill to an agent version",
@@ -197,7 +195,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         ],
         tags=["elitea_core/skills"],
         mcp_tool=False,
-        available_to_users=False,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.skills.update"],
@@ -221,29 +219,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ), 400
 
         if relation_data.has_relation:
-            result = attach_skill_to_agent(
+            try:
+                data = attach_skill_to_agent(
+                    project_id=project_id,
+                    entity_version_id=relation_data.entity_version_id,
+                    skill_id=skill_id,
+                    skill_version_id=relation_data.skill_version_id,
+                    entity_type=relation_data.entity_type,
+                )
+            except SkillError as exc:
+                return {"error": str(exc)}, exc.http_status
+            return data, 201
+
+        try:
+            detach_skill_from_agent(
                 project_id=project_id,
                 entity_version_id=relation_data.entity_version_id,
                 skill_id=skill_id,
-                skill_version_id=relation_data.skill_version_id,
                 entity_type=relation_data.entity_type,
             )
-            if not result.get('ok'):
-                msg = result.get('msg', '')
-                status = 404 if 'not found' in msg.lower() else 400
-                return {"error": msg}, status
-            return result.get('data', {'ok': True}), 201
-
-        result = detach_skill_from_agent(
-            project_id=project_id,
-            entity_version_id=relation_data.entity_version_id,
-            skill_id=skill_id,
-            entity_type=relation_data.entity_type,
-        )
-        if not result.get('ok'):
-            msg = result.get('msg', '')
-            status = 404 if ('not found' in msg.lower() or 'not attached' in msg.lower()) else 400
-            return {"error": msg}, status
+        except SkillError as exc:
+            return {"error": str(exc)}, exc.http_status
         return {'ok': True}, 200
 
     @register_openapi(
@@ -255,6 +251,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "version_name", "in": "path", "required": False, "schema": {"type": "string"}, "description": "Optional version name to delete a specific version"},
         ],
         tags=["elitea_core/skills"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.skills.delete"],
@@ -274,29 +271,25 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if not version:
                 return {"error": f"Skill version '{version_name}' not found"}, 404
 
-            result = delete_skill_version(
-                project_id=project_id,
-                skill_id=skill_id,
-                version_id=version.id,
-            )
-
-            if not result.get('ok'):
-                msg = result.get('msg', '')
-                status = 404 if 'not found' in msg.lower() else 400
-                return {"error": msg}, status
+            try:
+                delete_skill_version(
+                    project_id=project_id,
+                    skill_id=skill_id,
+                    version_id=version.id,
+                )
+            except SkillError as exc:
+                return {"error": str(exc)}, exc.http_status
 
             return '', 204
 
         # Delete the entire skill.
-        result = delete_skill(
-            project_id=project_id,
-            skill_id=skill_id,
-        )
-
-        if not result.get('ok'):
-            msg = result.get('msg', '')
-            status = 404 if 'not found' in msg.lower() else 400
-            return {"error": msg}, status
+        try:
+            delete_skill(
+                project_id=project_id,
+                skill_id=skill_id,
+            )
+        except SkillError as exc:
+            return {"error": str(exc)}, exc.http_status
 
         return '', 204
 

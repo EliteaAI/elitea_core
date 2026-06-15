@@ -280,8 +280,21 @@ class ApplicationVersionDetailModel(ApplicationVersionBaseModel):
         return self
 
 
+class AttachedSkillModel(BaseModel):
+    """Selected-version body of an attached skill carried in the runtime payload."""
+    skill_id: int
+    skill_version_id: Optional[int] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    version_name: Optional[str] = None
+    instructions: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ApplicationVersionDetailToolValidatedModel(ApplicationVersionDetailModel, ApplicationVersionArgsForwardingModel):
     tools: Optional[List[ToolValidatedDetails]] = []
+    skills: Optional[List[AttachedSkillModel]] = []
 
 
 class ApplicationExportVersionDetailModel(ApplicationVersionDetailModel, ApplicationVersionArgsForwardingModel):

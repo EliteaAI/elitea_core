@@ -12,6 +12,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="List skills attached to an application version",
         description="Returns the skills attached to the given application version. Used by the chat UI to populate the `~` skill autocomplete and by the agent configuration page. Attaching/detaching skills is done via PATCH on the skill endpoint (Link or unlink a skill to an agent version).",
         tags=["elitea_core/skills"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.applications.details"],

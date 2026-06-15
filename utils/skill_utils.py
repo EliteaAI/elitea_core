@@ -1,11 +1,11 @@
+import re
+from contextlib import contextmanager
 from typing import List, Optional, Tuple, Literal
 
 from sqlalchemy import func, or_, asc, desc
 from sqlalchemy.orm import selectinload
-from sqlalchemy.exc import IntegrityError
 
 from tools import db, auth, serialize
-from pylon.core.tools import log
 
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag
@@ -14,6 +14,7 @@ from ..models.pd.skill import (
     SkillCreateModel,
     SkillDetailModel,
     SkillUpdateModel,
+    SkillImportResultModel,
 )
 from ..models.pd.skill_version import (
     SkillVersionCreateModel,
@@ -24,14 +25,33 @@ from ..models.pd.skill_version import (
 
 MAX_SKILLS_PER_AGENT = 5
 
+_SKILL_SORT_WHITELIST = frozenset({'created_at', 'name', 'id'})
 
-class SkillNotFoundError(Exception):
+
+class SkillError(Exception):
+    """Base class for all skill domain errors.
+
+    Each subclass carries ``http_status`` — the HTTP status the v2 API boundary
+    returns for it. The API catches ``SkillError`` and returns
+    ``{'error': str(exc)}, exc.http_status``; non-HTTP callers (e.g. the RPC
+    layer) let it propagate and ignore ``http_status``. Defaults to 400;
+    subclasses override it. An unexpected, non-``SkillError`` error is never
+    caught at the boundary and correctly propagates to a 500.
+    """
+    http_status = 400
+
+
+class SkillNotFoundError(SkillError):
+    http_status = 404
+
     def __init__(self, skill_id: int):
         super().__init__(f"Skill with id {skill_id} not found")
         self.skill_id = skill_id
 
 
-class SkillVersionNotFoundError(Exception):
+class SkillVersionNotFoundError(SkillError):
+    http_status = 404
+
     def __init__(self, skill_id: int, version_id: int = None, version_name: str = None):
         if version_id:
             msg = f"Skill version with id {version_id} not found for skill {skill_id}"
@@ -43,7 +63,9 @@ class SkillVersionNotFoundError(Exception):
         self.version_name = version_name
 
 
-class SkillVersionInUseError(Exception):
+class SkillVersionInUseError(SkillError):
+    http_status = 409
+
     def __init__(self, version_id: int, usage_count: int):
         super().__init__(
             f"Skill version {version_id} is attached to {usage_count} agent(s). "
@@ -53,7 +75,9 @@ class SkillVersionInUseError(Exception):
         self.usage_count = usage_count
 
 
-class SkillLimitExceededError(Exception):
+class SkillLimitExceededError(SkillError):
+    http_status = 400
+
     def __init__(self, entity_version_id: int, current_count: int):
         super().__init__(
             f"Agent version {entity_version_id} already has {current_count} skills attached. "
@@ -63,7 +87,9 @@ class SkillLimitExceededError(Exception):
         self.current_count = current_count
 
 
-class SkillAlreadyAttachedError(Exception):
+class SkillAlreadyAttachedError(SkillError):
+    http_status = 409
+
     def __init__(self, skill_id: int, entity_version_id: int):
         super().__init__(
             f"Skill {skill_id} is already attached to agent version {entity_version_id}"
@@ -72,12 +98,68 @@ class SkillAlreadyAttachedError(Exception):
         self.entity_version_id = entity_version_id
 
 
-class SkillResolutionError(Exception):
-    """Raised when a skill cannot be resolved for chat invocation."""
-    def __init__(self, skill_name: str, reason: str):
-        super().__init__(f"Cannot invoke skill '~{skill_name}': {reason}")
-        self.skill_name = skill_name
-        self.reason = reason
+class SkillNameConflictError(SkillError):
+    """Raised when a skill name already exists in the project"""
+    http_status = 409
+
+    def __init__(self, name: str):
+        super().__init__(f"A skill named '{name}' already exists in this project")
+        self.name = name
+
+
+class SkillNotAttachedError(SkillError):
+    """Raised when detaching a skill that has no mapping to the agent version."""
+    http_status = 404
+
+    def __init__(self, skill_id: int, entity_version_id: int):
+        super().__init__(
+            f"Skill {skill_id} is not attached to agent version {entity_version_id}"
+        )
+        self.skill_id = skill_id
+        self.entity_version_id = entity_version_id
+
+
+class SkillVersionConflictError(SkillError):
+    """Raised when a version name already exists for the skill (create/rename clash)."""
+    http_status = 409
+
+    def __init__(self, skill_id: int, version_name: str):
+        super().__init__(
+            f'Version name "{version_name}" already exists for skill {skill_id}'
+        )
+        self.skill_id = skill_id
+        self.version_name = version_name
+
+
+class SkillVersionNotUpdatableError(SkillError):
+    """Raised for forbidden version mutations (rename 'base', delete only/base version)."""
+    http_status = 400
+
+    def __init__(self, message: str, version_id: int = None):
+        super().__init__(message)
+        self.version_id = version_id
+
+
+@contextmanager
+def _skill_session(session, project_id):
+    """Yield a usable session. Own commit/rollback/close ONLY when we created it.
+
+    Caller-passed session: flush (so IDs populate) but never commit/rollback/close —
+    the caller owns the transaction; exceptions propagate untouched.
+    Owned session (created here via ``closing(...)``): commit on success, rollback
+    on error, and close on exit (the closing() context manager closes).
+    """
+    if session is not None:
+        yield session
+        session.flush()
+        return
+    with db.get_session(project_id) as owned:   # closing(...) → close on exit
+        try:
+            yield owned
+            owned.commit()
+        except Exception:
+            owned.rollback()
+            raise
 
 
 def list_skills(
@@ -107,13 +189,9 @@ def list_skills(
     if filters is None:
         filters = []
 
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
+    with _skill_session(session, project_id) as s:
         # Count query
-        count_query = session.query(func.count(Skill.id))
+        count_query = s.query(func.count(Skill.id))
         if filters:
             count_query = count_query.filter(*filters)
         total = count_query.scalar() or 0
@@ -122,7 +200,7 @@ def list_skills(
             return 0, []
 
         # Main query with eager loading
-        query = session.query(Skill).options(
+        query = s.query(Skill).options(
             selectinload(Skill.versions).selectinload(SkillVersion.tags)
         )
 
@@ -130,6 +208,8 @@ def list_skills(
             query = query.filter(*filters)
 
         # Sorting
+        if sort_by not in _SKILL_SORT_WHITELIST:
+            sort_by = 'created_at'
         sort_column = getattr(Skill, sort_by, Skill.created_at)
         if sort_order == 'desc':
             query = query.order_by(desc(sort_column))
@@ -144,10 +224,6 @@ def list_skills(
 
         skills = query.all()
         return total, skills
-
-    finally:
-        if owns_session:
-            session.close()
 
 
 def list_skills_api(
@@ -242,12 +318,8 @@ def get_skill_details(
     Returns:
         Dictionary with 'data' key containing skill details, or None if not found
     """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        skill = session.query(Skill).filter(
+    with _skill_session(session, project_id) as s:
+        skill = s.query(Skill).filter(
             Skill.id == skill_id
         ).options(
             selectinload(Skill.versions).selectinload(SkillVersion.tags)
@@ -278,27 +350,19 @@ def get_skill_details(
 
         return {'data': serialize(result)}
 
-    finally:
-        if owns_session:
-            session.close()
-
 
 def create_skill(
     skill_data: SkillCreateModel,
     session,
     project_id: int,
 ) -> Skill:
-    """
-    Create a new skill with its initial version.
+    """Create a new skill with its initial version."""
+    existing = session.query(Skill.id).filter(
+        func.lower(Skill.name) == skill_data.name.lower()
+    ).first()
+    if existing:
+        raise SkillNameConflictError(skill_data.name)
 
-    Args:
-        skill_data: Validated skill creation data
-        session: Database session
-        project_id: Project ID
-
-    Returns:
-        Created Skill object
-    """
     # Create skill
     skill = Skill(
         name=skill_data.name,
@@ -308,7 +372,7 @@ def create_skill(
         meta=skill_data.meta or {},
     )
     session.add(skill)
-    session.flush()  # Get skill.id
+    session.flush()
 
     # Create initial version
     for version_data in skill_data.versions:
@@ -316,7 +380,7 @@ def create_skill(
             skill_id=skill.id,
             name=version_data.name,
             instructions=version_data.instructions,
-            author_id=version_data.author_id if hasattr(version_data, 'author_id') else skill.author_id,
+            author_id=version_data.author_id or skill.author_id,
             meta=version_data.meta or {},
         )
         session.add(version)
@@ -335,34 +399,30 @@ def update_skill(
     update_data: SkillUpdateModel,
     session=None,
 ) -> dict:
-    """
-    Update skill metadata and optionally version content.
+    """Update skill metadata and optionally version content."""
 
-    Args:
-        project_id: Project ID
-        skill_id: Skill ID to update
-        update_data: Validated update data
-        session: Database session
-
-    Returns:
-        Dictionary with 'ok' and 'data' or 'msg' keys
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        skill = session.query(Skill).filter(
+    with _skill_session(session, project_id) as s:
+        skill = s.query(Skill).filter(
             Skill.id == skill_id
         ).options(
             selectinload(Skill.versions)
         ).first()
 
         if not skill:
-            return {'ok': False, 'msg': f'Skill with id {skill_id} not found'}
+            raise SkillNotFoundError(skill_id)
 
         # Update skill metadata
         if update_data.name is not None:
+            # Per-project name uniqueness (case-insensitive). On a real rename
+            # (name differs case-insensitively from the current name), ensure no
+            # OTHER skill in the project already owns the target name.
+            if update_data.name.lower() != (skill.name or '').lower():
+                conflict = s.query(Skill.id).filter(
+                    func.lower(Skill.name) == update_data.name.lower(),
+                    Skill.id != skill_id,
+                ).first()
+                if conflict:
+                    raise SkillNameConflictError(update_data.name)
             skill.name = update_data.name
         if update_data.description is not None:
             skill.description = update_data.description
@@ -373,24 +433,9 @@ def update_skill(
         if update_data.version:
             version = skill.get_default_version()
             if version:
-                result = _update_version_fields(session, version, update_data.version)
-                if not result.get('ok', True):
-                    return result
+                _update_version_fields(s, version, update_data.version)
 
-        session.commit()
-        session.refresh(skill)
-
-        result = SkillDetailModel.model_validate(skill)
-        return {'ok': True, 'data': serialize(result)}
-
-    except Exception as e:
-        if owns_session:
-            session.rollback()
-        log.error(f"Error updating skill {skill_id}: {e}")
-        return {'ok': False, 'msg': str(e)}
-    finally:
-        if owns_session:
-            session.close()
+        return serialize(SkillDetailModel.model_validate(skill))
 
 
 def delete_skill(
@@ -398,42 +443,21 @@ def delete_skill(
     skill_id: int,
     session=None,
 ) -> dict:
-    """
-    Delete a skill and all its versions (cascades to agent attachments).
-
-    Args:
-        project_id: Project ID
-        skill_id: Skill ID to delete
-        session: Database session
-
-    Returns:
-        Dictionary with 'ok' key and optional 'msg' for errors
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        skill = session.query(Skill).filter(
+    """Delete a skill and all its versions (cascades to agent attachments)."""
+    with _skill_session(session, project_id) as s:
+        skill = s.query(Skill).filter(
             Skill.id == skill_id
         ).first()
 
         if not skill:
-            return {'ok': False, 'msg': f'Skill with id {skill_id} not found'}
+            raise SkillNotFoundError(skill_id)
 
-        session.delete(skill)
-        session.commit()
+        s.query(EntitySkillMapping).filter(
+            EntitySkillMapping.skill_id == skill_id
+        ).delete(synchronize_session=False)
 
-        return {'ok': True}
-
-    except Exception as e:
-        if owns_session:
-            session.rollback()
-        log.error(f"Error deleting skill {skill_id}: {e}")
-        return {'ok': False, 'msg': str(e)}
-    finally:
-        if owns_session:
-            session.close()
+        s.delete(skill)
+        return None
 
 
 def create_skill_version(
@@ -442,63 +466,36 @@ def create_skill_version(
     version_data: SkillVersionCreateModel,
     session=None,
 ) -> dict:
-    """
-    Create a new version for an existing skill.
-
-    Args:
-        project_id: Project ID
-        skill_id: Skill ID to add version to
-        version_data: Validated version data
-        session: Database session
-
-    Returns:
-        Dictionary with 'ok' and 'data' or 'msg' keys
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
+    """Create a new version for an existing skill."""
+    with _skill_session(session, project_id) as s:
         # Verify skill exists
-        skill = session.query(Skill).filter(Skill.id == skill_id).first()
+        skill = s.query(Skill).filter(Skill.id == skill_id).first()
         if not skill:
-            return {'ok': False, 'msg': f'Skill with id {skill_id} not found'}
+            raise SkillNotFoundError(skill_id)
+
+        existing_version = s.query(SkillVersion.id).filter(
+            SkillVersion.skill_id == skill_id,
+            SkillVersion.name == version_data.name,
+        ).first()
+        if existing_version:
+            raise SkillVersionConflictError(skill_id, version_data.name)
 
         # Create version
         version = SkillVersion(
             skill_id=skill_id,
             name=version_data.name,
             instructions=version_data.instructions,
-            author_id=version_data.author_id if hasattr(version_data, 'author_id') else auth.current_user().get('id'),
+            author_id=version_data.author_id or auth.current_user().get('id'),
             meta=version_data.meta or {},
         )
-        session.add(version)
+        s.add(version)
+        s.flush()
 
         # Handle tags
         if version_data.tags:
-            session.flush()  # Get version.id
-            _apply_tags_to_version(session, version, version_data.tags)
+            _apply_tags_to_version(s, version, version_data.tags)
 
-        session.commit()
-        session.refresh(version)
-
-        result = SkillVersionDetailModel.model_validate(version)
-        return {'ok': True, 'data': serialize(result)}
-
-    except IntegrityError as e:
-        if owns_session:
-            session.rollback()
-        if 'unique' in str(e).lower():
-            return {'ok': False, 'msg': f'Version name "{version_data.name}" already exists for this skill'}
-        return {'ok': False, 'msg': str(e)}
-    except Exception as e:
-        if owns_session:
-            session.rollback()
-        log.error(f"Error creating skill version: {e}")
-        return {'ok': False, 'msg': str(e)}
-    finally:
-        if owns_session:
-            session.close()
+        return serialize(SkillVersionDetailModel.model_validate(version))
 
 
 def update_skill_version(
@@ -508,25 +505,9 @@ def update_skill_version(
     update_data: SkillVersionUpdateModel,
     session=None,
 ) -> dict:
-    """
-    Update an existing skill version.
-
-    Args:
-        project_id: Project ID
-        skill_id: Skill ID
-        version_id: Version ID to update
-        update_data: Validated update data
-        session: Database session
-
-    Returns:
-        Dictionary with 'ok' and 'data' or 'msg' keys
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        version = session.query(SkillVersion).filter(
+    """Update an existing skill version."""
+    with _skill_session(session, project_id) as s:
+        version = s.query(SkillVersion).filter(
             SkillVersion.id == version_id,
             SkillVersion.skill_id == skill_id,
         ).options(
@@ -534,36 +515,27 @@ def update_skill_version(
         ).first()
 
         if not version:
-            return {'ok': False, 'msg': f'Version {version_id} not found for skill {skill_id}'}
+            raise SkillVersionNotFoundError(skill_id, version_id=version_id)
 
         # Prevent renaming 'base' version
         if version.name == 'base' and update_data.name and update_data.name != 'base':
-            return {'ok': False, 'msg': 'Cannot rename the base version'}
+            raise SkillVersionNotUpdatableError(
+                'Cannot rename the base version', version_id=version_id
+            )
 
-        result = _update_version_fields(session, version, update_data)
-        if not result.get('ok', True):
-            return result
+        # Pre-check rename uniqueness (commit moved to the helper boundary).
+        if update_data.name and update_data.name != version.name:
+            conflict = s.query(SkillVersion.id).filter(
+                SkillVersion.skill_id == skill_id,
+                SkillVersion.name == update_data.name,
+                SkillVersion.id != version_id,
+            ).first()
+            if conflict:
+                raise SkillVersionConflictError(skill_id, update_data.name)
 
-        session.commit()
-        session.refresh(version)
+        _update_version_fields(s, version, update_data)
 
-        result = SkillVersionDetailModel.model_validate(version)
-        return {'ok': True, 'data': serialize(result)}
-
-    except IntegrityError as e:
-        if owns_session:
-            session.rollback()
-        if 'unique' in str(e).lower():
-            return {'ok': False, 'msg': f'Version name "{update_data.name}" already exists for this skill'}
-        return {'ok': False, 'msg': str(e)}
-    except Exception as e:
-        if owns_session:
-            session.rollback()
-        log.error(f"Error updating skill version {version_id}: {e}")
-        return {'ok': False, 'msg': str(e)}
-    finally:
-        if owns_session:
-            session.close()
+        return serialize(SkillVersionDetailModel.model_validate(version))
 
 
 def delete_skill_version(
@@ -572,65 +544,39 @@ def delete_skill_version(
     version_id: int,
     session=None,
 ) -> dict:
-    """
-    Delete a skill version (validates not in use by agents).
+    """Delete a skill version (validates not in use by agents)."""
 
-    Args:
-        project_id: Project ID
-        skill_id: Skill ID
-        version_id: Version ID to delete
-        session: Database session
-
-    Returns:
-        Dictionary with 'ok' key and optional 'msg' for errors
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        version = session.query(SkillVersion).filter(
+    with _skill_session(session, project_id) as s:
+        version = s.query(SkillVersion).filter(
             SkillVersion.id == version_id,
             SkillVersion.skill_id == skill_id,
         ).first()
 
         if not version:
-            return {'ok': False, 'msg': f'Version {version_id} not found for skill {skill_id}'}
+            raise SkillVersionNotFoundError(skill_id, version_id=version_id)
 
         # Prevent deleting 'base' version if it's the only one
-        other_versions = session.query(SkillVersion).filter(
+        other_versions = s.query(SkillVersion).filter(
             SkillVersion.skill_id == skill_id,
             SkillVersion.id != version_id,
         ).count()
 
         if version.name == 'base' and other_versions == 0:
-            return {'ok': False, 'msg': 'Cannot delete the only version of a skill. Delete the skill instead.'}
+            raise SkillVersionNotUpdatableError(
+                'Cannot delete the only version of a skill. Delete the skill instead.',
+                version_id=version_id,
+            )
 
         # Check if version is in use by any agents
-        usage_count = session.query(EntitySkillMapping).filter(
+        usage_count = s.query(EntitySkillMapping).filter(
             EntitySkillMapping.skill_version_id == version_id
         ).count()
 
         if usage_count > 0:
-            return {
-                'ok': False,
-                'msg': f'Version is attached to {usage_count} agent(s). Detach it from all agents before deleting.',
-                'usage_count': usage_count
-            }
+            raise SkillVersionInUseError(version_id, usage_count)
 
-        session.delete(version)
-        session.commit()
-
-        return {'ok': True}
-
-    except Exception as e:
-        if owns_session:
-            session.rollback()
-        log.error(f"Error deleting skill version {version_id}: {e}")
-        return {'ok': False, 'msg': str(e)}
-    finally:
-        if owns_session:
-            session.close()
+        s.delete(version)
+        return None
 
 
 def get_skill_version_by_name(
@@ -639,30 +585,95 @@ def get_skill_version_by_name(
     version_name: str,
     session=None,
 ) -> Optional[SkillVersion]:
-    """
-    Get a skill version by name.
-
-    Args:
-        project_id: Project ID
-        skill_id: Skill ID
-        version_name: Version name to look up
-        session: Database session
-
-    Returns:
-        SkillVersion object or None if not found
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        return session.query(SkillVersion).filter(
+    """Get a skill version by name."""
+    with _skill_session(session, project_id) as s:
+        return s.query(SkillVersion).filter(
             SkillVersion.skill_id == skill_id,
             SkillVersion.name == version_name,
         ).first()
-    finally:
-        if owns_session:
-            session.close()
+
+
+def find_existing_skill_by_name(session, name: str) -> Optional[Skill]:
+    return session.query(Skill).filter(
+        func.lower(Skill.name) == name.lower()
+    ).options(
+        selectinload(Skill.versions)
+    ).order_by(Skill.id).first()
+
+
+def import_skill(
+    project_id: int,
+    name: str,
+    description: str,
+    versions: list,
+    author_id: int,
+    *,
+    on_conflict: str = 'merge',
+    session=None,
+) -> SkillImportResultModel:
+    if not versions:
+        raise ValueError(f"Skill '{name}' has no versions to import")
+
+    payloads = [
+        {
+            'name': v.get('name', 'base'),
+            'instructions': v.get('instructions', ''),
+            'author_id': v.get('author_id', author_id),
+            'tags': v.get('tags') or None,
+            'meta': v.get('meta') or None,
+        }
+        for v in versions
+    ]
+
+    with _skill_session(session, project_id) as s:
+        existing = find_existing_skill_by_name(s, name)
+        if existing:
+            version_map = {v.name: v.id for v in existing.versions}
+            existing_by_name = {v.name: v for v in existing.versions}
+            if on_conflict == 'overwrite' and description and existing.description != description:
+                existing.description = description
+            for vp in payloads:
+                vname = vp['name']
+                if vname in version_map:
+                    if on_conflict == 'overwrite':
+                        _update_version_fields(
+                            s, existing_by_name[vname],
+                            SkillVersionUpdateModel.model_validate(
+                                {'instructions': vp['instructions'], 'tags': vp['tags']}
+                            ),
+                        )
+                    continue
+                detail = create_skill_version(
+                    project_id=project_id,
+                    skill_id=existing.id,
+                    version_data=SkillVersionCreateModel.model_validate(vp),
+                    session=s,
+                )
+                version_map[vname] = detail['id']
+            return SkillImportResultModel(id=existing.id, versions=version_map, reused=True)
+
+        # New skill: create_skill enforces exactly one version, so create with the
+        # first and append the rest — all in this one transaction.
+        skill_model = SkillCreateModel.model_validate({
+            'name': name,
+            'description': description or name,
+            'owner_id': project_id,
+            'project_id': project_id,
+            'user_id': author_id,
+            'versions': payloads[:1],
+            'meta': None,
+        })
+        skill = create_skill(skill_model, s, project_id)
+        version_map = {v.name: v.id for v in skill.versions}
+        for vp in payloads[1:]:
+            detail = create_skill_version(
+                project_id=project_id,
+                skill_id=skill.id,
+                version_data=SkillVersionCreateModel.model_validate(vp),
+                session=s,
+            )
+            version_map[vp['name']] = detail['id']
+        return SkillImportResultModel(id=skill.id, versions=version_map, reused=False)
 
 
 def validate_agent_skill_limit(
@@ -670,20 +681,6 @@ def validate_agent_skill_limit(
     entity_version_id: int,
     entity_type: str = SkillEntityTypes.agent,
 ) -> bool:
-    """
-    Validate that an agent hasn't exceeded the maximum skill limit.
-
-    Args:
-        session: Database session
-        entity_version_id: Application version ID
-        entity_type: Entity type (default: 'agent')
-
-    Returns:
-        True if under limit
-
-    Raises:
-        SkillLimitExceededError if limit exceeded
-    """
     current_count = session.query(EntitySkillMapping).filter(
         EntitySkillMapping.entity_version_id == entity_version_id,
         EntitySkillMapping.entity_type == entity_type,
@@ -703,43 +700,35 @@ def attach_skill_to_agent(
     entity_type: str = SkillEntityTypes.agent,
     session=None,
 ) -> dict:
-    """
-    Attach a skill to an agent version.
+    """Attach a skill to an agent version."""
 
-    Args:
-        project_id: Project ID
-        entity_version_id: Application version ID
-        skill_id: Skill ID to attach
-        skill_version_id: Specific version to attach
-        entity_type: Entity type (default: 'agent')
-        session: Database session
-
-    Returns:
-        Dictionary with 'ok' key and optional 'msg' or 'data'
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        # Validate skill limit
-        try:
-            validate_agent_skill_limit(session, entity_version_id, entity_type)
-        except SkillLimitExceededError as e:
-            return {'ok': False, 'msg': str(e)}
+    with _skill_session(session, project_id) as s:
+        # Validate skill limit (raises SkillLimitExceededError)
+        validate_agent_skill_limit(s, entity_version_id, entity_type)
 
         # Verify skill exists
-        skill = session.query(Skill).filter(Skill.id == skill_id).first()
+        skill = s.query(Skill).filter(Skill.id == skill_id).first()
         if not skill:
-            return {'ok': False, 'msg': f'Skill with id {skill_id} not found'}
+            raise SkillNotFoundError(skill_id)
 
         # Verify version exists and belongs to skill
-        version = session.query(SkillVersion).filter(
+        version = s.query(SkillVersion).filter(
             SkillVersion.id == skill_version_id,
             SkillVersion.skill_id == skill_id,
         ).first()
         if not version:
-            return {'ok': False, 'msg': f'Version {skill_version_id} not found for skill {skill_id}'}
+            raise SkillVersionNotFoundError(skill_id, version_id=skill_version_id)
+
+        # Pre-check duplicate attach (the mapping unique key is
+        # (entity_version_id, skill_id, entity_type)). The DB unique constraint
+        # remains a backstop for a rare TOCTOU race.
+        existing_mapping = s.query(EntitySkillMapping.id).filter(
+            EntitySkillMapping.entity_version_id == entity_version_id,
+            EntitySkillMapping.entity_type == entity_type,
+            EntitySkillMapping.skill_id == skill_id,
+        ).first()
+        if existing_mapping:
+            raise SkillAlreadyAttachedError(skill_id, entity_version_id)
 
         # Create mapping
         mapping = EntitySkillMapping(
@@ -748,33 +737,14 @@ def attach_skill_to_agent(
             skill_id=skill_id,
             skill_version_id=skill_version_id,
         )
-        session.add(mapping)
-        session.commit()
+        s.add(mapping)
 
         return {
-            'ok': True,
-            'data': {
-                'skill_id': skill_id,
-                'skill_version_id': skill_version_id,
-                'skill_name': skill.name,
-                'version_name': version.name,
-            }
+            'skill_id': skill_id,
+            'skill_version_id': skill_version_id,
+            'skill_name': skill.name,
+            'version_name': version.name,
         }
-
-    except IntegrityError as e:
-        if owns_session:
-            session.rollback()
-        if 'unique' in str(e).lower():
-            return {'ok': False, 'msg': f'Skill {skill_id} is already attached to this agent'}
-        return {'ok': False, 'msg': str(e)}
-    except Exception as e:
-        if owns_session:
-            session.rollback()
-        log.error(f"Error attaching skill {skill_id} to agent: {e}")
-        return {'ok': False, 'msg': str(e)}
-    finally:
-        if owns_session:
-            session.close()
 
 
 def detach_skill_from_agent(
@@ -784,183 +754,60 @@ def detach_skill_from_agent(
     entity_type: str = SkillEntityTypes.agent,
     session=None,
 ) -> dict:
-    """
-    Detach a skill from an agent version.
-
-    Args:
-        project_id: Project ID
-        entity_version_id: Application version ID
-        skill_id: Skill ID to detach
-        entity_type: Entity type (default: 'agent')
-        session: Database session
-
-    Returns:
-        Dictionary with 'ok' key and optional 'msg'
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        mapping = session.query(EntitySkillMapping).filter(
+    """Detach a skill from an agent version."""
+    with _skill_session(session, project_id) as s:
+        mapping = s.query(EntitySkillMapping).filter(
             EntitySkillMapping.entity_version_id == entity_version_id,
             EntitySkillMapping.entity_type == entity_type,
             EntitySkillMapping.skill_id == skill_id,
         ).first()
 
         if not mapping:
-            return {'ok': False, 'msg': 'Skill not attached to this agent'}
+            raise SkillNotAttachedError(skill_id, entity_version_id)
 
-        session.delete(mapping)
-        session.commit()
-
-        return {'ok': True}
-
-    except Exception as e:
-        if owns_session:
-            session.rollback()
-        log.error(f"Error detaching skill {skill_id} from agent: {e}")
-        return {'ok': False, 'msg': str(e)}
-    finally:
-        if owns_session:
-            session.close()
+        s.delete(mapping)
+        return None
 
 
-def validate_agent_skills(
-    project_id: int,
-    entity_version_id: int,
-    entity_type: str = SkillEntityTypes.agent,
-    session=None,
-) -> dict:
-    """
-    Validate all skills attached to an agent before runtime.
+class SkillVersionDeletedError(SkillError):
+    """Raised at chat predict time when an attached skill's selected version is gone."""
+    http_status = 400
 
-    Performs pre-flight validation to ensure all attached skill versions exist.
-    This is a blocking validation - if any skill version is missing, the agent
-    cannot run.
-
-    Args:
-        project_id: Project ID
-        entity_version_id: Application version ID
-        entity_type: Entity type (default: 'agent')
-        session: Database session
-
-    Returns:
-        Dictionary with 'ok' key and 'errors' list if validation fails
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        mappings = session.query(EntitySkillMapping).filter(
-            EntitySkillMapping.entity_version_id == entity_version_id,
-            EntitySkillMapping.entity_type == entity_type,
-        ).all()
-
-        errors = []
-        for mapping in mappings:
-            # Check version exists
-            version = session.query(SkillVersion).filter(
-                SkillVersion.id == mapping.skill_version_id
-            ).first()
-
-            if not version:
-                skill = session.query(Skill).filter(
-                    Skill.id == mapping.skill_id
-                ).first()
-                skill_name = skill.name if skill else f'Skill {mapping.skill_id}'
-                errors.append({
-                    'skill_id': mapping.skill_id,
-                    'skill_name': skill_name,
-                    'version_id': mapping.skill_version_id,
-                    'error': 'Attached version no longer exists',
-                })
-
-        if errors:
-            return {'ok': False, 'errors': errors}
-
-        return {'ok': True}
-
-    finally:
-        if owns_session:
-            session.close()
+    def __init__(self, skill_id: int, skill_version_id: int, skill_name: str = None):
+        label = f"'{skill_name}'" if skill_name else f"id={skill_id}"
+        super().__init__(
+            f"Attached skill {label} references a deleted version "
+            f"(skill_version_id={skill_version_id}). Re-attach the skill with a "
+            "valid version before chatting."
+        )
+        self.skill_id = skill_id
+        self.skill_version_id = skill_version_id
+        self.skill_name = skill_name
 
 
-def get_skill_for_agent(
-    project_id: int,
-    entity_version_id: int,
-    skill_name: str,
-    entity_type: str = SkillEntityTypes.agent,
-    session=None,
-) -> dict:
-    """
-    Get a skill for runtime invocation by name.
+def detach_skills_for_entity_versions(session, entity_version_ids, entity_type: str = None) -> int:
+    """Delete skill mappings for the given entity version ids (no-op if empty)."""
+    ids = [vid for vid in (entity_version_ids or []) if vid is not None]
+    if not ids:
+        return 0
+    query = session.query(EntitySkillMapping).filter(
+        EntitySkillMapping.entity_version_id.in_(ids)
+    )
+    if entity_type is not None:
+        query = query.filter(EntitySkillMapping.entity_type == entity_type)
+    return query.delete(synchronize_session=False)
 
-    This is the runtime fetch function called when a user types ~skill-name.
-    It does NOT fall back to 'base' version - if the attached version is missing,
-    it raises an error.
 
-    Args:
-        project_id: Project ID
-        entity_version_id: Application version ID
-        skill_name: Skill name to look up
-        entity_type: Entity type (default: 'agent')
-        session: Database session
-
-    Returns:
-        Dictionary with skill data including 'instructions'
-
-    Raises:
-        SkillResolutionError if skill cannot be resolved
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        # Find skill by name
-        skill = session.query(Skill).filter(
-            Skill.name == skill_name
-        ).first()
-
-        if not skill:
-            raise SkillResolutionError(skill_name, "Skill not found in this project")
-
-        # Find mapping for this agent
-        mapping = session.query(EntitySkillMapping).filter(
-            EntitySkillMapping.entity_version_id == entity_version_id,
-            EntitySkillMapping.entity_type == entity_type,
-            EntitySkillMapping.skill_id == skill.id,
-        ).first()
-
-        if not mapping:
-            raise SkillResolutionError(skill_name, "Skill is not attached to this agent")
-
-        # Get the specific attached version (NO FALLBACK to base)
-        version = session.query(SkillVersion).filter(
-            SkillVersion.id == mapping.skill_version_id
-        ).first()
-
-        if not version:
-            raise SkillResolutionError(
-                skill_name,
-                f"Attached version (id={mapping.skill_version_id}) no longer exists. "
-                "Please re-attach the skill with a valid version."
+def validate_agent_skills(skills: List[dict]) -> None:
+    """Validate the resolved attached-skills list for the chat payload"""
+    for skill in skills or []:
+        instructions = skill.get('instructions')
+        if instructions is None or not instructions.strip():
+            raise SkillVersionDeletedError(
+                skill_id=skill.get('skill_id'),
+                skill_version_id=skill.get('skill_version_id'),
+                skill_name=skill.get('name'),
             )
-
-        return {
-            'skill_id': skill.id,
-            'skill_name': skill.name,
-            'version_id': version.id,
-            'version_name': version.name,
-            'instructions': version.instructions,
-            'description': skill.description,
-        }
-
-    finally:
-        if owns_session:
-            session.close()
 
 
 def get_available_skills_for_agent(
@@ -969,39 +816,16 @@ def get_available_skills_for_agent(
     entity_type: str = SkillEntityTypes.agent,
     session=None,
 ) -> List[dict]:
-    """
-    Get list of skills attached to an agent for UI autocomplete.
-
-    Called when user types `~` in chat to show available skills.
-
-    Args:
-        project_id: Project ID
-        entity_version_id: Application version ID
-        entity_type: Entity type (default: 'agent')
-        session: Database session
-
-    Returns:
-        List of skill dictionaries for autocomplete dropdown
-    """
-    owns_session = session is None
-    if owns_session:
-        session = db.get_session(project_id).__enter__()
-
-    try:
-        mappings = session.query(EntitySkillMapping).filter(
+    with _skill_session(session, project_id) as s:
+        mappings = s.query(EntitySkillMapping).filter(
             EntitySkillMapping.entity_version_id == entity_version_id,
             EntitySkillMapping.entity_type == entity_type,
         ).all()
 
         skills = []
         for mapping in mappings:
-            skill = session.query(Skill).filter(
-                Skill.id == mapping.skill_id
-            ).first()
-
-            version = session.query(SkillVersion).filter(
-                SkillVersion.id == mapping.skill_version_id
-            ).first()
+            skill = mapping.skill
+            version = mapping.skill_version
 
             if skill:
                 skills.append({
@@ -1015,14 +839,107 @@ def get_available_skills_for_agent(
 
         return skills
 
-    finally:
-        if owns_session:
-            session.close()
+
+_NAME_BOUNDARY_CHARS = re.compile(r'[0-9A-Za-z\-]')
 
 
-# =============================================================================
-# Helper Functions
-# =============================================================================
+def parse_invoked_skill_names(user_input: Optional[str], attached_names: List[str]) -> List[str]:
+    """Parse ``~<skill-name>`` tokens from the raw user message."""
+    if not user_input or not attached_names:
+        return []
+
+    lower_to_original: dict = {}
+    for name in attached_names:
+        if not name:
+            continue
+        key = name.lower()
+        if key not in lower_to_original:
+            lower_to_original[key] = name
+    if not lower_to_original:
+        return []
+
+    # Longest name first so prefix-overlap resolves to the longer match.
+    candidates = sorted(lower_to_original.keys(), key=len, reverse=True)
+
+    text = user_input
+    lower_text = text.lower()
+    ordered: List[str] = []
+    seen: set = set()
+
+    i = 0
+    n = len(lower_text)
+    while i < n:
+        ch = lower_text[i]
+        if ch != '~':
+            i += 1
+            continue
+
+        start = i + 1
+        matched_key = None
+        for cand in candidates:
+            end = start + len(cand)
+            if end > n:
+                continue
+            if lower_text[start:end] != cand:
+                continue
+            # Require a word/punctuation boundary AFTER the match: the next char
+            # must not be a name char (so ``~code`` won't match ``code-review``,
+            # and ``~pirate-talkative`` won't match ``pirate-talk``).
+            if end < n and _NAME_BOUNDARY_CHARS.match(lower_text[end]):
+                continue
+            matched_key = cand
+            break
+
+        if matched_key is not None:
+            original = lower_to_original[matched_key]
+            if matched_key not in seen:
+                seen.add(matched_key)
+                ordered.append(original)
+                if len(ordered) >= MAX_SKILLS_PER_AGENT:
+                    break
+            # Advance past the matched name (next ``~`` scan resumes after it).
+            i = start + len(matched_key)
+        else:
+            # Lone ``~`` (prose/code/path/email) — advance one char and keep scanning.
+            i += 1
+
+    return ordered
+
+
+def build_invoked_skills(
+    user_input: Optional[str],
+    attached_skills: List[dict],
+) -> List[dict]:
+    """Build the per-turn ``invoked_skills`` payload."""
+    if not user_input or not attached_skills:
+        return []
+
+    by_name: dict = {}
+    for skill in attached_skills:
+        name = skill.get('name')
+        if name and name.lower() not in by_name:
+            by_name[name.lower()] = skill
+
+    matched_names = parse_invoked_skill_names(user_input, [s.get('name') for s in attached_skills])
+
+    invoked: List[dict] = []
+    for name in matched_names:
+        skill = by_name.get(name.lower())
+        if not skill:
+            continue
+        instructions = skill.get('instructions')
+        if not instructions or not instructions.strip():
+            # Defensive: validate_agent_skills already blocks deleted/empty bodies.
+            continue
+        invoked.append({
+            'skill_id': skill.get('skill_id'),
+            'skill_version_id': skill.get('skill_version_id'),
+            'name': skill.get('name'),
+            'version_name': skill.get('version_name'),
+            'instructions': instructions,
+        })
+    return invoked
+
 
 def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
     """Apply tags to a skill version."""
@@ -1042,8 +959,8 @@ def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
         version.tags.append(tag_obj)
 
 
-def _update_version_fields(session, version: SkillVersion, update_data: SkillVersionUpdateModel) -> dict:
-    """Update version fields from update data."""
+def _update_version_fields(session, version: SkillVersion, update_data: SkillVersionUpdateModel) -> None:
+    """Apply field updates from ``update_data`` onto ``version`` in place."""
     if update_data.name is not None:
         version.name = update_data.name
     if update_data.instructions is not None:
@@ -1059,5 +976,3 @@ def _update_version_fields(session, version: SkillVersion, update_data: SkillVer
 
         # Add new tags
         _apply_tags_to_version(session, version, update_data.tags)
-
-    return {'ok': True}

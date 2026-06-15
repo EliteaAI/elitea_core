@@ -87,6 +87,7 @@ def build_skill_mappings_list(skill_mappings) -> list:
             'name': mapping.skill.name if mapping.skill else None,
             'description': mapping.skill.description if mapping.skill else None,
             'version_name': mapping.skill_version.name if mapping.skill_version else None,
+            'instructions': mapping.skill_version.instructions if mapping.skill_version else None,
         }
         for mapping in skill_mappings
     ]
@@ -1354,7 +1355,8 @@ def get_application_version_details_expanded(
             selectinload(ApplicationVersion.tools),
             selectinload(ApplicationVersion.tool_mappings),
             selectinload(ApplicationVersion.variables),
-            selectinload(ApplicationVersion.tags)
+            selectinload(ApplicationVersion.tags),
+            selectinload(ApplicationVersion.skill_mappings),
         ).first()
         if not application_version:
             raise ApplicationVersionNonFoundError(application_id, version_id)
@@ -1369,6 +1371,9 @@ def get_application_version_details_expanded(
             tool.set_agent_meta_and_fields(project_id)
 
         result = version_details.model_dump(mode='json', exclude={'author_id'})
+
+        if not result.get('skills'):
+            result.pop('skills', None)
 
         if result.get('llm_settings'):
             # Response-only path (never persisted): include openai_compatible so the SDK

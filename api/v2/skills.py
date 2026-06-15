@@ -11,7 +11,11 @@ from ...models.pd.skill import (
     MultipleSkillListModel,
 )
 from ...models.skill import SkillVersion
-from ...utils.skill_utils import list_skills_api, create_skill
+from ...utils.skill_utils import (
+    list_skills_api,
+    create_skill,
+    SkillError,
+)
 from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
@@ -31,6 +35,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "sort_order", "in": "query", "schema": {"type": "string", "default": "desc"}},
         ],
         tags=["elitea_core/skills"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {
@@ -63,13 +68,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 }, 200
             except Exception as e:
                 log.error(f'skill list exc\n{format_exc()}')
-                return {"ok": False, "error": str(e)}, 400
+                return {"error": str(e)}, 400
 
     @register_openapi(
         name="Create a new skill with a mandatory initial 'base' version",
         description="Creates a new skill with an initial version. The request must include skill metadata (name, description) and exactly one version definition.",
         request_body=SkillCreateModel,
         tags=["elitea_core/skills"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {
@@ -99,7 +105,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ), 400
 
         with db.get_session(project_id) as session:
-            skill = create_skill(skill_data, session, project_id)
+            try:
+                skill = create_skill(skill_data, session, project_id)
+            except SkillError as e:
+                return {"error": str(e)}, e.http_status
             session.commit()
             session.refresh(skill)
 
