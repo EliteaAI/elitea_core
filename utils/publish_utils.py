@@ -2410,6 +2410,7 @@ def run_ai_validation(
             data=data,
             await_task_timeout=timeout,
             is_system_user=True,
+            return_chat_history=True,
         )
     except Exception as exc:
         raise AIValidationError(
