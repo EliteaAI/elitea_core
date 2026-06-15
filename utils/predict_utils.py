@@ -241,6 +241,7 @@ def generate_predict_payload(
         'context_settings': parsed.context_settings.dict() if parsed.context_settings else {},
         'supports_vision': supports_vision,
         'return_chat_history': return_chat_history,
+        'invoked_skills': getattr(parsed, 'invoked_skills', None) or [],
     }
 
     # Auto-approve sensitive actions for API requests when project secret is set.
