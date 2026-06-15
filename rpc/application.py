@@ -354,7 +354,10 @@ class RPC:
 
         if sid and not auth.is_sio_user_in_project(sid, parsed.project_id):
             log.warning("Sid %s is not in project %s", sid, parsed.project_id)
-            return  # FIXME: need some proper error?
+            raise PermissionError(
+                f"Socket session is not authorized for project {parsed.project_id}. "
+                "Please refresh the page and try again."
+            )
 
         room = get_event_room(
             event_name=sio_event,
