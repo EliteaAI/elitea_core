@@ -190,31 +190,6 @@ if _API_AVAILABLE:
 
             try:
                 with db.with_project_schema_session(None) as session:
-                    # Get actual project members to filter cross-project events
-                    actual_project_members = set()
-                    try:
-                        project_user_data = auth.list_project_users(project_id)
-                        if project_user_data:
-                            for user_id_item in project_user_data:
-                                try:
-                                    user_details = auth.get_user(user_id_item)
-                                    user_email = user_details.get('email', '') if user_details else ''
-                                    if user_email and not any([
-                                        user_email in ['system@centry.user'],
-                                        user_email.startswith('system_user_') and user_email.endswith('@centry.user')
-                                    ]):
-                                        actual_project_members.add(user_id_item)
-                                except Exception:
-                                    continue
-                    except Exception as e:
-                        log.error(f"Failed to get project users for project {project_id}: {e}")
-                        from flask import g
-                        try:
-                            if hasattr(g, 'auth') and g.auth and hasattr(g.auth, 'user_id'):
-                                actual_project_members = {g.auth.user_id}
-                        except Exception:
-                            actual_project_members = set()
-
                     base = session.query(AuditEvent).filter(
                         AuditEvent.project_id == project_id,
                         AuditEvent.user_id.isnot(None),
@@ -224,12 +199,6 @@ if _API_AVAILABLE:
                         ]),
                         ~AuditEvent.user_email.like('system_user_%@centry.user'),
                     )
-
-                    # Filter to only actual project members
-                    if actual_project_members:
-                        base = base.filter(AuditEvent.user_id.in_(actual_project_members))
-                    else:
-                        base = base.filter(AuditEvent.user_id.is_(None))
 
                     if dt_from:
                         base = base.filter(AuditEvent.timestamp >= dt_from)

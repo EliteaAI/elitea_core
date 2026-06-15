@@ -197,31 +197,7 @@ if _API_AVAILABLE:
 
             try:
                 with db.with_project_schema_session(None) as session:
-                    # Get actual project members to filter cross-project events
-                    try:
-                        actual_project_members = set()
-                        project_user_data = auth.list_project_users(project_id)
-                        if project_user_data:
-                            for user_id in project_user_data:
-                                try:
-                                    user_details = auth.get_user(user_id)
-                                    user_email = user_details.get('email', '') if user_details else ''
-                                    # Only include non-system users
-                                    if user_email and not any([
-                                        user_email in ['system@centry.user'],
-                                        user_email.startswith('system_user_') and user_email.endswith('@centry.user')
-                                    ]):
-                                        actual_project_members.add(user_id)
-                                except:
-                                    continue
-                    except Exception:
-                        actual_project_members = set()
-
                     base = _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to)
-                    
-                    # Filter to only include events from actual project members
-                    if actual_project_members:
-                        base = base.filter(AuditEvent.user_id.in_(actual_project_members))
 
                     # 1. KPIs
                     kpi_row = base.with_entities(
@@ -290,6 +266,10 @@ if _API_AVAILABLE:
                             total_project_users = 0
                     except Exception:
                         total_project_users = 0
+
+                    # Ensure denominator is never less than numerator
+                    # (removed users still count in historical periods)
+                    total_project_users = max(total_project_users, unique_users)
 
                     kpis = {
                         "total_events": total_events,
