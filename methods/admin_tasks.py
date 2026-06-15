@@ -835,6 +835,212 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return result
 
     @web.method()
+    def cleanup_oversized_message_meta(self, *args, **kwargs):
+        """Admin task: find and prune oversized chat_message_group.meta JSONB blobs.
+
+        A tool result containing large content (e.g. a binary file dumped into an
+        error message) can be persisted into a message group's meta, producing
+        multi-MB rows. Loading such a conversation serializes the whole blob and
+        stalls the gevent hub, freezing the platform. This task detects oversized
+        rows and prunes the offending top-level keys, preserving the rest of meta.
+
+        SAFETY: the oversized meta value is NEVER loaded into memory. Detection and
+        pruning happen entirely SQL-side (length(meta::text), jsonb_each, meta-key
+        removal), so running this task cannot itself trigger the freeze.
+
+        Dry-run is ON by default — pass dry_run=false to actually prune.
+
+        Param format:
+            "project_id=<all|N>;threshold_bytes=<N>;per_key_bytes=<N>;dry_run=false"
+
+        Defaults: project_id=all, threshold_bytes=1000000 (1 MB row total),
+        per_key_bytes=262144 (256 KB per key), dry_run=true.
+
+        Examples:
+            ""                                          - dry-run census, all projects
+            "project_id=3"                              - dry-run census, project 3 only
+            "project_id=3;dry_run=false"                - prune oversized rows in project 3
+            "project_id=all;threshold_bytes=500000;dry_run=false"  - prune across all projects
+        """
+        import datetime  # pylint: disable=C0415
+        import json  # pylint: disable=C0415
+        from sqlalchemy import text  # pylint: disable=C0415
+        from tools import db  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = True
+        project_id_filter = None
+        threshold_bytes = 1_000_000
+        per_key_bytes = 262_144
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.warning(
+                            "cleanup_oversized_message_meta: invalid project_id '%s', scanning all",
+                            value,
+                        )
+            elif seg_lower.startswith("threshold_bytes="):
+                try:
+                    threshold_bytes = int(seg[len("threshold_bytes="):].strip())
+                except ValueError:
+                    log.warning("cleanup_oversized_message_meta: invalid threshold_bytes, using default")
+            elif seg_lower.startswith("per_key_bytes="):
+                try:
+                    per_key_bytes = int(seg[len("per_key_bytes="):].strip())
+                except ValueError:
+                    log.warning("cleanup_oversized_message_meta: invalid per_key_bytes, using default")
+            elif seg_lower.startswith("dry_run="):
+                dry_run = seg_lower[len("dry_run="):].strip() != "false"
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info(
+            "%sStarting cleanup_oversized_message_meta (project_id=%s, threshold_bytes=%s, "
+            "per_key_bytes=%s, dry_run=%s)",
+            prefix, project_id_filter if project_id_filter is not None else "all",
+            threshold_bytes, per_key_bytes, dry_run,
+        )
+        start_ts = time.time()
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("cleanup_oversized_message_meta: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        projects_scanned = 0
+        groups_flagged = 0
+        groups_pruned = 0
+        by_project = {}
+
+        for project in projects:
+            project_id = project["id"]
+            table = f"p_{project_id}.chat_message_group"
+            proj_flagged = 0
+            proj_pruned = 0
+            details = []
+
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    # Step A — detect. Reads only the SIZE of meta, never the value.
+                    flagged_rows = session.execute(
+                        text(
+                            f"SELECT id, conversation_id, length(meta::text) AS meta_size "  # nosec B608
+                            f"FROM {table} "
+                            f"WHERE length(meta::text) > :threshold "
+                            f"ORDER BY meta_size DESC"
+                        ),
+                        {"threshold": threshold_bytes},
+                    ).fetchall()
+
+                    projects_scanned += 1
+
+                    for row in flagged_rows:
+                        group_id = row.id
+                        conversation_id = row.conversation_id
+                        meta_size = row.meta_size
+
+                        # Per-key sizes — jsonb_each + length evaluated server-side;
+                        # only (key, size) pairs return, never the values.
+                        key_rows = session.execute(
+                            text(
+                                f"SELECT key, length(value::text) AS key_size "  # nosec B608
+                                f"FROM {table}, jsonb_each(meta) "
+                                f"WHERE id = :row_id AND length(value::text) > :per_key"
+                            ),
+                            {"row_id": group_id, "per_key": per_key_bytes},
+                        ).fetchall()
+
+                        oversized_keys = [k.key for k in key_rows]
+                        if not oversized_keys:
+                            # Row is large but no single key exceeds per_key_bytes;
+                            # report it but do not prune (no clear offender).
+                            log.warning(
+                                "%scleanup_oversized_message_meta: project %s group %s "
+                                "(conversation %s) meta_size=%s but no key over per_key_bytes=%s",
+                                prefix, project_id, group_id, conversation_id, meta_size, per_key_bytes,
+                            )
+                            continue
+
+                        proj_flagged += 1
+                        groups_flagged += 1
+                        sizes = {k.key: k.key_size for k in key_rows}
+                        details.append({
+                            "conversation_id": conversation_id,
+                            "group_id": group_id,
+                            "meta_size": meta_size,
+                            "oversized_keys": sizes,
+                        })
+                        log.info(
+                            "%scleanup_oversized_message_meta: project %s group %s "
+                            "(conversation %s) meta_size=%s oversized_keys=%s",
+                            prefix, project_id, group_id, conversation_id, meta_size, sizes,
+                        )
+
+                        # Step B — prune (only when not dry-run). Built server-side,
+                        # blob never enters Python.
+                        if not dry_run:
+                            marker = json.dumps({
+                                "keys": oversized_keys,
+                                "sizes_bytes": sizes,
+                                "reason": "oversized meta pruned by cleanup_oversized_message_meta",
+                                "pruned_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            })
+                            session.execute(
+                                text(
+                                    f"UPDATE {table} "  # nosec B608
+                                    f"SET meta = (meta - CAST(:keys AS text[])) "
+                                    f"           || jsonb_build_object('_pruned_keys', CAST(:marker AS jsonb)) "
+                                    f"WHERE id = :row_id"
+                                ),
+                                {
+                                    "keys": oversized_keys,
+                                    "marker": marker,
+                                    "row_id": group_id,
+                                },
+                            )
+                            proj_pruned += 1
+                            groups_pruned += 1
+
+                    if not dry_run and proj_pruned:
+                        session.commit()
+
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "%scleanup_oversized_message_meta: error in project %s", prefix, project_id
+                )
+                continue
+
+            if proj_flagged:
+                by_project[project_id] = {
+                    "flagged": proj_flagged,
+                    "pruned": proj_pruned,
+                    "details": details,
+                }
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting cleanup_oversized_message_meta — scanned=%s flagged=%s pruned=%s "
+            "(duration = %ss)",
+            prefix, projects_scanned, groups_flagged, groups_pruned, round(end_ts - start_ts, 2),
+        )
+        return {
+            "dry_run": dry_run,
+            "projects_scanned": projects_scanned,
+            "groups_flagged": groups_flagged,
+            "groups_pruned": groups_pruned,
+            "by_project": by_project,
+        }
+
+    @web.method()
     def migrate_conversation_source_to_elitea(self, *args, **kwargs):
         """Admin task: rename legacy conversation source values to 'elitea'.
 

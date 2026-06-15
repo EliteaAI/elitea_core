@@ -329,6 +329,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_llm_model", self.migrate_llm_model
             )
+            this.for_module("admin").module.register_admin_task(
+                "cleanup_oversized_message_meta", self.cleanup_oversized_message_meta
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -710,6 +713,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_llm_model", self.migrate_llm_model
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "cleanup_oversized_message_meta", self.cleanup_oversized_message_meta
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
