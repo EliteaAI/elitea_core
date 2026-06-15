@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from tools import api_tools, auth, config as c, serialize, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.mcp_config import is_mcp_exposure_enabled
 from ...utils.sio_utils import SioValidationError
 from ...utils.exceptions import PoolSaturationError
 
@@ -63,6 +64,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         Returns:
             Dictionary with tools list or task ID for async operation
         """
+        if not is_mcp_exposure_enabled():
+            return {"error": "MCP exposure is disabled on this deployment"}, 403
+
         raw = dict(request.json)
         await_response = request.args.get('await_response', 'true').lower() == 'true'
         # Configurable timeout with sensible default (2 minutes for sync, no timeout for async)

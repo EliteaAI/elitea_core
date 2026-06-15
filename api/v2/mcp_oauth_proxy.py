@@ -23,6 +23,7 @@ from pylon.core.tools import log
 
 from ...models.elitea_tools import EliteATool
 from ...models.pd.mcp_oauth import McpOAuthTokenRequest
+from ...utils.mcp_config import is_mcp_exposure_enabled
 from ...utils.mcp_oauth import exchange_token, refresh_token
 from ....configurations.utils import expand_configuration
 
@@ -52,6 +53,9 @@ class ProjectAPI(api_tools.APIModeHandler):
         Uses elitea_sdk's exchange_oauth_token function to perform the token exchange.
         If toolkit_id is provided, credentials are fetched from the database.
         """
+        if not is_mcp_exposure_enabled():
+            return {"error": "MCP exposure is disabled on this deployment"}, 403
+
         try:
             data = McpOAuthTokenRequest.model_validate(request.json)
         except Exception as e:

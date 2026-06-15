@@ -22,6 +22,7 @@ from tools import api_tools, auth, config as c, register_openapi
 from pylon.core.tools import log
 
 from ...models.pd.mcp_oauth import McpDynamicClientRegistrationRequest
+from ...utils.mcp_config import is_mcp_exposure_enabled
 from ...utils.mcp_oauth import register_dynamic_client
 
 
@@ -50,6 +51,9 @@ class ProjectAPI(api_tools.APIModeHandler):
         This endpoint proxies RFC 7591 Dynamic Client Registration requests
         to OAuth authorization servers that support DCR.
         """
+        if not is_mcp_exposure_enabled():
+            return {"error": "MCP exposure is disabled on this deployment"}, 403
+
         try:
             data = McpDynamicClientRegistrationRequest.model_validate(request.json)
         except Exception as e:
