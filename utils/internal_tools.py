@@ -11,6 +11,8 @@ from typing import Optional
 from pylon.core.tools import log
 from tools import VaultClient, rpc_tools, this, config as c, auth
 
+from .mcp_config import is_mcp_exposure_enabled
+
 
 # ImageGen Constants
 IMAGEGEN_PROVIDER_TYPE = 'ImageGenServiceProvider_ImageGen'
@@ -496,6 +498,9 @@ def inject_mcp_toolkits(
         List of MCP toolkit payloads with id=None, or empty list if not enabled
     """
     log.info(f"[MCP Injection] Checking internal_tools={internal_tools}, looking for key={MCP_INTERNAL_TOOL_KEY}")
+    if not is_mcp_exposure_enabled():
+        log.debug("MCP exposure is disabled, skipping MCP injection")
+        return []
     if MCP_INTERNAL_TOOL_KEY not in (internal_tools or []):
         log.debug("MCP internal tool not enabled, skipping auto-injection")
         return []

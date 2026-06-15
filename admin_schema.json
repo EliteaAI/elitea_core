@@ -99,7 +99,7 @@
     "mcp_enabled": {
       "type": "boolean",
       "title": "Enable MCP",
-      "description": "Master switch for MCP (Model Context Protocol) exposure. When disabled, the MCP checkbox is hidden in toolkit UI and all MCP SSE endpoints return 403.",
+      "description": "Master switch for MCP (Model Context Protocol). When disabled, removes all MCP-related functionality across the entire application including API endpoints and all UI entry points.",
       "path": "mcp_exposure.enabled",
       "section": "guardrails",
       "default": true,
@@ -107,8 +107,8 @@
     },
     "mcp_in_menu": {
       "type": "boolean",
-      "title": "Show MCPs in Sidebar",
-      "description": "Controls whether the MCPs menu item is visible in sidebar navigation.",
+      "title": "Show MCPs in UI",
+      "description": "When disabled, hides all MCP entry points across the UI (sidebar, Agent Tools, Pipeline Tools, Toolkit creation, Chat options, Chat Participants) while keeping MCP API functionality intact.",
       "path": "mcp_exposure.in_menu",
       "section": "guardrails",
       "default": true,

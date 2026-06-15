@@ -402,6 +402,11 @@ class Module(module.ModuleModel):
 
         # Expose elitea_core config as a shared tool for cross-plugin access
         # Usage: from tools import elitea_config; elitea_config.get("ai_project_id", 1)
+        # Unregister first to handle hot-reload (pylon does not call deinit on old module)
+        try:
+            self.descriptor.unregister_tool('elitea_config')
+        except RuntimeError:
+            pass  # Not yet registered on first startup
         self.descriptor.register_tool('elitea_config', self.descriptor.config)
 
         # Initialize elitea_ui FIRST (it originally loaded before elitea_core)
@@ -718,6 +723,12 @@ class Module(module.ModuleModel):
         # Push admin-configured cron / enabled flag to the scheduling plugin
         # so cadence and disable changes apply without a pylon restart.
         self._apply_scheduler_runtime_config()
+        # Refresh cached MCP exposure settings so admin toggle changes take
+        # effect immediately without requiring a container restart.
+        mcp_config = self.descriptor.config.get('mcp_exposure', {})
+        self.mcp_exposure_enabled = mcp_config.get('enabled', True)
+        self.mcp_in_menu_enabled = mcp_config.get('in_menu', True)
+        log.info(f"MCP config reloaded: exposure={self.mcp_exposure_enabled}, in_menu={self.mcp_in_menu_enabled}")
 
     def _apply_scheduler_runtime_config(self):
         """Push admin-configured scheduler cron/enabled flags into DB rows.
