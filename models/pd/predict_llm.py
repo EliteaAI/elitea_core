@@ -49,6 +49,7 @@ class ChatMessage(BaseModel):
 class LLMPredictRequest(BaseModel):
     """Simplified LLM Prediction Request"""
     model_config = ConfigDict(
+        extra='allow',
         json_schema_extra={
             "examples": [
                 {
@@ -90,6 +91,14 @@ class LLMPredictRequest(BaseModel):
     sid: Optional[str] = Field(
         default=None,
         description="Socket.IO session ID for streaming responses"
+    )
+    stream_id: Optional[str] = Field(
+        default=None,
+        description="Stream ID for SIO room scoping. Clients SHOULD provide this so they can subscribe to the matching room before the request. If omitted, the server generates one (which the client cannot listen for)."
+    )
+    message_id: Optional[str] = Field(
+        default=None,
+        description="Message ID for the LLM turn. If omitted, the server generates one."
     )
     thread_id: Optional[str] = Field(
         default=None,

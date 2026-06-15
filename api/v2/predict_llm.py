@@ -95,11 +95,17 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
         except PredictPayloadError as e:
             return {"error": str(e)}, 400
+        except PermissionError as e:
+            return {"error": str(e)}, 403
         except BaseException as exc:  # pylint: disable=W0718
             log.exception("LLM Predict error: %s", exc)
             return {"error": "Can not do LLM predict"}, 500
         finally:
             self.module.not_starting_task_event.set()
+        #
+        if not isinstance(result, dict):
+            log.error("predict_sio_llm returned unexpected result: %r", result)
+            return {"error": "LLM predict failed: empty result"}, 500
         #
         response_code = 200
         if "error" in result and result["error"] is not None:
