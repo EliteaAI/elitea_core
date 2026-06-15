@@ -5,6 +5,7 @@ ENTITY_IMPORT_MAPPER = {
     'datasources': 'datasources_import_datasource',
     'agents': 'applications_import_application',
     'toolkits': 'applications_import_toolkit',
+    'skills': 'applications_import_skill',
 }
 
 
