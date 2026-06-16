@@ -291,8 +291,8 @@ def _dispatch_whisper_call(sid: str, session: dict, pcm_data: bytes) -> None:
         pool="indexer",
         meta={
             "task_name": "indexer_asr_whisper",
-            "project_id": project_id,
-            "model_name": model_name,
+            "project_id": session["project_id"],
+            "model_name": session["model_name"],
         },
     )
 
