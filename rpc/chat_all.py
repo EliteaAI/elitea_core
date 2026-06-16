@@ -624,14 +624,16 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 agent_project_id=participant.entity_meta.get('project_id'),
             )
 
-            # Inject project context into agent instructions
-            _ctx_content, _ctx_enabled = get_project_context(predict_payload.project_id)
-            if _ctx_enabled and _ctx_content:
-                _vd = result.get('version_details') or {}
-                _ignore = (_vd.get('meta') or {}).get('ignore_project_context', False)
-                if not _ignore:
-                    _vd['instructions'] = prepend_project_context(_vd.get('instructions') or '', _ctx_content)
-                result['version_details'] = _vd
+            # Inject project context into agent instructions (skip for pipelines)
+            _vd = result.get('version_details') or {}
+            _is_pipeline = _vd.get('agent_type') == AgentTypes.pipeline.value
+            if not _is_pipeline:
+                _ctx_content, _ctx_enabled = get_project_context(predict_payload.project_id)
+                if _ctx_enabled and _ctx_content:
+                    _ignore = (_vd.get('meta') or {}).get('ignore_project_context', False)
+                    if not _ignore:
+                        _vd['instructions'] = prepend_project_context(_vd.get('instructions') or '', _ctx_content)
+                    result['version_details'] = _vd
 
             # IMPORTANT: Use offset(1) to retrieve the previous agent message, skipping the newly created response
             last_agent_message: ConversationMessageGroup = session.query(ConversationMessageGroup).where(
