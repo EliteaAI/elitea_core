@@ -232,7 +232,7 @@ def import_skill_md(
             description=frontmatter['description'],
             versions=[version],
             author_id=author_id,
-            on_conflict='overwrite',
+            on_conflict='error',
             session=s,
         )
         result = get_skill_details(project_id=project_id, skill_id=imported.id, session=s)

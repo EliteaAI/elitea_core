@@ -628,6 +628,8 @@ def import_skill(
     with _skill_session(session, project_id) as s:
         existing = find_existing_skill_by_name(s, name)
         if existing:
+            if on_conflict == 'error':
+                raise SkillNameConflictError(name)
             version_map = {v.name: v.id for v in existing.versions}
             existing_by_name = {v.name: v for v in existing.versions}
             if on_conflict == 'overwrite' and description and existing.description != description:
