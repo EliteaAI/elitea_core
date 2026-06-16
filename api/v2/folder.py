@@ -115,7 +115,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             user_id = auth.current_user().get("id")
             rpc = rpc_tools.RpcMixin().rpc
 
-            support_config = rpc.timeout(3).support_assistant_get_config()
+            try:
+                support_config = rpc.timeout(3).support_assistant_get_config()
+            except Exception:
+                support_config = {}
             is_support_project = support_config.get('project_id') == project_id
             user_is_admin = rpc.timeout(3).admin_check_user_is_admin(
                 project_id, user_id
