@@ -50,6 +50,7 @@ _TABLE = f'{c.POSTGRES_SCHEMA}.parallel_agent_runs'
 _STATUS_RUNNING = 'running'
 _STATUS_TERMINAL = 'terminal'
 _STATUS_ERROR = 'error'
+_STATUS_CANCELLED = 'cancelled'
 
 # Redis lease TTL (seconds): guards double-wake of the parent across concurrent
 # child-terminal events. Generous — the lease only needs to outlive the gate +
@@ -82,6 +83,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 child_index      INTEGER NOT NULL,
                 status           TEXT NOT NULL,
                 project_id       INTEGER,
+                parent_task_id   TEXT,
+                child_task_id    TEXT,
                 created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
                 PRIMARY KEY (parent_thread_id, reconcile_epoch, child_thread_id)
             )
@@ -93,10 +96,31 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             ON {_TABLE} (parent_thread_id, reconcile_epoch)
             """
         )
+        # Stop fan-out (#4993 Track 2): the chat stop button only knows the
+        # parked PARENT's task_id (msg_group.task_id) — it cannot stop the N
+        # spawned children, which are independent arbiter tasks. parent_task_id
+        # is the lookup key for "enumerate this run's live children"; the index
+        # serves that stop-time query. ALTER is idempotent so an already-deployed
+        # table (created before these columns existed) gains them in place.
+        alter = text(
+            f"""
+            ALTER TABLE {_TABLE}
+                ADD COLUMN IF NOT EXISTS parent_task_id TEXT,
+                ADD COLUMN IF NOT EXISTS child_task_id  TEXT
+            """
+        )
+        idx_stop = text(
+            f"""
+            CREATE INDEX IF NOT EXISTS ix_parallel_agent_runs_parent_task
+            ON {_TABLE} (parent_task_id)
+            """
+        )
         try:
             with db.get_session(None) as session:
                 session.execute(ddl)
+                session.execute(alter)
                 session.execute(idx)
+                session.execute(idx_stop)
                 session.commit()
             log.info("[PARALLEL] ensured side-table %s", _TABLE)
         except Exception:  # pylint: disable=W0703
@@ -182,6 +206,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 'child_index': spec.get('index', i),
                 'status': _STATUS_RUNNING,
                 'project_id': project_id,
+                # The parked parent's task_id — the only id the chat stop button
+                # carries (msg_group.task_id). Stored on every child row so stop
+                # can enumerate this run's live children and stop them too.
+                'parent_task_id': parent_task_id,
             }
             for i, spec in enumerate(specs)
         ]
@@ -252,6 +280,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             if child_task_id is None:
                 log.warning("[PARALLEL] child %s not dispatched (saturation?); marking error", child_thread_id)
                 self._parallel_mark_child(parent_thread_id, epoch, child_thread_id, _STATUS_ERROR)
+            else:
+                # Record the child's own arbiter task_id so a chat stop can
+                # stop_task() each live child, not just the parent.
+                self._parallel_set_child_task_id(
+                    parent_thread_id, epoch, child_thread_id, child_task_id,
+                )
 
     @web.method()
     def parallel_dispatch_on_child_terminal(self, child_meta, child_result):
@@ -267,6 +301,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         epoch = child_meta.get('reconcile_epoch')
         child_thread_id = child_meta.get('child_thread_id')
         if not (parent_thread_id and epoch and child_thread_id):
+            return
+
+        # Chat stopped mid fan-out: the stop_task kill makes each child fire a
+        # terminal `stopped`. Refuse to advance the gate so the parent is never
+        # re-invoked with a final answer for a chat the user cancelled (#4993).
+        if self._parallel_epoch_cancelled(parent_thread_id, epoch):
+            log.info("[PARALLEL] child %s terminal but epoch cancelled; gate not advanced", child_thread_id)
             return
 
         # HITL-paused child: still open, not terminal.
@@ -361,9 +402,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         stmt = text(
             f"""
             INSERT INTO {_TABLE}
-                (parent_thread_id, reconcile_epoch, child_thread_id, child_index, status, project_id)
+                (parent_thread_id, reconcile_epoch, child_thread_id, child_index,
+                 status, project_id, parent_task_id)
             VALUES
-                (:parent_thread_id, :reconcile_epoch, :child_thread_id, :child_index, :status, :project_id)
+                (:parent_thread_id, :reconcile_epoch, :child_thread_id, :child_index,
+                 :status, :project_id, :parent_task_id)
             ON CONFLICT (parent_thread_id, reconcile_epoch, child_thread_id) DO NOTHING
             """
         )
@@ -396,6 +439,112 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 session.commit()
         except Exception:  # pylint: disable=W0703
             log.exception("[PARALLEL] side-table mark child failed")
+
+    @web.method()
+    def _parallel_set_child_task_id(self, parent_thread_id, epoch, child_thread_id, child_task_id):
+        """Record a launched child's arbiter task_id on its side-table row."""
+        stmt = text(
+            f"""
+            UPDATE {_TABLE}
+            SET child_task_id = :child_task_id
+            WHERE parent_thread_id = :parent_thread_id
+              AND reconcile_epoch = :reconcile_epoch
+              AND child_thread_id = :child_thread_id
+            """
+        )
+        try:
+            with db.get_session(None) as session:
+                session.execute(stmt, {
+                    'child_task_id': child_task_id,
+                    'parent_thread_id': parent_thread_id,
+                    'reconcile_epoch': epoch,
+                    'child_thread_id': child_thread_id,
+                })
+                session.commit()
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] side-table set child_task_id failed")
+
+    @web.method()
+    def parallel_dispatch_stop_children(self, parent_task_id):
+        """Stop all live children spawned by a parked parent (chat stop button).
+
+        The chat stop button reaches stop_task with ONLY the parent's task_id
+        (msg_group.task_id). In park+spawn the parent has already gone terminal,
+        but its N children run as independent durable indexer_agent tasks that no
+        single stop_task reaches. This enumerates this run's children by
+        parent_task_id, arbiter-stops each one, marks their rows cancelled, and
+        sets a per-epoch cancel flag so the reconcile gate never re-invokes the
+        parent with a final answer for a chat the user stopped (#4993 Track 2).
+
+        Returns the number of children stopped (0 = not a fan-out run, the
+        common case — ordinary single-agent chats never insert rows here).
+        """
+        if not parent_task_id:
+            return 0
+        rows = self._parallel_children_for_parent_task(parent_task_id)
+        if not rows:
+            return 0
+
+        # Flag every epoch this parent_task_id owns as cancelled BEFORE stopping,
+        # so a child's terminal `stopped` event (fired by the stop_task kill)
+        # cannot win the race into the reconcile gate.
+        epochs = {r['reconcile_epoch'] for r in rows if r.get('reconcile_epoch')}
+        for epoch in epochs:
+            parent_thread_id = next(
+                (r['parent_thread_id'] for r in rows if r.get('reconcile_epoch') == epoch),
+                None,
+            )
+            if parent_thread_id:
+                self._parallel_mark_epoch_cancelled(parent_thread_id, epoch)
+
+        stopped = 0
+        for r in rows:
+            child_task_id = r.get('child_task_id')
+            if not child_task_id:
+                continue
+            try:
+                self.task_node.stop_task(child_task_id)  # pylint: disable=E1101
+                stopped += 1
+            except Exception:  # pylint: disable=W0703
+                log.exception("[PARALLEL] failed to stop child task %s", child_task_id)
+
+        # Mark rows cancelled and drop the per-child HITL stashes so a stopped
+        # child cannot be resumed from a stale paused card.
+        for r in rows:
+            self._parallel_mark_child(
+                r['parent_thread_id'], r['reconcile_epoch'],
+                r['child_thread_id'], _STATUS_CANCELLED,
+            )
+            self._parallel_child_unstash(r.get('child_thread_id'))
+
+        log.info(
+            "[PARALLEL] stop fan-out: parent_task_id=%s stopped %d child task(s) across %d epoch(s)",
+            parent_task_id, stopped, len(epochs),
+        )
+        return stopped
+
+    @web.method()
+    def _parallel_children_for_parent_task(self, parent_task_id):
+        """All child rows for a parent's task_id (across any open epochs).
+
+        Returns every row, not just running ones: stopping an already-terminal
+        arbiter task is a harmless no-op, and cancelling the whole epoch is the
+        intent regardless of which children already settled.
+        """
+        stmt = text(
+            f"""
+            SELECT parent_thread_id, reconcile_epoch, child_thread_id, child_task_id, status
+            FROM {_TABLE}
+            WHERE parent_task_id = :parent_task_id
+            """
+        )
+        try:
+            with db.get_session(None) as session:
+                result = session.execute(stmt, {'parent_task_id': parent_task_id})
+                return [dict(row._mapping) for row in result]  # pylint: disable=W0212
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] children-for-parent lookup failed")
+            return []
 
     @web.method()
     def _parallel_epoch_pending(self, parent_thread_id, epoch):
@@ -452,6 +601,92 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Fail open: a missed reconcile is worse than a rare double-wake, and
             # the re-invoke is idempotent enough (parent checkpoint is the source).
             return True
+
+    @web.method()
+    def _parallel_mark_epoch_cancelled(self, parent_thread_id, epoch):
+        """Set the per-epoch cancel flag (chat stopped mid fan-out).
+
+        Decoupled from the side-table rows (which get deleted) so a child's
+        terminal `stopped` event — fired by the stop_task kill, possibly after
+        rows are gone — still finds the flag and refuses to open the reconcile
+        gate. TTL matches the reconcile payload's human-think-time window.
+        """
+        key = f"parallel_reconcile_cancelled:{parent_thread_id}:{epoch}"
+        try:
+            client = self.get_redis_client()  # pylint: disable=E1101
+            client.set(key, '1', ex=_RECONCILE_PAYLOAD_TTL)
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] mark epoch cancelled failed")
+
+    @web.method()
+    def _parallel_epoch_cancelled(self, parent_thread_id, epoch):
+        """True if this epoch was cancelled by a chat stop."""
+        key = f"parallel_reconcile_cancelled:{parent_thread_id}:{epoch}"
+        try:
+            client = self.get_redis_client()  # pylint: disable=E1101
+            return client.get(key) is not None
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] epoch-cancelled check failed")
+            # Fail open: if Redis is unreachable, do not silently swallow a
+            # legitimate reconcile — the gate's own guards still apply.
+            return False
+
+    @web.method()
+    def mark_chat_run_stopped(self, message_uuid):
+        """Flag a chat response message's run as stopped (frozen).
+
+        Set by the stop button. Any later HITL resume / continue on this message
+        is refused so a stale approval card cannot re-invoke the parent and
+        re-fan-out the children (#4993 Track 2). Keyed by the response message
+        uuid — the same id the stop API and the continue resume both carry, so
+        it guards every resume variant (fan-out child OR parent continue).
+        """
+        if not message_uuid:
+            return
+        key = f"chat_run_stopped:{message_uuid}"
+        try:
+            client = self.get_redis_client()  # pylint: disable=E1101
+            client.set(key, '1', ex=_RECONCILE_PAYLOAD_TTL)
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] mark chat run stopped failed (%s)", message_uuid)
+
+    @web.method()
+    def is_chat_run_stopped(self, message_uuid):
+        """True if this chat response message's run was stopped by the user."""
+        if not message_uuid:
+            return False
+        key = f"chat_run_stopped:{message_uuid}"
+        try:
+            client = self.get_redis_client()  # pylint: disable=E1101
+            return client.get(key) is not None
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] chat-run-stopped check failed (%s)", message_uuid)
+            # Fail open: do not block a legitimate resume on a Redis blip.
+            return False
+
+    @web.method()
+    def clear_chat_run_stopped(self, message_uuid):
+        """Clear the stopped flag (e.g. when the user sends a fresh message)."""
+        if not message_uuid:
+            return
+        key = f"chat_run_stopped:{message_uuid}"
+        try:
+            client = self.get_redis_client()  # pylint: disable=E1101
+            client.delete(key)
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] clear chat run stopped failed (%s)", message_uuid)
+
+    @web.method()
+    def _parallel_child_unstash(self, child_thread_id):
+        """Drop a child's HITL-resume launch stash (used on cancel)."""
+        if not child_thread_id:
+            return
+        key = f"parallel_child_launch:{child_thread_id}"
+        try:
+            client = self.get_redis_client()  # pylint: disable=E1101
+            client.delete(key)
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] child unstash failed (%s)", child_thread_id)
 
     @web.method()
     def _parallel_reconcile_stash(self, parent_thread_id, epoch, value):

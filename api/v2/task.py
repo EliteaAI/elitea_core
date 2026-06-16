@@ -49,6 +49,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             self.module.stop_task(msg_group.task_id)
 
+            # Freeze this run: refuse any later HITL resume / continue on it so a
+            # stale approval card cannot re-invoke the parent and re-fan-out the
+            # parallel children (#4993 Track 2). Keyed by the response message
+            # uuid — the same id the continue resume carries.
+            self.module.mark_chat_run_stopped(message_group_uuid)
+
             msg_group.is_streaming = False
             msg_group_deleted = False
             thinking_steps = msg_group.meta.get('thinking_steps', [])

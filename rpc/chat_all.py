@@ -1186,6 +1186,15 @@ class RPC:
         else:
             current_user = auth.current_user()
 
+        # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
+        # run. A stale HITL approval card left in the UI must NOT resume anything
+        # — without this, a fan-out child whose stash was cleared on stop falls
+        # through to the parent continue flow below and re-fans-out EVERY child,
+        # including ones that had already completed. Refuse the resume cleanly.
+        if self.is_chat_run_stopped(parsed.message_id):
+            log.info("[PARALLEL] continue refused — run stopped (message_id=%s)", parsed.message_id)
+            return {"stopped": True}
+
         # Parallel sub-agent HITL (#4993 Track 2): if this resume targets a
         # parked-fan-out child thread, replay that child directly (with
         # hitl_resume) instead of regenerating the parent message's payload —

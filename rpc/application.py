@@ -1944,6 +1944,16 @@ class RPC:
             self,
             task_id: str
     ):
+        # Parallel fan-out (#4993 Track 2): a parked parent spawns N independent
+        # children whose task_ids the stop button never sees. Stop them first,
+        # keyed by this parent task_id, and flag their epoch cancelled so the
+        # reconcile gate won't re-invoke the parent. No-op for ordinary
+        # single-agent chats. Best-effort — never block the parent stop.
+        try:
+            self.parallel_dispatch_stop_children(task_id)
+        except Exception as e:  # pylint: disable=W0703
+            log.warning('Parallel child stop fan-out failed')
+            log.debug(f'Stop fan-out details {task_id}: {e}')
         try:
             self.task_node.stop_task(task_id)
         except Exception as e:
