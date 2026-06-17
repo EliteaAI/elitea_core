@@ -98,15 +98,6 @@ class SkillAlreadyAttachedError(SkillError):
         self.entity_version_id = entity_version_id
 
 
-class SkillNameConflictError(SkillError):
-    """Raised when a skill name already exists in the project"""
-    http_status = 409
-
-    def __init__(self, name: str):
-        super().__init__(f"A skill named '{name}' already exists in this project")
-        self.name = name
-
-
 class SkillNotAttachedError(SkillError):
     """Raised when detaching a skill that has no mapping to the agent version."""
     http_status = 404
@@ -357,12 +348,6 @@ def create_skill(
     project_id: int,
 ) -> Skill:
     """Create a new skill with its initial version."""
-    existing = session.query(Skill.id).filter(
-        func.lower(Skill.name) == skill_data.name.lower()
-    ).first()
-    if existing:
-        raise SkillNameConflictError(skill_data.name)
-
     # Create skill
     skill = Skill(
         name=skill_data.name,
@@ -393,6 +378,14 @@ def create_skill(
     return skill
 
 
+def build_skill_detail(skill: Skill) -> SkillDetailModel:
+    """Build a SkillDetailModel with version_details from a refreshed skill."""
+    result = SkillDetailModel.model_validate(skill)
+    if skill.versions:
+        result.version_details = SkillVersionDetailModel.model_validate(skill.versions[0])
+    return result
+
+
 def update_skill(
     project_id: int,
     skill_id: int,
@@ -413,16 +406,6 @@ def update_skill(
 
         # Update skill metadata
         if update_data.name is not None:
-            # Per-project name uniqueness (case-insensitive). On a real rename
-            # (name differs case-insensitively from the current name), ensure no
-            # OTHER skill in the project already owns the target name.
-            if update_data.name.lower() != (skill.name or '').lower():
-                conflict = s.query(Skill.id).filter(
-                    func.lower(Skill.name) == update_data.name.lower(),
-                    Skill.id != skill_id,
-                ).first()
-                if conflict:
-                    raise SkillNameConflictError(update_data.name)
             skill.name = update_data.name
         if update_data.description is not None:
             skill.description = update_data.description

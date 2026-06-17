@@ -1020,7 +1020,8 @@ def validate_application_version_details(
             selectinload(ApplicationVersion.tools),
             selectinload(ApplicationVersion.tool_mappings),
             selectinload(ApplicationVersion.variables),
-            selectinload(ApplicationVersion.tags)
+            selectinload(ApplicationVersion.tags),
+            selectinload(ApplicationVersion.skill_mappings),
         ).first()
         if not application_version:
             raise ApplicationVersionNonFoundError(application_id, version_id)

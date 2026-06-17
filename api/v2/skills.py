@@ -7,13 +7,12 @@ from tools import api_tools, config as c, db, auth, serialize, register_openapi
 
 from ...models.pd.skill import (
     SkillCreateModel,
-    SkillDetailModel,
     MultipleSkillListModel,
 )
-from ...models.skill import SkillVersion
 from ...utils.skill_utils import (
     list_skills_api,
     create_skill,
+    build_skill_detail,
     SkillError,
 )
 from ...utils.constants import PROMPT_LIB_MODE
@@ -112,16 +111,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             session.commit()
             session.refresh(skill)
 
-            first_version = session.query(SkillVersion).filter(
-                SkillVersion.id == skill.versions[0].id
-            ).first() if skill.versions else None
-
-            result = SkillDetailModel.model_validate(skill)
-            if first_version is not None:
-                from ...models.pd.skill_version import SkillVersionDetailModel
-                result.version_details = SkillVersionDetailModel.model_validate(first_version)
-
-            return result.model_dump(mode='json'), 201
+            return build_skill_detail(skill).model_dump(mode='json'), 201
 
 
 class API(api_tools.APIBase):

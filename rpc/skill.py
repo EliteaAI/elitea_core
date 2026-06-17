@@ -6,11 +6,11 @@ from tools import db, serialize
 
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.enums.all import SkillEntityTypes
-from ..models.pd.skill import SkillCreateModel, SkillDetailModel
-from ..models.pd.skill_version import SkillVersionDetailModel
+from ..models.pd.skill import SkillCreateModel
 from ..utils.skill_utils import (
     get_skill_details,
     create_skill,
+    build_skill_detail,
     attach_skill_to_agent,
     detach_skill_from_agent,
     get_available_skills_for_agent,
@@ -84,15 +84,7 @@ class RPC:
             session.commit()
             session.refresh(skill)
 
-            first_version = session.query(SkillVersion).filter(
-                SkillVersion.id == skill.versions[0].id
-            ).first() if skill.versions else None
-
-            result = SkillDetailModel.model_validate(skill)
-            if first_version is not None:
-                result.version_details = SkillVersionDetailModel.model_validate(first_version)
-
-            return serialize(result)
+            return serialize(build_skill_detail(skill))
 
     @web.rpc("skills_get_skills_for_agent", "get_skills_for_agent")
     def skills_get_skills_for_agent(
