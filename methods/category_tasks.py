@@ -22,6 +22,8 @@ import time
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
+from sqlalchemy.orm import selectinload
+
 from tools import db  # pylint: disable=E0611,E0401
 
 from ..models.all import ApplicationVersion, Tag
@@ -176,6 +178,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     versions = (
                         session.query(ApplicationVersion)
                         .filter(ApplicationVersion.tags.any(Tag.id == old_tag.id))
+                        .options(selectinload(ApplicationVersion.tags))
                         .all()
                     )
                     moved = 0
