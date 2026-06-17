@@ -607,7 +607,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         key = f"parallel_reconcile_payload:{parent_thread_id}:{epoch}"
         try:
             client = self.get_redis_client()  # pylint: disable=E1101
-            client.set(key, json.dumps(value), ex=_RECONCILE_PAYLOAD_TTL)
+            # default=str so a stray non-serialisable leaf degrades that leaf to
+            # its string form rather than raising — a dropped reconcile payload
+            # means the parked parent never reconciles (the run hangs forever).
+            client.set(key, json.dumps(value, default=str), ex=_RECONCILE_PAYLOAD_TTL)
         except Exception:  # pylint: disable=W0703
             log.exception("[PARALLEL] reconcile stash failed")
 
@@ -619,8 +622,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             raw = client.get(key)
             if raw is None:
                 return None
+            # Parse BEFORE delete: if decoding fails (corrupt/stale/partial
+            # write) the key survives under its TTL for inspection instead of
+            # being lost. The Redis-counter gate guarantees a single winner
+            # reaches this point, so reordering opens no double-reconcile window.
+            payload = json.loads(raw)
             client.delete(key)
-            return json.loads(raw)
+            return payload
         except Exception:  # pylint: disable=W0703
             log.exception("[PARALLEL] reconcile unstash failed")
             return None
@@ -636,12 +644,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             client = self.get_redis_client()  # pylint: disable=E1101
             client.set(
                 key,
+                # default=str: a non-serialisable leaf must not blow up the
+                # stash — a missing child stash silently breaks HITL resume for
+                # that child (it can't be replayed on its own thread).
                 json.dumps({
                     'child_payload': child_payload,
                     'child_meta': child_meta,
                     'parent_stream_id': parent_stream_id,
                     'parent_message_id': parent_message_id,
-                }),
+                }, default=str),
                 ex=_RECONCILE_PAYLOAD_TTL,
             )
         except Exception:  # pylint: disable=W0703
