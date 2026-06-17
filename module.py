@@ -439,9 +439,6 @@ class Module(module.ModuleModel):
         )
 
         # self.init_db()
-        # Parallel sub-agent dispatch (#4993 Track 2): ensure the global
-        # coordination side-table exists before any parked parent stops.
-        self.parallel_dispatch_ensure_table()
         # TaskNode
         self.task_node.start()
         self.task_node.subscribe_to_task_statuses(self.task_status_changed)
