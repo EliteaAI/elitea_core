@@ -242,6 +242,10 @@ class Module(module.ModuleModel):
         self.publish_validation_rules = guardrail.get(
             'publish_validation_rules', '',
         )
+        # Extra admin-added agent categories (on top of DEFAULT_AGENT_CATEGORIES).
+        # The active list is resolved live by category_utils.get_active_categories();
+        # this attribute is cached only for logging visibility at init / reload.
+        self.extra_agent_categories = guardrail.get('agent_categories', [])
         log.info("Publishing guardrail: blocked=%s, whitelist=%s, custom_rules=%s",
                  self.is_publish_blocked, self.publish_whitelist_project_ids,
                  bool(self.publish_validation_rules))
@@ -322,6 +326,12 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "cleanup_oversized_message_meta", self.cleanup_oversized_message_meta
+            )
+            this.for_module("admin").module.register_admin_task(
+                "reassign_agent_category", self.reassign_agent_category,
+            )
+            this.for_module("admin").module.register_admin_task(
+                "rename_agent_category", self.rename_agent_category,
             )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)

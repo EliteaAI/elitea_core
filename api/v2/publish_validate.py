@@ -57,6 +57,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         try:
             result = validate_for_publish(
                 project_id, version_id, application_id, parsed.version_name, user_id,
+                category=parsed.category,
             )
         except AIValidationError as e:
             log.error(

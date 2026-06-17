@@ -146,6 +146,16 @@
       "default": "",
       "requires_restart": true
     },
+    "agent_categories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "title": "Agent Categories",
+      "description": "Additional agent categories available in the publish modal and Agent Studio filter bar, on top of the built-in defaults. Built-in defaults (including \"Other\") cannot be removed here. New categories take effect immediately without a restart. Use the \"Rename agent category\" admin task to rename a category across already published agents.",
+      "path": "publishing_guardrail.agent_categories",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false
+    },
     "ai_project_id": {
       "type": "integer",
       "title": "Public Project ID",
