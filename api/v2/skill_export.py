@@ -1,9 +1,12 @@
+from traceback import format_exc
+
 from flask import Response
 
 from tools import api_tools, config as c, auth, register_openapi
 from pylon.core.tools import log
 
 from ...utils.skill_export_import import export_skill_md
+from ...utils.skill_utils import SkillError
 from ...utils.constants import PROMPT_LIB_MODE
 
 
@@ -40,9 +43,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 skill_id=skill_id,
                 version_name=version_name,
             )
-        except Exception as e:  # pragma: no cover - defensive
-            log.error(f"Skill MD export failed: {e}")
-            return {"error": str(e)}, 400
+        except SkillError as exc:
+            return {"error": str(exc)}, exc.http_status
+        except Exception as e:
+            log.error(f"Skill MD export failed: {e}\n{format_exc()}")
+            return {"error": "Internal server error"}, 500
 
         if not result.get('ok'):
             return {"error": result.get('msg', 'Export failed')}, 404

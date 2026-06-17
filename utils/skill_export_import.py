@@ -11,7 +11,6 @@ from .skill_utils import (
 
 
 DEFAULT_VERSION_NAME = 'base'
-SKILL_TYPE = 'skill'
 ALLOWED_SKILL_EXTENSIONS = {'.md'}
 
 REQUIRED_FRONTMATTER_FIELDS = ('name', 'description')
@@ -63,14 +62,13 @@ def skill_to_md(skill_data: dict, version_name: Optional[str] = None) -> str:
         tags_source = version
 
     frontmatter: Dict[str, Any] = {
-        'type': SKILL_TYPE,
         'name': skill_data.get('name', ''),
         'description': skill_data.get('description', ''),
     }
 
     resolved_version_name = version.get('name', DEFAULT_VERSION_NAME)
     if resolved_version_name and resolved_version_name != DEFAULT_VERSION_NAME:
-        frontmatter['version'] = resolved_version_name
+        frontmatter['elitea_version'] = resolved_version_name
 
     tags = _normalize_tags(tags_source)
     if tags:
@@ -163,8 +161,7 @@ def validate_skill_frontmatter(meta: dict) -> None:
     """Validate skill frontmatter.
 
     - ``name`` and ``description`` are required and non-empty.
-    - ``type``, when present, must equal 'skill'.
-    - ``version``, when present, must be a non-empty string.
+    - ``elitea_version``, when present, must be a non-empty string.
     - ``tags``, when present, must be a list of strings.
 
     """
@@ -176,12 +173,8 @@ def validate_skill_frontmatter(meta: dict) -> None:
         if value is None or (isinstance(value, str) and not value.strip()):
             raise ValueError(f'Required field "{field}" is missing or empty')
 
-    skill_type = meta.get('type')
-    if skill_type is not None and skill_type != SKILL_TYPE:
-        raise ValueError(f'Invalid type "{skill_type}". Expected "{SKILL_TYPE}"')
-
-    if 'version' in meta:
-        version = meta['version']
+    if 'elitea_version' in meta:
+        version = meta['elitea_version']
         if not isinstance(version, str) or not version.strip():
             raise ValueError('Version name must be a non-empty string')
 
@@ -217,7 +210,7 @@ def import_skill_md(
     body = parsed['body']
     validate_skill_frontmatter(frontmatter)
 
-    version_name = frontmatter.get('version', DEFAULT_VERSION_NAME)
+    version_name = frontmatter.get('elitea_version', DEFAULT_VERSION_NAME)
     tags = frontmatter.get('tags')
     tag_payload = [{'name': tag} for tag in tags] if tags else None
 
@@ -232,7 +225,6 @@ def import_skill_md(
             description=frontmatter['description'],
             versions=[version],
             author_id=author_id,
-            on_conflict='error',
             session=s,
         )
         result = get_skill_details(project_id=project_id, skill_id=imported.id, session=s)

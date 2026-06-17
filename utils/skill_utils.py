@@ -576,14 +576,6 @@ def get_skill_version_by_name(
         ).first()
 
 
-def find_existing_skill_by_name(session, name: str) -> Optional[Skill]:
-    return session.query(Skill).filter(
-        func.lower(Skill.name) == name.lower()
-    ).options(
-        selectinload(Skill.versions)
-    ).order_by(Skill.id).first()
-
-
 def import_skill(
     project_id: int,
     name: str,
@@ -591,7 +583,6 @@ def import_skill(
     versions: list,
     author_id: int,
     *,
-    on_conflict: str = 'merge',
     session=None,
 ) -> SkillImportResultModel:
     if not versions:
@@ -609,34 +600,6 @@ def import_skill(
     ]
 
     with _skill_session(session, project_id) as s:
-        existing = find_existing_skill_by_name(s, name)
-        if existing:
-            if on_conflict == 'error':
-                raise SkillNameConflictError(name)
-            version_map = {v.name: v.id for v in existing.versions}
-            existing_by_name = {v.name: v for v in existing.versions}
-            if on_conflict == 'overwrite' and description and existing.description != description:
-                existing.description = description
-            for vp in payloads:
-                vname = vp['name']
-                if vname in version_map:
-                    if on_conflict == 'overwrite':
-                        _update_version_fields(
-                            s, existing_by_name[vname],
-                            SkillVersionUpdateModel.model_validate(
-                                {'instructions': vp['instructions'], 'tags': vp['tags']}
-                            ),
-                        )
-                    continue
-                detail = create_skill_version(
-                    project_id=project_id,
-                    skill_id=existing.id,
-                    version_data=SkillVersionCreateModel.model_validate(vp),
-                    session=s,
-                )
-                version_map[vname] = detail['id']
-            return SkillImportResultModel(id=existing.id, versions=version_map, reused=True)
-
         # New skill: create_skill enforces exactly one version, so create with the
         # first and append the rest — all in this one transaction.
         skill_model = SkillCreateModel.model_validate({

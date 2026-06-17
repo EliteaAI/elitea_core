@@ -231,6 +231,7 @@ def _resolve_and_attach_skill(
     app_version_id,
     skill_ref,
     skill_id_mapper,
+    session,
 ) -> Optional[str]:
     """Resolve one skill reference (import_uuid -> id, version_name -> version id) and
     attach it to the agent version."""
@@ -253,6 +254,7 @@ def _resolve_and_attach_skill(
             entity_version_id=app_version_id,
             skill_id=skill_info.id,
             skill_version_id=skill_version_id,
+            session=session,
         )
     except SkillError as ex:
         # max-5 exceeded / already attached / not found -> non-fatal warning.
@@ -272,30 +274,32 @@ def _attach_imported_skills(project_id, agents_with_skills, skill_id_mapper,
                             application_version_mapper, errors):
     """Attach previously-imported skills to newly-created agent versions."""
 
-    for item_index, agent_name, raw_item in agents_with_skills:
-        for version in raw_item.get('versions', []):
-            skill_refs = (version or {}).get('skills') or []
-            if not skill_refs:
-                continue
-            version_name = version.get('name', 'base')
-            target = (application_version_mapper.get((agent_name, version_name))
-                      or application_version_mapper.get((agent_name, 'base')))
-            if not target:
-                # base-version synthesis may have renamed a sole version.
-                errors['skills'].append(_wrap_import_error(
-                    item_index,
-                    f"Could not locate imported agent '{agent_name}' version "
-                    f"'{version_name}' to attach skills"
-                ))
-                continue
-            _app_id, app_version_id = target
+    with db.get_session(project_id) as s:
+        for item_index, agent_name, raw_item in agents_with_skills:
+            for version in raw_item.get('versions', []):
+                skill_refs = (version or {}).get('skills') or []
+                if not skill_refs:
+                    continue
+                version_name = version.get('name', 'base')
+                target = (application_version_mapper.get((agent_name, version_name))
+                          or application_version_mapper.get((agent_name, 'base')))
+                if not target:
+                    # base-version synthesis may have renamed a sole version.
+                    errors['skills'].append(_wrap_import_error(
+                        item_index,
+                        f"Could not locate imported agent '{agent_name}' version "
+                        f"'{version_name}' to attach skills"
+                    ))
+                    continue
+                _app_id, app_version_id = target
 
-            for skill_ref in skill_refs:
-                err = _resolve_and_attach_skill(
-                    project_id, agent_name, version_name, app_version_id, skill_ref, skill_id_mapper,
-                )
-                if err:
-                    errors['skills'].append(_wrap_import_error(item_index, err))
+                for skill_ref in skill_refs:
+                    err = _resolve_and_attach_skill(
+                        project_id, agent_name, version_name, app_version_id, skill_ref, skill_id_mapper, s,
+                    )
+                    if err:
+                        errors['skills'].append(_wrap_import_error(item_index, err))
+        s.commit()
 
 
 class RPC:
@@ -382,7 +386,7 @@ class RPC:
                     if entity == 'skills':
                         # Build the uuid -> (id, versions) mapper the post-loop attach
                         # needs; pop 'versions' so the public result entry matches the
-                        # shape other skill results use (id/name/reused/notice).
+                        # shape other skill results use (id/name/reused).
                         skill_id_mapper[model.import_uuid] = SkillImportResultModel(
                             id=r['id'],
                             versions=r.get('versions') or {},

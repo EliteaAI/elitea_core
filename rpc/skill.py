@@ -28,7 +28,6 @@ class RPC:
                 description=model_data.get('description') or model_data['name'],
                 versions=model_data.get('versions') or [],
                 author_id=author_id,
-                on_conflict='merge',
             )
         except Exception as ex:
             log.error(f"[IMPORT] Failed to import skill '{model_data.get('name')}': {ex}")
@@ -40,11 +39,6 @@ class RPC:
             'reused': imported.reused,
             'versions': imported.versions,
         }
-        if imported.reused:
-            result['notice'] = (
-                f'Skill "{model_data["name"]}" already exists in project and was '
-                f'reused (existing skill ID: {imported.id}) instead of creating a new one'
-            )
         return result, []
 
     @web.rpc("skills_get_skill_by_id", "get_skill_by_id")
