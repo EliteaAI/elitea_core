@@ -480,6 +480,7 @@ def create_publish_snapshot(
         version = (
             session.query(ApplicationVersion)
             .filter(ApplicationVersion.id == version_id)
+            .options(selectinload(ApplicationVersion.skill_mappings))
             .first()
         )
         if version is None:

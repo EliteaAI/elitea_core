@@ -1,10 +1,12 @@
+import re
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Annotated, Dict, List, Optional
 
 from pydantic import (
     BaseModel,
     Field,
+    AfterValidator,
     field_validator,
     model_validator,
     ConfigDict,
@@ -14,6 +16,19 @@ from .collection_base import TagBaseModel, AuthorBaseModel
 from ...models.enums.all import SkillEntityTypes
 from ...utils.authors import get_authors_data
 from ...utils.constants import ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API
+
+SKILL_NAME_RE = re.compile(r'^[a-z0-9]$|^[a-z0-9][a-z0-9-]*[a-z0-9]$')
+
+
+def validate_skill_name(value: str) -> str:
+    if len(value) > 64 or not SKILL_NAME_RE.match(value):
+        raise ValueError('name must be <=64 chars, lowercase letters/digits/hyphens only')
+    if 'claude' in value or 'anthropic' in value:
+        raise ValueError('name cannot contain "claude" or "anthropic"')
+    return value
+
+
+SkillName = Annotated[str, AfterValidator(validate_skill_name)]
 
 from .skill_version import (
     SkillVersionCreateModel,
@@ -68,7 +83,7 @@ class SkillArgsForwardingModel(BaseModel):
 
 class SkillCreateModel(SkillArgsForwardingModel):
     """Model for creating a new skill with initial version."""
-    name: str = Field(min_length=1, max_length=32)
+    name: SkillName = Field(min_length=1, max_length=64)
     description: str = Field(min_length=1, max_length=2304)
     owner_id: int
     versions: List[SkillVersionCreateModel]
@@ -161,7 +176,7 @@ class SkillDetailModel(BaseModel):
 
 
 class SkillUpdateModel(SkillArgsForwardingModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=32)
+    name: Optional[SkillName] = Field(None, min_length=1, max_length=64)
     description: Optional[str] = Field(None, min_length=1, max_length=2304)
     version: Optional[SkillVersionUpdateModel] = None
     meta: Optional[dict] = None
@@ -187,7 +202,7 @@ class SkillExportModel(SkillArgsForwardingModel):
 
 
 class SkillImportModel(SkillArgsForwardingModel):
-    name: str = Field(min_length=1, max_length=32)
+    name: SkillName = Field(min_length=1, max_length=64)
     description: str = Field(min_length=1, max_length=2304)
     versions: List[SkillVersionImportModel]
     meta: Optional[dict] = None
