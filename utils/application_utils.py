@@ -1171,6 +1171,11 @@ def list_applications_api(
             # active-category tag at all (uncategorised legacy agents). The check
             # is correlated with the published version so a tagless base/draft
             # version cannot leak a categorised agent into this bucket.
+            # TODO: transition shim — the ~tags.any(name.in_(...)) leg exists only
+            # for agents published before categories were introduced. Once all legacy
+            # versions have been backfilled with the "Other" tag (reassign_agent_category
+            # admin task), simplify to a plain tags.any(name == "Other") like every
+            # other category filter.
             other_active = [c for c in active_categories if c != DEFAULT_FALLBACK_CATEGORY]
             filters.append(
                 Application.versions.any(
