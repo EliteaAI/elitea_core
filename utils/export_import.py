@@ -94,8 +94,10 @@ def _export_compound_application_tools(
                 res.setdefault('toolkits', []).extend(toolkits)
             if skills := tools_result.get('skills'):
                 res.setdefault('skills', []).extend(skills)
+            if warnings := tools_result.get('warnings'):
+                res.setdefault('warnings', []).extend(warnings)
         else:
-            for entity in ('applications', 'toolkits', 'skills'):
+            for entity in ('applications', 'toolkits', 'skills', 'warnings'):
                 if ent_res := tools_result.get(entity):
                     res.setdefault(entity, []).extend(ent_res)
 
@@ -187,6 +189,7 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
             data_done['application_version_id'][version_id] = version['import_version_uuid']
 
     skills = []
+    skills_export_error = None
     try:
         skills = _export_skills_main(
             project_id=project_id,
@@ -196,6 +199,7 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
         )
     except Exception as ex:
         log.error(f'Skill export error: {ex}')
+        skills_export_error = f'Skill export failed: {ex}'
 
     try:
         compound_res = {
@@ -205,6 +209,8 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
         }
         if skills:
             compound_res['skills'] = skills
+        if skills_export_error:
+            compound_res.setdefault('warnings', []).append(skills_export_error)
         res = _export_compound_application_tools(
             res=compound_res,
             project_id=project_id,
@@ -328,7 +334,7 @@ def _export_skills_main(
     return skills_serialized
 
 
-def _toolkits_deduplicate_by_import_uuid(toolkits):
+def _deduplicate_by_import_uuid(toolkits):
     res = []
     import_uuids = set()
     for toolkit in toolkits:
@@ -373,7 +379,7 @@ def _post_export(project_id: int, result: dict, data_done: dict, forked: bool = 
                 ent['original_exported'] = False
 
     # substitute all ids in toolkits with refs by import_uuid/import_version_uuid
-    result['toolkits'] = _toolkits_deduplicate_by_import_uuid(result['toolkits'])
+    result['toolkits'] = _deduplicate_by_import_uuid(result['toolkits'])
     for tool in result['toolkits']:
         tool_type = tool['type']
         tool_name = tool['name']
@@ -394,9 +400,11 @@ def _post_export(project_id: int, result: dict, data_done: dict, forked: bool = 
                 }
 
     if result.get('skills'):
-        result['skills'] = _toolkits_deduplicate_by_import_uuid(result['skills'])
+        result['skills'] = _deduplicate_by_import_uuid(result['skills'])
 
     result['_metadata'] = {'version': 2}
+    if warnings := result.pop('warnings', None):
+        result['_metadata']['warnings'] = warnings
 
     return result
 
