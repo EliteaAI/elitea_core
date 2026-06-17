@@ -256,6 +256,15 @@ def _export_skills_main(
     if not skill_ids:
         return []
 
+    # Map skill_id -> {selected version names} the exported agents actually use,
+    # so only those versions are shipped (not the skill's full version history).
+    selected_versions_by_skill_id = {}
+    for refs in version_skill_refs.values():
+        for ref in refs:
+            version_name = ref.get('version_name')
+            if version_name:
+                selected_versions_by_skill_id.setdefault(ref['skill_id'], set()).add(version_name)
+
     # Load full skill data for the referenced skills.
     skills_serialized = []
     skill_uuid_by_id = {}
@@ -270,8 +279,22 @@ def _export_skills_main(
             skill_dict = skill.to_json()
             skill_dict['project_id'] = project_id
             skill_dict['user_id'] = user_id
+
+            # Export only the version(s) the exported agents actually use, so the
+            # package isn't bloated with (and import doesn't recreate) the skill's
+            # unused version history. Fall back to all versions when the selection
+            # can't be matched (e.g. a dangling ref) so the skill still imports
+            # and re-attach can warn if needed — never emit an empty list.
+            selected_names = selected_versions_by_skill_id.get(skill.id)
+            versions = (
+                [v for v in skill.versions if v.name in selected_names]
+                if selected_names else list(skill.versions)
+            )
+            if not versions:
+                versions = list(skill.versions)
+
             skill_dict['versions'] = []
-            for version in skill.versions:
+            for version in versions:
                 version_dict = version.to_json()
                 version_dict['tags'] = [t.to_json() for t in version.tags]
                 skill_dict['versions'].append(version_dict)
