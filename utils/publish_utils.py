@@ -30,6 +30,7 @@ from ..models.pd.version import ApplicationVersionForkCreateModel
 from ..models.pd.publish import PublishAIResult
 from .create_utils import create_application, create_version
 from .utils import get_public_project_id
+from .category_utils import apply_category_to_tag_dicts, is_valid_category
 
 
 def is_publishing_blocked_for_project(project_id: int) -> bool:
@@ -1311,6 +1312,7 @@ def admin_publish(
     version_name: str,
     user_id: int,
     max_versions: int,
+    category: Optional[str] = None,
 ) -> Tuple[dict, int]:
     """Admin in-place publish: append a sanitised published version to the original app.
 
@@ -1325,6 +1327,7 @@ def admin_publish(
         version_name=version_name,
         user_id=user_id,
         max_versions=max_versions,
+        category=category,
     )
 
 
@@ -1336,6 +1339,7 @@ def user_publish(
     user_id: int,
     public_project_id: int,
     max_versions: int,
+    category: Optional[str] = None,
 ) -> Tuple[dict, int]:
     """Clone the source version, then snapshot the clone into the public project."""
     return _publish_impl(
@@ -1344,6 +1348,7 @@ def user_publish(
         public_project_id=public_project_id,
         max_versions=max_versions,
         clone_source=True,
+        category=category,
     )
 
 
@@ -1354,6 +1359,7 @@ def _publish_impl_inplace(
     version_name: str,
     user_id: int,
     max_versions: int,
+    category: Optional[str] = None,
 ) -> Tuple[dict, int]:
     """Admin in-place publish: append a sanitised published version onto the
     original Application that lives in the public project.
@@ -1412,6 +1418,9 @@ def _publish_impl_inplace(
 
     # 3. Sanitised snapshot of the (untouched) original version
     snapshot = create_publish_snapshot(project_id, version_id, user_id)
+    snapshot['version']['tags'] = apply_category_to_tag_dicts(
+        snapshot['version'].get('tags'), category,
+    )
 
     # 4. Append the sanitised published version to the original Application
     result = publish_additional_version(
@@ -1472,6 +1481,7 @@ def _publish_impl(
     public_project_id: int,
     max_versions: int,
     clone_source: bool,
+    category: Optional[str] = None,
 ) -> Tuple[dict, int]:
     """Cross-project user publish: clone, snapshot, copy to public project.
 
@@ -1543,6 +1553,9 @@ def _publish_impl(
 
     # 4. Create sanitised snapshot
     snapshot = create_publish_snapshot(project_id, snapshot_version_id, user_id)
+    snapshot['version']['tags'] = apply_category_to_tag_dicts(
+        snapshot['version'].get('tags'), category,
+    )
 
     # 5. Publish into the public project
     if public_app_id is not None:
@@ -2056,6 +2069,26 @@ class TagsChecker(BaseChecker):
             )
 
 
+class CategoryChecker(BaseChecker):
+    """Validates the selected agent category is in the active set.
+
+    A missing category is allowed and defaults to the fallback category
+    (API-optional, UI-mandatory). An explicitly provided but unknown
+    category is a critical failure.
+    """
+
+    def check(self, data, result, *, context=None):
+        category = (data.get('category') or '').strip()
+        if not category:
+            return  # defaults to fallback category at publish time
+        if not is_valid_category(category):
+            result.issue(
+                'critical', 'category',
+                f"Category '{category}' is not a recognised category",
+                'Select a valid agent category from the list', context,
+            )
+
+
 class InstructionsChecker(BaseChecker):
     """Agent/sub-agent instructions quality."""
 
@@ -2222,6 +2255,7 @@ _PARENT_CHAIN = ValidationChain([
     DescriptionChecker(min_length=50),
     IconChecker(),
     TagsChecker(),
+    CategoryChecker(),
     InstructionsChecker(),
     VariablesChecker(),
     LLMSharedModelChecker(),
@@ -2244,6 +2278,7 @@ def run_deterministic_checks(
     public_project_id: int,
     public_app_id,
     sub_agent_snapshots: list,
+    category: Optional[str] = None,
 ) -> dict:
     """Fast rule-based checks using chain-of-responsibility."""
     result = ValidationResult()
@@ -2258,6 +2293,7 @@ def run_deterministic_checks(
         'description': app.get('description'),
         'icon_meta': meta.get('icon_meta'),
         'tags': ver.get('tags'),
+        'category': category,
         'instructions': ver.get('instructions'),
         'variables': ver.get('variables'),
         'llm_settings': ver.get('llm_settings', {}),
@@ -2519,6 +2555,7 @@ def validate_for_publish(
     application_id: int,
     version_name: str,
     user_id: int,
+    category: Optional[str] = None,
 ) -> dict:
     """Full validation: deterministic + AI.
 
@@ -2552,7 +2589,7 @@ def validate_for_publish(
     # Deterministic
     det_result = run_deterministic_checks(
         parent_snapshot, version_name, public_project_id,
-        public_app_id, sub_snapshots,
+        public_app_id, sub_snapshots, category=category,
     )
 
     # AI (raises AIValidationError on failure)

@@ -50,6 +50,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         version_name = parsed.version_name
         validation_token = parsed.validation_token
+        category = parsed.category
 
         user_id = auth.current_user().get("id")
         public_project_id = get_public_project_id()
@@ -81,6 +82,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     # Inline validation fallback
                     result = validate_for_publish(
                         project_id, version_id, source_app_id, version_name, user_id,
+                        category=category,
                     )
                     if result.get('status') == 'FAIL':
                         return {
@@ -94,11 +96,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return admin_publish(
                     project_id, version_id, source_app_id,
                     version_name, user_id, max_versions,
+                    category=category,
                 )
             else:
                 return user_publish(
                     project_id, version_id, source_app_id,
                     version_name, user_id, public_project_id, max_versions,
+                    category=category,
                 )
 
         except AIValidationError as e:

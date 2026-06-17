@@ -1,7 +1,7 @@
 from json import loads
 from datetime import datetime
 from typing import List, NamedTuple, Optional, Tuple, Literal, Generator
-from sqlalchemy import func, desc, or_, asc, distinct
+from sqlalchemy import func, desc, or_, and_, asc, distinct
 from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 from pydantic import ValidationError
@@ -11,6 +11,7 @@ from pylon.core.tools import log
 
 from .utils import get_public_project_id
 from ..models.enums.all import AgentTypes
+from ..models.enums.all import PublishStatus
 from ..models.all import Application, ApplicationVersion, ApplicationVariable
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.enums.events import ApplicationEvents
@@ -25,6 +26,8 @@ from ..models.all import Tag
 from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
 from ..models.pd.tool import ToolValidatedDetails
+from .category_utils import get_active_categories, resolve_category
+from .constants import DEFAULT_FALLBACK_CATEGORY
 
 
 class _AuthorSortRow(NamedTuple):
@@ -1124,6 +1127,7 @@ def list_applications_api(
         with_likes: bool = True,
         agents_type: str = 'all',
         without_tags: bool = False,
+        category: str | None = None,
         session=None,
 ) -> dict:
     # OPTIMIZATION: Only include likes subqueries for Agent Studio (public library)
@@ -1158,6 +1162,36 @@ def list_applications_api(
                 ApplicationVersion.tags.any()
             )
         )
+
+    if category:
+        canonical = resolve_category(category)
+        active_categories = get_active_categories()
+        if canonical == DEFAULT_FALLBACK_CATEGORY:
+            # "Other" is a catch-all: published agents tagged "Other" OR with no
+            # active-category tag at all (uncategorised legacy agents). The check
+            # is correlated with the published version so a tagless base/draft
+            # version cannot leak a categorised agent into this bucket.
+            other_active = [c for c in active_categories if c != DEFAULT_FALLBACK_CATEGORY]
+            filters.append(
+                Application.versions.any(
+                    and_(
+                        ApplicationVersion.status == PublishStatus.published,
+                        or_(
+                            ApplicationVersion.tags.any(Tag.name == DEFAULT_FALLBACK_CATEGORY),
+                            ~ApplicationVersion.tags.any(Tag.name.in_(other_active)),
+                        ),
+                    )
+                )
+            )
+        else:
+            filters.append(
+                Application.versions.any(
+                    and_(
+                        ApplicationVersion.status == PublishStatus.published,
+                        ApplicationVersion.tags.any(Tag.name == canonical),
+                    )
+                )
+            )
 
     if statuses:
         if isinstance(statuses, str):
