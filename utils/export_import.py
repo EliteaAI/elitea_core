@@ -107,7 +107,8 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
             selectinload(Application.versions).selectinload(ApplicationVersion.tools),
             selectinload(Application.versions).selectinload(ApplicationVersion.tool_mappings),
             selectinload(Application.versions).selectinload(ApplicationVersion.variables),
-            selectinload(Application.versions).selectinload(ApplicationVersion.tags)
+            selectinload(Application.versions).selectinload(ApplicationVersion.tags),
+            selectinload(Application.versions).selectinload(ApplicationVersion.skill_mappings),
         ).all()
 
         application_db_ids = {app.id for app in applications}

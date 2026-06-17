@@ -146,8 +146,8 @@ class ApplicationVersion(db_tools.AbstractBaseMixin, db.Base):
     )
     skill_mappings: Mapped[List['EntitySkillMapping']] = relationship(
         'EntitySkillMapping',
-        primaryjoin='and_(ApplicationVersion.id == foreign(EntitySkillMapping.entity_version_id), '
-                    'EntitySkillMapping.entity_type == "agent")',
+        primaryjoin=f'and_(ApplicationVersion.id == foreign(EntitySkillMapping.entity_version_id), '
+                    f'EntitySkillMapping.entity_type == "{SkillEntityTypes.agent}")',
         lazy=True,
         viewonly=True
     )
