@@ -37,6 +37,10 @@ class Skill(db_tools.AbstractBaseMixin, db.Base):
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
+    # Entity name used by the social plugin's pin subquery
+    # (mirrors Application.pins_entity_name = 'application').
+    pins_entity_name: str = 'skill'
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(String(2304), nullable=False)

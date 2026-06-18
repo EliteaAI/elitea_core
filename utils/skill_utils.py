@@ -5,8 +5,9 @@ from typing import List, Optional, Tuple, Literal
 from sqlalchemy import func, or_, asc, desc
 from sqlalchemy.orm import selectinload
 
-from tools import db, auth, serialize
+from tools import db, auth, serialize, rpc_tools
 
+from .utils import set_columns_as_attrs
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag
 from ..models.enums.all import SkillEntityTypes
@@ -198,14 +199,27 @@ def list_skills(
         if filters:
             query = query.filter(*filters)
 
-        # Sorting
+        # Add pin status (project-wide) so pinned skills surface first and each
+        # row carries `is_pinned`/`pin_updated_at` — mirrors application_utils.
+        add_pins_with_priority = rpc_tools.RpcMixin().rpc.timeout(2).social_add_pins_with_priority()
+        query, extra_columns = add_pins_with_priority(
+            original_query=query,
+            project_id=project_id,
+            entity=Skill,
+        )
+
+        # Sorting: pinned first (is_pinned DESC, pin_updated_at DESC), then the
+        # user's sort, then id. The query now ends with the is_pinned and
+        # pin_updated_at columns added above.
         if sort_by not in _SKILL_SORT_WHITELIST:
             sort_by = 'created_at'
-        sort_column = getattr(Skill, sort_by, Skill.created_at)
-        if sort_order == 'desc':
-            query = query.order_by(desc(sort_column))
-        else:
-            query = query.order_by(asc(sort_column))
+        sort_fn = asc if sort_order == 'asc' else desc
+        query = query.order_by(
+            desc(query.column_descriptions[-2]['expr']),  # is_pinned column
+            desc(query.column_descriptions[-1]['expr']),  # pin_updated_at column
+            sort_fn(getattr(Skill, sort_by, Skill.created_at)),
+            asc(Skill.id),
+        )
 
         # Pagination
         if limit:
@@ -213,7 +227,9 @@ def list_skills(
         if offset:
             query = query.offset(offset)
 
-        skills = query.all()
+        # With extra columns the query yields Row tuples; map them back onto
+        # each Skill instance so `is_pinned`/`pin_updated_at` are serializable.
+        skills = list(set_columns_as_attrs(query.all(), extra_columns))
         return total, skills
 
 
