@@ -170,7 +170,7 @@ def exclude_image_base64_content_from_chat_history(
     chat_history: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """Exclude image_url items from all messages in chat history."""
-    log.info("Filtering image content from chat history (model doesn't support vision)")
+    log.debug("Filtering image content from chat history (model doesn't support vision)")
     
     result = []
     for msg in chat_history:
