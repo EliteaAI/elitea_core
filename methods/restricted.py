@@ -40,15 +40,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.warning("Provider not found: %s (user=%s, project=%s)", provider_name, user_id, project_id)
             return None
         #
-        log.info("get_provider_api_info: provider=%s, toolkits=%s",
-                 provider_name, [tk.name for tk in provider.provided_toolkits])
+        log.debug("get_provider_api_info: provider=%s, toolkits=%s",
+                  provider_name, [tk.name for tk in provider.provided_toolkits])
         #
-        # Debug: show tools count per toolkit
         for tk in provider.provided_toolkits:
             tools_list = tk.provided_tools
             tools_count = len(tools_list) if tools_list else 0
-            log.info("get_provider_api_info: toolkit=%s, provided_tools type=%s, count=%s",
-                     tk.name, type(tools_list).__name__, tools_count)
+            log.debug("get_provider_api_info: toolkit=%s, provided_tools type=%s, count=%s",
+                      tk.name, type(tools_list).__name__, tools_count)
         #
         toolkits = {}
         toolkits_metadata = {}
@@ -64,8 +63,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             #
             for tool in toolkit.provided_tools:
                 try:
-                    log.info("get_provider_api_info: converting tool=%s, args_schema type=%s, tool_metadata type=%s",
-                             tool.name, type(tool.args_schema).__name__, type(tool.tool_metadata).__name__)
+                    log.debug("get_provider_api_info: converting tool=%s, args_schema type=%s, tool_metadata type=%s",
+                              tool.name, type(tool.args_schema).__name__, type(tool.tool_metadata).__name__)
                     tools.append({
                         "name": tool.name,
                         "description": tool.description,
