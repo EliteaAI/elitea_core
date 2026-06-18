@@ -44,6 +44,9 @@ class ApplicationChatRequest(MergeUpdateBase):
     hitl_resume: Optional[bool] = False
     hitl_action: Optional[str] = None
     hitl_value: Optional[str] = None
+    # Parallel sub-agent fan-out (#4993): per-child HITL decisions keyed by the
+    # parent Application tool_call_id. {tool_call_id, action, value}.
+    hitl_decisions: Optional[List[Dict[str, Any]]] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
     variables: Optional[List[ApplicationVariableModel]] = None
@@ -97,6 +100,9 @@ class LLMChatRequest(MergeUpdateBase):
     hitl_resume: Optional[bool] = False
     hitl_action: Optional[str] = None
     hitl_value: Optional[str] = None
+    # Parallel sub-agent fan-out (#4993): per-child HITL decisions keyed by the
+    # parent Application tool_call_id. {tool_call_id, action, value}.
+    hitl_decisions: Optional[List[Dict[str, Any]]] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
     tools: Optional[List[dict]] = []

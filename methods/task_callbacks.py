@@ -35,6 +35,15 @@ class Method:
         if status != "stopped":
             return
         #
+        # Parallel sub-agent dispatch (#4993 Track 2) runs BEFORE the callback
+        # pop: SIO agent tasks (parked parents and their children) register no
+        # callback, so they would otherwise hit the early-return below. Best-effort
+        # and self-contained — a failure here must never block the callback path.
+        try:
+            self._maybe_handle_parallel_dispatch(task_id)
+        except Exception:  # pylint: disable=W0702,W0703
+            log.exception("Parallel dispatch handling failed (task_id=%s)", task_id)
+        #
         callback_data = self.callback_tasks.pop(task_id, None)
         #
         if not callback_data and not self.not_starting_task_event.is_set():
@@ -69,3 +78,44 @@ class Method:
             log.info("Callback POST result: %s", requests_result)
         except:  # pylint: disable=W0702
             log.exception("Error in callback sender (task_id=%s)", task_id)
+
+    @web.method()
+    def _maybe_handle_parallel_dispatch(self, task_id):
+        """Route a stopped task into parked-parent launch or child reconcile.
+
+        Reads meta first (cheap) to branch:
+          * child  — meta carries reconcile_epoch → advance the reconcile gate.
+          * parent — task_name is an agent runner AND its result is parked →
+                     launch one durable child per spec.
+        Anything else (ordinary agent run, index task, unknown) is ignored. The
+        result is only deserialized when the cheap meta check already matched, so
+        the common no-op path stays O(meta lookup).
+        """
+        try:
+            meta = self.task_node.get_task_meta(task_id)  # pylint: disable=E1101
+        except Exception:  # pylint: disable=W0703
+            return
+        if not isinstance(meta, dict):
+            return
+
+        # Child terminal: presence of reconcile_epoch is the marker.
+        if meta.get("reconcile_epoch"):
+            try:
+                child_result = self.task_node.get_task_result(task_id)  # pylint: disable=E1101
+            except Exception:  # pylint: disable=W0703
+                child_result = None
+            if child_result is ...:  # stopped via stop_task / invalid — treat as terminal, no HITL
+                child_result = None
+            self.parallel_dispatch_on_child_terminal(meta, child_result)
+            return
+
+        # Parent candidate: only the two agent runners can park.
+        if meta.get("task_name") not in ("indexer_agent", "indexer_predict_agent"):
+            return
+        try:
+            result = self.task_node.get_task_result(task_id)  # pylint: disable=E1101
+        except Exception:  # pylint: disable=W0703
+            return
+        if not isinstance(result, dict) or not result.get("parallel_parked"):
+            return
+        self.parallel_dispatch_launch_children(task_id, meta, result)

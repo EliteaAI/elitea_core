@@ -162,6 +162,12 @@ class SioContinuePredictModel(BaseModel):
     hitl_resume: bool = Field(default=False, description="Whether this continue request resumes a HITL interrupt")
     hitl_action: Optional[str] = Field(default=None, description="HITL action: approve, reject, or edit")
     hitl_value: Optional[str] = Field(default=None, description="Edited text for HITL edit resumes")
+    # Parallel sub-agent fan-out (#4993): one decision per paused child, each
+    # keyed by the parent Application tool_call_id. {tool_call_id, action, value}.
+    hitl_decisions: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Per-child HITL decisions for a parallel sub-agent resume",
+    )
     # Fields needed for compatibility with generate_payload
     interaction_uuid: str | uuid.UUID | None = None
     llm_settings: Optional[EntitySettingsLlm] = None

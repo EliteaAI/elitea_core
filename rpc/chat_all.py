@@ -593,6 +593,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
         'hitl_resume': bool(getattr(predict_payload, 'hitl_resume', False)),
         'hitl_action': getattr(predict_payload, 'hitl_action', None),
         'hitl_value': getattr(predict_payload, 'hitl_value', None),
+        'hitl_decisions': getattr(predict_payload, 'hitl_decisions', None),
         'thread_id': predict_payload.thread_id,
     }
 
@@ -1187,6 +1188,25 @@ class RPC:
         else:
             current_user = auth.current_user()
 
+        # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
+        # run. A stale HITL approval card left in the UI must NOT resume anything
+        # — without this, a fan-out child whose stash was cleared on stop falls
+        # through to the parent continue flow below and re-fans-out EVERY child,
+        # including ones that had already completed. Refuse the resume cleanly.
+        if self.is_chat_run_stopped(parsed.message_id):
+            log.info("[PARALLEL] continue refused — run stopped (message_id=%s)", parsed.message_id)
+            return {"stopped": True}
+
+        # Parallel sub-agent HITL (#4993 Track 2): if this resume targets a
+        # parked-fan-out child thread, replay that child directly (with
+        # hitl_resume) instead of regenerating the parent message's payload —
+        # the approval belongs to the child's own agent identity + checkpoint.
+        # The child resumes on its own thread; on completion it fires `stopped`
+        # and the reconcile gate wakes the parent.
+        child_resume = self._continue_child_resume(sid, parsed, current_user)
+        if child_resume is not None:
+            return child_resume
+
         with db.get_session(parsed.project_id) as session:
             conversation: Conversation = session.query(Conversation).where(
                 Conversation.uuid == parsed.conversation_uuid
@@ -1335,6 +1355,69 @@ class RPC:
                     stream_id=str(parsed.conversation_uuid),
                     message_id=parsed.message_id,
                 )
+
+    @web.method()
+    def _continue_child_resume(self, sid, parsed, current_user):
+        """Resume a parked-fan-out child on its own thread, or None if N/A.
+
+        A parallel sub-agent child pauses for HITL on its OWN thread_id and emits
+        its own approval card. When the user approves, the continue request
+        carries that child thread_id — we replay the child's stashed launch
+        payload with hitl_resume set, on the agents pool, keeping the reconcile
+        linkage meta so the child's eventual completion wakes the parent gate.
+        Returns the start_task result dict, or None when thread_id is not a known
+        child (caller then falls through to the normal parent continue flow).
+        """
+        thread_id = getattr(parsed, 'thread_id', None)
+        if not thread_id:
+            return None
+        stash = self.parallel_dispatch_lookup_child(thread_id)
+        if not stash:
+            return None
+
+        child_payload = dict(stash.get('child_payload') or {})
+        child_meta = dict(stash.get('child_meta') or {})
+        if not child_payload:
+            return None
+
+        # Pick this child's decision out of hitl_decisions (keyed by the parent
+        # tool_call_id == the child_thread_id's tool_call_id), else fall back to
+        # the scalar hitl_action/value on the request.
+        action = getattr(parsed, 'hitl_action', None)
+        value = getattr(parsed, 'hitl_value', None)
+        for decision in (getattr(parsed, 'hitl_decisions', None) or []):
+            if decision.get('thread_id') == thread_id or \
+                    decision.get('tool_call_id') == child_meta.get('tool_call_id'):
+                action = decision.get('action', action)
+                value = decision.get('value', value)
+                break
+
+        child_payload['hitl_resume'] = True
+        child_payload['hitl_action'] = action or 'approve'
+        child_payload['hitl_value'] = value or ''
+        child_payload['should_continue'] = False
+        child_payload.setdefault('thread_id', thread_id)
+        child_payload.update({
+            'mcp_tokens': getattr(parsed, 'mcp_tokens', None) or child_payload.get('mcp_tokens') or {},
+            'ignored_mcp_servers': getattr(parsed, 'ignored_mcp_servers', None)
+            or child_payload.get('ignored_mcp_servers') or [],
+        })
+
+        stream_id = stash.get('parent_stream_id')
+        message_id = stash.get('parent_message_id')
+
+        task_id = self.task_node.start_task(
+            "indexer_agent",
+            args=[stream_id, message_id],
+            kwargs=child_payload,
+            pool="agents",
+            meta=child_meta,
+        )
+        if task_id is None:
+            log.warning("[PARALLEL] child resume saturated for thread_id=%s", thread_id)
+            raise PoolSaturationError(pool="agents", retry_after=5)
+        log.info("[PARALLEL] resumed child thread_id=%s task_id=%s", thread_id, task_id)
+        return {"task_id": task_id}
 
     @web.rpc(f'chat_predict_summary_content', "predict_summary_content")
     def predict_summary_content(
