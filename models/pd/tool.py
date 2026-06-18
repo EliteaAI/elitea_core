@@ -271,7 +271,8 @@ class ToolValidatedDetails(ToolDetails):
         try:
             values['settings'] = expand_toolkit_settings(type_, settings, project_id, user_id)
         except ValidatorNotSupportedError as ex:
-            log.warning(ex)
+            if type_ != 'application':
+                log.warning(ex)
         except ConfigurationExpandError as ex:
             raise_validation_error_if_any(ex.errors, ToolValidatedDetails)
         except Exception as e:
@@ -424,7 +425,8 @@ class ToolCreateModel(ToolBase):
         try:
             settings = expand_toolkit_settings(type_, settings, project_id, user_id)
         except ValidatorNotSupportedError as ex:
-            log.warning(ex)
+            if type_ != 'application':
+                log.warning(ex)
         except ConfigurationExpandError as ex:
             raise_validation_error_if_any(ex.errors, ToolValidatedDetails)
         except Exception as e:
