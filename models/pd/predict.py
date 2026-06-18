@@ -69,7 +69,15 @@ class SioPredictModel(BaseModel):
     should_continue: Optional[bool] = Field(default=False, description="Deprecated: Use chat_continue_predict event instead")
     runtime_context: Optional[Dict[str, Any]] = None
     thread_id: Optional[str] = Field(default=None, description="Thread ID for execution")
-    persona: Optional[str] = Field(default="generic", description="Default persona for chat: 'generic' or 'qa'")
+    persona: Optional[str] = Field(
+        default="generic",
+        description=(
+            "Default persona for chat. Accepted values: 'generic', 'qa', 'nerdy', "
+            "'quirky', 'cynical', 'none', 'bare'. Use 'bare' to bypass all "
+            "Elitea-injected identity/persona content and send only the user's own "
+            "instructions (plus tool-required guidance) to the model."
+        ),
+    )
 
     @model_validator(mode='after')
     def user_input_from_tool_call_input(self):

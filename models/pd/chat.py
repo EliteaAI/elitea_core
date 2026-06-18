@@ -129,7 +129,12 @@ class LLMChatRequest(MergeUpdateBase):
     )
     persona: Optional[str] = Field(
         default="generic",
-        description="Default persona for chat: 'generic' or 'qa'"
+        description=(
+            "Default persona for chat. Accepted values: 'generic', 'qa', 'nerdy', "
+            "'quirky', 'cynical', 'none', 'bare'. Use 'bare' to bypass all "
+            "Elitea-injected identity/persona content and send only the user's own "
+            "instructions (plus tool-required guidance) to the model."
+        )
     )
     steps_limit: Optional[int] = Field(
         default=None,
