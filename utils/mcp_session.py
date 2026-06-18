@@ -43,13 +43,13 @@ class SseSession:
                         timeout=_SSE_EVENTS_LISTENING_INTERVAL_SEC,
                     )
                     #
-                    log.info(f"Sending message to SSE (session_id: {self.sid}): {msg}")
+                    log.debug("Sending message to SSE (session_id: %s): %s", self.sid, msg)
                     last_emit_time = time.time()
                     #
                     yield msg
                     #
                     if self.one_time and not msg.startswith("\n"):
-                        log.info("Stopping one-time SSE stream")
+                        log.debug("Stopping one-time SSE stream")
                         break
                 except queue.Empty:
                     if time.time() - last_emit_time >= _SSE_KEEP_ALIVE_INTERVAL_SEC:
@@ -101,7 +101,7 @@ class SseSession:
         else:
             msg = f"event: {event}\ndata: {data}\n\n"
         #
-        log.info(f"Dispatching message for session_id: {self.sid}: {msg}")
+        log.debug("Dispatching message for session_id: %s", self.sid)
         self.event_queue.put(msg)
 
     def _dispatch_sse_comment(self, comment: str) -> None:
@@ -110,7 +110,7 @@ class SseSession:
         else:
             msg = f":{comment}\n\n"
         #
-        log.info(f"Dispatching comment for session_id: {self.sid}: {comment}")
+        log.debug("Dispatching comment for session_id: %s", self.sid)
         self.event_queue.put(msg)
 
 
