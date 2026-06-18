@@ -1,4 +1,3 @@
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -521,7 +520,8 @@ def generate_application_version_payload(
     # Pass current participant ID so SDK can identify self for loop prevention
     app_version_details['current_participant_id'] = msg_group.sent_to_id
     log.debug(
-        f'Generated chat application version details payload for question_id={predict_payload.question_id}:\n{app_version_details}'
+        'Generated chat application version details payload for question_id=%s:\n%s',
+        predict_payload.question_id, app_version_details
     )
     return app_version_details
 
@@ -1111,7 +1111,7 @@ class RPC:
                     payload['chat_history'] = generate_chat_history(
                         message_groups=chat_history_groups, summaries=summaries
                     )
-                    log.debug(f'chat {payload["chat_history"]=}')
+                    log.debug('chat payload["chat_history"]=%s', payload["chat_history"])
 
                     context_meta = {
                         'context': {

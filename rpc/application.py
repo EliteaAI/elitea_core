@@ -1157,10 +1157,9 @@ class RPC:
                 log.debug(f"No SID provided and no current user session available")
 
         user_id = data.get('user_id')
-        log.debug(f"About to expand toolkit configurations: user_id={user_id}, project_id={project_id}")
+        log.debug("Expanding toolkit configurations: user_id=%s, project_id=%s", user_id, project_id)
         try:
-            log.debug(f"Starting toolkit configuration expansion for user {user_id} in project {project_id}")
-            log.debug(f"Original toolkit_config: {data.get('toolkit_config', {})}")
+            log.debug("Original toolkit_config: %s", data.get('toolkit_config', {}))
 
             toolkit_config = data.get('toolkit_config', {})
             toolkit_type = toolkit_config.get('type', 'unknown_toolkit')
@@ -1179,8 +1178,7 @@ class RPC:
                 'settings': toolkit_settings_expanded
             }
 
-            log.debug(f"Expanded toolkit configuration for user {user_id} in project {project_id}")
-            log.debug(f"Expanded toolkit_config: {data['toolkit_config']}")
+            log.debug("Expanded toolkit_config: %s", data['toolkit_config'])
         except Exception as e:
             log.error(f"Error expanding toolkit configurations: {str(e)}")
             # Continue with original config if expansion fails
