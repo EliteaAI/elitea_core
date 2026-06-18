@@ -112,8 +112,17 @@ def generate_toolkit_payload(
             log.warning(f"Skipping toolkit id={participant_plus.entity_meta.get('id')} due to error: {str(e)}")
             continue
 
-    # Always include application participants - SDK handles swarm logic and filtering
-    participants_applications = [p for p in conversation.participants if p.entity_name == ParticipantTypes.application]
+    # Sibling Application participants become callable handoff/sub-agent tools ONLY
+    # in swarm mode. A directly-selected agent/pipeline must run standalone; its OWN
+    # configured sub-agents arrive separately via app_version_details['tools'] and are
+    # unaffected by this gate. Without it, every conversation participant auto-binds as
+    # a handoff (the SDK force-binds all Application tools regardless of swarm) and the
+    # selected agent fans out to its siblings — most visibly after a HITL resume (#4993).
+    swarm_enabled = 'swarm' in (internal_tools or [])
+    participants_applications = (
+        [p for p in conversation.participants if p.entity_name == ParticipantTypes.application]
+        if swarm_enabled else []
+    )
     for app_participant in participants_applications:
         try:
             # Get application version from participant mapping
