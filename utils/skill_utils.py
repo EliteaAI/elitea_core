@@ -922,6 +922,10 @@ def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
             session.add(tag_obj)
         version.tags.append(tag_obj)
 
+    # Flush so newly-created tags receive their auto-increment ids before the
+    # version is serialized (SkillVersionDetailModel.tags requires int ids).
+    session.flush()
+
 
 def _update_version_fields(session, version: SkillVersion, update_data: SkillVersionUpdateModel) -> None:
     """Apply field updates from ``update_data`` onto ``version`` in place."""
