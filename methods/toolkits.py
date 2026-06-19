@@ -20,37 +20,22 @@ from copy import deepcopy
 from pylon.core.tools import web, log  # pylint: disable=E0611,E0401
 
 from tools import context
-from ..utils.toolkit_security import (
-    filter_blocked_toolkit_list,
-    filter_tools_in_schema,
-    get_toolkit_security_config
-)
 
 
 class Method:
     @web.method()
     def toolkits_collected(self, event, payload: list[dict]):
-        # Filter out blocked toolkits before registration
-        config = get_toolkit_security_config()
-        if config['blocked_toolkits']:
-            log.info(f"[SECURITY] Blocking toolkits: {config['blocked_toolkits']}")
-        if config['blocked_tools']:
-            log.info(f"[SECURITY] Blocking tools: {config['blocked_tools']}")
-
-        filtered_payload = filter_blocked_toolkit_list(payload)
-
-        # Also filter blocked tools within each toolkit and pre-compute name_required
-        for schema in filtered_payload:
-            filtered_schema = filter_tools_in_schema(schema, config=config)
-            filtered_schema['name_required'] = not any(
+        # Store the full, UNFILTERED toolkit registry. Guardrails (blocked
+        # toolkits/tools) are applied live at read time in get_toolkit_schemas,
+        # so block/unblock take effect without a pylon restart. Filtering here
+        # would be destructive — an unblocked toolkit could never be restored
+        # without rebuilding this startup-built registry.
+        for schema in payload:
+            schema['name_required'] = not any(
                 v.get('toolkit_name') and isinstance(v['toolkit_name'], bool)
-                for v in filtered_schema.get('properties', {}).values()
+                for v in schema.get('properties', {}).values()
             )
-            self.toolkit_schemas[filtered_schema['title']] = filtered_schema
-
-        blocked_count = len(payload) - len(filtered_payload)
-        if blocked_count > 0:
-            log.info(f"[SECURITY] Blocked {blocked_count} toolkit(s) from registration")
+            self.toolkit_schemas[schema['title']] = schema
 
         log.info("Toolkit schemas definitions collected successfully")
 
