@@ -1,5 +1,5 @@
 from typing import Optional, List
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 from .predict_llm import LLMSettingsRequest
 
@@ -52,11 +52,62 @@ class GenerateApplicationDraftResponse(BaseModel):
     welcome_message: Optional[str] = None
     conversation_starters: Optional[List[str]] = None
 
+    @field_validator("conversation_starters", mode="before")
+    @classmethod
+    def limit_conversation_starters(cls, v):
+        if v is not None and len(v) > 4:
+            return v[:4]
+        return v
+
     suggested_toolkits: List[ToolkitSuggestion] = Field(
         default_factory=list,
-        description="Toolkit types the agent likely needs — requires user confirmation before linking"
+        description="Toolkit instances (excluding MCP and application/pipeline types)"
     )
-    suggested_applications: List[ApplicationSuggestion] = Field(
+    suggested_mcp: List[ToolkitSuggestion] = Field(
         default_factory=list,
-        description="Existing agents/pipelines the agent may want to call — requires user confirmation"
+        description="MCP toolkit instances the agent likely needs"
     )
+    suggested_pipelines: List[ApplicationSuggestion] = Field(
+        default_factory=list,
+        description="Pipeline applications the agent may want to call"
+    )
+    suggested_agents: List[ApplicationSuggestion] = Field(
+        default_factory=list,
+        description="Existing agents the agent may want to call"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def split_by_type(cls, data):
+        if not isinstance(data, dict):
+            return data
+        # Split suggested_toolkits by toolkit type
+        all_toolkit_items = []
+        for key in ("suggested_toolkits", "suggested_mcp"):
+            all_toolkit_items.extend(data.get(key) or [])
+        mcp_items = []
+        remaining_toolkits = []
+        for item in all_toolkit_items:
+            item_type = item.get("type", "") if isinstance(item, dict) else getattr(item, "type", "")
+            if item_type == "mcp":
+                mcp_items.append(item)
+            else:
+                remaining_toolkits.append(item)
+        data["suggested_toolkits"] = remaining_toolkits
+        data["suggested_mcp"] = mcp_items
+        # Split suggested_applications by application type
+        all_app_items = []
+        for key in ("suggested_applications", "suggested_agents", "suggested_pipelines"):
+            all_app_items.extend(data.get(key) or [])
+        agent_items = []
+        pipeline_items = []
+        for item in all_app_items:
+            item_type = item.get("type", "") if isinstance(item, dict) else getattr(item, "type", "")
+            if item_type == "pipeline":
+                pipeline_items.append(item)
+            else:
+                agent_items.append(item)
+        data["suggested_agents"] = agent_items
+        data["suggested_pipelines"] = pipeline_items
+        data.pop("suggested_applications", None)
+        return data
