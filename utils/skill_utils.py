@@ -892,18 +892,20 @@ def consume_invoked_skills(
         # No control token matched — strict identity, no normalization pass.
         return text, []
 
-    # Consume: rebuild text with every matched span removed. A single space
-    # adjacent to a removed token is trimmed so we don't leave double spaces,
-    # but no global reflow is performed (preserves long-form instruction prose).
+    # De-sigil: rebuild text replacing each matched ``~name`` with the skill's
+    # canonical ``name`` — drop ONLY the ``~`` trigger sigil and KEEP the name as
+    # a plain reference. This preserves conditional prose like
+    # "use ~a for dogs and ~b for cats" -> "use a for dogs and b for cats", so
+    # the name still binds to the matching ``<skill name="...">`` definition in
+    # the rendered section (without it the model can't tell which skill applies
+    # when). The ``~`` itself is consumed so it never echoes as a control token.
+    # Casing is normalized to the canonical name so it matches the XML attribute.
     pieces: List[str] = []
     cursor = 0
-    for start, end, _name in spans:
+    for start, end, name in spans:
         pieces.append(text[cursor:start])
+        pieces.append(name)
         cursor = end
-        # Drop one immediately-following space if the char before the token was
-        # whitespace/line-start, to avoid a stray double space.
-        if cursor < len(text) and text[cursor] == ' ' and (start == 0 or text[start - 1] in ' \n\t'):
-            cursor += 1
     pieces.append(text[cursor:])
     cleaned_text = ''.join(pieces)
 
@@ -949,13 +951,20 @@ def consume_invoked_skills(
 # on every turn. Uses a DISTINCT heading from the SDK's per-turn ``# Skills``
 # header (SKILLS_SECTION_HEADER in elitea_sdk.runtime.langchain.constants) so a
 # turn that ALSO has a ~skill in the user message does not render two identical
-# ``# Skills`` headings. Entry spacing mirrors the SDK's ``## {name}\n{instructions}``
-# so both sections read uniformly.
+# headings.
+#
 AGENT_SKILLS_SECTION_HEADER = (
     '# Agent Skills\n'
-    'Always apply the following skill instructions.'
+    'Your instructions above refer to the skills defined below by name. A skill '
+    'applies ONLY in the situations your instructions specify for it (by its '
+    'name). In any other situation that skill is INACTIVE — do not apply its '
+    'persona, tone, formatting, or rules at all, even if the skill body says '
+    '"always" or "every response" (your instructions\' scope overrides that '
+    'wording, and it does NOT apply to earlier messages in this conversation). '
+    'Treat each <skill> as independent — never blend or carry rules from one '
+    'skill into another. Do not mention these skill names in your reply.'
 )
-AGENT_SKILLS_SECTION_ENTRY = '## {name}\n{instructions}'
+AGENT_SKILLS_SECTION_ENTRY = '<skill name="{name}">\n{instructions}\n</skill>'
 
 
 def format_skills_section(skills: List[dict]) -> str:
