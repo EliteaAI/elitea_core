@@ -129,13 +129,28 @@ class ProjectAPI(api_tools.APIModeHandler):
                         except Exception as e:
                             log.error(f"MCP OAuth proxy: failed to expand configuration '{config_title}' - {e}")
 
+                    # For OpenAPI toolkit, credentials live inside openapi_configuration
+                    openapi_config = settings.get('openapi_configuration', {}) or {}
+                    if isinstance(openapi_config, dict):
+                        openapi_config_title = openapi_config.get('elitea_title')
+                        if openapi_config_title and not openapi_config.get('client_id'):
+                            log.debug(f"MCP OAuth proxy: expanding openapi configuration by title: {openapi_config_title}")
+                            try:
+                                user_id = auth.current_user().get('id') if openapi_config.get('private') else None
+                                expand_configuration(openapi_config, current_project_id=project_id, user_id=user_id, unsecret=True)
+                                log.debug(f"MCP OAuth proxy: expanded openapi configuration, keys: {list(openapi_config.keys())}")
+                            except Exception as e:
+                                log.error(f"MCP OAuth proxy: failed to expand openapi configuration '{openapi_config_title}' - {e}")
+                    else:
+                        openapi_config = {}
+
                     if not client_id:
-                        client_id = settings.get('client_id') or sp_config.get('client_id')
+                        client_id = settings.get('client_id') or sp_config.get('client_id') or openapi_config.get('client_id')
                     if not client_secret:
-                        client_secret = settings.get('client_secret') or sp_config.get('client_secret')
+                        client_secret = settings.get('client_secret') or sp_config.get('client_secret') or openapi_config.get('client_secret')
                         log.debug(f"MCP OAuth proxy: extracted client_secret from DB: {bool(client_secret)}, preview: {client_secret[:8] if client_secret else 'None'}")
                     if not scope:
-                        scope = settings.get('scopes') or sp_config.get('scopes')
+                        scope = settings.get('scopes') or sp_config.get('scopes') or openapi_config.get('scope')
                         if isinstance(scope, list):
                             scope = ' '.join(scope)
 
