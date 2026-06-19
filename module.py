@@ -322,6 +322,9 @@ class Module(module.ModuleModel):
                 "migrate_llm_model", self.migrate_llm_model
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_embedding_model", self.migrate_embedding_model
+            )
+            this.for_module("admin").module.register_admin_task(
                 "collections_removal_migration", self.collections_removal_migration, group="R-2.0.4"
             )
             this.for_module("admin").module.register_admin_task(
@@ -719,6 +722,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_llm_model", self.migrate_llm_model
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_embedding_model", self.migrate_embedding_model
             )
             this.for_module("admin").module.unregister_admin_task(
                 "collections_removal_migration", self.collections_removal_migration

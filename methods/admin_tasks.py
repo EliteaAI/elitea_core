@@ -35,6 +35,10 @@ from ..utils.llm_migration_utils import (
     migrate_application_versions,
     migrate_participant_mappings,
 )
+from ..utils.embedding_migration_utils import (
+    validate_target_embedding_model,
+    migrate_toolkit_embedding_models,
+)
 from ..utils.utils import get_public_project_id
 
 
@@ -1793,6 +1797,101 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             total_projects, projects_touched,
             total_versions, total_mappings,
             duration,
+        )
+
+    # pylint: disable=R,W0613
+    @web.method()
+    def migrate_embedding_model(self, *args, **kwargs):
+        """Migrate stale embedding model references in toolkit settings.
+
+        Embedding section only. Embedding model names are stored as plain
+        strings in EliteATool.settings under the ``embedding_model`` and
+        ``toolkit_configuration_embedding_model`` fields; this task swaps a
+        deprecated name for a new one. Idempotent -- safe to re-run.
+
+        NOTE: changing the embedding model may require RE-INDEXING affected
+        datasources, as vectors produced by different models are not
+        interchangeable. Re-indexing is NOT performed by this task.
+
+        Dry-run is OFF by default -- pass dry_run=true to preview changes.
+
+        Params (semicolon-separated):
+            from=<deprecated_model_name>  (required)
+            to=<new_model_name>           (required, must exist as shared embedding in public project)
+            project_id=<int|X-Y|all>      (optional, default: all)
+            dry_run=<true|false>           (optional, default: false)
+
+        Examples:
+            from=text-embedding-ada-002;to=text-embedding-3-small                  - live run (all projects)
+            from=text-embedding-ada-002;to=text-embedding-3-small;dry_run=true     - dry run to preview changes
+            from=text-embedding-ada-002;to=text-embedding-3-small;project_id=42     - live run on project 42 only
+        """
+        from tools import db  # pylint: disable=C0415
+
+        start_ts = time.time()
+
+        # ── 1. Parse and validate params ──────────────────────────────────
+        raw_param = kwargs.get("param", "")
+        try:
+            params = parse_migration_params(raw_param)
+        except ValueError as exc:
+            log.error("Invalid params: %s", exc)
+            return
+
+        from_model = params['from_model']
+        to_model = params['to_model']
+        dry_run = params['dry_run']
+
+        log.info(
+            "Params: from=%s  to=%s  project_id=%s  dry_run=%s",
+            from_model, to_model, params['project_id_spec'], dry_run,
+        )
+
+        # ── 2. Pre-flight: validate target model exists ───────────────────
+        try:
+            validate_target_embedding_model(to_model)
+        except ValueError as exc:
+            log.error("Pre-flight failed: %s", exc)
+            return
+
+        # ── 3. Resolve target projects ────────────────────────────────────
+        try:
+            project_ids = resolve_target_project_ids(params['project_id_spec'])
+        except ValueError as exc:
+            log.error("Project resolution failed: %s", exc)
+            return
+
+        # ── 4. Per-project migration ──────────────────────────────────────
+        total_projects = len(project_ids)
+        total_toolkits = 0
+        projects_touched = 0
+
+        for idx, project_id in enumerate(project_ids, 1):
+            try:
+                with db.get_session(project_id) as session:
+                    t_count = migrate_toolkit_embedding_models(
+                        session, from_model, to_model, dry_run,
+                    )
+
+                    if t_count:
+                        if not dry_run:
+                            session.commit()
+                        projects_touched += 1
+                        total_toolkits += t_count
+                        log.info(
+                            "Project %s (%s/%s): %s toolkits %s",
+                            project_id, idx, total_projects, t_count,
+                            "[dry_run]" if dry_run else "[committed]",
+                        )
+            except Exception:  # pylint: disable=W0702
+                log.exception("Error processing project %s, skipping", project_id)
+
+        # ── 5. Summary ────────────────────────────────────────────────────
+        duration = time.time() - start_ts
+        log.info(
+            "Done%s. Projects scanned: %s, touched: %s. Toolkits: %s. Duration: %.1fs",
+            " [DRY RUN]" if dry_run else "",
+            total_projects, projects_touched, total_toolkits, duration,
         )
 
     @web.method("collections_removal_migration")
