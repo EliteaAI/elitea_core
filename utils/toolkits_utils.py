@@ -70,12 +70,11 @@ def get_toolkit_schemas(project_id: int, user_id: int) -> dict:
     # Step 2: static schemas have name_required pre-computed at startup. The
     # registry (this.module.toolkit_schemas) holds the UNFILTERED set, so apply
     # guardrails live here — this makes block/unblock take effect without a
-    # restart, mirroring the dynamic branch below. filter_* is cheap: it
-    # early-returns / copies-on-write only for toolkits that actually have a
-    # blocked entry, so the common (empty block list) case is a shallow rebuild.
-    toolkit_schemas = filter_blocked_toolkits(dict(this.module.toolkit_schemas), config=security_config)
-    for k in list(toolkit_schemas.keys()):
-        toolkit_schemas[k] = filter_tools_in_schema(toolkit_schemas[k], config=security_config)
+    # restart, mirroring the dynamic branch below.
+    toolkit_schemas = filter_blocked_toolkits(this.module.toolkit_schemas, config=security_config)
+    if security_config.get('blocked_tools'):
+        for k in list(toolkit_schemas.keys()):
+            toolkit_schemas[k] = filter_tools_in_schema(toolkit_schemas[k], config=security_config)
 
     # Step 1: pass the already-resolved personal_project_id to avoid duplicate RPC calls
     provider_hub_schemas = this.module.get_tool_schemas_provider_hub(
