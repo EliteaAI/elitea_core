@@ -69,7 +69,7 @@ class GenerateApplicationDraftResponse(BaseModel):
     )
     suggested_pipelines: List[ApplicationSuggestion] = Field(
         default_factory=list,
-        description="Pipeline applications the agent may want to call"
+        description="Pipeline/application instances the agent likely needs"
     )
     suggested_agents: List[ApplicationSuggestion] = Field(
         default_factory=list,
@@ -86,21 +86,30 @@ class GenerateApplicationDraftResponse(BaseModel):
         for key in ("suggested_toolkits", "suggested_mcp"):
             all_toolkit_items.extend(data.get(key) or [])
         mcp_items = []
+        pipeline_items = []
         remaining_toolkits = []
         for item in all_toolkit_items:
             item_type = item.get("type", "") if isinstance(item, dict) else getattr(item, "type", "")
             if item_type == "mcp":
                 mcp_items.append(item)
+            elif item_type == "application":
+                # Convert toolkit format to ApplicationSuggestion format
+                pipeline_items.append({
+                    "application_id": item.get("id"),
+                    "id": item.get("id"),
+                    "name": item.get("name", ""),
+                    "description": item.get("description"),
+                    "type": "pipeline",
+                })
             else:
                 remaining_toolkits.append(item)
         data["suggested_toolkits"] = remaining_toolkits
         data["suggested_mcp"] = mcp_items
-        # Split suggested_applications by application type
+        # Split suggested_applications by application type into agents and pipelines
         all_app_items = []
         for key in ("suggested_applications", "suggested_agents", "suggested_pipelines"):
             all_app_items.extend(data.get(key) or [])
         agent_items = []
-        pipeline_items = []
         for item in all_app_items:
             item_type = item.get("type", "") if isinstance(item, dict) else getattr(item, "type", "")
             if item_type == "pipeline":
