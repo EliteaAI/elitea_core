@@ -10,7 +10,7 @@
       "path": "toolkit_security.blocked_toolkits",
       "section": "guardrails",
       "default": [],
-      "requires_restart": true,
+      "requires_restart": false,
       "enum_source": "toolkit_names",
       "sync_targets": [
         {
@@ -31,7 +31,7 @@
       "path": "toolkit_security.blocked_tools",
       "section": "guardrails",
       "default": {},
-      "requires_restart": true,
+      "requires_restart": false,
       "enum_source_keys": "toolkit_names",
       "enum_source_values": "toolkit_tools",
       "sync_targets": [
@@ -53,7 +53,7 @@
       "path": "toolkit_security.sensitive_tools",
       "section": "guardrails",
       "default": {},
-      "requires_restart": true,
+      "requires_restart": false,
       "enum_source_keys": "toolkit_names",
       "enum_source_values": "toolkit_tools",
       "sync_targets": [
@@ -71,7 +71,7 @@
       "path": "toolkit_security.sensitive_action_company_name",
       "section": "guardrails",
       "default": "",
-      "requires_restart": true,
+      "requires_restart": false,
       "sync_targets": [
         {
           "pylon": "pylon-indexer",
@@ -87,7 +87,7 @@
       "path": "toolkit_security.sensitive_action_message_template",
       "section": "guardrails",
       "default": "",
-      "requires_restart": true,
+      "requires_restart": false,
       "sync_targets": [
         {
           "pylon": "pylon-indexer",
