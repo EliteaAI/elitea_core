@@ -35,7 +35,7 @@ from ..utils.sio_utils import get_chat_room
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
-from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError, build_invoked_skills
+from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.exceptions import PoolSaturationError
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
@@ -731,12 +731,6 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
 
     # Add steps limit parameter if any
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
-
-    if getattr(predict_payload, 'tool_call_input', None) is None:
-        attached_skills = (result.get('version_details') or {}).get('skills') or []
-        invoked_skills = build_invoked_skills(getattr(predict_payload, 'user_input', None), attached_skills)
-        if invoked_skills:
-            result['invoked_skills'] = invoked_skills
 
     return result
 
