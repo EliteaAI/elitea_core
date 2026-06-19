@@ -133,4 +133,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         except:  # pylint: disable=W0702
             elitea_ui_config_data["allow_project_own_llms"] = True
         #
+        # Expose blocked toolkit types so the UI can show a named warning when a
+        # configured toolkit has been blocked by org guardrails. Read live from
+        # the descriptor (blocked toolkits are otherwise omitted from the toolkit
+        # catalog, making them indistinguishable from deleted/renamed ones).
+        #
+        try:
+            toolkit_security = self.descriptor.config.get("toolkit_security", {}) or {}
+            elitea_ui_config_data["blocked_toolkits"] = list(
+                toolkit_security.get("blocked_toolkits") or []
+            )
+        except:  # pylint: disable=W0702
+            elitea_ui_config_data["blocked_toolkits"] = []
+        #
         return elitea_ui_config_data
