@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from pylon.core.tools import web, log
 from sqlalchemy import Integer, and_
 from sqlalchemy.orm import joinedload, selectinload
-from tools import db, serialize, auth, store_secrets, VaultClient, this
+from tools import db, serialize, auth, store_secrets, VaultClient, this, rpc_tools
 
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.all import Application, ApplicationVersion, ApplicationVersionTagAssociation
@@ -1190,6 +1190,29 @@ class RPC:
             data['deployment_url'] = get_predict_base_url(project_id)
         except Exception as e:
             log.warning(f"Failed to retrieve project secrets: {e}")
+
+        # Resolve openai_compatible from the model registry and stamp it into llm_settings so the
+        # SDK's get_llm picks the right provider (ChatOpenAI vs ChatAnthropic) for openai-compatible
+        # models whose name contains "claude"/"anthropic". The model may be owned by the project or
+        # shared into it from the public project (the test UI does not send model_project_id), so we
+        # resolve against the same visibility set the UI offered: private models plus public models
+        # with shared==True (configurations_get_models include_shared=True). A non-shared public
+        # model is correctly invisible here. Best-effort: on failure or no match, leave llm_settings
+        # as-is (get_llm defaults openai_compatible to False).
+        try:
+            llm_settings = data.get('llm_settings') or {}
+            model_name = data.get('llm_model') or llm_settings.get('model_name')
+            if model_name:
+                models_response = rpc_tools.RpcMixin().rpc.call.configurations_get_models(
+                    project_id=project_id, section='llm', include_shared=True
+                )
+                for model in models_response.get('items', []):
+                    if model.get('name') == model_name:
+                        llm_settings['openai_compatible'] = model.get('openai_compatible', False)
+                        data['llm_settings'] = llm_settings
+                        break
+        except Exception as e:
+            log.warning(f"Failed to resolve openai_compatible for test_toolkit_tool: {e}")
 
         # Add authentication parameters to the data (don't expose auth_token to user)
 
