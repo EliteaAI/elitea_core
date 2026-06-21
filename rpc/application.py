@@ -1201,16 +1201,17 @@ class RPC:
         # as-is (get_llm defaults openai_compatible to False).
         try:
             llm_settings = data.get('llm_settings') or {}
-            model_name = data.get('llm_model') or llm_settings.get('model_name')
-            if model_name:
-                models_response = rpc_tools.RpcMixin().rpc.call.configurations_get_models(
-                    project_id=project_id, section='llm', include_shared=True
-                )
-                for model in models_response.get('items', []):
-                    if model.get('name') == model_name:
-                        llm_settings['openai_compatible'] = model.get('openai_compatible', False)
-                        data['llm_settings'] = llm_settings
-                        break
+            if 'openai_compatible' not in llm_settings:
+                model_name = data.get('llm_model') or llm_settings.get('model_name')
+                if model_name:
+                    models_response = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_models(
+                        project_id=project_id, section='llm', include_shared=True
+                    ) or {}
+                    for model in models_response.get('items', []):
+                        if model.get('name') == model_name:
+                            llm_settings['openai_compatible'] = bool(model.get('openai_compatible', False))
+                            data['llm_settings'] = llm_settings
+                            break
         except Exception as e:
             log.warning(f"Failed to resolve openai_compatible for test_toolkit_tool: {e}")
 
