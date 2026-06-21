@@ -64,9 +64,17 @@ def get_toolkit_schemas(project_id: int, user_id: int) -> dict:
     except Exception:
         log.warning("Failed to resolve personal project ID for user %s", user_id)
 
-    # Step 2/3: static schemas are already filtered and have name_required pre-computed at
-    # startup (in toolkits_collected). Shallow-copy the outer dict — values are not mutated.
-    toolkit_schemas = dict(this.module.toolkit_schemas)
+    # Step 4: read security config once for the whole request
+    security_config = get_toolkit_security_config()
+
+    # Step 2: static schemas have name_required pre-computed at startup. The
+    # registry (this.module.toolkit_schemas) holds the UNFILTERED set, so apply
+    # guardrails live here — this makes block/unblock take effect without a
+    # restart, mirroring the dynamic branch below.
+    toolkit_schemas = filter_blocked_toolkits(this.module.toolkit_schemas, config=security_config)
+    if security_config.get('blocked_tools'):
+        for k in list(toolkit_schemas.keys()):
+            toolkit_schemas[k] = filter_tools_in_schema(toolkit_schemas[k], config=security_config)
 
     # Step 1: pass the already-resolved personal_project_id to avoid duplicate RPC calls
     provider_hub_schemas = this.module.get_tool_schemas_provider_hub(
@@ -75,9 +83,6 @@ def get_toolkit_schemas(project_id: int, user_id: int) -> dict:
     mcp_schemas = this.module.get_tool_schemas_mcp_sse(
         project_id, user_id, personal_project_id=personal_project_id
     )
-
-    # Step 4: read security config once for the whole request
-    security_config = get_toolkit_security_config()
 
     # Step 3: apply filtering and set name_required only for dynamic (non-static) schemas
     dynamic_schemas = {**provider_hub_schemas, **mcp_schemas}
