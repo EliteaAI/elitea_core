@@ -139,6 +139,23 @@ class EmbeddedToolkitConfig(BaseModel):
         return values
 
 
+class SkillImportVersion(BaseModel):
+    name: str = 'base'
+    instructions: str
+    tags: List[dict] = Field(default_factory=list)
+    meta: Optional[dict] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra='allow')
+
+
+class SkillsImport(ImportData):
+    versions: List[SkillImportVersion] = Field(default_factory=list)
+    owner_id: Optional[int] = None
+    meta: Optional[dict] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra='allow')
+
+
 class AgentsImportVersion(ImportVersionModel):
     tools: List[ApplicationExistingImportTool] = []
     postponed_tools: List[ApplicationSelfImportTool] = Field(default_factory=list, exclude=True)
@@ -269,7 +286,8 @@ class AgentsImport(ImportData):
 
 IMPORT_MODEL_ENTITY_MAPPER = {
     'agents': AgentsImport,
-    'toolkits': ToolImportModel
+    'toolkits': ToolImportModel,
+    'skills': SkillsImport,
 }
 
 DEPRECATED_ENTITIES = ['prompts', 'prompt', 'datasources', 'datasource']

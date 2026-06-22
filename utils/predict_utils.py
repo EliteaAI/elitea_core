@@ -7,6 +7,7 @@ from tools import auth, rpc_tools, VaultClient, serialize, context
 from typing import Optional, Union
 
 from .llm_settings import get_default_max_tokens
+from .skill_utils import consume_invoked_skills, format_skills_section
 from ..models.elitea_tools import EliteATool
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
 from ..models.pd.tool import ToolDetails
@@ -242,6 +243,7 @@ def generate_predict_payload(
         'context_settings': parsed.context_settings.dict() if parsed.context_settings else {},
         'supports_vision': supports_vision,
         'return_chat_history': return_chat_history,
+        'invoked_skills': getattr(parsed, 'invoked_skills', None) or [],
     }
 
     # Auto-approve sensitive actions for API requests when project secret is set.
@@ -269,13 +271,76 @@ def generate_predict_payload(
         if parsed.variables:
             payload_variables = {v.name: v.dict() for v in parsed.variables}
         #
+        version_details = dict(parsed.version_details) if parsed.version_details else {}
         payload['application'] = {
             "id": parsed.application_id,
             "name": resolve_application_name(parsed),
             "version_id": parsed.version_id,
             "variables": payload_variables,
-            "version_details": parsed.version_details,
+            "version_details": version_details,
         }
+
+        attached_skills = version_details.get('skills') or []
+
+        agent_instructions = version_details.get('instructions')
+        if isinstance(agent_instructions, str) and agent_instructions:
+            cleaned_instructions, instruction_skills = consume_invoked_skills(
+                agent_instructions, attached_skills
+            )
+            if instruction_skills:
+                version_details['instructions'] = (
+                    cleaned_instructions + format_skills_section(instruction_skills)
+                )
+            elif cleaned_instructions is not agent_instructions:
+                # Spans were stripped (e.g. blank-body ~ref) but nothing injected;
+                # still write the cleaned string so no ~name echoes.
+                version_details['instructions'] = cleaned_instructions
+        else:
+            instruction_skills = []
+
+        instruction_skill_ids = {s.get('skill_id') for s in instruction_skills}
+
+        # Message-referenced skills (per-turn): resolve + consume from the user's
+        # message and send via the dynamic invoked_skills channel (injected AFTER
+        # the cache breakpoint, correct for per-turn data). Strip the ~name from
+        # the payload's user_input ONLY (never the stored/displayed DB message).
+        # user_input is either a str (API) or the UI's list of content blocks
+        # ({'type':'text','text':...} plus image blocks). The list branch rebuilds
+        # a FRESH list — payload['user_input'] aliases the validated
+        # parsed.user_input, so we must not mutate blocks in place — and drops a
+        # text block emptied to just a ~token (Anthropic rejects empty text blocks
+        # in vision flows).
+        message_skills: list = []
+        message_content = payload.get('user_input')
+        if isinstance(message_content, str):
+            cleaned_message, message_skills = consume_invoked_skills(message_content, attached_skills)
+            payload['user_input'] = cleaned_message or 'continue'
+        elif isinstance(message_content, list):
+            rebuilt_blocks: list = []
+            for block in message_content:
+                if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
+                    cleaned_text, block_skills = consume_invoked_skills(block['text'], attached_skills)
+                    for skill in block_skills:
+                        if not any(existing.get('skill_id') == skill.get('skill_id') for existing in message_skills):
+                            message_skills.append(skill)
+                    if cleaned_text.strip():
+                        rebuilt_blocks.append({**block, 'text': cleaned_text})
+                else:
+                    rebuilt_blocks.append(block)
+            # If consumption emptied every text block, keep the turn valid.
+            if not any(
+                isinstance(b, dict) and b.get('type') == 'text' and (b.get('text') or '').strip()
+                for b in rebuilt_blocks
+            ):
+                rebuilt_blocks.append({'type': 'text', 'text': 'continue'})
+            payload['user_input'] = rebuilt_blocks
+
+        # A skill referenced in BOTH places applies ONCE via the agent-skills
+        # (cached instructions) block and is EXCLUDED from the dynamic channel to
+        # avoid double injection.
+        payload['invoked_skills'] = [
+            s for s in message_skills if s.get('skill_id') not in instruction_skill_ids
+        ]
         # Merge version_details tools (including nested agents) with request-level tools
         if parsed.version_details and parsed.version_details.get('tools'):
             version_tools = parsed.version_details.get('tools', [])

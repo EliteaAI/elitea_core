@@ -38,6 +38,7 @@ from ..utils.application_utils import (
 from ..utils.exceptions import PoolSaturationError
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
+from ..utils.skill_utils import detach_skills_for_entity_versions
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
     get_predict_token_and_session, load_context_settings_from_conversation
 from ..utils.application_utils_general import deep_update
@@ -771,6 +772,10 @@ class RPC:
                             'blocked_version_id': ver.id,
                             'blocked_status': ver.status,
                         }
+
+                detach_skills_for_entity_versions(
+                    session, [ver.id for ver in application.versions]
+                )
 
                 session.delete(application)
                 session.commit()
@@ -1845,6 +1850,8 @@ class RPC:
             }
 
             # Delete the version
+            detach_skills_for_entity_versions(session, [version_id])
+
             session.delete(version)
             session.commit()
 

@@ -225,6 +225,17 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
     else:
         new_meta['thinking_steps'] = new_thinking_steps
 
+    new_invoked_skills = response_meta.get('invoked_skills') or []
+    old_invoked_skills = old_meta.get('invoked_skills', [])
+    if new_invoked_skills:
+        new_meta['invoked_skills'] = [
+            {'skill_id': e.get('skill_id'), 'name': e.get('name')}
+            for e in new_invoked_skills
+            if isinstance(e, dict)
+        ]
+    else:
+        new_meta['invoked_skills'] = old_invoked_skills
+
     # Ensure context metadata exists and is properly initialized
     if 'context' not in new_meta:
         new_meta['context'] = {}

@@ -8,8 +8,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import Integer, String, DateTime, func, ForeignKey, JSON, Table, Column, UniqueConstraint
 from sqlalchemy.ext.mutable import MutableDict
 
-from .enums.all import ToolTypes, AgentTypes, PublishStatus, ToolEntityTypes
+from .enums.all import AgentTypes, PublishStatus, ToolEntityTypes, SkillEntityTypes
 from ..models.elitea_tools import EliteATool, EntityToolMapping
+from ..models.skill import Skill, EntitySkillMapping
 
 
 # Merged from promptlib_shared.models.all
@@ -133,29 +134,49 @@ class ApplicationVersion(db_tools.AbstractBaseMixin, db.Base):
         viewonly=True,
         overlaps='tools'
     )
+
+    skills: Mapped[List['Skill']] = relationship(
+        secondary=EntitySkillMapping.__table__,
+        primaryjoin=f'and_(ApplicationVersion.id == EntitySkillMapping.entity_version_id, '
+                    f'EntitySkillMapping.entity_type == "{SkillEntityTypes.agent}")',
+        secondaryjoin=f'and_(Skill.id == EntitySkillMapping.skill_id, '
+                      f'EntitySkillMapping.entity_type == "{SkillEntityTypes.agent}")',
+        lazy=True,
+        viewonly=True
+    )
+    skill_mappings: Mapped[List['EntitySkillMapping']] = relationship(
+        'EntitySkillMapping',
+        primaryjoin=f'and_(ApplicationVersion.id == foreign(EntitySkillMapping.entity_version_id), '
+                    f'EntitySkillMapping.entity_type == "{SkillEntityTypes.agent}")',
+        lazy=True,
+        viewonly=True
+    )
+
     agent_type: Mapped[str] = mapped_column(String, nullable=False, default=AgentTypes.openai.value)
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
     pipeline_settings: Mapped[dict] = mapped_column(JSONB, default=dict)
 
     def to_dict(self):
-        from ..utils.application_utils import apply_selected_tools_intersection
-        
+        from ..utils.application_utils import apply_selected_tools_intersection, build_skill_mappings_list
+
         app_version_dict = self.to_json()
         app_version_dict['tools'] = []
         app_version_dict['variables'] = []
         app_version_dict['tags'] = []
-        
+
         for toolkit in self.tools:
             tool_dict = toolkit.to_json()
             app_version_dict['tools'].append(tool_dict)
-        
+
         # Apply selected_tools intersection using pre-loaded tool_mappings
         apply_selected_tools_intersection(app_version_dict['tools'], self.tool_mappings)
-        
+
         for variable in self.variables:
             app_version_dict['variables'].append(variable.to_json())
         for tag in self.tags:
             app_version_dict['tags'].append(tag.to_json())
+
+        app_version_dict['skills'] = build_skill_mappings_list(self.skill_mappings)
 
         return app_version_dict
 

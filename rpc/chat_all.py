@@ -34,6 +34,7 @@ from ..utils.sio_utils import get_chat_room
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
+from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.exceptions import PoolSaturationError
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
@@ -497,6 +498,11 @@ def generate_application_version_payload(
     )
     if 'error' in app_version_details:
         raise PayloadGenerationError(app_version_details['error'])
+
+    try:
+        validate_agent_skills(app_version_details.get('skills', []))
+    except SkillVersionDeletedError as skill_err:
+        raise PayloadGenerationError(str(skill_err)) from skill_err
 
     # Block prediction for unpublished or embedded-only versions
     version_status = app_version_details.get('status', '')
