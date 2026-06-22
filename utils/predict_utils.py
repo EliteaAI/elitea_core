@@ -198,6 +198,7 @@ def generate_predict_payload(
                 "api_extra_headers": {
                     'X-SECRET': all_secrets.get('secrets_header_value', 'secret'),
                     'X-USERSESSION': auth_session if auth_session else '-',
+                    'X-Project-Id': str(parsed.project_id),
                 }
             }
         },
