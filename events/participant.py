@@ -31,25 +31,6 @@ def _delete_entity_participant_from_chats(module, context, entity_name, entity_d
 
 
 class Event:
-    @web.event('datasource_deleted')
-    def delete_datasource_participant_handler(self, context, event, datasource_data: dict):
-        _delete_entity_participant_from_chats(
-            self, context, ParticipantTypes.datasource.name, datasource_data
-        )
-
-    @web.event('datasource_updated')
-    def update_datasource_participant_handler(self, context, event, datasource_data: dict):
-        project_id = datasource_data['owner_id']
-        update_participant_meta(
-            project_id,
-            ParticipantTypes.datasource,
-            entity_meta={
-                'project_id': project_id,
-                'id': datasource_data['id']
-            },
-            meta=datasource_data['data']
-        )
-
     @web.event('prompt_deleted')
     def delete_prompt_participant_handler(self, context, event, data: dict):
         _delete_entity_participant_from_chats(

@@ -34,21 +34,6 @@ class Module(module.ModuleModel):
         #
         if event_node_config is not None:
             self.event_node = arbiter.make_event_node(config=event_node_config)
-        else:
-            module_manager = self.context.module_manager
-            #
-            for module_name in ["datasources"]:
-                if module_name in module_manager.modules:
-                    cfg_module = module_manager.modules[module_name].module
-                    #
-                    clone_config = cfg_module.event_node.clone_config
-                    if clone_config is None:
-                        continue
-                    #
-                    clone_config = clone_config.copy()
-                    #
-                    self.event_node = arbiter.make_event_node(config=clone_config)
-                    break
         #
         if self.event_node is None:
             raise ValueError("No event_node config")
@@ -326,6 +311,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "collections_removal_migration", self.collections_removal_migration, group="R-2.0.4"
+            )
+            this.for_module("admin").module.register_admin_task(
+                "datasource_removal_migration", self.datasource_removal_migration, group="R-2.0.4"
             )
             this.for_module("admin").module.register_admin_task(
                 "cleanup_oversized_message_meta", self.cleanup_oversized_message_meta
@@ -728,6 +716,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "collections_removal_migration", self.collections_removal_migration
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "datasource_removal_migration", self.datasource_removal_migration
             )
             this.for_module("admin").module.unregister_admin_task(
                 "cleanup_oversized_message_meta", self.cleanup_oversized_message_meta

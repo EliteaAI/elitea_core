@@ -49,7 +49,6 @@ CHAT_PREDICT_MAPPER = {
     ParticipantTypes.dummy: 'applications_predict_sio_llm',
     ParticipantTypes.llm: 'applications_predict_sio_llm',
     ParticipantTypes.application: 'applications_predict_sio',
-    ParticipantTypes.datasource: 'datasources_predict_sio',
     ParticipantTypes.toolkit: 'applications_test_toolkit_tool_sio',
     # ParticipantTypes.pipeline: 'applications_predict_sio',
 }

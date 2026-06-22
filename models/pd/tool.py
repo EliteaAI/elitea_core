@@ -126,13 +126,7 @@ class ToolDetails(ToolBase):
 
     @model_validator(mode='after')
     def set_toolkit_name(self) -> 'ToolDetails':
-        if self.type == 'datasource':
-            cleaned_string = re.sub(
-                sanitization_pattern, '', str(self.name)
-            ).replace('.', '_')
-            self.toolkit_name = cleaned_string
-            return self
-        elif self.type in {'application', 'prompt'}:
+        if self.type in {'application', 'prompt'}:
             return self
         
         from pylon.core.tools import log

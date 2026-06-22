@@ -11,7 +11,7 @@ from ..models.enums.all import ParticipantTypes, ChatHistoryTemplates
 from ..models.message_group import ConversationMessageGroup
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.participant import ParticipantBase, ParticipantCreate, EntityMetaType, \
-    ParticipantEntityDatasource, ParticipantEntityDummy, ParticipantEntityApplication, \
+    ParticipantEntityDummy, ParticipantEntityApplication, \
     entity_meta_mapping, ParticipantEntityUser, ParticipantEntityToolkit
 from ..models.pd.participant_settings import EntitySettingsApplication, \
     EntitySettingsLlm, EntitySettingsUser
@@ -80,8 +80,6 @@ def get_or_create_one(
             entity_meta = entity_meta.dict()
         match entity_name:
             case ParticipantTypes.prompt:
-                meta = {'name': entity_details.get('name')}
-            case ParticipantTypes.datasource:
                 meta = {'name': entity_details.get('name')}
             case ParticipantTypes.application:
                 meta = {
@@ -284,16 +282,6 @@ def get_entity_details(
 ) -> dict | None:
     match entity_name:
         # todo: handle some timeouts and empty responses
-        case ParticipantTypes.datasource:
-            meta: ParticipantEntityDatasource = ParticipantEntityDatasource.parse_obj(entity_meta)
-            return rpc_tools.RpcMixin().rpc.timeout(
-                5
-            ).datasources_get_datasource_by_id(
-                project_id=meta.project_id,
-                datasource_id=meta.id,
-                first_existing_version=True
-            )
-
         case ParticipantTypes.application:
             meta: ParticipantEntityApplication = ParticipantEntityApplication.parse_obj(entity_meta)
             return this.module.get_application_by_id(

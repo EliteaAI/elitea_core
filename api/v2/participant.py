@@ -22,8 +22,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - 'llm' → a bare LLM; entity_meta.model_name = model identifier
         - 'user' → a human user; entity_meta.id = user_id
         - 'toolkit' → a toolkit; entity_meta.id = toolkit_id
-        - 'datasource' → a datasource; entity_meta.id = datasource_id
-        
         Examples:
         1. Get agent participant details: GET .../participant/prompt_lib/42/7/15 → check entity_settings.version_id 
         to see which version is active.

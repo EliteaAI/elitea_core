@@ -15,9 +15,6 @@ class SioEvents(StrEnum):
     promptlib_predict = 'promptlib_predict'
     promptlib_leave_rooms = 'promptlib_leave_rooms'
 
-    datasource_predict = 'datasource_predict'
-    datasource_dataset_status = 'datasource_dataset_status'
-    datasource_leave_rooms = 'datasource_leave_rooms'
 
     application_predict = 'application_predict'
     application_continue_message = 'application_continue_message'
