@@ -59,6 +59,10 @@ class ApplicationChatRequest(MergeUpdateBase):
     interaction_uuid: str | uuid.UUID | None = None
     version_details: Optional[dict] = None
     internal_tools: Optional[List[str]] = []
+    invoked_skills: Optional[List[dict]] = Field(
+        default=None,
+        description="Per-turn resolved skill bodies (from ~skill refs) injected at the LLM node",
+    )
     mcp_tokens: Optional[Dict[str, str | Dict[str, Any]]] = Field(
         default_factory=dict,
         description="MCP OAuth tokens by server URL (string for legacy, dict with access_token/session_id for new format)"
@@ -108,6 +112,10 @@ class LLMChatRequest(MergeUpdateBase):
     checkpoint_id: Optional[str] = None
     interaction_uuid: str | uuid.UUID | None = None
     internal_tools: Optional[List[str]] = []
+    invoked_skills: Optional[List[dict]] = Field(
+        default=None,
+        description="Per-turn resolved skill bodies (from ~skill refs) injected at the LLM node",
+    )
     mcp_tokens: Optional[Dict[str, str | Dict[str, Any]]] = Field(
         default_factory=dict,
         description="MCP OAuth tokens by server URL (string for legacy, dict with access_token/session_id for new format)"

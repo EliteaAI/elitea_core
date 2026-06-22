@@ -5,8 +5,9 @@ from typing import List, Optional, Tuple, Literal
 from sqlalchemy import func, or_, asc, desc
 from sqlalchemy.orm import selectinload
 
-from tools import db, auth, serialize
+from tools import db, auth, serialize, rpc_tools
 
+from .utils import set_columns_as_attrs
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag
 from ..models.enums.all import SkillEntityTypes
@@ -198,14 +199,27 @@ def list_skills(
         if filters:
             query = query.filter(*filters)
 
-        # Sorting
+        # Add pin status (project-wide) so pinned skills surface first and each
+        # row carries `is_pinned`/`pin_updated_at` — mirrors application_utils.
+        add_pins_with_priority = rpc_tools.RpcMixin().rpc.timeout(2).social_add_pins_with_priority()
+        query, extra_columns = add_pins_with_priority(
+            original_query=query,
+            project_id=project_id,
+            entity=Skill,
+        )
+
+        # Sorting: pinned first (is_pinned DESC, pin_updated_at DESC), then the
+        # user's sort, then id. The query now ends with the is_pinned and
+        # pin_updated_at columns added above.
         if sort_by not in _SKILL_SORT_WHITELIST:
             sort_by = 'created_at'
-        sort_column = getattr(Skill, sort_by, Skill.created_at)
-        if sort_order == 'desc':
-            query = query.order_by(desc(sort_column))
-        else:
-            query = query.order_by(asc(sort_column))
+        sort_fn = asc if sort_order == 'asc' else desc
+        query = query.order_by(
+            desc(query.column_descriptions[-2]['expr']),  # is_pinned column
+            desc(query.column_descriptions[-1]['expr']),  # pin_updated_at column
+            sort_fn(getattr(Skill, sort_by, Skill.created_at)),
+            asc(Skill.id),
+        )
 
         # Pagination
         if limit:
@@ -213,7 +227,9 @@ def list_skills(
         if offset:
             query = query.offset(offset)
 
-        skills = query.all()
+        # With extra columns the query yields Row tuples; map them back onto
+        # each Skill instance so `is_pinned`/`pin_updated_at` are serializable.
+        skills = list(set_columns_as_attrs(query.all(), extra_columns))
         return total, skills
 
 
@@ -791,8 +807,10 @@ def get_available_skills_for_agent(
 _NAME_BOUNDARY_CHARS = re.compile(r'[0-9A-Za-z\-]')
 
 
-def parse_invoked_skill_names(user_input: Optional[str], attached_names: List[str]) -> List[str]:
-    """Parse ``~<skill-name>`` tokens from the raw user message."""
+def _find_skill_mention_spans(
+    user_input: Optional[str], attached_names: List[str]
+) -> List[Tuple[int, int, str]]:
+    """Locate every ``~<skill-name>`` control token in ``user_input``."""
     if not user_input or not attached_names:
         return []
 
@@ -809,16 +827,23 @@ def parse_invoked_skill_names(user_input: Optional[str], attached_names: List[st
     # Longest name first so prefix-overlap resolves to the longer match.
     candidates = sorted(lower_to_original.keys(), key=len, reverse=True)
 
-    text = user_input
-    lower_text = text.lower()
-    ordered: List[str] = []
-    seen: set = set()
+    lower_text = user_input.lower()
+    spans: List[Tuple[int, int, str]] = []
 
     i = 0
     n = len(lower_text)
     while i < n:
         ch = lower_text[i]
         if ch != '~':
+            i += 1
+            continue
+
+        # Require a word boundary BEFORE the ``~`` too: the preceding char must
+        # not be a name char or another ``~``. This avoids false matches inside
+        # identifiers/paths (``foo~deploy``) and markdown strikethrough
+        # (``~~skill~~``), which are far more likely in long-form instructions
+        # than in a short chat message.
+        if i > 0 and (_NAME_BOUNDARY_CHARS.match(lower_text[i - 1]) or lower_text[i - 1] == '~'):
             i += 1
             continue
 
@@ -839,46 +864,75 @@ def parse_invoked_skill_names(user_input: Optional[str], attached_names: List[st
             break
 
         if matched_key is not None:
-            original = lower_to_original[matched_key]
-            if matched_key not in seen:
-                seen.add(matched_key)
-                ordered.append(original)
-                if len(ordered) >= MAX_SKILLS_PER_AGENT:
-                    break
+            name_end = start + len(matched_key)
+            # Span includes the leading ``~`` at index ``i`` so consumption
+            # removes the whole control token, never leaving a dangling ``~``.
+            spans.append((i, name_end, lower_to_original[matched_key]))
             # Advance past the matched name (next ``~`` scan resumes after it).
-            i = start + len(matched_key)
+            i = name_end
         else:
             # Lone ``~`` (prose/code/path/email) — advance one char and keep scanning.
             i += 1
 
-    return ordered
+    return spans
 
 
-def build_invoked_skills(
-    user_input: Optional[str],
+def consume_invoked_skills(
+    text: Optional[str],
     attached_skills: List[dict],
-) -> List[dict]:
-    """Build the per-turn ``invoked_skills`` payload."""
-    if not user_input or not attached_skills:
-        return []
+) -> Tuple[Optional[str], List[dict]]:
+    """Resolve ``~skill`` control tokens AND consume them from ``text``."""
+    # Fast path: the overwhelming majority of turns/instructions contain no
+    # ``~`` token, so return the original text object unchanged (identity).
+    if not text or not attached_skills or '~' not in text:
+        return text, []
 
+    spans = _find_skill_mention_spans(text, [s.get('name') for s in attached_skills])
+    if not spans:
+        # No control token matched — strict identity, no normalization pass.
+        return text, []
+
+    # De-sigil: rebuild text replacing each matched ``~name`` with the skill's
+    # canonical ``name`` — drop ONLY the ``~`` trigger sigil and KEEP the name as
+    # a plain reference. This preserves conditional prose like
+    # "use ~a for dogs and ~b for cats" -> "use a for dogs and b for cats", so
+    # the name still binds to the matching ``<skill name="...">`` definition in
+    # the rendered section (without it the model can't tell which skill applies
+    # when). The ``~`` itself is consumed so it never echoes as a control token.
+    # Casing is normalized to the canonical name so it matches the XML attribute.
+    pieces: List[str] = []
+    cursor = 0
+    for start, end, name in spans:
+        pieces.append(text[cursor:start])
+        pieces.append(name)
+        cursor = end
+    pieces.append(text[cursor:])
+    cleaned_text = ''.join(pieces)
+
+    # Resolve: dedup by name (document order), skip blank bodies, cap.
     by_name: dict = {}
     for skill in attached_skills:
         name = skill.get('name')
         if name and name.lower() not in by_name:
             by_name[name.lower()] = skill
 
-    matched_names = parse_invoked_skill_names(user_input, [s.get('name') for s in attached_skills])
-
     invoked: List[dict] = []
-    for name in matched_names:
-        skill = by_name.get(name.lower())
+    seen: set = set()
+    for _start, _end, original in spans:
+        key = original.lower()
+        if key in seen:
+            continue
+        skill = by_name.get(key)
         if not skill:
             continue
         instructions = skill.get('instructions')
         if not instructions or not instructions.strip():
-            # Defensive: validate_agent_skills already blocks deleted/empty bodies.
+            # Defensive: validate_agent_skills already blocks deleted/empty
+            # bodies. The span is still consumed above (no echo), just not
+            # injected here.
+            seen.add(key)
             continue
+        seen.add(key)
         invoked.append({
             'skill_id': skill.get('skill_id'),
             'skill_version_id': skill.get('skill_version_id'),
@@ -886,7 +940,50 @@ def build_invoked_skills(
             'version_name': skill.get('version_name'),
             'instructions': instructions,
         })
-    return invoked
+        if len(invoked) >= MAX_SKILLS_PER_AGENT:
+            break
+
+    return cleaned_text, invoked
+
+
+# Section for an agent's OWN skills — i.e. a ~skill the agent references in its
+# instructions, whose body is baked into the (cached) system prompt and applied
+# on every turn. Uses a DISTINCT heading from the SDK's per-turn ``# Skills``
+# header (SKILLS_SECTION_HEADER in elitea_sdk.runtime.langchain.constants) so a
+# turn that ALSO has a ~skill in the user message does not render two identical
+# headings.
+#
+AGENT_SKILLS_SECTION_HEADER = (
+    '# Agent Skills\n'
+    'Your instructions above refer to the skills defined below by name. A skill '
+    'applies ONLY in the situations your instructions specify for it (by its '
+    'name). In any other situation that skill is INACTIVE — do not apply its '
+    'persona, tone, formatting, or rules at all, even if the skill body says '
+    '"always" or "every response" (your instructions\' scope overrides that '
+    'wording, and it does NOT apply to earlier messages in this conversation). '
+    'Treat each <skill> as independent — never blend or carry rules from one '
+    'skill into another. Do not mention these skill names in your reply.'
+)
+AGENT_SKILLS_SECTION_ENTRY = '<skill name="{name}">\n{instructions}\n</skill>'
+
+
+def format_skills_section(skills: List[dict]) -> str:
+    """Render a deterministic ``# Agent Skills`` block.
+
+    Pure function of (header constant, ``skills`` in the given order). Iterates
+    the list directly (never a set/dict) so identical inputs yield byte-identical
+    output — required for the appended block to be prompt-cache stable. Returns
+    ``''`` for an empty list.
+    """
+    if not skills:
+        return ''
+    entries = [
+        AGENT_SKILLS_SECTION_ENTRY.format(
+            name=s.get('name'), instructions=s.get('instructions'),
+        )
+        for s in skills
+    ]
+    return '\n\n' + AGENT_SKILLS_SECTION_HEADER + '\n\n' + '\n\n'.join(entries)
 
 
 def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
@@ -905,6 +1002,10 @@ def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
             tag_obj = Tag(name=tag.name)
             session.add(tag_obj)
         version.tags.append(tag_obj)
+
+    # Flush so newly-created tags receive their auto-increment ids before the
+    # version is serialized (SkillVersionDetailModel.tags requires int ids).
+    session.flush()
 
 
 def _update_version_fields(session, version: SkillVersion, update_data: SkillVersionUpdateModel) -> None:
