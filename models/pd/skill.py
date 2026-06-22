@@ -110,6 +110,7 @@ class SkillListModel(BaseModel):
     authors: List[AuthorBaseModel] = Field(default_factory=list)
     tags: List[TagBaseModel] = Field(default_factory=list)
     meta: Optional[dict] = None
+    is_pinned: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

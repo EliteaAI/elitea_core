@@ -13,7 +13,7 @@ from ...utils.export_import import (
     export_application_md,
     create_zip_archive
 )
-from ...utils.export_import import _slugify
+from ...utils.export_import_utils import slugify
 
 
 def _generate_export_filename(result, file_extension="zip"):
@@ -55,7 +55,7 @@ def _generate_export_filename(result, file_extension="zip"):
         elif 'applications' in result:  # JSON export result
             for app in result['applications']:
                 if app.get('original_exported', False) and app.get('name'):
-                    name = _slugify(app.get('name', ''))
+                    name = slugify(app.get('name', ''))
                     # Determine entity type
                     entity_type = app.get('entity_type', app.get('type', 'agent'))
                     original_apps.append(f"{name}.{entity_type}")

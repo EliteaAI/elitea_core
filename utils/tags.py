@@ -10,6 +10,7 @@ from pylon.core.tools import log
 from .like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
 from ..models.all import Tag
 from ..models.all import Application, ApplicationVersion, ApplicationVersionTagAssociation
+from ..models.skill import Skill, SkillVersion, SkillVersionTagAssociation
 
 
 class TagListABC(ABCMeta):
@@ -145,7 +146,7 @@ class TagList(metaclass=TagListABC):
         return total, query.all()
 
     def _as_dict(self, x):
-        result = {'id': x[0], 'name': x[1], 'data': loads(x[2])}
+        result = {'id': x[0], 'name': x[1], 'data': loads(x[2]) if x[2] else None}
         result[self.count_name] = x[3]
         return result
 
@@ -214,6 +215,34 @@ class PipelineTagList(TagList):
             self.Entity.versions.any(self.Version.agent_type == "pipeline")
         )
         return filters
+
+
+class SkillTagList(TagList):
+    def set_related_entity_info(self):
+        self.Entity = Skill
+        self.Version = SkillVersion
+        self.VersionTagAssociation = SkillVersionTagAssociation
+        self.foriegn_key = 'skill_id'
+        self.count_name = "skill_count"
+
+    def get_related_entity_filters(self):
+        filters = []
+        if author_id := self.args.get('author_id'):
+            filters.append(self.Entity.versions.any(self.Version.author_id == author_id))
+        if query := self.args.get('query'):
+            filters.append(
+                or_(
+                    self.Entity.name.ilike(f"%{query}%"),
+                    self.Entity.description.ilike(f"%{query}%")
+                )
+            )
+        return filters
+
+    def get_related_entity_query(self, filters):
+        entity_query = self.session.query(self.Entity)
+        if filters:
+            entity_query = entity_query.filter(*filters)
+        return entity_query.with_entities(self.Entity.id).subquery()
 
 
 class AllTagList(TagList):

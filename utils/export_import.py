@@ -2,7 +2,6 @@ from collections import defaultdict
 from copy import deepcopy
 from io import BytesIO
 import json
-import re
 from typing import List, Dict, Any
 import uuid
 import zipfile
@@ -16,11 +15,15 @@ from sqlalchemy.orm import joinedload, selectinload
 from tools import db, rpc_tools, serialize
 from pylon.core.tools import log
 
+from .export_import_utils import slugify
+
 from ..models.pd.application import (
     ApplicationExportModel,
 )
 from ..models.pd.export_import import ApplicationForkModel
 from ..models.pd.tool import ToolExportDetails, ToolForkDetails
+from ..models.skill import Skill, SkillVersion
+from ..models.pd.skill import SkillExportModel
 
 
 def _export_compound_application_tools(
@@ -89,8 +92,12 @@ def _export_compound_application_tools(
                 res.setdefault('applications', []).extend(new_apps)
             if toolkits := tools_result.get('toolkits'):
                 res.setdefault('toolkits', []).extend(toolkits)
+            if skills := tools_result.get('skills'):
+                res.setdefault('skills', []).extend(skills)
+            if warnings := tools_result.get('warnings'):
+                res.setdefault('warnings', []).extend(warnings)
         else:
-            for entity in ('applications', 'toolkits'):
+            for entity in ('applications', 'toolkits', 'skills', 'warnings'):
                 if ent_res := tools_result.get(entity):
                     res.setdefault(entity, []).extend(ent_res)
 
@@ -181,13 +188,31 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
                 version_id = version.pop('id')
             data_done['application_version_id'][version_id] = version['import_version_uuid']
 
+    skills = []
+    skills_export_error = None
     try:
+        skills = _export_skills_main(
+            project_id=project_id,
+            user_id=user_id,
+            applications_serialized=applications_serialized,
+            result=result,
+        )
+    except Exception as ex:
+        log.error(f'Skill export error: {ex}')
+        skills_export_error = f'Skill export failed: {ex}'
+
+    try:
+        compound_res = {
+            'ok': True,
+            'applications': result,
+            'toolkits': toolkits,
+        }
+        if skills:
+            compound_res['skills'] = skills
+        if skills_export_error:
+            compound_res.setdefault('warnings', []).append(skills_export_error)
         res = _export_compound_application_tools(
-            res={
-                'ok': True,
-                'applications': result,
-                'toolkits': toolkits
-            },
+            res=compound_res,
             project_id=project_id,
             user_id=user_id,
             forked=forked,
@@ -200,7 +225,116 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
     return serialize(res)
 
 
-def _toolkits_deduplicate_by_import_uuid(toolkits):
+def _export_skills_main(
+    project_id: int,
+    user_id: int,
+    applications_serialized: list,
+    result: list,
+) -> list:
+    """Export skills attached to the given application versions."""
+
+    version_skill_refs = {}
+    skill_ids = set()
+
+    # result rows and applications_serialized rows are 1:1 in order; pair them
+    # and match versions by name to copy raw skills onto the result rows.
+    for res_app, raw_app in zip(result, applications_serialized):
+        raw_versions_by_name = {v.get('name'): v for v in raw_app.get('versions', [])}
+        for res_version in res_app.get('versions', []):
+            raw_version = raw_versions_by_name.get(res_version.get('name'))
+            if not raw_version:
+                continue
+            mappings = raw_version.get('skills') or []
+            if not mappings:
+                continue
+            refs = []
+            for mapping in mappings:
+                sid = mapping.get('skill_id')
+                if sid is None:
+                    continue
+                skill_ids.add(sid)
+                refs.append({
+                    'skill_id': sid,
+                    'version_name': mapping.get('version_name'),
+                })
+            if refs:
+                version_skill_refs[res_version.get('import_version_uuid')] = refs
+
+    if not skill_ids:
+        return []
+
+    # Map skill_id -> {selected version names} the exported agents actually use,
+    # so only those versions are shipped (not the skill's full version history).
+    selected_versions_by_skill_id = {}
+    for refs in version_skill_refs.values():
+        for ref in refs:
+            version_name = ref.get('version_name')
+            if version_name:
+                selected_versions_by_skill_id.setdefault(ref['skill_id'], set()).add(version_name)
+
+    # Load full skill data for the referenced skills.
+    skills_serialized = []
+    skill_uuid_by_id = {}
+    with db.get_session(project_id) as session:
+        skill_objs = session.query(Skill).filter(
+            Skill.id.in_(skill_ids),
+        ).options(
+            selectinload(Skill.versions).selectinload(SkillVersion.tags)
+        ).all()
+
+        for skill in skill_objs:
+            skill_dict = skill.to_json()
+            skill_dict['project_id'] = project_id
+            skill_dict['user_id'] = user_id
+
+            # Export only the version(s) the exported agents actually use, so the
+            # package isn't bloated with (and import doesn't recreate) the skill's
+            # unused version history. Fall back to all versions when the selection
+            # can't be matched (e.g. a dangling ref) so the skill still imports
+            # and re-attach can warn if needed — never emit an empty list.
+            selected_names = selected_versions_by_skill_id.get(skill.id)
+            versions = (
+                [v for v in skill.versions if v.name in selected_names]
+                if selected_names else list(skill.versions)
+            )
+            if not versions:
+                versions = list(skill.versions)
+
+            skill_dict['versions'] = []
+            for version in versions:
+                version_dict = version.to_json()
+                version_dict['tags'] = [t.to_json() for t in version.tags]
+                skill_dict['versions'].append(version_dict)
+            export_model = SkillExportModel.model_validate(skill_dict)
+            export_dict = export_model.model_dump(mode='json')
+            skill_uuid_by_id[skill.id] = export_dict['import_uuid']
+            skills_serialized.append(export_dict)
+
+    if not skills_serialized:
+        return []
+
+    # Rewrite per-version skill refs to use import_uuid (skill id is source-local).
+    for res_app in result:
+        for res_version in res_app.get('versions', []):
+            refs = version_skill_refs.get(res_version.get('import_version_uuid'))
+            if not refs:
+                continue
+            resolved = []
+            for ref in refs:
+                import_uuid = skill_uuid_by_id.get(ref['skill_id'])
+                if not import_uuid:
+                    continue
+                resolved.append({
+                    'import_uuid': import_uuid,
+                    'version_name': ref.get('version_name'),
+                })
+            if resolved:
+                res_version['skills'] = resolved
+
+    return skills_serialized
+
+
+def _deduplicate_by_import_uuid(toolkits):
     res = []
     import_uuids = set()
     for toolkit in toolkits:
@@ -245,7 +379,7 @@ def _post_export(project_id: int, result: dict, data_done: dict, forked: bool = 
                 ent['original_exported'] = False
 
     # substitute all ids in toolkits with refs by import_uuid/import_version_uuid
-    result['toolkits'] = _toolkits_deduplicate_by_import_uuid(result['toolkits'])
+    result['toolkits'] = _deduplicate_by_import_uuid(result['toolkits'])
     for tool in result['toolkits']:
         tool_type = tool['type']
         tool_name = tool['name']
@@ -265,7 +399,12 @@ def _post_export(project_id: int, result: dict, data_done: dict, forked: bool = 
                     )
                 }
 
+    if result.get('skills'):
+        result['skills'] = _deduplicate_by_import_uuid(result['skills'])
+
     result['_metadata'] = {'version': 2}
+    if warnings := result.pop('warnings', None):
+        result['_metadata']['warnings'] = warnings
 
     return result
 
@@ -363,14 +502,6 @@ def generate_repeatable_uuid(prefix: str, values: dict, suffix: str):
 # ============================================================================
 # MD Format Export/Import Functions
 # ============================================================================
-
-def _slugify(text: str) -> str:
-    """Convert text to a safe filename slug."""
-    text = text.lower().strip()
-    text = re.sub(r'[^\w\s-]', '', text)
-    text = re.sub(r'[-\s]+', '-', text)
-    return text[:50]  # Limit length
-
 
 # Fields to exclude from settings (internal/confusing for users)
 # configuration_uuid and configuration_project_id are internal refs to source project's config
@@ -730,7 +861,66 @@ def _build_version_map(applications: list) -> dict:
     return version_map
 
 
-def _application_to_md(app: dict, toolkits: list, applications: list = None, version: dict = None) -> str:
+def _extract_skills_for_md(version: dict, skills: list) -> list:
+    """Extract attached-skill blocks for an agent version's MD frontmatter.
+
+    The JSON export stores per-version skill refs as ``[{import_uuid,
+    version_name}]`` and the full skill content in the separate top-level
+    ``skills`` list. For MD (a self-contained, human-editable file) we embed
+    enough to recreate each skill: ``name``, ``description``, ``version`` (the
+    attached version name) and ``instructions`` (that version's body).
+
+    Returns an empty list when the version has no attached skills (keeps the
+    frontmatter unchanged for skill-less agents — backward compatible).
+    """
+    refs = version.get('skills') or []
+    if not refs:
+        return []
+
+    skills_by_uuid = {s.get('import_uuid'): s for s in (skills or []) if s.get('import_uuid')}
+
+    out = []
+    for ref in refs:
+        full_skill = skills_by_uuid.get(ref.get('import_uuid'))
+        if not full_skill:
+            # Ref points to a skill not present in the exported skills list;
+            # skip its MD block (no-fallback principle) and log for visibility.
+            log.warning(
+                "Skill export: attached skill (import_uuid=%s) not found among "
+                "exported skills; skipping its MD block",
+                ref.get('import_uuid'),
+            )
+            continue
+        version_name = ref.get('version_name') or 'base'
+        skill_versions = full_skill.get('versions') or []
+        skill_version = next(
+            (v for v in skill_versions if v.get('name') == version_name),
+            None,
+        )
+        if skill_version is None:
+            # Attached version no longer present among exported versions. Skip
+            # the skill's MD block rather than embedding a WRONG version
+            # (no-fallback principle); log for visibility.
+            log.warning(
+                "Skill export: attached version '%s' not found for skill '%s' "
+                "(import_uuid=%s); skipping its MD block",
+                version_name, full_skill.get('name', ''), ref.get('import_uuid'),
+            )
+            continue
+
+        block = {
+            'name': full_skill.get('name', ''),
+            'description': full_skill.get('description', ''),
+            'version': version_name,
+            'instructions': skill_version.get('instructions', ''),
+        }
+        out.append(block)
+
+    return out
+
+
+def _application_to_md(app: dict, toolkits: list, applications: list = None, version: dict = None,
+                       skills: list = None) -> str:
     """
     Convert application dictionary to Markdown format.
 
@@ -739,6 +929,8 @@ def _application_to_md(app: dict, toolkits: list, applications: list = None, ver
         toolkits: List of toolkit configurations
         applications: List of all exported applications (for version_map building)
         version: Specific version to export (if None, exports first version)
+        skills: List of exported skill entities (for resolving per-version
+            attached-skill refs into embedded frontmatter blocks)
 
     Returns:
         Markdown string with YAML frontmatter
@@ -863,6 +1055,11 @@ def _application_to_md(app: dict, toolkits: list, applications: list = None, ver
     if variables:
         frontmatter['variables'] = variables
 
+    # Add attached skills if present (embedded so the MD file is self-contained)
+    skill_blocks = _extract_skills_for_md(version, skills)
+    if skill_blocks:
+        frontmatter['skills'] = skill_blocks
+
     # Build final MD content
     yaml_str = yaml.dump(
         frontmatter,
@@ -931,6 +1128,7 @@ def export_application_md(
     has_dependencies = False
     all_applications = json_export.get('applications', [])
     all_toolkits = json_export.get('toolkits', [])
+    all_skills = json_export.get('skills', [])
 
     # Convert each application version to MD (one file per version)
     for app in all_applications:
@@ -946,7 +1144,8 @@ def export_application_md(
                     app,
                     all_toolkits,
                     applications=all_applications,
-                    version=version
+                    version=version,
+                    skills=all_skills
                 )
 
                 version_name = version.get('name', 'base')
@@ -954,9 +1153,9 @@ def export_application_md(
 
                 # Filename includes version for non-base versions
                 if version_name == 'base':
-                    filename = f"{_slugify(app_name)}.{agent_type}.md"
+                    filename = f"{slugify(app_name)}.{agent_type}.md"
                 else:
-                    filename = f"{_slugify(app_name)}.{_slugify(version_name)}.{agent_type}.md"
+                    filename = f"{slugify(app_name)}.{slugify(version_name)}.{agent_type}.md"
 
                 md_files.append({
                     'filename': filename,
