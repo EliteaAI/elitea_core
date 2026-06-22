@@ -143,7 +143,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             elitea_ui_config_data["blocked_toolkits"] = list(
                 toolkit_security.get("blocked_toolkits") or []
             )
-        except:  # pylint: disable=W0702
+        except Exception as e:  # pylint: disable=W0703
+            log.warning("Failed to load blocked_toolkits from toolkit_security config: %s", e)
             elitea_ui_config_data["blocked_toolkits"] = []
         #
         return elitea_ui_config_data
