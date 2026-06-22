@@ -19,7 +19,7 @@ from pylon.core.tools import log
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Add Participants",
-        description="Add one or more participants (users, agents, pipelines, LLMs, toolkits, datasources) to an existing conversation",
+        description="Add one or more participants (users, agents, pipelines, LLMs, toolkits) to an existing conversation",
         mcp_description="""
         USE to add agents, pipelines, LLMs, toolkits, or other users to an existing conversation so they can
         participate in the chat.

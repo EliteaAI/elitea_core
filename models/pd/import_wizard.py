@@ -38,34 +38,10 @@ class ImportVersionModel(BaseModel):
         return values
 
 
-class DatasourcesImport(ImportData):
-    versions: List[dict]
-    embedding_model: str
-    embedding_model_settings: dict
-    storage: str
-    storage_settings: Optional[dict] = {}
-    meta: Optional[dict] = {}
-
-    def map_postponed_ids(self, imported_entity):
-        return {
-            self.import_uuid: imported_entity['id']
-        }
-
-
 class SelfImportToolSettings(BaseModel):
     import_uuid: str
     import_version_uuid: str
     variables: List[dict]
-
-
-class DatasourceImportToolSettings(BaseModel):
-    datasource_id: int
-    selected_tools: list
-
-
-class DatasourceSelfImportToolSettings(BaseModel):
-    import_uuid: str
-    selected_tools: list
 
 
 class ApplicationImportToolSettings(BaseModel):
@@ -115,20 +91,15 @@ class ApplicationToolImportModel(ToolImportModelBase):
     settings: SelfImportToolSettings | ApplicationImportToolSettings
 
 
-class DatasourceToolImportModel(ToolImportModelBase):
-    type: Literal['datasource']
-    settings: DatasourceSelfImportToolSettings | DatasourceImportToolSettings
-
-
 class OtherToolImportModel(ToolImportModelBase):
-    type: str = Field(pattern=r'^(?!application|datasource).*')
+    type: str = Field(pattern=r'^(?!application).*')
     settings: dict
 
     model_config = ConfigDict(regex_engine='python-re')
 
 
 class ToolImportModel(BaseModel):
-    import_data: ApplicationToolImportModel | DatasourceToolImportModel | OtherToolImportModel = Field(union_mode='left_to_right')
+    import_data: ApplicationToolImportModel | OtherToolImportModel = Field(union_mode='left_to_right')
 
     @model_validator(mode='before')
     def to_import_data(cls, values):

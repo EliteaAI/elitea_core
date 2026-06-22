@@ -113,10 +113,7 @@ class ApplicationForkPayloadProcessor:
                 tool_data, to_delete_uuid = self._update_tool_if_fork_exists(target_toolkit, owner_id)
             if to_delete_uuid:
                 to_delete_uuids.add(target_toolkit['import_uuid'])
-                if target_toolkit['type'] == 'datasource':
-                    to_delete_uuids.add(to_delete_uuid)
-                else:
-                    to_delete_version_uuids.add(to_delete_uuid)
+                to_delete_version_uuids.add(to_delete_uuid)
             else:
                 tools.append(tool)
 
@@ -163,17 +160,11 @@ class ApplicationForkPayloadProcessor:
     ) -> Tuple[Dict, str]:
         tool_parent_entity_id = None
         for obj in self._fork_input_entities:
-            if obj['entity'] == 'datasources':
-                target_uuid = input_tool['settings'].get('import_uuid')
-                if obj['import_uuid'] == target_uuid:
+            target_uuid = input_tool['settings'].get('import_version_uuid')
+            for ver in obj.get('versions', []):
+                if ver.get('import_version_uuid') == target_uuid:
                     tool_parent_entity_id = obj.get('id')
                     break
-            else:
-                target_uuid = input_tool['settings'].get('import_version_uuid')
-                for ver in obj.get('versions', []):
-                    if ver.get('import_version_uuid') == target_uuid:
-                        tool_parent_entity_id = obj.get('id')
-                        break
 
         if tool_parent_entity_id is None:
             return input_tool, str()
@@ -186,7 +177,6 @@ class ApplicationForkPayloadProcessor:
         tool_update_map = {
             'application': 'applications_update_tool_with_existing_fork',
             'prompt': 'prompt_lib_update_tool_with_existing_fork',
-            'datasource': 'datasources_update_tool_with_existing_fork',
         }
         tool_type = input_tool.get('type')
 

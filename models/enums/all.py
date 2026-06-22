@@ -61,7 +61,6 @@ class IndexDataStatus(StrEnum):
 
 class ToolEntityTypes(StrEnum):
     agent = 'agent'
-    datasource = 'datasource'
 
 
 class InitiatorType(StrEnum):
@@ -73,14 +72,12 @@ class InitiatorType(StrEnum):
 
 class ToolTypes(StrEnum):
     prompt = 'prompt'
-    datasource = 'datasource'
     openapi = 'openapi'
     # custom = 'custom'
 
 
 class EntityTypes(StrEnum):
     prompt = 'prompt'
-    datasource = 'datasource'
     agent = 'agent'
 
 
@@ -88,7 +85,6 @@ class EntityTypes(StrEnum):
 class ParticipantTypes(StrEnum):
     user = 'user'
     prompt = 'prompt'
-    datasource = 'datasource'
     application = 'application'
     llm = 'llm'
     dummy = 'dummy'

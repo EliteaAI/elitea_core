@@ -2007,6 +2007,114 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 "errors": errors,
             })
 
+    @web.method("datasource_removal_migration")
+    def datasource_removal_migration(self, *args, **kwargs):
+        """Delete datasource participants and datasource-type tools for all or specific projects.
+
+        Param / payload fields:
+            project_ids (list[int], optional): projects to migrate; empty/omitted runs all projects.
+            dry_run (bool, optional): inspect without making changes. Default false.
+
+        Admin UI usage (param string):
+            {"dry_run": true}
+            {"project_ids": [1, 2], "dry_run": true}
+        """
+        import json
+        from typing import Optional, List
+        from pydantic import BaseModel
+        from plugins.admin.tasks.logs import make_logger
+        from sqlalchemy import text
+        from tools import db, rpc_tools, serialize
+
+        class DatasourceRemovalPayload(BaseModel):
+            project_ids: Optional[List[int]] = []
+            dry_run: Optional[bool] = False
+
+        with make_logger() as log:
+            raw_param = kwargs.get("param", "") or ""
+            payload = None
+            if raw_param.strip():
+                try:
+                    payload = json.loads(raw_param)
+                except (json.JSONDecodeError, ValueError):
+                    log.warning(
+                        "[datasource_removal_migration] Could not parse param as JSON: %r",
+                        raw_param,
+                    )
+
+            if payload is None:
+                migration_payload = DatasourceRemovalPayload.model_construct()
+            else:
+                migration_payload = DatasourceRemovalPayload.model_validate(payload)
+
+            dry_run = migration_payload.dry_run
+            mode = "DRY RUN" if dry_run else "LIVE"
+            log.info("[datasource_removal_migration] [%s] Starting. Payload: %s", mode, migration_payload)
+
+            rpc = rpc_tools.RpcMixin().rpc.call
+
+            def get_all_project_ids():
+                return [i['id'] for i in rpc.project_list(filter_={'create_success': True})]
+
+            project_ids = migration_payload.project_ids or get_all_project_ids()
+            project_ids = sorted(set(project_ids))
+
+            results = []
+            errors = []
+
+            for pid in project_ids:
+                try:
+                    with db.get_session(pid) as session:
+                        participants_count = session.execute(text(
+                            f"SELECT COUNT(*) FROM p_{pid}.chat_participants"
+                            " WHERE entity_name = 'datasource'"
+                        )).scalar()
+
+                        tools_count = session.execute(text(
+                            f"SELECT COUNT(*) FROM p_{pid}.elitea_tools"
+                            " WHERE type = 'datasource'"
+                        )).scalar()
+
+                        entry = {
+                            "project_id": pid,
+                            "participants_to_delete": participants_count,
+                            "tools_to_delete": tools_count,
+                        }
+
+                        if not dry_run:
+                            if participants_count:
+                                session.execute(text(
+                                    f"DELETE FROM p_{pid}.chat_participants"
+                                    " WHERE entity_name = 'datasource'"
+                                ))
+                            if tools_count:
+                                session.execute(text(
+                                    f"DELETE FROM p_{pid}.elitea_tools"
+                                    " WHERE type = 'datasource'"
+                                ))
+                            session.commit()
+                            entry["status"] = "migrated"
+                        else:
+                            entry["status"] = "dry_run"
+
+                    log.info("[datasource_removal_migration] [%s] project_id=%s: %s", mode, pid, entry)
+                    results.append(entry)
+
+                except Exception as e:
+                    log.error("[datasource_removal_migration] [%s] project_id=%s failed: %s", mode, pid, e)
+                    errors.append({"project_id": pid, "error": str(e)})
+
+            log.info(
+                "[datasource_removal_migration] [%s] Finished: results=%s, errors=%s",
+                mode, results, errors,
+            )
+
+            return serialize({
+                "dry_run": dry_run,
+                "results": results,
+                "errors": errors,
+            })
+
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
     project_id, conversation_arg, dry_run, prefix,
