@@ -56,6 +56,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         
         Error in HTTP 200: response.error != null → treat as logical failure.
         HTTP 503: { 'retry_after': 5 } → wait 5 seconds then retry.""",
+        mcp_tool=True,
         tags=["elitea_core/applications"],
         request_body=ApplicationPredictRequest,
         available_to_users=True,
