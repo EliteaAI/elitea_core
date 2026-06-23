@@ -66,7 +66,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Delete an agent or pipeline",
-        description="Permanently deletes the agent or pipeline and all its versions. This action is irreversible.",
+        description=(
+            "Deletes a specific agent or pipeline version when version_name is provided, "
+            "or permanently deletes the entire agent/pipeline with all versions when version_name is omitted. "
+            "Full deletion is irreversible."
+        ),
+        parameters=[
+            {"name": "version_name", "in": "path", "required": False,
+             "schema": {"type": "string"},
+             "description": "Version name to delete. When omitted, the entire application and all its versions are deleted."},
+        ],
         tags=["elitea_core/applications"],
         available_to_users=True,
     )
@@ -77,7 +86,21 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
-    def delete(self, project_id, application_id):
+    def delete(self, project_id, application_id, version_name: str = None):
+        if version_name:
+            with db.get_session(project_id) as session:
+                from ...models.all import ApplicationVersion
+                version = session.query(ApplicationVersion).filter(
+                    ApplicationVersion.application_id == application_id,
+                    ApplicationVersion.name == version_name,
+                ).first()
+                if not version:
+                    return {"ok": False, "error": f"Version '{version_name}' not found"}, 404
+                version_id = version.id
+            result = self.module.delete_application_version(project_id, version_id)
+            if isinstance(result, dict) and 'error' in result:
+                return {"ok": False, "error": result['error']}, 400
+            return '', 204
         result = self.module.delete_application(project_id, application_id)
         if isinstance(result, dict) and 'error' in result:
             return {"ok": False, "error": result['error']}, 400

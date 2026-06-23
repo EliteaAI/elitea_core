@@ -537,7 +537,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create Folder",
-        description="Create a new named folder to organize conversations in the sidebar",
+        description="Create a new named folder to organize conversations in the sidebar. The folder name is provided in the request body — the `folder_id` path segment is not used for this operation.",
         mcp_description="""
         USE to create a new folder for organizing conversations.
 
@@ -769,6 +769,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "folder_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Folder ID."},
         ],
+        request_body={
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["is_pinned"],
+                        "properties": {
+                            "is_pinned": {
+                                "type": "boolean",
+                                "description": "Set to true to pin the folder, false to unpin.",
+                            }
+                        },
+                    }
+                }
+            },
+        },
         available_to_users=True,
     )
     @auth.decorators.check_api({

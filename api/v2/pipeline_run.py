@@ -18,6 +18,40 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "async", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Run asynchronously."},
         ],
+        request_body={
+            "required": False,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "object",
+                                "description": "Pipeline input variables as key-value pairs.",
+                            },
+                            "callback_url": {
+                                "type": "string",
+                                "description": "URL to receive the result when running asynchronously.",
+                            },
+                            "callback_headers": {
+                                "type": "object",
+                                "description": "HTTP headers to include in the callback request.",
+                            },
+                            "async_mode": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "Run pipeline asynchronously (alternative to ?async query param).",
+                            },
+                            "return_chat_history": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "Include full chat history in the response.",
+                            },
+                        },
+                    }
+                }
+            },
+        },
         available_to_users=True,
     )
     @auth.decorators.check_api({

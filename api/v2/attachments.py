@@ -60,6 +60,44 @@ class PromptLibAPI(api_tools.APIModeHandler):
         2. Resume large file upload: send 3 chunks with file_id='abc', chunk_index=0/1/2, total_chunks=3. Last chunk triggers assembly.
         3. Overwrite existing: add overwrite_attachments=1 to form data.
         """,
+        request_body={
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "file": {
+                                "type": "string",
+                                "format": "binary",
+                                "description": "File to upload (for single/direct upload).",
+                            },
+                            "file_id": {
+                                "type": "string",
+                                "description": "Unique file identifier for chunked uploads (shared across all chunks).",
+                            },
+                            "chunk_index": {
+                                "type": "integer",
+                                "description": "Zero-based chunk index for chunked uploads.",
+                            },
+                            "total_chunks": {
+                                "type": "integer",
+                                "description": "Total number of chunks for chunked uploads.",
+                            },
+                            "file_name": {
+                                "type": "string",
+                                "description": "Original file name for chunked uploads.",
+                            },
+                            "overwrite_attachments": {
+                                "type": "integer",
+                                "default": 0,
+                                "description": "Set to 1 to overwrite existing attachments with the same name.",
+                            },
+                        },
+                    }
+                }
+            },
+        },
         tags=["elitea_core/chat"],
         available_to_users=True,
     )
@@ -116,8 +154,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Delete one or more attachments from a conversation and optionally keep files in storage.",
         tags=["elitea_core/chat"],
         parameters=[
-            {"name": "filename", "in": "query", "required": True, "schema": {"type": "string"}, "description": "Filename or filepath to delete. Can be provided multiple times."},
-            {"name": "keep_in_storage", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "If true, keep files in bucket and remove only DB attachment records."},
+            {"name": "filename", "in": "query", "required": True,
+             "schema": {"type": "array", "items": {"type": "string"}},
+             "style": "form", "explode": True,
+             "description": "Filename or filepath to delete. Repeat this parameter to delete multiple files at once."},
+            {"name": "keep_in_storage", "in": "query", "required": False, "schema": {"type": "boolean"},
+             "description": "If true, keep files in bucket and remove only DB attachment records."},
         ],
         available_to_users=True,
     )

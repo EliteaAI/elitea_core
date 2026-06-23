@@ -115,6 +115,22 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         name="Webhook Trigger",
         description="Trigger application or pipeline execution via signed webhook payload.",
         tags=["elitea_core/applications"],
+        parameters=[
+            {"name": "webhook_type", "in": "path", "required": True,
+             "schema": {"type": "string", "enum": ["github", "gitlab", "custom"]},
+             "description": "Webhook source type. Determines which signature header is validated."},
+        ],
+        request_body={
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "description": "Webhook payload from the source system (GitHub, GitLab, or custom).",
+                    }
+                }
+            },
+        },
         available_to_users=True,
     )
     @api_tools.endpoint_metrics
