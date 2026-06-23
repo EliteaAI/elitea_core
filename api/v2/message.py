@@ -6,6 +6,7 @@ from pylon.core.tools import log
 from ...models.enums.all import ParticipantTypes
 from ...models.message_group import ConversationMessageGroup
 from ...models.pd.message import MessageGroupDetail
+from ...utils.meta_guard import guard_meta_dict
 from ...utils.context_analytics import update_context_analytics_after_message_delete
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
@@ -51,7 +52,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ).first()
                 if message_group is None:
                     return {"error": "Message group was not found"}, 400
-                result = serialize(MessageGroupDetail.from_orm(message_group))
+                detail = MessageGroupDetail.from_orm(message_group)
+                detail.meta = guard_meta_dict(detail.meta)  # strip oversized tool_calls/thinking_steps
+                result = serialize(detail)
             except Exception as ex:
                 log.debug(ex)
                 return {

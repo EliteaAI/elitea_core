@@ -16,6 +16,7 @@ from ...models.message_group import ConversationMessageGroup
 from ...models.message_items.base import MessageItem
 from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail, MessagePostPayload
+from ...utils.meta_guard import guard_meta_cumulative
 from ...models.participants import Participant, ParticipantMapping
 from ...models.enums.all import ParticipantTypes
 from ...utils.sio_utils import get_chat_room
@@ -24,6 +25,17 @@ from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.context_analytics import update_conversation_meta
 from ...utils.sio_utils import SioEvents, SioValidationError
 from ...utils.exceptions import PoolSaturationError
+
+
+def _dump_guarded_list(message_groups: list) -> list:
+    """Serialize a list of message groups with per-group + cumulative-budget meta stripping."""
+    out = []
+    running = 0
+    for mg in message_groups:
+        detail = MessageGroupDetail.from_orm(mg)
+        detail.meta, running = guard_meta_cumulative(detail.meta, running)
+        out.append(detail.model_dump(mode='json'))
+    return out
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -92,9 +104,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             total = query.count()
             result = query.order_by(sorting(sorting_by)).limit(limit).offset(offset).all()
 
-            rows = [{
-                **MessageGroupDetail.from_orm(i).model_dump(mode='json'),
-            } for i in result]
+            rows = _dump_guarded_list(result)
 
             return {
                 'total': total,
@@ -343,9 +353,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     time.sleep(poll_timeout)
                 else:
                     status_code = 202
-            result = [{
-                **MessageGroupDetail.from_orm(i).model_dump(mode='json'),
-            } for i in message_groups]
+            result = _dump_guarded_list(message_groups)
 
         return {"message_groups": result}, status_code
 
