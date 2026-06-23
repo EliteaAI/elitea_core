@@ -11,7 +11,7 @@ from ...utils.support_utils import get_support_config
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Conversation",
-        description="Retrieve full details of a specific conversation including participants and paginated message history",
+        description="Retrieve full details of a specific conversation including participants and message history",
         mcp_description="""
         USE to retrieve the full conversation record including its participants and recent messages in a single call.
 
@@ -25,6 +25,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
         1. Get conversation 42 with last 20 messages: GET .../conversation/prompt_lib/1/42?messages_limit=20&sort_order=desc
         2. Get conversation with messages in chronological order: ?sort_order=acs (default).
         """,
+        parameters=[
+            {"name": "messages_limit", "in": "query", "required": False,
+             "schema": {"type": "integer", "default": 100},
+             "description": "Maximum number of messages to include in the response."},
+            {"name": "messages_offset", "in": "query", "required": False,
+             "schema": {"type": "integer", "default": 0},
+             "description": "Offset for message pagination."},
+            {"name": "sort_order", "in": "query", "required": False,
+             "schema": {"type": "string", "default": "acs"},
+             "description": "Message sort order: 'acs' (chronological) or 'desc' (newest first)."},
+        ],
         mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,
