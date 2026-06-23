@@ -6,6 +6,7 @@ from pylon.core.tools import log
 from ...models.enums.all import ParticipantTypes
 from ...models.message_group import ConversationMessageGroup
 from ...models.pd.message import MessageGroupDetail
+from ...utils.conversation_utils import _message_group_columns, fetch_guarded_message_groups
 from ...utils.context_analytics import update_context_analytics_after_message_delete
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
@@ -45,12 +46,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, message_group_uid: str, **kwargs):
         with db.get_session(project_id) as session:
             try:
-                message_group: ConversationMessageGroup = session.query(ConversationMessageGroup).filter(
+                # Select safe (server-side stripped) meta columns so an oversized blob never crosses
+                # the wire / hits the gevent hub (same pattern as get_conversation_details).
+                rows = session.query(*_message_group_columns()).filter(
                     ConversationMessageGroup.uuid == message_group_uid,
-                ).first()
-                if message_group is None:
+                ).all()
+                if not rows:
                     return {"error": "Message group was not found"}, 400
-                result = serialize(MessageGroupDetail.from_orm(message_group))
+                group_dicts = fetch_guarded_message_groups(
+                    session, rows, log_label=f'message_group {message_group_uid}')
+                result = serialize(MessageGroupDetail.model_validate(group_dicts[0]))
             except Exception as ex:
                 log.debug(ex)
                 return {

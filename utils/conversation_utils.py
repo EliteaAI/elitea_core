@@ -1,4 +1,4 @@
-from sqlalchemy import and_, or_, asc, desc, Integer, Float, func, case, cast, TIMESTAMP
+from sqlalchemy import and_, or_, asc, desc, Integer, Float, func, case, cast, TIMESTAMP, Text
 from sqlalchemy.orm import joinedload, selectinload, Session
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -8,9 +8,14 @@ from pylon.core.tools import log
 from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
+from ..models.message_items.base import MessageItem
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationDetailsOrm, ConversationDetails
 from ..utils.authors import get_authors_data
+from ..utils.meta_guard import (
+    META_SIZE_LIMIT_BYTES, RESPONSE_META_BUDGET_BYTES,
+    meta_bytes_expr, safe_meta_expr, strip_heavy_meta_keys,
+)
 
 MESSAGES_DISPLAY_COUNT: int = 100
 
@@ -136,6 +141,83 @@ def calculate_conversation_durations_batch(
     return {cid: round(float(d or 0.0), 2) for cid, d in rows}
 
 
+MESSAGES_LIMIT_HARD_CAP: int = 100
+
+
+# Column list selected for every message-group read. meta is replaced by the server-side safe_meta
+# expression so an oversized blob is stripped inside Postgres and never crosses the wire / hits the
+# gevent hub; meta_bytes carries the real decompressed size for the cumulative budget below.
+def _message_group_columns():
+    return [
+        ConversationMessageGroup.id,
+        ConversationMessageGroup.uuid,
+        ConversationMessageGroup.author_participant_id,
+        ConversationMessageGroup.created_at,
+        ConversationMessageGroup.updated_at,
+        ConversationMessageGroup.reply_to_id,
+        ConversationMessageGroup.is_streaming,
+        ConversationMessageGroup.task_id,
+        ConversationMessageGroup.sent_to_id,
+        safe_meta_expr(ConversationMessageGroup.meta).label('meta'),
+        meta_bytes_expr(ConversationMessageGroup.meta).label('meta_bytes'),
+    ]
+
+
+def fetch_guarded_message_groups(session, rows, log_label: str = 'message_groups') -> list[dict]:
+    """Build guarded message-group dicts from rows selected via _message_group_columns().
+
+    Applies the cumulative per-response budget (per-group oversize is already stripped in SQL),
+    loads message_items ordered by order_index, and resolves sent_to participants — shared by every
+    read path so the stall guard and item ordering stay consistent.
+    """
+    group_ids = [r.id for r in rows]
+    items_by_group = {}
+    sent_to_by_id = {}
+    if group_ids:
+        all_items = session.query(MessageItem).filter(
+            MessageItem.message_group_id.in_(group_ids),
+            MessageItem.item_type != 'context_message',
+        ).order_by(MessageItem.order_index.asc(), MessageItem.id.asc()).all()
+        for item in all_items:
+            items_by_group.setdefault(item.message_group_id, []).append(item)
+        sent_to_ids = {r.sent_to_id for r in rows if r.sent_to_id is not None}
+        if sent_to_ids:
+            for p in session.query(Participant).filter(Participant.id.in_(sent_to_ids)).all():
+                sent_to_by_id[p.id] = p
+    group_dicts = []
+    cumulative_meta_bytes = 0
+    for r in rows:
+        meta = r.meta or {}
+        group_bytes = r.meta_bytes or 0
+        if meta.get('_oversized'):
+            # heavy keys already stripped in SQL; stripped group is tiny, don't charge the budget
+            log.warning('%s: group %s meta %.1f MB > %d MB — stripped', log_label, r.id,
+                        group_bytes / 1024 / 1024, META_SIZE_LIMIT_BYTES // 1024 // 1024)
+            meta = strip_heavy_meta_keys(meta)
+        elif cumulative_meta_bytes + group_bytes > RESPONSE_META_BUDGET_BYTES:
+            # individually fine but the cumulative response would freeze the hub
+            log.warning('%s: group %s trimmed — response budget %d MB exhausted', log_label, r.id,
+                        RESPONSE_META_BUDGET_BYTES // 1024 // 1024)
+            meta = strip_heavy_meta_keys(meta)
+        else:
+            cumulative_meta_bytes += group_bytes
+        group_dicts.append({
+            'id': r.id,
+            'uuid': r.uuid,
+            'author_participant_id': r.author_participant_id,
+            'created_at': r.created_at,
+            'updated_at': r.updated_at,
+            'reply_to_id': r.reply_to_id,
+            'is_streaming': r.is_streaming,
+            'task_id': r.task_id,
+            'sent_to_id': r.sent_to_id,
+            'sent_to': sent_to_by_id.get(r.sent_to_id),
+            'meta': meta,
+            'message_items': items_by_group.get(r.id, []),
+        })
+    return group_dicts
+
+
 def get_conversation_details(
     session,
     conversation_id: int,
@@ -146,6 +228,7 @@ def get_conversation_details(
     messages_offset: int = 0,
     sort_order: str = 'acs',
 ) -> ConversationDetails | None:
+    messages_limit = min(messages_limit, MESSAGES_LIMIT_HARD_CAP)
     # filter participants based on entity_meta['id']
     conversation = session.query(Conversation).filter(
         Conversation.id == conversation_id
@@ -207,14 +290,18 @@ def get_conversation_details(
         ).all()
     }
     conversation_dict = ConversationDetailsOrm.model_validate(conversation).model_dump()
-    message_groups = conversation.message_groups.options(
-        selectinload(ConversationMessageGroup.message_items)
-    )
-    conversation_dict['message_groups_count'] = message_groups.count()
+    conversation_dict['message_groups_count'] = conversation.message_groups.count()
     order_func = desc if sort_order == 'desc' else asc
-    conversation_dict['message_groups'] = message_groups.order_by(
-        order_func(ConversationMessageGroup.created_at)
-    ).offset(messages_offset).limit(messages_limit).all()
+    rows = (
+        session.query(*_message_group_columns())
+        .filter(ConversationMessageGroup.conversation_id == conversation.id)
+        .order_by(order_func(ConversationMessageGroup.created_at))
+        .offset(messages_offset)
+        .limit(messages_limit)
+        .all()
+    )
+    conversation_dict['message_groups'] = fetch_guarded_message_groups(
+        session, rows, log_label=f'conversation_details conv {conversation_id}')
 
     # Batch author lookups for all user participants in one call instead of
     # one get_authors_data() round-trip per participant (audit #10).
