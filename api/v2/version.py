@@ -60,7 +60,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         → response.agent_type = 'pipeline' → parse response.instructions as YAML.
         
         3. Check available tools: response.tools[].settings.selected_tools = restricted tool list for this version.""",
-        mcp_tool=True,
         tags=["elitea_core/applications"],
         available_to_users=True,
     )

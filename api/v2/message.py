@@ -31,7 +31,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         1. Get message by UUID: GET .../message/prompt_lib/42/550e8400-e29b-41d4-a716-446655440000
         2. Check streaming status: if response.is_streaming == true → wait and retry.
         """,
-        mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,
     )
