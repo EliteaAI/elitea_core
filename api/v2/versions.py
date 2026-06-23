@@ -36,7 +36,6 @@ class ProjectAPI(api_tools.APIModeHandler):
         
         2. Find published version: filter where status == 'published'.
         3. Find draft version to update: filter where status == 'draft' → pass its id to update_version.""",
-        mcp_tool=True,
         tags=["elitea_core/applications"],
         available_to_users=True,
     )
