@@ -54,7 +54,6 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         { 'user_input': 'What was my last question?', 'chat_history': [{ 'role': 'user', 'content': 'What is 2+2?' }, { 'role': 'assistant', 'content': '4' }] }
         
         4. Async call: { 'user_input': 'Write a long essay...', 'await_task_timeout': 0 }""",
-        mcp_tool=True,
         tags=["elitea_core/applications"],
         request_body=LLMPredictRequest,
         available_to_users=True,

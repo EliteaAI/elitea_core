@@ -52,7 +52,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "sort_by", "in": "query", "required": False, "schema": {"type": "string", "default": "created_at"}},
             {"name": "sort_order", "in": "query", "required": False, "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"}},
         ],
-        mcp_tool=True,
         tags=["elitea_core/chat"],
         available_to_users=True,
     )
