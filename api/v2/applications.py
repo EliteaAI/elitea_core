@@ -121,7 +121,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Create a new agent or pipeline with a mandatory initial 'base' version — agent type is set by agent_type inside the version definition",
         description="Creates a new agent or pipeline with an initial (base) version. The request must include agent or pipeline metadata and at least one version definition.",
         request_body=ApplicationCreateModel,
-        mcp_description="""
+        mcp_description=f"""
         USE to create a brand-new agent or pipeline from scratch.
         DO NOT USE when:
         - Adding a version to existing app → use create_version
@@ -129,15 +129,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - Importing from JSON → use the import endpoint
         
         Classic agent payload:
-        { 'name': 'Code Reviewer', 'owner_id': 42, 'versions': [{ 'name': 'base', 'agent_type': 'openai', 'llm_settings': { 'model_name': 'gpt-5-mini' }, 'instructions': 'You are a senior engineer...' }] }
+        {{"name": "Code Reviewer", "owner_id": 42, "versions": [{{"name": "base", "agent_type": "openai", "llm_settings": {{"model_name": "gpt-5-mini"}}, "instructions": "You are a senior engineer..."}}]}}
         
         Pipeline payload:
-        { 'name': 'CI Pipeline', 'owner_id': 42, 'versions': [{ 'name': 'base', 'agent_type': 'pipeline', 'llm_settings': { 'model_name': 'gpt-5-mini' }, 'instructions': 'nodes:\n  - id: start\n    type: llm\nedges:\n  ...' }] }
+        {{"name": "CI Pipeline", "owner_id": 42, "versions": [{{"name": "base", "agent_type": "pipeline", "llm_settings": {{"model_name": "gpt-5-mini"}}, "instructions": "nodes:\\n  - id: start\\n    type: llm\\nedges:\\n  ..."}}]}}
+        
+        Params and default values :
+        - owner_id is current user ID
+        - project_id is current project
+        - user_id is current user ID
         
         Key errors:
         - versions[0].name != 'base' → HTTP 400
         - len(versions) > 1 → HTTP 400
-        - Invalid YAML in pipeline instructions → HTTP 400""",
+        - Invalid YAML in pipeline instructions → HTTP 400
+        
+        Return link to created entity in one of these formats:
+        - Agent: {c.APP_HOST}/app/agents/all/<application_id>?viewMode=owner&name=<agent_name>
+        - Pipeline: {c.APP_HOST}/app/pipelines/all/<application_id>?viewMode=owner&name=<pipeline_name>
+        
+        Where <agent_name> or <pipeline_name> is the name you provided in the request
+        """,
         mcp_tool=True,
         tags=["elitea_core/applications"],
         available_to_users=True,
