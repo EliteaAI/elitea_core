@@ -168,8 +168,6 @@ class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVers
         self.meta = self.meta or {}
         if 'step_limit' not in self.meta:
             self.meta['step_limit'] = DEFAULT_STEP_LIMIT
-        if 'internal_tools' not in self.meta:
-            self.meta['internal_tools'] = ['internal_mcp', 'lazy_tools_mode']
         return self
 
 
@@ -212,8 +210,6 @@ class ApplicationVersionBaseCreateModel(ApplicationVersionBaseModel, Application
         self.meta = self.meta or {}
         if 'step_limit' not in self.meta:
             self.meta['step_limit'] = DEFAULT_STEP_LIMIT
-        if 'internal_tools' not in self.meta:
-            self.meta['internal_tools'] = ['internal_mcp', 'lazy_tools_mode']
         return self
 
 
