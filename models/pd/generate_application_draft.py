@@ -18,11 +18,13 @@ class GenerateApplicationDraftRequest(BaseModel):
         }
     )
 
-    user_description: str = Field(description="Natural-language description of the desired agent")
+    user_description: str = Field(
+        description="Natural-language description of the desired agent"
+    )
     llm_settings: Optional[LLMSettingsRequest] = Field(
         default=None,
         description="LLM model override. If not provided, "
-                    "uses the project's default model with temperature=0 and max_tokens=2048.",
+        "uses the project's default model with temperature=0 and max_tokens=2048.",
     )
 
 
@@ -46,34 +48,47 @@ class ApplicationSuggestion(BaseModel):
 
 
 class GenerateApplicationDraftResponse(BaseModel):
-    name: str = Field(max_length=32, description="Agent name (≤ 32 characters)")
-    description: Optional[str] = None
+    name: str = Field(
+        min_length=1, max_length=32, description="Agent name (1–32 characters)"
+    )
+    description: str = Field(
+        min_length=1,
+        max_length=2304,
+        description="Agent description (1–2304 characters)",
+    )
     instructions: str = Field(description="Agent system prompt / instructions")
-    welcome_message: Optional[str] = None
+    welcome_message: Optional[str] = Field(
+        default=None, max_length=768, description="Welcome message (≤ 768 characters)"
+    )
     conversation_starters: Optional[List[str]] = None
 
     @field_validator("conversation_starters", mode="before")
     @classmethod
     def limit_conversation_starters(cls, v):
-        if v is not None and len(v) > 4:
-            return v[:4]
+        if v is None:
+            return v
+        # Filter out empty strings
+        v = [s for s in v if s and s.strip()]
+        # Truncate list to max 4
+        if len(v) > 4:
+            v = v[:4]
+        # Truncate each starter to max 768 characters
+        v = [s[:768] for s in v]
         return v
 
     suggested_toolkits: List[ToolkitSuggestion] = Field(
         default_factory=list,
-        description="Toolkit instances (excluding MCP and application/pipeline types)"
+        description="Toolkit instances (excluding MCP and application/pipeline types)",
     )
     suggested_mcp: List[ToolkitSuggestion] = Field(
-        default_factory=list,
-        description="MCP toolkit instances the agent likely needs"
+        default_factory=list, description="MCP toolkit instances the agent likely needs"
     )
     suggested_pipelines: List[ApplicationSuggestion] = Field(
         default_factory=list,
-        description="Pipeline/application instances the agent likely needs"
+        description="Pipeline/application instances the agent likely needs",
     )
     suggested_agents: List[ApplicationSuggestion] = Field(
-        default_factory=list,
-        description="Existing agents the agent may want to call"
+        default_factory=list, description="Existing agents the agent may want to call"
     )
 
     @model_validator(mode="before")
@@ -89,29 +104,43 @@ class GenerateApplicationDraftResponse(BaseModel):
         pipeline_items = []
         remaining_toolkits = []
         for item in all_toolkit_items:
-            item_type = item.get("type", "") if isinstance(item, dict) else getattr(item, "type", "")
+            item_type = (
+                item.get("type", "")
+                if isinstance(item, dict)
+                else getattr(item, "type", "")
+            )
             if item_type == "mcp":
                 mcp_items.append(item)
             elif item_type == "application":
                 # Convert toolkit format to ApplicationSuggestion format
-                pipeline_items.append({
-                    "application_id": item.get("id"),
-                    "id": item.get("id"),
-                    "name": item.get("name", ""),
-                    "description": item.get("description"),
-                    "type": "pipeline",
-                })
+                pipeline_items.append(
+                    {
+                        "application_id": item.get("id"),
+                        "id": item.get("id"),
+                        "name": item.get("name", ""),
+                        "description": item.get("description"),
+                        "type": "pipeline",
+                    }
+                )
             else:
                 remaining_toolkits.append(item)
         data["suggested_toolkits"] = remaining_toolkits
         data["suggested_mcp"] = mcp_items
         # Split suggested_applications by application type into agents and pipelines
         all_app_items = []
-        for key in ("suggested_applications", "suggested_agents", "suggested_pipelines"):
+        for key in (
+            "suggested_applications",
+            "suggested_agents",
+            "suggested_pipelines",
+        ):
             all_app_items.extend(data.get(key) or [])
         agent_items = []
         for item in all_app_items:
-            item_type = item.get("type", "") if isinstance(item, dict) else getattr(item, "type", "")
+            item_type = (
+                item.get("type", "")
+                if isinstance(item, dict)
+                else getattr(item, "type", "")
+            )
             if item_type == "pipeline":
                 pipeline_items.append(item)
             else:
