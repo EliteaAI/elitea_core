@@ -65,9 +65,36 @@ class AdminAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Delete VectorStore Credentials",
-        description="Remove pgvector password and connection string secrets from specified projects (or all projects if none specified).",
+        description="Remove pgvector password and connection string secrets from specified projects. If project_ids is omitted or null, credentials are removed from all projects.",
         tags=["elitea_core/runtime"],
-        request_body=VectorStoreCreate,
+        request_body={
+            "required": False,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "project_ids": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "nullable": True,
+                                "description": "List of project IDs to remove credentials from. Omit or set to null to remove from all projects.",
+                            }
+                        },
+                    },
+                    "examples": {
+                        "specific_projects": {
+                            "summary": "Remove from specific projects",
+                            "value": {"project_ids": [1, 2, 3]},
+                        },
+                        "all_projects": {
+                            "summary": "Remove from all projects",
+                            "value": {"project_ids": None},
+                        },
+                    },
+                }
+            },
+        },
         available_to_users=True,
     )
     @auth.decorators.check_api(["runtime.plugins"])
