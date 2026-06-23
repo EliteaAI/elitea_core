@@ -36,38 +36,12 @@ def safe_meta_expr(meta_column):
 
 
 def strip_heavy_meta_keys(meta: dict) -> dict:
-    """Drop tool_calls / thinking_steps; keep every other key. _oversized is the sole signal."""
+    """Drop tool_calls / thinking_steps; keep every other key. _oversized is the sole signal.
+
+    Used by the read paths after the SQL strip (safe_meta_expr) has already replaced an oversized
+    meta with `{..lightweight keys.., _oversized: true}`, and for the cumulative-budget trim where a
+    group is individually fine but the response total would freeze the hub.
+    """
     trimmed = {k: v for k, v in (meta or {}).items() if k not in HEAVY_META_KEYS}
     trimmed['_oversized'] = True
     return trimmed
-
-
-def _heavy_bytes(meta: dict) -> int:
-    """Decompressed byte size of just the heavy keys (0 if none). Cheap relative to a full dump."""
-    import json
-    if not (meta.get('tool_calls') or meta.get('thinking_steps')):
-        return 0
-    heavy = {k: meta[k] for k in HEAVY_META_KEYS if k in meta}
-    return len(json.dumps(heavy, separators=(',', ':'), default=str).encode())
-
-
-def guard_meta_dict(meta: dict) -> dict:
-    """Python-side guard for from_orm/serialize paths (no SQL strip). Strips heavy keys if oversized."""
-    if _heavy_bytes(meta or {}) > META_SIZE_LIMIT_BYTES:
-        return strip_heavy_meta_keys(meta)
-    return meta or {}
-
-
-def guard_meta_cumulative(meta: dict, running_bytes: int) -> tuple:
-    """Per-group + cumulative-budget guard for list endpoints (no SQL strip available).
-
-    Returns (guarded_meta, new_running_bytes). Oversized single groups are stripped and don't charge
-    the budget; once the running total would exceed the response budget the group is also stripped.
-    """
-    meta = meta or {}
-    hb = _heavy_bytes(meta)
-    if hb > META_SIZE_LIMIT_BYTES:
-        return strip_heavy_meta_keys(meta), running_bytes
-    if running_bytes + hb > RESPONSE_META_BUDGET_BYTES:
-        return strip_heavy_meta_keys(meta), running_bytes
-    return meta, running_bytes + hb
