@@ -15,6 +15,7 @@ from ...models.message_group import ConversationMessageGroup
 from ...models.message_items.base import MessageItem
 from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail, MessagePostPayload
+from ...utils.conversation_utils import _message_group_columns, fetch_guarded_message_groups
 from ...models.participants import Participant, ParticipantMapping
 from ...models.enums.all import ParticipantTypes
 from ...utils.sio_utils import get_chat_room
@@ -22,6 +23,11 @@ from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.context_analytics import update_conversation_meta
 from ...utils.sio_utils import SioEvents, SioValidationError
+
+
+def _serialize_guarded_groups(group_dicts: list) -> list:
+    """Validate guarded message-group dicts through MessageGroupDetail to the JSON output shape."""
+    return [MessageGroupDetail.model_validate(g).model_dump(mode='json') for g in group_dicts]
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -56,9 +62,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             sort_order = request.args.get('sort_order', default='desc')
             sorting = desc if sort_order == 'desc' else asc
 
-            query = session.query(
-                ConversationMessageGroup
-            ).filter(
+            # Select safe (server-side stripped) meta columns so an oversized blob never crosses the
+            # wire / hits the gevent hub (same pattern as get_conversation_details).
+            query = session.query(*_message_group_columns()).filter(
                 ConversationMessageGroup.conversation_id == conversation_id
             )
 
@@ -72,9 +78,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             total = query.count()
             result = query.order_by(sorting(sorting_by)).limit(limit).offset(offset).all()
 
-            rows = [{
-                **serialize(MessageGroupDetail.from_orm(i)),
-            } for i in result]
+            group_dicts = fetch_guarded_message_groups(
+                session, result, log_label=f'messages_list conv {conversation_id}')
+            rows = _serialize_guarded_groups(group_dicts)
 
             return {
                 'total': total,
@@ -295,9 +301,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     time.sleep(poll_timeout)
                 else:
                     status_code = 202
-            result = [{
-                **serialize(MessageGroupDetail.from_orm(i)),
-            } for i in message_groups]
+            # Re-select via safe (server-side stripped) meta columns so an oversized reply blob
+            # never crosses the wire / hits the gevent hub.
+            ordered_ids = [mg.id for mg in message_groups]
+            safe_rows = session.query(*_message_group_columns()).filter(
+                ConversationMessageGroup.id.in_(ordered_ids)
+            ).order_by(ConversationMessageGroup.created_at.asc()).all()
+            group_dicts = fetch_guarded_message_groups(
+                session, safe_rows, log_label=f'send_message conv {conversation_uuid}')
+            result = _serialize_guarded_groups(group_dicts)
 
         return {"message_groups": result}, status_code
 
