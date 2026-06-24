@@ -93,7 +93,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 ).filter(TextMessageItem.content.ilike(f'%{q}%'))
 
             total = query.count()
-            result = query.order_by(sorting(sorting_by)).limit(limit).offset(offset).all()
+            # `created_at` uses Postgres `now()` which is transaction-scoped, so message groups
+            # inserted in the same transaction (e.g. the trigger run pair created by
+            # `create_trigger_run_conversation`) share a timestamp. Sort by `id` as a tiebreaker
+            # so the human/assistant order is deterministic. Issue #5081.
+            result = query.order_by(
+                sorting(sorting_by), sorting(ConversationMessageGroup.id)
+            ).limit(limit).offset(offset).all()
 
             group_dicts = fetch_guarded_message_groups(
                 session, result, log_label=f'messages_list conv {conversation_id}')
@@ -331,7 +337,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).filter(
                 ConversationMessageGroup.id.in_(result.values())
             ).order_by(
-                ConversationMessageGroup.created_at.asc()
+                ConversationMessageGroup.created_at.asc(),
+                ConversationMessageGroup.id.asc(),
             ).all()
             if len(message_groups) != 2:
                 return {
@@ -351,7 +358,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ordered_ids = [mg.id for mg in message_groups]
             safe_rows = session.query(*_message_group_columns()).filter(
                 ConversationMessageGroup.id.in_(ordered_ids)
-            ).order_by(ConversationMessageGroup.created_at.asc()).all()
+            ).order_by(
+                ConversationMessageGroup.created_at.asc(),
+                ConversationMessageGroup.id.asc(),
+            ).all()
             group_dicts = fetch_guarded_message_groups(
                 session, safe_rows, log_label=f'send_message conv {conversation_uuid}')
             result = _serialize_guarded_groups(group_dicts)
