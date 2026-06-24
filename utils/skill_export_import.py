@@ -89,6 +89,7 @@ def export_skill_md(
     project_id: int,
     skill_id: int,
     version_name: Optional[str] = None,
+    version_id: Optional[int] = None,
     session=None,
 ) -> dict:
     """Export a skill as Markdown."""
@@ -96,11 +97,25 @@ def export_skill_md(
         project_id=project_id,
         skill_id=skill_id,
         version_name=version_name,
+        version_id=version_id,
         session=session,
     )
     skill_data = result.get('data')
     if not skill_data:
         return {'ok': False, 'msg': f'Skill with id {skill_id} not found'}
+
+    if version_id is not None:
+        version = next(
+            (v for v in (skill_data.get('versions') or []) if v.get('id') == version_id),
+            None,
+        )
+        if not version:
+            return {
+                'ok': False,
+                'msg': f"Version '{version_id}' not found for skill {skill_id}",
+            }
+        # Render/name the export by the resolved version name.
+        version_name = version.get('name')
 
     if version_name:
         names = {v.get('name') for v in (skill_data.get('versions') or [])}

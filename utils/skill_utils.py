@@ -592,6 +592,20 @@ def get_skill_version_by_name(
         ).first()
 
 
+def get_skill_version_by_id(
+    project_id: int,
+    skill_id: int,
+    version_id: int,
+    session=None,
+) -> Optional[SkillVersion]:
+    """Get a skill version by its numeric id."""
+    with _skill_session(session, project_id) as s:
+        return s.query(SkillVersion).filter(
+            SkillVersion.skill_id == skill_id,
+            SkillVersion.id == version_id,
+        ).first()
+
+
 def import_skill(
     project_id: int,
     name: str,

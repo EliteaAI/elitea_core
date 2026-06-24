@@ -15,7 +15,7 @@ from ...utils.skill_utils import (
     create_skill_version,
     update_skill_version,
     delete_skill_version,
-    get_skill_version_by_name,
+    get_skill_version_by_id,
     attach_skill_to_agent,
     detach_skill_from_agent,
     SkillError,
@@ -26,11 +26,11 @@ from ...utils.constants import PROMPT_LIB_MODE
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Retrieve full metadata and version configuration of a specific skill",
-        description="Returns the full details of the specified skill. If a version_name path segment is provided, that version's details are included (404 if the named version does not exist); otherwise the default ('base') version is included.",
+        description="Returns the full details of the specified skill. If a version_id path segment is provided, that version's details are included (404 if the version id does not exist); otherwise the default ('base') version is included.",
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "version_name", "in": "path", "required": False, "schema": {"type": "string"}, "description": "Optional version name to load details for"},
+            {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to load details for"},
         ],
         tags=["elitea_core/skills"],
         available_to_users=True,
@@ -42,21 +42,21 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
-    def get(self, project_id: int, skill_id: int, version_name: str | None = None, **kwargs):
-        # When a version name is addressed in the path, it must exist.
-        if version_name is not None:
-            version = get_skill_version_by_name(
+    def get(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
+        # When a version id is addressed in the path, it must exist.
+        if version_id is not None:
+            version = get_skill_version_by_id(
                 project_id=project_id,
                 skill_id=skill_id,
-                version_name=version_name,
+                version_id=version_id,
             )
             if not version:
-                return {"error": f"Skill version '{version_name}' not found"}, 404
+                return {"error": f"Skill version '{version_id}' not found"}, 404
 
         result = get_skill_details(
             project_id=project_id,
             skill_id=skill_id,
-            version_name=version_name,
+            version_id=version_id,
         )
 
         if not result.get('data'):
@@ -111,12 +111,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Update a skill's metadata or a specific skill version",
-        description="Without a version_name path segment, updates the skill metadata (name, description, meta) and optionally its default version content. With a version_name segment, updates that specific version (resolved by name).",
+        description="Without a version_id path segment, updates the skill metadata (name, description, meta) and optionally its default version content. With a version_id segment, updates that specific version (resolved by numeric id).",
         request_body=SkillUpdateModel,
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "version_name", "in": "path", "required": False, "schema": {"type": "string"}, "description": "Optional version name to update a specific version"},
+            {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to update a specific version"},
         ],
         tags=["elitea_core/skills"],
         available_to_users=True,
@@ -128,16 +128,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
-    def put(self, project_id: int, skill_id: int, version_name: str | None = None, **kwargs):
-        # Update a specific named version.
-        if version_name is not None:
-            version = get_skill_version_by_name(
+    def put(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
+        # Update a specific version addressed by id.
+        if version_id is not None:
+            version = get_skill_version_by_id(
                 project_id=project_id,
                 skill_id=skill_id,
-                version_name=version_name,
+                version_id=version_id,
             )
             if not version:
-                return {"error": f"Skill version '{version_name}' not found"}, 404
+                return {"error": f"Skill version '{version_id}' not found"}, 404
 
             try:
                 update_data = SkillVersionUpdateModel.model_validate(dict(request.json))
@@ -204,10 +204,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
-    def patch(self, project_id: int, skill_id: int, version_name: str | None = None, **kwargs):
-        # PATCH does not address a specific named version in the path.
-        if version_name is not None:
-            return {"error": "version_name path segment is not supported for PATCH"}, 400
+    def patch(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
+        # PATCH does not address a specific version in the path.
+        if version_id is not None:
+            return {"error": "version_id path segment is not supported for PATCH"}, 400
 
         try:
             relation_data = SkillUpdateRelationModel.model_validate(dict(request.json))
@@ -244,11 +244,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Delete a skill or a specific skill version",
-        description="Without a version_name path segment, permanently deletes the skill and all of its versions (agent attachments cascade-removed). With a version_name segment, deletes that specific version (cannot delete the only version or a version still attached to agents). Irreversible.",
+        description="Without a version_id path segment, permanently deletes the skill and all of its versions (agent attachments cascade-removed). With a version_id segment, deletes that specific version (cannot delete the only version or a version still attached to agents). Irreversible.",
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "version_name", "in": "path", "required": False, "schema": {"type": "string"}, "description": "Optional version name to delete a specific version"},
+            {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to delete a specific version"},
         ],
         tags=["elitea_core/skills"],
         available_to_users=True,
@@ -260,16 +260,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
-    def delete(self, project_id: int, skill_id: int, version_name: str | None = None, **kwargs):
-        # Delete a specific named version.
-        if version_name is not None:
-            version = get_skill_version_by_name(
+    def delete(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
+        # Delete a specific version addressed by id.
+        if version_id is not None:
+            version = get_skill_version_by_id(
                 project_id=project_id,
                 skill_id=skill_id,
-                version_name=version_name,
+                version_id=version_id,
             )
             if not version:
-                return {"error": f"Skill version '{version_name}' not found"}, 404
+                return {"error": f"Skill version '{version_id}' not found"}, 404
 
             try:
                 delete_skill_version(
@@ -297,7 +297,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 class API(api_tools.APIBase):
     url_params = api_tools.with_modes([
         '<int:project_id>/<int:skill_id>',
-        '<int:project_id>/<int:skill_id>/<string:version_name>',
+        '<int:project_id>/<int:skill_id>/<int:version_id>',
     ])
 
     mode_handlers = {

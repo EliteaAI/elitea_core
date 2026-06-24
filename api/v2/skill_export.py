@@ -16,14 +16,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description=(
             "Exports the specified skill as a downloadable Markdown (.md) file "
             "with YAML frontmatter (type, name, description, optional version and "
-            "tags) and the skill instructions as the body. When a version_name "
+            "tags) and the skill instructions as the body. When a version_id "
             "path segment is supplied that version is exported (404 if it does not "
             "exist); otherwise the default ('base') version is used."
         ),
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "version_name", "in": "path", "required": False, "schema": {"type": "string"}, "description": "Optional version name to export (defaults to 'base')."},
+            {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to export (defaults to the 'base' version)."},
         ],
         tags=["elitea_core/skills"],
         mcp_tool=False,
@@ -36,12 +36,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
-    def get(self, project_id: int, skill_id: int, version_name: str | None = None, **kwargs):
+    def get(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         try:
             result = export_skill_md(
                 project_id=project_id,
                 skill_id=skill_id,
-                version_name=version_name,
+                version_id=version_id,
             )
         except SkillError as exc:
             return {"error": str(exc)}, exc.http_status
@@ -65,7 +65,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 class API(api_tools.APIBase):
     url_params = api_tools.with_modes([
         '<int:project_id>/<int:skill_id>',
-        '<int:project_id>/<int:skill_id>/<string:version_name>',
+        '<int:project_id>/<int:skill_id>/<int:version_id>',
     ])
 
     mode_handlers = {
