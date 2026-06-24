@@ -203,18 +203,26 @@ def import_skill_md(
     author_id: int,
     session=None,
 ) -> dict:
-    """Import a skill from Markdown content (parse -> validate -> upsert)."""
-    
+    """Import a skill from Markdown content (parse -> validate -> upsert).
+
+    The imported skill is always created with version 'base', regardless of
+    what version name was in the exported file's frontmatter. This ensures
+    imports create fresh, independent skills rather than inheriting version
+    names from the source.
+    """
+
     parsed = parse_skill_md(content)
     frontmatter = parsed['frontmatter']
     body = parsed['body']
     validate_skill_frontmatter(frontmatter)
 
-    version_name = frontmatter.get('elitea_version', DEFAULT_VERSION_NAME)
+    # Always use 'base' as the version name for imports. The elitea_version
+    # field in the frontmatter is only informational (indicates which version
+    # was exported) and should not affect the imported skill's version name.
     tags = frontmatter.get('tags')
     tag_payload = [{'name': tag} for tag in tags] if tags else None
 
-    version = {'name': version_name, 'instructions': body, 'author_id': author_id}
+    version = {'name': DEFAULT_VERSION_NAME, 'instructions': body, 'author_id': author_id}
     if tag_payload:
         version['tags'] = tag_payload
 
