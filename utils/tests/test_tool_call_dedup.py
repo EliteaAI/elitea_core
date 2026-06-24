@@ -201,6 +201,42 @@ def test_distinct_inputs_not_merged():
     assert len(result) == 2, f'{_survivors(result)}'
 
 
+# --------------------------------------------------------------------------- #
+# Malformed entries — non-dict meta fields must not crash the persist path
+# --------------------------------------------------------------------------- #
+
+def test_identity_tolerates_non_dict_meta_fields():
+    """A corrupt/partial entry whose ``metadata`` or ``tool_meta`` round-tripped
+    as a non-dict (stray string/number/list/None) must still yield a 4-tuple
+    identity instead of raising AttributeError on the ``.get()`` calls — dedup
+    runs on every partial save and must not break the persist path."""
+    for bad in ('oops', 42, ['x'], None):
+        tc = {
+            'tool_name': 'Name Resolver',
+            'tool_meta': bad,
+            'metadata': bad,
+            'tool_inputs': {'task': 'Resolve name Roman'},
+        }
+        identity = d._tool_call_identity(tc)
+        assert isinstance(identity, tuple) and len(identity) == 4, identity
+        # name falls back to tool_name when tool_meta is unusable.
+        assert identity[0] == 'Name Resolver', identity
+
+
+def test_identity_tolerates_non_dict_nested_tool_meta_metadata():
+    """``tool_meta`` is a dict but its nested ``metadata`` is a non-dict — the
+    parent lookup (``tm_meta.get('parent_agent_name')``) must not raise."""
+    tc = {
+        'tool_name': 'inner_tool',
+        'tool_meta': {'name': 'inner_tool', 'metadata': 'not-a-dict'},
+        'metadata': {'checkpoint_ns': 'agent:uuid-1'},
+        'tool_inputs': {'q': 1},
+    }
+    identity = d._tool_call_identity(tc)
+    assert isinstance(identity, tuple) and len(identity) == 4, identity
+    assert identity[0] == 'inner_tool', identity
+
+
 def test_empty_and_singleton_passthrough():
     assert d._dedupe_replayed_tool_calls({}) == {}
     single = {'x': _wrapper('x', 'u', '2024-01-01T00:00:00', tool_output=None)}

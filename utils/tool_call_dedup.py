@@ -70,10 +70,12 @@ def _tool_call_identity(tc: dict) -> tuple:
         # use as a dict key in _dedupe_replayed_tool_calls.
         return tuple(cached) if isinstance(cached, list) else cached
 
-    meta = tc.get('metadata') or {}
-    tool_meta = tc.get('tool_meta') or {}
-    tm_meta = tool_meta.get('metadata') if isinstance(tool_meta, dict) else {}
-    tm_meta = tm_meta or {}
+    meta = tc.get('metadata')
+    meta = meta if isinstance(meta, dict) else {}
+    tool_meta = tc.get('tool_meta')
+    tool_meta = tool_meta if isinstance(tool_meta, dict) else {}
+    tm_meta = tool_meta.get('metadata')
+    tm_meta = tm_meta if isinstance(tm_meta, dict) else {}
     name = tool_meta.get('name') or tc.get('tool_name') or ''
     parent = meta.get('parent_agent_name') or tm_meta.get('parent_agent_name') or ''
     raw_ns = meta.get('checkpoint_ns') or ''
