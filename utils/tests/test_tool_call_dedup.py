@@ -3,7 +3,7 @@
 Run standalone (no pylon runtime needed) with the project venv:
 
     source projects/venv/bin/activate
-    pytest centry/pylon_main/plugins/elitea_core/utils/tests/test_tool_call_dedup.py -v
+    pytest utils/tests/test_tool_call_dedup.py -v
 
 The module under test imports only ``json`` so it loads in isolation; we add the
 parent ``utils/`` dir to sys.path and import it directly.
