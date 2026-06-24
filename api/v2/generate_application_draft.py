@@ -99,15 +99,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {"error": "Failed to resolve project default LLM model"}, 400
 
         try:
-            toolkits, agents = fetch_project_resources(project_id, req.user_description)
+            toolkits, agents, skills = fetch_project_resources(project_id, req.user_description)
         except Exception:
             log.warning("generate_application_draft: failed to fetch project resources")
-            toolkits, agents = [], []
+            toolkits, agents, skills = [], [], []
 
         template = _get_system_prompt_template()
         if not template:
             return {"error": "Service prompt 'generate_application_draft' is not configured"}, 500
-        system_prompt = build_system_prompt(template, toolkits, agents)
+        system_prompt = build_system_prompt(template, toolkits, agents, skills)
 
         try:
             result = self.module.predict_sio_llm(

@@ -3,6 +3,8 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator, model_valida
 
 from .predict_llm import LLMSettingsRequest
 
+MAX_SUGGESTED_SKILLS = 5
+
 
 class GenerateApplicationDraftRequest(BaseModel):
     model_config = ConfigDict(
@@ -45,6 +47,12 @@ class ApplicationSuggestion(BaseModel):
     def model_post_init(self, __context):
         if self.id is None:
             self.id = self.application_id
+
+
+class SkillSuggestion(BaseModel):
+    id: int = Field(description="Skill ID from skills table")
+    name: str = Field(description="Skill name")
+    description: Optional[str] = Field(default=None, description="Skill description")
 
 
 class GenerateApplicationDraftResponse(BaseModel):
@@ -90,6 +98,19 @@ class GenerateApplicationDraftResponse(BaseModel):
     suggested_agents: List[ApplicationSuggestion] = Field(
         default_factory=list, description="Existing agents the agent may want to call"
     )
+    suggested_skills: List[SkillSuggestion] = Field(
+        default_factory=list,
+        description=f"Skills the agent may want to use (max {MAX_SUGGESTED_SKILLS})",
+    )
+
+    @field_validator("suggested_skills", mode="before")
+    @classmethod
+    def limit_suggested_skills(cls, v):
+        if v is None:
+            return []
+        if len(v) > MAX_SUGGESTED_SKILLS:
+            v = v[:MAX_SUGGESTED_SKILLS]
+        return v
 
     @model_validator(mode="before")
     @classmethod
