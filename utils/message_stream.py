@@ -1,5 +1,3 @@
-import json
-
 from tools import rpc_tools
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -8,127 +6,12 @@ from ..models.message_group import ConversationMessageGroup
 
 from pylon.core.tools import log
 
+# HITL-replay tool_call dedup (identity + completion-epoch grouping) lives in a
+# pure, dependency-free module so it can be unit-tested without the pylon
+# runtime (see utils/tests/test_tool_call_dedup.py). Re-imported here so the
+# call site below keeps working unchanged.
+from .tool_call_dedup import _dedupe_replayed_tool_calls
 
-# Input keys that grow/echo across HITL replays and must NOT contribute to a
-# tool_call's identity. A sub-agent invocation re-fired on each resume carries
-# the same logical args (its "task") plus a swelling transient payload
-# (accumulated hitl_decisions, echoed state channels). Hashing the whole dict
-# makes each replay look unique; dropping these leaves only the stable args.
-_TRANSIENT_INPUT_KEYS = {
-    'hitl_decisions', 'state_types', 'parallel_tasks',
-    'messages', 'chat_history', '_pipeline_blocked', 'hitl_resume',
-    'hitl_action', 'hitl_value',
-}
-
-
-# Private key under which a tool_call's computed identity is memoized ON the
-# entry itself. It persists through the meta-JSON DB round-trip, so a reloaded
-# entry skips re-serialization on the next save (see _tool_call_identity).
-# The UI reads named fields off each entry and ignores unknown keys, so this is
-# inert to consumers.
-_IDENTITY_CACHE_KEY = '_dedup_identity'
-
-
-def _tool_call_identity(tc: dict) -> tuple:
-    """Stable identity for a tool_call across HITL-replay re-fires (#4993).
-
-    A pipeline sub-agent with N sensitive tool calls pauses for HITL N times.
-    Each resume makes LangGraph replay the graph from its checkpoint and re-fire
-    on_tool_start for the SAME embedded-agent node — a fresh run_id and a fresh
-    checkpoint_ns uuid every time (e.g. "Agent1:<uuid-A>" then "Agent1:<uuid-B>").
-    Only the final replay ever completes; the rest are empty placeholders. Two
-    entries are "the same call" when tool name, sub-agent attribution, bare node
-    name, and stable inputs match. Genuinely different calls (read_file on
-    another path) keep distinct inputs and are never collapsed.
-
-    Identity is memoized on the entry under `_IDENTITY_CACHE_KEY`. dedup runs on
-    EVERY partial save over the whole accumulated tool_calls dict (fan-out
-    children persist only via partial_message, never full_message), so without a
-    cache each of K entries is json.dumps'd on each of S saves — O(K*S) ≈ O(K^2)
-    CPU + transient-dict churn. The stamp persists through the meta-JSON DB
-    round-trip; reloaded entries return their cached identity without
-    re-serializing, making total work O(K) (one serialize per distinct entry).
-    A replacement entry for the same run_id (e.g. on_tool_end adding output /
-    parent_agent_name) arrives WITHOUT the stamp, so its identity is recomputed
-    from current state — never served stale.
-    """
-    cached = tc.get(_IDENTITY_CACHE_KEY)
-    if cached is not None:
-        # Reloaded from JSON: list, not tuple. Coerce so it stays hashable for
-        # use as a dict key in _dedupe_replayed_tool_calls.
-        return tuple(cached) if isinstance(cached, list) else cached
-
-    meta = tc.get('metadata') or {}
-    tool_meta = tc.get('tool_meta') or {}
-    tm_meta = tool_meta.get('metadata') if isinstance(tool_meta, dict) else {}
-    tm_meta = tm_meta or {}
-    name = tool_meta.get('name') or tc.get('tool_name') or ''
-    parent = meta.get('parent_agent_name') or tm_meta.get('parent_agent_name') or ''
-    raw_ns = meta.get('checkpoint_ns') or ''
-    node = raw_ns.split(':', 1)[0] if raw_ns else (meta.get('langgraph_node') or '')
-    raw_inputs = tc.get('tool_inputs')
-    if isinstance(raw_inputs, dict):
-        stable_inputs = {k: v for k, v in raw_inputs.items() if k not in _TRANSIENT_INPUT_KEYS}
-    else:
-        stable_inputs = raw_inputs
-    try:
-        inputs = json.dumps(stable_inputs, sort_keys=True, default=str)
-    except (TypeError, ValueError):
-        inputs = str(stable_inputs)
-    identity = (name, parent, node, inputs)
-    # Stamp the entry so subsequent saves reuse this without re-serializing.
-    # All four components are strings → JSON-safe; stored as a list and coerced
-    # back to a tuple on the cached-read path above.
-    if isinstance(tc, dict):
-        tc[_IDENTITY_CACHE_KEY] = list(identity)
-    return identity
-
-
-def _dedupe_replayed_tool_calls(tool_calls: dict) -> dict:
-    """Collapse HITL-replay duplicate tool_calls, keeping the COMPLETED entry.
-
-    Each HITL resume replays the same sub-agent invocation with a fresh run_id;
-    most replays are empty placeholders (no tool_output, timestamp_finish unset)
-    and only the final one carries the real result. Keep the entry that actually
-    completed (has tool_output, else timestamp_finish) per identity; fall back to
-    the earliest if none completed. Preserves first-seen insertion order so the
-    surviving chip holds its natural position. Returns a dict still keyed by
-    run_id; genuinely distinct calls keep separate identities and are not merged.
-    """
-    if not isinstance(tool_calls, dict) or len(tool_calls) < 2:
-        return tool_calls
-
-    def _completeness(tc: dict) -> int:
-        if not isinstance(tc, dict):
-            return 0
-        if tc.get('tool_output'):
-            return 2
-        if tc.get('timestamp_finish'):
-            return 1
-        return 0
-
-    best: dict = {}   # identity -> (run_id, tc)
-    order: list = []  # identities in first-seen order
-    for run_id, tc in tool_calls.items():
-        if not isinstance(tc, dict):
-            best[run_id] = (run_id, tc)
-            order.append(run_id)
-            continue
-        identity = _tool_call_identity(tc)
-        if identity not in best:
-            best[identity] = (run_id, tc)
-            order.append(identity)
-            continue
-        # Same logical call replayed: keep whichever entry is more complete.
-        _, kept = best[identity]
-        if _completeness(tc) > _completeness(kept):
-            best[identity] = (run_id, tc)
-
-    deduped: dict = {}
-    for identity in order:
-        run_id, tc = best[identity]
-        deduped[run_id] = tc
-    return deduped
 
 def safe_decode_bytes_in_dict(obj):
     if isinstance(obj, dict):
