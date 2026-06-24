@@ -1,9 +1,20 @@
+import re
 from typing import Optional
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 from .predict_llm import LLMSettingsRequest
-from .skill import SkillName
+
+NAME_MAX_LENGTH = 64
+DESCRIPTION_MAX_LENGTH = 2304
+INSTRUCTIONS_MAX_LENGTH = 2500
+
+
+def _slugify_skill_name(value: str) -> str:
+    s = value.strip().lower()
+    s = re.sub(r"[^a-z0-9-]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    return s[:NAME_MAX_LENGTH].strip("-")
 
 
 class GenerateSkillDraftRequest(BaseModel):
@@ -31,27 +42,43 @@ class GenerateSkillDraftRequest(BaseModel):
 
 
 class GenerateSkillDraftResponse(BaseModel):
-    """Validated AI-generated skill draft.
+    """AI-generated skill draft, coerced to be creatable.
 
-    Constraints mirror the skill create model (``models/pd/skill.py``):
-    ``name`` reuses :data:`SkillName` (lowercase letters/digits/hyphens, no
-    leading/trailing hyphen, <=64 chars, no "claude"/"anthropic"); description
-    and instructions use the same caps as ``SkillVersionCreateModel``. There are
-    deliberately NO suggested toolkits/agents/pipelines/MCPs for skills.
+    The fields are normalized to fit the skill entity's constraints rather than
+    rejected when slightly off, so a usable draft always reaches the review form:
+    ``name`` is slugified, ``description``/``instructions`` are truncated to their
+    caps. A 422 is only raised when a required field is missing/empty — i.e. a
+    genuine generation failure the user retries (AC9). There are deliberately NO
+    suggested toolkits/agents/pipelines/MCPs for skills.
     """
 
-    name: SkillName = Field(
+    name: str = Field(
         min_length=1,
-        max_length=64,
-        description="Skill name (lowercase letters/digits/hyphens, no leading/trailing hyphen)",
+        max_length=NAME_MAX_LENGTH,
+        description="Skill name, slugified (lowercase letters/digits/hyphens, no leading/trailing hyphen)",
     )
     description: str = Field(
         min_length=1,
-        max_length=2304,
-        description="Skill description (1–2304 characters)",
+        max_length=DESCRIPTION_MAX_LENGTH,
+        description=f"Skill description (truncated to {DESCRIPTION_MAX_LENGTH} characters)",
     )
     instructions: str = Field(
         min_length=1,
-        max_length=2500,
-        description="Skill instructions in Markdown (1–2500 characters)",
+        max_length=INSTRUCTIONS_MAX_LENGTH,
+        description=f"Skill instructions in Markdown (truncated to {INSTRUCTIONS_MAX_LENGTH} characters)",
     )
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _normalize_name(cls, v):
+        return _slugify_skill_name(v) if isinstance(v, str) else v
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _truncate_description(cls, v):
+        return v[:DESCRIPTION_MAX_LENGTH].rstrip() if isinstance(v, str) else v
+
+    @field_validator("instructions", mode="before")
+    @classmethod
+    def _truncate_instructions(cls, v):
+        return v[:INSTRUCTIONS_MAX_LENGTH].rstrip() if isinstance(v, str) else v

@@ -86,7 +86,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 )
                 if not llm_settings or not llm_settings.get("model_name"):
                     return {"error": "No default LLM model configured for this project"}, 400
-                # Structured JSON generation — favour determinism and low cost
                 llm_settings.setdefault("temperature", 0.7)
                 llm_settings.setdefault("max_tokens", 4096)
                 if req.llm_settings:
