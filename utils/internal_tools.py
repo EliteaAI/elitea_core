@@ -564,7 +564,7 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
         f"- Agent: {app_host}/app/agents/all/<application_id>?viewMode=owner&name=<agent_name>\n"
         f"- Pipeline: {app_host}/app/pipelines/all/<application_id>?viewMode=owner&name=<pipeline_name>\n"
         f"- Tool: {app_host}/app/toolkits/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
-        f"- Tool: {app_host}/app/mcps/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
+        f"- MCP: {app_host}/app/mcps/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
         f"Where <application_id> is returned by the creation tool and <..._name> is the name provided in the request."
     )
 
