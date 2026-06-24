@@ -135,8 +135,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         {{"name": "CI Pipeline", "owner_id": 42, "versions": [{{"name": "base", "agent_type": "pipeline", "llm_settings": {{"model_name": "gpt-5-mini"}}, "instructions": "nodes:\\n  - id: start\\n    type: llm\\nedges:\\n  ..."}}]}}
         
         Params and default values :
-        - owner_id is current user ID
-        - project_id is current project
+        - owner_id is current project ID
+        - project_id is current project ID
         - user_id is current user ID
         
         Key errors:
