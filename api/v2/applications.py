@@ -143,12 +143,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - versions[0].name != 'base' → HTTP 400
         - len(versions) > 1 → HTTP 400
         - Invalid YAML in pipeline instructions → HTTP 400
-        
-        Return link to created entity in one of these formats:
-        - Agent: {c.APP_HOST}/app/agents/all/<application_id>?viewMode=owner&name=<agent_name>
-        - Pipeline: {c.APP_HOST}/app/pipelines/all/<application_id>?viewMode=owner&name=<pipeline_name>
-        
-        Where <agent_name> or <pipeline_name> is the name you provided in the request
         """,
         mcp_tool=True,
         tags=["elitea_core/applications"],
