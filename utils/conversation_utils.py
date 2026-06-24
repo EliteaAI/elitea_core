@@ -295,7 +295,13 @@ def get_conversation_details(
     rows = (
         session.query(*_message_group_columns())
         .filter(ConversationMessageGroup.conversation_id == conversation.id)
-        .order_by(order_func(ConversationMessageGroup.created_at))
+        # `created_at` uses Postgres `now()` (transaction-scoped), so message groups inserted
+        # in the same transaction share a timestamp. Add `id` as tiebreaker so trigger-run
+        # pairs render in insertion order rather than implementation-defined order. Issue #5081.
+        .order_by(
+            order_func(ConversationMessageGroup.created_at),
+            order_func(ConversationMessageGroup.id),
+        )
         .offset(messages_offset)
         .limit(messages_limit)
         .all()
