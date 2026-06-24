@@ -4,6 +4,7 @@ from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 from .predict_llm import LLMSettingsRequest
+from .skill import validate_skill_name
 
 NAME_MAX_LENGTH = 64
 DESCRIPTION_MAX_LENGTH = 2304
@@ -46,10 +47,12 @@ class GenerateSkillDraftResponse(BaseModel):
 
     The fields are normalized to fit the skill entity's constraints rather than
     rejected when slightly off, so a usable draft always reaches the review form:
-    ``name`` is slugified, ``description``/``instructions`` are truncated to their
-    caps. A 422 is only raised when a required field is missing/empty — i.e. a
-    genuine generation failure the user retries (AC9). There are deliberately NO
-    suggested toolkits/agents/pipelines/MCPs for skills.
+    ``name`` is slugified then checked against :func:`validate_skill_name` (the
+    same rule the skill create API enforces — single source of truth), and
+    ``description``/``instructions`` are truncated to their caps. A 422 is only
+    raised when a required field is missing/empty or the name cannot be salvaged
+    into a valid slug — i.e. a genuine generation failure the user retries (AC9).
+    There are deliberately NO suggested toolkits/agents/pipelines/MCPs for skills.
     """
 
     name: str = Field(
@@ -71,7 +74,7 @@ class GenerateSkillDraftResponse(BaseModel):
     @field_validator("name", mode="before")
     @classmethod
     def _normalize_name(cls, v):
-        return _slugify_skill_name(v) if isinstance(v, str) else v
+        return validate_skill_name(_slugify_skill_name(v)) if isinstance(v, str) else v
 
     @field_validator("description", mode="before")
     @classmethod
