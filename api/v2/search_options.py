@@ -4,6 +4,7 @@ from queue import Empty
 from flask import request
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.skill_utils import list_skills_api
 
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi
@@ -42,7 +43,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Get search option values for selected entities.",
         tags=["elitea_core/discovery"],
         parameters=[
-            {"name": "entities[]", "in": "query", "required": True, "schema": {"type": "array", "items": {"type": "string"}}, "description": "Entities to include (application, pipeline, toolkit, credential)."},
+            {"name": "entities[]", "in": "query", "required": True, "schema": {"type": "array", "items": {"type": "string"}}, "description": "Entities to include (application, pipeline, toolkit, credential, skill)."},
         ],
         available_to_users=True,
     )
@@ -60,7 +61,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         results = {}
         entities = set(request.args.getlist('entities[]'))
 
-        for entity in ('application', 'pipeline', 'toolkit', 'credential'):
+        for entity in ('application', 'pipeline', 'toolkit', 'credential', 'skill'):
             results[entity] = {"total": 0, "rows": []}
 
         try:
@@ -104,6 +105,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     log.warning("Configurations plugin is not available, skipping for search_options")
                 else:
                     results.update(res)
+
+            if "skill" in entities:
+                skill_res = list_skills_api(
+                    project_id=project_id,
+                    q=request.args.get('query'),
+                    limit=request.args.get('col_limit', default=10, type=int),
+                    offset=request.args.get('col_offset', default=0, type=int),
+                )
+                results['skill'] = {
+                    "total": skill_res['total'],
+                    "rows": [{"id": s.id, "name": s.name} for s in skill_res['skills']],
+                }
 
         except AttributeError as ex:
             log.error(ex)
