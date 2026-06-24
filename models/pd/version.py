@@ -105,7 +105,7 @@ class ApplicationVersionBaseModel(BaseModel):
     agent_type: AgentTypes = AgentTypes.openai.value
     welcome_message: Optional[str] = None
     pipeline_settings: Optional[dict] = Field(default_factory=dict)
-    notes: Optional[str] = Field(default=None, max_length=10000)
+    notes: Optional[str] = Field(default=None, max_length=1000)
 
     model_config = ConfigDict(from_attributes=True)
 
