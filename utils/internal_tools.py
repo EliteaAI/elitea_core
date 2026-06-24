@@ -546,3 +546,25 @@ def inject_mcp_toolkits(
     log.info(f"[MCP Injection] Auto-injecting {len(tools)} MCP toolkits for user {user_id}")
     return tools
 
+
+def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
+    """
+    Return a system-prompt addon that instructs the model to return entity links
+    after creating agents or pipelines via Elitea MCP Tools.
+
+    Returns empty string when MCP internal tool is not active.
+    """
+    if not is_mcp_exposure_enabled():
+        return ''
+    if MCP_INTERNAL_TOOL_KEY not in (internal_tools or []):
+        return ''
+    app_host = c.APP_HOST.rstrip('/')
+    return (
+        f"\n\nReturn response text and ALWAYS include a link to the created entity:\n"
+        f"- Agent: {app_host}/app/agents/all/<application_id>?viewMode=owner&name=<agent_name>\n"
+        f"- Pipeline: {app_host}/app/pipelines/all/<application_id>?viewMode=owner&name=<pipeline_name>\n"
+        f"- Tool: {app_host}/app/toolkits/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
+        f"- Tool: {app_host}/app/mcps/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
+        f"Where <application_id> is returned by the creation tool and <..._name> is the name provided in the request."
+    )
+

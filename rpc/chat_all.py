@@ -40,7 +40,8 @@ from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
-    inject_mcp_toolkits, MCP_INTERNAL_TOOL_KEY
+    inject_mcp_toolkits, MCP_INTERNAL_TOOL_KEY,
+    get_mcp_entity_link_instructions,
 )
 from ..utils.utils import get_public_project_id
 from ..utils.predict_utils import get_project_context, prepend_project_context
@@ -674,6 +675,13 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 if tool not in combined_tools:
                     combined_tools.append(tool)
             result['internal_tools'] = combined_tools
+
+            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
+            mcp_link_addon = get_mcp_entity_link_instructions(combined_tools)
+            if mcp_link_addon:
+                _vd = result.get('version_details') or {}
+                _vd['instructions'] = (_vd.get('instructions') or '') + mcp_link_addon
+                result['version_details'] = _vd
         # case ParticipantTypes.pipeline:
         #     # TODO: handle as simplified application, but should not ?
         #     entity_settings = EntitySettingsApplication.parse_obj(participant_chat_settings.entity_settings)
@@ -725,6 +733,11 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             _ctx_content, _ctx_enabled = get_project_context(predict_payload.project_id)
             if _ctx_enabled and _ctx_content:
                 result['instructions'] = prepend_project_context(result.get('instructions') or '', _ctx_content)
+
+            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
+            mcp_link_addon = get_mcp_entity_link_instructions(llm_chat_internal_tools)
+            if mcp_link_addon:
+                result['instructions'] = (result.get('instructions') or '') + mcp_link_addon
 
             if predict_payload.llm_settings:
                 result['llm_settings'].update(predict_payload.llm_settings.dict(exclude_none=True))
