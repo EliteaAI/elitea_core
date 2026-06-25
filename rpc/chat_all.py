@@ -990,13 +990,22 @@ class RPC:
             session.add(msg_group)
             session.add(msg)
 
-            if parsed.runtime_context:
+            # Inject context only when internal_mcp is enabled for this conversation.
+            # Support assistant conversations always have 'internal_mcp' in internal_tools.
+            conversation_internal_tools = (conversation.meta or {}).get('internal_tools', [])
+            if 'internal_mcp' in conversation_internal_tools:
+                effective_runtime_context = dict(parsed.runtime_context) if parsed.runtime_context else {}
+
+                # Always set server-side truth values
+                effective_runtime_context['user_id'] = current_user['id']
+                effective_runtime_context['project_id'] = parsed.project_id
+
                 from ..models.message_items.context import ContextMessageItem
                 context_msg = ContextMessageItem(
                     message_group=msg_group,
                     item_type=ContextMessageItem.__mapper_args__['polymorphic_identity'],
                     order_index=-1,
-                    context_data=parsed.runtime_context,
+                    context_data=effective_runtime_context,
                     context_type='support_assistant_context',
                 )
                 session.add(context_msg)

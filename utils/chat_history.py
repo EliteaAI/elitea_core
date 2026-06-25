@@ -87,6 +87,8 @@ def format_context_for_llm(context_data: dict) -> str:
         return ""
 
     parts = []
+    if context_data.get('user_id'):
+        parts.append(f"  <user_id>{context_data['user_id']}</user_id>")
     if context_data.get('project_id'):
         parts.append(f"  <project_id>{context_data['project_id']}</project_id>")
     if context_data.get('assistant_name'):
