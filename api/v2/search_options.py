@@ -42,7 +42,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Get search option values for selected entities.",
         tags=["elitea_core/discovery"],
         parameters=[
-            {"name": "entities[]", "in": "query", "required": True, "schema": {"type": "array", "items": {"type": "string"}}, "description": "Entities to include (application, pipeline, toolkit, credential)."},
+            {"name": "entities[]", "in": "query", "required": True, "schema": {"type": "array", "items": {"type": "string"}}, "description": "Entities to include (application, pipeline, toolkit, credential, skill)."},
         ],
         available_to_users=True,
     )
@@ -60,7 +60,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         results = {}
         entities = set(request.args.getlist('entities[]'))
 
-        for entity in ('application', 'pipeline', 'toolkit', 'credential'):
+        for entity in ('application', 'pipeline', 'toolkit', 'credential', 'skill'):
             results[entity] = {"total": 0, "rows": []}
 
         try:
@@ -104,6 +104,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     log.warning("Configurations plugin is not available, skipping for search_options")
                 else:
                     results.update(res)
+
+            if "skill" in entities:
+                try:
+                    res = self.module.skills_get_search_options(
+                        project_id,
+                        **request.args.to_dict()
+                    )
+                except Empty:
+                    log.warning("Skills RPC is not available, skipping skills for search_options")
+                else:
+                    results['skill'] = res
 
         except AttributeError as ex:
             log.error(ex)

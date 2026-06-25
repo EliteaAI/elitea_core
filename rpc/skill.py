@@ -7,6 +7,8 @@ from tools import db, serialize
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.enums.all import SkillEntityTypes
 from ..models.pd.skill import SkillCreateModel
+from ..models.pd.search import MultipleApplicationSearchModel
+from ..utils.searches import get_search_options
 from ..utils.skill_utils import (
     get_skill_details,
     create_skill,
@@ -19,6 +21,18 @@ from ..utils.skill_utils import (
 
 
 class RPC:
+    @web.rpc("skills_get_search_options", "skills_get_search_options")
+    def skills_get_search_options(self, project_id: int, **kwargs) -> dict:
+        return get_search_options(
+            project_id,
+            Model=Skill,
+            PDModel=MultipleApplicationSearchModel,
+            joinedload_=None,
+            args_prefix='skill',
+            filters=[],
+            search_fields=('name', 'description'),
+        )
+
     @web.rpc("applications_import_skill", "applications_import_skill")
     def applications_import_skill(self, model_data: dict, project_id: int, author_id: int):
         try:
