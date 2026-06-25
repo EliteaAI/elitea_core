@@ -85,10 +85,11 @@ class Method:
             )
 
         room = get_event_room(sio_event, stream_id)
+        force_emit = payload.get('type') == "mcp_authorization_required"
         # Skip the emit if no client has joined this room — avoids serializing and
         # pushing the payload for non-interactive flows (scheduled pipelines,
         # webhooks, blocking REST calls) where the room always has zero subscribers.
-        if not any(self.context.sio.manager.get_participants('/', room)):
+        if not force_emit and not any(self.context.sio.manager.get_participants('/', room)):
             return
         self.context.sio.emit(
             event=sio_event,

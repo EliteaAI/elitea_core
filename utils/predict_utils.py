@@ -232,6 +232,7 @@ def generate_predict_payload(
         'steps_limit': parsed.steps_limit if isinstance(parsed, LLMChatRequest) else None,
         'mcp_tokens': parsed.mcp_tokens or {},
         'ignored_mcp_servers': parsed.ignored_mcp_servers or [],
+        'user_declined_mcp_servers': getattr(parsed, 'user_declined_mcp_servers', None) or [],
         'should_continue': parsed.should_continue,
         'hitl_resume': bool(getattr(parsed, 'hitl_resume', False)),
         'hitl_action': getattr(parsed, 'hitl_action', None),

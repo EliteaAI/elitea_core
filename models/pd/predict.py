@@ -163,6 +163,7 @@ class SioContinuePredictModel(BaseModel):
     thread_id: Optional[str] = Field(default=None, description="Thread ID for continuing execution (optional, falls back to message meta)")
     mcp_tokens: Optional[Dict[str, str | Dict[str, Any]]] = Field(default_factory=dict, description="MCP OAuth tokens by server URL")
     ignored_mcp_servers: Optional[List[str]] = Field(default_factory=list, description="List of MCP server URLs to ignore")
+    user_declined_mcp_servers: Optional[List[dict]] = Field(default=None, description="MCP servers the user explicitly declined this session, with full OAuth metadata for LLM context and re-auth")
     # Always True for Continue flow - used by generate_payload to signal resume from checkpoint
     should_continue: bool = Field(default=True, description="Always True for Continue flow")
     # User input for continue flow - if provided, uses this instead of 'continue'
