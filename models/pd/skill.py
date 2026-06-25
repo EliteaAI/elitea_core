@@ -12,7 +12,8 @@ from pydantic import (
     ConfigDict,
 )
 
-from .collection_base import TagBaseModel, AuthorBaseModel
+from .collection_base import AuthorBaseModel
+from .tag import TagDetailModel
 from ...models.enums.all import SkillEntityTypes
 from ...utils.authors import get_authors_data
 from ...utils.constants import ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API
@@ -108,7 +109,7 @@ class SkillListModel(BaseModel):
     versions: List[SkillVersionListModel] = Field(default_factory=list, exclude=True)
     author_ids: set[int] = Field(default_factory=set, exclude=True)
     authors: List[AuthorBaseModel] = Field(default_factory=list)
-    tags: List[TagBaseModel] = Field(default_factory=list)
+    tags: List[TagDetailModel] = Field(default_factory=list)
     meta: Optional[dict] = None
     is_pinned: bool = False
 

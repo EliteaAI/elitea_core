@@ -29,7 +29,7 @@ class SkillVersionListModel(BaseModel):
     name: str
     created_at: datetime
     author_id: int = Field(..., exclude=True)
-    tags: List[TagBaseModel] = Field(default_factory=list, exclude=True)
+    tags: List[TagDetailModel] = Field(default_factory=list, exclude=True)
 
     model_config = ConfigDict(from_attributes=True)
 
