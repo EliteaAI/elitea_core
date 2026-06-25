@@ -4,7 +4,6 @@ from queue import Empty
 from flask import request
 
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.skill_utils import list_skills_api
 
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi
@@ -107,16 +106,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     results.update(res)
 
             if "skill" in entities:
-                skill_res = list_skills_api(
-                    project_id=project_id,
-                    q=request.args.get('query'),
-                    limit=request.args.get('col_limit', default=10, type=int),
-                    offset=request.args.get('col_offset', default=0, type=int),
-                )
-                results['skill'] = {
-                    "total": skill_res['total'],
-                    "rows": [{"id": s.id, "name": s.name} for s in skill_res['skills']],
-                }
+                try:
+                    res = self.module.skills_get_search_options(
+                        project_id,
+                        **request.args.to_dict()
+                    )
+                except Empty:
+                    log.warning("Skills RPC is not available, skipping skills for search_options")
+                else:
+                    results['skill'] = res
 
         except AttributeError as ex:
             log.error(ex)
