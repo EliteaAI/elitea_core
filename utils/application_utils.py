@@ -177,12 +177,29 @@ def applications_update_version(version_data, session) -> dict:
                 )
                 session.commit()
 
-    for key, value in version_data.model_dump(exclude={'tags', 'variables', 'tools'}, exclude_unset=True).items():
+    dumped = version_data.model_dump(exclude={'tags', 'variables', 'tools'}, exclude_unset=True)
+
+    # `notes` is stored inside the `meta` JSONB column (issue #5410: avoids a per-tenant schema
+    # migration). Extract it from the top-level dump so the setattr loop below doesn't try to
+    # write it to a non-existent ORM attribute, then merge into meta AFTER meta itself is applied
+    # so a concurrent `meta` field in the same payload doesn't overwrite the notes value.
+    notes_provided = 'notes' in dumped
+    notes_value = dumped.pop('notes', None) if notes_provided else None
+
+    for key, value in dumped.items():
         if key == 'pipeline_settings' and isinstance(value, dict) and 'trigger' not in value:
             existing_trigger = (version.pipeline_settings or {}).get('trigger')
             if existing_trigger:
                 value = {**value, 'trigger': existing_trigger}
         setattr(version, key, value)
+
+    if notes_provided:
+        merged_meta = dict(version.meta or {})
+        if notes_value is None:
+            merged_meta.pop('notes', None)
+        else:
+            merged_meta['notes'] = notes_value
+        version.meta = merged_meta
 
     try:
         # Explicitly delete tag associations first to avoid unique constraint violations
@@ -1410,7 +1427,11 @@ def get_application_version_details_expanded(
             tool.set_online(project_id)
             tool.set_agent_meta_and_fields(project_id)
 
-        result = version_details.model_dump(mode='json', exclude={'author_id'})
+        # `notes` is metadata-only and MUST stay out of the predict/SDK payload that flows from
+        # this dict into chat_all.generate_payload — otherwise it would leak into LLM context.
+        # Defense in depth: ApplicationVersionDetailModel.hydrate_notes_from_meta already strips
+        # `notes` from the `meta` dict copy; this exclude drops the surfaced top-level field too.
+        result = version_details.model_dump(mode='json', exclude={'author_id', 'notes'})
 
         if not result.get('skills'):
             result.pop('skills', None)

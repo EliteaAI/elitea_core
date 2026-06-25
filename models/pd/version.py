@@ -105,6 +105,7 @@ class ApplicationVersionBaseModel(BaseModel):
     agent_type: AgentTypes = AgentTypes.openai.value
     welcome_message: Optional[str] = None
     pipeline_settings: Optional[dict] = Field(default_factory=dict)
+    notes: Optional[str] = Field(default=None, max_length=1000)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -277,6 +278,19 @@ class ApplicationVersionDetailModel(ApplicationVersionBaseModel):
         if 'icon_meta' in meta:
             self.icon_meta = meta['icon_meta'] or {}
 
+        return self
+
+    @model_validator(mode='after')
+    def hydrate_notes_from_meta(self):
+        # Notes live inside the `meta` JSONB column (issue #5410: chosen over a dedicated column
+        # to avoid a per-tenant schema migration). Surface as a top-level field for the UI and
+        # remove from the meta copy so downstream consumers (predict payload, indexer) never
+        # receive it. The original ORM MutableDict is left untouched — we replace self.meta with
+        # a plain copy here.
+        if isinstance(self.meta, dict) and 'notes' in self.meta:
+            if self.notes is None:
+                self.notes = self.meta.get('notes')
+            self.meta = {k: v for k, v in self.meta.items() if k != 'notes'}
         return self
 
 
