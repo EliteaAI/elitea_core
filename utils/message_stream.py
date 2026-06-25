@@ -56,8 +56,19 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
     response_meta = payload['response_metadata']
     should_continue = payload['response_metadata'].get("should_continue")
 
+    # first_tool_timestamp_start must remain the EARLIEST llm start across all partial saves of
+    # this group. new_meta.update() below clobbers keys, and sub-agent / multi-round / HITL-resume
+    # saves each carry a fresh, LATER llm_start_timestamp; overwriting collapsed the recorded run
+    # duration to the final round only (#5422). ISO-8601 UTC strings sort chronologically -> keep min.
+    incoming_first_start = response_meta.get('llm_start_timestamp')
+    existing_first_start = old_meta.get('first_tool_timestamp_start')
+    if incoming_first_start and existing_first_start:
+        first_tool_timestamp_start = min(incoming_first_start, existing_first_start)
+    else:
+        first_tool_timestamp_start = incoming_first_start or existing_first_start
+
     response_meta_fields = {
-        'first_tool_timestamp_start': response_meta.get('llm_start_timestamp'),
+        'first_tool_timestamp_start': first_tool_timestamp_start,
         # Store execution_time_seconds for toolkit testing (no LLM/thinking_steps involved)
         'execution_time_seconds': response_meta.get('execution_time_seconds'),
         **payload['response_metadata'].get('additional_response_meta', {})

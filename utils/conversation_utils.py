@@ -36,13 +36,19 @@ def calculate_conversation_duration(conversation: Conversation, session: Session
         return 0.0
 
     duration_expression = case(
-        # Case 1: Agent/LLM execution with thinking_steps (most accurate for agent runs)
+        # Case 1: Agent/LLM execution with thinking_steps (most accurate for agent runs).
+        # Duration = first thinking step start -> last thinking step finish (full wall-clock,
+        # matching the chat "Thought for X"). Do NOT use meta['first_tool_timestamp_start']: it is
+        # overwritten on each partial save with the latest llm_start_timestamp, so sub-agent /
+        # multi-round / HITL-resume runs collapse it to only the final round (#5422). thinking_steps
+        # are accumulated, so [0]['timestamp_start'] preserves the true earliest start.
         (
             and_(
-                ConversationMessageGroup.meta['first_tool_timestamp_start'].isnot(None),
                 func.jsonb_array_length(
                     func.coalesce(ConversationMessageGroup.meta['thinking_steps'], cast('[]', JSONB))
-                ) > 0
+                ) > 0,
+                ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start'].astext.isnot(None),
+                ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish'].astext.isnot(None)
             ),
             func.extract(
                 'epoch',
@@ -50,7 +56,7 @@ def calculate_conversation_duration(conversation: Conversation, session: Session
                     (ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish']).astext,
                     TIMESTAMP
                 ) - cast(
-                    ConversationMessageGroup.meta['first_tool_timestamp_start'].astext,
+                    (ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start']).astext,
                     TIMESTAMP
                 )
             )
@@ -97,12 +103,17 @@ def calculate_conversation_durations_batch(
         return {}
 
     duration_expression = case(
+        # Case 1: Agent/LLM duration = first thinking step start -> last thinking step finish
+        # (full wall-clock, matches chat "Thought for X"). meta['first_tool_timestamp_start'] is
+        # intentionally NOT used -- partial saves overwrite it with the latest llm_start_timestamp,
+        # collapsing multi-round / sub-agent / HITL durations to the final round only (#5422).
         (
             and_(
-                ConversationMessageGroup.meta['first_tool_timestamp_start'].isnot(None),
                 func.jsonb_array_length(
                     func.coalesce(ConversationMessageGroup.meta['thinking_steps'], cast('[]', JSONB))
-                ) > 0
+                ) > 0,
+                ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start'].astext.isnot(None),
+                ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish'].astext.isnot(None)
             ),
             func.extract(
                 'epoch',
@@ -110,7 +121,7 @@ def calculate_conversation_durations_batch(
                     (ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish']).astext,
                     TIMESTAMP
                 ) - cast(
-                    ConversationMessageGroup.meta['first_tool_timestamp_start'].astext,
+                    (ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start']).astext,
                     TIMESTAMP
                 )
             )
