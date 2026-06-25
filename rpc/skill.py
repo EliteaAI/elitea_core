@@ -30,6 +30,7 @@ class RPC:
             joinedload_=None,
             args_prefix='skill',
             filters=[],
+            search_fields=('name', 'description'),
         )
 
     @web.rpc("applications_import_skill", "applications_import_skill")

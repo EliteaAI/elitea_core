@@ -3,7 +3,7 @@ from typing import List
 
 from flask import request
 from sqlalchemy.orm import joinedload
-from sqlalchemy import and_, not_
+from sqlalchemy import and_, not_, or_
 
 from ..models.all import Tag
 from ..utils.utils import get_entities_by_tags
@@ -13,20 +13,16 @@ from tools import db, api_tools
 from pylon.core.tools import log
 
 
-def get_search_options(project_id, Model, PDModel, joinedload_, args_prefix, filters=None):
+def get_search_options(project_id, Model, PDModel, joinedload_, args_prefix, filters=None, search_fields=('name',)):
     query = request.args.get('query', '')
     search_query = f"%{query}%"
 
-    # filter_fields = ('name', 'title')
-    # conditions = []
-    # for field in filter_fields:
-    #     if hasattr(Model, field):
-    #         conditions.append(
-    #             getattr(Model, field).ilike(search_query)
-    #         )
-    # or_(*conditions)
-
-    filter_ = and_(getattr(Model, 'name').ilike(search_query), *filters)
+    conditions = [
+        getattr(Model, field).ilike(search_query)
+        for field in search_fields
+        if hasattr(Model, field)
+    ]
+    filter_ = and_(or_(*conditions), *filters)
     args_data = get_args(args_prefix)
     total, res = api_tools.get(
         project_id=project_id,
