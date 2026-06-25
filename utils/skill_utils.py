@@ -578,20 +578,6 @@ def delete_skill_version(
         return None
 
 
-def get_skill_version_by_name(
-    project_id: int,
-    skill_id: int,
-    version_name: str,
-    session=None,
-) -> Optional[SkillVersion]:
-    """Get a skill version by name."""
-    with _skill_session(session, project_id) as s:
-        return s.query(SkillVersion).filter(
-            SkillVersion.skill_id == skill_id,
-            SkillVersion.name == version_name,
-        ).first()
-
-
 def get_skill_version_by_id(
     project_id: int,
     skill_id: int,

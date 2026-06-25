@@ -114,10 +114,9 @@ def export_skill_md(
                 'ok': False,
                 'msg': f"Version '{version_id}' not found for skill {skill_id}",
             }
-        # Render/name the export by the resolved version name.
+        # Render/name the export by the resolved version name (already validated).
         version_name = version.get('name')
-
-    if version_name:
+    elif version_name:
         names = {v.get('name') for v in (skill_data.get('versions') or [])}
         if version_name not in names:
             return {
