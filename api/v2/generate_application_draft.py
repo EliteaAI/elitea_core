@@ -31,22 +31,10 @@ from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import PredictPayloadError
 from ...utils.exceptions import PoolSaturationError
 from ...utils.generate_application_utils import fetch_project_resources, build_system_prompt
+from ...utils.service_prompt_utils import get_service_prompt
 from ...utils.utils import extract_json_from_text
 
 _SERVICE_PROMPT_KEY = "generate_application_draft"
-
-
-def _get_system_prompt_template() -> str:
-    try:
-        configs = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_filtered_public(
-            filter_fields={"type": "service_prompt"}
-        )
-        for cfg in configs or []:
-            if cfg.get("data", {}).get("key") == _SERVICE_PROMPT_KEY:
-                return cfg["data"].get("prompt", "")
-    except Exception:
-        log.warning("generate_application_draft: failed to fetch service prompt from configurations")
-    return ""
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -104,7 +92,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.warning("generate_application_draft: failed to fetch project resources")
             toolkits, agents, skills = [], [], []
 
-        template = _get_system_prompt_template()
+        template = get_service_prompt(_SERVICE_PROMPT_KEY)
         if not template:
             return {"error": "Service prompt 'generate_application_draft' is not configured"}, 500
         system_prompt = build_system_prompt(template, toolkits, agents, skills)
