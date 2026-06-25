@@ -42,10 +42,16 @@ def create_version(
         application: Application | None = None,
         session=None
 ) -> ApplicationVersion:
-    application_version = ApplicationVersion(**version_data.dict(
+    version_dict = version_data.dict(
         exclude_unset=True,
         exclude={'tags', 'variables', 'tools'}
-    ))
+    )
+    notes_value = version_dict.pop('notes', None) if 'notes' in version_dict else None
+    if notes_value is not None:
+        merged_meta = dict(version_dict.get('meta') or {})
+        merged_meta['notes'] = notes_value
+        version_dict['meta'] = merged_meta
+    application_version = ApplicationVersion(**version_dict)
     # session.add(application_version)
 
     if application:
