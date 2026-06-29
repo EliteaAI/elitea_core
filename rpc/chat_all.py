@@ -609,6 +609,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
         ),
         'mcp_tokens': predict_payload.mcp_tokens or {},
         'ignored_mcp_servers': predict_payload.ignored_mcp_servers or [],
+        'user_declined_mcp_servers': getattr(predict_payload, 'user_declined_mcp_servers', None) or [],
         'conversation_id': predict_payload.conversation_uuid,  # For planning toolkit scoping
         'should_continue': predict_payload.should_continue or False,
         'hitl_resume': bool(getattr(predict_payload, 'hitl_resume', False)),
@@ -677,8 +678,9 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             result['internal_tools'] = combined_tools
 
             # Append MCP entity-link instruction when Elitea MCP Tools are enabled
+            # Skip for pipelines: their instructions are YAML, not a text prompt
             mcp_link_addon = get_mcp_entity_link_instructions(combined_tools)
-            if mcp_link_addon:
+            if mcp_link_addon and not _is_pipeline:
                 _vd = result.get('version_details') or {}
                 _vd['instructions'] = (_vd.get('instructions') or '') + mcp_link_addon
                 result['version_details'] = _vd

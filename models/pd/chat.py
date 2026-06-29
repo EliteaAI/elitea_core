@@ -74,6 +74,10 @@ class ApplicationChatRequest(MergeUpdateBase):
         default_factory=list,
         description="List of MCP server URLs to ignore (user chose to continue without auth)"
     )
+    user_declined_mcp_servers: Optional[List[dict]] = Field(
+        default_factory=list,
+        description="MCP servers the user explicitly declined this session, with full OAuth metadata"
+    )
     should_continue: Optional[bool] = False
     meta: Optional[dict] = {}
     conversation_id: Optional[str] = Field(
@@ -129,6 +133,10 @@ class LLMChatRequest(MergeUpdateBase):
     ignored_mcp_servers: Optional[List[str]] = Field(
         default_factory=list,
         description="List of MCP server URLs to ignore (user chose to continue without auth)"
+    )
+    user_declined_mcp_servers: Optional[List[dict]] = Field(
+        default_factory=list,
+        description="MCP servers the user explicitly declined this session, with full OAuth metadata"
     )
     should_continue: Optional[bool] = False
     conversation_id: Optional[str] = Field(

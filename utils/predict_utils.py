@@ -232,6 +232,7 @@ def generate_predict_payload(
         'steps_limit': parsed.steps_limit if isinstance(parsed, LLMChatRequest) else None,
         'mcp_tokens': parsed.mcp_tokens or {},
         'ignored_mcp_servers': parsed.ignored_mcp_servers or [],
+        'user_declined_mcp_servers': getattr(parsed, 'user_declined_mcp_servers', None) or [],
         'should_continue': parsed.should_continue,
         'hitl_resume': bool(getattr(parsed, 'hitl_resume', False)),
         'hitl_action': getattr(parsed, 'hitl_action', None),
@@ -282,9 +283,10 @@ def generate_predict_payload(
         }
 
         attached_skills = version_details.get('skills') or []
+        is_pipeline = version_details.get('agent_type') == 'pipeline'
 
         agent_instructions = version_details.get('instructions')
-        if isinstance(agent_instructions, str) and agent_instructions:
+        if isinstance(agent_instructions, str) and agent_instructions and not is_pipeline:
             cleaned_instructions, instruction_skills = consume_invoked_skills(
                 agent_instructions, attached_skills
             )
