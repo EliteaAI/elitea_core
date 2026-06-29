@@ -39,6 +39,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         2. Get named version of pipeline 15: { project_id: 42, application_id: 15, version_name: 'v2' } → returns version 'v2' with YAML graph.
         3. Detect type: if response.version_details.agent_type == 'pipeline' → parse instructions as YAML.
         """,
+        parameters=[
+            {"name": "version_name", "in": "query", "required": False,
+             "schema": {"type": "string"},
+             "description": "Version name to retrieve. If omitted, the active default version is returned."},
+        ],
+        path_suffix_override='<string:mode>/<int:project_id>/<int:application_id>',
         mcp_tool=True,
         tags=["elitea_core/applications"],
         available_to_users=True,
@@ -72,10 +78,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "Full deletion is irreversible."
         ),
         parameters=[
-            {"name": "version_name", "in": "path", "required": False,
+            {"name": "version_name", "in": "query", "required": False,
              "schema": {"type": "string"},
              "description": "Version name to delete. When omitted, the entire application and all its versions are deleted."},
         ],
+        path_suffix_override='<string:mode>/<int:project_id>/<int:application_id>',
         tags=["elitea_core/applications"],
         available_to_users=True,
     )
