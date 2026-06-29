@@ -678,8 +678,9 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             result['internal_tools'] = combined_tools
 
             # Append MCP entity-link instruction when Elitea MCP Tools are enabled
+            # Skip for pipelines: their instructions are YAML, not a text prompt
             mcp_link_addon = get_mcp_entity_link_instructions(combined_tools)
-            if mcp_link_addon:
+            if mcp_link_addon and not _is_pipeline:
                 _vd = result.get('version_details') or {}
                 _vd['instructions'] = (_vd.get('instructions') or '') + mcp_link_addon
                 result['version_details'] = _vd
