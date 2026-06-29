@@ -240,7 +240,7 @@ class API(api_tools.APIBase):  # pylint: disable=R0903
     """ API """
 
     url_params = api_tools.with_modes([
-        '<int:project_id>/<int:version_id>/<webhook_type>',
+        '<int:project_id>/<int:version_id>/<string:webhook_type>',
     ])
 
     mode_handlers = {
