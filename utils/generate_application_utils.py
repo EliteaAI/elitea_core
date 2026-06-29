@@ -78,7 +78,7 @@ def fetch_project_resources(
                         "id": r.id,
                         "name": r.name,
                         "description": r.description,
-                        "type": r.agent_type or "agent",
+                        "type": "pipeline" if r.agent_type == "pipeline" else "agent",
                     },
                 )
                 for r in agent_rows

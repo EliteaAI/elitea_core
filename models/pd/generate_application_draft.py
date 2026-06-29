@@ -129,7 +129,7 @@ class GenerateApplicationDraftResponse(BaseModel):
                 item.get("type", "")
                 if isinstance(item, dict)
                 else getattr(item, "type", "")
-            )
+            ).lower()
             if item_type == "mcp":
                 mcp_items.append(item)
             elif item_type == "application":
@@ -161,7 +161,7 @@ class GenerateApplicationDraftResponse(BaseModel):
                 item.get("type", "")
                 if isinstance(item, dict)
                 else getattr(item, "type", "")
-            )
+            ).lower()
             if item_type == "pipeline":
                 pipeline_items.append(item)
             else:
