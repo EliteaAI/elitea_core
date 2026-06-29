@@ -283,9 +283,10 @@ def generate_predict_payload(
         }
 
         attached_skills = version_details.get('skills') or []
+        is_pipeline = version_details.get('agent_type') == 'pipeline'
 
         agent_instructions = version_details.get('instructions')
-        if isinstance(agent_instructions, str) and agent_instructions:
+        if isinstance(agent_instructions, str) and agent_instructions and not is_pipeline:
             cleaned_instructions, instruction_skills = consume_invoked_skills(
                 agent_instructions, attached_skills
             )
