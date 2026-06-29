@@ -50,7 +50,10 @@ class AttachmentManagerCreatePayload(BaseModel):
 
 class ChunkUploadPayload(BaseModel):
     """Payload for chunked file upload"""
-    file_id: str = Field(..., min_length=1, description="Unique identifier for the file upload session")
+    # file_id is joined with the chunk temp dir to build filesystem paths, so it
+    # is restricted to a safe charset to prevent path traversal (e.g. "../..").
+    file_id: str = Field(..., min_length=1, max_length=64, pattern=r'^[A-Za-z0-9_-]+$',
+                         description="Unique identifier for the file upload session")
     chunk_index: int = Field(..., ge=0, description="Index of the current chunk (0-based)")
     total_chunks: int = Field(..., gt=0, description="Total number of chunks for this file")
     file_name: str = Field(..., min_length=1, description="Original filename")
