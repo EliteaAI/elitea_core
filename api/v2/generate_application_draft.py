@@ -138,6 +138,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.debug("generate_application_draft: LLM output is not valid JSON: %s", raw_text[:300])
             return {"error": "LLM returned unparseable output"}, 422
 
+        # Override application types from authoritative source — don't trust LLM classification
+        app_type_by_id = {a["id"]: a["type"] for a in agents}
+        for item in parsed.get("suggested_applications") or []:
+            if isinstance(item, dict):
+                app_id = item.get("application_id") or item.get("id")
+                if app_id and app_id in app_type_by_id:
+                    item["type"] = app_type_by_id[app_id]
+
         try:
             draft = GenerateApplicationDraftResponse.model_validate(parsed)
         except ValidationError as e:
