@@ -18,6 +18,7 @@ from ..utils.skill_utils import (
     get_available_skills_for_agent,
     import_skill,
 )
+from ..utils.skill_export_import import ensure_base_version
 
 
 class RPC:
@@ -35,12 +36,14 @@ class RPC:
 
     @web.rpc("applications_import_skill", "applications_import_skill")
     def applications_import_skill(self, model_data: dict, project_id: int, author_id: int):
+        # ensure an imported skill has a 'base' version (additive). See ensure_base_version.
+        versions = ensure_base_version(model_data.get('versions') or [])
         try:
             imported = import_skill(
                 project_id=project_id,
                 name=model_data['name'],
                 description=model_data.get('description') or model_data['name'],
-                versions=model_data.get('versions') or [],
+                versions=versions,
                 author_id=author_id,
             )
         except Exception as ex:

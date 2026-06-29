@@ -36,6 +36,26 @@ def _select_version(skill_data: dict, version_name: Optional[str]) -> dict:
     )
 
 
+def ensure_base_version(raw_versions):
+    """Guarantee a 'base' version exists, additively (issue #5469).
+
+    Unlike import_skill_md (#5414) which COLLAPSES an imported skill to a
+    single 'base' version and drops the source version name, the agent
+    import path is ADDITIVE: it PREPENDS a 'base' clone of the first
+    version while PRESERVING all named versions (e.g. 'yoda'), so agent
+    versions that reference a named version still resolve. A skill_ref
+    with version_name=None then attaches to this base, matching
+    Skill.get_default_version()'s base fallback.
+    """
+    versions = list(raw_versions or [])
+    if not versions or any((v or {}).get('name') == DEFAULT_VERSION_NAME for v in versions):
+        return versions
+    # Spread is safe: import_skill whitelists payload keys, so no stray
+    # id/created_at/skill_id leaks and absent author_id -> importing user.
+    base = {**(versions[0] or {}), 'name': DEFAULT_VERSION_NAME}
+    return [base, *versions]
+
+
 def _normalize_tags(version: dict) -> List[str]:
     tags = version.get('tags') or []
     names: List[str] = []
