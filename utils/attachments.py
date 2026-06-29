@@ -781,7 +781,7 @@ def handle_chunked_upload(
 
     except Exception as e:
         log.error(f"Error handling chunked upload: {str(e)}")
-        # Cleanup on error
-        cleanup_chunks(file_id)
+        # Cleanup on error (use the validated file_id from the payload)
+        cleanup_chunks(chunk_payload.file_id)
         return {"error": f"Failed to process chunked upload: {str(e)}"}, 500
 
