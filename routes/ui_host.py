@@ -389,6 +389,9 @@ class Route:  # pylint: disable=E1101,R0903
         #
         if secure:
             ssl_context = ssl.create_default_context()
+            # Pin an explicit TLS floor (default context already negotiates >=1.2,
+            # but make it explicit so it holds across runtimes/OpenSSL defaults).
+            ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
             #
             if not ssl_verify:
                 ssl_context.check_hostname = False
