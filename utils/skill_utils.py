@@ -9,7 +9,7 @@ from tools import db, auth, serialize, rpc_tools
 
 from .utils import set_columns_as_attrs
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
-from ..models.all import Tag
+from ..models.all import Tag, ApplicationVersion
 from ..models.enums.all import SkillEntityTypes
 from ..models.pd.skill import (
     SkillCreateModel,
@@ -760,6 +760,67 @@ def detach_skills_for_entity_versions(session, entity_version_ids, entity_type: 
     if entity_type is not None:
         query = query.filter(EntitySkillMapping.entity_type == entity_type)
     return query.delete(synchronize_session=False)
+
+
+def copy_skill_mappings(
+    session,
+    source_version_id,
+    target_version_id: int,
+    application_id: int,
+) -> int:
+    """Copy every EntitySkillMapping from one application version to another, verbatim.
+
+    Used when a new agent version is created via "Save As Version" so the attached
+    skills (and their selected skill versions) carry over to the new version.
+
+    The copy is intentionally verbatim:
+    - No cap re-check — the source set already respects MAX_SKILLS_PER_AGENT, so a
+      source at the limit copies all of its rows.
+    - Deleted/soft-deleted skill_version rows are preserved as-is — the INSERT reuses
+      the same skill_version_id FK the source references, so there is no IntegrityError;
+      the source set is already valid.
+    - Every entity_type is copied (no 'agent' hardcode) so this stays correct if
+      pipeline skills ever ship.
+
+    Non-raising on any input: a bad/foreign/equal source id is silently a no-op
+    (returns 0), never an error — so a broad caller try/except cannot newly 500.
+
+    Returns the number of mappings copied.
+    """
+    # Coerce + guard the client-influenced source id to a no-op on bad input.
+    try:
+        source_version_id = int(source_version_id)
+    except (TypeError, ValueError):
+        return 0
+
+    if not source_version_id or source_version_id == target_version_id:
+        return 0
+
+    # Same-application guard: the mapping table has no application column, so verify
+    # the source version belongs to THIS application before copying. This blocks any
+    # cross-application / cross-tenant copy.
+    source_version = session.query(ApplicationVersion).filter(
+        ApplicationVersion.id == source_version_id,
+        ApplicationVersion.application_id == application_id,
+    ).one_or_none()
+    if source_version is None:
+        return 0
+
+    mappings = session.query(EntitySkillMapping).filter(
+        EntitySkillMapping.entity_version_id == source_version_id,
+    ).all()
+
+    count = 0
+    for m in mappings:
+        session.add(EntitySkillMapping(
+            entity_version_id=target_version_id,
+            entity_type=m.entity_type,
+            skill_id=m.skill_id,
+            skill_version_id=m.skill_version_id,
+        ))
+        count += 1
+    session.flush()
+    return count
 
 
 def validate_agent_skills(skills: List[dict]) -> None:

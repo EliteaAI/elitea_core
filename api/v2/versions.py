@@ -61,11 +61,18 @@ class ProjectAPI(api_tools.APIModeHandler):
             
     @register_openapi(
         name="Add a new named draft version to an existing agent or pipeline — version name must not be 'base', agent type must match the parent application",
-        description="Create a new version for an existing agent or pipeline.",
+        description=(
+            "Create a new version for an existing agent or pipeline. Optional body field "
+            "copy_skills_from_version_id (int): copies the skills of that source version "
+            "(same application only; invalid/foreign ids ignored) onto the new version."
+        ),
         request_body=ApplicationVersionCreateModel,
         mcp_description="""
         USE to add a new draft version to an existing agent or pipeline for iteration, testing, or staging variants.
-        
+
+        Optionally pass copy_skills_from_version_id (source version's numeric id, same application) to copy that
+        version's attached skills onto the new one — used by "Save As Version"; invalid/foreign ids are ignored.
+
         DO NOT USE when:
         - Application does not exist yet → use create_agent
         - Modifying an existing version → use update_version
@@ -100,6 +107,18 @@ class ProjectAPI(api_tools.APIModeHandler):
                     "ok": False,
                     "error": f"Application with id '{application_id}' doesn't exist"
                 }
+            
+            # Unlike tools, attached skills are NOT carried as content in the payload.
+            # Tools live in the client's form state and ride into the body as data
+            # (version_details.tools), so they are re-materialized from the request.
+            # Skills are version-scoped junction rows (EntitySkillMapping) that the form
+            # never holds, so instead of trusting a client-supplied skill list we take a
+            # pointer to the source version and copy its already-valid rows server-side.
+            # The id is popped off the RAW payload BEFORE model_validate (rather than
+            # living on ApplicationVersionCreateModel) so a malformed value can never
+            # raise ValidationError and 400 the entire version create; copy_skill_mappings
+            # int-coerces/guards it to a harmless no-op.
+            copy_id = payload.pop('copy_skills_from_version_id', None)
             try:
                 payload['user_id'] = payload['author_id'] = auth.current_user().get("id")
                 payload['project_id'] = project_id
@@ -111,7 +130,10 @@ class ProjectAPI(api_tools.APIModeHandler):
                     include_context=False,
                     include_input=False,
                 ), 400
-            version = create_version(version_data, application, session)
+            version = create_version(
+                version_data, application, session,
+                copy_skills_from_version_id=copy_id,
+            )
             # session.add(version)
             session.commit()
 

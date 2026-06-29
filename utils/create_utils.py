@@ -8,6 +8,7 @@ from ..models.pd.version import ApplicationVersionCreateModel, ApplicationVersio
 from typing import Generator, List
 
 from ..models.all import Tag
+from .skill_utils import copy_skill_mappings
 
 
 def get_existing_tags(
@@ -40,7 +41,9 @@ def generate_tags(
 def create_version(
         version_data: ApplicationVersionCreateModel | ApplicationVersionBaseCreateModel,
         application: Application | None = None,
-        session=None
+        session=None,
+        *,
+        copy_skills_from_version_id: int | None = None,
 ) -> ApplicationVersion:
     version_dict = version_data.dict(
         exclude_unset=True,
@@ -79,6 +82,17 @@ def create_version(
 
     session.add(application_version)
     session.flush()
+
+    # Carry attached skills onto the new version. The
+    # helper is same-application guarded and non-raising, so an absent/foreign id
+    # is a harmless no-op.
+    if copy_skills_from_version_id and application is not None:
+        copy_skill_mappings(
+            session=session,
+            source_version_id=copy_skills_from_version_id,
+            target_version_id=application_version.id,
+            application_id=application.id,
+        )
 
     # do not allow to create toolkits alongside with version
     # todo: comment this piece of code

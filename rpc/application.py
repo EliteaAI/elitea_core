@@ -1654,6 +1654,7 @@ class RPC:
                     version_data=new_version_pd,
                     application=application,
                     session=session,
+                    copy_skills_from_version_id=version_id,
                 )
                 session.commit()
 
