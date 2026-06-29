@@ -28,6 +28,18 @@ class VectorStoreCreate(BaseModel):
     )
 
 
+class VectorStoreDelete(BaseModel):
+    project_ids: list[int] | None = None
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"project_ids": [1, 2, 3]},
+            ]
+        }
+    )
+
+
 class AdminAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Create VectorStore Credentials",
@@ -67,13 +79,13 @@ class AdminAPI(api_tools.APIModeHandler):
         name="Delete VectorStore Credentials",
         description="Remove pgvector password and connection string secrets from specified projects (or all projects if none specified).",
         tags=["elitea_core/runtime"],
-        request_body=VectorStoreCreate,
+        request_body=VectorStoreDelete,
         available_to_users=True,
     )
     @auth.decorators.check_api(["runtime.plugins"])
     def delete(self, **kwargs):
         try:
-            parsed = VectorStoreCreate.model_validate(request.json)
+            parsed = VectorStoreDelete.model_validate(request.json or {})
         except ValidationError as e:
             return e.errors(), 400
 
