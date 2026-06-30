@@ -556,6 +556,9 @@ class Module(module.ModuleModel):
         from .models import all, folder, message_group, participants
         from .models.message_items import base, text, canvas, context
 
+        from .utils.distributed_lock import DistributedLock
+        self.distributed_lock = DistributedLock(self.get_redis_client())
+
         self.thread = Thread(
             target=self.listen_in_memory_event
         )
