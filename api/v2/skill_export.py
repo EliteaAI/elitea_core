@@ -8,6 +8,7 @@ from pylon.core.tools import log
 from ...utils.skill_export_import import export_skill_md
 from ...utils.skill_utils import SkillError
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.export_import_utils import content_disposition_attachment
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -56,7 +57,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             result['content'],
             mimetype='text/markdown; charset=utf-8',
             headers={
-                'Content-Disposition': f'attachment; filename="{result["filename"]}"',
+                'Content-Disposition': content_disposition_attachment(result["filename"]),
                 'Access-Control-Expose-Headers': 'Content-Disposition',
             },
         )
