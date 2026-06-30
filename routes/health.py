@@ -106,3 +106,25 @@ class Route:
             "status": overall_status,
             "checks": checks,
         }), code
+
+    @web.route("/health/events")
+    def health_events(self):
+        from ..utils.event_metrics import EventMetrics  # pylint: disable=C0415
+        try:
+            client = self.get_redis_client()
+            metrics = EventMetrics(client)
+            summary = metrics.get_summary()
+            streams = metrics.get_all_streams_health()
+            status = "healthy"
+            if summary.get("streams_unhealthy", 0) > 0:
+                status = "degraded"
+            return flask.jsonify({
+                "status": status,
+                "summary": summary,
+                "streams": streams,
+            }), 200
+        except Exception as e:
+            return flask.jsonify({
+                "status": "unhealthy",
+                "error": str(e),
+            }), 503
