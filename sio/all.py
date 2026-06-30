@@ -39,6 +39,7 @@ from ..models.pd.sio import (
 from ..utils.continue_message import continue_message
 from ..utils.participant_utils import get_entity_details, get_or_create_one
 from ..utils.canvas_utils import get_canvas_key, get_canvas_authors_key, get_shadow_key
+from ..utils.canvas_autosave import CanvasAutosave
 from ..utils.chat_constants import CANVAS_CONTENT_TTL, CANVAS_SHADOW_KEY_OFFSET_TTL
 from ..utils.sio_utils import get_chat_room, get_canvas_room, get_event_room
 from ..utils.sio_utils import SioEvents, SioValidationError
@@ -267,9 +268,15 @@ class SIO:
                         )
                         return
 
+                autosave = CanvasAutosave(client)
+                recovery_info = autosave.get_recovery_info(project_id, canvas_uuid)
+                detail_data = {'content': content}
+                if recovery_info["has_unsaved"] or recovery_info["last_saved_at"]:
+                    detail_data['recovery'] = recovery_info
+
                 self.context.sio.emit(
                     event=SioEvents.chat_canvas_detail,
-                    data={'content': content},
+                    data=detail_data,
                     room=sid
                 )
 
@@ -356,6 +363,8 @@ class SIO:
             canvas_shadow_key: str = get_shadow_key(canvas_key)
             client.set(canvas_shadow_key, "")
             client.expire(canvas_shadow_key, timedelta(seconds=CANVAS_CONTENT_TTL - CANVAS_SHADOW_KEY_OFFSET_TTL))
+
+            CanvasAutosave(client).mark_dirty(project_id, canvas_uuid)
 
         except redis.exceptions.ConnectionError as e:
             log.error(f"Redis connection error: {e}")
