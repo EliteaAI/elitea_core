@@ -374,45 +374,58 @@ class AuditLogger:
         return result
 
     def _archive_to_s3(self, conn, cutoff: datetime, batch_size: int) -> str:
-        """Upload expired entries as JSONL to S3.
+        """Upload expired entries as JSONL to S3 in batches.
 
-        Returns the S3 key of the uploaded archive.
+        Processes rows in pages of batch_size to avoid loading all into RAM.
+        Each batch is uploaded as a separate S3 object.
+
+        Returns the S3 key prefix used for the archive.
         """
         timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        s3_key = f"{self._s3_prefix}audit_{timestamp_str}.jsonl"
+        s3_prefix = f"{self._s3_prefix}audit_{timestamp_str}"
+        part = 0
+        last_id = None
 
-        select_q = (
-            audit_log_table.select()
-            .where(audit_log_table.c.timestamp < cutoff)
-            .order_by(audit_log_table.c.timestamp)
-        )
-
-        rows = conn.execute(select_q).fetchall()
-        if not rows:
-            return s3_key
-
-        lines = []
-        for row in rows:
-            entry = self._row_to_dict(row)
-            if entry.get("timestamp") and isinstance(entry["timestamp"], datetime):
-                entry["timestamp"] = entry["timestamp"].isoformat()
-            lines.append(json.dumps(entry, default=str))
-
-        body = "\n".join(lines) + "\n"
-
-        try:
-            self._s3.put_object(
-                Bucket=self._s3_bucket,
-                Key=s3_key,
-                Body=body.encode("utf-8"),
-                ContentType="application/x-ndjson",
+        while True:
+            select_q = (
+                audit_log_table.select()
+                .where(audit_log_table.c.timestamp < cutoff)
+                .order_by(audit_log_table.c.id)
+                .limit(batch_size)
             )
-        except Exception as e:
-            raise AuditRetentionError(
-                f"Failed to upload archive to S3: {e}"
-            ) from e
+            if last_id is not None:
+                select_q = select_q.where(audit_log_table.c.id > last_id)
 
-        return s3_key
+            rows = conn.execute(select_q).fetchall()
+            if not rows:
+                break
+
+            lines = []
+            for row in rows:
+                entry = self._row_to_dict(row)
+                if entry.get("timestamp") and isinstance(entry["timestamp"], datetime):
+                    entry["timestamp"] = entry["timestamp"].isoformat()
+                lines.append(json.dumps(entry, default=str))
+                last_id = row[0]  # id column
+
+            body = "\n".join(lines) + "\n"
+            s3_key = f"{s3_prefix}_part{part:04d}.jsonl"
+
+            try:
+                self._s3.put_object(
+                    Bucket=self._s3_bucket,
+                    Key=s3_key,
+                    Body=body.encode("utf-8"),
+                    ContentType="application/x-ndjson",
+                )
+            except Exception as e:
+                raise AuditRetentionError(
+                    f"Failed to upload archive batch {part} to S3: {e}"
+                ) from e
+
+            part += 1
+
+        return f"{s3_prefix}_part*.jsonl"
 
     def get_entry(self, event_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a single audit entry by its event_id.

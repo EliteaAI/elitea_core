@@ -8,22 +8,23 @@ crashes, preventing deadlocks.
 Usage:
     lock = DistributedLock(redis_client)
 
-    # Explicit acquire/release
-    if lock.acquire("my_resource", ttl=30):
+    # Explicit acquire/release — caller owns the token
+    token = lock.acquire("my_resource", ttl=30)
+    if token:
         try:
             do_work()
         finally:
-            lock.release("my_resource")
+            lock.release("my_resource", token)
 
-    # Context manager
-    with lock.lock("my_resource", ttl=30) as acquired:
-        if acquired:
+    # Context manager (recommended)
+    with lock.lock("my_resource", ttl=30) as token:
+        if token:
             do_work()
         else:
             handle_contention()
 
     # Blocking context manager (raises on timeout)
-    with lock.lock("my_resource", ttl=30, wait=True, wait_timeout=10):
+    with lock.lock("my_resource", ttl=30, wait=True, wait_timeout=10) as token:
         do_work()
 """
 
@@ -62,19 +63,24 @@ class LockNotAcquired(Exception):
 
 
 class DistributedLock:
-    """Redis-based distributed lock using SET NX EX + Lua release."""
+    """Redis-based distributed lock using SET NX EX + Lua release.
+
+    Thread-safe and WSGI-worker-safe: no shared mutable state. The lock token
+    is returned to the caller from acquire() and must be passed back to
+    release()/extend(). This ensures correct behavior across threads, greenlets,
+    and forked workers.
+    """
 
     def __init__(self, redis_client, key_prefix: str = "lock"):
         self._client = redis_client
         self._prefix = key_prefix
-        self._tokens = {}
         self._release_script = self._client.register_script(_RELEASE_SCRIPT)
         self._extend_script = self._client.register_script(_EXTEND_SCRIPT)
 
     def _key(self, name: str) -> str:
         return f"{self._prefix}:{name}"
 
-    def acquire(self, name: str, ttl: int = DEFAULT_TTL) -> bool:
+    def acquire(self, name: str, ttl: int = DEFAULT_TTL):
         """Try to acquire a lock (non-blocking).
 
         Args:
@@ -82,30 +88,30 @@ class DistributedLock:
             ttl: Time-to-live in seconds. Lock auto-releases after this.
 
         Returns:
-            True if lock was acquired, False if already held by another.
+            str: The lock token (UUID) if acquired — caller must keep this
+                 and pass to release()/extend(). None if lock is already held.
         """
         key = self._key(name)
         token = str(uuid.uuid4())
 
         acquired = self._client.set(key, token, nx=True, ex=ttl)
         if acquired:
-            self._tokens[name] = token
             log.info("Distributed lock '%s' acquired (ttl=%ds)", name, ttl)
-            return True
-        return False
+            return token
+        return None
 
-    def release(self, name: str) -> bool:
+    def release(self, name: str, token: str) -> bool:
         """Release a lock. Only succeeds if we hold it (token matches).
 
         Args:
             name: Lock name to release.
+            token: The token returned by acquire(). Must match Redis value.
 
         Returns:
             True if lock was released, False if we didn't hold it.
         """
-        token = self._tokens.pop(name, None)
-        if token is None:
-            log.warning("Attempted to release lock '%s' but no token found", name)
+        if not token:
+            log.warning("Attempted to release lock '%s' with empty token", name)
             return False
 
         key = self._key(name)
@@ -117,38 +123,39 @@ class DistributedLock:
             log.warning("Distributed lock '%s' release failed (expired or stolen)", name)
             return False
 
-    def extend(self, name: str, additional_ms: int) -> bool:
+    def extend(self, name: str, token: str, additional_ms: int) -> bool:
         """Extend the TTL of a lock we hold.
 
         Args:
             name: Lock name to extend.
+            token: The token returned by acquire().
             additional_ms: Milliseconds to set as new TTL.
 
         Returns:
             True if extended, False if we don't hold it.
         """
-        token = self._tokens.get(name)
-        if token is None:
+        if not token:
             return False
 
         key = self._key(name)
         result = self._extend_script(keys=[key], args=[token, str(additional_ms)])
         return bool(result)
 
-    def is_held(self, name: str) -> bool:
-        """Check if we currently hold a lock (token exists locally).
+    def is_locked(self, name: str) -> bool:
+        """Check if a lock is currently held by anyone.
 
         Args:
             name: Lock name to check.
 
         Returns:
-            True if we have a token for this lock.
+            True if the lock key exists in Redis.
         """
-        return name in self._tokens
+        key = self._key(name)
+        return bool(self._client.exists(key))
 
     def acquire_blocking(self, name: str, ttl: int = DEFAULT_TTL,
                          wait_timeout: float = DEFAULT_WAIT_TIMEOUT,
-                         poll_interval: float = DEFAULT_POLL_INTERVAL) -> bool:
+                         poll_interval: float = DEFAULT_POLL_INTERVAL):
         """Acquire a lock, blocking until available or timeout.
 
         Args:
@@ -158,15 +165,16 @@ class DistributedLock:
             poll_interval: Seconds between retry attempts.
 
         Returns:
-            True if acquired.
+            str: The lock token if acquired.
 
         Raises:
             LockNotAcquired: If timeout expires before lock is available.
         """
         start = time.time()
         while True:
-            if self.acquire(name, ttl):
-                return True
+            token = self.acquire(name, ttl)
+            if token:
+                return token
 
             elapsed = time.time() - start
             if elapsed + poll_interval > wait_timeout:
@@ -185,27 +193,27 @@ class DistributedLock:
             name: Lock name.
             ttl: TTL in seconds.
             wait: If True, block until acquired (raises LockNotAcquired on timeout).
-                  If False, yield True/False indicating acquisition status.
+                  If False, yield token or None indicating acquisition status.
             wait_timeout: Max seconds to wait (only when wait=True).
             poll_interval: Seconds between retries (only when wait=True).
 
         Yields:
-            bool: True if lock was acquired, False otherwise (only when wait=False).
-            When wait=True, always yields True or raises LockNotAcquired.
+            str or None: The lock token if acquired, None if not (only when wait=False).
+            When wait=True, always yields the token or raises LockNotAcquired.
 
         Raises:
             LockNotAcquired: When wait=True and timeout expires.
         """
         if wait:
-            self.acquire_blocking(name, ttl, wait_timeout, poll_interval)
+            token = self.acquire_blocking(name, ttl, wait_timeout, poll_interval)
             try:
-                yield True
+                yield token
             finally:
-                self.release(name)
+                self.release(name, token)
         else:
-            acquired = self.acquire(name, ttl)
+            token = self.acquire(name, ttl)
             try:
-                yield acquired
+                yield token
             finally:
-                if acquired:
-                    self.release(name)
+                if token:
+                    self.release(name, token)

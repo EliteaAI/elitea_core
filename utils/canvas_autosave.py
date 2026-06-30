@@ -1,7 +1,11 @@
 import json
+import re
 import time
 
 from pylon.core.tools import log
+
+
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
 
 AUTOSAVE_INTERVAL_SECONDS = 300  # 5 minutes
@@ -29,6 +33,8 @@ class CanvasAutosave:
         self._client = redis_client
 
     def _autosave_key(self, project_id, canvas_uuid):
+        if not _UUID_RE.match(str(canvas_uuid)):
+            raise ValueError(f"Invalid canvas_uuid format: {canvas_uuid!r}")
         return f"{AUTOSAVE_KEY_PREFIX}{project_id}_{canvas_uuid}"
 
     def mark_dirty(self, project_id, canvas_uuid):

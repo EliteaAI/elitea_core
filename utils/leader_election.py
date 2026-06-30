@@ -75,6 +75,7 @@ class LeaderElection:
         self._key = f"{key_prefix}:{service_name}"
         self._token = str(uuid.uuid4())
         self._is_leader = False
+        self._leader_lock = threading.Lock()
         self._running = False
         self._stop_event = threading.Event()
         self._thread = None
@@ -86,7 +87,8 @@ class LeaderElection:
     @property
     def is_leader(self) -> bool:
         """Whether this instance currently holds the leader lock."""
-        return self._is_leader
+        with self._leader_lock:
+            return self._is_leader
 
     @property
     def service_name(self) -> str:
@@ -139,8 +141,10 @@ class LeaderElection:
             self._key, self._token, nx=True, ex=self._ttl
         )
         if acquired:
-            if not self._is_leader:
+            with self._leader_lock:
+                was_leader = self._is_leader
                 self._is_leader = True
+            if not was_leader:
                 log.info(
                     "Leadership acquired: service=%s, token=%s",
                     self._service_name, self._token[:8],
@@ -157,8 +161,10 @@ class LeaderElection:
         )
         if result:
             return True
-        if self._is_leader:
+        with self._leader_lock:
+            was_leader = self._is_leader
             self._is_leader = False
+        if was_leader:
             log.warning(
                 "Leadership lost (refresh failed): service=%s",
                 self._service_name,
@@ -176,8 +182,9 @@ class LeaderElection:
     def _release_leadership(self):
         """Release the leader lock if we hold it."""
         result = self._release_script(keys=[self._key], args=[self._token])
-        was_leader = self._is_leader
-        self._is_leader = False
+        with self._leader_lock:
+            was_leader = self._is_leader
+            self._is_leader = False
         if result:
             log.info("Leadership released: service=%s", self._service_name)
         if was_leader:
@@ -196,8 +203,10 @@ class LeaderElection:
                     "Leader election error: service=%s, error=%r",
                     self._service_name, exc,
                 )
-                if self._is_leader:
+                with self._leader_lock:
+                    was_leader = self._is_leader
                     self._is_leader = False
+                if was_leader:
                     self._fire_lost()
             self._stop_event.wait(timeout=self._refresh_interval)
 

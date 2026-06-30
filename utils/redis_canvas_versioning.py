@@ -1,6 +1,8 @@
 import json
 import time
 
+from redis.exceptions import WatchError
+
 
 DEFAULT_TTL = 120
 MAX_RETRIES = 3
@@ -34,12 +36,12 @@ class RedisCanvasVersioning:
         return canvas_key + VERSION_KEY_SUFFIX
 
     def get_content(self, canvas_key):
-        """Get the current canvas content and version.
+        """Get the current canvas content and version atomically.
 
         Returns:
             tuple: (content: str or None, version: int)
         """
-        pipe = self._client.pipeline(transaction=False)
+        pipe = self._client.pipeline(transaction=True)
         pipe.get(canvas_key)
         pipe.get(self._version_key(canvas_key))
         content, version_raw = pipe.execute()
@@ -110,11 +112,9 @@ class RedisCanvasVersioning:
 
             try:
                 results = pipe.execute()
-            except Exception as e:
-                if "WatchError" in type(e).__name__ or "WATCH" in str(e):
-                    current = self._get_current_version(version_key)
-                    raise CanvasVersionConflict(canvas_key, current) from e
-                raise
+            except WatchError as e:
+                current = self._get_current_version(version_key)
+                raise CanvasVersionConflict(canvas_key, current) from e
 
             new_version = results[1]
             return new_version

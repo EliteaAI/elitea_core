@@ -566,6 +566,9 @@ class Module(module.ModuleModel):
         from .utils.distributed_lock import DistributedLock
         self.distributed_lock = DistributedLock(self.get_redis_client())
 
+        from .utils.cookie_hardening import register_cookie_hardening
+        register_cookie_hardening(self.descriptor.app)
+
         from .utils.tmp_cleanup import TmpCleanup
         self.tmp_cleanup = TmpCleanup()
         self.tmp_cleanup.start()

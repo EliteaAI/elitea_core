@@ -64,7 +64,7 @@ def _build_ssl_context():
     if cert_file and key_file and os.path.isfile(cert_file) and os.path.isfile(key_file):
         ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
     #
-    ctx.check_hostname = False
+    ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
     return ctx
 

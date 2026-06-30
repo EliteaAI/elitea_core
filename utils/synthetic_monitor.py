@@ -74,7 +74,8 @@ class SyntheticMonitor:
     """Runs synthetic health probes and tracks consecutive failures."""
 
     def __init__(self, redis_client, db_engine=None, health_url: str = "",
-                 sio_url: str = "", failure_threshold: int = DEFAULT_FAILURE_THRESHOLD):
+                 sio_url: str = "", webhook_url: str = "",
+                 failure_threshold: int = DEFAULT_FAILURE_THRESHOLD):
         """Initialize synthetic monitor.
 
         Args:
@@ -82,6 +83,8 @@ class SyntheticMonitor:
             db_engine: SQLAlchemy engine for PostgreSQL probe.
             health_url: URL for HTTP health probe (e.g. http://localhost:8080/health/live).
             sio_url: URL for Socket.IO probe (optional, skipped if empty).
+            webhook_url: Base URL for webhook endpoint probe (optional, skipped if empty).
+                         Example: http://localhost:8080/api/v2/elitea_core/webhook/prompt_lib/1/1/custom
             failure_threshold: Number of consecutive failures before alerting.
         """
         if failure_threshold < 1:
@@ -90,6 +93,7 @@ class SyntheticMonitor:
         self._db_engine = db_engine
         self._health_url = health_url
         self._sio_url = sio_url
+        self._webhook_url = webhook_url
         self._failure_threshold = failure_threshold
         self._probes = self._build_probe_list()
 
@@ -104,6 +108,8 @@ class SyntheticMonitor:
             probes.append(("http_health", self._probe_http_health))
         if self._sio_url:
             probes.append(("socketio", self._probe_socketio))
+        if self._webhook_url:
+            probes.append(("webhook", self._probe_webhook))
         return probes
 
     @property
@@ -196,14 +202,17 @@ class SyntheticMonitor:
     def _set_alert(self, probe_name: str, count: int, error: str) -> None:
         """Set alert state for a probe that has exceeded the failure threshold."""
         alert_key = f"{KEY_PREFIX_ALERT}:{probe_name}"
-        self._client.hset(alert_key, mapping={
+        pipe = self._client.pipeline(transaction=False)
+        pipe.hset(alert_key, mapping={
             "probe": probe_name,
             "consecutive_failures": str(count),
             "last_error": error[:200],
             "alerted_at": str(time.time()),
         })
-        self._client.expire(alert_key, PROBE_RESULT_TTL * 2)
-        self._client.sadd(ALERTS_SET_KEY, probe_name)
+        pipe.expire(alert_key, PROBE_RESULT_TTL * 2)
+        pipe.sadd(ALERTS_SET_KEY, probe_name)
+        pipe.expire(ALERTS_SET_KEY, PROBE_RESULT_TTL * 3)
+        pipe.execute()
 
     def get_status(self) -> dict:
         """Get current synthetic monitoring status for all probes.
@@ -386,6 +395,33 @@ class SyntheticMonitor:
             raise RuntimeError(f"Socket.IO handshake returned {e.code}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"Socket.IO unreachable: {e.reason}") from e
+
+    def _probe_webhook(self) -> None:
+        """Probe: POST to webhook endpoint with invalid token → expect 400.
+
+        A 400 response proves the endpoint is live and processing requests
+        (signature validation is happening). A 5xx or timeout means the
+        webhook handler is broken or unreachable.
+        """
+        import urllib.request  # pylint: disable=C0415
+        import urllib.error  # pylint: disable=C0415
+
+        data = b'{"probe": "synthetic_monitor"}'
+        req = urllib.request.Request(self._webhook_url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-Webhook-Token", "synthetic-probe-invalid-token")
+        req.add_header("User-Agent", "SyntheticMonitor/1.0")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    return
+                raise RuntimeError(f"Webhook probe unexpected status {resp.status}")
+        except urllib.error.HTTPError as e:
+            if e.code == 400:
+                return  # Expected — endpoint is live but rejected invalid signature
+            raise RuntimeError(f"Webhook endpoint returned {e.code}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Webhook endpoint unreachable: {e.reason}") from e
 
     @staticmethod
     def _decode_hash(raw: dict) -> dict:

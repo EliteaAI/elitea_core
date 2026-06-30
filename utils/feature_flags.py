@@ -45,7 +45,7 @@ _FALSE_VALUES = frozenset(("0", "false", "no"))
 
 def _hash_user_bucket(user_id) -> int:
     """Deterministically map a user_id to a bucket 0-99."""
-    digest = hashlib.md5(str(user_id).encode()).hexdigest()
+    digest = hashlib.sha256(str(user_id).encode()).hexdigest()
     return int(digest[:8], 16) % 100
 
 
@@ -124,7 +124,7 @@ class FeatureFlags:
         return _hash_user_bucket(user_id) < rollout_pct
 
     def set_flag(self, flag_name: str, enabled: bool, project_id=None,
-                 rollout_pct: int = 100) -> None:
+                 rollout_pct: int = 100, ttl: int = None) -> None:
         """Set a feature flag value in Redis.
 
         Args:
@@ -132,6 +132,7 @@ class FeatureFlags:
             enabled: Whether to enable or disable the flag
             project_id: Optional project ID for per-project scope (None = global)
             rollout_pct: Percentage of users to enable for (0-100, default 100)
+            ttl: Optional TTL in seconds (default 30 days; prevents orphaned keys)
         """
         if project_id is not None:
             key = f"feature_flags:{project_id}:{flag_name}"
@@ -140,7 +141,8 @@ class FeatureFlags:
 
         rollout_pct = max(0, min(100, rollout_pct))
         value = json.dumps({"enabled": enabled, "rollout_pct": rollout_pct})
-        self._client.set(key, value)
+        expire = ttl if ttl is not None else 2592000  # 30 days default
+        self._client.set(key, value, ex=expire)
         scope = f"project {project_id}" if project_id else "global"
         log.info(
             "Feature flag %s set to enabled=%s rollout_pct=%d (%s)",

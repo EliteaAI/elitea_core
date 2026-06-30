@@ -197,13 +197,11 @@ class DisconnectCleanup:
             self._pending_timers.pop(sid, None)
 
         pending_key = self._pending_key(sid)
-        still_pending = self._client.get(pending_key)
+        still_pending = self._client.getdel(pending_key)
 
         if not still_pending:
             log.debug("Cleanup for SID %s cancelled (key expired or reconnected)", sid)
             return
-
-        self._client.delete(pending_key)
         log.info("Executing disconnect cleanup for SID %s", sid)
 
         for callback in self._callbacks:

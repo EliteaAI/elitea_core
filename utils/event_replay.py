@@ -68,7 +68,7 @@ class EventReplay:
                       to_id: str = "+", target_stream: str = None,
                       dry_run: bool = False, delay_ms: int = DEFAULT_DELAY_MS,
                       batch_size: int = DEFAULT_BATCH_SIZE,
-                      max_messages: int = 0) -> dict:
+                      max_messages: int = 10000) -> dict:
         """Replay messages from a stream within a given ID range.
 
         Reads messages using XRANGE and re-publishes them to a target stream.
@@ -84,7 +84,7 @@ class EventReplay:
             delay_ms: Milliseconds to wait between each replayed message.
                      Set to 0 for no delay.
             batch_size: Number of messages to read per XRANGE call.
-            max_messages: Stop after this many messages. 0 means no limit.
+            max_messages: Stop after this many messages (default 10000, must be > 0).
 
         Returns:
             Dict with replay statistics:

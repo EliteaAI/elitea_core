@@ -40,6 +40,9 @@ def harden_set_cookie_header(header_value, secure=True, samesite='Lax'):
 
     if '; samesite' not in lower and ';samesite' not in lower:
         header_value += f'; SameSite={samesite}'
+        if samesite == 'None' and secure:
+            if '; secure' not in header_value.lower() and ';secure' not in header_value.lower():
+                header_value += '; Secure'
 
     return header_value
 
