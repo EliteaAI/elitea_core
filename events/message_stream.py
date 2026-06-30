@@ -149,8 +149,9 @@ class Event:
                     ).first()
                     if reply_to:
                         response_payload['reply_to_uuid'] = str(reply_to.uuid)
-                        if reply_to.message_items:
-                            response_payload['reply_to_first_message_item_uuid'] = str(reply_to.message_items[0].uuid)
+                        non_context_items = [i for i in reply_to.message_items if getattr(i, 'item_type', None) != 'context_message']
+                        if non_context_items:
+                            response_payload['reply_to_first_message_item_uuid'] = str(non_context_items[0].uuid)
                 if msg_group.conversation and msg_group.conversation.meta:
                     context_analytics = msg_group.conversation.meta.get('context_analytics')
                     if context_analytics:
