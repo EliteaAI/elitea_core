@@ -677,13 +677,12 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                     combined_tools.append(tool)
             result['internal_tools'] = combined_tools
 
-            # Pass MCP entity-link instruction as separate parameter when Elitea MCP Tools are enabled
+            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
             # Skip for pipelines: their instructions are YAML, not a text prompt
-            # This prevents MCP instructions from polluting empty/bare personalization prompts
             mcp_link_addon = get_mcp_entity_link_instructions(combined_tools)
             if mcp_link_addon and not _is_pipeline:
                 _vd = result.get('version_details') or {}
-                _vd['mcp_addon_instructions'] = mcp_link_addon
+                _vd['instructions'] = (_vd.get('instructions') or '') + mcp_link_addon
                 result['version_details'] = _vd
         # case ParticipantTypes.pipeline:
         #     # TODO: handle as simplified application, but should not ?
@@ -737,11 +736,10 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             if _ctx_enabled and _ctx_content:
                 result['instructions'] = prepend_project_context(result.get('instructions') or '', _ctx_content)
 
-            # Pass MCP entity-link instruction as separate parameter when Elitea MCP Tools are enabled
-            # This prevents MCP instructions from polluting empty/bare personalization prompts
+            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
             mcp_link_addon = get_mcp_entity_link_instructions(llm_chat_internal_tools)
             if mcp_link_addon:
-                result['mcp_addon_instructions'] = mcp_link_addon
+                result['instructions'] = (result.get('instructions') or '') + mcp_link_addon
 
             if predict_payload.llm_settings:
                 result['llm_settings'].update(predict_payload.llm_settings.dict(exclude_none=True))
