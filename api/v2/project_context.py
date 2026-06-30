@@ -24,8 +24,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api({
         "permissions": ["models.project_context.edit"],
         "recommended_roles": {
-            c.ADMINISTRATION_MODE: {"admin": True, "editor": False, "viewer": False},
-            c.DEFAULT_MODE: {"admin": True, "editor": False, "viewer": False},
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
     def put(self, project_id: int, **kwargs):
