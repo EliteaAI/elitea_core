@@ -168,6 +168,19 @@ class Route:
                 "error": str(e),
             }), 503
 
+    @web.route("/api/rate-limit/status")
+    def rate_limit_status(self):
+        from ..middleware.rate_limiter import RateLimiter, get_rate_limit_status  # pylint: disable=C0415
+
+        rate_limiter = getattr(self, "_rate_limiter", None)
+        if rate_limiter is None:
+            redis_client = self.get_redis_client()
+            rate_limiter = RateLimiter(redis_client=redis_client)
+            self._rate_limiter = rate_limiter
+
+        status = get_rate_limit_status(rate_limiter, flask.request)
+        return flask.jsonify(status), 200
+
     @web.route("/metrics")
     def prometheus_metrics(self):
         from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # pylint: disable=C0415
@@ -189,3 +202,84 @@ class Route:
             generate_latest(registry),
             mimetype=CONTENT_TYPE_LATEST,
         )
+
+    @web.route("/api/admin/feature-flags", methods=["GET"])
+    def admin_feature_flags_list(self):
+        from ..utils.feature_flags import FeatureFlags  # pylint: disable=C0415
+
+        if not self._check_admin_auth(flask.request):
+            return flask.jsonify({"error": "unauthorized"}), 401
+
+        project_id = flask.request.args.get("project_id")
+        if project_id is not None:
+            try:
+                project_id = int(project_id)
+            except (ValueError, TypeError):
+                return flask.jsonify({"error": "project_id must be an integer"}), 400
+
+        redis_client = self.get_redis_client()
+        ff = FeatureFlags(redis_client)
+        flags = ff.list_all_details(project_id=project_id)
+        return flask.jsonify({"flags": flags}), 200
+
+    @web.route("/api/admin/feature-flags", methods=["POST"])
+    def admin_feature_flags_set(self):
+        from ..utils.feature_flags import FeatureFlags, KNOWN_FLAGS  # pylint: disable=C0415
+
+        if not self._check_admin_auth(flask.request):
+            return flask.jsonify({"error": "unauthorized"}), 401
+
+        data = flask.request.get_json(silent=True)
+        if not data:
+            return flask.jsonify({"error": "request body must be JSON"}), 400
+
+        flag_name = data.get("flag_name")
+        if not flag_name:
+            return flask.jsonify({"error": "flag_name is required"}), 400
+        if flag_name not in KNOWN_FLAGS:
+            return flask.jsonify({
+                "error": f"unknown flag: {flag_name}",
+                "known_flags": list(KNOWN_FLAGS),
+            }), 400
+
+        enabled = data.get("enabled")
+        if enabled is None:
+            return flask.jsonify({"error": "enabled (bool) is required"}), 400
+
+        rollout_pct = data.get("rollout_pct", 100)
+        try:
+            rollout_pct = int(rollout_pct)
+        except (ValueError, TypeError):
+            return flask.jsonify({"error": "rollout_pct must be an integer 0-100"}), 400
+        if rollout_pct < 0 or rollout_pct > 100:
+            return flask.jsonify({"error": "rollout_pct must be 0-100"}), 400
+
+        project_id = data.get("project_id")
+        if project_id is not None:
+            try:
+                project_id = int(project_id)
+            except (ValueError, TypeError):
+                return flask.jsonify({"error": "project_id must be an integer"}), 400
+
+        redis_client = self.get_redis_client()
+        ff = FeatureFlags(redis_client)
+        ff.set_flag(flag_name, bool(enabled), project_id=project_id,
+                    rollout_pct=rollout_pct)
+
+        details = ff.get_flag_details(flag_name, project_id=project_id)
+        return flask.jsonify({"updated": details}), 200
+
+    def _check_admin_auth(self, request):
+        """Verify admin authorization via internal token or auth context."""
+        import os  # pylint: disable=C0415
+        internal_token = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
+        if internal_token:
+            header_token = request.headers.get("X-Internal-Token", "")
+            if header_token == internal_token and len(header_token) > 0:
+                return True
+
+        auth_info = getattr(flask.g, "auth_info", None)
+        if auth_info and auth_info.get("role") in ("admin", "superadmin"):
+            return True
+
+        return False
