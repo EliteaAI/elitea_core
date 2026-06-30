@@ -181,6 +181,25 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return res['data'], 201
 
+    @register_openapi(
+        name="Delete a specific agent or pipeline version by numeric version ID — optionally reassign dependents to a replacement version",
+        description="Deletes a specific agent or pipeline version. If the version is referenced by other entities, provide a replacement_version_id to reassign dependents before deletion.",
+        mcp_description="""
+        USE to permanently delete a draft or unpublished agent or pipeline version.
+        DO NOT USE when:
+        - You want to archive or unpublish a version → use update_version instead
+        - The version is currently published or embedded and referenced — provide replacement_version_id to safely reassign dependents
+
+        REQUIRED path params: project_id, application_id, version_id (the numeric version ID).
+        OPTIONAL query param: replacement_version_id — numeric ID of the version to reassign dependents to before deleting.
+
+        Example: DELETE .../prompt_lib/42/7/101?replacement_version_id=99
+        → Reassigns all references from version 101 to version 99, then deletes version 101.
+
+        Error: HTTP 400 with 'error' field — e.g. version not found or deletion not allowed.""",
+        tags=["elitea_core/applications"],
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.delete"],
         "recommended_roles": {
