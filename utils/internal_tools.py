@@ -560,7 +560,7 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
         return ''
     app_host = c.APP_HOST.rstrip('/')
     return (
-        f"\n\nReturn response text and ALWAYS include a link to the created entity:\n"
+        f"\n\nWhen you use an Elitea MCP tool to create an entity, include a link to it in your response:\n"
         f"- Agent: {app_host}/app/agents/all/<application_id>?viewMode=owner&name=<agent_name>\n"
         f"- Pipeline: {app_host}/app/pipelines/all/<application_id>?viewMode=owner&name=<pipeline_name>\n"
         f"- Tool: {app_host}/app/toolkits/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
