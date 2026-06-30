@@ -1898,58 +1898,61 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def collections_removal_migration(self, *args, **kwargs):
         """Drop prompt_collections table and applications.collections column for all or specific projects.
 
-        Param / payload fields:
-            project_ids (list[int], optional): projects to migrate; empty/omitted runs all projects.
-            dry_run (bool, optional): inspect without making changes. Default false.
+        Param format:
+            "project_id=<all|N>[;dry_run]"
 
-        Admin UI usage (param string):
-            {"dry_run": true}
-            {"project_ids": [1, 2], "dry_run": true}
+        Examples:
+            "project_id=all"          - migrate all projects
+            "project_id=all;dry_run"  - dry run across all projects (no DB writes)
+            "project_id=34"           - migrate project 34 only
+            "project_id=34;dry_run"   - dry run for project 34
+
+        Always run with dry_run first to verify expected changes.
         """
-        import json
-        from typing import Optional, List
-        from pydantic import BaseModel
         from plugins.admin.tasks.logs import make_logger
         from sqlalchemy import text
-        from tools import db, rpc_tools, serialize
-
-        class CollectionsRemovalPayload(BaseModel):
-            project_ids: Optional[List[int]] = []
-            dry_run: Optional[bool] = False
+        from tools import db, serialize
 
         with make_logger() as log:
-            raw_param = kwargs.get("param", "") or ""
-            payload = None
-            if raw_param.strip():
-                try:
-                    payload = json.loads(raw_param)
-                except (json.JSONDecodeError, ValueError):
-                    log.warning(
-                        "[collections_removal_migration] Could not parse param as JSON: %r",
-                        raw_param,
-                    )
+            param = kwargs.get("param", "") or ""
+            dry_run = False
+            project_id_filter = None
 
-            if payload is None:
-                migration_payload = CollectionsRemovalPayload.model_construct()
-            else:
-                migration_payload = CollectionsRemovalPayload.model_validate(payload)
+            for seg in [s.strip() for s in param.split(";")]:
+                seg_lower = seg.lower()
+                if seg_lower.startswith("project_id="):
+                    value = seg[len("project_id="):].strip()
+                    if value.lower() != "all":
+                        try:
+                            project_id_filter = int(value)
+                        except ValueError:
+                            log.warning(
+                                "collections_removal_migration: invalid project_id '%s', scanning all",
+                                value,
+                            )
+                elif seg_lower == "dry_run":
+                    dry_run = True
 
-            dry_run = migration_payload.dry_run
             mode = "DRY RUN" if dry_run else "LIVE"
-            log.info("[collections_removal_migration] [%s] Starting. Payload: %s", mode, migration_payload)
+            log.info(
+                "[collections_removal_migration] [%s] Starting. project_id=%s",
+                mode, project_id_filter if project_id_filter is not None else "all",
+            )
 
-            rpc = rpc_tools.RpcMixin().rpc.call
-
-            def get_all_project_ids():
-                return [i['id'] for i in rpc.project_list(filter_={'create_success': True})]
-
-            project_ids = migration_payload.project_ids or get_all_project_ids()
-            project_ids = sorted(set(project_ids))
+            try:
+                if project_id_filter is not None:
+                    projects = [{"id": project_id_filter}]
+                else:
+                    projects = self.context.rpc_manager.call.project_list() or []
+            except Exception:  # pylint: disable=W0703
+                log.exception("collections_removal_migration: failed to list projects")
+                return serialize({"error": "failed to list projects"})
 
             results = []
             errors = []
 
-            for pid in project_ids:
+            for project in projects:
+                pid = project["id"]
                 try:
                     with db.get_session(pid) as session:
                         has_collections_table = session.execute(text(
@@ -2011,58 +2014,61 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def datasource_removal_migration(self, *args, **kwargs):
         """Delete datasource participants and datasource-type tools for all or specific projects.
 
-        Param / payload fields:
-            project_ids (list[int], optional): projects to migrate; empty/omitted runs all projects.
-            dry_run (bool, optional): inspect without making changes. Default false.
+        Param format:
+            "project_id=<all|N>[;dry_run]"
 
-        Admin UI usage (param string):
-            {"dry_run": true}
-            {"project_ids": [1, 2], "dry_run": true}
+        Examples:
+            "project_id=all"          - migrate all projects
+            "project_id=all;dry_run"  - dry run across all projects (no DB writes)
+            "project_id=34"           - migrate project 34 only
+            "project_id=34;dry_run"   - dry run for project 34
+
+        Always run with dry_run first to verify expected changes.
         """
-        import json
-        from typing import Optional, List
-        from pydantic import BaseModel
         from plugins.admin.tasks.logs import make_logger
         from sqlalchemy import text
-        from tools import db, rpc_tools, serialize
-
-        class DatasourceRemovalPayload(BaseModel):
-            project_ids: Optional[List[int]] = []
-            dry_run: Optional[bool] = False
+        from tools import db, serialize
 
         with make_logger() as log:
-            raw_param = kwargs.get("param", "") or ""
-            payload = None
-            if raw_param.strip():
-                try:
-                    payload = json.loads(raw_param)
-                except (json.JSONDecodeError, ValueError):
-                    log.warning(
-                        "[datasource_removal_migration] Could not parse param as JSON: %r",
-                        raw_param,
-                    )
+            param = kwargs.get("param", "") or ""
+            dry_run = False
+            project_id_filter = None
 
-            if payload is None:
-                migration_payload = DatasourceRemovalPayload.model_construct()
-            else:
-                migration_payload = DatasourceRemovalPayload.model_validate(payload)
+            for seg in [s.strip() for s in param.split(";")]:
+                seg_lower = seg.lower()
+                if seg_lower.startswith("project_id="):
+                    value = seg[len("project_id="):].strip()
+                    if value.lower() != "all":
+                        try:
+                            project_id_filter = int(value)
+                        except ValueError:
+                            log.warning(
+                                "datasource_removal_migration: invalid project_id '%s', scanning all",
+                                value,
+                            )
+                elif seg_lower == "dry_run":
+                    dry_run = True
 
-            dry_run = migration_payload.dry_run
             mode = "DRY RUN" if dry_run else "LIVE"
-            log.info("[datasource_removal_migration] [%s] Starting. Payload: %s", mode, migration_payload)
+            log.info(
+                "[datasource_removal_migration] [%s] Starting. project_id=%s",
+                mode, project_id_filter if project_id_filter is not None else "all",
+            )
 
-            rpc = rpc_tools.RpcMixin().rpc.call
-
-            def get_all_project_ids():
-                return [i['id'] for i in rpc.project_list(filter_={'create_success': True})]
-
-            project_ids = migration_payload.project_ids or get_all_project_ids()
-            project_ids = sorted(set(project_ids))
+            try:
+                if project_id_filter is not None:
+                    projects = [{"id": project_id_filter}]
+                else:
+                    projects = self.context.rpc_manager.call.project_list() or []
+            except Exception:  # pylint: disable=W0703
+                log.exception("datasource_removal_migration: failed to list projects")
+                return serialize({"error": "failed to list projects"})
 
             results = []
             errors = []
 
-            for pid in project_ids:
+            for project in projects:
+                pid = project["id"]
                 try:
                     with db.get_session(pid) as session:
                         participants_count = session.execute(text(
