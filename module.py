@@ -403,6 +403,13 @@ class Module(module.ModuleModel):
                 'cron': '* * * * *',
                 'active': True
             })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                'rpc_func': 'chat_canvas_autosave',
+                'rpc_kwargs': {},
+                'name': 'canvas_autosave',
+                'cron': '*/5 * * * *',
+                'active': True
+            })
         except Empty:
             log.warning('No scheduling plugin found')
 
@@ -559,6 +566,10 @@ class Module(module.ModuleModel):
         from .utils.distributed_lock import DistributedLock
         self.distributed_lock = DistributedLock(self.get_redis_client())
 
+        from .utils.tmp_cleanup import TmpCleanup
+        self.tmp_cleanup = TmpCleanup()
+        self.tmp_cleanup.start()
+
         self.thread = Thread(
             target=self.listen_in_memory_event
         )
@@ -678,6 +689,9 @@ class Module(module.ModuleModel):
             shutdown_handler.execute()
         except Exception as e:
             log.warning("Graceful shutdown handler failed: %s", e)
+
+        if hasattr(self, 'tmp_cleanup'):
+            self.tmp_cleanup.stop()
 
         self.thread._stop()
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, computed_field, model_validator
 from .. import config as c
 from ..enums.all import CanvasTypes, ParticipantTypes
 from ...utils.canvas_utils import get_canvas_authors_key
+from ...utils.canvas_autosave import CanvasAutosave
 from ...utils.participant_utils import get_entity_details
 
 
@@ -47,6 +48,18 @@ class CanvasItemBase(BaseModel):
 class CanvasItemDetail(CanvasItemBase):
     latest_version: Optional[CanvasItemVersionDetail] = None
     item_type: Literal['canvas_message']
+
+    @computed_field
+    def last_saved_at(self) -> Optional[float]:
+        try:
+            from flask import request
+            if project_id := request.view_args.get('project_id'):
+                client = this.module.get_redis_client()
+                autosave = CanvasAutosave(client)
+                return autosave.get_last_saved_at(project_id, str(self.uuid))
+        except (RuntimeError, Exception):
+            pass
+        return None
 
     @computed_field
     def editors(self) -> list:

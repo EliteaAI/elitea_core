@@ -12,7 +12,9 @@ except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
 from ..models.enums.all import ParticipantTypes
 from ..models.message_items.canvas import CanvasMessageItem, CanvasVersionItem
 from ..utils.canvas_utils import (get_list_canvas_details, get_canvas_details,
-                                  get_origin_key_by_shadow, get_canvas_authors_key)
+                                  get_origin_key_by_shadow, get_canvas_authors_key,
+                                  get_canvas_key)
+from ..utils.canvas_autosave import CanvasAutosave
 from ..utils.participant_utils import get_entity_details
 from ..utils.sio_utils import get_chat_room
 from ..utils.sio_utils import SioEvents
@@ -146,3 +148,72 @@ class RPC:
                     current_editors=list(current_editors),
                     content=canvas_content
                 )
+
+    @web.rpc("chat_canvas_autosave", "canvas_autosave")
+    def canvas_autosave(self, **kwargs):
+        """Periodic auto-save: persists dirty canvases that haven't been saved in 5+ minutes.
+
+        Only saves canvases where:
+        1. The dirty flag is set (content changed since last save)
+        2. At least AUTOSAVE_INTERVAL_SECONDS (300s) have elapsed since last save
+
+        This is complementary to the existing per-minute save_versions cron —
+        autosave focuses on ensuring no edit goes unpersisted for more than 5 minutes.
+        """
+        redis_client = self.get_redis_client()
+        autosave = CanvasAutosave(redis_client)
+
+        dirty_canvases = autosave.get_dirty_canvases()
+        if not dirty_canvases:
+            return
+
+        saved_count = 0
+        skipped_count = 0
+
+        for canvas_info in dirty_canvases:
+            project_id = canvas_info["project_id"]
+            canvas_uuid = canvas_info["canvas_uuid"]
+
+            if not autosave.should_save(project_id, canvas_uuid):
+                skipped_count += 1
+                continue
+
+            canvas_key = get_canvas_key(int(project_id), canvas_uuid)
+            content = redis_client.get(canvas_key)
+            if content is None:
+                autosave.mark_saved(project_id, canvas_uuid)
+                continue
+
+            try:
+                with db.get_session(project_id) as session:
+                    canvas: CanvasMessageItem = session.query(CanvasMessageItem).filter(
+                        CanvasMessageItem.uuid == canvas_uuid
+                    ).first()
+                    if not canvas:
+                        log.warning(f"Canvas autosave: canvas {canvas_uuid} not found in DB")
+                        autosave.delete_state(project_id, canvas_uuid)
+                        continue
+
+                    if not canvas.latest_version or canvas.latest_version.canvas_content != content:
+                        canvas_version = CanvasVersionItem(
+                            canvas_content=content,
+                            canvas_item_id=canvas.id,
+                            code_language=(
+                                canvas.latest_version.code_language
+                                if canvas.latest_version else None
+                            ),
+                        )
+                        session.add(canvas_version)
+                        session.commit()
+                        saved_count += 1
+
+                    autosave.mark_saved(project_id, canvas_uuid)
+
+            except Exception as exc:
+                log.error(f"Canvas autosave failed for {canvas_uuid}: {exc}")
+
+        if saved_count or skipped_count:
+            log.info(
+                f"Canvas autosave: saved={saved_count}, skipped={skipped_count}, "
+                f"total_dirty={len(dirty_canvases)}"
+            )
