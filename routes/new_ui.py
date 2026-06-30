@@ -40,6 +40,11 @@ class Route:
             idx_data = idx_data.replace(
                 'href="./assets', f'href="{vite_base_uri}/assets'
             )
+            # Fix favicon path: replace relative path with absolute
+            idx_data = idx_data.replace(
+                'href="./favicon.svg"',
+                f'href="{vite_base_uri}/favicon.svg"'
+            )
             idx_data = idx_data.replace(
                 '<!-- elitea_ui_config -->',
                 f"<script>window.elitea_ui_config = JSON.parse('{elitea_ui_config}');</script>"
