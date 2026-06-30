@@ -159,3 +159,11 @@ Run admin task migrate_ado_project_to_toolkit with param: project_id=all
 # Run dry_run first to verify expected changes.
 Run admin task migrate_toolkit_selected_tools with params: artifact;get_file_type>get_file_metadata;project_id=all;dry_run
 Run admin task migrate_toolkit_selected_tools with params: artifact;get_file_type>get_file_metadata;project_id=all
+
+# Bug #5357: Rewrite legacy Confluence api_version='3' -> '2' in toolkit settings
+# The api_version Literal was renumbered (old ['Auto','2','3'] -> new ['Auto','1','2']),
+# so toolkits stored with api_version='3' now fail Pydantic validation in the UI.
+# Only the unambiguous '3' -> '2' case is migrated; existing '2' values are left alone.
+# Idempotent; run dry_run first to verify expected changes.
+Run admin task migrate_confluence_api_version with param: project_id=all;dry_run
+Run admin task migrate_confluence_api_version with param: project_id=all

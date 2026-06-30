@@ -289,6 +289,9 @@ class Module(module.ModuleModel):
                 "migrate_jira_confluence_hosting", self.migrate_jira_confluence_hosting
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_confluence_api_version", self.migrate_confluence_api_version
+            )
+            this.for_module("admin").module.register_admin_task(
                 "migrate_mcp_client_secrets", self.migrate_mcp_client_secrets
             )
             this.for_module("admin").module.register_admin_task(
@@ -692,6 +695,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_jira_confluence_hosting", self.migrate_jira_confluence_hosting
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_confluence_api_version", self.migrate_confluence_api_version
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_mcp_client_secrets", self.migrate_mcp_client_secrets
