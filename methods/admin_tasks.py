@@ -1943,7 +1943,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 if project_id_filter is not None:
                     projects = [{"id": project_id_filter}]
                 else:
-                    projects = self.context.rpc_manager.call.project_list() or []
+                    projects = self.context.rpc_manager.timeout(120).project_list() or []
             except Exception:  # pylint: disable=W0703
                 log.exception("collections_removal_migration: failed to list projects")
                 return serialize({"error": "failed to list projects"})
@@ -2059,7 +2059,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 if project_id_filter is not None:
                     projects = [{"id": project_id_filter}]
                 else:
-                    projects = self.context.rpc_manager.call.project_list() or []
+                    projects = self.context.rpc_manager.timeout(120).project_list() or []
             except Exception:  # pylint: disable=W0703
                 log.exception("datasource_removal_migration: failed to list projects")
                 return serialize({"error": "failed to list projects"})
