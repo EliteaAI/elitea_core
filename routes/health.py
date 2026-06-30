@@ -128,3 +128,18 @@ class Route:
                 "status": "unhealthy",
                 "error": str(e),
             }), 503
+
+    @web.route("/health/streams")
+    def health_streams(self):
+        from ..utils.streams_monitor import StreamsMonitor  # pylint: disable=C0415
+        try:
+            client = self.get_redis_client()
+            monitor = StreamsMonitor(client)
+            status = monitor.get_streams_status()
+            code = 200 if status["status"] == "healthy" else 503
+            return flask.jsonify(status), code
+        except Exception as e:
+            return flask.jsonify({
+                "status": "unhealthy",
+                "error": str(e),
+            }), 503
