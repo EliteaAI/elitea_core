@@ -167,3 +167,25 @@ class Route:
                 "status": "unhealthy",
                 "error": str(e),
             }), 503
+
+    @web.route("/metrics")
+    def prometheus_metrics(self):
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # pylint: disable=C0415
+        from ..utils.prometheus_metrics import MetricsCollector, get_registry  # pylint: disable=C0415
+
+        collector = getattr(self, "_metrics_collector", None)
+        if collector is None:
+            redis_client = self.get_redis_client()
+            sio_server = getattr(self.context, "sio", None)
+            collector = MetricsCollector(
+                sio_server=sio_server,
+                redis_client=redis_client,
+            )
+            self._metrics_collector = collector
+            self._metrics_registry = get_registry(collector)
+
+        registry = self._metrics_registry
+        return flask.Response(
+            generate_latest(registry),
+            mimetype=CONTENT_TYPE_LATEST,
+        )
