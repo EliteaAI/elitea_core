@@ -560,8 +560,9 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
         return ''
     app_host = c.APP_HOST.rstrip('/')
     return (
-        f"\n\nYou have access to Elitea MCP tools. Only use them when the user explicitly requests it. "
-        f"Do not proactively offer, suggest, or perform any MCP tool actions unless asked.\n"
+        f"\n\nYou have access to Elitea MCP tools and may have project context available. "
+        f"Only use MCP tools and only reference project context when the user explicitly requests it. "
+        f"Do not proactively offer, suggest, or perform any MCP tool actions, and do not mention project details unless asked.\n"
         f"When you use an Elitea MCP tool to create an entity, include a link to it in your response:\n"
         f"- Agent: {app_host}/app/agents/all/<application_id>?viewMode=owner&name=<agent_name>\n"
         f"- Pipeline: {app_host}/app/pipelines/all/<application_id>?viewMode=owner&name=<pipeline_name>\n"
