@@ -68,13 +68,9 @@ class IdempotencyStore:
     def check_and_set(self, key: str, result, ttl: int = None) -> tuple:
         """Atomically check for existing result or set a new one.
 
-        This is NOT truly atomic across check+set (Redis doesn't support
-        conditional SET with GET in one command for complex values). Instead,
-        use the two-phase approach: get() then set() with the decorator
-        handling the flow. This method is a convenience for the common pattern:
-
-        - If key exists in Redis: return (True, cached_result)
-        - If key absent: store result, return (False, result)
+        Uses SET NX EX with GET flag (Redis 6.2+) for atomic check-and-set.
+        If the key already exists, the existing value is returned without
+        modification. If absent, the result is stored atomically.
 
         Args:
             key: Full idempotency key (operation:hash).
@@ -89,6 +85,11 @@ class IdempotencyStore:
         ttl = ttl if ttl is not None else self._default_ttl
         full_key = f"{self._prefix}:{key}" if not key.startswith(self._prefix) else key
 
+        serialized = json.dumps(result, default=str)
+        was_set = self._client.set(full_key, serialized, nx=True, ex=ttl)
+        if was_set:
+            return (False, result)
+
         existing = self._client.get(full_key)
         if existing is not None:
             try:
@@ -99,8 +100,6 @@ class IdempotencyStore:
                     return (True, existing.decode(errors="replace"))
                 return (True, existing)
 
-        serialized = json.dumps(result, default=str)
-        self._client.set(full_key, serialized, ex=ttl)
         return (False, result)
 
     def get(self, operation: str, params_hash: str):

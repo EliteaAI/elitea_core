@@ -1,3 +1,5 @@
+import hmac
+import os
 import time
 
 import flask
@@ -22,36 +24,24 @@ class Route:
                 "latency_ms": round((time.time() - redis_start) * 1000, 1),
             }
         except Exception as e:
+            log.error("Health check: Redis ping failed: %s", e)
             checks["redis"] = {
                 "status": "unhealthy",
-                "error": str(e),
                 "latency_ms": round((time.time() - redis_start) * 1000, 1),
             }
             overall_status = "unhealthy"
 
-        # Sentinel check (if configured)
+        # Sentinel check (if configured) — only report status, not topology
         sentinel_info = self.get_sentinel_info()
         if sentinel_info is not None:
             if sentinel_info.get("error"):
-                checks["sentinel"] = {
-                    "status": "unhealthy",
-                    "error": sentinel_info["error"],
-                }
+                checks["sentinel"] = {"status": "unhealthy"}
                 overall_status = "unhealthy"
             elif sentinel_info["sentinels_reachable"] == 0:
-                checks["sentinel"] = {
-                    "status": "unhealthy",
-                    "error": "no sentinels reachable",
-                    "configured": sentinel_info["sentinels_configured"],
-                }
+                checks["sentinel"] = {"status": "unhealthy"}
                 overall_status = "unhealthy"
             else:
-                checks["sentinel"] = {
-                    "status": "ok",
-                    "master": sentinel_info["master_address"],
-                    "sentinels_reachable": sentinel_info["sentinels_reachable"],
-                    "sentinels_configured": sentinel_info["sentinels_configured"],
-                }
+                checks["sentinel"] = {"status": "ok"}
 
         # PostgreSQL check
         pg_start = time.time()
@@ -64,9 +54,9 @@ class Route:
                 "latency_ms": round((time.time() - pg_start) * 1000, 1),
             }
         except Exception as e:
+            log.error("Health check: PostgreSQL failed: %s", e)
             checks["postgres"] = {
                 "status": "unhealthy",
-                "error": str(e),
                 "latency_ms": round((time.time() - pg_start) * 1000, 1),
             }
             overall_status = "unhealthy"
@@ -100,9 +90,9 @@ class Route:
                 "latency_ms": round((time.time() - redis_start) * 1000, 1),
             }
         except Exception as e:
+            log.error("Health check: Redis ping failed: %s", e)
             checks["redis"] = {
                 "status": "unhealthy",
-                "error": str(e),
                 "latency_ms": round((time.time() - redis_start) * 1000, 1),
             }
             overall_status = "unhealthy"
@@ -118,9 +108,9 @@ class Route:
                 "latency_ms": round((time.time() - pg_start) * 1000, 1),
             }
         except Exception as e:
+            log.error("Health check: PostgreSQL failed: %s", e)
             checks["postgres"] = {
                 "status": "unhealthy",
-                "error": str(e),
                 "latency_ms": round((time.time() - pg_start) * 1000, 1),
             }
             overall_status = "unhealthy"
@@ -133,6 +123,9 @@ class Route:
 
     @web.route("/health/events")
     def health_events(self):
+        if not self._check_admin_auth(flask.request):
+            return flask.jsonify({"error": "unauthorized"}), 401
+
         from ..utils.event_metrics import EventMetrics  # pylint: disable=C0415
         try:
             client = self.get_redis_client()
@@ -148,13 +141,14 @@ class Route:
                 "streams": streams,
             }), 200
         except Exception as e:
-            return flask.jsonify({
-                "status": "unhealthy",
-                "error": str(e),
-            }), 503
+            log.error("Health events endpoint failed: %s", e)
+            return flask.jsonify({"status": "unhealthy"}), 503
 
     @web.route("/health/streams")
     def health_streams(self):
+        if not self._check_admin_auth(flask.request):
+            return flask.jsonify({"error": "unauthorized"}), 401
+
         from ..utils.streams_monitor import StreamsMonitor  # pylint: disable=C0415
         try:
             client = self.get_redis_client()
@@ -163,13 +157,14 @@ class Route:
             code = 200 if status["status"] == "healthy" else 503
             return flask.jsonify(status), code
         except Exception as e:
-            return flask.jsonify({
-                "status": "unhealthy",
-                "error": str(e),
-            }), 503
+            log.error("Health streams endpoint failed: %s", e)
+            return flask.jsonify({"status": "unhealthy"}), 503
 
-    @web.route("/api/rate-limit/status")
+    @web.route("/api/admin/rate-limit/status")
     def rate_limit_status(self):
+        if not self._check_admin_auth(flask.request):
+            return flask.jsonify({"error": "unauthorized"}), 401
+
         from ..middleware.rate_limiter import RateLimiter, get_rate_limit_status  # pylint: disable=C0415
 
         rate_limiter = getattr(self, "_rate_limiter", None)
@@ -183,6 +178,9 @@ class Route:
 
     @web.route("/metrics")
     def prometheus_metrics(self):
+        if not self._check_admin_auth(flask.request):
+            return flask.Response("Unauthorized", status=401)
+
         from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # pylint: disable=C0415
         from ..utils.prometheus_metrics import MetricsCollector, get_registry  # pylint: disable=C0415
 
@@ -271,11 +269,10 @@ class Route:
 
     def _check_admin_auth(self, request):
         """Verify admin authorization via internal token or auth context."""
-        import os  # pylint: disable=C0415
         internal_token = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
         if internal_token:
             header_token = request.headers.get("X-Internal-Token", "")
-            if header_token == internal_token and len(header_token) > 0:
+            if header_token and hmac.compare_digest(header_token, internal_token):
                 return True
 
         auth_info = getattr(flask.g, "auth_info", None)

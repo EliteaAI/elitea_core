@@ -203,19 +203,11 @@ class DeadLetterQueue:
         parsed = self._parse_dlq_entry(dlq_message_id, fields)
         original_data = parsed.get("data", {})
 
-        original_stream_key = original_stream
-        if not original_stream_key.startswith(STREAM_PREFIX):
-            original_stream_key = f"{STREAM_PREFIX}{original_stream_key}"
-
         try:
-            payload = {
-                "data": json.dumps(original_data),
-                "published_at": str(time.time()),
-                "retried_from_dlq": dlq_message_id,
-            }
-            new_msg_id = self._client.xadd(original_stream_key, payload)
-            if isinstance(new_msg_id, bytes):
-                new_msg_id = new_msg_id.decode("utf-8")
+            retry_payload = dict(original_data) if isinstance(original_data, dict) else {"raw": str(original_data)}
+            retry_payload["_retried_from_dlq"] = dlq_message_id
+            original_producer = StreamProducer(self._client)
+            new_msg_id = original_producer.publish(original_stream, retry_payload)
         except Exception as e:
             log.error(
                 "Failed to re-publish DLQ message %s to %s: %s",
@@ -285,38 +277,41 @@ class DeadLetterQueue:
             )
             return False
 
-    def discard_all(self, original_stream: str) -> int:
-        """Remove all messages from a DLQ stream.
+    def discard_all(self, original_stream: str, batch_size: int = 500) -> int:
+        """Remove all messages from a DLQ stream in batches.
 
         Args:
             original_stream: The source stream name.
+            batch_size: Number of IDs to delete per XDEL call.
 
         Returns:
             Number of messages discarded.
         """
         key = self._dlq_stream_key(original_stream)
+        total_deleted = 0
         try:
-            length = self._client.xlen(key)
-            if length == 0:
-                return 0
-            entries = self._client.xrange(key, count=length)
-            if not entries:
-                return 0
-            ids = []
-            for msg_id, _ in entries:
-                if isinstance(msg_id, bytes):
-                    msg_id = msg_id.decode("utf-8")
-                ids.append(msg_id)
-            if ids:
-                deleted = self._client.xdel(key, *ids)
+            while True:
+                entries = self._client.xrange(key, count=batch_size)
+                if not entries:
+                    break
+                ids = []
+                for msg_id, _ in entries:
+                    if isinstance(msg_id, bytes):
+                        msg_id = msg_id.decode("utf-8")
+                    ids.append(msg_id)
+                if ids:
+                    deleted = self._client.xdel(key, *ids)
+                    total_deleted += deleted
+                else:
+                    break
+            if total_deleted > 0:
                 log.info(
-                    "Discarded %d messages from DLQ stream %s", deleted, key
+                    "Discarded %d messages from DLQ stream %s", total_deleted, key
                 )
-                return deleted
-            return 0
+            return total_deleted
         except Exception as e:
             log.error("Failed to discard all from DLQ %s: %s", key, e)
-            return 0
+            return total_deleted
 
     def get_message(self, original_stream: str, dlq_message_id: str) -> dict:
         """Get a specific DLQ message by ID.

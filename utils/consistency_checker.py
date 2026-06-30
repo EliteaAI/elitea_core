@@ -95,6 +95,15 @@ class ConsistencyChecker:
         self._client = redis_client
         self._db_engine = db_engine
         self._session_key_pattern = session_key_pattern
+        _ALLOWED_SESSION_TABLES = frozenset((
+            "auth_session", "flask_session", "sessions",
+            "user_sessions", "pylon_sessions",
+        ))
+        if session_table not in _ALLOWED_SESSION_TABLES:
+            raise ValueError(
+                f"session_table must be one of {sorted(_ALLOWED_SESSION_TABLES)}, "
+                f"got: {session_table!r}"
+            )
         self._session_table = session_table
         self._checks = self._build_check_list()
 

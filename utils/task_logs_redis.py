@@ -101,6 +101,8 @@ class TaskLogsRedis:
     def get_all(self, task_id: str) -> list:
         """Get all log entries for a task in chronological order.
 
+        Capped at max_entries to prevent unbounded memory usage.
+
         Args:
             task_id: The task identifier
 
@@ -108,7 +110,7 @@ class TaskLogsRedis:
             List of log record dicts ordered by timestamp ascending
         """
         key = self._key(task_id)
-        members = self._client.zrange(key, 0, -1)
+        members = self._client.zrange(key, -self._max_entries, -1)
         result = []
         for member in members:
             raw = member if isinstance(member, str) else member.decode()
@@ -122,7 +124,7 @@ class TaskLogsRedis:
         """Get log entries after a given timestamp.
 
         Useful for incremental polling by clients that already have
-        older entries cached locally.
+        older entries cached locally. Capped at max_entries.
 
         Args:
             task_id: The task identifier
@@ -133,7 +135,8 @@ class TaskLogsRedis:
         """
         key = self._key(task_id)
         members = self._client.zrangebyscore(
-            key, f"({since_timestamp}", "+inf"
+            key, f"({since_timestamp}", "+inf",
+            start=0, num=self._max_entries,
         )
         result = []
         for member in members:

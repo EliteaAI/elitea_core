@@ -35,6 +35,7 @@ from pylon.core.tools import log
 
 METRICS_KEY_PREFIX = "metrics:streams"
 STREAMS_REGISTRY_KEY = "metrics:streams:_registry"
+METRICS_TTL = 604800  # 7 days — auto-expire if stream stops producing
 
 
 class EventMetrics:
@@ -66,6 +67,7 @@ class EventMetrics:
         pipe = self._client.pipeline(transaction=False)
         pipe.hincrby(key, "messages_published", count)
         pipe.hset(key, "last_published_at", str(time.time()))
+        pipe.expire(key, METRICS_TTL)
         pipe.execute()
         self._register_stream(stream_name)
 
@@ -80,6 +82,7 @@ class EventMetrics:
         pipe = self._client.pipeline(transaction=False)
         pipe.hincrby(key, "messages_consumed", count)
         pipe.hset(key, "last_consumed_at", str(time.time()))
+        pipe.expire(key, METRICS_TTL)
         pipe.execute()
 
     def record_failed(self, stream_name: str, count: int = 1) -> None:
@@ -93,6 +96,7 @@ class EventMetrics:
         pipe = self._client.pipeline(transaction=False)
         pipe.hincrby(key, "messages_failed", count)
         pipe.hset(key, "last_failed_at", str(time.time()))
+        pipe.expire(key, METRICS_TTL)
         pipe.execute()
 
     def update_pending(self, stream_name: str, count: int) -> None:

@@ -182,7 +182,7 @@ class StreamConsumer:
             self._client.xgroup_create(
                 self._stream_key,
                 self._group,
-                id="0",
+                id="$",
                 mkstream=True,
             )
             log.info(

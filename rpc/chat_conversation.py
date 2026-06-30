@@ -263,9 +263,10 @@ class RPC:
         """
         lock_name = f"conversation_create:{project_id}:{user_id}"
         lock = getattr(self, 'distributed_lock', None)
+        lock_token = None
         if lock:
             try:
-                lock.acquire_blocking(lock_name, ttl=10, wait_timeout=5, poll_interval=0.2)
+                lock_token = lock.acquire_blocking(lock_name, ttl=10, wait_timeout=5, poll_interval=0.2)
             except LockNotAcquired:
                 log.warning("Conversation creation lock contention (RPC): %s", lock_name)
                 return {'error': 'Concurrent conversation creation in progress', 'retry_after': 2}
@@ -284,8 +285,8 @@ class RPC:
                 apply_context_strategy=apply_context_strategy,
             )
         finally:
-            if lock:
-                lock.release(lock_name)
+            if lock and lock_token:
+                lock.release(lock_name, lock_token)
 
     def _do_create_conversation(
         self,

@@ -141,9 +141,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         lock_name = f"conversation_create:{project_id}:{user_id}"
         lock = getattr(self.module, 'distributed_lock', None)
+        lock_token = None
         if lock:
             try:
-                lock.acquire_blocking(lock_name, ttl=10, wait_timeout=5, poll_interval=0.2)
+                lock_token = lock.acquire_blocking(lock_name, ttl=10, wait_timeout=5, poll_interval=0.2)
             except LockNotAcquired:
                 log.warning("Conversation creation lock contention: %s", lock_name)
                 return {"error": "Concurrent conversation creation in progress", "retry_after": 2}, 409
@@ -151,8 +152,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         try:
             return self._create_conversation(project_id, user_id, parsed)
         finally:
-            if lock:
-                lock.release(lock_name)
+            if lock and lock_token:
+                lock.release(lock_name, lock_token)
 
     def _create_conversation(self, project_id, user_id, parsed):
         # Fetch user's personalization settings
