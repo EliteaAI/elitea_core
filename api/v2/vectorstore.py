@@ -46,7 +46,7 @@ class AdminAPI(api_tools.APIModeHandler):
         description="Create pgvector credentials for one or more projects and store connection strings in secrets.",
         tags=["elitea_core/runtime"],
         request_body=VectorStoreCreate,
-        available_to_users=True,
+        available_to_users=False,
     )
     @auth.decorators.check_api(["runtime.plugins"])
     def post(self, **kwargs):
@@ -80,7 +80,7 @@ class AdminAPI(api_tools.APIModeHandler):
         description="Remove pgvector password and connection string secrets from specified projects (or all projects if none specified).",
         tags=["elitea_core/runtime"],
         request_body=VectorStoreDelete,
-        available_to_users=True,
+        available_to_users=False,
     )
     @auth.decorators.check_api(["runtime.plugins"])
     def delete(self, **kwargs):
