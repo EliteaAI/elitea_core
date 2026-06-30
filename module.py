@@ -419,6 +419,16 @@ class Module(module.ModuleModel):
         except Exception as e:
             log.warning('Failed to register provider RPC method: %s', e)
 
+        try:
+            from .utils.state_reconstruction import StateReconstruction
+            reconstruction = StateReconstruction(
+                redis_client=self.get_redis_client(),
+                event_node=self.event_node,
+            )
+            reconstruction.run()
+        except Exception as exc:
+            log.warning("State reconstruction failed (non-fatal): %s", exc)
+
         self._scaling_ready = True
 
     def init(self):
