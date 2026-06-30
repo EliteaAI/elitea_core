@@ -21,7 +21,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Stop Task",
         description="Stop a running chat task for a message group.",
         tags=["elitea_core/runtime"],
-        available_to_users=True,
+        available_to_users=False,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.task.delete"],
