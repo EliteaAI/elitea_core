@@ -14,6 +14,11 @@ Redis key layout:
   stream:{stream_name}  — the stream itself (XADD entries)
   Consumer group created on first use with XGROUP CREATE ... MKSTREAM
 
+Retention policy (MAXLEN applied on every XADD, approximate ~ for performance):
+  - work streams: 10000 messages (~24h of data at typical throughput)
+  - notification streams: 1000 messages (ephemeral, loss acceptable)
+  - dlq streams: 50000 messages (keep failures longer for inspection)
+
 Usage:
     producer = StreamProducer(redis_client)
     producer.publish("work:task_distribution", {"task_id": "abc", "type": "predict"})
@@ -42,22 +47,44 @@ class StreamProducer:
     """Publishes events to Redis Streams with MAXLEN trimming."""
 
     def __init__(self, redis_client, maxlen: int = DEFAULT_MAXLEN,
-                 approximate_trim: bool = True):
+                 approximate_trim: bool = True,
+                 use_classification_retention: bool = False):
         """Initialize the stream producer.
 
         Args:
             redis_client: Redis client instance.
             maxlen: Maximum stream length (trimmed on each publish).
+                    Used as default when classification lookup yields nothing.
             approximate_trim: Use approximate (~) trimming for performance.
+            use_classification_retention: If True, resolve MAXLEN from
+                event_classification.get_stream_retention() on each publish,
+                falling back to the maxlen parameter.
         """
         self._client = redis_client
         self._maxlen = maxlen
         self._approximate = approximate_trim
+        self._use_classification = use_classification_retention
 
     def _stream_key(self, stream_name: str) -> str:
         if stream_name.startswith(STREAM_PREFIX):
             return stream_name
         return f"{STREAM_PREFIX}{stream_name}"
+
+    def _resolve_retention(self, stream_name: str) -> int:
+        """Resolve MAXLEN from event classification registry."""
+        try:
+            from ..events.event_classification import get_stream_retention
+            return get_stream_retention(stream_name)
+        except (ImportError, ValueError):
+            pass
+        try:
+            import sys
+            ec = sys.modules.get("event_classification")
+            if ec and hasattr(ec, "get_stream_retention"):
+                return ec.get_stream_retention(stream_name)
+        except Exception:
+            pass
+        return self._maxlen
 
     def publish(self, stream_name: str, event_data: dict,
                 maxlen: int = None) -> str:
@@ -66,13 +93,22 @@ class StreamProducer:
         Args:
             stream_name: Name of the stream (e.g. "work:task_distribution").
             event_data: Dict payload to publish. Values are JSON-serialized.
-            maxlen: Override default maxlen for this publish.
+            maxlen: Override default maxlen for this publish. Takes precedence
+                    over classification-based retention.
 
         Returns:
             The message ID assigned by Redis (e.g. "1234567890123-0").
         """
         key = self._stream_key(stream_name)
-        trim_len = maxlen if maxlen is not None else self._maxlen
+        if maxlen is not None:
+            trim_len = maxlen
+        elif self._use_classification:
+            try:
+                trim_len = self._resolve_retention(stream_name)
+            except Exception:
+                trim_len = self._maxlen
+        else:
+            trim_len = self._maxlen
 
         payload = {
             "data": json.dumps(event_data),

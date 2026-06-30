@@ -43,6 +43,7 @@ class StreamRetention:
 
 
 _REGISTRY: Dict[str, Tuple[EventType, str]] = {}
+_STREAM_RETENTION: Dict[str, int] = {}
 
 
 def register_event(event_name: str, event_type: EventType, description: str = "") -> None:
@@ -80,12 +81,50 @@ def get_notification_events() -> Dict[str, str]:
 
 
 def get_retention(event_name: str) -> int:
+    """Get MAXLEN retention for a registered event name."""
     event_type = get_event_type(event_name)
     if event_type == EventType.WORK:
         return StreamRetention.WORK
     elif event_type == EventType.NOTIFICATION:
         return StreamRetention.NOTIFICATION
     return StreamRetention.WORK
+
+
+def register_stream_retention(stream_name: str, maxlen: int) -> None:
+    """Register a custom MAXLEN retention for a specific stream name.
+
+    Overrides the default classification-based retention for this stream.
+    """
+    _STREAM_RETENTION[stream_name] = maxlen
+
+
+def get_stream_retention(stream_name: str) -> int:
+    """Get MAXLEN retention for a stream name.
+
+    Priority:
+    1. Explicit per-stream registration (register_stream_retention)
+    2. DLQ prefix detection → StreamRetention.DLQ
+    3. Stream-name-to-event lookup (work:* → WORK, notify:* → NOTIFICATION)
+    4. Default: StreamRetention.WORK
+    """
+    if stream_name in _STREAM_RETENTION:
+        return _STREAM_RETENTION[stream_name]
+
+    if stream_name.startswith("dlq:"):
+        return StreamRetention.DLQ
+
+    if stream_name.startswith("work:"):
+        return StreamRetention.WORK
+
+    if stream_name.startswith("notify:") or stream_name.startswith("notification:"):
+        return StreamRetention.NOTIFICATION
+
+    return StreamRetention.WORK
+
+
+def list_stream_retentions() -> Dict[str, int]:
+    """Return all explicitly registered stream retention configs."""
+    return dict(_STREAM_RETENTION)
 
 
 def is_registered(event_name: str) -> bool:
@@ -98,6 +137,7 @@ def list_all() -> Dict[str, Tuple[EventType, str]]:
 
 def clear_registry() -> None:
     _REGISTRY.clear()
+    _STREAM_RETENTION.clear()
 
 
 # --- Built-in event registrations ---
@@ -389,3 +429,18 @@ register_event(
     EventType.WORK,
     "Service response — matched by request_id to caller"
 )
+
+
+# --- Built-in stream retention registrations ---
+# Explicit overrides for known streams. Streams not listed here fall back to
+# prefix-based detection in get_stream_retention().
+
+register_stream_retention("work:task_distribution", StreamRetention.WORK)
+register_stream_retention("work:voice_events", StreamRetention.WORK)
+register_stream_retention("work:service_request", StreamRetention.WORK)
+register_stream_retention("notify:stream_event", StreamRetention.NOTIFICATION)
+register_stream_retention("notify:log_data", StreamRetention.NOTIFICATION)
+register_stream_retention("notify:voice_tts_audio_chunk", StreamRetention.NOTIFICATION)
+register_stream_retention("dlq:work:task_distribution", StreamRetention.DLQ)
+register_stream_retention("dlq:work:voice_events", StreamRetention.DLQ)
+register_stream_retention("dlq:work:service_request", StreamRetention.DLQ)
