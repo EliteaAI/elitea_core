@@ -1,4 +1,21 @@
 import re
+from urllib.parse import quote
+
+
+def content_disposition_attachment(filename: str) -> str:
+    """Build an RFC 5987-compliant Content-Disposition header value.
+
+    HTTP headers must be ASCII-only, so a non-Latin ``filename`` (Cyrillic,
+    Arabic, CJK, ...) inserted verbatim makes Werkzeug raise a
+    ``UnicodeEncodeError`` and return a 500. We emit an ASCII fallback plus a
+    ``filename*`` parameter with the UTF-8 name, matching what
+    ``flask.send_file`` does for its ``download_name``.
+    """
+    ascii_fallback = filename.encode('ascii', 'replace').decode('ascii')
+    return (
+        f'attachment; filename="{ascii_fallback}"; '
+        f"filename*=UTF-8''{quote(filename)}"
+    )
 
 
 ENTITY_IMPORT_MAPPER = {
