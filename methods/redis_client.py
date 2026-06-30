@@ -18,6 +18,7 @@
 """ Methods """
 
 import os
+import ssl
 
 import redis  # pylint: disable=E0401
 from redis.sentinel import Sentinel  # pylint: disable=E0401
@@ -41,6 +42,33 @@ def _parse_sentinel_hosts(hosts_str):
     return sentinels
 
 
+def _build_ssl_context():
+    """Build an SSL context from environment variables for Redis TLS connections.
+
+    Returns an ssl.SSLContext if TLS is configured, or None otherwise.
+    Env vars:
+      REDIS_TLS_CA_FILE   - path to CA certificate
+      REDIS_TLS_CERT_FILE - path to client certificate (optional, for mTLS)
+      REDIS_TLS_KEY_FILE  - path to client private key (optional, for mTLS)
+    """
+    ca_file = os.environ.get("REDIS_TLS_CA_FILE", "")
+    cert_file = os.environ.get("REDIS_TLS_CERT_FILE", "")
+    key_file = os.environ.get("REDIS_TLS_KEY_FILE", "")
+    #
+    if not ca_file or not os.path.isfile(ca_file):
+        return None
+    #
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.load_verify_locations(ca_file)
+    #
+    if cert_file and key_file and os.path.isfile(cert_file) and os.path.isfile(key_file):
+        ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+    #
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    return ctx
+
+
 class Method:  # pylint: disable=R0903
     """ Method """
 
@@ -52,6 +80,9 @@ class Method:  # pylint: disable=R0903
         - Sentinel: if REDIS_SENTINEL_HOSTS env var is set, discovers master
           via Sentinel and returns a failover-aware client.
         - Direct: otherwise connects directly to REDIS_HOST:REDIS_PORT.
+
+        When REDIS_TLS_ENABLED=true and TLS certificate files are present,
+        connections use TLS with certificate verification.
 
         redis-py clients and their pools are greenlet/thread-safe and meant
         to be long-lived, so we cache one on the module instance.
@@ -74,6 +105,18 @@ class Method:  # pylint: disable=R0903
             }
         #
         redis_config = redis_config.copy()
+        #
+        tls_enabled = os.environ.get("REDIS_TLS_ENABLED", "false").lower() == "true"
+        ssl_context = None
+        if tls_enabled:
+            ssl_context = _build_ssl_context()
+            if ssl_context:
+                redis_config["ssl"] = True
+                redis_config["ssl_context"] = ssl_context
+                redis_config.setdefault("port", 6380)
+                if redis_config.get("port") == 6379:
+                    redis_config["port"] = 6380
+                log.info("Redis TLS enabled with certificate verification")
         #
         if redis_config.get("use_managed_identity", False):
             redis_config.pop("use_managed_identity")
@@ -98,23 +141,29 @@ class Method:  # pylint: disable=R0903
                     sentinel_kwargs["password"] = redis_config["password"]
                 if redis_config.get("ssl"):
                     sentinel_kwargs["ssl"] = True
+                if ssl_context:
+                    sentinel_kwargs["ssl_context"] = ssl_context
                 #
                 sentinel_obj = Sentinel(
                     sentinels,
                     socket_timeout=5.0,
                     sentinel_kwargs=sentinel_kwargs,
                 )
-                client = sentinel_obj.master_for(
-                    sentinel_master,
-                    socket_timeout=5.0,
-                    db=redis_config.get("db", 0),
-                    password=redis_config.get("password", ""),
-                    username=redis_config.get("username", ""),
-                    decode_responses=redis_config.get("decode_responses", True),
-                )
+                master_kwargs = {
+                    "socket_timeout": 5.0,
+                    "db": redis_config.get("db", 0),
+                    "password": redis_config.get("password", ""),
+                    "username": redis_config.get("username", ""),
+                    "decode_responses": redis_config.get("decode_responses", True),
+                }
+                if ssl_context:
+                    master_kwargs["ssl"] = True
+                    master_kwargs["ssl_context"] = ssl_context
+                #
+                client = sentinel_obj.master_for(sentinel_master, **master_kwargs)
                 log.info(
-                    "Redis client connected via Sentinel (master=%s, sentinels=%d)",
-                    sentinel_master, len(sentinels),
+                    "Redis client connected via Sentinel (master=%s, sentinels=%d, tls=%s)",
+                    sentinel_master, len(sentinels), tls_enabled,
                 )
             else:
                 client = redis.Redis(**redis_config)
@@ -146,11 +195,20 @@ class Method:  # pylint: disable=R0903
             password = c.REDIS_PASSWORD
             use_ssl = c.REDIS_USE_SSL
         #
+        tls_enabled = os.environ.get("REDIS_TLS_ENABLED", "false").lower() == "true"
+        ssl_context = None
+        if tls_enabled:
+            ssl_context = _build_ssl_context()
+            if ssl_context:
+                use_ssl = True
+        #
         sentinel_kwargs = {}
         if password:
             sentinel_kwargs["password"] = password
         if use_ssl:
             sentinel_kwargs["ssl"] = True
+        if ssl_context:
+            sentinel_kwargs["ssl_context"] = ssl_context
         #
         result = {
             "enabled": True,
@@ -158,6 +216,7 @@ class Method:  # pylint: disable=R0903
             "sentinels_configured": len(sentinels),
             "sentinels_reachable": 0,
             "master_address": None,
+            "tls_enabled": tls_enabled,
         }
         #
         try:
