@@ -29,6 +29,30 @@ class Route:
             }
             overall_status = "unhealthy"
 
+        # Sentinel check (if configured)
+        sentinel_info = self.get_sentinel_info()
+        if sentinel_info is not None:
+            if sentinel_info.get("error"):
+                checks["sentinel"] = {
+                    "status": "unhealthy",
+                    "error": sentinel_info["error"],
+                }
+                overall_status = "unhealthy"
+            elif sentinel_info["sentinels_reachable"] == 0:
+                checks["sentinel"] = {
+                    "status": "unhealthy",
+                    "error": "no sentinels reachable",
+                    "configured": sentinel_info["sentinels_configured"],
+                }
+                overall_status = "unhealthy"
+            else:
+                checks["sentinel"] = {
+                    "status": "ok",
+                    "master": sentinel_info["master_address"],
+                    "sentinels_reachable": sentinel_info["sentinels_reachable"],
+                    "sentinels_configured": sentinel_info["sentinels_configured"],
+                }
+
         # PostgreSQL check
         pg_start = time.time()
         try:
