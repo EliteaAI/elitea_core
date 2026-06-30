@@ -401,6 +401,8 @@ class Module(module.ModuleModel):
         except Exception as e:
             log.warning('Failed to register provider RPC method: %s', e)
 
+        self._scaling_ready = True
+
     def init(self):
         self.bp = self.descriptor.init_all(url_prefix="/app")
 
@@ -524,6 +526,10 @@ class Module(module.ModuleModel):
         log.info(f"Making webhook API url public: {self.webhook_api_url_re}")
         auth.add_public_rule({"uri": self.webhook_api_url_re})
 
+        # Health endpoints (must be accessible without auth for k8s probes)
+        auth.add_public_rule({"uri": "/app/health/live"})
+        auth.add_public_rule({"uri": "/app/health/ready"})
+
         # Provider Hub initialization
         self.provider_hub_init()
 
@@ -643,6 +649,19 @@ class Module(module.ModuleModel):
 
     def deinit(self):
         log.info('De-initializing')
+
+        # Graceful shutdown: disconnect Socket.IO clients and flush Redis
+        try:
+            from .utils.graceful_shutdown import GracefulShutdown
+            shutdown_handler = GracefulShutdown(
+                sio=self.context.sio,
+                redis_client=self.get_redis_client(),
+                drain_timeout=15,
+            )
+            shutdown_handler.execute()
+        except Exception as e:
+            log.warning("Graceful shutdown handler failed: %s", e)
+
         self.thread._stop()
 
         # MCP SSE deinitialization
