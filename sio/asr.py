@@ -6,8 +6,10 @@ from pylon.core.tools import log, web
 from tools import auth
 
 from ..utils.sio_utils import SioEvents
+from ..utils.redis_asr_store import RedisAsrSessionStore
 
-# Per-sid sessions: { sid: { "type": ..., "last_active": float, ... } }
+# Per-sid local sessions (VAD processing state — hot path, needs sub-ms access)
+# Redis stores the persistent config; local dict holds threading primitives + buffer
 _sessions: dict = {}
 
 # Session limits
@@ -15,18 +17,28 @@ _MAX_SESSIONS = 200
 _SESSION_TIMEOUT_S = 60
 
 # --- Whisper VAD constants ---
-# Peak amplitude (0–32767) below which a frame is considered silence
 _VAD_SPEECH_THRESHOLD = 500
-# Consecutive silent frames before flushing the speech buffer
-# With 300 ms Whisper chunks: 2 frames = 600 ms silence needed → halves max API call rate
 _VAD_SILENCE_FRAMES = 2
-# Absolute minimum PCM bytes to bother sending (~0.1 s at 24 kHz, 16-bit)
 _WHISPER_MIN_BYTES = 4800
-# Hard-limit flush timer (seconds) — guards against very long pauses
 _WHISPER_MAX_BUFFER_SECS = 30
 
 # Single global voice events channel (pylon_main → indexer)
 _VOICE_EVENTS_CHANNEL = "voice_events"
+
+# Module-level reference to the Redis store (set during plugin init)
+_redis_store: RedisAsrSessionStore = None
+
+
+def init_redis_store(redis_client, ttl: int = 300) -> RedisAsrSessionStore:
+    """Initialize the module-level Redis ASR store. Called from module.py during init."""
+    global _redis_store
+    _redis_store = RedisAsrSessionStore(redis_client, ttl=ttl)
+    return _redis_store
+
+
+def get_redis_store() -> RedisAsrSessionStore:
+    """Get the module-level Redis ASR store instance."""
+    return _redis_store
 
 
 def _is_whisper_model(model_name: str) -> bool:
@@ -49,7 +61,7 @@ def _frame_is_speech(pcm_bytes: bytes) -> bool:
 # ---------------------------------------------------------------------------
 
 def _evict_stale_sessions() -> None:
-    """Evict sessions idle for longer than _SESSION_TIMEOUT_S. Called lazily at asr_start."""
+    """Evict sessions idle for longer than _SESSION_TIMEOUT_S."""
     now = time.monotonic()
     stale = [
         sid for sid, s in list(_sessions.items())
@@ -66,6 +78,8 @@ def _evict_stale_sessions() -> None:
             event_node = session.get("event_node")
             if event_node is not None:
                 event_node.emit(_VOICE_EVENTS_CHANNEL, {"type": "asr_stop", "sid": sid})
+        if _redis_store:
+            _redis_store.remove_session(sid)
 
 
 class SIO:
@@ -102,8 +116,15 @@ class SIO:
             self.context.sio.emit(SioEvents.asr_error, {"error": "Failed to resolve model configuration"}, to=sid)
             return
 
+        session_config = {
+            "project_id": config_project_id,
+            "project_llm_key": project_llm_key,
+            "model_name": model_name,
+            "language": language,
+        }
+
         if _is_whisper_model(model_name):
-            # Whisper: VAD buffering stays in pylon_main; dispatch an indexer task per flush
+            session_type = "whisper"
             _sessions[sid] = {
                 "type": "whisper",
                 "last_active": time.monotonic(),
@@ -118,14 +139,11 @@ class SIO:
                 "model_name": model_name,
                 "language": language,
                 "task_node": self.task_node,
-                # Serialisation: at most one Whisper call in flight per session.
-                # Audio that arrives while a call is in flight is accumulated here
-                # and dispatched when the current call completes.
                 "call_in_flight": False,
                 "pending_buffer": bytearray(),
             }
         else:
-            # Realtime: dispatch long-lived indexer task, forward audio via event_node
+            session_type = "realtime"
             _sessions[sid] = {
                 "type": "realtime",
                 "last_active": time.monotonic(),
@@ -149,15 +167,24 @@ class SIO:
                 },
             )
 
+        if _redis_store:
+            _redis_store.create_session(sid, session_type, session_config)
+
     @web.sio(SioEvents.asr_audio_chunk)
     def asr_audio_chunk(self, sid: str, data) -> None:
         session = _sessions.get(sid)
         if not session:
-            return
+            if _redis_store and _redis_store.session_exists(sid):
+                log.info("ASR: session %s found in Redis but not local — attempting recovery", sid)
+                _try_recover_session(self, sid)
+                session = _sessions.get(sid)
+                if not session:
+                    return
+            else:
+                return
 
         session["last_active"] = time.monotonic()
 
-        # Accept raw bytes (binary Socket.IO frame) or dict with "audio" key
         if isinstance(data, (bytes, bytearray)):
             pcm_bytes = bytes(data)
         else:
@@ -170,7 +197,6 @@ class SIO:
             _handle_whisper_audio(sid, session, pcm_bytes)
             return
 
-        # Realtime: forward raw PCM bytes to the indexer task via event_node
         self.event_node.emit(
             _VOICE_EVENTS_CHANNEL,
             {"type": "asr_audio_input", "sid": sid, "audio": pcm_bytes},
@@ -186,6 +212,49 @@ class SIO:
 
 
 # ---------------------------------------------------------------------------
+# Session recovery
+# ---------------------------------------------------------------------------
+
+def _try_recover_session(sio_handler, sid: str) -> None:
+    """Attempt to recover a session from Redis when a client reconnects to a different pod."""
+    if not _redis_store:
+        return
+
+    recovered = _redis_store.recover_session(sid)
+    if not recovered:
+        return
+
+    session_type = recovered.get("type")
+    log.info("ASR: recovering %s session for sid %s from Redis", session_type, sid)
+
+    if session_type == "whisper":
+        recovered_buffer = recovered.get("buffer", b"")
+        _sessions[sid] = {
+            "type": "whisper",
+            "last_active": time.monotonic(),
+            "event_node": sio_handler.event_node,
+            "lock": threading.Lock(),
+            "buffer": bytearray(recovered_buffer),
+            "speech_detected": recovered.get("speech_detected", False),
+            "silent_frames": recovered.get("silent_frames", 0),
+            "flush_timer": None,
+            "project_id": recovered.get("project_id", ""),
+            "project_llm_key": recovered.get("project_llm_key", ""),
+            "model_name": recovered.get("model_name", ""),
+            "language": recovered.get("language", "en"),
+            "task_node": sio_handler.task_node,
+            "call_in_flight": recovered.get("call_in_flight", False),
+            "pending_buffer": bytearray(),
+        }
+    elif session_type == "realtime":
+        _sessions[sid] = {
+            "type": "realtime",
+            "last_active": time.monotonic(),
+            "event_node": sio_handler.event_node,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Whisper VAD helpers
 # ---------------------------------------------------------------------------
 
@@ -198,15 +267,12 @@ def _handle_whisper_audio(sid: str, session: dict, pcm_bytes: bytes) -> None:
     with session["lock"]:
         if is_speech:
             if not session["speech_detected"]:
-                # Transition from silence → speech: notify frontend so it can
-                # cancel any pending auto-send timer before the transcript arrives.
                 session["event_node"].emit("voice_asr_speech_started", {"sid": sid})
             session["buffer"].extend(pcm_bytes)
             session["speech_detected"] = True
             session["silent_frames"] = 0
             _reset_flush_timer(sid, session)
         elif session["speech_detected"]:
-            # Include the trailing silent frame for natural audio context
             session["buffer"].extend(pcm_bytes)
             session["silent_frames"] += 1
             if session["silent_frames"] >= _VAD_SILENCE_FRAMES:
@@ -242,38 +308,33 @@ def _flush_whisper_buffer(sid: str, session: dict) -> None:
 
 
 def _do_flush(sid: str, session: dict) -> None:
-    """Flush current buffer (lock must be held).
-
-    If a Whisper call is already in flight the audio is accumulated in
-    ``pending_buffer`` instead of being dispatched immediately.  This
-    serialises calls to one-at-a-time per session, preventing RPM exhaustion
-    on Azure Whisper (10 RPM) which would cause 30-second LiteLLM retry
-    delays and late transcript_done events.
-    """
+    """Flush current buffer (lock must be held)."""
     pcm_data = bytes(session["buffer"])
     session["buffer"] = bytearray()
     session["speech_detected"] = False
     session["silent_frames"] = 0
 
     if len(pcm_data) < _WHISPER_MIN_BYTES:
-        # No Whisper call, but speech_started was already emitted — balance the
-        # counter on the frontend by sending an empty transcript_done.
         session["event_node"].emit("voice_asr_transcript_done", {"sid": sid, "transcript": ""})
         return
 
-    # Notify frontend that this speech segment has ended so it can start the
-    # silence timer relative to when the user actually stopped speaking (not
-    # when the transcript arrives, which may be delayed by serialisation).
     session["event_node"].emit("voice_asr_vad_flush", {"sid": sid})
 
     if session["call_in_flight"]:
-        # Accumulate audio; it will be dispatched by on_whisper_call_done once
-        # the current call completes.
         session["pending_buffer"].extend(pcm_data)
         return
 
     session["call_in_flight"] = True
     _dispatch_whisper_call(sid, session, pcm_data)
+
+    if _redis_store:
+        _redis_store.update_vad_state(
+            sid,
+            speech_detected=False,
+            silent_frames=0,
+            call_in_flight=True,
+        )
+        _redis_store.clear_buffer(sid)
 
 
 def _dispatch_whisper_call(sid: str, session: dict, pcm_data: bytes) -> None:
@@ -298,11 +359,7 @@ def _dispatch_whisper_call(sid: str, session: dict, pcm_data: bytes) -> None:
 
 
 def on_whisper_call_done(sid: str) -> None:
-    """Called from module.py after voice_asr_transcript_done is forwarded to the SIO client.
-
-    Dispatches buffered audio (if any) or clears the in-flight flag so the
-    next VAD flush is sent immediately.
-    """
+    """Called from module.py after voice_asr_transcript_done is forwarded to the SIO client."""
     session = _sessions.get(sid)
     if not session or session.get("type") != "whisper":
         return
@@ -314,16 +371,25 @@ def on_whisper_call_done(sid: str) -> None:
             _dispatch_whisper_call(sid, session, pending)
         else:
             session["call_in_flight"] = False
+            if _redis_store:
+                _redis_store.update_vad_state(
+                    sid,
+                    speech_detected=session["speech_detected"],
+                    silent_frames=session["silent_frames"],
+                    call_in_flight=False,
+                )
 
 
 def _close_session(sio_handler, sid: str) -> None:
     session = _sessions.pop(sid, None)
     if not session:
+        if _redis_store:
+            _redis_store.remove_session(sid)
         return
     if session.get("type") == "whisper":
         _cancel_flush_timer(session)
     else:
-        # Signal the indexer task to stop
         sio_handler.event_node.emit(_VOICE_EVENTS_CHANNEL, {"type": "asr_stop", "sid": sid})
 
-
+    if _redis_store:
+        _redis_store.remove_session(sid)
