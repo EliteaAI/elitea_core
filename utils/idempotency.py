@@ -313,6 +313,8 @@ def idempotent(redis_client, key_func=None, ttl: int = DEFAULT_TTL,
     store = IdempotencyStore(redis_client, key_prefix=key_prefix,
                              default_ttl=ttl)
 
+    _EXECUTING_SENTINEL = "__idempotency_executing__"
+
     def decorator(func):
         op_name = operation or f"{func.__module__}.{func.__qualname__}"
 
@@ -325,19 +327,26 @@ def idempotent(redis_client, key_func=None, ttl: int = DEFAULT_TTL,
 
             cached = store.get(op_name, params_hash)
             if cached is not None:
-                log.debug(
-                    "Idempotent cache hit for %s (key=%s)",
-                    op_name, params_hash[:8]
-                )
-                return cached
+                if cached == _EXECUTING_SENTINEL:
+                    log.debug(
+                        "Idempotent key %s in-flight on another worker, executing locally",
+                        params_hash[:8]
+                    )
+                else:
+                    log.debug(
+                        "Idempotent cache hit for %s (key=%s)",
+                        op_name, params_hash[:8]
+                    )
+                    return cached
+
+            claimed = store.set(op_name, params_hash, _EXECUTING_SENTINEL, ttl)
+            if not claimed:
+                existing = store.get(op_name, params_hash)
+                if existing is not None and existing != _EXECUTING_SENTINEL:
+                    return existing
 
             result = func(*args, **kwargs)
-
-            if result is not None:
-                store.set(op_name, params_hash, result, ttl)
-            else:
-                store.force_set(op_name, params_hash, result, ttl)
-
+            store.force_set(op_name, params_hash, result, ttl)
             return result
 
         wrapper._idempotency_store = store

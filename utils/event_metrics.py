@@ -53,8 +53,11 @@ class EventMetrics:
         return f"{METRICS_KEY_PREFIX}:{stream_name}"
 
     def _register_stream(self, stream_name: str) -> None:
-        """Register a stream in the global registry set."""
-        self._client.sadd(STREAMS_REGISTRY_KEY, stream_name)
+        """Register a stream in the global registry set (with TTL refresh)."""
+        pipe = self._client.pipeline(transaction=False)
+        pipe.sadd(STREAMS_REGISTRY_KEY, stream_name)
+        pipe.expire(STREAMS_REGISTRY_KEY, METRICS_TTL)
+        pipe.execute()
 
     def record_published(self, stream_name: str, count: int = 1) -> None:
         """Record that messages were published to a stream.
