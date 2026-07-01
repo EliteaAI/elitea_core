@@ -49,6 +49,9 @@ def create_version(
         exclude_unset=True,
         exclude={'tags', 'variables', 'tools'}
     )
+    # Ensure instructions is never NULL in database (issue #5664)
+    if 'instructions' not in version_dict or version_dict.get('instructions') is None:
+        version_dict['instructions'] = ''
     notes_value = version_dict.pop('notes', None) if 'notes' in version_dict else None
     if notes_value is not None:
         merged_meta = dict(version_dict.get('meta') or {})

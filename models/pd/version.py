@@ -94,7 +94,7 @@ class ApplicationVersionBaseModel(BaseModel):
     name: str = Field(min_length=1)
     author_id: int
     tags: Optional[List[TagBaseModel]] = None
-    instructions: Optional[str] = None
+    instructions: Optional[str] = ''
     application_id: Optional[int] = None
     shared_id: Optional[int] = None
     shared_owner_id: Optional[int] = None
@@ -108,6 +108,11 @@ class ApplicationVersionBaseModel(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=1000)
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator('instructions', mode='after')
+    @classmethod
+    def ensure_instructions_not_null(cls, v):
+        return v if v is not None else ''
 
 
 class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
