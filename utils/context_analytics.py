@@ -161,25 +161,27 @@ def set_context_strategy(
     """
     strategy_data = {}
 
+    log.info(f"Setting context strategy for conversation {conversation_id} - user_context_defaults: {user_context_defaults}, user_summarization_defaults: {user_summarization_defaults}")
+
     if user_context_defaults:
-        if 'enabled' in user_context_defaults:
+        if 'enabled' in user_context_defaults and user_context_defaults['enabled'] is not None:
             strategy_data['enabled'] = user_context_defaults['enabled']
-        if 'max_context_tokens' in user_context_defaults:
+        if 'max_context_tokens' in user_context_defaults and user_context_defaults['max_context_tokens'] is not None:
             strategy_data['max_context_tokens'] = user_context_defaults['max_context_tokens']
-        if 'preserve_recent_messages' in user_context_defaults:
+            log.info(f"Set max_context_tokens to {user_context_defaults['max_context_tokens']} from user defaults")
+        if 'preserve_recent_messages' in user_context_defaults and user_context_defaults['preserve_recent_messages'] is not None:
             strategy_data['preserve_recent_messages'] = user_context_defaults['preserve_recent_messages']
-        if 'enable_summarization' in user_context_defaults:
+        if 'enable_summarization' in user_context_defaults and user_context_defaults['enable_summarization'] is not None:
             strategy_data['enable_summarization'] = user_context_defaults['enable_summarization']
 
     if user_summarization_defaults:
-        if 'enable_summarization' in user_summarization_defaults and user_summarization_defaults[
-            'enable_summarization'] is not None:
+        if user_summarization_defaults.get('enable_summarization') is not None:
             strategy_data['enable_summarization'] = user_summarization_defaults['enable_summarization']
-        if 'summary_instructions' in user_summarization_defaults:
+        if user_summarization_defaults.get('summary_instructions') is not None:
             strategy_data['summary_instructions'] = user_summarization_defaults['summary_instructions']
         # Build summary_llm_settings from flat personalization fields
         summary_llm_settings = {}
-        if user_summarization_defaults.get('summary_model_name'):
+        if user_summarization_defaults.get('summary_model_name') is not None:
             summary_llm_settings['model_name'] = user_summarization_defaults['summary_model_name']
         if user_summarization_defaults.get('summary_model_project_id') is not None:
             summary_llm_settings['model_project_id'] = user_summarization_defaults['summary_model_project_id']
@@ -191,6 +193,7 @@ def set_context_strategy(
     try:
         strategy = ContextStrategy(**strategy_data)
         strategy_dict = strategy.model_dump()
+        log.info(f"Created ContextStrategy for conversation {conversation_id}: max_context_tokens={strategy_dict.get('max_context_tokens')}")
     except Exception as e:
         log.warning(f"Failed to create context strategy: {e}, using defaults")
         strategy = ContextStrategy()
@@ -201,6 +204,6 @@ def set_context_strategy(
         conversation_id=conversation_id,
         meta_updates={'context_strategy': strategy_dict}
     )
-    log.debug(f"Set context strategy for conversation {conversation_id}")
+    log.info(f"Stored context strategy for conversation {conversation_id}: {strategy_dict}")
 
     return strategy_dict
