@@ -70,7 +70,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 if key in self.descriptor.config:
                     elitea_ui_config_data[key] = self.descriptor.config.get(key)
         else:
-            from tools import theme, VaultClient  # pylint: disable=E0611,E0401,W0611,C0415
+            from tools import VaultClient  # pylint: disable=E0611,E0401,W0611,C0415
             #
             secrets = VaultClient().get_all_secrets()
             #
@@ -84,10 +84,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             #
             vite_base_uri = flask.url_for("elitea_core.route_elitea_ui").rstrip("/")
             vite_public_project_id = int(self.descriptor.config.get("ai_project_id", 1))
-            try:
-                vite_socket_path = flask.url_for("theme.socketio")
-            except:  # pylint: disable=W0702
-                vite_socket_path = "/socket.io/"
+            vite_socket_path = "/socket.io/"
             #
             default_release = self.default_release
             #
