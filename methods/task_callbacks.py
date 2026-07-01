@@ -22,7 +22,7 @@ import requests  # pylint: disable=E0401
 
 from pylon.core.tools import web, log  # pylint: disable=E0401,E0611,W0611
 
-from ..utils.application_tools import cancel_toolkit_index_meta
+from ..utils.application_tools import cancel_toolkit_index_meta, resolve_toolkit_index_connection
 
 
 class Method:
@@ -93,34 +93,67 @@ class Method:
 
     @web.method()
     def reconcile_stopped_index_metas(self, task_id):
-        """Flip index_meta rows for a stopped task from 'in_progress' to 'cancelled'.
+        """Cancel any in_progress index_meta rows a stopped task left orphaned.
 
-        A chat/agent/pipeline Stop is a hard kill: index_data runs inline in the
-        agent's forked worker, and on Stop the worker is terminated before the SDK's
-        terminal-state writer runs, orphaning the index_meta row at 'in_progress'.
-        Here we consume the in-memory registry populated from the in_progress event
-        (module.active_index_tasks) and, for every index this task started, transition
-        the row to 'cancelled' via the shared helper. cancel_toolkit_index_meta only
-        touches rows still in 'in_progress', so a row that already reached a terminal
-        state is never clobbered.
+        A Stop hard-kills the forked worker before the SDK writes a terminal state, so
+        pylon_main reconciles here from the active_index_tasks registry. Also records the
+        task as recently-stopped so a late in_progress event can self-cancel (see stream).
         """
+        self._mark_task_recently_stopped(task_id)
         entries = self.active_index_tasks.pop(str(task_id), {})
         if not entries:
             return
-        for (connection_string, toolkit_name_id, index_name) in entries:
-            try:
-                cancel_toolkit_index_meta(
-                    connection_string,
-                    toolkit_name_id,
-                    index_name,
-                    expected_task_id=str(task_id),
-                    delete_embeddings=False,
+        for (project_id, toolkit_id, index_name), info in entries.items():
+            info = info or {}
+            self._cancel_stopped_index(
+                project_id, toolkit_id, index_name, task_id,
+                info.get('user_id'), info.get('created_on'),
+            )
+
+    @web.method()
+    def _cancel_stopped_index(self, project_id, toolkit_id, index_name, task_id,
+                              user_id=None, created_on=None):
+        """Resolve a stopped index's connection and cancel its in_progress row (best-effort).
+
+        Shared by reconcile_stopped_index_metas and the fast-Stop race path in stream.
+        """
+        try:
+            connection_string, toolkit_name_id = resolve_toolkit_index_connection(
+                project_id, toolkit_id, user_id
+            )
+            if not connection_string or not toolkit_name_id:
+                log.warning(
+                    "Cannot resolve connection to cancel stopped index_meta "
+                    "(task_id=%s, project_id=%s, toolkit_id=%s, index_name=%s)",
+                    task_id, project_id, toolkit_id, index_name,
                 )
-            except Exception:  # pylint: disable=W0702,W0703
-                log.exception(
-                    "Failed to cancel stopped index_meta (task_id=%s, index_name=%s)",
-                    task_id, index_name,
-                )
+                return
+            cancel_toolkit_index_meta(
+                connection_string,
+                toolkit_name_id,
+                index_name,
+                expected_task_id=str(task_id),
+                delete_embeddings=False,
+                expected_created_on=created_on,
+            )
+        except Exception:  # pylint: disable=W0702,W0703
+            log.exception(
+                "Failed to cancel stopped index_meta (task_id=%s, index_name=%s)",
+                task_id, index_name,
+            )
+
+    @web.method()
+    def _mark_task_recently_stopped(self, task_id):
+        """Record a stopped task id in the bounded recently-stopped set (FIFO cap)."""
+        try:
+            store = self.recently_stopped_index_tasks
+            key = str(task_id)
+            store[key] = True
+            store.move_to_end(key)
+            while len(store) > self.recently_stopped_index_tasks_max:
+                store.popitem(last=False)
+        except Exception:  # pylint: disable=W0702,W0703
+            log.exception("Failed to record recently-stopped task %s", task_id)
 
     @web.method()
     def _maybe_handle_parallel_dispatch(self, task_id):

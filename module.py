@@ -1,6 +1,7 @@
 import os
 import re
 
+from collections import OrderedDict
 from json import dumps
 from pathlib import Path
 from queue import Empty
@@ -65,14 +66,9 @@ class Module(module.ModuleModel):
         # Must be initialized here in __init__ — the callback is registered in init() via
         # task_node.subscribe_to_task_statuses, which can fire before ready() runs.
         self.callback_tasks = {}
-        # In-memory registry bridging the early in_progress index_data_status event
-        # (which carries task_id + toolkit_config + index_name) to the later 'stopped'
-        # terminal event, so an index_data run hard-killed on Stop can be reconciled
-        # to 'cancelled'. Same in-memory-module-state pattern as self.callback_tasks;
-        # must be initialized here in __init__ because task_status_changed can fire
-        # before ready(). Shape:
-        #   task_id(str) -> { (connection_string, toolkit_name_id, index_name): {'created_on': float} }
         self.active_index_tasks = {}
+        self.recently_stopped_index_tasks = OrderedDict()
+        self.recently_stopped_index_tasks_max = 1024
         self.not_starting_task_event = Event()
         self.not_starting_task_event.set()
         # logs in-memory cache

@@ -42,13 +42,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         log.warning(f"Failed to stop task {task_id}: {e}. Proceeding with cleanup.")
                 log.debug(f"Attempting to update index meta to 'cancelled' state for index {index_name}")
                 try:
-                    cancel_toolkit_index_meta(
+                    cancelled = cancel_toolkit_index_meta(
                         connection_string,
                         toolkit_name_id,
                         index_name,
                         expected_task_id=task_id,
                         delete_embeddings=True,
+                        require_in_progress=False,
+                        session=session,
                     )
+                    if not cancelled:
+                        log.warning(f"Manual cancel transitioned no row for index {index_name} (task {task_id})")
                 except Exception as e:
                     return {
                         "ok": False,

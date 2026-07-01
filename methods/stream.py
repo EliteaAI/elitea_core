@@ -24,7 +24,7 @@ from ..models.enums.all import IndexDataStatus
 from ..models.pd.index import IndexDataRemovedEvent
 from ..sio.all import get_event_room, SioEvents
 from ..utils.application_tools import handle_index_data_failure, ensure_index_data_has_task_id, \
-    clean_up_schedule_in_toolkit, validate_toolkit_for_index
+    clean_up_schedule_in_toolkit
 
 
 class Method:
@@ -137,46 +137,38 @@ class Method:
 
     @web.method()
     def _maintain_active_index_registry(self, response_metadata):
-        """
-        Populate/evict the in-memory active_index_tasks registry from index_data_status
-        events, so a hard-killed index_data run can be reconciled to 'cancelled' when
-        its task later fires a 'stopped' status (see methods/task_callbacks).
+        """Populate/evict the active_index_tasks registry from index_data_status events.
 
-        - On in_progress: record {task_id -> {(connection_string, toolkit_name_id,
-          index_name): {'created_on': ...}}} using the toolkit_config the event
-          already carries. in_progress is emitted at the very start of index_data, so
-          the entry exists before the user can click Stop.
-        - On any terminal state (completed/failed/cancelled): evict the matching
-          (task_id, index_name) entry so a later same-id task cannot cancel an
-          unrelated index.
-
-        Args:
-            response_metadata: Event metadata containing state, task_id, index_name,
-                toolkit_config, created_at, etc.
+        Stores only raw ids (connection resolved lazily at Stop); registers on
+        in_progress, evicts on terminal state. See task_callbacks.reconcile_stopped_index_metas.
         """
         state = response_metadata.get('state')
         task_id = response_metadata.get('task_id')
         index_name = response_metadata.get('index_name')
-        toolkit_config = response_metadata.get('toolkit_config', {})
+        toolkit_id = response_metadata.get('toolkit_id')
+        project_id = response_metadata.get('project_id')
 
-        if not task_id or not index_name or not toolkit_config:
+        if not task_id or not index_name or not toolkit_id or not project_id:
             return
 
-        connection_string, toolkit_name_id = None, None
-        try:
-            toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
-        except Exception as e:
-            log.debug(f"Cannot resolve toolkit for active index registry: {e}")
-            return
-
-        registry_key = (connection_string, toolkit_name_id, index_name)
+        registry_key = (project_id, toolkit_id, index_name)
         task_key = str(task_id)
 
         if state == IndexDataStatus.in_progress:
+            # Fast-Stop race: task already stopped before this event landed — cancel now
+            # instead of registering a zombie entry.
+            if task_key in self.recently_stopped_index_tasks:
+                log.debug(f"in_progress for already-stopped task {task_key}; cancelling index_name={index_name} directly")
+                self._cancel_stopped_index(
+                    project_id, toolkit_id, index_name, task_key,
+                    response_metadata.get('user_id'), response_metadata.get('created_at'),
+                )
+                return
             self.active_index_tasks.setdefault(task_key, {})[registry_key] = {
+                'user_id': response_metadata.get('user_id'),
                 'created_on': response_metadata.get('created_at'),
             }
-            log.debug(f"Registered active index task {task_key} for index_name={index_name}")
+            log.debug(f"Registered active index task {task_key} for index_name={index_name} (toolkit {toolkit_id})")
         elif state in (IndexDataStatus.completed, IndexDataStatus.failed, IndexDataStatus.cancelled):
             entries = self.active_index_tasks.get(task_key)
             if entries:
