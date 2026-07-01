@@ -178,9 +178,6 @@ class Route:
 
     @web.route("/metrics")
     def prometheus_metrics(self):
-        if not self._check_admin_auth(flask.request):
-            return flask.Response("Unauthorized", status=401)
-
         from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # pylint: disable=C0415
         from ..utils.prometheus_metrics import MetricsCollector, get_registry  # pylint: disable=C0415
 
