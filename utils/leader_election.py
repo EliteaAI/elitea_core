@@ -194,7 +194,9 @@ class LeaderElection:
         """Background loop: acquire or refresh leadership."""
         while not self._stop_event.is_set():
             try:
-                if self._is_leader:
+                with self._leader_lock:
+                    currently_leader = self._is_leader
+                if currently_leader:
                     self.refresh()
                 else:
                     self.try_acquire()

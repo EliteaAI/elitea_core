@@ -26,6 +26,7 @@ DEFAULT_IP_LIMIT = 100
 DEFAULT_USER_LIMIT = 1000
 WINDOW_SECONDS = 60
 INTERNAL_TOKEN_HEADER = "X-Internal-Token"
+TRUSTED_PROXY_CIDRS_ENV = "RATE_LIMIT_TRUSTED_PROXIES"
 RATE_LIMIT_HEADER_LIMIT = "X-RateLimit-Limit"
 RATE_LIMIT_HEADER_REMAINING = "X-RateLimit-Remaining"
 RATE_LIMIT_HEADER_RESET = "X-RateLimit-Reset"
@@ -44,12 +45,54 @@ def _get_minute_bucket():
     return int(time.time()) // WINDOW_SECONDS
 
 
+def _parse_trusted_proxies():
+    """Parse RATE_LIMIT_TRUSTED_PROXIES env var into a set of CIDR networks."""
+    import ipaddress
+    raw = os.environ.get(TRUSTED_PROXY_CIDRS_ENV, "")
+    if not raw:
+        return None
+    networks = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            pass
+    return networks or None
+
+
+_TRUSTED_PROXIES = None
+
+
+def _get_trusted_proxies():
+    global _TRUSTED_PROXIES
+    if _TRUSTED_PROXIES is None:
+        _TRUSTED_PROXIES = _parse_trusted_proxies() or []
+    return _TRUSTED_PROXIES
+
+
+def _is_trusted_proxy(remote_addr):
+    """Check if the direct connection is from a trusted proxy."""
+    import ipaddress
+    proxies = _get_trusted_proxies()
+    if not proxies:
+        return False
+    try:
+        addr = ipaddress.ip_address(remote_addr)
+    except (ValueError, TypeError):
+        return False
+    return any(addr in network for network in proxies)
+
+
 def _get_client_ip(request):
-    """Extract client IP from request, respecting X-Forwarded-For."""
+    """Extract client IP, only trusting X-Forwarded-For from known proxies."""
+    remote = request.remote_addr or "unknown"
     forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
+    if forwarded and _is_trusted_proxy(remote):
         return forwarded.split(",")[0].strip()
-    return request.remote_addr or "unknown"
+    return remote
 
 
 def _get_reset_timestamp(bucket):
