@@ -99,8 +99,11 @@ class Method:
         pylon_main reconciles here from the active_index_tasks registry. Also records the
         task as recently-stopped so a late in_progress event can self-cancel (see stream).
         """
-        self._mark_task_recently_stopped(task_id)
-        entries = self.active_index_tasks.pop(str(task_id), {})
+        # Mark + drain atomically vs. the in_progress register (see stream); cancel the
+        # drained entries after releasing the lock (cancel does DB/vault I/O).
+        with self.active_index_tasks_lock:
+            self._mark_task_recently_stopped(task_id)
+            entries = self.active_index_tasks.pop(str(task_id), {})
         if not entries:
             return
         for (project_id, toolkit_id, index_name), info in entries.items():

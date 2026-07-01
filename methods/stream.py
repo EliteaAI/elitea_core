@@ -155,26 +155,50 @@ class Method:
         task_key = str(task_id)
 
         if state == IndexDataStatus.in_progress:
-            # Fast-Stop race: task already stopped before this event landed — cancel now
-            # instead of registering a zombie entry.
-            if task_key in self.recently_stopped_index_tasks:
+            # Fast-Stop race: the 'stopped' callback runs on another thread and may
+            # mark+drain between this check and the register, so do check-or-register
+            # atomically under the lock and defer the (I/O-bound) cancel until after
+            # releasing it. Otherwise a zombie entry could leak and leave the row stuck.
+            cancel_now = False
+            evicted_over_cap = []
+            with self.active_index_tasks_lock:
+                if task_key in self.recently_stopped_index_tasks:
+                    cancel_now = True
+                else:
+                    self.active_index_tasks.setdefault(task_key, {})[registry_key] = {
+                        'user_id': response_metadata.get('user_id'),
+                        'created_on': response_metadata.get('created_at'),
+                    }
+                    # Keep active tasks LRU by last activity, then bound the registry
+                    # (symmetry with recently_stopped): a dropped terminal event on a
+                    # never-Stopped task would otherwise leak an entry forever. Only the
+                    # least-recently-active bucket is dropped, and only far past any real
+                    # indexing concurrency.
+                    self.active_index_tasks.move_to_end(task_key)
+                    while len(self.active_index_tasks) > self.active_index_tasks_max:
+                        ek, _ = self.active_index_tasks.popitem(last=False)
+                        evicted_over_cap.append(ek)
+            if cancel_now:
                 log.debug(f"in_progress for already-stopped task {task_key}; cancelling index_name={index_name} directly")
                 self._cancel_stopped_index(
                     project_id, toolkit_id, index_name, task_key,
                     response_metadata.get('user_id'), response_metadata.get('created_at'),
                 )
-                return
-            self.active_index_tasks.setdefault(task_key, {})[registry_key] = {
-                'user_id': response_metadata.get('user_id'),
-                'created_on': response_metadata.get('created_at'),
-            }
-            log.debug(f"Registered active index task {task_key} for index_name={index_name} (toolkit {toolkit_id})")
+            else:
+                log.debug(f"Registered active index task {task_key} for index_name={index_name} (toolkit {toolkit_id})")
+                for ek in evicted_over_cap:
+                    log.warning(f"active_index_tasks over cap ({self.active_index_tasks_max}); evicted oldest task {ek} "
+                                f"(a later Stop for it will not auto-reconcile)")
         elif state in (IndexDataStatus.completed, IndexDataStatus.failed, IndexDataStatus.cancelled):
-            entries = self.active_index_tasks.get(task_key)
-            if entries:
-                entries.pop(registry_key, None)
-                if not entries:
-                    self.active_index_tasks.pop(task_key, None)
+            evicted = False
+            with self.active_index_tasks_lock:
+                entries = self.active_index_tasks.get(task_key)
+                if entries:
+                    entries.pop(registry_key, None)
+                    if not entries:
+                        self.active_index_tasks.pop(task_key, None)
+                    evicted = True
+            if evicted:
                 log.debug(f"Evicted active index task {task_key} for index_name={index_name}")
 
     @web.method()
