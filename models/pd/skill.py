@@ -1,6 +1,7 @@
 import re
 import uuid
 from datetime import datetime
+from queue import Empty
 from typing import Annotated, Dict, List, Optional
 
 from pydantic import (
@@ -11,6 +12,8 @@ from pydantic import (
     model_validator,
     ConfigDict,
 )
+
+from tools import rpc_tools
 
 from .collection_base import AuthorBaseModel
 from .tag import TagDetailModel
@@ -173,8 +176,18 @@ class SkillDetailModel(BaseModel):
     versions: List[SkillVersionListModel]
     version_details: Optional[SkillVersionDetailModel] = None
     meta: Optional[dict] = None
+    is_pinned: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+    def check_is_pinned(self, project_id: int):
+        try:
+            self.is_pinned = rpc_tools.RpcMixin().rpc.timeout(2).social_is_pinned(
+                project_id=project_id, entity='skill', entity_id=self.id
+            )
+        except Empty:
+            self.is_pinned = False
+        return self
 
 
 class SkillUpdateModel(SkillArgsForwardingModel):
