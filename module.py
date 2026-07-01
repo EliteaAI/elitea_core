@@ -550,6 +550,8 @@ class Module(module.ModuleModel):
         # Health endpoints (must be accessible without auth for k8s probes)
         auth.add_public_rule({"uri": "/app/health/live"})
         auth.add_public_rule({"uri": "/app/health/ready"})
+        # Metrics endpoint (must be accessible for Prometheus scraping / HPA)
+        auth.add_public_rule({"uri": "/metrics"})
 
         # Provider Hub initialization
         self.provider_hub_init()
