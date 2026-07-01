@@ -87,6 +87,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         except Empty:
             ...
+
+        # In terms of https://github.com/EliteaAI/elitea_issues/issues/5394, description is set to None
+        author['description'] = None
+
         return author, 200
 
 
