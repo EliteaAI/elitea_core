@@ -13,6 +13,7 @@ from ..models.all import EliteATool, EntityToolMapping, ApplicationVersion
 from ..models.indexer import EmbeddingStore
 from ..models.enums.all import ToolEntityTypes
 from ..models.enums.all import InitiatorType
+from ..models.enums.all import IndexDataStatus
 from ..utils.exceptions import PoolSaturationError
 
 RPC_CALL_TIMEOUT = 3
@@ -1221,6 +1222,80 @@ def is_index_stale(updated_on: float, index_data_state: str, task_disconnected_t
     time_since_update = current_time - updated_on
 
     return time_since_update > task_disconnected_timeout
+
+
+def cancel_toolkit_index_meta(connection_string: str, toolkit_name_id: str, index_name: str,
+                              expected_task_id: Optional[str] = None,
+                              delete_embeddings: bool = False) -> bool:
+    """
+    Transition a toolkit's index_meta row to the 'cancelled' terminal state.
+
+    Single source of truth for the cancel write, shared by the manual index_cancel
+    endpoint and the system reconcile-on-stop path (task_status_changed). Only rows
+    currently in the 'in_progress' state are transitioned, which makes this
+    idempotent and additive: it never clobbers a row that already reached a terminal
+    state (completed/failed/cancelled). This is what makes it safe to call from a
+    system callback.
+
+    Args:
+        connection_string: PGVector connection string for the toolkit schema.
+        toolkit_name_id: Toolkit schema/name id (search_path schema).
+        index_name: Collection / index name whose meta should be cancelled.
+        expected_task_id: If provided, only cancel when the row's task_id matches
+            (None on the row is also accepted, since a hard-killed run may never
+            have had its task_id stamped).
+        delete_embeddings: When True, also delete the non-meta EmbeddingStore rows
+            for the collection (manual cancel behavior). Defaults to False so the
+            automatic stop path does not wipe a stopped reindex's prior good index.
+
+    Returns:
+        bool: True if a row was transitioned to 'cancelled', False otherwise.
+    """
+    with get_session_for_schema(connection_string, toolkit_name_id) as session:
+        meta = get_toolkit_index_meta(session, index_name)
+        if not meta:
+            log.debug(f"No index_meta to cancel for index_name={index_name}")
+            return False
+        #
+        current_state = meta.cmetadata.get("state")
+        if current_state != IndexDataStatus.in_progress.value:
+            log.debug(f"Skipping cancel for index_name={index_name}: state is '{current_state}', not in_progress")
+            return False
+        #
+        if expected_task_id is not None:
+            row_task_id = meta.cmetadata.get("task_id")
+            if row_task_id not in (None, expected_task_id):
+                log.debug(f"Skipping cancel for index_name={index_name}: "
+                          f"task_id mismatch (row={row_task_id}, expected={expected_task_id})")
+                return False
+        #
+        meta.cmetadata["state"] = IndexDataStatus.cancelled.value
+        meta.cmetadata["task_id"] = None
+        meta.cmetadata["updated_on"] = time.time()
+        history_raw = meta.cmetadata.pop("history", "[]")
+        try:
+            history = json.loads(history_raw) if history_raw.strip() else []
+            # replace the last history item with updated metadata
+            if history and isinstance(history, list):
+                history[-1] = meta.cmetadata
+            else:
+                history = [meta.cmetadata]
+        except (json.JSONDecodeError, TypeError):
+            log.warning(f"Failed to load index history: {history_raw}. Create new with only current item.")
+            history = [meta.cmetadata]
+        #
+        meta.cmetadata["history"] = json.dumps(history)
+        session.commit()
+        #
+        if delete_embeddings:
+            session.query(EmbeddingStore).filter(
+                EmbeddingStore.cmetadata["collection"].astext == index_name,
+                EmbeddingStore.cmetadata['type'].astext != "index_meta",
+            ).delete(synchronize_session=False)
+            session.commit()
+        #
+        log.debug(f"Cancelled index_meta for index_name={index_name} (delete_embeddings={delete_embeddings})")
+        return True
 
 
 def clean_up_schedule_in_toolkit(project_id: int, toolkit_id: int, index_name: str):

@@ -22,6 +22,8 @@ import requests  # pylint: disable=E0401
 
 from pylon.core.tools import web, log  # pylint: disable=E0401,E0611,W0611
 
+from ..utils.application_tools import cancel_toolkit_index_meta
+
 
 class Method:
     """ Method """
@@ -43,6 +45,16 @@ class Method:
             self._maybe_handle_parallel_dispatch(task_id)
         except Exception:  # pylint: disable=W0702,W0703
             log.exception("Parallel dispatch handling failed (task_id=%s)", task_id)
+        #
+        # Reconcile any index_data run that was hard-killed by this Stop: an inline
+        # index_data run in the agent worker never writes its terminal state when the
+        # worker is SIGTERM/os._exit'd, so its index_meta row sticks at 'in_progress'.
+        # This runs BEFORE the callback_tasks early-return so it also covers SIO agent
+        # runs that register no callback. Best-effort — must never block the callback.
+        try:
+            self.reconcile_stopped_index_metas(task_id)
+        except Exception:  # pylint: disable=W0702,W0703
+            log.exception("Stopped-index reconcile failed (task_id=%s)", task_id)
         #
         callback_data = self.callback_tasks.pop(task_id, None)
         #
@@ -78,6 +90,37 @@ class Method:
             log.info("Callback POST result: %s", requests_result)
         except:  # pylint: disable=W0702
             log.exception("Error in callback sender (task_id=%s)", task_id)
+
+    @web.method()
+    def reconcile_stopped_index_metas(self, task_id):
+        """Flip index_meta rows for a stopped task from 'in_progress' to 'cancelled'.
+
+        A chat/agent/pipeline Stop is a hard kill: index_data runs inline in the
+        agent's forked worker, and on Stop the worker is terminated before the SDK's
+        terminal-state writer runs, orphaning the index_meta row at 'in_progress'.
+        Here we consume the in-memory registry populated from the in_progress event
+        (module.active_index_tasks) and, for every index this task started, transition
+        the row to 'cancelled' via the shared helper. cancel_toolkit_index_meta only
+        touches rows still in 'in_progress', so a row that already reached a terminal
+        state is never clobbered.
+        """
+        entries = self.active_index_tasks.pop(str(task_id), {})
+        if not entries:
+            return
+        for (connection_string, toolkit_name_id, index_name) in entries:
+            try:
+                cancel_toolkit_index_meta(
+                    connection_string,
+                    toolkit_name_id,
+                    index_name,
+                    expected_task_id=str(task_id),
+                    delete_embeddings=False,
+                )
+            except Exception:  # pylint: disable=W0702,W0703
+                log.exception(
+                    "Failed to cancel stopped index_meta (task_id=%s, index_name=%s)",
+                    task_id, index_name,
+                )
 
     @web.method()
     def _maybe_handle_parallel_dispatch(self, task_id):
