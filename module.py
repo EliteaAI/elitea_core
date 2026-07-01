@@ -551,7 +551,7 @@ class Module(module.ModuleModel):
         auth.add_public_rule({"uri": "/app/health/live"})
         auth.add_public_rule({"uri": "/app/health/ready"})
         # Metrics endpoint (must be accessible for Prometheus scraping / HPA)
-        auth.add_public_rule({"uri": "/metrics"})
+        auth.add_public_rule({"uri": "/app/metrics"})
 
         # Provider Hub initialization
         self.provider_hub_init()
