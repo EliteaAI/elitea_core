@@ -355,6 +355,8 @@ def get_skill_details(
         if version:
             result.version_details = SkillVersionDetailModel.model_validate(version)
 
+        result.check_is_pinned(project_id)
+
         return {'data': serialize(result)}
 
 
