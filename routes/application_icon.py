@@ -15,3 +15,7 @@ class Route:
     @web.route("/default_entity_icons/<path:sub_path>")
     def default_entity_icons(self, sub_path):
         return flask.send_from_directory(self.default_entity_icons_path, sub_path)
+
+    @web.route("/project_icon/<path:sub_path>")
+    def project_icon(self, sub_path):
+        return flask.send_from_directory(self.project_icon_path, sub_path)

@@ -79,6 +79,10 @@ class Module(module.ModuleModel):
             config.get("application_icon_subpath", "application_icon")
         )
         #
+        self.project_icon_path = base_path.joinpath(
+            config.get("project_icon_subpath", "project_icon")
+        )
+        #
         self.application_tool_icon_path = base_path.joinpath(
             config.get("application_tool_icon_subpath", "elitea_static-main/tool_icons")
         )
