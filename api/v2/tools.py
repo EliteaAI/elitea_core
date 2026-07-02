@@ -87,6 +87,25 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "error": "Failed to list toolkits"
             }, 400
 
+    @register_openapi(
+        name="Create Toolkit",
+        description="Create a new toolkit in the project from a type and its settings.",
+        request_body=ToolCreateModel,
+        mcp_description="""
+        USE to create a brand-new toolkit from scratch.
+
+        Provide the toolkit `type` (e.g. an integration or MCP type) plus a `name`
+        and type-specific `settings`. `author_id`, `user_id` and `project_id` are set
+        automatically from the request context — do not send them.
+
+        Key errors:
+        - Invalid or unsupported `type`/`settings` → HTTP 400
+        - Toolkit type blocked in this deployment → HTTP 403
+        """,
+        tags=["elitea_core/toolkits"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.applications.tools.create"],
