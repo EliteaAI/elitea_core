@@ -122,6 +122,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if 'error' in version_details:
             return {'error': version_details['error']}, 404
 
+        # #5267: MCP tools are computed at runtime, not stored in the DB. The direct-chat
+        # path injects them in generate_toolkit_payload(); the SDK sub-agent path fetches
+        # version details through this endpoint and never received them. Inject here, scoped
+        # to the resolved end-user (own private project + own token) — see
+        # inject_mcp_toolkits(). Guarded and non-fatal: agents without 'internal_mcp' return
+        # before any RPC/token work.
+        try:
+            from ...utils.internal_tools import inject_mcp_toolkits
+            agent_internal_tools = (version_details.get('meta') or {}).get('internal_tools', [])
+            mcp_tools = inject_mcp_toolkits(user_id=user_id, internal_tools=agent_internal_tools)
+            if mcp_tools:
+                version_details.setdefault('tools', [])
+                version_details['tools'].extend(mcp_tools)
+        except Exception as e:
+            log.warning(f"[#5267] Failed to inject MCP toolkits into version details: {e}")
+
         return version_details, 200
 
     @register_openapi(
