@@ -1000,7 +1000,8 @@ class RPC:
 
                 # Always set server-side truth values
                 effective_runtime_context['user_id'] = current_user['id']
-                effective_runtime_context['project_id'] = parsed.project_id
+                if 'project_id' not in effective_runtime_context:
+                    effective_runtime_context['project_id'] = parsed.project_id
 
                 from ..models.message_items.context import ContextMessageItem
                 context_msg = ContextMessageItem(
