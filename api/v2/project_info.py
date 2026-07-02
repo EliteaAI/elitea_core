@@ -1,7 +1,7 @@
 from flask import request
 from tools import api_tools, auth, config as c, rpc_tools
 
-from ...configurations.models.pd.project_icon import IconMeta
+from plugins.configurations.models.pd.project_icon import IconMeta
 from ...utils.constants import PROMPT_LIB_MODE
 
 
