@@ -50,7 +50,10 @@ class Method:
         # index_data run in the agent worker never writes its terminal state when the
         # worker is SIGTERM/os._exit'd, so its index_meta row sticks at 'in_progress'.
         # This runs BEFORE the callback_tasks early-return so it also covers SIO agent
-        # runs that register no callback. Best-effort — must never block the callback.
+        # runs that register no callback. Best-effort (exceptions are swallowed so it can
+        # never break the callback path). It runs inline, so when the stopped task had an
+        # active index it adds a small, bounded latency (a toolkit-config resolve + cancel)
+        # ahead of the callback POST — rare (only for index-bearing stops) and acceptable.
         try:
             self.reconcile_stopped_index_metas(task_id)
         except Exception:  # pylint: disable=W0702,W0703

@@ -69,7 +69,10 @@ class Module(module.ModuleModel):
         self.active_index_tasks = OrderedDict()
         self.active_index_tasks_max = 4096
         self.recently_stopped_index_tasks = OrderedDict()
-        self.recently_stopped_index_tasks_max = 1024
+        # Marked for EVERY stopped task (a late in_progress can't be known in advance), so
+        # keep the cap generous to avoid churning out an index task's entry before its late
+        # in_progress event lands on a busy platform.
+        self.recently_stopped_index_tasks_max = 8192
         # Guards active_index_tasks + recently_stopped_index_tasks: register (in_progress
         # event) and mark+drain ('stopped' callback) run on different threads. Held only
         # around dict ops, never during the cancel's DB/vault I/O.
