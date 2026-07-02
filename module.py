@@ -95,7 +95,6 @@ class Module(module.ModuleModel):
             'commit_sha': '',
             'commit_ref': '',
         }
-        self.standalone_mode = False
         self.release_owner = None
         self.release_repo = None
         self.default_release = None
@@ -867,131 +866,125 @@ class Module(module.ModuleModel):
         """Initialize elitea_ui functionality (migrated from elitea_ui plugin)"""
         log.info("Initializing elitea_ui")
         #
-        # Determine mode
-        #
-        module_manager = self.context.module_manager
-        self.standalone_mode = "theme" not in module_manager.modules
-        #
         # Blueprint already initialized by descriptor.init_all()
         # Just ensure we have it
         if not hasattr(self, 'bp') or self.bp is None:
             log.warning("Blueprint not initialized, cannot complete elitea_ui_init")
             return
         #
-        if self.standalone_mode:
-            import flask as _flask  # pylint: disable=C0415
-            from pylon.core.tools.context import Context as Holder  # pylint: disable=C0415
-            #
-            # Register "default" mode landing with the framework router
-            # so "/" redirects to the EliteA UI at /app/
-            # (the framework router already handles "/" in app_router)
-            #
-            from tools import router  # pylint: disable=E0401,C0415
-            router.register_mode(
-                kind="route",
-                route="elitea_core.route_elitea_ui",
+        import flask as _flask  # pylint: disable=C0415
+        from pylon.core.tools.context import Context as Holder  # pylint: disable=C0415
+        #
+        # Register "default" mode landing with the framework router
+        # so "/" redirects to the EliteA UI at /app/
+        # (the framework router already handles "/" in app_router)
+        #
+        from tools import router  # pylint: disable=E0401,C0415
+        router.register_mode(
+            kind="route",
+            route="elitea_core.route_elitea_ui",
+        )
+        #
+        # Set g.theme on ALL apps for auth compatibility
+        # (uses app shim → register_app_hook → applies to every Flask app)
+        #
+        def _set_g_theme():
+            _flask.g.theme = Holder()
+            _flask.g.theme.active_section = None
+            _flask.g.theme.active_subsection = None
+            _flask.g.theme.active_mode = c.DEFAULT_MODE
+            _flask.g.theme.active_parameter = None
+        self.context.app.before_request(_set_g_theme)
+        #
+        # SocketIO connect handler (save auth data for SID)
+        #
+        def _standalone_sio_connect(sid, environ, *args, **kwargs):
+            auth.sio_users[sid] = auth.sio_make_auth_data(environ)
+            log.debug("SIO connect (standalone): %s", sid)
+        self.context.sio.on("connect", handler=_standalone_sio_connect)
+        #
+        # Public auth rules (moved from theme)
+        #
+        auth.add_public_rule({"uri": f'{re.escape("/socket.io/")}.*'})
+        auth.add_public_rule({"uri": re.escape("/robots.txt")})
+        auth.add_public_rule({"uri": re.escape("/favicon.ico")})
+        auth.add_public_rule({"uri": re.escape("/app/access_denied")})
+        #
+        # Set auth denied URL to styled access denied page
+        #
+        auth.descriptor.config["auth_denied_url"] = "/app/access_denied"
+        #
+        # Global error handler for styled error pages
+        # (uses app shim → register_app_hook → applies to every Flask app)
+        #
+        import traceback as _tb  # pylint: disable=C0415
+        from werkzeug.exceptions import HTTPException  # pylint: disable=C0415
+        #
+        _error_pages = {
+            400: (
+                "Bad Request",
+                "The server couldn't understand your request.",
+                ["Check that the URL is correct", "Try refreshing the page"],
+            ),
+            403: (
+                "Access Denied",
+                "Sorry, you don't have permission to access this resource.",
+                ["Your session may have expired", "You may lack the required permissions"],
+            ),
+            404: (
+                "Page Not Found",
+                "The page you're looking for doesn't exist or has been moved.",
+                ["Check that the URL is correct", "The page may have been moved or deleted"],
+            ),
+            405: (
+                "Method Not Allowed",
+                "The request method is not supported for this resource.",
+                ["Check the API documentation for allowed methods"],
+            ),
+            500: (
+                "Internal Server Error",
+                "Something went wrong on our end.",
+                ["Try again in a few moments", "If the problem persists, contact your administrator"],
+            ),
+            502: (
+                "Bad Gateway",
+                "The server received an invalid response from an upstream service.",
+                ["Try again in a few moments", "The service may be temporarily unavailable"],
+            ),
+            503: (
+                "Service Unavailable",
+                "The service is temporarily unavailable.",
+                ["Try again in a few moments", "The service may be undergoing maintenance"],
+            ),
+        }
+        _descriptor = self.descriptor
+        #
+        def _error_handler(error):
+            code = error.code if isinstance(error, HTTPException) else 500
+            log.error(
+                "Error: (%s) %s:\n%s",
+                type(error), error,
+                "".join(_tb.format_tb(error.__traceback__)),
             )
-            #
-            # Set g.theme on ALL apps for auth compatibility
-            # (uses app shim → register_app_hook → applies to every Flask app)
-            #
-            def _set_g_theme():
-                _flask.g.theme = Holder()
-                _flask.g.theme.active_section = None
-                _flask.g.theme.active_subsection = None
-                _flask.g.theme.active_mode = c.DEFAULT_MODE
-                _flask.g.theme.active_parameter = None
-            self.context.app.before_request(_set_g_theme)
-            #
-            # SocketIO connect handler (save auth data for SID)
-            #
-            def _standalone_sio_connect(sid, environ, *args, **kwargs):
-                auth.sio_users[sid] = auth.sio_make_auth_data(environ)
-                log.debug("SIO connect (standalone): %s", sid)
-            self.context.sio.on("connect", handler=_standalone_sio_connect)
-            #
-            # Public auth rules (moved from theme)
-            #
-            auth.add_public_rule({"uri": f'{re.escape("/socket.io/")}.*'})
-            auth.add_public_rule({"uri": re.escape("/robots.txt")})
-            auth.add_public_rule({"uri": re.escape("/favicon.ico")})
-            auth.add_public_rule({"uri": re.escape("/app/access_denied")})
-            #
-            # Set auth denied URL to styled access denied page
-            #
-            auth.descriptor.config["auth_denied_url"] = "/app/access_denied"
-            #
-            # Global error handler for styled error pages
-            # (uses app shim → register_app_hook → applies to every Flask app)
-            #
-            import traceback as _tb  # pylint: disable=C0415
-            from werkzeug.exceptions import HTTPException  # pylint: disable=C0415
-            #
-            _error_pages = {
-                400: (
-                    "Bad Request",
-                    "The server couldn't understand your request.",
-                    ["Check that the URL is correct", "Try refreshing the page"],
-                ),
-                403: (
-                    "Access Denied",
-                    "Sorry, you don't have permission to access this resource.",
-                    ["Your session may have expired", "You may lack the required permissions"],
-                ),
-                404: (
-                    "Page Not Found",
-                    "The page you're looking for doesn't exist or has been moved.",
-                    ["Check that the URL is correct", "The page may have been moved or deleted"],
-                ),
-                405: (
-                    "Method Not Allowed",
-                    "The request method is not supported for this resource.",
-                    ["Check the API documentation for allowed methods"],
-                ),
-                500: (
-                    "Internal Server Error",
-                    "Something went wrong on our end.",
-                    ["Try again in a few moments", "If the problem persists, contact your administrator"],
-                ),
-                502: (
-                    "Bad Gateway",
-                    "The server received an invalid response from an upstream service.",
-                    ["Try again in a few moments", "The service may be temporarily unavailable"],
-                ),
-                503: (
-                    "Service Unavailable",
-                    "The service is temporarily unavailable.",
-                    ["Try again in a few moments", "The service may be undergoing maintenance"],
-                ),
-            }
-            _descriptor = self.descriptor
-            #
-            def _error_handler(error):
-                code = error.code if isinstance(error, HTTPException) else 500
-                log.error(
-                    "Error: (%s) %s:\n%s",
-                    type(error), error,
-                    "".join(_tb.format_tb(error.__traceback__)),
-                )
-                # Return JSON for API requests
-                if _flask.request.path.startswith("/api/"):
-                    msg = str(error)
-                    if isinstance(error, HTTPException):
-                        msg = error.description
-                    return _flask.jsonify({"error": msg}), code
-                # Render styled HTML page for browser requests
-                title, message, hints = _error_pages.get(
-                    code,
-                    ("Error", "An unexpected error occurred.", ["Try again or go back to the main page"]),
-                )
-                return _descriptor.render_template(
-                    "error.html",
-                    error_code=code,
-                    error_title=title,
-                    error_message=message,
-                    error_hints=hints,
-                ), code
-            self.context.app.errorhandler(Exception)(_error_handler)
+            # Return JSON for API requests
+            if _flask.request.path.startswith("/api/"):
+                msg = str(error)
+                if isinstance(error, HTTPException):
+                    msg = error.description
+                return _flask.jsonify({"error": msg}), code
+            # Render styled HTML page for browser requests
+            title, message, hints = _error_pages.get(
+                code,
+                ("Error", "An unexpected error occurred.", ["Try again or go back to the main page"]),
+            )
+            return _descriptor.render_template(
+                "error.html",
+                error_code=code,
+                error_title=title,
+                error_message=message,
+                error_hints=hints,
+            ), code
+        self.context.app.errorhandler(Exception)(_error_handler)
         #
         # Download UI if needed for first time
         #
