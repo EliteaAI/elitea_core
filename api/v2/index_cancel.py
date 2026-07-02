@@ -1,12 +1,9 @@
-import json
-import time
-
 from tools import api_tools, auth, config as c, log
-from ...models.indexer import EmbeddingStore
 from ...utils.application_tools import (
     get_toolkit_index_meta,
     load_and_validate_toolkit_for_index,
     get_session_for_schema,
+    cancel_toolkit_index_meta,
 )
 from ...utils.predict_utils import get_toolkit_config
 from ...utils.constants import PROMPT_LIB_MODE
@@ -45,30 +42,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         log.warning(f"Failed to stop task {task_id}: {e}. Proceeding with cleanup.")
                 log.debug(f"Attempting to update index meta to 'cancelled' state for index {index_name}")
                 try:
-                    meta.cmetadata["state"] = "cancelled"
-                    meta.cmetadata["task_id"] = None
-                    meta.cmetadata["updated_on"] = time.time()
-                    history_raw = meta.cmetadata.pop("history", "[]")
-                    try:
-                        history = json.loads(history_raw) if history_raw.strip() else []
-                        # replace the last history item with updated metadata
-                        if history and isinstance(history, list):
-                            history[-1] = meta.cmetadata
-                        else:
-                            history = [meta.cmetadata]
-                    except (json.JSONDecodeError, TypeError):
-                        log.warning(
-                            f"Failed to load index history: {history_raw}. Create new with only current item.")
-                        history = [meta.cmetadata]
-                    #
-                    meta.cmetadata["history"] = json.dumps(history)
-                    session.commit()
-                    #
-                    session.query(EmbeddingStore).filter(
-                        EmbeddingStore.cmetadata["collection"].astext == index_name,
-                        EmbeddingStore.cmetadata['type'].astext != "index_meta",
-                    ).delete(synchronize_session=False)
-                    session.commit()
+                    cancelled = cancel_toolkit_index_meta(
+                        connection_string,
+                        toolkit_name_id,
+                        index_name,
+                        expected_task_id=task_id,
+                        delete_embeddings=True,
+                        require_in_progress=False,
+                        session=session,
+                    )
+                    if not cancelled:
+                        log.warning(f"Manual cancel transitioned no row for index {index_name} (task {task_id})")
                 except Exception as e:
                     return {
                         "ok": False,

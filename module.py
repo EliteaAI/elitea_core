@@ -1,10 +1,11 @@
 import os
 import re
 
+from collections import OrderedDict
 from json import dumps
 from pathlib import Path
 from queue import Empty
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 
 from pylon.core.tools import module, log
 
@@ -65,6 +66,17 @@ class Module(module.ModuleModel):
         # Must be initialized here in __init__ — the callback is registered in init() via
         # task_node.subscribe_to_task_statuses, which can fire before ready() runs.
         self.callback_tasks = {}
+        self.active_index_tasks = OrderedDict()
+        self.active_index_tasks_max = 4096
+        self.recently_stopped_index_tasks = OrderedDict()
+        # Marked for EVERY stopped task (a late in_progress can't be known in advance), so
+        # keep the cap generous to avoid churning out an index task's entry before its late
+        # in_progress event lands on a busy platform.
+        self.recently_stopped_index_tasks_max = 8192
+        # Guards active_index_tasks + recently_stopped_index_tasks: register (in_progress
+        # event) and mark+drain ('stopped' callback) run on different threads. Held only
+        # around dict ops, never during the cancel's DB/vault I/O.
+        self.active_index_tasks_lock = Lock()
         self.not_starting_task_event = Event()
         self.not_starting_task_event.set()
         # logs in-memory cache

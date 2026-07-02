@@ -13,6 +13,7 @@ from ..models.all import EliteATool, EntityToolMapping, ApplicationVersion
 from ..models.indexer import EmbeddingStore
 from ..models.enums.all import ToolEntityTypes
 from ..models.enums.all import InitiatorType
+from ..models.enums.all import IndexDataStatus
 from ..utils.exceptions import PoolSaturationError
 
 RPC_CALL_TIMEOUT = 3
@@ -1221,6 +1222,118 @@ def is_index_stale(updated_on: float, index_data_state: str, task_disconnected_t
     time_since_update = current_time - updated_on
 
     return time_since_update > task_disconnected_timeout
+
+
+def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Optional[str],
+                                  delete_embeddings: bool, require_in_progress: bool,
+                                  expected_created_on: Optional[float]) -> bool:
+    """Core cancel write against an already-open session. See cancel_toolkit_index_meta."""
+    meta = get_toolkit_index_meta(session, index_name)
+    if not meta:
+        log.debug(f"No index_meta to cancel for index_name={index_name}")
+        return False
+    #
+    current_state = meta.cmetadata.get("state")
+    if require_in_progress and current_state != IndexDataStatus.in_progress.value:
+        log.debug(f"Skipping cancel for index_name={index_name}: state is '{current_state}', not in_progress")
+        return False
+    #
+    if expected_task_id is not None:
+        row_task_id = meta.cmetadata.get("task_id")
+        if row_task_id not in (None, expected_task_id):
+            log.debug(f"Skipping cancel for index_name={index_name}: "
+                      f"task_id mismatch (row={row_task_id}, expected={expected_task_id})")
+            return False
+        # Row has no task_id (agent path): a reused index_name may be a NEWER run
+        # (reindex race). Disambiguate by created_on with tolerance (float round-trip
+        # drift must not cause a false skip); missing created_on -> still cancel.
+        if row_task_id is None and expected_created_on is not None:
+            row_created_on = meta.cmetadata.get("created_on")
+            try:
+                if row_created_on is not None and abs(float(row_created_on) - float(expected_created_on)) > 1.0:
+                    log.debug(f"Skipping cancel for index_name={index_name}: created_on mismatch "
+                              f"(row={row_created_on}, expected={expected_created_on}) - likely a newer run")
+                    return False
+            except (TypeError, ValueError):
+                pass
+    #
+    meta.cmetadata["state"] = IndexDataStatus.cancelled.value
+    meta.cmetadata["task_id"] = None
+    meta.cmetadata["updated_on"] = time.time()
+    history_raw = meta.cmetadata.pop("history", "[]")
+    try:
+        history = json.loads(history_raw) if history_raw.strip() else []
+        # replace the last history item with updated metadata
+        if history and isinstance(history, list):
+            history[-1] = meta.cmetadata
+        else:
+            history = [meta.cmetadata]
+    except (json.JSONDecodeError, TypeError):
+        log.warning(f"Failed to load index history: {history_raw}. Create new with only current item.")
+        history = [meta.cmetadata]
+    #
+    meta.cmetadata["history"] = json.dumps(history)
+    session.commit()
+    #
+    if delete_embeddings:
+        session.query(EmbeddingStore).filter(
+            EmbeddingStore.cmetadata["collection"].astext == index_name,
+            EmbeddingStore.cmetadata['type'].astext != "index_meta",
+        ).delete(synchronize_session=False)
+        session.commit()
+    #
+    log.debug(f"Cancelled index_meta for index_name={index_name} (delete_embeddings={delete_embeddings})")
+    return True
+
+
+def cancel_toolkit_index_meta(connection_string: str, toolkit_name_id: str, index_name: str,
+                              expected_task_id: Optional[str] = None,
+                              delete_embeddings: bool = False,
+                              require_in_progress: bool = True,
+                              expected_created_on: Optional[float] = None,
+                              session=None) -> bool:
+    """Transition a toolkit's index_meta row to 'cancelled'. Single write site, shared by
+    the manual index_cancel endpoint and the system reconcile-on-stop path. Returns True
+    if a row was transitioned.
+
+    require_in_progress: only touch in_progress rows (default; safe/idempotent for the
+        reconcile path). Manual cancel passes False for its "cancel any state" contract.
+    expected_created_on: when the row's task_id is None, only cancel if created_on matches
+        (tolerance-based) - guards a reindex race on the same index_name.
+    delete_embeddings: also delete the collection's non-meta rows (manual cancel).
+    session: reuse an open session instead of opening a second engine.
+    """
+    if session is not None:
+        return _cancel_index_meta_in_session(
+            session, index_name, expected_task_id, delete_embeddings,
+            require_in_progress, expected_created_on,
+        )
+    with get_session_for_schema(connection_string, toolkit_name_id) as session:
+        return _cancel_index_meta_in_session(
+            session, index_name, expected_task_id, delete_embeddings,
+            require_in_progress, expected_created_on,
+        )
+
+
+def resolve_toolkit_index_connection(project_id: int, toolkit_id: int, user_id: Optional[int] = None):
+    """Resolve (connection_string, toolkit_name_id) from ids for flows whose event lacks
+    toolkit_config (the agent/chat path). Called only at Stop time, never per event.
+    Returns (None, None) if it cannot be resolved.
+    """
+    from ..utils.predict_utils import get_toolkit_config
+    try:
+        toolkit_config = get_toolkit_config(project_id, user_id, toolkit_id)
+    except Exception as e:
+        log.warning(f"Failed to load toolkit config for toolkit_id={toolkit_id}, project_id={project_id}: {e}")
+        return None, None
+    if not toolkit_config or (isinstance(toolkit_config, dict) and toolkit_config.get('error')):
+        log.warning(f"No toolkit config resolved for toolkit_id={toolkit_id}, project_id={project_id}")
+        return None, None
+    toolkit_name_id, connection_string, error = load_and_validate_toolkit_for_index(toolkit_config)
+    if error:
+        log.warning(f"Cannot resolve index connection for toolkit_id={toolkit_id}: {error[0].get('error')}")
+        return None, None
+    return connection_string, toolkit_name_id
 
 
 def clean_up_schedule_in_toolkit(project_id: int, toolkit_id: int, index_name: str):
