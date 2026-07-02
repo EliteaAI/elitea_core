@@ -884,6 +884,8 @@ class Module(module.ModuleModel):
             log.warning("Blueprint not initialized, cannot complete elitea_ui_init")
             return
         #
+        import flask as _flask  # pylint: disable=C0415
+        #
         # Register "default" mode landing with the framework router
         # so "/" redirects to the EliteA UI at /app/
         # (the framework router already handles "/" in app_router)
