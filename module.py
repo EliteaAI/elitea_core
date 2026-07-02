@@ -889,7 +889,6 @@ class Module(module.ModuleModel):
             return
         #
         import flask as _flask  # pylint: disable=C0415
-        from pylon.core.tools.context import Context as Holder  # pylint: disable=C0415
         #
         # Register "default" mode landing with the framework router
         # so "/" redirects to the EliteA UI at /app/
@@ -900,17 +899,6 @@ class Module(module.ModuleModel):
             kind="route",
             route="elitea_core.route_elitea_ui",
         )
-        #
-        # Set g.theme on ALL apps for auth compatibility
-        # (uses app shim → register_app_hook → applies to every Flask app)
-        #
-        def _set_g_theme():
-            _flask.g.theme = Holder()
-            _flask.g.theme.active_section = None
-            _flask.g.theme.active_subsection = None
-            _flask.g.theme.active_mode = c.DEFAULT_MODE
-            _flask.g.theme.active_parameter = None
-        self.context.app.before_request(_set_g_theme)
         #
         # SocketIO connect handler (save auth data for SID)
         #
