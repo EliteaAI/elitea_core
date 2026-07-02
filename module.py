@@ -9,7 +9,7 @@ from threading import Thread, Event, Lock
 
 from pylon.core.tools import module, log
 
-from tools import db, theme, config as c, auth, context, this
+from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
 
 from .utils.sio_utils import SioEvents
@@ -428,36 +428,22 @@ class Module(module.ModuleModel):
         # Initialize elitea_ui FIRST (it originally loaded before elitea_core)
         self.elitea_ui_init()
 
-        theme.register_mode_section(
-            "administration", "elitea", "EliteA",
-            kind="holder",
-            permissions={
-                "permissions": ["runtime.elitea"],
-                "recommended_roles": {
-                    "administration": {"admin": True, "viewer": False, "editor": False},
-                    "default": {"admin": True, "viewer": False, "editor": False},
-                    "developer": {"admin": True, "viewer": False, "editor": False},
-                }
-            },
-            location="left",
-            icon_class="fas fa-info-circle fa-fw",
-        )
-        theme.register_mode_subsection(
-            "administration", "elitea",
-            "ui", "UI",
-            title="UI",
-            kind="slot",
-            permissions={
-                "permissions": ["runtime.elitea.ui"],
-                "recommended_roles": {
-                    "administration": {"admin": True, "viewer": False, "editor": False},
-                    "default": {"admin": True, "viewer": False, "editor": False},
-                    "developer": {"admin": True, "viewer": False, "editor": False},
-                }
-            },
-            prefix="admin_elitea_ui_",
-            icon_class="fas fa-server fa-fw",
-        )
+        auth.register_permissions({
+            "permissions": ["runtime.elitea"],
+            "recommended_roles": {
+                "administration": {"admin": True, "viewer": False, "editor": False},
+                "default": {"admin": True, "viewer": False, "editor": False},
+                "developer": {"admin": True, "viewer": False, "editor": False},
+            }
+        })
+        auth.register_permissions({
+            "permissions": ["runtime.elitea.ui"],
+            "recommended_roles": {
+                "administration": {"admin": True, "viewer": False, "editor": False},
+                "default": {"admin": True, "viewer": False, "editor": False},
+                "developer": {"admin": True, "viewer": False, "editor": False},
+            }
+        })
 
         # self.init_db()
         # TaskNode
@@ -860,37 +846,22 @@ class Module(module.ModuleModel):
     # Provider Hub Methods
     def provider_hub_init(self):
         """Initialize Provider Hub functionality"""
-        # Register admin sections
-        theme.register_mode_section(
-            "administration", "airun", "AI/Run",
-            kind="holder",
-            permissions={
-                "permissions": ["runtime.airun"],
-                "recommended_roles": {
-                    "administration": {"admin": True, "viewer": False, "editor": False},
-                    "default": {"admin": True, "viewer": False, "editor": False},
-                    "developer": {"admin": True, "viewer": False, "editor": False},
-                }
-            },
-            location="left",
-            icon_class="fas fa-info-circle fa-fw",
-        )
-        theme.register_mode_subsection(
-            "administration", "airun",
-            "serviceproviders", "ServiceProviders",
-            title="ServiceProviders",
-            kind="slot",
-            permissions={
-                "permissions": ["runtime.airun.serviceproviders"],
-                "recommended_roles": {
-                    "administration": {"admin": True, "viewer": False, "editor": False},
-                    "default": {"admin": True, "viewer": False, "editor": False},
-                    "developer": {"admin": True, "viewer": False, "editor": False},
-                }
-            },
-            prefix="admin_airun_serviceproviders_",
-            icon_class="fas fa-server fa-fw",
-        )
+        auth.register_permissions({
+            "permissions": ["runtime.airun"],
+            "recommended_roles": {
+                "administration": {"admin": True, "viewer": False, "editor": False},
+                "default": {"admin": True, "viewer": False, "editor": False},
+                "developer": {"admin": True, "viewer": False, "editor": False},
+            }
+        })
+        auth.register_permissions({
+            "permissions": ["runtime.airun.serviceproviders"],
+            "recommended_roles": {
+                "administration": {"admin": True, "viewer": False, "editor": False},
+                "default": {"admin": True, "viewer": False, "editor": False},
+                "developer": {"admin": True, "viewer": False, "editor": False},
+            }
+        })
 
     def provider_hub_deinit(self):
         """Deinitialize Provider Hub functionality"""
@@ -1030,26 +1001,6 @@ class Module(module.ModuleModel):
                     error_hints=hints,
                 ), code
             self.context.app.errorhandler(Exception)(_error_handler)
-        else:
-            #
-            # Register a mode (for admin UI switch-back)
-            #
-            from tools import theme  # pylint: disable=E0401,C0415
-            #
-            try:
-                theme.register_mode(
-                    "elitea", "EliteA",
-                    public=True,
-                )
-            except:  # pylint: disable=W0702
-                log.warning("Failed to register EliteA mode, assuming present")
-            #
-            # IMPORTANT: Change route reference from elitea_ui to elitea_core
-            theme.register_mode_landing(
-                mode="elitea",
-                kind="route",
-                route="elitea_core.route_elitea_ui",  # Changed from elitea_ui.route_elitea_ui
-            )
         #
         # Download UI if needed for first time
         #

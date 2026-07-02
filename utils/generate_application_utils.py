@@ -61,6 +61,7 @@ def fetch_project_resources(
                 Application.id,
                 Application.name,
                 Application.description,
+                ApplicationVersion.id.label("version_id"),
                 ApplicationVersion.agent_type,
             )
             .outerjoin(
@@ -75,7 +76,8 @@ def fetch_project_resources(
                 (
                     _score_item(query_tokens, r.name or "", r.description or ""),
                     {
-                        "id": r.id,
+                        "application_id": r.id,
+                        "id": r.version_id,
                         "name": r.name,
                         "description": r.description,
                         "type": "pipeline" if r.agent_type == "pipeline" else "agent",
@@ -130,7 +132,7 @@ def build_system_prompt(
     )
     agent_lines = (
         [
-            f'- application_id={a["id"]}  type="{a["type"]}"  name="{a["name"]}"  {(a["description"] or "")[:100]}'
+            f'- application_id={a["application_id"]}  type="{a["type"]}"  name="{a["name"]}"  {(a["description"] or "")[:100]}'
             for a in agents
         ]
         if agents
