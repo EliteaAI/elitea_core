@@ -7,6 +7,7 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 FLASK_ROUTE_URL: str = "elitea_core.project_icon"
 MAX_FILE_SIZE_KB: int = 512
+MAX_DIMENSION: int = 512
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -53,8 +54,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if file_size > max_file_size:
             return {"error": f"File size exceeds {MAX_FILE_SIZE_KB} KB"}, 400
 
-        final_width = int(request.form.get("width", 64))
-        final_height = int(request.form.get("height", 64))
+        final_width = min(int(request.form.get("width", 64)), MAX_DIMENSION)
+        final_height = min(int(request.form.get("height", 64)), MAX_DIMENSION)
         folder_path: Path = self.module.project_icon_path.joinpath(str(project_id))
         folder_path.mkdir(parents=True, exist_ok=True)
         file_path: Path = folder_path.joinpath(f"{uuid4()}.png")
@@ -77,13 +78,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, icon_name: str = None, **kwargs):
-        if not icon_name or "/" in icon_name or ".." in icon_name:
+        if not icon_name:
             return {"error": "Invalid icon name"}, 400
 
         folder_path: Path = self.module.project_icon_path.joinpath(str(project_id))
         folder_path.mkdir(parents=True, exist_ok=True)
 
-        file_path = folder_path.joinpath(icon_name)
+        file_path = (folder_path / icon_name).resolve()
+        if not str(file_path).startswith(str(folder_path.resolve())):
+            return {"error": "Invalid icon name"}, 400
+
         if file_path.exists():
             file_path.unlink()
             return {"ok": True, "msg": "Icon deleted"}, 200

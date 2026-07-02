@@ -1,6 +1,7 @@
 from flask import request
 from tools import api_tools, auth, config as c, rpc_tools
 
+from ...configurations.models.pd.project_icon import IconMeta
 from ...utils.constants import PROMPT_LIB_MODE
 
 
@@ -29,7 +30,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         # Get project icon_meta from configurations
         config = rpc.configurations_get_first_filtered_project(
             project_id=project_id,
-            filter_fields={"type": "project_icon"},
+            filter_fields={"type": "project_icon", "elitea_title": f"project_icon_{project_id}"},
         )
         icon_meta = None
         if config and config.get("data"):
@@ -52,12 +53,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def put(self, project_id: int, **kwargs):
         """Update project icon_meta selection."""
         raw = dict(request.json)
-        icon_meta = raw.get("icon_meta")
+        raw_icon_meta = raw.get("icon_meta")
+        icon_meta = IconMeta.model_validate(raw_icon_meta).model_dump() if raw_icon_meta else None
 
         rpc = rpc_tools.RpcMixin().rpc.timeout(5)
         config = rpc.configurations_get_first_filtered_project(
             project_id=project_id,
-            filter_fields={"type": "project_icon"},
+            filter_fields={"type": "project_icon", "elitea_title": f"project_icon_{project_id}"},
         )
 
         if config is None:
