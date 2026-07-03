@@ -147,11 +147,18 @@ def generate_toolkit_payload(
             app_version_id = participant_mapping.entity_settings.get('version_id')
 
             # --- Leaf-only guard for adhoc LLM-chat binding (issue #5680) ---
-            # In an LLM/dummy chat, the chat model is the orchestrator and each bound agent
+            # In an LLM/dummy chat, the chat model is the orchestrator and each injected agent
             # becomes its CHILD (level-2 nesting). A "container" agent (one that itself uses
-            # other agents) must not be nested there — it triggers the parallel-run/HITL restart
-            # bug and only runs correctly as a direct participant. Block it here with a clear
-            # error instead of forwarding a broken config to the SDK. Leaf agents are fine.
+            # other agents) can't be nested there — it triggers the parallel-run/HITL restart
+            # bug. It runs correctly only as a DIRECT participant (selected as the active agent),
+            # which goes through generate_application_version_payload, NOT this loop.
+            #
+            # SKIP it here rather than raising: this path runs on EVERY chat turn, so a raise
+            # would brick the whole conversation (even "Hi", even after the participant is
+            # removed) instead of just declining the one illegal tool. Skipping keeps the chat
+            # working with the base model; the agent simply isn't offered as a callable tool.
+            # The user runs it by selecting it as the active agent. Guidance/prevention lives at
+            # add-time in the UI (useAgentPipelineAssociation), not on the runtime hot path.
             # This does NOT apply to swarm sibling injection (is_llm_chat=False), where agents
             # are peer handoff targets, not nested children.
             if is_llm_chat and app_version_id is not None:
@@ -164,11 +171,13 @@ def generate_toolkit_payload(
                     and bound_version.agent_type != AgentTypes.pipeline.value
                     and is_container_version(bound_version)
                 ):
-                    raise PayloadGenerationError(
-                        f"\"{app_participant.meta.get('name', 'This agent')}\" uses other agents, "
-                        f"so it can't be used as a tool by the chat model. Select it as the active "
-                        f"agent to run it directly as an orchestrator."
+                    log.warning(
+                        "Skipping container agent '%s' (ver=%s) as an adhoc tool for the chat "
+                        "model — it uses other agents and can only run as the active agent "
+                        "(orchestrator). Nesting it would be level-2 (unsupported).",
+                        app_participant.meta.get('name'), app_version_id,
                     )
+                    continue
 
             # Include all application participants - SDK will handle:
             # - Whether to create handoff tools (based on internal_tools having 'swarm')
@@ -193,10 +202,6 @@ def generate_toolkit_payload(
                 "created_at": datetime.now(tz=timezone.utc).isoformat(),
             }
             tools.append(app_toolkit_details)
-        except PayloadGenerationError:
-            # Leaf-only guard above — never transient, requires user action; propagate so the
-            # chat turn fails with the clear message instead of silently dropping the agent.
-            raise
         except Exception as e:
             log.warning(f"Skipping application id={app_participant.entity_meta.get('id')} due to error: {str(e)}")
             continue
