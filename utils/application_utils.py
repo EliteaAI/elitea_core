@@ -1023,10 +1023,25 @@ def validate_application_version_details(
     _visited: set = None
 ) -> bool:
     # Initialize _visited set at the top level to share across all sibling toolkits
+    top_level = _visited is None
     if _visited is None:
         _visited = set()
 
-    # Skip if already validated in this chain (prevents circular references and duplicate work)
+    # Structural sub-agent-tree check (issue #5680): run ONCE at the top-level entry.
+    # Detects circular references (path-based) and enforces the leaf-only rule (a non-pipeline
+    # agent child must not itself contain sub-agents), recursing through pipelines to full
+    # depth. Raises SubAgentTreeError -> surfaced as a validation error by the caller.
+    if top_level:
+        from .publish_utils import collect_sub_agent_tree, MAX_SUB_AGENT_VALIDATION_DEPTH
+        collect_sub_agent_tree(
+            project_id, version_id,
+            max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+            recurse_pipelines=True,
+            enforce_leaf_rule=True,
+        )
+
+    # Skip if already validated in this chain (dedup — a leaf legitimately reused by several
+    # parents is validated once). NOT the cycle guard; cycles are caught structurally above.
     key = (application_id, version_id)
     if key in _visited:
         return True

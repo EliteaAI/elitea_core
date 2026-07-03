@@ -511,7 +511,28 @@ def generate_application_version_payload(
         raise PayloadGenerationError(
             f"Agent version {entity_settings.version_id} has status '{version_status}' and cannot be used directly"
         )
-    
+
+    # --- Authoritative sub-agent-tree gate (issue #5680) ---
+    # This runs every chat turn on the version ACTUALLY selected (top-level or switched via a
+    # per-subagent version dropdown), so it catches circular/over-nested references that
+    # bind-time and UI guards cannot — e.g. a leaf promoted to a container by a version switch.
+    # Rejects a poisoned config here instead of forwarding it to the SDK (which would recurse).
+    from ..utils.publish_utils import collect_sub_agent_tree, SubAgentTreeError, MAX_SUB_AGENT_VALIDATION_DEPTH
+    try:
+        collect_sub_agent_tree(
+            project_id, entity_settings.version_id,
+            max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+            session=session,
+            recurse_pipelines=True,
+            enforce_leaf_rule=True,
+        )
+    except SubAgentTreeError as tree_err:
+        raise PayloadGenerationError(
+            f"Agent version {entity_settings.version_id} has an invalid sub-agent "
+            f"configuration: {tree_err}"
+        ) from tree_err
+
+
     # Get internal_tools from agent version meta for attachment injection decision
     agent_internal_tools = app_version_details.get('meta', {}).get('internal_tools', [])
 

@@ -61,8 +61,16 @@ _META_ALLOWLIST = frozenset({
 })
 
 
-# Maximum sub-agent nesting depth (configurable)
+# Maximum sub-agent nesting depth for the PUBLISH path (unchanged; publishing agents that
+# nest more than this is rejected as before).
 _MAX_SUB_AGENT_DEPTH = 3
+
+# Anti-runaway backstop for the VALIDATION walk (cycle + leaf-rule mode), where legitimate
+# pipeline-of-pipeline composition may nest deeply. The real business rule is the leaf-only
+# check (is_container_version), NOT this number — this only prevents a pathological
+# misconfiguration from walking unbounded. Keep aligned with _MAX_APP_NESTING_BACKSTOP in the
+# SDK (elitea-sdk/elitea_sdk/runtime/toolkits/tools.py).
+MAX_SUB_AGENT_VALIDATION_DEPTH = 25
 
 # ---------------------------------------------------------------------------
 # Validation constants
@@ -330,17 +338,31 @@ def collect_sub_agent_tree(
     version_id: int,
     max_depth: int = _MAX_SUB_AGENT_DEPTH,
     session=None,
+    recurse_pipelines: bool = False,
+    enforce_leaf_rule: bool = False,
 ) -> List[SubAgentNode]:
     """Recursively discover sub-agents referenced by a version's tools.
 
     Returns a list of top-level ``SubAgentNode`` objects, each of which may
     contain nested children.  Raises ``SubAgentTreeError`` on circular
     references or depth violations, ``ValueError`` on missing sub-agents.
+
+    Two modes (issue #5680):
+
+    * **Publish** (defaults): ``recurse_pipelines=False`` skips pipeline-type children
+      (they are never materialized into the public project), ``enforce_leaf_rule=False``.
+    * **Validation** (bind-time / version-resolution): ``recurse_pipelines=True`` walks
+      *through* pipeline children so cycles/violations hidden behind a pipeline are caught
+      and pipeline-of-pipeline nesting is scanned to full depth; ``enforce_leaf_rule=True``
+      rejects a non-pipeline agent child that itself contains sub-agents (the "leaf-only"
+      rule — a container agent may only run at the top, not be nested).
     """
     visited: set = set()
     return _collect_sub_agents_recursive(
         project_id, version_id, max_depth, depth=0, visited=visited,
         session=session,
+        recurse_pipelines=recurse_pipelines,
+        enforce_leaf_rule=enforce_leaf_rule,
     )
 
 
@@ -351,18 +373,35 @@ def _collect_sub_agents_recursive(
     depth: int,
     visited: set,
     session=None,
+    recurse_pipelines: bool = False,
+    enforce_leaf_rule: bool = False,
 ) -> List[SubAgentNode]:
     """Internal recursive helper for ``collect_sub_agent_tree``."""
     if session is not None:
         return _collect_sub_agents_in_session(
             project_id, version_id, max_depth, depth, visited,
             session,
+            recurse_pipelines=recurse_pipelines,
+            enforce_leaf_rule=enforce_leaf_rule,
         )
     with db.get_session(project_id) as session:
         return _collect_sub_agents_in_session(
             project_id, version_id, max_depth, depth, visited,
             session,
+            recurse_pipelines=recurse_pipelines,
+            enforce_leaf_rule=enforce_leaf_rule,
         )
+
+
+def is_container_version(version) -> bool:
+    """True if a version references any sub-agent (has ≥1 ``application``-type tool).
+
+    Uniform predicate for the leaf-only rule (issue #5680): a "container" is any agent OR
+    pipeline that itself composes other applications. Pipeline agent-node targets are stored
+    as ``application`` tool rows too (resolved by name at runtime), so this one lookup over
+    ``version.tools`` classifies both mechanisms. Requires ``version.tools`` to be loaded.
+    """
+    return any(t.type == 'application' for t in (version.tools or []))
 
 
 def _collect_sub_agents_in_session(
@@ -372,6 +411,8 @@ def _collect_sub_agents_in_session(
     depth: int,
     visited: set,
     session,
+    recurse_pipelines: bool = False,
+    enforce_leaf_rule: bool = False,
 ) -> List[SubAgentNode]:
     """Core logic for sub-agent tree collection within a session."""
     version = (
@@ -404,17 +445,17 @@ def _collect_sub_agents_in_session(
                 f"(application_id={child_app_id}, application_version_id={child_ver_id})"
             )
 
-        # Cycle detection
+        # Cycle detection — always on, for agents AND pipelines (P->A->P recurses forever).
         key = (child_app_id, child_ver_id)
         if key in visited:
             raise SubAgentTreeError(
                 f"Circular sub-agent dependency detected involving "
                 f"application {child_app_id} version {child_ver_id}",
                 error_code='cycle_detected',
-                fix='Remove the circular sub-agent reference before publishing',
+                fix='Remove the circular sub-agent reference',
             )
 
-        # Depth check
+        # Depth check (anti-runaway backstop)
         next_depth = depth + 1
         if next_depth > max_depth:
             raise SubAgentTreeError(
@@ -423,10 +464,11 @@ def _collect_sub_agents_in_session(
                 fix=f'Reduce sub-agent nesting to at most {max_depth} levels',
             )
 
-        # Validate sub-agent exists
+        # Validate sub-agent exists (load tools so is_container_version can classify it)
         child_version = (
             session.query(ApplicationVersion)
             .filter(ApplicationVersion.id == child_ver_id)
+            .options(selectinload(ApplicationVersion.tools))
             .first()
         )
         if child_version is None:
@@ -435,9 +477,11 @@ def _collect_sub_agents_in_session(
                 f"(referenced by tool '{tool_name}') not found"
             )
 
-        # Skip pipeline-type sub-agents — pipelines must never be
-        # published or validated as sub-agents
-        if child_version.agent_type == AgentTypes.pipeline.value:
+        is_pipeline_child = child_version.agent_type == AgentTypes.pipeline.value
+
+        if is_pipeline_child and not recurse_pipelines:
+            # Publish path: pipelines are never materialized as sub-agents — skip the
+            # subtree (matches prior behavior exactly; key is NOT added to `visited`).
             log.info(
                 "Skipping pipeline sub-agent '%s' (ver=%d) from "
                 "sub-agent tree — pipelines are excluded",
@@ -445,12 +489,40 @@ def _collect_sub_agents_in_session(
             )
             continue
 
+        # Leaf-only rule (validation path): a non-pipeline agent child must NOT itself be a
+        # container. Pipelines are the sanctioned deep-composition primitive and are exempt
+        # from the leaf rule (but still walked below for cycle/depth accounting).
+        if (
+            enforce_leaf_rule
+            and not is_pipeline_child
+            and is_container_version(child_version)
+        ):
+            raise SubAgentTreeError(
+                f"Agent '{tool_name}' (version {child_ver_id}) uses other agents and "
+                f"cannot be nested as a sub-agent",
+                error_code='container_child_forbidden',
+                fix='Run it directly as a chat participant, or bind only leaf agents '
+                    '(agents that do not themselves use other agents) as sub-agents.',
+            )
+
+        # Enter the cycle set before descending. In validation mode pipeline children reach
+        # this point (no `continue` above), so a back-reference through a pipeline (P->A->P)
+        # is caught on re-entry. Publish-skipped pipelines never get here.
         visited.add(key)
         children = _collect_sub_agents_recursive(
             project_id, child_ver_id, max_depth,
             depth=next_depth, visited=visited,
             session=session,
+            recurse_pipelines=recurse_pipelines,
+            enforce_leaf_rule=enforce_leaf_rule,
         )
+        # Validation walk uses PATH-based cycle detection: a cycle is a back-edge to a node
+        # on the current ancestor path, not merely one seen on a sibling branch. Backtrack so
+        # a leaf legitimately shared by two pipeline branches (P1->L, P2->L) is not mistaken
+        # for a cycle. Publish keeps its historical global-visited behavior (pipelines are
+        # skipped there, so the shared-leaf-through-pipelines case cannot arise).
+        if recurse_pipelines or enforce_leaf_rule:
+            visited.discard(key)
         nodes.append(SubAgentNode(
             app_id=child_app_id,
             version_id=child_ver_id,
