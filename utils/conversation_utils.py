@@ -6,7 +6,7 @@ from tools import rpc_tools, this
 from pylon.core.tools import log
 
 from ..models.conversation import Conversation
-from ..models.enums.all import ParticipantTypes
+from ..models.enums.all import ParticipantTypes, AgentTypes
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.base import MessageItem
 from ..models.participants import Participant, ParticipantMapping
@@ -367,7 +367,22 @@ def get_conversation_details(
                     f"Application with ID {participant['entity_meta']['id']} not found"
                 )
                 continue
-            participant['meta']['tools'] = application_version_details['version_details']['tools']
+            version_details = application_version_details['version_details']
+            participant['meta']['tools'] = version_details['tools']
+            # "Container" flag (issue #5680): a non-pipeline agent that itself uses other agents
+            # (has an application-type tool) is SKIPPED as a callable tool in adhoc LLM chat — it
+            # can only run as the active agent (orchestrator). Surface it so the participant chip
+            # can explain that to the user instead of the skip looking like a silent no-op. Mirrors
+            # the skip rule in rpc/chat_all.generate_toolkit_payload (agent_type != pipeline AND
+            # is_container_version); computed here from already-fetched data (no extra query).
+            # Pipelines are the sanctioned deep-composition primitive and are never flagged.
+            participant['meta']['is_container'] = (
+                version_details.get('agent_type') != AgentTypes.pipeline.value
+                and any(
+                    (t or {}).get('type') == 'application'
+                    for t in (version_details.get('tools') or [])
+                )
+            )
 
     return ConversationDetails.model_validate(conversation_dict)
 
