@@ -44,8 +44,15 @@ def calculate_conversation_duration(conversation: Conversation, session: Session
         # are accumulated, so [0]['timestamp_start'] preserves the true earliest start.
         (
             and_(
-                func.jsonb_array_length(
-                    func.coalesce(ConversationMessageGroup.meta['thinking_steps'], cast('[]', JSONB))
+                # Guard: only call jsonb_array_length when the value is actually a JSON array.
+                # coalesce(meta['thinking_steps'], cast('[]', JSONB)) passes '[]' as a JSON
+                # *string* "[]" (not an array), so jsonb_array_length crashes on any non-array
+                # value.  The nested case below guarantees jsonb_array_length is never called on
+                # a scalar or NULL.
+                case(
+                    (func.jsonb_typeof(ConversationMessageGroup.meta['thinking_steps']) == 'array',
+                     func.jsonb_array_length(ConversationMessageGroup.meta['thinking_steps'])),
+                    else_=0,
                 ) > 0,
                 ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start'].astext.isnot(None),
                 ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish'].astext.isnot(None)
@@ -109,8 +116,15 @@ def calculate_conversation_durations_batch(
         # collapsing multi-round / sub-agent / HITL durations to the final round only (#5422).
         (
             and_(
-                func.jsonb_array_length(
-                    func.coalesce(ConversationMessageGroup.meta['thinking_steps'], cast('[]', JSONB))
+                # Guard: only call jsonb_array_length when the value is actually a JSON array.
+                # coalesce(meta['thinking_steps'], cast('[]', JSONB)) passes '[]' as a JSON
+                # *string* "[]" (not an array), so jsonb_array_length crashes on any non-array
+                # value.  The nested case below guarantees jsonb_array_length is never called on
+                # a scalar or NULL.
+                case(
+                    (func.jsonb_typeof(ConversationMessageGroup.meta['thinking_steps']) == 'array',
+                     func.jsonb_array_length(ConversationMessageGroup.meta['thinking_steps'])),
+                    else_=0,
                 ) > 0,
                 ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start'].astext.isnot(None),
                 ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish'].astext.isnot(None)
