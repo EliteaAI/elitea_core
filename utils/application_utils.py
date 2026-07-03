@@ -73,9 +73,16 @@ def apply_selected_tools_intersection(tools, tool_mappings):
 
             # Apply intersection if mapping exists
             if tool_selected_from_mapping:
-                settings['selected_tools'] = list(
-                    set(tool_selected_from_settings) & set(tool_selected_from_mapping)
-                )
+                settings_set = set(tool_selected_from_settings)
+                # Preserve the mapping's order so the resulting payload is deterministic.
+                intersection = [name for name in tool_selected_from_mapping if name in settings_set]
+                # Fail-open guard: downstream (SDK/indexer) treats an EMPTY
+                # selected_tools as "expose ALL tools". If the entity's explicit
+                # selection and the toolkit's enabled set are disjoint, a naive
+                # intersection collapses to [] and silently re-enables every tool the
+                # user explicitly disabled (e.g. SharePoint read_file_from_sharing_link).
+                # Honor the entity's explicit selection instead of failing open.
+                settings['selected_tools'] = intersection or tool_selected_from_mapping
         elif tool_selected_from_mapping:
             # No tools in toolkit settings, but mapping has selected tools
             # Use mapping directly (for toolkits that don't pre-define available tools)
