@@ -47,6 +47,7 @@ if _API_AVAILABLE:
                 "Returns paginated agent/application usage statistics with optional "
                 "date filtering, search by name, sorting, and a daily chat-message trend."
             ),
+            mcp_description="Use this tool when you need a leaderboard or paginated comparison of agents/applications in a project, with search and sorting. Do not use this tool when you need the full breakdown for one specific agent — use Get Agent Analytics Detail. Do not use for overall project KPIs — use Get Project Analytics Overview. This is the primary discovery/list endpoint for agent-level analytics.",
             tags=["elitea_core/analytics"],
             parameters=[
                 {

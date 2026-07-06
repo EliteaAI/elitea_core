@@ -43,6 +43,7 @@ if _API_AVAILABLE:
                 "Returns KPIs, model usage, tool usage, agent usage, and daily activity "
                 "breakdown for a single user identified by user_id."
             ),
+            mcp_description="Use this tool when you need a drill-down on one known user's activity: which models they used, which tools they invoked, which agents they interacted with, and how active they were by day. Do not use this tool to browse all users — use List User Analytics. Do not use for overall project or agent/tool-centric dashboards. This is the correct endpoint for 'analyze this specific user.'",
             tags=["elitea_core/analytics"],
             parameters=[
                 {
