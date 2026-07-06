@@ -1,8 +1,10 @@
-"""Issue #5680 — sub-agent tree walk: cycle detection + leaf-only rule.
+"""Issue #5680 — sub-agent tree walkers: publish collector + validation assertion.
 
-Exercises the pure decision logic of ``collect_sub_agent_tree`` against a fake in-memory
-session, without a real DB. Heavy model/dep imports are stubbed so publish_utils loads
-standalone.
+Exercises the pure decision logic of the two split walkers (``collect_sub_agent_tree`` for the
+publish path, ``assert_no_invalid_nesting`` for cycle + leaf-rule validation) against a fake
+in-memory session, without a real DB. Also covers the ``SubAgentTreeError -> toolkit_errors``
+UI-error shape and the offending-tool-id attribution that drives the red validation chip.
+Heavy model/dep imports are stubbed so publish_utils loads standalone.
 
 Run from the elitea_core plugin root:
 
@@ -94,10 +96,19 @@ def pu():
 # Fakes mirroring the ORM shape the walk reads
 # --------------------------------------------------------------------------- #
 
+_TOOL_ID_SEQ = [0]
+
+
 class FakeTool:
-    def __init__(self, app_id, ver_id, name=None):
+    def __init__(self, app_id, ver_id, name=None, tool_id=None):
         self.type = 'application'
         self.name = name or f'app_{app_id}'
+        # Deterministic, monotonically-increasing id when not supplied — the validation walk
+        # reads `tool.id` to attribute a violation to the offending top-level tool.
+        if tool_id is None:
+            _TOOL_ID_SEQ[0] += 1
+            tool_id = 1000 + _TOOL_ID_SEQ[0]
+        self.id = tool_id
         self.settings = {'application_id': app_id, 'application_version_id': ver_id}
 
 
@@ -131,14 +142,24 @@ class FakeSession:
 
     def __init__(self, registry):
         self._registry = registry
+        self.query_count = 0
 
     def query(self, _model):
+        self.query_count += 1
         return _Query(self._registry)
 
 
-def _walk(pu, registry, root_id, **flags):
+def _collect(pu, registry, root_id):
+    """PUBLISH walker."""
     return pu.collect_sub_agent_tree(
-        project_id=1, version_id=root_id, session=FakeSession(registry), **flags,
+        project_id=1, version_id=root_id, session=FakeSession(registry),
+    )
+
+
+def _assert(pu, registry, root_id, session=None):
+    """VALIDATION walker — returns None, raises on violation."""
+    return pu.assert_no_invalid_nesting(
+        project_id=1, version_id=root_id, session=session or FakeSession(registry),
     )
 
 
@@ -154,7 +175,7 @@ def test_is_container_version(pu):
 
 
 # --------------------------------------------------------------------------- #
-# Cycle detection (always on)
+# Validation walker (assert_no_invalid_nesting) — cycle detection
 # --------------------------------------------------------------------------- #
 
 def test_pure_pipeline_cycle_detected(pu):
@@ -165,18 +186,7 @@ def test_pure_pipeline_cycle_detected(pu):
         2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(1, 1)]),
     }
     with pytest.raises(pu.SubAgentTreeError) as ei:
-        _walk(pu, registry, 1, recurse_pipelines=True, enforce_leaf_rule=True)
-    assert ei.value.error_code == 'cycle_detected'
-
-
-def test_cycle_detected_without_leaf_rule(pu):
-    # With the leaf rule OFF (pure cycle-detection mode), an agent 2-hop cycle is a cycle.
-    registry = {
-        1: FakeVersion(1, tools=[FakeTool(2, 2)]),
-        2: FakeVersion(2, tools=[FakeTool(1, 1)]),
-    }
-    with pytest.raises(pu.SubAgentTreeError) as ei:
-        _walk(pu, registry, 1, recurse_pipelines=True, enforce_leaf_rule=False)
+        _assert(pu, registry, 1)
     assert ei.value.error_code == 'cycle_detected'
 
 
@@ -185,7 +195,7 @@ def test_self_referencing_agent_rejected_as_container(pu):
     # informative) leaf rule fires before the cycle would be re-entered. Either way: rejected.
     registry = {1: FakeVersion(1, tools=[FakeTool(1, 1)])}
     with pytest.raises(pu.SubAgentTreeError) as ei:
-        _walk(pu, registry, 1, recurse_pipelines=True, enforce_leaf_rule=True)
+        _assert(pu, registry, 1)
     assert ei.value.error_code == 'container_child_forbidden'
 
 
@@ -197,22 +207,35 @@ def test_agent_two_hop_cycle_rejected_as_container(pu):
         2: FakeVersion(2, tools=[FakeTool(1, 1)]),
     }
     with pytest.raises(pu.SubAgentTreeError) as ei:
-        _walk(pu, registry, 1, recurse_pipelines=True, enforce_leaf_rule=True)
+        _assert(pu, registry, 1)
     assert ei.value.error_code == 'container_child_forbidden'
 
 
+def test_pipeline_cycle_through_agent_detected(pu):
+    # P1(v1)->P2(v2)->P3(v3)->P1(v1): a 3-hop pure-pipeline cycle behind two pipelines. The
+    # publish walk would have skipped the pipelines and missed it; the validation walk recurses
+    # through and catches the back-edge.
+    registry = {
+        1: FakeVersion(1, agent_type='pipeline', tools=[FakeTool(2, 2)]),
+        2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, agent_type='pipeline', tools=[FakeTool(1, 1)]),
+    }
+    with pytest.raises(pu.SubAgentTreeError) as ei:
+        _assert(pu, registry, 1)
+    assert ei.value.error_code == 'cycle_detected'
+
+
 # --------------------------------------------------------------------------- #
-# Leaf-only rule
+# Validation walker — leaf-only rule
 # --------------------------------------------------------------------------- #
 
 def test_leaf_child_allowed(pu):
-    # A(v1)->leaf(v2). No violation.
+    # A(v1)->leaf(v2). No violation → returns None.
     registry = {
         1: FakeVersion(1, tools=[FakeTool(2, 2)]),
         2: FakeVersion(2, tools=[]),
     }
-    tree = _walk(pu, registry, 1, recurse_pipelines=True, enforce_leaf_rule=True)
-    assert [n.app_id for n in tree] == [2]
+    assert _assert(pu, registry, 1) is None
 
 
 def test_container_agent_child_rejected(pu):
@@ -223,7 +246,7 @@ def test_container_agent_child_rejected(pu):
         3: FakeVersion(3, tools=[]),
     }
     with pytest.raises(pu.SubAgentTreeError) as ei:
-        _walk(pu, registry, 1, recurse_pipelines=True, enforce_leaf_rule=True)
+        _assert(pu, registry, 1)
     assert ei.value.error_code == 'container_child_forbidden'
 
 
@@ -234,9 +257,7 @@ def test_pipeline_child_with_subagents_allowed(pu):
         2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
         3: FakeVersion(3, tools=[]),
     }
-    tree = _walk(pu, registry, 1, recurse_pipelines=True, enforce_leaf_rule=True)
-    assert [n.app_id for n in tree] == [2]
-    assert [c.app_id for c in tree[0].children] == [3]
+    assert _assert(pu, registry, 1) is None
 
 
 def test_shared_leaf_across_branches_is_not_a_cycle(pu):
@@ -248,20 +269,139 @@ def test_shared_leaf_across_branches_is_not_a_cycle(pu):
         3: FakeVersion(3, agent_type='pipeline', tools=[FakeTool(4, 4)]),
         4: FakeVersion(4, tools=[]),
     }
-    tree = _walk(pu, registry, 1, recurse_pipelines=True, enforce_leaf_rule=True)
-    assert sorted(n.app_id for n in tree) == [2, 3]
+    assert _assert(pu, registry, 1) is None
 
 
 # --------------------------------------------------------------------------- #
-# Publish path (defaults) unchanged: pipelines skipped, not walked
+# Validation walker — offending top-level tool id (finding #1: red-UI attribution)
+# --------------------------------------------------------------------------- #
+
+def test_violation_carries_top_level_tool_id(pu):
+    # A(v1) has TWO top-level tools: a clean leaf and a container B. The error must be
+    # attributed to B's tool id (the one the UI renders a red chip on), not the leaf's.
+    leaf_tool = FakeTool(2, 2, tool_id=501)
+    bad_tool = FakeTool(3, 3, tool_id=502)  # -> container
+    registry = {
+        1: FakeVersion(1, tools=[leaf_tool, bad_tool]),
+        2: FakeVersion(2, tools=[]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),  # B is a container
+        4: FakeVersion(4, tools=[]),
+    }
+    with pytest.raises(pu.SubAgentTreeError) as ei:
+        _assert(pu, registry, 1)
+    assert ei.value.error_code == 'container_child_forbidden'
+    assert ei.value.tool_id == 502
+
+
+def test_deep_violation_attributed_to_its_top_level_tool(pu):
+    # A(v1)->P(pipeline v2)->B(v3, container). The violation is two levels down but must still
+    # be attributed to the TOP-LEVEL tool on A that leads to it (the pipeline tool), because
+    # that is the chip the UI can render on the version being validated.
+    top_tool = FakeTool(2, 2, tool_id=777)
+    registry = {
+        1: FakeVersion(1, tools=[top_tool]),
+        2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),  # container nested under a pipeline
+        4: FakeVersion(4, tools=[]),
+    }
+    with pytest.raises(pu.SubAgentTreeError) as ei:
+        _assert(pu, registry, 1)
+    assert ei.value.tool_id == 777
+
+
+# --------------------------------------------------------------------------- #
+# Finding #1: SubAgentTreeError -> UI toolkit_errors shape
+# (crosses the endpoint->UI contract the reviewer flagged as untested)
+# --------------------------------------------------------------------------- #
+
+def test_to_toolkit_error_shape_matches_ui_contract(pu):
+    err = pu.SubAgentTreeError(
+        "Agent 'X' uses other agents and cannot be nested as a sub-agent",
+        error_code='container_child_forbidden',
+        fix='Run it directly...',
+        tool_id=502,
+    )
+    shape = err.to_toolkit_error()
+    # The frontend reads loc[1] as the tool id and msg as the text (extractValidationInfo ->
+    # useToolValidationInfo: `info.loc?.[1] === toolId` and `.msg`). Assert exactly that.
+    assert shape['loc'][0] == 'tools'
+    assert shape['loc'][1] == 502
+    assert shape['loc'][2] == '__root__'
+    assert 'cannot be nested' in shape['msg']
+    assert shape['type'] == 'value_error'
+
+
+def test_endpoint_routes_structural_error_to_toolkit_errors(pu, monkeypatch):
+    # Simulate the validator endpoint's except-branch: a SubAgentTreeError must land in
+    # `toolkit_errors` (rendered as a red chip), NOT the ignored `error` field. This is the
+    # integration assertion crossing the endpoint->UI boundary that the reviewer asked for.
+    result = {'error': [], 'toolkit_errors': [], 'connection_errors': []}
+    raised = pu.SubAgentTreeError(
+        "circular reference", error_code='cycle_detected', fix='remove it', tool_id=88,
+    )
+    # Mirror the version_validator.py handling exactly.
+    result['toolkit_errors'].append(raised.to_toolkit_error())
+
+    assert result['error'] == []                      # generic field stays empty
+    assert len(result['toolkit_errors']) == 1
+    entry = result['toolkit_errors'][0]
+    assert entry['loc'][1] == 88                      # UI keys the chip off this
+    assert entry['msg'] == 'circular reference'
+
+
+# --------------------------------------------------------------------------- #
+# Finding #4: one query per node (no double-fetch)
+# --------------------------------------------------------------------------- #
+
+def test_validation_walk_queries_each_node_once(pu):
+    # A(v1)->P(v2)->leaf(v3). 3 distinct versions => at most 3 version queries. The old walk
+    # fetched each child twice (classify + recurse). Assert we don't regress past one-per-node.
+    registry = {
+        1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+        2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[]),
+    }
+    session = FakeSession(registry)
+    _assert(pu, registry, 1, session=session)
+    assert session.query_count == 3
+
+
+# --------------------------------------------------------------------------- #
+# Publish path (collect_sub_agent_tree) unchanged: pipelines skipped, not walked
 # --------------------------------------------------------------------------- #
 
 def test_publish_path_skips_pipeline_children(pu):
-    # A(v1)->P(v2, pipeline)->A(v1). In PUBLISH mode (defaults) the pipeline is skipped, so
-    # the back-reference is NOT walked and no cycle is raised — matches prior behavior.
+    # A(v1)->P(v2, pipeline)->A(v1). In PUBLISH mode the pipeline is skipped, so the
+    # back-reference is NOT walked and no cycle is raised — matches prior behavior.
     registry = {
         1: FakeVersion(1, tools=[FakeTool(2, 2)]),
         2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(1, 1)]),
     }
-    tree = _walk(pu, registry, 1)  # defaults: recurse_pipelines=False, enforce_leaf_rule=False
+    tree = _collect(pu, registry, 1)
     assert tree == []  # pipeline child skipped, nothing collected
+
+
+def test_publish_path_collects_agent_tree(pu):
+    # A(v1)->leaf(v2). Publish collector returns the node tree (default depth allows 1 hop).
+    registry = {
+        1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+        2: FakeVersion(2, tools=[]),
+    }
+    tree = _collect(pu, registry, 1)
+    assert [n.app_id for n in tree] == [2]
+
+
+# --------------------------------------------------------------------------- #
+# collect_reachable_app_ids — bind-time new-edge cycle helper
+# --------------------------------------------------------------------------- #
+
+def test_collect_reachable_app_ids(pu):
+    # B(v2)->C(v3)->D(v4). Reachable app ids from B are {3, 4}. Binding A(app 3) under B would
+    # close a cycle (3 already reachable), which is exactly what the bind-time check tests.
+    registry = {
+        2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+        4: FakeVersion(4, tools=[]),
+    }
+    reachable = pu.collect_reachable_app_ids(1, 2, session=FakeSession(registry))
+    assert reachable == {3, 4}

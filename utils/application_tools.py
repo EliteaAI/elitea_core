@@ -721,7 +721,8 @@ def application_toolkit_change_relation(
             # guidance — the authoritative gate is the version-resolution choke point — but it
             # catches the common case at the moment of the edit.
             from .publish_utils import (
-                collect_sub_agent_tree,
+                assert_no_invalid_nesting,
+                collect_reachable_app_ids,
                 is_container_version,
                 SubAgentTreeError,
                 MAX_SUB_AGENT_VALIDATION_DEPTH,
@@ -733,7 +734,7 @@ def application_toolkit_change_relation(
                     f"Cannot bind an agent to itself: application_id={application_id}"
                 )
 
-            # Load the child's tools so we can classify it and walk its subtree.
+            # Load the child's tools so we can classify it directly.
             child_with_tools = session.query(ApplicationVersion).options(
                 selectinload(ApplicationVersion.tools)
             ).filter(ApplicationVersion.id == version_id).first()
@@ -756,25 +757,25 @@ def application_toolkit_change_relation(
                     f"only leaf agents (agents that do not themselves use other agents)."
                 )
 
-            # Cycle: walk the child's subtree; reject if the parent app id appears in it
-            # (A->B where B already reaches A), and surface any deeper cycle/leaf violation.
+            # Surface any cycle/leaf violation already present deeper in the child's subtree.
             try:
-                child_tree = collect_sub_agent_tree(
+                assert_no_invalid_nesting(
                     project_id, version_id,
-                    max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
                     session=session,
-                    recurse_pipelines=True,
-                    enforce_leaf_rule=True,
+                    max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
                 )
             except SubAgentTreeError as exc:
                 raise ToolkitChangeRelationError(str(exc)) from exc
 
-            def _app_ids_in_tree(nodes):
-                for node in nodes:
-                    yield node.app_id
-                    yield from _app_ids_in_tree(node.children)
-
-            if update_data.application_id in set(_app_ids_in_tree(child_tree)):
+            # New-edge cycle check: reject if the PARENT app is already reachable from the child
+            # (A->B where B already reaches A). This is NOT redundant with the walk's own cycle
+            # detection above — the new A->B edge is not committed yet, so the walk cannot
+            # traverse it; only a membership test against B's existing reachable set catches it.
+            reachable = collect_reachable_app_ids(
+                project_id, version_id, session=session,
+                max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+            )
+            if update_data.application_id in reachable:
                 raise ToolkitChangeRelationError(
                     f"Adding this agent would create a circular reference: application "
                     f"{update_data.application_id} is already reachable from "

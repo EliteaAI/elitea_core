@@ -550,14 +550,12 @@ def generate_application_version_payload(
     # per-subagent version dropdown), so it catches circular/over-nested references that
     # bind-time and UI guards cannot — e.g. a leaf promoted to a container by a version switch.
     # Rejects a poisoned config here instead of forwarding it to the SDK (which would recurse).
-    from ..utils.publish_utils import collect_sub_agent_tree, SubAgentTreeError, MAX_SUB_AGENT_VALIDATION_DEPTH
+    from ..utils.publish_utils import assert_no_invalid_nesting, SubAgentTreeError, MAX_SUB_AGENT_VALIDATION_DEPTH
     try:
-        collect_sub_agent_tree(
+        assert_no_invalid_nesting(
             project_id, entity_settings.version_id,
-            max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
             session=session,
-            recurse_pipelines=True,
-            enforce_leaf_rule=True,
+            max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
         )
     except SubAgentTreeError as tree_err:
         raise PayloadGenerationError(
