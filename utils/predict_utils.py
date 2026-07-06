@@ -345,12 +345,10 @@ def generate_predict_payload(
             s for s in message_skills if s.get('skill_id') not in instruction_skill_ids
         ]
 
-        # Progressive disclosure: skills attached to the agent version but NOT
-        # baked into the cached instructions are advertised (name+description) in a
-        # cached registry index and made loadable on demand via the load_skill tool.
-        # Excluding instruction-baked ids keeps always-on skills out of the registry
-        # so they are never re-advertised or double-injected. Gated on not is_pipeline
-        # so deterministic pipeline nodes gain no autonomous load_skill tool.
+        # Progressive disclosure: attached skills become loadable on demand via the
+        # SDK's load_skill tool. Instruction-baked ids are excluded (already always-on
+        # in the cached prompt — re-advertising them would double-inject); pipelines
+        # are excluded so deterministic nodes gain no autonomous tool.
         if attached_skills and not is_pipeline:
             disclosable_skills = [
                 {
