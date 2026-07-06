@@ -47,6 +47,7 @@ if _API_AVAILABLE:
                 "Returns paginated tool usage statistics with optional date filtering, "
                 "search by tool name, and sorting."
             ),
+            mcp_description="Use this tool when you need a project-wide ranking or paginated inventory of tool usage, including call volume and error counts. Do not use this tool when you need the detailed per-user/per-agent breakdown for one exact tool — use Get Tool Analytics Detail. Do not use for project dashboard KPIs. This is the main discovery/list endpoint for tool analytics.",
             tags=["elitea_core/analytics"],
             parameters=[
                 {

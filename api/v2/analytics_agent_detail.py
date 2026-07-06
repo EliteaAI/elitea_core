@@ -43,6 +43,7 @@ if _API_AVAILABLE:
                 "Returns KPIs, per-user breakdown, tool usage, and daily activity "
                 "for a single agent (application) identified by entity_id."
             ),
+            mcp_description="Use this tool when you want a drill-down analysis for one specific agent/application and already know its entity_id. Do not use this tool to discover which agents are active in the project — use List Agent Analytics first. Do not use for project-wide summaries or user-specific analytics. This is the correct endpoint for 'show me detailed analytics for this one agent.'",
             tags=["elitea_core/analytics"],
             parameters=[
                 {

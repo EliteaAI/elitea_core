@@ -43,6 +43,7 @@ if _API_AVAILABLE:
                 "Returns KPIs, per-user breakdown, associated agents, and daily usage trend "
                 "for a single tool identified by tool_name."
             ),
+            mcp_description="Use this tool when you need a full drill-down on one known tool, including who used it, which agents invoked it, and how its usage/errors changed over time. Do not use this tool to browse all tools in a project — use List Tool Analytics first. Do not use if you only know a partial tool name and still need discovery. This endpoint is best for 'investigate this exact tool.'",
             tags=["elitea_core/analytics"],
             parameters=[
                 {
