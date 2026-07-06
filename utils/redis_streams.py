@@ -73,7 +73,7 @@ class StreamProducer:
     def _resolve_retention(self, stream_name: str) -> int:
         """Resolve MAXLEN from event classification registry."""
         try:
-            from ..events.event_classification import get_stream_retention
+            from .event_classification import get_stream_retention
             return get_stream_retention(stream_name)
         except (ImportError, ValueError):
             pass
