@@ -127,6 +127,18 @@ class Event:
                 msg_group = update_message_group_meta(msg_group, payload, session=session)
                 # Set is_streaming to False after refresh to ensure it's persisted
                 msg_group.is_streaming = False
+                # Clear any HITL interrupt persisted at pause time (#4823). stream_end is
+                # the terminal path — it fires ONLY when the run has fully completed (a HITL
+                # pause skips it entirely, see chat_message_stream_pause), so reaching here
+                # means every interrupt is resolved and the resume buttons must not
+                # reconstruct on reload. This is the implicit-DELETE half of the persist->
+                # clear lifecycle; it rides this UPDATE, so no extra write. NOT done in
+                # update_message_group_meta (which also runs on partial_save): a sibling's
+                # partial save during a parallel run would otherwise wipe a still-pending
+                # child's card. A re-pause re-persists via chat_message_stream_pause.
+                if msg_group.meta:
+                    msg_group.meta.pop('hitl_interrupt', None)
+                    msg_group.meta.pop('hitl_interrupts', None)
                 flag_modified(msg_group, 'is_streaming')
                 flag_modified(msg_group, 'meta')
                 session.add(msg_group)
@@ -326,19 +338,28 @@ class Event:
     @web.event('chat_message_stream_pause')
     def chat_message_stream_pause(self, context, event, payload):
         """
-        Handle pausing the message stream when MCP authorization is required.
+        Handle pausing the message stream when MCP authorization is required OR a HITL
+        interrupt is raised.
+
         Sets is_streaming = False so UI shows the message is paused waiting for user action.
+
+        For a HITL pause (#4823) the interrupt is otherwise live-only — the indexer skips
+        the full_message/agent_response events on a pause, so chat_message_stream_end never
+        fires and the Approve/Edit/Reject state is never written to the DB. Here we persist
+        the interrupt into the message-group meta so it can be reconstructed on reload /
+        navigate-away. The persisted keys are cleared again when the resumed run completes
+        (see update_message_group_meta), so a resolved message shows no stale buttons.
         """
         log.debug(f'chat_message_stream_pause {event=}')
-        
+
         # Get project_id from response_metadata (set by indexer)
         response_metadata = payload.get('response_metadata', {})
         chat_project_id = response_metadata.get('chat_project_id')
-        
+
         if not chat_project_id:
             log.warning('chat_message_stream_pause: No chat_project_id in payload')
             return
-            
+
         message_id = payload.get('message_id')
         if not message_id:
             log.warning('chat_message_stream_pause: No message_id in payload')
@@ -350,6 +371,29 @@ class Event:
             ).first()
             if msg_group:
                 msg_group.is_streaming = False
+
+                # Persist HITL interrupt state so the resume buttons survive reload (#4823).
+                # Present only on a HITL pause; the MCP-auth pause carries no interrupt and
+                # is unaffected.
+                hitl_interrupt = response_metadata.get('hitl_interrupt')
+                if hitl_interrupt:
+                    if msg_group.meta is None:
+                        msg_group.meta = {}
+                    msg_group.meta['hitl_interrupt'] = hitl_interrupt
+                    # Plural list for parallel / park+dispatch fan-out (each entry carries
+                    # its own tool_call_id + thread_id for per-child resume routing). Absent
+                    # for a single pause — leave it unset so the reload path keeps the
+                    # single-pause resume shape.
+                    hitl_interrupts = response_metadata.get('hitl_interrupts')
+                    if hitl_interrupts:
+                        msg_group.meta['hitl_interrupts'] = hitl_interrupts
+                    # thread_id powers the single-pause resume. Don't clobber an existing one.
+                    thread_id = response_metadata.get('thread_id')
+                    if thread_id and not msg_group.meta.get('thread_id'):
+                        msg_group.meta['thread_id'] = thread_id
+                    flag_modified(msg_group, 'meta')
+
                 session.add(msg_group)
                 session.commit()
-                log.debug(f'chat_message_stream_pause: Set is_streaming=False for message {message_id}')
+                log.debug(f'chat_message_stream_pause: Set is_streaming=False for message {message_id}'
+                          f'{" (HITL interrupt persisted)" if hitl_interrupt else ""}')

@@ -46,6 +46,16 @@ class Method:
         if payload.get('type') == "mcp_authorization_required":
             self.context.event_manager.fire_event('chat_message_stream_pause', payload)
 
+        # Handle HITL interrupt - pause streaming AND persist the interrupt into the
+        # message-group meta so the Approve/Edit/Reject buttons survive navigate-away
+        # and reload (#4823). The interrupt is otherwise live-only: on a HITL pause the
+        # indexer skips the full_message/agent_response events, so chat_message_stream_end
+        # never fires and nothing is written to the DB. Covers every HITL mode (pipeline
+        # node, sensitive tool, sequential, parallel, park+dispatch) — all funnel through
+        # this single event.
+        if payload.get('type') == "agent_hitl_interrupt":
+            self.context.event_manager.fire_event('chat_message_stream_pause', payload)
+
         # Handle swarm agent response - emit as separate child message for non-parent agents
         if payload.get('type') == "agent_swarm_agent_response":
             response_metadata = payload.get('response_metadata', {})
