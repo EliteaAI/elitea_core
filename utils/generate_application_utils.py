@@ -88,6 +88,11 @@ def fetch_project_resources(
             key=lambda x: x[0],
             reverse=True,
         )
+        # NOTE(#5680): these are ranked SUGGESTIONS shown to the LLM, not auto-bindings — a
+        # suggested container agent only becomes a real sub-agent if the user accepts it, and
+        # that binding is now rejected at bind time (application_toolkit_change_relation) and
+        # at chat resolution. If this endpoint ever gains an owner-application context, filter
+        # it out here so an agent is never suggested as its own sub-agent.
         agents = [item for _, item in agents_scored[:_MAX_APPLICATIONS]]
 
         # Fetch skills

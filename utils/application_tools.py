@@ -6,12 +6,12 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 from sqlalchemy import asc, create_engine, desc, func, String, text, Integer, Boolean
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from tools import auth, db, this, serialize, context
 
 from ..models.all import EliteATool, EntityToolMapping, ApplicationVersion
 from ..models.indexer import EmbeddingStore
-from ..models.enums.all import ToolEntityTypes
+from ..models.enums.all import ToolEntityTypes, AgentTypes
 from ..models.enums.all import InitiatorType
 from ..models.enums.all import IndexDataStatus
 from ..utils.exceptions import PoolSaturationError
@@ -714,6 +714,74 @@ def application_toolkit_change_relation(
                 # No toolkit linked to this parent - relation already removed or never existed
                 return {'ok': True, 'already_removed': True}
         else:
+            # --- Cycle + leaf-only validation at bind time (issue #5680) ---
+            # Fail fast with a clear message when adding this child would create a circular
+            # reference or nest a container agent. Here `application_id`/`version_id` is the
+            # CHILD being added; `update_data.application_id` is the PARENT. This is best-effort
+            # guidance — the authoritative gate is the version-resolution choke point — but it
+            # catches the common case at the moment of the edit.
+            from .publish_utils import (
+                assert_no_invalid_nesting,
+                collect_reachable_app_ids,
+                is_container_version,
+                SubAgentTreeError,
+                MAX_SUB_AGENT_VALIDATION_DEPTH,
+            )
+
+            # Self-reference (belt-and-suspenders over the API-layer check).
+            if application_id == update_data.application_id:
+                raise ToolkitChangeRelationError(
+                    f"Cannot bind an agent to itself: application_id={application_id}"
+                )
+
+            # Load the child's tools so we can classify it directly.
+            child_with_tools = session.query(ApplicationVersion).options(
+                selectinload(ApplicationVersion.tools)
+            ).filter(ApplicationVersion.id == version_id).first()
+
+            # Leaf-only rule: a non-pipeline agent that itself contains sub-agents (a
+            # "container") may not be nested. Pipelines are exempt (deep-composition primitive)
+            # but are still walked below for cycle detection.
+            child_is_pipeline = (
+                child_with_tools is not None
+                and child_with_tools.agent_type == AgentTypes.pipeline.value
+            )
+            if (
+                child_with_tools is not None
+                and not child_is_pipeline
+                and is_container_version(child_with_tools)
+            ):
+                raise ToolkitChangeRelationError(
+                    f"'{child_application_version.name}' uses other agents and cannot be "
+                    f"added as a sub-agent. Run it directly as a chat participant, or add "
+                    f"only leaf agents (agents that do not themselves use other agents)."
+                )
+
+            # Surface any cycle/leaf violation already present deeper in the child's subtree.
+            try:
+                assert_no_invalid_nesting(
+                    project_id, version_id,
+                    session=session,
+                    max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+                )
+            except SubAgentTreeError as exc:
+                raise ToolkitChangeRelationError(str(exc)) from exc
+
+            # New-edge cycle check: reject if the PARENT app is already reachable from the child
+            # (A->B where B already reaches A). This is NOT redundant with the walk's own cycle
+            # detection above — the new A->B edge is not committed yet, so the walk cannot
+            # traverse it; only a membership test against B's existing reachable set catches it.
+            reachable = collect_reachable_app_ids(
+                project_id, version_id, session=session,
+                max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+            )
+            if update_data.application_id in reachable:
+                raise ToolkitChangeRelationError(
+                    f"Adding this agent would create a circular reference: application "
+                    f"{update_data.application_id} is already reachable from "
+                    f"application {application_id}."
+                )
+
             # When ADDING a relation (has_relation=True), first check if this parent already
             # has a relation to this child application (any version). This prevents duplicates
             # that can occur after version deletion with replacement.
