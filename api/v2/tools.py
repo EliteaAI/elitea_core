@@ -96,7 +96,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         Provide the toolkit `type` (e.g. an integration or MCP type) plus a `name`
         and type-specific `settings`. `author_id`, `user_id` and `project_id` are set
-        automatically from the request context — do not send them.
+        automatically from the request context; any values you send for them are ignored.
 
         Key errors:
         - Invalid or unsupported `type`/`settings` → HTTP 400

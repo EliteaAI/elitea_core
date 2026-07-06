@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Any, Optional
 
@@ -5,6 +6,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 _ELITEA_TITLE_PATTERN = re.compile(r'^[A-Za-z0-9_.\- ]+$')
+
+# Coarse cap on the serialized credential payload to keep an LLM/MCP caller from
+# pushing oversized / deeply-nested blobs through the configurations service.
+CREDENTIAL_MAX_DATA_LEN = 64 * 1024
 
 
 class CredentialCreateModel(BaseModel):
@@ -30,9 +35,25 @@ class CredentialCreateModel(BaseModel):
     @field_validator('elitea_title')
     @classmethod
     def validate_elitea_title(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and not _ELITEA_TITLE_PATTERN.match(v):
+        if v is None:
+            return v
+        # Strip before validating so " foo " and "foo" cannot create duplicate
+        # credentials that differ only by surrounding whitespace.
+        v = v.strip()
+        if not v:
+            return None
+        if not _ELITEA_TITLE_PATTERN.match(v):
             raise ValueError(
                 "elitea_title may only contain letters, digits, spaces, '_', '.' and '-'"
+            )
+        return v
+
+    @field_validator('data')
+    @classmethod
+    def validate_data_size(cls, v: dict) -> dict:
+        if len(json.dumps(v, default=str)) > CREDENTIAL_MAX_DATA_LEN:
+            raise ValueError(
+                f"Credential data exceeds the maximum size of {CREDENTIAL_MAX_DATA_LEN} bytes"
             )
         return v
 
