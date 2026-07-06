@@ -344,6 +344,36 @@ def generate_predict_payload(
         payload['invoked_skills'] = [
             s for s in message_skills if s.get('skill_id') not in instruction_skill_ids
         ]
+
+        # Progressive disclosure: skills attached to the agent version but NOT
+        # baked into the cached instructions are advertised (name+description) in a
+        # cached registry index and made loadable on demand via the load_skill tool.
+        # Excluding instruction-baked ids keeps always-on skills out of the registry
+        # so they are never re-advertised or double-injected. Gated on not is_pipeline
+        # so deterministic pipeline nodes gain no autonomous load_skill tool.
+        if attached_skills and not is_pipeline:
+            disclosable_skills = [
+                {
+                    'skill_id': s.get('skill_id'),
+                    'name': s.get('name'),
+                    'description': s.get('description'),
+                    'instructions': s.get('instructions'),
+                }
+                for s in attached_skills
+                if s.get('skill_id') not in instruction_skill_ids
+                and s.get('name')
+                and (s.get('instructions') or '').strip()
+            ]
+            if disclosable_skills:
+                payload['attached_skills'] = disclosable_skills
+            dropped = len(attached_skills) - len(disclosable_skills)
+            if dropped:
+                log.debug(
+                    '[Skills] Progressive disclosure dropped %d of %d attached skills '
+                    '(instruction-baked/blank-instructions/missing-name)',
+                    dropped, len(attached_skills),
+                )
+
         # Merge version_details tools (including nested agents) with request-level tools
         if parsed.version_details and parsed.version_details.get('tools'):
             version_tools = parsed.version_details.get('tools', [])
