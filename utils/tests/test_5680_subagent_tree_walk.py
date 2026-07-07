@@ -405,3 +405,92 @@ def test_collect_reachable_app_ids(pu):
     }
     reachable = pu.collect_reachable_app_ids(1, 2, session=FakeSession(registry))
     assert reachable == {3, 4}
+
+
+# --------------------------------------------------------------------------- #
+# collect_reachable_version_ids — version-aware bind-time cycle helper (issue #5719)
+# --------------------------------------------------------------------------- #
+
+def _reachable_vids(pu, registry, root_id):
+    """Call collect_reachable_version_ids with the FakeSession harness."""
+    return pu.collect_reachable_version_ids(1, root_id, session=FakeSession(registry))
+
+
+def test_collect_reachable_version_ids_basic(pu):
+    # B(v2)->C(v3)->D(v4). Version-aware reachable set from v2 is {(3,3),(4,4)}.
+    registry = {
+        2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+        4: FakeVersion(4, tools=[]),
+    }
+    reachable = _reachable_vids(pu, registry, 2)
+    assert reachable == {(3, 3), (4, 4)}
+
+
+def test_5719_different_version_of_parent_is_not_a_false_cycle(pu):
+    # Regression for issue #5719:
+    # AgentA app=801: version "base" vid=1424 (CONTAINER, being bound as parent)
+    #                 version "pipeline" vid=1427 (LEAF)
+    # PipelineA app=804: version "base" vid=1430, tools=[AgentA vid=1427 (LEAF)]
+    #
+    # User binds PipelineA base (804/1430) as a child of AgentA base (801/1424).
+    # collect_reachable_version_ids from vid=1430 reaches only (801, 1427) — NOT (801, 1424).
+    # Membership test: (801, 1424) NOT in reachable => correctly ALLOW.
+    registry = {
+        1430: FakeVersion(1430, tools=[FakeTool(801, 1427)]),  # PipelineA base -> AgentA pipeline (leaf)
+        1427: FakeVersion(1427, tools=[]),                      # AgentA pipeline = leaf
+    }
+    reachable = _reachable_vids(pu, registry, 1430)
+    # Only (801, 1427) is reachable — not (801, 1424)
+    assert (801, 1427) in reachable
+    assert (801, 1424) not in reachable, (
+        "False positive: version-unaware check would have blocked this bind"
+    )
+
+
+def test_5719_true_version_level_cycle_is_still_caught(pu):
+    # True cycle: AgentA base (801/1424) -> PipelineA base (804/1430) -> AgentA base (801/1424).
+    # collect_reachable_version_ids from vid=1430 must include (801, 1424).
+    # Membership test: (801, 1424) IN reachable => correctly REJECT.
+    registry = {
+        1430: FakeVersion(1430, tools=[FakeTool(801, 1424)]),  # PipelineA base -> AgentA base (cycle)
+        1424: FakeVersion(1424, tools=[]),                      # leaf for the purpose of this walk
+    }
+    reachable = _reachable_vids(pu, registry, 1430)
+    assert (801, 1424) in reachable, (
+        "Real version-level cycle must still be detected"
+    )
+
+
+def test_collect_reachable_version_ids_diamond_not_a_cycle(pu):
+    # Diamond: B(v2)->{C(v3),D(v4)}, C(v3)->E(v5), D(v4)->E(v5). E(v5) is a shared leaf.
+    # Path-based traversal: both branches reach (5,5); path guard prevents double-counting
+    # but (5,5) should still appear exactly once in the result set.
+    registry = {
+        2: FakeVersion(2, tools=[FakeTool(3, 3), FakeTool(4, 4)]),
+        3: FakeVersion(3, tools=[FakeTool(5, 5)]),
+        4: FakeVersion(4, tools=[FakeTool(5, 5)]),
+        5: FakeVersion(5, tools=[]),
+    }
+    reachable = _reachable_vids(pu, registry, 2)
+    # All downstream (app_id, ver_id) pairs are reachable, shared leaf exactly once in set
+    assert reachable == {(3, 3), (4, 4), (5, 5)}
+
+
+def test_collect_reachable_version_ids_pipeline_walked(pu):
+    # Pipelines are walked (recurse through them) unlike the publish path which skips them.
+    # B(v2, pipeline)->C(v3)->D(v4). All three nodes reachable.
+    registry = {
+        2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+        4: FakeVersion(4, tools=[]),
+    }
+    reachable = _reachable_vids(pu, registry, 2)
+    assert reachable == {(3, 3), (4, 4)}
+
+
+def test_collect_reachable_version_ids_empty_for_leaf(pu):
+    # A leaf has no sub-agents — reachable set is empty.
+    registry = {1: FakeVersion(1, tools=[])}
+    reachable = _reachable_vids(pu, registry, 1)
+    assert reachable == set()

@@ -683,7 +683,7 @@ def collect_reachable_app_ids(
     session,
     max_depth: int = MAX_SUB_AGENT_VALIDATION_DEPTH,
 ) -> Set[int]:
-    """Return the set of application ids reachable from a version's sub-agent tree.
+    """Return the set of application ids (version-unaware) reachable from a version's sub-agent tree.
 
     Used by bind-time validation (issue #5680): before committing a new A->B edge we walk B's
     existing subtree and reject the bind if A is already reachable from B (which would close a
@@ -707,6 +707,52 @@ def collect_reachable_app_ids(
                 continue
             reachable.add(app_id)
             key = (app_id, ver_id)
+            if key in path:  # already on this path — stop, cycle guard lives elsewhere
+                continue
+            path.add(key)
+            _walk(ver_id, depth + 1, path)
+            path.discard(key)
+
+    _walk(version_id, 1, set())
+    return reachable
+
+
+def collect_reachable_version_ids(
+    project_id: int,
+    version_id: int,
+    session,
+    max_depth: int = MAX_SUB_AGENT_VALIDATION_DEPTH,
+) -> Set[Tuple[int, int]]:
+    """Return the set of (app_id, version_id) pairs reachable from a version's sub-agent tree.
+
+    Version-aware sibling of ``collect_reachable_app_ids`` (issue #5719): the cycle graph is
+    keyed on (app_id, version_id) pairs so that a different version of the same application
+    reachable through the child's subtree does NOT falsely block the bind of the parent's
+    exact version. The runtime chain terminates at a LEAF version; two versions of the same
+    app are distinct runtime termini and must be treated as distinct graph nodes.
+
+    Used by bind-time validation: before committing a new PARENT->CHILD edge we walk CHILD's
+    existing subtree and reject the bind only if the exact (parent_app_id, parent_version_id)
+    pair is already reachable — closing a true version-level cycle.
+
+    Preserves all other invariants: depth backstop, path-based stop (not global visited),
+    one-query-per-node, recurse through pipelines.
+    """
+    reachable: Set[Tuple[int, int]] = set()
+
+    def _walk(vid: int, depth: int, path: Set[tuple]):
+        if depth > max_depth:
+            return
+        version = _load_version_with_tools(session, vid)
+        if version is None:
+            return
+        for tool in (t for t in (version.tools or []) if t.type == 'application'):
+            app_id = (tool.settings or {}).get('application_id')
+            ver_id = (tool.settings or {}).get('application_version_id')
+            if app_id is None or ver_id is None:
+                continue
+            key = (app_id, ver_id)
+            reachable.add(key)
             if key in path:  # already on this path — stop, cycle guard lives elsewhere
                 continue
             path.add(key)
