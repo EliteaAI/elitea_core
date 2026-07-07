@@ -47,20 +47,21 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - You only know the version name → use get_agent_details with version_name
         - You need application metadata (name, description) → use get_agent_details
         - You need a list of all versions → use list_versions
-        
+
         Reading the response by type:
         Agent: response.instructions = system prompt text; response.llm_settings = model config.
         Pipeline: response.instructions = YAML string → parse to understand graph nodes and edges.
-        
+
         Examples:
         1. Read agent system prompt: GET .../version/prompt_lib/42/7/101
         → response.instructions = 'You are a code review expert...'
-        
+
         2. Inspect pipeline graph: GET .../15/202
         → response.agent_type = 'pipeline' → parse response.instructions as YAML.
-        
+
         3. Check available tools: response.tools[].settings.selected_tools = restricted tool list for this version.""",
         tags=["elitea_core/applications"],
+        mcp_tool=True,
         available_to_users=True,
     )
     @auth.decorators.check_api({

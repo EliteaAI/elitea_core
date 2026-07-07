@@ -87,6 +87,21 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "error": "Failed to list toolkits"
             }, 400
 
+    @register_openapi(
+        name="Create Toolkit",
+        description="Create a new toolkit in the project.",
+        mcp_description="""
+        USE to create a new toolkit instance in the project for attaching to agent versions.
+
+        DO NOT USE when:
+        - You need to list existing toolkits → use get_elitea_core_tools
+        - You need to link a toolkit to an agent → use patch_elitea_core_tool after creating
+
+        REQUIRED body fields: type, name. Pass settings as required by the toolkit type schema.""",
+        tags=["elitea_core/toolkits"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.applications.tools.create"],

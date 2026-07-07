@@ -33,6 +33,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to load details for"},
         ],
         tags=["elitea_core/skills"],
+        mcp_tool=True,
         available_to_users=True,
     )
     @auth.decorators.check_api({
@@ -119,6 +120,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to update a specific version"},
         ],
         tags=["elitea_core/skills"],
+        mcp_tool=True,
         available_to_users=True,
     )
     @auth.decorators.check_api({
@@ -194,7 +196,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
         ],
         tags=["elitea_core/skills"],
-        mcp_tool=False,
+        mcp_tool=True,
         available_to_users=True,
     )
     @auth.decorators.check_api({

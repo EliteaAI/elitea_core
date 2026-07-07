@@ -140,6 +140,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return result, 201
 
+    @register_openapi(
+        name="Update Toolkit",
+        description="Update an existing toolkit's configuration.",
+        mcp_description="""
+        USE to modify an existing toolkit instance — update its name, settings, or configuration references.
+
+        DO NOT USE when:
+        - Linking/unlinking a toolkit to an agent version → use patch (Link Agent to Toolkit)
+        - Creating a new toolkit → use post (Create Toolkit)
+
+        REQUIRED path params: project_id, tool_id (numeric toolkit ID).
+        Pass only the fields you want to change.""",
+        tags=["elitea_core/toolkits"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.applications.tool.update"],

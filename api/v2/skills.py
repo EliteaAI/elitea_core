@@ -34,6 +34,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "sort_order", "in": "query", "schema": {"type": "string", "default": "desc"}},
         ],
         tags=["elitea_core/skills"],
+        mcp_tool=True,
         available_to_users=True,
     )
     @auth.decorators.check_api(
@@ -74,6 +75,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Creates a new skill with an initial version. The request must include skill metadata (name, description) and exactly one version definition.",
         request_body=SkillCreateModel,
         tags=["elitea_core/skills"],
+        mcp_tool=True,
         available_to_users=True,
     )
     @auth.decorators.check_api(
