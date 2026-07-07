@@ -48,6 +48,7 @@ if _API_AVAILABLE:
                 "Returns paginated user activity statistics broken down by LLM calls, "
                 "tool runs, agent interactions, and chat events, with sorting and search."
             ),
+            mcp_tool=True,
             mcp_description="Use this tool when you need a paginated leaderboard or searchable list of user activity across a project. Do not use this tool when you need the detailed model/tool/agent breakdown for one individual — use Get User Analytics Detail. Do not use for project-level KPI dashboards. This is the primary list/discovery endpoint for user analytics.",
             tags=["elitea_core/analytics"],
             parameters=[

@@ -62,6 +62,7 @@ if _API_AVAILABLE:
                 "top active users, daily activity trend, tool usage, model usage, "
                 "agent activity, chat session stats, and per-event-type health metrics."
             ),
+            mcp_tool=True,
             mcp_description="Use this tool when you need the overall analytics dashboard view for a project: adoption KPIs, activity trends, top users, top tools, model usage, and general health metrics in one call. Do not use this tool when you need paginated rankings or one entity's details — use the dedicated user/agent/tool list or detail endpoints instead. This is the best first-step endpoint for broad project analytics and dashboard summaries.",
             tags=["elitea_core/analytics"],
             parameters=[
