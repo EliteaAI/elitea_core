@@ -25,6 +25,7 @@ from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.context_analytics import update_conversation_meta
 from ...utils.sio_utils import SioEvents, SioValidationError
 from ...utils.exceptions import PoolSaturationError
+from ...utils.maintenance_gate import is_maintenance_active
 
 
 def _serialize_guarded_groups(group_dicts: list) -> list:
@@ -229,6 +230,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def post(self, project_id: int, conversation_uuid: str):
+        if is_maintenance_active():
+            return {
+                "error": "maintenance_in_progress",
+                "message": "The platform is currently in maintenance mode. Please try again later.",
+            }, 503
         raw = dict(request.json)
         raw['conversation_uuid'] = conversation_uuid
         if "llm_settings" not in raw:

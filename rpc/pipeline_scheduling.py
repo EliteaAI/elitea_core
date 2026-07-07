@@ -22,6 +22,7 @@ from ..models.all import Application, ApplicationVersion
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
 from ..utils.cron_utils import is_cron_due
+from ..utils.maintenance_gate import is_maintenance_active
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
@@ -259,6 +260,14 @@ class RPC:
         with the next minute's tick on the same pylon_main instance. For
         multi-replica deployments a Postgres advisory lock would be needed.
         """
+        # Skip the tick while maintenance mode is on so no new pipeline runs
+        # are dispatched to task nodes that are rejecting/tearing down work.
+        if is_maintenance_active():
+            log.info(
+                "check_pipeline_scheduling: maintenance mode active, skipping tick"
+            )
+            return None
+        #
         if not _check_pipeline_scheduling_lock.acquire(blocking=False):
             log.warning(
                 "check_pipeline_scheduling: previous tick still running, "

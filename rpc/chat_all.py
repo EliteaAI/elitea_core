@@ -45,6 +45,7 @@ from ..utils.internal_tools import (
 )
 from ..utils.utils import get_public_project_id
 from ..utils.predict_utils import get_project_context, prepend_project_context
+from ..utils.maintenance_gate import is_maintenance_active
 
 
 CHAT_PREDICT_MAPPER = {
@@ -880,6 +881,8 @@ class RPC:
         self, sid: str | None, data: dict, await_task_timeout: int = -1, return_message_ids: bool = False,
         return_chat_history: bool = False,
     ) -> Optional[str | dict]:
+        if is_maintenance_active():
+            return {"error": "Maintenance in progress. Please try again later."}
         try:
             parsed = SioPredictModel.model_validate(data)
         except ValidationError as e:
