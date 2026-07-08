@@ -18,6 +18,15 @@ MAX_FILE_SIZE_KB: int = 512
 MAX_ICON_DIMENSION: int = 64
 
 
+def _safe_int(value, default: int) -> int:
+    """Parse a client-supplied query/form value, falling back to default on
+    missing or non-numeric input (rather than 500ing on int() ValueError)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="List uploaded skill icons",
@@ -42,8 +51,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def get(self, project_id: int, **kwargs):
-        skip = int(request.args.get('skip', 0))
-        limit = int(request.args.get('limit', 200))
+        skip = _safe_int(request.args.get('skip'), 0)
+        limit = _safe_int(request.args.get('limit'), 200)
         folder_path: Path = self.module.skill_icon_path.joinpath(str(project_id))
         folder_path.mkdir(parents=True, exist_ok=True)
         results = self.module.context.rpc_manager.call.social_get_icons_list(
@@ -93,8 +102,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         # Clamp client-supplied dimensions: 0/negative values would bypass the
         # min-dimension guard in social_save_image, oversized values inflate the
         # thumbnail box.
-        final_width = min(max(int(request.form.get('width', MAX_ICON_DIMENSION)), 1), MAX_ICON_DIMENSION)
-        final_height = min(max(int(request.form.get('height', MAX_ICON_DIMENSION)), 1), MAX_ICON_DIMENSION)
+        final_width = min(max(_safe_int(request.form.get('width'), MAX_ICON_DIMENSION), 1), MAX_ICON_DIMENSION)
+        final_height = min(max(_safe_int(request.form.get('height'), MAX_ICON_DIMENSION), 1), MAX_ICON_DIMENSION)
         folder_path: Path = self.module.skill_icon_path.joinpath(str(project_id))
         folder_path.mkdir(parents=True, exist_ok=True)
         file_path: Path = folder_path.joinpath(f'{uuid4()}.png')
@@ -146,7 +155,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 SkillVersion.id == skill_version_id
             ).first()
             if not version:
-                return {'ok': False, 'msg': f'There is no such version id {skill_version_id}'}
+                return {'ok': False, 'msg': f'There is no such version id {skill_version_id}'}, 404
 
             if version.meta:
                 version.meta['icon_meta'] = update_input.dict()
