@@ -35,7 +35,7 @@ from ..utils.application_utils import (
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
-from ..utils.exceptions import PoolSaturationError
+from ..utils.exceptions import PoolSaturationError, MaintenanceInProgressError
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.skill_utils import detach_skills_for_entity_versions
@@ -239,22 +239,38 @@ class RPC:
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
-        task_id = self.task_node.start_task(
-            "indexer_agent",
-            args=[parsed.stream_id, parsed.message_id],
-            kwargs=payload,
-            pool="agents",
-            meta=add_trace_context_to_meta({
-                "task_name": "indexer_agent",
-                "project_id": parsed.project_id,
-                "message_id": parsed.message_id,
-                "question_id": start_event_content.get('question_id') if start_event_content else None,
-                "sio_event": f'{sio_event}',  # enums like this
-                'chat_project_id': chat_project_id,
-                'user_context': serialize(user_context),
-                'non_interactive': non_interactive,
-            }),
-        )
+        try:
+            task_id = self.task_node.start_task(
+                "indexer_agent",
+                args=[parsed.stream_id, parsed.message_id],
+                kwargs=payload,
+                pool="agents",
+                meta=add_trace_context_to_meta({
+                    "task_name": "indexer_agent",
+                    "project_id": parsed.project_id,
+                    "message_id": parsed.message_id,
+                    "question_id": start_event_content.get('question_id') if start_event_content else None,
+                    "sio_event": f'{sio_event}',  # enums like this
+                    'chat_project_id': chat_project_id,
+                    'user_context': serialize(user_context),
+                    'non_interactive': non_interactive,
+                }),
+            )
+        except MaintenanceInProgressError:
+            error_payload = {
+                "error": "maintenance_in_progress",
+                "message": "The platform is currently in maintenance mode. Please try again later.",
+            }
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=error_payload,
+                    stream_id=parsed.stream_id,
+                    message_id=parsed.message_id,
+                )
+            return error_payload
 
         # Handle pool saturation: start_task returns None when no workers available
         if task_id is None:
@@ -412,25 +428,41 @@ class RPC:
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
-        task_id = self.task_node.start_task(
-            "indexer_predict_agent",
-            args=[parsed.stream_id, parsed.message_id],
-            kwargs=payload,
-            pool="agents",
-            meta=add_trace_context_to_meta({
-                "task_name": "indexer_predict_agent",
-                "project_id": parsed.project_id,
-                "message_id": parsed.message_id,
-                "question_id": start_event_content.get('question_id') if start_event_content else None,
-                "sio_event": f'{sio_event}',
-                'chat_project_id': chat_project_id,
-                'user_context': {
-                    "user_id": user_id,
+        try:
+            task_id = self.task_node.start_task(
+                "indexer_predict_agent",
+                args=[parsed.stream_id, parsed.message_id],
+                kwargs=payload,
+                pool="agents",
+                meta=add_trace_context_to_meta({
+                    "task_name": "indexer_predict_agent",
                     "project_id": parsed.project_id,
-                },  # NOTE: needed for external providers to work!
-                'non_interactive': non_interactive,
-            }),
-        )
+                    "message_id": parsed.message_id,
+                    "question_id": start_event_content.get('question_id') if start_event_content else None,
+                    "sio_event": f'{sio_event}',
+                    'chat_project_id': chat_project_id,
+                    'user_context': {
+                        "user_id": user_id,
+                        "project_id": parsed.project_id,
+                    },  # NOTE: needed for external providers to work!
+                    'non_interactive': non_interactive,
+                }),
+            )
+        except MaintenanceInProgressError:
+            error_payload = {
+                "error": "maintenance_in_progress",
+                "message": "The platform is currently in maintenance mode. Please try again later.",
+            }
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=error_payload,
+                    stream_id=parsed.stream_id,
+                    message_id=parsed.message_id,
+                )
+            return error_payload
 
         # Handle pool saturation: start_task returns None when no workers available
         if task_id is None:

@@ -21,6 +21,7 @@ from ..utils.application_tools import get_session_for_schema, start_index_task, 
 from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
 from ..utils.index_scheduling import resolve_credentials, handle_failed_index_schedule
+from ..utils.maintenance_gate import is_maintenance_active
 
 
 # Re-entrancy guard: skip overlapping ticks if a previous run is still in
@@ -31,6 +32,14 @@ _check_index_scheduling_lock = threading.Lock()
 class RPC:
     @web.rpc("applications_check_index_scheduling")
     def check_index_scheduling(self, **kwargs):
+        # Skip the tick while maintenance mode is on so no new index tasks
+        # are dispatched to task nodes that are rejecting/tearing down work.
+        if is_maintenance_active():
+            log.info(
+                "check_index_scheduling: maintenance mode active, skipping tick"
+            )
+            return None
+        #
         if not _check_index_scheduling_lock.acquire(blocking=False):
             log.warning(
                 "check_index_scheduling: previous tick still running, "
