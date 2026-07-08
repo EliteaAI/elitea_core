@@ -722,7 +722,7 @@ def application_toolkit_change_relation(
             # catches the common case at the moment of the edit.
             from .publish_utils import (
                 assert_no_invalid_nesting,
-                collect_reachable_app_ids,
+                collect_reachable_version_ids,
                 is_container_version,
                 SubAgentTreeError,
                 MAX_SUB_AGENT_VALIDATION_DEPTH,
@@ -767,19 +767,22 @@ def application_toolkit_change_relation(
             except SubAgentTreeError as exc:
                 raise ToolkitChangeRelationError(str(exc)) from exc
 
-            # New-edge cycle check: reject if the PARENT app is already reachable from the child
-            # (A->B where B already reaches A). This is NOT redundant with the walk's own cycle
-            # detection above — the new A->B edge is not committed yet, so the walk cannot
-            # traverse it; only a membership test against B's existing reachable set catches it.
-            reachable = collect_reachable_app_ids(
+            # New-edge cycle check: reject only if the exact (parent_app_id, parent_version_id)
+            # pair is already reachable from the child's existing subtree (A/Va->B where B
+            # already reaches A/Va). Version-aware check (issue #5719): a DIFFERENT version of
+            # the parent app being reachable is NOT a cycle — the runtime chain terminates at a
+            # leaf version, so two versions are distinct runtime termini.
+            # This is NOT redundant with the walk's own cycle detection above — the new A->B
+            # edge is not committed yet, so the walk cannot traverse it.
+            reachable_versions = collect_reachable_version_ids(
                 project_id, version_id, session=session,
                 max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
             )
-            if update_data.application_id in reachable:
+            if (update_data.application_id, update_data.version_id) in reachable_versions:
                 raise ToolkitChangeRelationError(
                     f"Adding this agent would create a circular reference: application "
-                    f"{update_data.application_id} is already reachable from "
-                    f"application {application_id}."
+                    f"{update_data.application_id} version {update_data.version_id} is already "
+                    f"reachable from application {application_id}."
                 )
 
             # When ADDING a relation (has_relation=True), first check if this parent already
