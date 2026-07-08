@@ -131,7 +131,11 @@ class ProjectAPI(api_tools.APIModeHandler):
 
                     if not client_id:
                         client_id = settings.get('client_id') or sp_config.get('client_id')
-                    if not client_secret:
+                    # When the client_id was obtained via DCR, the registered client is public
+                    # (token_endpoint_auth_method=none). Never load a client_secret from DB in
+                    # that case — sending a secret for a public client causes Aha (and others)
+                    # to reject the token request with "unknown client".
+                    if not client_secret and not data.used_dcr:
                         client_secret = settings.get('client_secret') or sp_config.get('client_secret')
                         log.debug(f"MCP OAuth proxy: extracted client_secret from DB: {bool(client_secret)}, preview: {client_secret[:8] if client_secret else 'None'}")
                     if not scope:
@@ -188,9 +192,11 @@ class ProjectAPI(api_tools.APIModeHandler):
             return {"error": "Missing redirect_uri", "details": "redirect_uri is required for authorization_code grant"}, 400
 
         try:
-            log.debug(f"MCP OAuth proxy: exchanging code at {data.token_endpoint}")
-            log.debug(f"MCP OAuth proxy exchange request: client_id={client_id}, has_secret={bool(client_secret)}, "
-                     f"redirect_uri={data.redirect_uri}, has_code_verifier={bool(data.code_verifier)}, scope={scope}")
+            log.warning(f"[MCP OAuth proxy] exchanging code at {data.token_endpoint}, "
+                        f"client_id={client_id}, has_secret={bool(client_secret)}, "
+                        f"redirect_uri={data.redirect_uri}, "
+                        f"has_code_verifier={bool(data.code_verifier)}, "
+                        f"scope={scope}")
             token_data = exchange_token(
                 token_endpoint=data.token_endpoint,
                 code=data.code,
