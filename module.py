@@ -91,6 +91,9 @@ class Module(module.ModuleModel):
             config.get("application_icon_subpath", "application_icon")
         )
         #
+        self.skill_icon_path = base_path.joinpath(
+            config.get("skill_icon_subpath", "skill_icon")
+        )
         self.project_icon_path = base_path.joinpath(
             config.get("project_icon_subpath", "project_icon")
         )
@@ -488,6 +491,7 @@ class Module(module.ModuleModel):
         self.event_node.emit("application_mcp_prebuilt_config_request", dict())
         #
         self.application_icon_path.mkdir(parents=True, exist_ok=True)
+        self.skill_icon_path.mkdir(parents=True, exist_ok=True)
         self.application_tool_icon_path.mkdir(parents=True, exist_ok=True)
         self.default_entity_icons_path.mkdir(parents=True, exist_ok=True)
         #

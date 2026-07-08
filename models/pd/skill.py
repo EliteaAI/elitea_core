@@ -114,6 +114,7 @@ class SkillListModel(BaseModel):
     authors: List[AuthorBaseModel] = Field(default_factory=list)
     tags: List[TagDetailModel] = Field(default_factory=list)
     meta: Optional[dict] = None
+    icon_meta: Optional[dict] = {}
     is_pinned: bool = False
 
     model_config = ConfigDict(from_attributes=True)
@@ -126,6 +127,20 @@ class SkillListModel(BaseModel):
                 tags[tag.name] = tag
             self.author_ids.add(version.author_id)
         self.tags = list(tags.values())
+        return self
+
+    @model_validator(mode='after')
+    def set_icon_meta(self):
+        if not self.versions:
+            return self
+        default_id = (self.meta or {}).get('default_version_id')
+        selected = (
+            next((v for v in self.versions if v.id == default_id), None)
+            or next((v for v in self.versions if v.name == 'base'), None)
+            or min(self.versions, key=lambda version: version.created_at)
+        )
+        if selected and (selected.meta or {}).get('icon_meta'):
+            self.icon_meta = selected.meta['icon_meta']
         return self
 
     def set_authors(self, user_map: dict) -> None:

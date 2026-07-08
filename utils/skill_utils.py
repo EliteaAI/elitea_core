@@ -862,6 +862,7 @@ def get_available_skills_for_agent(
                     'version_id': mapping.skill_version_id,
                     'version_name': version.name if version else 'unknown',
                     'version_missing': version is None,
+                    'icon_meta': (version.meta or {}).get('icon_meta') if version else None,
                 })
 
         return skills
