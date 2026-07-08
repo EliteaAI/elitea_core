@@ -392,22 +392,6 @@ def test_publish_path_collects_agent_tree(pu):
 
 
 # --------------------------------------------------------------------------- #
-# collect_reachable_app_ids — bind-time new-edge cycle helper
-# --------------------------------------------------------------------------- #
-
-def test_collect_reachable_app_ids(pu):
-    # B(v2)->C(v3)->D(v4). Reachable app ids from B are {3, 4}. Binding A(app 3) under B would
-    # close a cycle (3 already reachable), which is exactly what the bind-time check tests.
-    registry = {
-        2: FakeVersion(2, tools=[FakeTool(3, 3)]),
-        3: FakeVersion(3, tools=[FakeTool(4, 4)]),
-        4: FakeVersion(4, tools=[]),
-    }
-    reachable = pu.collect_reachable_app_ids(1, 2, session=FakeSession(registry))
-    assert reachable == {3, 4}
-
-
-# --------------------------------------------------------------------------- #
 # collect_reachable_version_ids — version-aware bind-time cycle helper (issue #5719)
 # --------------------------------------------------------------------------- #
 
