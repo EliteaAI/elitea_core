@@ -455,6 +455,28 @@ class Module(module.ModuleModel):
         # TaskNode
         self.task_node.start()
         self.task_node.subscribe_to_task_statuses(self.task_status_changed)
+        # Maintenance gate: one check at the shared dispatch point covers every
+        # start_task callsite (predicts, index, TTS/ASR, pipeline, parallel
+        # child dispatch). Structurally prevents a new predict entry point from
+        # being missed. Callers that want entry-point-specific error shapes
+        # catch MaintenanceInProgressError and translate; unhandled propagation
+        # is intentional and preferable to silently returning None (which is
+        # indistinguishable from pool saturation).
+        _original_start_task = self.task_node.start_task
+
+        def _maintenance_gated_start_task(*args, **kwargs):
+            from .utils.maintenance_gate import is_maintenance_active
+            from .utils.exceptions import MaintenanceInProgressError
+            if is_maintenance_active():
+                task_name = args[0] if args else kwargs.get("task_name") or "?"
+                log.info(
+                    "task_node.start_task: rejected — maintenance mode active (task=%s)",
+                    task_name,
+                )
+                raise MaintenanceInProgressError(task_name=task_name)
+            return _original_start_task(*args, **kwargs)
+
+        self.task_node.start_task = _maintenance_gated_start_task
         # Events
         self.event_node.subscribe("application_stream_response", self.stream_response)
         self.event_node.subscribe("application_full_response", self.conversation_message_proxy)
