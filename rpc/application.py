@@ -36,6 +36,7 @@ from ..utils.application_utils import (
     ApplicationToolExpandedError
 )
 from ..utils.exceptions import PoolSaturationError
+from ..utils.maintenance_gate import is_maintenance_active
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.skill_utils import detach_skills_for_entity_versions
@@ -110,6 +111,25 @@ class RPC:
             non_interactive = sid is None
         data['message_id'] = data.get('message_id', str(uuid4()))
         data['stream_id'] = data.get('stream_id', data['message_id'])
+        if is_maintenance_active():
+            log.info(
+                "predict_sio: rejected — maintenance mode active (project_id=%s, message_id=%s)",
+                data.get('project_id'), data['message_id'],
+            )
+            error_payload = {
+                "error": "maintenance_in_progress",
+                "message": "The platform is currently in maintenance mode. Please try again later.",
+            }
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=error_payload,
+                    stream_id=data['stream_id'],
+                    message_id=data['message_id'],
+                )
+            return error_payload
         try:
             parsed = ApplicationChatRequest.model_validate(data)
         except ValidationError as e:
@@ -323,6 +343,25 @@ class RPC:
             start_event_content = {}
         data['message_id'] = data.get('message_id', str(uuid4()))
         data['stream_id'] = data.get('stream_id', data['message_id'])
+        if is_maintenance_active():
+            log.info(
+                "predict_sio_llm: rejected — maintenance mode active (project_id=%s, message_id=%s)",
+                data.get('project_id'), data['message_id'],
+            )
+            error_payload = {
+                "error": "maintenance_in_progress",
+                "message": "The platform is currently in maintenance mode. Please try again later.",
+            }
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=error_payload,
+                    stream_id=data['stream_id'],
+                    message_id=data['message_id'],
+                )
+            return error_payload
 
         # Determine call type and validate arguments
         is_blocking = await_task_timeout > 0
