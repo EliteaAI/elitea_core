@@ -192,11 +192,9 @@ class ProjectAPI(api_tools.APIModeHandler):
             return {"error": "Missing redirect_uri", "details": "redirect_uri is required for authorization_code grant"}, 400
 
         try:
-            log.warning(f"[MCP OAuth proxy] exchanging code at {data.token_endpoint}, "
-                        f"client_id={client_id}, has_secret={bool(client_secret)}, "
-                        f"redirect_uri={data.redirect_uri}, "
-                        f"has_code_verifier={bool(data.code_verifier)}, "
-                        f"scope={scope}")
+            log.debug(f"MCP OAuth proxy: exchanging code at {data.token_endpoint}")
+            log.debug(f"MCP OAuth proxy exchange request: client_id={client_id}, has_secret={bool(client_secret)}, "
+                     f"redirect_uri={data.redirect_uri}, has_code_verifier={bool(data.code_verifier)}, scope={scope}")
             token_data = exchange_token(
                 token_endpoint=data.token_endpoint,
                 code=data.code,
