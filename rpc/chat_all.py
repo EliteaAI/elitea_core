@@ -878,7 +878,7 @@ class RPC:
     @web.rpc("chat_predict_sio", "chat_predict_sio")
     def predict_sio(
         self, sid: str | None, data: dict, await_task_timeout: int = -1, return_message_ids: bool = False,
-        return_chat_history: bool = False,
+        return_chat_history: bool = False, eligible_for_autoapproval: bool = False,
     ) -> Optional[str | dict]:
         try:
             parsed = SioPredictModel.model_validate(data)
@@ -1193,6 +1193,10 @@ class RPC:
                             room=room
                         )
                         return {"error": str(e)}
+
+                    if eligible_for_autoapproval:
+                        payload['auto_approve_sensitive_actions'] = True
+                        log.debug('[SENSITIVE] Auto-approve sensitive actions enabled for SIO request (eligible_for_autoapproval)')
 
                     # Pass pipeline attachment filepaths so the indexer can inject them into graph state
                     if pipeline_attachment_filepaths:
