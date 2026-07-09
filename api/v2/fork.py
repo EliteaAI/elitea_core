@@ -26,7 +26,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         for entity in entities:
             if entity.get('entity') in ('agents', 'skills'):
                 for version in entity.get('versions', []):
-                    meta = version.get('meta', {})
+                    meta = version.get('meta') or {}
                     meta.update({
                         'parent_entity_id': entity['id'],
                         'parent_project_id': entity['owner_id'],
