@@ -124,14 +124,14 @@ class SkillListModel(BaseModel):
     def set_is_forked(self):
         for v in self.versions:
             meta = v.meta or {}
-            if 'parent_entity_id' in meta and 'parent_project_id' in meta:
+            if meta.get('parent_entity_id') is not None and meta.get('parent_project_id') is not None:
                 self.is_forked = True
                 self.meta = {
                     **(self.meta or {}),
                     'parent_entity_id': meta['parent_entity_id'],
                     'parent_project_id': meta['parent_project_id'],
                     **({'parent_version_id': meta['parent_version_id']}
-                       if 'parent_version_id' in meta else {}),
+                       if meta.get('parent_version_id') is not None else {}),
                 }
                 break
         return self
