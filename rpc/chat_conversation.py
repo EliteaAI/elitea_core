@@ -41,7 +41,8 @@ class RPC:
         messages_limit: int = 100,
         messages_offset: int = 0,
         sort_order: str = 'acs',
-    ) -> dict | None:
+        return_json: bool = False,
+    ) -> dict | str | None:
         """
         Get full conversation details with participants and message groups.
 
@@ -81,14 +82,20 @@ class RPC:
                 if not result:
                     return None
 
-                serialized = serialize(result)
-
-                # Allow callers to skip heavy fields if not needed
+                # Heavy fields callers may opt out of.
+                exclude = set()
                 if not include_participants:
-                    serialized.pop('participants', None)
+                    exclude.add('participants')
                 if not include_message_groups:
-                    serialized.pop('message_groups', None)
+                    exclude.add('message_groups')
 
+                # Fast path: single pydantic-core (rust) pass, skips serialize() re-walk.
+                if return_json:
+                    return result.model_dump_json(exclude=exclude or None)
+
+                serialized = serialize(result)
+                for field in exclude:
+                    serialized.pop(field, None)
                 return serialized
 
             except Exception as e:
