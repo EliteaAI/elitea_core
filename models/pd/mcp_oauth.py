@@ -42,7 +42,7 @@ class McpOAuthTokenRequest(BaseModel):
     toolkit_id: Optional[int] = Field(default=None, description="Toolkit ID to fetch credentials from DB")
     toolkit_type: Optional[str] = Field(default=None, description="Toolkit type for fetching credentials (e.g., mcp_github, etc.)")
     configuration_uuid: Optional[str] = Field(default=None, description="Configuration UUID for token storage key (frontend use only)")
-    used_dcr: Optional[bool] = Field(default=False, description="True when the client_id was obtained via Dynamic Client Registration (RFC 7591). Prevents loading client_secret from toolkit DB settings since DCR-registered public clients have no secret.")
+    used_dcr: bool = Field(default=False, description="True when the client_id was obtained via Dynamic Client Registration (RFC 7591). Prevents loading client_secret from toolkit DB settings since DCR-registered public clients have no secret.")
 
     model_config = ConfigDict(
         json_schema_extra={
