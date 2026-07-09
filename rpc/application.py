@@ -318,6 +318,7 @@ class RPC:
                         is_system_user: bool = False,
                         return_chat_history: bool = False,
                         non_interactive: Optional[bool] = None,
+                        eligible_for_autoapproval: bool = False,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
