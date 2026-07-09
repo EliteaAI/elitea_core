@@ -28,8 +28,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 for version in entity.get('versions', []):
                     meta = version.get('meta') or {}
                     meta.update({
-                        'parent_entity_id': entity['id'],
-                        'parent_project_id': entity['owner_id'],
+                        'parent_entity_id': entity.get('id'),
+                        'parent_project_id': entity.get('owner_id'),
                         'parent_author_id': version.get('author_id'),
                         'parent_version_id': version.get('id')
                     })
