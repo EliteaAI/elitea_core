@@ -230,6 +230,9 @@ class RPC:
                 message_id=data.get("message_id")
             )
 
+        if eligible_for_autoapproval:
+            payload['auto_approve_sensitive_actions'] = True
+
         if not user_context:
             user_context = {
                 "user_id": user_id,
