@@ -99,6 +99,7 @@ class RPC:
                     is_system_user: bool = False,
                     return_chat_history: bool = False,
                     non_interactive: Optional[bool] = None,
+                    eligible_for_autoapproval: bool = False,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -218,7 +219,7 @@ class RPC:
                     parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
         except PredictPayloadError as e:
             raise SioValidationError(
                 sio=self.context.sio,
