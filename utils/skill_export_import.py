@@ -1,7 +1,11 @@
+import uuid
 from typing import Any, Dict, List, Optional
 
 import yaml
+from sqlalchemy.orm import selectinload
 
+from ..models.skill import Skill, SkillVersion
+from ..models.pd.skill import SkillExportModel
 from .export_import_utils import slugify
 from .skill_utils import (
     _skill_session,
@@ -156,6 +160,58 @@ def export_skill_md(
         filename = f"{name_slug}.md"
 
     return {'ok': True, 'filename': filename, 'content': content}
+
+
+def build_skill_fork_payload(
+    project_id: int,
+    skill_id: int,
+    version_id: Optional[int] = None,
+    session=None,
+) -> Optional[dict]:
+    """Build the fork payload for a skill, or None if the skill/version is missing."""
+    with _skill_session(session, project_id) as s:
+        skill = (
+            s.query(Skill)
+            .options(selectinload(Skill.versions).selectinload(SkillVersion.tags))
+            .filter(Skill.id == skill_id)
+            .first()
+        )
+        if skill is None:
+            return None
+
+        if version_id is not None:
+            source_version = next((v for v in skill.versions if v.id == version_id), None)
+        else:
+            source_version = skill.get_default_version() or (skill.versions[0] if skill.versions else None)
+        if source_version is None:
+            return None
+
+        skill_dict = skill.to_json()
+        skill_dict['project_id'] = project_id
+        skill_dict['user_id'] = skill.author_id
+        version_dict = source_version.to_json()
+        version_dict['tags'] = [t.to_json() for t in source_version.tags]
+        version_dict['name'] = DEFAULT_VERSION_NAME
+        skill_dict['versions'] = [version_dict]
+
+        source_version_id = source_version.id
+        source_author_id = source_version.author_id
+
+        payload = SkillExportModel.model_validate(skill_dict).model_dump(mode='json')
+
+    # SkillExportModel excludes owner_id and has no entity field; the version
+    # export model omits per-version id/author_id. fork.py stamps parent lineage
+    # from these, so re-add them explicitly.
+    payload['owner_id'] = project_id
+    payload['entity'] = 'skills'
+    payload['import_uuid'] = str(uuid.uuid5(
+        uuid.NAMESPACE_OID,
+        f"skill_fork:{project_id}:{skill_id}:{payload['name']}",
+    ))
+    payload['versions'][0]['id'] = source_version_id
+    payload['versions'][0]['author_id'] = source_author_id
+
+    return payload
 
 
 def parse_skill_md(content: str) -> dict:
