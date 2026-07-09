@@ -391,7 +391,7 @@ DEFAULT_SKILL_VALIDATION_PROMPT = _SKILL_VALIDATION_PROMPT_TEMPLATE.format(
 
 
 def _build_skill_validation_prompt() -> str:
-    custom_rules = getattr(this.module, 'skill_publish_validation_rules', '').strip()
+    custom_rules = (getattr(this.module, 'skill_publish_validation_rules', '') or '').strip()
     if custom_rules:
         return _SKILL_VALIDATION_PROMPT_TEMPLATE.format(
             skill_validation_rules=custom_rules,
@@ -623,5 +623,5 @@ def is_skill_publish_blocked_for_project(project_id: int) -> bool:
     """Platform guardrail; defaults to not-blocked until admin config exists."""
     if not getattr(this.module, 'is_skill_publish_blocked', False):
         return False
-    whitelist = getattr(this.module, 'skill_publish_whitelist_project_ids', set())
+    whitelist = getattr(this.module, 'skill_publish_whitelist_project_ids', set()) or set()
     return project_id not in whitelist
