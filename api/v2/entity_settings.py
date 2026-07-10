@@ -11,6 +11,7 @@ from ...models.enums.all import ParticipantTypes
 from ...models.participants import Participant, ParticipantMapping
 from ...models.pd.participant import ParticipantBase, ParticipantEntityUser
 from ...models.pd.participant_settings import EntitySettingsLlm, EntitySettingsApplication
+from ...utils.entity_settings_utils import coerce_version_id
 from ...utils.participant_utils import make_query_filter_for_entity
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
@@ -23,6 +24,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
         """Update entity_settings for a participant in a conversation."""
         with db.get_session(project_id) as session:
             data = dict(request.json)
+
+            # Stored verbatim in entity_settings JSONB; coerce so it matches the
+            # integer ApplicationVersion.id during version resolution.
+            try:
+                coerce_version_id(data)
+            except (TypeError, ValueError):
+                return {"error": "version_id must be an integer"}, 400
 
             participant = session.query(Participant).filter(
                 Participant.id == participant_id
