@@ -34,7 +34,7 @@ class Method:
         
         # If this is exactly the second message (user input + AI response), trigger auto-naming
         # Only do this if conversation has a default name pattern
-        if conversation.name.lower().startswith('new conversation'):
+        if conversation.name.lower().startswith('new conversation') or conversation.name.lower().startswith('new chat'):
             log.debug(f"Triggering auto-naming for conversation {conversation.id}")
             
             try:

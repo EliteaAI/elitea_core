@@ -30,6 +30,7 @@ class SkillVersionListModel(BaseModel):
     created_at: datetime
     author_id: int = Field(..., exclude=True)
     tags: List[TagDetailModel] = Field(default_factory=list, exclude=True)
+    meta: Optional[dict] = Field(None, exclude=True)
 
     model_config = ConfigDict(from_attributes=True)
 

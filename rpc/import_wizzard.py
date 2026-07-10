@@ -245,8 +245,11 @@ def _resolve_and_attach_skill(
     ref_version_name = skill_ref.get('version_name') or 'base'
     skill_version_id = skill_info.versions.get(ref_version_name)
     if not skill_version_id:
-        return (f"Skill version '{ref_version_name}' for skill (uuid={import_uuid}) "
-                f"attached to agent '{agent_name}' is missing - attachment skipped")
+        skill_version_id = (skill_info.versions.get('base')
+                            or next(iter(skill_info.versions.values()), None))
+        if not skill_version_id:
+            return (f"Skill version '{ref_version_name}' for skill (uuid={import_uuid}) "
+                    f"attached to agent '{agent_name}' is missing - attachment skipped")
 
     try:
         attach_skill_to_agent(

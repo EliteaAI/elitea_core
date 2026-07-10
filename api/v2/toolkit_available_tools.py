@@ -1,6 +1,6 @@
 import json
 
-from tools import api_tools, auth, config as c, db
+from tools import api_tools, auth, config as c, db, register_openapi
 from pylon.core.tools import log
 
 from ...utils.constants import PROMPT_LIB_MODE
@@ -13,6 +13,22 @@ from ...utils.application_tools import (
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get toolkit available tools",
+        description="Get list of tools/actions available within a specific toolkit.",
+        mcp_description="""
+        USE to discover what tools and actions are available within a specific toolkit instance by its numeric ID.
+        Returns the list of callable tool names and their metadata for the given toolkit.
+
+        DO NOT USE when:
+        - You need to list all toolkits in a project → use get_elitea_core_tools
+        - You need toolkit configuration schemas (type catalog) → use get_elitea_core_toolkits
+
+        REQUIRED path params: project_id, toolkit_id (numeric ID of the toolkit instance).""",
+        tags=["elitea_core/toolkits"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.details"],
         "recommended_roles": {

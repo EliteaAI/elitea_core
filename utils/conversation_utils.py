@@ -6,7 +6,7 @@ from tools import rpc_tools, this
 from pylon.core.tools import log
 
 from ..models.conversation import Conversation
-from ..models.enums.all import ParticipantTypes
+from ..models.enums.all import ParticipantTypes, AgentTypes
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.base import MessageItem
 from ..models.participants import Participant, ParticipantMapping
@@ -44,8 +44,15 @@ def calculate_conversation_duration(conversation: Conversation, session: Session
         # are accumulated, so [0]['timestamp_start'] preserves the true earliest start.
         (
             and_(
-                func.jsonb_array_length(
-                    func.coalesce(ConversationMessageGroup.meta['thinking_steps'], cast('[]', JSONB))
+                # Guard: only call jsonb_array_length when the value is actually a JSON array.
+                # coalesce(meta['thinking_steps'], cast('[]', JSONB)) passes '[]' as a JSON
+                # *string* "[]" (not an array), so jsonb_array_length crashes on any non-array
+                # value.  The nested case below guarantees jsonb_array_length is never called on
+                # a scalar or NULL.
+                case(
+                    (func.jsonb_typeof(ConversationMessageGroup.meta['thinking_steps']) == 'array',
+                     func.jsonb_array_length(ConversationMessageGroup.meta['thinking_steps'])),
+                    else_=0,
                 ) > 0,
                 ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start'].astext.isnot(None),
                 ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish'].astext.isnot(None)
@@ -109,8 +116,15 @@ def calculate_conversation_durations_batch(
         # collapsing multi-round / sub-agent / HITL durations to the final round only (#5422).
         (
             and_(
-                func.jsonb_array_length(
-                    func.coalesce(ConversationMessageGroup.meta['thinking_steps'], cast('[]', JSONB))
+                # Guard: only call jsonb_array_length when the value is actually a JSON array.
+                # coalesce(meta['thinking_steps'], cast('[]', JSONB)) passes '[]' as a JSON
+                # *string* "[]" (not an array), so jsonb_array_length crashes on any non-array
+                # value.  The nested case below guarantees jsonb_array_length is never called on
+                # a scalar or NULL.
+                case(
+                    (func.jsonb_typeof(ConversationMessageGroup.meta['thinking_steps']) == 'array',
+                     func.jsonb_array_length(ConversationMessageGroup.meta['thinking_steps'])),
+                    else_=0,
                 ) > 0,
                 ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start'].astext.isnot(None),
                 ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish'].astext.isnot(None)
@@ -367,7 +381,22 @@ def get_conversation_details(
                     f"Application with ID {participant['entity_meta']['id']} not found"
                 )
                 continue
-            participant['meta']['tools'] = application_version_details['version_details']['tools']
+            version_details = application_version_details['version_details']
+            participant['meta']['tools'] = version_details['tools']
+            # "Container" flag (issue #5680): a non-pipeline agent that itself uses other agents
+            # (has an application-type tool) is SKIPPED as a callable tool in adhoc LLM chat — it
+            # can only run as the active agent (orchestrator). Surface it so the participant chip
+            # can explain that to the user instead of the skip looking like a silent no-op. Mirrors
+            # the skip rule in rpc/chat_all.generate_toolkit_payload (agent_type != pipeline AND
+            # is_container_version); computed here from already-fetched data (no extra query).
+            # Pipelines are the sanctioned deep-composition primitive and are never flagged.
+            participant['meta']['is_container'] = (
+                version_details.get('agent_type') != AgentTypes.pipeline.value
+                and any(
+                    (t or {}).get('type') == 'application'
+                    for t in (version_details.get('tools') or [])
+                )
+            )
 
     return ConversationDetails.model_validate(conversation_dict)
 

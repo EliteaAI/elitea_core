@@ -1,6 +1,7 @@
 import re
 import uuid
 from datetime import datetime
+from queue import Empty
 from typing import Annotated, Dict, List, Optional
 
 from pydantic import (
@@ -11,6 +12,8 @@ from pydantic import (
     model_validator,
     ConfigDict,
 )
+
+from tools import rpc_tools
 
 from .collection_base import AuthorBaseModel
 from .tag import TagDetailModel
@@ -111,9 +114,27 @@ class SkillListModel(BaseModel):
     authors: List[AuthorBaseModel] = Field(default_factory=list)
     tags: List[TagDetailModel] = Field(default_factory=list)
     meta: Optional[dict] = None
+    icon_meta: Optional[dict] = {}
+    is_forked: bool = False
     is_pinned: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='after')
+    def set_is_forked(self):
+        for v in self.versions:
+            meta = v.meta or {}
+            if meta.get('parent_entity_id') is not None and meta.get('parent_project_id') is not None:
+                self.is_forked = True
+                self.meta = {
+                    **(self.meta or {}),
+                    'parent_entity_id': meta['parent_entity_id'],
+                    'parent_project_id': meta['parent_project_id'],
+                    **({'parent_version_id': meta['parent_version_id']}
+                       if meta.get('parent_version_id') is not None else {}),
+                }
+                break
+        return self
 
     @model_validator(mode='after')
     def parse_versions_data(self):
@@ -123,6 +144,20 @@ class SkillListModel(BaseModel):
                 tags[tag.name] = tag
             self.author_ids.add(version.author_id)
         self.tags = list(tags.values())
+        return self
+
+    @model_validator(mode='after')
+    def set_icon_meta(self):
+        if not self.versions:
+            return self
+        default_id = (self.meta or {}).get('default_version_id')
+        selected = (
+            next((v for v in self.versions if v.id == default_id), None)
+            or next((v for v in self.versions if v.name == 'base'), None)
+            or min(self.versions, key=lambda version: version.created_at)
+        )
+        if selected and (selected.meta or {}).get('icon_meta'):
+            self.icon_meta = selected.meta['icon_meta']
         return self
 
     def set_authors(self, user_map: dict) -> None:
@@ -173,8 +208,18 @@ class SkillDetailModel(BaseModel):
     versions: List[SkillVersionListModel]
     version_details: Optional[SkillVersionDetailModel] = None
     meta: Optional[dict] = None
+    is_pinned: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+    def check_is_pinned(self, project_id: int):
+        try:
+            self.is_pinned = rpc_tools.RpcMixin().rpc.timeout(2).social_is_pinned(
+                project_id=project_id, entity='skill', entity_id=self.id
+            )
+        except Empty:
+            self.is_pinned = False
+        return self
 
 
 class SkillUpdateModel(SkillArgsForwardingModel):

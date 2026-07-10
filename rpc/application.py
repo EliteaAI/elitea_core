@@ -35,7 +35,7 @@ from ..utils.application_utils import (
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
-from ..utils.exceptions import PoolSaturationError
+from ..utils.exceptions import PoolSaturationError, MaintenanceInProgressError
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.skill_utils import detach_skills_for_entity_versions
@@ -99,6 +99,7 @@ class RPC:
                     is_system_user: bool = False,
                     return_chat_history: bool = False,
                     non_interactive: Optional[bool] = None,
+                    eligible_for_autoapproval: bool = False,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -218,7 +219,7 @@ class RPC:
                     parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
         except PredictPayloadError as e:
             raise SioValidationError(
                 sio=self.context.sio,
@@ -228,6 +229,9 @@ class RPC:
                 stream_id=data.get("stream_id"),
                 message_id=data.get("message_id")
             )
+
+        if eligible_for_autoapproval:
+            payload['auto_approve_sensitive_actions'] = True
 
         if not user_context:
             user_context = {
@@ -239,22 +243,38 @@ class RPC:
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
-        task_id = self.task_node.start_task(
-            "indexer_agent",
-            args=[parsed.stream_id, parsed.message_id],
-            kwargs=payload,
-            pool="agents",
-            meta=add_trace_context_to_meta({
-                "task_name": "indexer_agent",
-                "project_id": parsed.project_id,
-                "message_id": parsed.message_id,
-                "question_id": start_event_content.get('question_id') if start_event_content else None,
-                "sio_event": f'{sio_event}',  # enums like this
-                'chat_project_id': chat_project_id,
-                'user_context': serialize(user_context),
-                'non_interactive': non_interactive,
-            }),
-        )
+        try:
+            task_id = self.task_node.start_task(
+                "indexer_agent",
+                args=[parsed.stream_id, parsed.message_id],
+                kwargs=payload,
+                pool="agents",
+                meta=add_trace_context_to_meta({
+                    "task_name": "indexer_agent",
+                    "project_id": parsed.project_id,
+                    "message_id": parsed.message_id,
+                    "question_id": start_event_content.get('question_id') if start_event_content else None,
+                    "sio_event": f'{sio_event}',  # enums like this
+                    'chat_project_id': chat_project_id,
+                    'user_context': serialize(user_context),
+                    'non_interactive': non_interactive,
+                }),
+            )
+        except MaintenanceInProgressError:
+            error_payload = {
+                "error": "maintenance_in_progress",
+                "message": "The platform is currently in maintenance mode. Please try again later.",
+            }
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=error_payload,
+                    stream_id=parsed.stream_id,
+                    message_id=parsed.message_id,
+                )
+            return error_payload
 
         # Handle pool saturation: start_task returns None when no workers available
         if task_id is None:
@@ -298,6 +318,7 @@ class RPC:
                         is_system_user: bool = False,
                         return_chat_history: bool = False,
                         non_interactive: Optional[bool] = None,
+                        eligible_for_autoapproval: bool = False,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
@@ -412,25 +433,41 @@ class RPC:
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
-        task_id = self.task_node.start_task(
-            "indexer_predict_agent",
-            args=[parsed.stream_id, parsed.message_id],
-            kwargs=payload,
-            pool="agents",
-            meta=add_trace_context_to_meta({
-                "task_name": "indexer_predict_agent",
-                "project_id": parsed.project_id,
-                "message_id": parsed.message_id,
-                "question_id": start_event_content.get('question_id') if start_event_content else None,
-                "sio_event": f'{sio_event}',
-                'chat_project_id': chat_project_id,
-                'user_context': {
-                    "user_id": user_id,
+        try:
+            task_id = self.task_node.start_task(
+                "indexer_predict_agent",
+                args=[parsed.stream_id, parsed.message_id],
+                kwargs=payload,
+                pool="agents",
+                meta=add_trace_context_to_meta({
+                    "task_name": "indexer_predict_agent",
                     "project_id": parsed.project_id,
-                },  # NOTE: needed for external providers to work!
-                'non_interactive': non_interactive,
-            }),
-        )
+                    "message_id": parsed.message_id,
+                    "question_id": start_event_content.get('question_id') if start_event_content else None,
+                    "sio_event": f'{sio_event}',
+                    'chat_project_id': chat_project_id,
+                    'user_context': {
+                        "user_id": user_id,
+                        "project_id": parsed.project_id,
+                    },  # NOTE: needed for external providers to work!
+                    'non_interactive': non_interactive,
+                }),
+            )
+        except MaintenanceInProgressError:
+            error_payload = {
+                "error": "maintenance_in_progress",
+                "message": "The platform is currently in maintenance mode. Please try again later.",
+            }
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=error_payload,
+                    stream_id=parsed.stream_id,
+                    message_id=parsed.message_id,
+                )
+            return error_payload
 
         # Handle pool saturation: start_task returns None when no workers available
         if task_id is None:
@@ -1342,7 +1379,7 @@ class RPC:
 
         toolkit_config = data.get('toolkit_config', {})
         toolkit_type = toolkit_config.get('type', 'unknown')
-        if toolkit_type != 'mcp':
+        if not toolkit_type.startswith('mcp'):
             raise ValueError(f"test_mcp_connection only works with MCP toolkits, got type: {toolkit_type}")
 
         project_id = data.get('project_id')

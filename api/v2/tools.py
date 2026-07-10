@@ -89,19 +89,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create Toolkit",
-        description="Create a new toolkit in the project from a type and its settings.",
-        request_body=ToolCreateModel,
+        description="Create a new toolkit in the project.",
         mcp_description="""
-        USE to create a brand-new toolkit from scratch.
+        USE to create a new toolkit instance in the project for attaching to agent versions.
 
-        Provide the toolkit `type` (e.g. an integration or MCP type) plus a `name`
-        and type-specific `settings`. `author_id`, `user_id` and `project_id` are set
-        automatically from the request context; any values you send for them are ignored.
+        DO NOT USE when:
+        - You need to list existing toolkits → use get_elitea_core_tools
+        - You need to link a toolkit to an agent → use patch_elitea_core_tool after creating
 
-        Key errors:
-        - Invalid or unsupported `type`/`settings` → HTTP 400
-        - Toolkit type blocked in this deployment → HTTP 403
-        """,
+        REQUIRED body fields: type, name. Pass settings as required by the toolkit type schema.""",
         tags=["elitea_core/toolkits"],
         mcp_tool=True,
         available_to_users=True,

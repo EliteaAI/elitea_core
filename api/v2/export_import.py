@@ -13,7 +13,7 @@ from ...utils.export_import import (
     export_application_md,
     create_zip_archive
 )
-from ...utils.export_import_utils import slugify
+from ...utils.export_import_utils import slugify, content_disposition_attachment
 
 
 def _generate_export_filename(result, file_extension="zip"):
@@ -147,7 +147,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     files[0]['content'],
                     mimetype='text/markdown; charset=utf-8',
                     headers={
-                        'Content-Disposition': f'attachment; filename="{files[0]["filename"]}"',
+                        'Content-Disposition': content_disposition_attachment(files[0]["filename"]),
                         'Access-Control-Expose-Headers': 'Content-Disposition'
                     }
                 )

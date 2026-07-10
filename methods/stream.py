@@ -46,6 +46,16 @@ class Method:
         if payload.get('type') == "mcp_authorization_required":
             self.context.event_manager.fire_event('chat_message_stream_pause', payload)
 
+        # Handle HITL interrupt - pause streaming AND persist the interrupt into the
+        # message-group meta so the Approve/Edit/Reject buttons survive navigate-away
+        # and reload (#4823). The interrupt is otherwise live-only: on a HITL pause the
+        # indexer skips the full_message/agent_response events, so chat_message_stream_end
+        # never fires and nothing is written to the DB. Covers every HITL mode (pipeline
+        # node, sensitive tool, sequential, parallel, park+dispatch) — all funnel through
+        # this single event.
+        if payload.get('type') == "agent_hitl_interrupt":
+            self.context.event_manager.fire_event('chat_message_stream_pause', payload)
+
         # Handle swarm agent response - emit as separate child message for non-parent agents
         if payload.get('type') == "agent_swarm_agent_response":
             response_metadata = payload.get('response_metadata', {})
@@ -120,12 +130,86 @@ class Method:
             except Exception as e:
                 log.error(f"Failed to ensure task_id for index: {e}")
 
+        # Maintain the in-memory registry that bridges the in_progress event to a later
+        # 'stopped' terminal event (see module.active_index_tasks). Best-effort only —
+        # registry maintenance must never break notification.
+        try:
+            self._maintain_active_index_registry(response_metadata)
+        except Exception as e:
+            log.error(f"Failed to maintain active index registry: {e}")
+
         # Handle failure events with error
         if response_metadata.get('state') == IndexDataStatus.failed and response_metadata.get('error'):
             try:
                 handle_index_data_failure(self.context, response_metadata)
             except Exception as e:
                 log.error(f"Failed to handle index_data failure event: {e}")
+
+    @web.method()
+    def _maintain_active_index_registry(self, response_metadata):
+        """Populate/evict the active_index_tasks registry from index_data_status events.
+
+        Stores only raw ids (connection resolved lazily at Stop); registers on
+        in_progress, evicts on terminal state. See task_callbacks.reconcile_stopped_index_metas.
+        """
+        state = response_metadata.get('state')
+        task_id = response_metadata.get('task_id')
+        index_name = response_metadata.get('index_name')
+        toolkit_id = response_metadata.get('toolkit_id')
+        project_id = response_metadata.get('project_id')
+
+        if not task_id or not index_name or not toolkit_id or not project_id:
+            return
+
+        registry_key = (project_id, toolkit_id, index_name)
+        task_key = str(task_id)
+
+        if state == IndexDataStatus.in_progress:
+            # Fast-Stop race: the 'stopped' callback runs on another thread and may
+            # mark+drain between this check and the register, so do check-or-register
+            # atomically under the lock and defer the (I/O-bound) cancel until after
+            # releasing it. Otherwise a zombie entry could leak and leave the row stuck.
+            cancel_now = False
+            evicted_over_cap = []
+            with self.active_index_tasks_lock:
+                if task_key in self.recently_stopped_index_tasks:
+                    cancel_now = True
+                else:
+                    self.active_index_tasks.setdefault(task_key, {})[registry_key] = {
+                        'user_id': response_metadata.get('user_id'),
+                        'created_on': response_metadata.get('created_at'),
+                    }
+                    # Keep active tasks LRU by last activity, then bound the registry
+                    # (symmetry with recently_stopped): a dropped terminal event on a
+                    # never-Stopped task would otherwise leak an entry forever. Only the
+                    # least-recently-active bucket is dropped, and only far past any real
+                    # indexing concurrency.
+                    self.active_index_tasks.move_to_end(task_key)
+                    while len(self.active_index_tasks) > self.active_index_tasks_max:
+                        ek, _ = self.active_index_tasks.popitem(last=False)
+                        evicted_over_cap.append(ek)
+            if cancel_now:
+                log.debug(f"in_progress for already-stopped task {task_key}; cancelling index_name={index_name} directly")
+                self._cancel_stopped_index(
+                    project_id, toolkit_id, index_name, task_key,
+                    response_metadata.get('user_id'), response_metadata.get('created_at'),
+                )
+            else:
+                log.debug(f"Registered active index task {task_key} for index_name={index_name} (toolkit {toolkit_id})")
+                for ek in evicted_over_cap:
+                    log.warning(f"active_index_tasks over cap ({self.active_index_tasks_max}); evicted oldest task {ek} "
+                                f"(a later Stop for it will not auto-reconcile)")
+        elif state in (IndexDataStatus.completed, IndexDataStatus.failed, IndexDataStatus.cancelled):
+            evicted = False
+            with self.active_index_tasks_lock:
+                entries = self.active_index_tasks.get(task_key)
+                if entries:
+                    entries.pop(registry_key, None)
+                    if not entries:
+                        self.active_index_tasks.pop(task_key, None)
+                    evicted = True
+            if evicted:
+                log.debug(f"Evicted active index task {task_key} for index_name={index_name}")
 
     @web.method()
     def process_index_data_removed_event(self, response_metadata):

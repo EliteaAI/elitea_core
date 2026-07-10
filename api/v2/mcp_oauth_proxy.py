@@ -129,9 +129,16 @@ class ProjectAPI(api_tools.APIModeHandler):
                         except Exception as e:
                             log.error(f"MCP OAuth proxy: failed to expand configuration '{config_title}' - {e}")
 
-                    if not client_id:
+                    # FE always sends the DCR client_id in the same request, so the guard below
+                    # is not hit in practice, but is included for symmetry with the secret guard
+                    # to prevent a stale DB client_id from overwriting a DCR-registered one.
+                    if not client_id and not data.used_dcr:
                         client_id = settings.get('client_id') or sp_config.get('client_id')
-                    if not client_secret:
+                    # When the client_id was obtained via DCR, the registered client is public
+                    # (token_endpoint_auth_method=none). Never load a client_secret from DB in
+                    # that case — sending a secret for a public client causes Aha (and others)
+                    # to reject the token request with "unknown client".
+                    if not client_secret and not data.used_dcr:
                         client_secret = settings.get('client_secret') or sp_config.get('client_secret')
                         log.debug(f"MCP OAuth proxy: extracted client_secret from DB: {bool(client_secret)}, preview: {client_secret[:8] if client_secret else 'None'}")
                     if not scope:

@@ -73,9 +73,16 @@ def apply_selected_tools_intersection(tools, tool_mappings):
 
             # Apply intersection if mapping exists
             if tool_selected_from_mapping:
-                settings['selected_tools'] = list(
-                    set(tool_selected_from_settings) & set(tool_selected_from_mapping)
-                )
+                settings_set = set(tool_selected_from_settings)
+                # Preserve the mapping's order so the resulting payload is deterministic.
+                intersection = [name for name in tool_selected_from_mapping if name in settings_set]
+                # Fail-open guard: downstream (SDK/indexer) treats an EMPTY
+                # selected_tools as "expose ALL tools". If the entity's explicit
+                # selection and the toolkit's enabled set are disjoint, a naive
+                # intersection collapses to [] and silently re-enables every tool the
+                # user explicitly disabled (e.g. SharePoint read_file_from_sharing_link).
+                # Honor the entity's explicit selection instead of failing open.
+                settings['selected_tools'] = intersection or tool_selected_from_mapping
         elif tool_selected_from_mapping:
             # No tools in toolkit settings, but mapping has selected tools
             # Use mapping directly (for toolkits that don't pre-define available tools)
@@ -1023,16 +1030,35 @@ def validate_application_version_details(
     _visited: set = None
 ) -> bool:
     # Initialize _visited set at the top level to share across all sibling toolkits
+    top_level = _visited is None
     if _visited is None:
         _visited = set()
 
-    # Skip if already validated in this chain (prevents circular references and duplicate work)
+    # Skip if already validated in this chain (dedup — a leaf legitimately reused by several
+    # parents is validated once). NOT the cycle guard; cycles are caught structurally below.
     key = (application_id, version_id)
     if key in _visited:
         return True
     _visited.add(key)
 
     with db.get_session(project_id) as session:
+        # Structural sub-agent-tree check (issue #5680): run ONCE at the top-level entry.
+        # Enforces the leaf-only rule and path-based cycle detection, recursing THROUGH
+        # pipelines to full depth. Raises SubAgentTreeError -> surfaced as a validation error
+        # by the caller. This is a deliberately SEPARATE pass from the per-toolkit field
+        # validation below: the two answer different questions (tree shape vs. each tool's
+        # config) and use different traversal semantics (path-based backtracking vs. global
+        # dedup, and pipeline recursion vs. per-tool descent), so merging them would tangle
+        # both. It reuses THIS session, so it is one transaction, not a second one (PR #203
+        # finding #5).
+        if top_level:
+            from .publish_utils import assert_no_invalid_nesting, MAX_SUB_AGENT_VALIDATION_DEPTH
+            assert_no_invalid_nesting(
+                project_id, version_id,
+                session=session,
+                max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+            )
+
         application_version = session.query(ApplicationVersion).filter(
             ApplicationVersion.id == version_id,
             ApplicationVersion.application_id == application_id

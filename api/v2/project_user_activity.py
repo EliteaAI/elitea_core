@@ -26,6 +26,8 @@ if _API_AVAILABLE:
                 "Admin-only endpoint. Returns distinct users with event counts "
                 "for a given project, optionally filtered by date range."
             ),
+            mcp_tool=True,
+            mcp_description="Use this tool when you are in administration mode and need a lightweight per-project user activity list for audit or admin oversight, especially across arbitrary projects selected by query parameter. Do not use this tool for detailed dashboard analytics — use the standard analytics endpoints instead. Do not use in prompt_lib mode; this endpoint is admin-only. This is best for 'which users had how many events in this project?' administrative queries.",
             tags=["elitea_core/analytics"],
             parameters=[
                 {

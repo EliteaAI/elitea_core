@@ -1,10 +1,11 @@
 import os
 import re
 
+from collections import OrderedDict
 from json import dumps
 from pathlib import Path
 from queue import Empty
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 
 from pylon.core.tools import module, log
 
@@ -65,6 +66,17 @@ class Module(module.ModuleModel):
         # Must be initialized here in __init__ — the callback is registered in init() via
         # task_node.subscribe_to_task_statuses, which can fire before ready() runs.
         self.callback_tasks = {}
+        self.active_index_tasks = OrderedDict()
+        self.active_index_tasks_max = 4096
+        self.recently_stopped_index_tasks = OrderedDict()
+        # Marked for EVERY stopped task (a late in_progress can't be known in advance), so
+        # keep the cap generous to avoid churning out an index task's entry before its late
+        # in_progress event lands on a busy platform.
+        self.recently_stopped_index_tasks_max = 8192
+        # Guards active_index_tasks + recently_stopped_index_tasks: register (in_progress
+        # event) and mark+drain ('stopped' callback) run on different threads. Held only
+        # around dict ops, never during the cancel's DB/vault I/O.
+        self.active_index_tasks_lock = Lock()
         self.not_starting_task_event = Event()
         self.not_starting_task_event.set()
         # logs in-memory cache
@@ -77,6 +89,13 @@ class Module(module.ModuleModel):
         #
         self.application_icon_path = base_path.joinpath(
             config.get("application_icon_subpath", "application_icon")
+        )
+        #
+        self.skill_icon_path = base_path.joinpath(
+            config.get("skill_icon_subpath", "skill_icon")
+        )
+        self.project_icon_path = base_path.joinpath(
+            config.get("project_icon_subpath", "project_icon")
         )
         #
         self.application_tool_icon_path = base_path.joinpath(
@@ -95,7 +114,6 @@ class Module(module.ModuleModel):
             'commit_sha': '',
             'commit_ref': '',
         }
-        self.standalone_mode = False
         self.release_owner = None
         self.release_repo = None
         self.default_release = None
@@ -440,6 +458,28 @@ class Module(module.ModuleModel):
         # TaskNode
         self.task_node.start()
         self.task_node.subscribe_to_task_statuses(self.task_status_changed)
+        # Maintenance gate: one check at the shared dispatch point covers every
+        # start_task callsite (predicts, index, TTS/ASR, pipeline, parallel
+        # child dispatch). Structurally prevents a new predict entry point from
+        # being missed. Callers that want entry-point-specific error shapes
+        # catch MaintenanceInProgressError and translate; unhandled propagation
+        # is intentional and preferable to silently returning None (which is
+        # indistinguishable from pool saturation).
+        _original_start_task = self.task_node.start_task
+
+        def _maintenance_gated_start_task(*args, **kwargs):
+            from .utils.maintenance_gate import is_maintenance_active
+            from .utils.exceptions import MaintenanceInProgressError
+            if is_maintenance_active():
+                task_name = args[0] if args else kwargs.get("task_name") or "?"
+                log.info(
+                    "task_node.start_task: rejected — maintenance mode active (task=%s)",
+                    task_name,
+                )
+                raise MaintenanceInProgressError(task_name=task_name)
+            return _original_start_task(*args, **kwargs)
+
+        self.task_node.start_task = _maintenance_gated_start_task
         # Events
         self.event_node.subscribe("application_stream_response", self.stream_response)
         self.event_node.subscribe("application_full_response", self.conversation_message_proxy)
@@ -473,6 +513,7 @@ class Module(module.ModuleModel):
         self.event_node.emit("application_mcp_prebuilt_config_request", dict())
         #
         self.application_icon_path.mkdir(parents=True, exist_ok=True)
+        self.skill_icon_path.mkdir(parents=True, exist_ok=True)
         self.application_tool_icon_path.mkdir(parents=True, exist_ok=True)
         self.default_entity_icons_path.mkdir(parents=True, exist_ok=True)
         #
@@ -867,131 +908,113 @@ class Module(module.ModuleModel):
         """Initialize elitea_ui functionality (migrated from elitea_ui plugin)"""
         log.info("Initializing elitea_ui")
         #
-        # Determine mode
-        #
-        module_manager = self.context.module_manager
-        self.standalone_mode = "theme" not in module_manager.modules
-        #
         # Blueprint already initialized by descriptor.init_all()
         # Just ensure we have it
         if not hasattr(self, 'bp') or self.bp is None:
             log.warning("Blueprint not initialized, cannot complete elitea_ui_init")
             return
         #
-        if self.standalone_mode:
-            import flask as _flask  # pylint: disable=C0415
-            from pylon.core.tools.context import Context as Holder  # pylint: disable=C0415
-            #
-            # Register "default" mode landing with the framework router
-            # so "/" redirects to the EliteA UI at /app/
-            # (the framework router already handles "/" in app_router)
-            #
-            from tools import router  # pylint: disable=E0401,C0415
-            router.register_mode(
-                kind="route",
-                route="elitea_core.route_elitea_ui",
+        import flask as _flask  # pylint: disable=C0415
+        #
+        # Register "default" mode landing with the framework router
+        # so "/" redirects to the EliteA UI at /app/
+        # (the framework router already handles "/" in app_router)
+        #
+        from tools import router  # pylint: disable=E0401,C0415
+        router.register_mode(
+            kind="route",
+            route="elitea_core.route_elitea_ui",
+        )
+        #
+        # SocketIO connect handler (save auth data for SID)
+        #
+        def _standalone_sio_connect(sid, environ, *args, **kwargs):
+            auth.sio_users[sid] = auth.sio_make_auth_data(environ)
+            log.debug("SIO connect (standalone): %s", sid)
+        self.context.sio.on("connect", handler=_standalone_sio_connect)
+        #
+        # Public auth rules (moved from theme)
+        #
+        auth.add_public_rule({"uri": f'{re.escape("/socket.io/")}.*'})
+        auth.add_public_rule({"uri": re.escape("/robots.txt")})
+        auth.add_public_rule({"uri": re.escape("/favicon.ico")})
+        auth.add_public_rule({"uri": re.escape("/app/access_denied")})
+        #
+        # Set auth denied URL to styled access denied page
+        #
+        auth.descriptor.config["auth_denied_url"] = "/app/access_denied"
+        #
+        # Global error handler for styled error pages
+        # (uses app shim → register_app_hook → applies to every Flask app)
+        #
+        import traceback as _tb  # pylint: disable=C0415
+        from werkzeug.exceptions import HTTPException  # pylint: disable=C0415
+        #
+        _error_pages = {
+            400: (
+                "Bad Request",
+                "The server couldn't understand your request.",
+                ["Check that the URL is correct", "Try refreshing the page"],
+            ),
+            403: (
+                "Access Denied",
+                "Sorry, you don't have permission to access this resource.",
+                ["Your session may have expired", "You may lack the required permissions"],
+            ),
+            404: (
+                "Page Not Found",
+                "The page you're looking for doesn't exist or has been moved.",
+                ["Check that the URL is correct", "The page may have been moved or deleted"],
+            ),
+            405: (
+                "Method Not Allowed",
+                "The request method is not supported for this resource.",
+                ["Check the API documentation for allowed methods"],
+            ),
+            500: (
+                "Internal Server Error",
+                "Something went wrong on our end.",
+                ["Try again in a few moments", "If the problem persists, contact your administrator"],
+            ),
+            502: (
+                "Bad Gateway",
+                "The server received an invalid response from an upstream service.",
+                ["Try again in a few moments", "The service may be temporarily unavailable"],
+            ),
+            503: (
+                "Service Unavailable",
+                "The service is temporarily unavailable.",
+                ["Try again in a few moments", "The service may be undergoing maintenance"],
+            ),
+        }
+        _descriptor = self.descriptor
+        #
+        def _error_handler(error):
+            code = error.code if isinstance(error, HTTPException) else 500
+            log.error(
+                "Error: (%s) %s:\n%s",
+                type(error), error,
+                "".join(_tb.format_tb(error.__traceback__)),
             )
-            #
-            # Set g.theme on ALL apps for auth compatibility
-            # (uses app shim → register_app_hook → applies to every Flask app)
-            #
-            def _set_g_theme():
-                _flask.g.theme = Holder()
-                _flask.g.theme.active_section = None
-                _flask.g.theme.active_subsection = None
-                _flask.g.theme.active_mode = c.DEFAULT_MODE
-                _flask.g.theme.active_parameter = None
-            self.context.app.before_request(_set_g_theme)
-            #
-            # SocketIO connect handler (save auth data for SID)
-            #
-            def _standalone_sio_connect(sid, environ, *args, **kwargs):
-                auth.sio_users[sid] = auth.sio_make_auth_data(environ)
-                log.debug("SIO connect (standalone): %s", sid)
-            self.context.sio.on("connect", handler=_standalone_sio_connect)
-            #
-            # Public auth rules (moved from theme)
-            #
-            auth.add_public_rule({"uri": f'{re.escape("/socket.io/")}.*'})
-            auth.add_public_rule({"uri": re.escape("/robots.txt")})
-            auth.add_public_rule({"uri": re.escape("/favicon.ico")})
-            auth.add_public_rule({"uri": re.escape("/app/access_denied")})
-            #
-            # Set auth denied URL to styled access denied page
-            #
-            auth.descriptor.config["auth_denied_url"] = "/app/access_denied"
-            #
-            # Global error handler for styled error pages
-            # (uses app shim → register_app_hook → applies to every Flask app)
-            #
-            import traceback as _tb  # pylint: disable=C0415
-            from werkzeug.exceptions import HTTPException  # pylint: disable=C0415
-            #
-            _error_pages = {
-                400: (
-                    "Bad Request",
-                    "The server couldn't understand your request.",
-                    ["Check that the URL is correct", "Try refreshing the page"],
-                ),
-                403: (
-                    "Access Denied",
-                    "Sorry, you don't have permission to access this resource.",
-                    ["Your session may have expired", "You may lack the required permissions"],
-                ),
-                404: (
-                    "Page Not Found",
-                    "The page you're looking for doesn't exist or has been moved.",
-                    ["Check that the URL is correct", "The page may have been moved or deleted"],
-                ),
-                405: (
-                    "Method Not Allowed",
-                    "The request method is not supported for this resource.",
-                    ["Check the API documentation for allowed methods"],
-                ),
-                500: (
-                    "Internal Server Error",
-                    "Something went wrong on our end.",
-                    ["Try again in a few moments", "If the problem persists, contact your administrator"],
-                ),
-                502: (
-                    "Bad Gateway",
-                    "The server received an invalid response from an upstream service.",
-                    ["Try again in a few moments", "The service may be temporarily unavailable"],
-                ),
-                503: (
-                    "Service Unavailable",
-                    "The service is temporarily unavailable.",
-                    ["Try again in a few moments", "The service may be undergoing maintenance"],
-                ),
-            }
-            _descriptor = self.descriptor
-            #
-            def _error_handler(error):
-                code = error.code if isinstance(error, HTTPException) else 500
-                log.error(
-                    "Error: (%s) %s:\n%s",
-                    type(error), error,
-                    "".join(_tb.format_tb(error.__traceback__)),
-                )
-                # Return JSON for API requests
-                if _flask.request.path.startswith("/api/"):
-                    msg = str(error)
-                    if isinstance(error, HTTPException):
-                        msg = error.description
-                    return _flask.jsonify({"error": msg}), code
-                # Render styled HTML page for browser requests
-                title, message, hints = _error_pages.get(
-                    code,
-                    ("Error", "An unexpected error occurred.", ["Try again or go back to the main page"]),
-                )
-                return _descriptor.render_template(
-                    "error.html",
-                    error_code=code,
-                    error_title=title,
-                    error_message=message,
-                    error_hints=hints,
-                ), code
-            self.context.app.errorhandler(Exception)(_error_handler)
+            # Return JSON for API requests
+            if _flask.request.path.startswith("/api/"):
+                msg = str(error)
+                if isinstance(error, HTTPException):
+                    msg = error.description
+                return _flask.jsonify({"error": msg}), code
+            # Render styled HTML page for browser requests
+            title, message, hints = _error_pages.get(
+                code,
+                ("Error", "An unexpected error occurred.", ["Try again or go back to the main page"]),
+            )
+            return _descriptor.render_template(
+                "error.html",
+                error_code=code,
+                error_title=title,
+                error_message=message,
+                error_hints=hints,
+            ), code
+        self.context.app.errorhandler(Exception)(_error_handler)
         #
         # Download UI if needed for first time
         #

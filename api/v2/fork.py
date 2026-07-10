@@ -16,31 +16,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def post(self, project_id: int, **kwargs):
-        # Work exactly like import_wizard, but set fork parent metadata for agents
+        # Work exactly like import_wizard, but set fork parent metadata
         fork_data = copy.copy(request.json)
         author_id = auth.current_user().get("id")
-        
-        # Set fork parent metadata for all agent versions (this makes is_forked = true)
-        for application in fork_data.get('applications', []):
-            if application.get('entity') == 'agents':
-                for version in application.get('versions', []):
-                    # Initialize meta if not present
-                    meta = version.get('meta', {})
-                    
-                    # Set fork parent metadata - this is what makes is_forked = true
+
+        entities = (fork_data.get('applications') or []) + (fork_data.get('skills') or [])
+
+        # Set fork parent metadata on each version (this makes is_forked = true)
+        for entity in entities:
+            if entity.get('entity') in ('agents', 'skills'):
+                for version in entity.get('versions', []):
+                    meta = version.get('meta') or {}
                     meta.update({
-                        'parent_entity_id': application['id'],
-                        'parent_project_id': application['owner_id'],
+                        'parent_entity_id': entity.get('id'),
+                        'parent_project_id': entity.get('owner_id'),
                         'parent_author_id': version.get('author_id'),
                         'parent_version_id': version.get('id')
                     })
-                    
                     version['meta'] = meta
 
         # Call import_wizard exactly like the import_wizard endpoint does
-        result, errors = self.module.import_wizard(
-            fork_data.get('applications', []), project_id, author_id
-        )
+        result, errors = self.module.import_wizard(entities, project_id, author_id)
 
         has_results = any(result[key] for key in result if result[key])
         has_errors = any(errors[key] for key in errors if errors[key])

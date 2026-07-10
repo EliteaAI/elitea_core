@@ -158,7 +158,7 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
         new_meta['context']['priority'] = 1.0
 
     new_meta = safe_decode_bytes_in_dict(new_meta)
-    
+
     msg_group.meta = new_meta
 
     # Update conversation meta with context analytics

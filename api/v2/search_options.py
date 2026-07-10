@@ -44,6 +44,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "entities[]", "in": "query", "required": True, "schema": {"type": "array", "items": {"type": "string"}}, "description": "Entities to include (application, pipeline, toolkit, credential, skill)."},
         ],
+        mcp_tool=True,
         available_to_users=True,
     )
     @auth.decorators.check_api(

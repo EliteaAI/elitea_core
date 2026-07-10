@@ -316,6 +316,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
             error_value = result["error"]
             if not isinstance(error_value, str):
                 error_value = str(error_value)
+            if error_value == "maintenance_in_progress":
+                return {
+                    "error": error_value,
+                    "message": result.get(
+                        "message",
+                        "The platform is currently in maintenance mode. Please try again later.",
+                    ),
+                }, 503
             return {
                 "error": error_value,
             }, 400
