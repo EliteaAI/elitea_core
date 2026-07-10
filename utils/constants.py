@@ -21,6 +21,19 @@ DEFAULT_AGENT_CATEGORIES: list = [
     'Other',
 ]
 
+DEFAULT_SKILL_CATEGORIES: list = [
+    'Code & Development',
+    'Writing & Communication',
+    'Analysis & Research',
+    'Data & Transformation',
+    'Productivity & Automation',
+    'Creative & Design',
+    'Testing & QA',
+    'Documentation',
+    'Security & Compliance',
+    'Other',
+]
+
 # Permanent fallback category. Agents without any valid category are surfaced
 # under this filter in Agent Studio.
 DEFAULT_FALLBACK_CATEGORY: str = 'Other'
