@@ -5,8 +5,10 @@ from typing import List, Optional
 from tools import db_tools, db, config as c
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Integer, String, DateTime, func, ForeignKey, Text, Table, Column, UniqueConstraint
+from sqlalchemy import Integer, String, DateTime, func, ForeignKey, Text, Table, Column, UniqueConstraint, Index, text
 from sqlalchemy.ext.mutable import MutableDict
+
+from .enums.all import PublishStatus
 
 
 SKILL_TABLE_NAME = 'skills'
@@ -34,6 +36,10 @@ SkillVersionTagAssociation = Table(
 class Skill(db_tools.AbstractBaseMixin, db.Base):
     __tablename__ = SKILL_TABLE_NAME
     __table_args__ = (
+        Index(
+            'uq_skills_shared_owner', 'shared_owner_id', 'shared_id',
+            unique=True, postgresql_where=text('shared_owner_id IS NOT NULL'),
+        ),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
@@ -50,9 +56,8 @@ class Skill(db_tools.AbstractBaseMixin, db.Base):
     uuid: Mapped[str] = mapped_column(UUID(as_uuid=True), unique=True, default=uuid.uuid4)
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
 
-    # Deferred to v2 (Publish/Fork):
-    # shared_owner_id: Mapped[int] = mapped_column(Integer, nullable=True)
-    # shared_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    shared_owner_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    shared_id: Mapped[int] = mapped_column(Integer, nullable=True)
 
     versions: Mapped[List['SkillVersion']] = relationship(
         back_populates='skill',
@@ -108,10 +113,13 @@ class SkillVersion(db_tools.AbstractBaseMixin, db.Base):
         lazy='select'
     )
 
-    # Deferred to v2 (Publish/Fork):
-    # status: Mapped[str] = mapped_column(String, nullable=False, default='draft', index=True)
-    # shared_owner_id: Mapped[int] = mapped_column(Integer, nullable=True)
-    # shared_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default=PublishStatus.draft.value,
+        default=PublishStatus.draft.value,
+        index=True
+    )
 
 
 class EntitySkillMapping(db_tools.AbstractBaseMixin, db.Base):
