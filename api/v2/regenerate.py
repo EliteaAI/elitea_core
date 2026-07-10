@@ -3,7 +3,6 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import flag_modified
 from pydantic import ValidationError
 
-from pylon.core.tools import log
 from tools import api_tools, auth, db, config as c, serialize, register_openapi
 
 from ...models.message_group import ConversationMessageGroup
