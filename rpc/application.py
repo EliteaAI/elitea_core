@@ -1379,7 +1379,7 @@ class RPC:
 
         toolkit_config = data.get('toolkit_config', {})
         toolkit_type = toolkit_config.get('type', 'unknown')
-        if toolkit_type != 'mcp':
+        if not toolkit_type.startswith('mcp'):
             raise ValueError(f"test_mcp_connection only works with MCP toolkits, got type: {toolkit_type}")
 
         project_id = data.get('project_id')
