@@ -1462,6 +1462,20 @@ def get_application_version_details_expanded(
         if not result.get('skills'):
             result.pop('skills', None)
 
+        # Agent-only subtree depth (issue #5778), counting this version as tier 1. The UI
+        # add-guard uses it to allow nesting only while host_tier + candidate depth stays within
+        # MAX_AGENT_NESTING_TIERS. Derived from the same walker as the authoritative validator so
+        # the two can't drift. Cheap (tools already selectin-loaded on the root; children are a
+        # bounded walk) and off the chat hot path — this is the edit/detail path.
+        try:
+            from .publish_utils import compute_agent_subtree_tiers, MAX_AGENT_NESTING_TIERS
+            result['agent_subtree_tiers'] = compute_agent_subtree_tiers(
+                project_id, version_id, session=session,
+            )
+            result['max_agent_nesting_tiers'] = MAX_AGENT_NESTING_TIERS
+        except Exception as depth_err:  # never fail detail fetch over an advisory field
+            log.warning(f"Could not compute agent_subtree_tiers for version {version_id}: {depth_err}")
+
         if result.get('llm_settings'):
             # Response-only path (never persisted): include openai_compatible so the SDK
             # building sub-agents routes Claude models through the correct client.

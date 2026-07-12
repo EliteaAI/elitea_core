@@ -65,9 +65,23 @@ _META_ALLOWLIST = frozenset({
 # nest more than this is rejected as before).
 _MAX_SUB_AGENT_DEPTH = 3
 
+# Maximum allowed AGENT nesting expressed in TIERS, counting the selected/root agent as tier 1
+# (issue #5778). "Main Orchestrator (tier 1) → Secondary Orchestrator (tier 2) → leaf (tier 3)".
+# A non-pipeline *container* (an agent that itself uses other agents) is permitted at tier 1 and
+# tier 2, but a tier-3 node MUST be a leaf. Pipelines are exempt — they remain the sanctioned
+# deep-composition primitive (see is_container_version / _validate_child_subtree).
+#
+# Depth↔tier convention: the validation walk assigns depth=1 to the root's DIRECT children
+# (see _assert_no_invalid_nesting_in_session), so tier = depth + 1. A non-pipeline container is
+# therefore forbidden once depth >= MAX_AGENT_NESTING_TIERS - 1 (i.e. depth >= 2 = tier 3).
+# This is DISTINCT from _MAX_SUB_AGENT_DEPTH (publish walker, pipeline-inclusive, no leaf rule):
+# both permit 3 levels, but that walker counts the root as level 1 while this validator counts
+# the root's first child as depth 1 — do not conflate the two counters.
+MAX_AGENT_NESTING_TIERS = 3
+
 # Anti-runaway backstop for the VALIDATION walk (cycle + leaf-rule mode), where legitimate
-# pipeline-of-pipeline composition may nest deeply. The real business rule is the leaf-only
-# check (is_container_version), NOT this number — this only prevents a pathological
+# pipeline-of-pipeline composition may nest deeply. The real business rule is the depth-aware
+# leaf check (MAX_AGENT_NESTING_TIERS), NOT this number — this only prevents a pathological
 # misconfiguration from walking unbounded. Keep aligned with _MAX_APP_NESTING_BACKSTOP in the
 # SDK (elitea-sdk/elitea_sdk/runtime/toolkits/tools.py).
 MAX_SUB_AGENT_VALIDATION_DEPTH = 25
@@ -517,6 +531,7 @@ def assert_no_invalid_nesting(
     version_id: int,
     session=None,
     max_depth: int = MAX_SUB_AGENT_VALIDATION_DEPTH,
+    start_depth: int = 1,
 ) -> None:
     """Enforce the leaf-only + cycle rules for a version's whole sub-agent tree (issue #5680).
 
@@ -532,12 +547,18 @@ def assert_no_invalid_nesting(
     Raises ``SubAgentTreeError`` (with ``tool_id`` set to the offending TOP-LEVEL application tool)
     on any violation, ``ValueError`` on a missing/incomplete sub-agent reference. Returns ``None`` —
     it is an assertion, not a collector; callers that need the tree use ``collect_sub_agent_tree``.
+
+    ``start_depth`` is the depth assigned to ``version_id``'s DIRECT children (default 1 = the
+    version is the selected/root agent at tier 1). The bind path passes ``start_depth=2`` because
+    the child being bound is already tier 2 under an assumed tier-1 parent, so its own children
+    must land at tier 3 (leaves) — see the depth-aware leaf rule in ``_validate_child_subtree`` and
+    ``MAX_AGENT_NESTING_TIERS`` (issue #5778).
     """
     if session is not None:
-        _assert_no_invalid_nesting_in_session(project_id, version_id, session, max_depth)
+        _assert_no_invalid_nesting_in_session(project_id, version_id, session, max_depth, start_depth)
         return
     with db.get_session(project_id) as session:
-        _assert_no_invalid_nesting_in_session(project_id, version_id, session, max_depth)
+        _assert_no_invalid_nesting_in_session(project_id, version_id, session, max_depth, start_depth)
 
 
 def _load_version_with_tools(session, version_id: int):
@@ -555,8 +576,13 @@ def _assert_no_invalid_nesting_in_session(
     version_id: int,
     session,
     max_depth: int,
+    start_depth: int = 1,
 ) -> None:
-    """Session-bound driver: load the root once, then walk each top-level tool's subtree."""
+    """Session-bound driver: load the root once, then walk each top-level tool's subtree.
+
+    ``start_depth`` is the depth of the root's DIRECT children (1 = root is tier 1; the bind path
+    passes 2 to validate a subtree that is already one level deep). See ``MAX_AGENT_NESTING_TIERS``.
+    """
     root = _load_version_with_tools(session, version_id)
     if root is None:
         raise ValueError(f"Version {version_id} not found in project {project_id}")
@@ -581,7 +607,7 @@ def _assert_no_invalid_nesting_in_session(
                 child_app_id=child_app_id,
                 child_ver_id=child_ver_id,
                 tool_name=tool_name,
-                depth=1,
+                depth=start_depth,
                 max_depth=max_depth,
                 path=set(),
             )
@@ -602,12 +628,20 @@ def _validate_child_subtree(
     max_depth: int,
     path: Set[tuple],
     child_version=None,
+    raw_depth: int = 1,
 ) -> None:
     """Recursively validate one sub-agent and everything beneath it.
 
+    ``depth`` is the AGENT-TIER depth of this node: it counts only agent→agent hops. A pipeline
+    hop is TRANSPARENT (issue #5778 decision) — pipelines are the exempt deep-composition
+    primitive and do NOT consume an agent tier — so descending through a pipeline passes ``depth``
+    through unchanged. ``raw_depth`` counts EVERY hop (agents and pipelines) purely as the
+    anti-runaway backstop, so a pathological pipeline-of-pipeline chain still can't walk unbounded
+    even though it consumes no agent tiers.
+
     ``path`` is the set of ``(app_id, version_id)`` on the CURRENT ancestor chain (path-based
-    cycle detection). ``child_version`` may be pre-loaded by the caller to avoid a re-fetch of a
-    node that was just queried (finding #4 — one query per node, not two).
+    cycle detection, independent of either depth counter). ``child_version`` may be pre-loaded by
+    the caller to avoid a re-fetch of a node that was just queried (finding #4 — one query per node).
     """
     key = (child_app_id, child_ver_id)
 
@@ -620,8 +654,9 @@ def _validate_child_subtree(
             fix='Remove the circular sub-agent reference',
         )
 
-    # Depth (anti-runaway backstop; the real business rule is the leaf check below).
-    if depth > max_depth:
+    # Anti-runaway backstop on RAW hops (agents + pipelines). The real business rule is the
+    # agent-tier leaf check below; this only stops a pathological misconfiguration walking forever.
+    if raw_depth > max_depth:
         raise SubAgentTreeError(
             f"Sub-agent nesting exceeds maximum depth of {max_depth}",
             error_code='depth_exceeded',
@@ -638,23 +673,38 @@ def _validate_child_subtree(
 
     is_pipeline_child = child_version.agent_type == AgentTypes.pipeline.value
 
-    # Leaf-only rule: a non-pipeline agent child must NOT itself be a container. Pipelines are
-    # the sanctioned deep-composition primitive — exempt from the leaf rule, still walked below.
-    if not is_pipeline_child and is_container_version(child_version):
+    # Depth-aware leaf rule (issue #5778, relaxing #5680's absolute ban): a non-pipeline agent
+    # child may itself be a container ONLY while there is still agent-tier budget below it — i.e.
+    # at tier 2 (depth == 1), where its own children land at tier 3 (leaves). Once depth >= 2
+    # (this node is already tier 3), a container is forbidden because its children would be tier 4.
+    # tier = depth + 1, so the container is allowed iff depth <= MAX_AGENT_NESTING_TIERS - 2.
+    # Pipelines stay exempt — the sanctioned deep-composition primitive, still walked below, and
+    # transparent to the agent-tier count (they don't push agent children deeper).
+    if (
+        not is_pipeline_child
+        and is_container_version(child_version)
+        and depth > MAX_AGENT_NESTING_TIERS - 2
+    ):
         raise SubAgentTreeError(
-            f"Agent '{tool_name}' (version {child_ver_id}) uses other agents and "
-            f"cannot be nested as a sub-agent",
+            f"Agent '{tool_name}' (version {child_ver_id}) uses other agents and is nested too "
+            f"deeply: agent nesting is limited to {MAX_AGENT_NESTING_TIERS} tiers "
+            f"(orchestrator → sub-orchestrator → leaf), and a sub-agent at this level must be a "
+            f"leaf (must not itself use other agents)",
             error_code='container_child_forbidden',
-            fix='Run it directly as a chat participant, or bind only leaf agents '
-                '(agents that do not themselves use other agents) as sub-agents.',
+            fix=f'Keep agent nesting within {MAX_AGENT_NESTING_TIERS} tiers: run this agent '
+                f'directly as a chat participant, or bind only leaf agents (agents that do not '
+                f'themselves use other agents) at the deepest level.',
         )
 
     # Descend. Add to the ancestor path for the duration of the subtree, then backtrack so a
-    # sibling reuse of the same leaf is not mistaken for a cycle.
+    # sibling reuse of the same leaf is not mistaken for a cycle. A pipeline hop is transparent to
+    # the agent-tier depth (pass `depth` through); an agent hop consumes one tier (`depth + 1`).
+    # `raw_depth` always increments (backstop only).
     grandchild_tools = [t for t in (child_version.tools or []) if t.type == 'application']
     if not grandchild_tools:
         return
 
+    child_tier_depth = depth if is_pipeline_child else depth + 1
     path.add(key)
     for tool in grandchild_tools:
         gc_app_id = (tool.settings or {}).get('application_id')
@@ -670,9 +720,10 @@ def _validate_child_subtree(
             child_app_id=gc_app_id,
             child_ver_id=gc_ver_id,
             tool_name=gc_name,
-            depth=depth + 1,
+            depth=child_tier_depth,
             max_depth=max_depth,
             path=path,
+            raw_depth=raw_depth + 1,
         )
     path.discard(key)
 
@@ -721,6 +772,57 @@ def collect_reachable_version_ids(
 
     _walk(version_id, 1, set())
     return reachable
+
+
+def compute_agent_subtree_tiers(
+    project_id: int,
+    version_id: int,
+    session,
+    max_depth: int = MAX_SUB_AGENT_VALIDATION_DEPTH,
+) -> int:
+    """Return the AGENT-only nesting depth of a version's subtree, counting the version as tier 1.
+
+    Issue #5778: the UI add-guard needs to know "if I nest this candidate under a host, will the
+    combined tree stay within MAX_AGENT_NESTING_TIERS?" — which it computes as
+    ``host_tier + candidate_subtree_tiers <= MAX_AGENT_NESTING_TIERS``. This returns the candidate
+    side: 1 for a leaf (no sub-agents), 2 for a container whose children are all leaves, etc.
+
+    Counting rules (must match ``_validate_child_subtree``'s notion of the agent budget):
+    * The version itself is tier 1.
+    * PIPELINE hops are TRANSPARENT (issue #5778 decision) — a pipeline does NOT consume an agent
+      tier, but we DO descend THROUGH it so an agent nested below a pipeline is still counted at
+      the correct agent-tier (``Agent → Pipeline → Agent`` = agent-tier 2, not 3).
+    * Path-based guard prevents a cycle from inflating the count; ``max_depth`` (raw-hop backstop)
+      caps a pathological config. On hitting either guard we stop descending that branch.
+    """
+    def _tiers(vid: int, agent_level: int, raw_level: int, path: Set[tuple]) -> int:
+        if raw_level >= max_depth:
+            return agent_level
+        version = _load_version_with_tools(session, vid)
+        if version is None:
+            return agent_level
+        deepest = agent_level
+        for tool in (t for t in (version.tools or []) if t.type == 'application'):
+            app_id = (tool.settings or {}).get('application_id')
+            ver_id = (tool.settings or {}).get('application_version_id')
+            if app_id is None or ver_id is None:
+                continue
+            child = _load_version_with_tools(session, ver_id)
+            if child is None:
+                continue
+            key = (app_id, ver_id)
+            if key in path:  # cycle — stop, don't inflate the count
+                continue
+            # Pipeline hop: transparent to the agent tier (pass agent_level through) but still
+            # descended so agents beneath it are counted; agent hop consumes one tier.
+            is_pipeline = child.agent_type == AgentTypes.pipeline.value
+            child_agent_level = agent_level if is_pipeline else agent_level + 1
+            path.add(key)
+            deepest = max(deepest, _tiers(ver_id, child_agent_level, raw_level + 1, path))
+            path.discard(key)
+        return deepest
+
+    return _tiers(version_id, 1, 1, set())
 
 
 # ---------------------------------------------------------------------------

@@ -146,36 +146,37 @@ def generate_toolkit_payload(
             app_id = app_participant.entity_meta['id']
             app_version_id = participant_mapping.entity_settings.get('version_id')
 
-            # --- Leaf-only guard for adhoc LLM-chat binding (issue #5680) ---
-            # In an LLM/dummy chat, the chat model is the orchestrator and each injected agent
-            # becomes its CHILD (level-2 nesting). A "container" agent (one that itself uses
-            # other agents) can't be nested there — it triggers the parallel-run/HITL restart
-            # bug. It runs correctly only as a DIRECT participant (selected as the active agent),
-            # which goes through generate_application_version_payload, NOT this loop.
+            # --- Depth-aware nesting guard for adhoc LLM-chat binding (issue #5778) ---
+            # In an LLM/dummy chat, the chat model is the tier-1 orchestrator and each injected
+            # agent becomes its CHILD at TIER 2. As of #5778 a container agent (one that itself
+            # uses other agents) is LEGAL here — the tier-1 → tier-2 container → tier-3 leaf shape
+            # is exactly what depth-3 nesting enables. What is NOT legal is a bound container whose
+            # OWN subtree busts the 3-tier budget (a tier-3 container → tier-4 leaves), which is
+            # what triggered the parallel-run/HITL restart problems #5680 originally banned wholesale.
             #
-            # SKIP it here rather than raising: this path runs on EVERY chat turn, so a raise
-            # would brick the whole conversation (even "Hi", even after the participant is
-            # removed) instead of just declining the one illegal tool. Skipping keeps the chat
-            # working with the base model; the agent simply isn't offered as a callable tool.
-            # The user runs it by selecting it as the active agent. Guidance/prevention lives at
-            # add-time in the UI (useAgentPipelineAssociation), not on the runtime hot path.
-            # This does NOT apply to swarm sibling injection (is_llm_chat=False), where agents
-            # are peer handoff targets, not nested children.
+            # So we validate the bound version's subtree as if rooted at tier 2 (start_depth=2) and
+            # SKIP (not raise) only when it violates. Skipping (rather than raising) is retained on
+            # purpose: this path runs on EVERY chat turn, so a raise would brick the whole
+            # conversation instead of just declining the one illegal tool. A legal tier-2 container
+            # falls through and is offered as a callable tool. This does NOT apply to swarm sibling
+            # injection (is_llm_chat=False), where agents are peer handoff targets, not children.
             if is_llm_chat and app_version_id is not None:
-                from ..utils.publish_utils import is_container_version
-                bound_version = session.query(ApplicationVersion).options(
-                    selectinload(ApplicationVersion.tools)
-                ).filter(ApplicationVersion.id == app_version_id).first()
-                if (
-                    bound_version is not None
-                    and bound_version.agent_type != AgentTypes.pipeline.value
-                    and is_container_version(bound_version)
-                ):
+                from ..utils.publish_utils import (
+                    assert_no_invalid_nesting, SubAgentTreeError,
+                    MAX_SUB_AGENT_VALIDATION_DEPTH,
+                )
+                try:
+                    assert_no_invalid_nesting(
+                        conversation_project_id, app_version_id,
+                        session=session,
+                        max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+                        start_depth=2,
+                    )
+                except SubAgentTreeError as tree_err:
                     log.warning(
-                        "Skipping container agent '%s' (ver=%s) as an adhoc tool for the chat "
-                        "model — it uses other agents and can only run as the active agent "
-                        "(orchestrator). Nesting it would be level-2 (unsupported).",
-                        app_participant.meta.get('name'), app_version_id,
+                        "Skipping agent '%s' (ver=%s) as an adhoc tool for the chat model — its "
+                        "sub-agent tree exceeds the supported nesting for a bound tool: %s",
+                        app_participant.meta.get('name'), app_version_id, tree_err,
                     )
                     continue
 

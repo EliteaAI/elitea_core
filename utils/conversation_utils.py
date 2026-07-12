@@ -383,12 +383,13 @@ def get_conversation_details(
                 continue
             version_details = application_version_details['version_details']
             participant['meta']['tools'] = version_details['tools']
-            # "Container" flag (issue #5680): a non-pipeline agent that itself uses other agents
-            # (has an application-type tool) is SKIPPED as a callable tool in adhoc LLM chat — it
-            # can only run as the active agent (orchestrator). Surface it so the participant chip
-            # can explain that to the user instead of the skip looking like a silent no-op. Mirrors
-            # the skip rule in rpc/chat_all.generate_toolkit_payload (agent_type != pipeline AND
-            # is_container_version); computed here from already-fetched data (no extra query).
+            # "Container" flag: a non-pipeline agent that itself uses other agents (has an
+            # application-type tool). NOTE (issue #5778): a container is NO LONGER unconditionally
+            # skipped as an adhoc chat tool — a tier-2 container is now legal. The adhoc skip is
+            # depth-aware (rpc/chat_all.generate_toolkit_payload skips only when the bound subtree
+            # exceeds the tier budget). This flag is retained as a factual "uses other agents"
+            # signal for the participant chip; consumers deciding whether it can be nested should
+            # use the version_details.agent_subtree_tiers depth field, not this boolean.
             # Pipelines are the sanctioned deep-composition primitive and are never flagged.
             participant['meta']['is_container'] = (
                 version_details.get('agent_type') != AgentTypes.pipeline.value

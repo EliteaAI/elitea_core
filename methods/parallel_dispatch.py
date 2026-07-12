@@ -55,6 +55,17 @@ from pylon.core.tools import web, log  # pylint: disable=E0401,E0611
 # between launch and reconcile.
 _RECONCILE_PAYLOAD_TTL = 6 * 60 * 60
 
+# Per-parent fan-out width cap (issue #5778). A single parent turn that fans out to more than this
+# many parallel sub-agents is rejected at mint time with a clear error, rather than relying on the
+# blunt global pool limit (agents_task_limit) and its reactive PoolSaturationError retry loop. This
+# bounds K (the tier-2 fan-out width) directly at the point the fan-out is created, independent of
+# the shared pool's current saturation, so one runaway tree can't starve every other tenant's chat.
+# Depth-3 worst case is roughly K (durable tier-2 children) since tier-2→tier-3 runs in-process
+# (Option B), so this cap on K is the primary durable-pool defense. Sized for local dev; tune per
+# deployment. NOTE: unlike the global agents_task_limit (held back per team decision), this
+# mint-time cap IS committable — it is the safe, targeted bound.
+_MAX_PARALLEL_CHILDREN_PER_PARENT = 16
+
 # Atomic reconcile-gate settle. KEYS[1]=done set, KEYS[2]=remaining counter,
 # ARGV[1]=child_thread_id, ARGV[2]=TTL. SADD is the per-child idempotency guard:
 # a duplicate terminal for the SAME child (HITL-pause `stopped` then completion
@@ -127,6 +138,22 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         specs = parent_result.get('parallel_dispatch') or []
         if not specs:
             return
+        # Per-parent fan-out width cap (issue #5778). The parent has already parked and split into
+        # specs, so we cannot silently drop back to in-process — we must honour the gate invariant
+        # (exactly len(specs) settles → one reconcile). When the roster exceeds the cap we still
+        # prime + reconcile, but launch NO children: every child is settled as an error via the
+        # same compensation path used for pool saturation, so the reconcile re-invoke fires once
+        # and the parent surfaces a clear "too many parallel sub-agents" failure instead of
+        # fork-bombing the pool or hanging. Truncating to the first N would be a silent partial
+        # result — worse than a clean rejection.
+        _over_cap = len(specs) > _MAX_PARALLEL_CHILDREN_PER_PARENT
+        if _over_cap:
+            log.warning(
+                "[PARALLEL] fan-out of %d children exceeds cap %d for parent_thread_id=%s — "
+                "rejecting the whole batch (settling all as error)",
+                len(specs), _MAX_PARALLEL_CHILDREN_PER_PARENT,
+                parent_result.get('thread_id'),
+            )
         parent_thread_id = parent_result.get('thread_id')
         reconcile_payload = parent_result.get('reconcile_payload') or {}
         project_id = parent_meta.get('project_id')
@@ -198,6 +225,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         for i, spec in enumerate(specs):
             child_thread_id = spec.get('child_thread_id')
             child_payload = spec.get('child_payload')
+            # Over-cap: launch nothing, settle every child so the gate drains to a single
+            # reconcile that reports the rejection (see the _over_cap comment above).
+            if _over_cap:
+                self._parallel_settle_child(parent_thread_id, epoch, child_thread_id)
+                continue
             if not child_payload:
                 log.warning("[PARALLEL] spec %s missing child_payload; settling as error", child_thread_id)
                 self._parallel_settle_child(parent_thread_id, epoch, child_thread_id)

@@ -740,7 +740,6 @@ def application_toolkit_change_relation(
             from .publish_utils import (
                 assert_no_invalid_nesting,
                 collect_reachable_version_ids,
-                is_container_version,
                 SubAgentTreeError,
                 MAX_SUB_AGENT_VALIDATION_DEPTH,
             )
@@ -751,35 +750,21 @@ def application_toolkit_change_relation(
                     f"Cannot bind an agent to itself: application_id={application_id}"
                 )
 
-            # Load the child's tools so we can classify it directly.
-            child_with_tools = session.query(ApplicationVersion).options(
-                selectinload(ApplicationVersion.tools)
-            ).filter(ApplicationVersion.id == version_id).first()
-
-            # Leaf-only rule: a non-pipeline agent that itself contains sub-agents (a
-            # "container") may not be nested. Pipelines are exempt (deep-composition primitive)
-            # but are still walked below for cycle detection.
-            child_is_pipeline = (
-                child_with_tools is not None
-                and child_with_tools.agent_type == AgentTypes.pipeline.value
-            )
-            if (
-                child_with_tools is not None
-                and not child_is_pipeline
-                and is_container_version(child_with_tools)
-            ):
-                raise ToolkitChangeRelationError(
-                    f"'{child_application_version.name}' uses other agents and cannot be "
-                    f"added as a sub-agent. Run it directly as a chat participant, or add "
-                    f"only leaf agents (agents that do not themselves use other agents)."
-                )
-
-            # Surface any cycle/leaf violation already present deeper in the child's subtree.
+            # Depth-aware nesting rule (issue #5778, relaxing #5680's absolute container ban).
+            # The child being bound sits at TIER 2 under this (assumed tier-1) parent, so it MAY
+            # itself be a container — what must hold is that its OWN subtree stays within the
+            # 3-tier budget (its children must be tier-3 leaves). We validate the child's subtree
+            # starting at depth=2 so a tier-3 container inside it is still rejected. This is
+            # best-effort edit-time guidance; the authoritative gate is the version-resolution
+            # choke point (chat_all.generate_application_version_payload), which re-walks from the
+            # true selected root every turn and catches full-path violations the parent's real
+            # ancestry might introduce.
             try:
                 assert_no_invalid_nesting(
                     project_id, version_id,
                     session=session,
                     max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+                    start_depth=2,
                 )
             except SubAgentTreeError as exc:
                 raise ToolkitChangeRelationError(str(exc)) from exc

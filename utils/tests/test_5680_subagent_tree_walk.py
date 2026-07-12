@@ -156,10 +156,15 @@ def _collect(pu, registry, root_id):
     )
 
 
-def _assert(pu, registry, root_id, session=None):
-    """VALIDATION walker — returns None, raises on violation."""
+def _assert(pu, registry, root_id, session=None, start_depth=1):
+    """VALIDATION walker — returns None, raises on violation.
+
+    ``start_depth`` mirrors the production param: 1 = root is the selected/tier-1 agent; 2 = the
+    bind path validating a subtree already one level deep (issue #5778).
+    """
     return pu.assert_no_invalid_nesting(
         project_id=1, version_id=root_id, session=session or FakeSession(registry),
+        start_depth=start_depth,
     )
 
 
@@ -190,18 +195,22 @@ def test_pure_pipeline_cycle_detected(pu):
     assert ei.value.error_code == 'cycle_detected'
 
 
-def test_self_referencing_agent_rejected_as_container(pu):
-    # A(v1)->A(v1): a self-referencing NON-pipeline agent is a container, so the (more
-    # informative) leaf rule fires before the cycle would be re-entered. Either way: rejected.
+def test_self_referencing_agent_rejected_as_cycle_5778(pu):
+    # A(v1)->A(v1): a self-referencing agent. Under #5778 a container at tier 2 is allowed, so the
+    # walk no longer short-circuits on the leaf rule at the first hop — it descends and hits the
+    # back-edge to A, reporting the (accurate) cycle. Still rejected, just via the cycle path.
     registry = {1: FakeVersion(1, tools=[FakeTool(1, 1)])}
     with pytest.raises(pu.SubAgentTreeError) as ei:
         _assert(pu, registry, 1)
-    assert ei.value.error_code == 'container_child_forbidden'
+    assert ei.value.error_code == 'cycle_detected'
 
 
-def test_agent_two_hop_cycle_rejected_as_container(pu):
-    # A(v1)->B(v2)->A(v1): B is a non-pipeline container, so with the leaf rule on it is
-    # rejected as container_child_forbidden (B "uses other agents") before the back-edge to A.
+def test_agent_two_hop_cycle_rejected_5778(pu):
+    # A(v1)->B(v2)->A(v1): B is a tier-2 container (now allowed under #5778), so the walk descends
+    # into B. A reappears at agent-tier 3 and is itself a container (references itself), so the
+    # DEPTH-AWARE leaf rule fires there (container_child_forbidden) before the back-edge to A would
+    # be reached at tier 4. Still rejected — the tier rule catches this shape first. (The pure
+    # self-reference A->A instead trips the cycle guard immediately; see the test above.)
     registry = {
         1: FakeVersion(1, tools=[FakeTool(2, 2)]),
         2: FakeVersion(2, tools=[FakeTool(1, 1)]),
@@ -238,12 +247,25 @@ def test_leaf_child_allowed(pu):
     assert _assert(pu, registry, 1) is None
 
 
-def test_container_agent_child_rejected(pu):
-    # A(v1)->B(v2), where B is itself a container (B->C). B is a non-pipeline agent → reject.
+def test_container_agent_child_at_tier2_allowed_5778(pu):
+    # A(v1)->B(v2)->C(v3 leaf). B is a tier-2 container whose child C is a tier-3 leaf. Under
+    # #5778's depth-3 rule this is LEGAL (was rejected under #5680's absolute container ban).
     registry = {
         1: FakeVersion(1, tools=[FakeTool(2, 2)]),
         2: FakeVersion(2, tools=[FakeTool(3, 3)]),
         3: FakeVersion(3, tools=[]),
+    }
+    assert _assert(pu, registry, 1) is None
+
+
+def test_container_agent_child_at_tier3_rejected_5778(pu):
+    # A(v1)->B(v2)->C(v3)->D(v4). C is a container at tier 3 — its child D would be tier 4,
+    # exceeding the 3-tier budget → reject. This is the new boundary #5778 enforces.
+    registry = {
+        1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+        2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+        4: FakeVersion(4, tools=[]),
     }
     with pytest.raises(pu.SubAgentTreeError) as ei:
         _assert(pu, registry, 1)
@@ -277,15 +299,17 @@ def test_shared_leaf_across_branches_is_not_a_cycle(pu):
 # --------------------------------------------------------------------------- #
 
 def test_violation_carries_top_level_tool_id(pu):
-    # A(v1) has TWO top-level tools: a clean leaf and a container B. The error must be
-    # attributed to B's tool id (the one the UI renders a red chip on), not the leaf's.
+    # A(v1) has TWO top-level tools: a clean leaf and B, whose subtree busts the tier budget
+    # (B tier2 -> C tier3 container -> D tier4). The error must be attributed to B's TOP-LEVEL
+    # tool id (the red chip the UI renders), not the leaf's, even though the violation is at C.
     leaf_tool = FakeTool(2, 2, tool_id=501)
-    bad_tool = FakeTool(3, 3, tool_id=502)  # -> container
+    bad_tool = FakeTool(3, 3, tool_id=502)  # -> B, subtree too deep
     registry = {
         1: FakeVersion(1, tools=[leaf_tool, bad_tool]),
         2: FakeVersion(2, tools=[]),
-        3: FakeVersion(3, tools=[FakeTool(4, 4)]),  # B is a container
-        4: FakeVersion(4, tools=[]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),  # B (tier2) -> C
+        4: FakeVersion(4, tools=[FakeTool(5, 5)]),  # C (tier3) is a container -> D would be tier4
+        5: FakeVersion(5, tools=[]),
     }
     with pytest.raises(pu.SubAgentTreeError) as ei:
         _assert(pu, registry, 1)
@@ -294,19 +318,99 @@ def test_violation_carries_top_level_tool_id(pu):
 
 
 def test_deep_violation_attributed_to_its_top_level_tool(pu):
-    # A(v1)->P(pipeline v2)->B(v3, container). The violation is two levels down but must still
-    # be attributed to the TOP-LEVEL tool on A that leads to it (the pipeline tool), because
-    # that is the chip the UI can render on the version being validated.
+    # A(v1)->P(pipeline v2)->B(v3 agent)->C(v4 container)->leaf(v5). The pipeline is transparent
+    # (#5778), so agent tiers are A(1)->B(2)->C(3); C is a container at tier 3, so its leaf would
+    # be tier 4 → violation. It must still be attributed to the TOP-LEVEL tool on A (the pipeline
+    # tool 777), the chip the UI renders on the version being validated.
     top_tool = FakeTool(2, 2, tool_id=777)
     registry = {
         1: FakeVersion(1, tools=[top_tool]),
         2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
-        3: FakeVersion(3, tools=[FakeTool(4, 4)]),  # container nested under a pipeline
-        4: FakeVersion(4, tools=[]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),   # agent-tier 2
+        4: FakeVersion(4, tools=[FakeTool(5, 5)]),   # container at agent-tier 3 → child is tier 4
+        5: FakeVersion(5, tools=[]),
     }
     with pytest.raises(pu.SubAgentTreeError) as ei:
         _assert(pu, registry, 1)
+    assert ei.value.error_code == 'container_child_forbidden'
     assert ei.value.tool_id == 777
+
+
+def test_pipeline_transparent_agent_below_it_allowed_5778(pu):
+    # A(v1)->P(pipeline v2)->B(v3 container)->leaf(v4). Pipeline is transparent, so B is agent-tier
+    # 2 and its leaf is tier 3 → LEGAL. Confirms a pipeline in the middle of an agent chain does
+    # not consume an agent tier (issue #5778 decision).
+    registry = {
+        1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+        2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),  # container at agent-tier 2 (pipeline transparent)
+        4: FakeVersion(4, tools=[]),
+    }
+    assert _assert(pu, registry, 1) is None
+
+
+def test_bind_path_start_depth_2_rejects_container_child_5778(pu):
+    # Bind path: the child being bound (B, v2) sits at tier 2. Validating its subtree with
+    # start_depth=2 means B's own container child C (v3) is at tier 3 → its leaf would be tier 4,
+    # so a container directly under the bound child is rejected. B->C(leaf) would be fine; here C
+    # is itself a container.
+    registry = {
+        2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),  # container at tier 3 under the bound child
+        4: FakeVersion(4, tools=[]),
+    }
+    with pytest.raises(pu.SubAgentTreeError) as ei:
+        _assert(pu, registry, 2, start_depth=2)
+    assert ei.value.error_code == 'container_child_forbidden'
+
+
+def test_bind_path_start_depth_2_allows_leaf_child_5778(pu):
+    # Bind path: bound child B (v2, tier 2) whose only child is a leaf C (v3, tier 3) → LEGAL.
+    registry = {
+        2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[]),
+    }
+    assert _assert(pu, registry, 2, start_depth=2) is None
+
+
+# --------------------------------------------------------------------------- #
+# #5778 — agent-subtree tier depth helper (drives the UI add-guard)
+# --------------------------------------------------------------------------- #
+
+def _tiers(pu, registry, root_id):
+    return pu.compute_agent_subtree_tiers(1, root_id, session=FakeSession(registry))
+
+
+def test_compute_tiers_leaf_is_one(pu):
+    registry = {1: FakeVersion(1, tools=[])}
+    assert _tiers(pu, registry, 1) == 1
+
+
+def test_compute_tiers_container_of_leaves_is_two(pu):
+    registry = {
+        1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+        2: FakeVersion(2, tools=[]),
+    }
+    assert _tiers(pu, registry, 1) == 2
+
+
+def test_compute_tiers_two_hop_agent_is_three(pu):
+    registry = {
+        1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+        2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[]),
+    }
+    assert _tiers(pu, registry, 1) == 3
+
+
+def test_compute_tiers_pipeline_transparent(pu):
+    # A->P(pipeline)->B(leaf): pipeline doesn't add a tier, so this is 2 agent tiers, not 3.
+    registry = {
+        1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+        2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[]),
+    }
+    assert _tiers(pu, registry, 1) == 2
 
 
 # --------------------------------------------------------------------------- #
