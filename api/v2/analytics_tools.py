@@ -36,6 +36,7 @@ if _API_AVAILABLE:
 
     _SORT_WHITELIST = frozenset([
         "calls", "users", "avg_duration_ms", "errors", "tool_name",
+        "total_tokens",
     ])
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -203,6 +204,10 @@ if _API_AVAILABLE:
                     errors_col = func.sum(case(
                         (AuditEvent.is_error.is_(True), 1), else_=0,
                     )).label("errors")
+                    total_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.input_tokens, 0)
+                        + func.coalesce(AuditEvent.output_tokens, 0)
+                    ).label("total_tokens")
 
                     query = base.with_entities(
                         AuditEvent.tool_name,
@@ -210,6 +215,7 @@ if _API_AVAILABLE:
                         users_col,
                         avg_dur_col,
                         errors_col,
+                        total_tokens_col,
                     ).group_by(
                         AuditEvent.tool_name,
                     )
@@ -226,6 +232,7 @@ if _API_AVAILABLE:
                         "avg_duration_ms": avg_dur_col,
                         "errors": errors_col,
                         "tool_name": AuditEvent.tool_name,
+                        "total_tokens": total_tokens_col,
                     }
                     col = sort_map.get(sort_by, calls_col)
                     order_fn = desc if sort_order == "desc" else asc
@@ -242,6 +249,7 @@ if _API_AVAILABLE:
                                 "users": r.users,
                                 "avg_duration_ms": round(r.avg_duration_ms, 1) if r.avg_duration_ms else 0,
                                 "errors": r.errors or 0,
+                                "total_tokens": r.total_tokens or 0,
                             }
                             for r in rows
                         ],
