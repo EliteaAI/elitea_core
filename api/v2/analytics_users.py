@@ -37,6 +37,7 @@ if _API_AVAILABLE:
     _SORT_WHITELIST = frozenset([
         "total_events", "active_days", "llm_events", "tool_events",
         "agent_events", "chat_events", "errors", "user_email",
+        "total_tokens", "llm_cost",
     ])
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -231,6 +232,11 @@ if _API_AVAILABLE:
                     errors_col = func.sum(case(
                         (AuditEvent.is_error.is_(True), 1), else_=0,
                     )).label("errors")
+                    total_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.input_tokens, 0)
+                        + func.coalesce(AuditEvent.output_tokens, 0)
+                    ).label("total_tokens")
+                    llm_cost_col = func.sum(AuditEvent.llm_cost).label("llm_cost")
 
                     query = base.with_entities(
                         AuditEvent.user_id,
@@ -242,6 +248,8 @@ if _API_AVAILABLE:
                         agent_col,
                         chat_col,
                         errors_col,
+                        total_tokens_col,
+                        llm_cost_col,
                     ).group_by(
                         AuditEvent.user_id,
                         AuditEvent.user_email,
@@ -262,6 +270,8 @@ if _API_AVAILABLE:
                         "chat_events": chat_col,
                         "errors": errors_col,
                         "user_email": AuditEvent.user_email,
+                        "total_tokens": total_tokens_col,
+                        "llm_cost": llm_cost_col,
                     }
                     col = sort_map.get(sort_by, total_events_col)
                     order_fn = desc if sort_order == "desc" else asc
@@ -282,6 +292,8 @@ if _API_AVAILABLE:
                                 "agent_events": r.agent_events or 0,
                                 "chat_events": r.chat_events or 0,
                                 "errors": r.errors or 0,
+                                "total_tokens": r.total_tokens or 0,
+                                "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
                             }
                             for r in rows
                         ],
