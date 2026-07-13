@@ -170,6 +170,11 @@ if _API_AVAILABLE:
                         func.sum(case(
                             (AuditEvent.is_error.is_(True), 1), else_=0,
                         )).label("errors"),
+                        func.sum(
+                            func.coalesce(AuditEvent.input_tokens, 0)
+                            + func.coalesce(AuditEvent.output_tokens, 0)
+                        ).label("total_tokens"),
+                        func.sum(AuditEvent.llm_cost).label("llm_cost"),
                     ).group_by(AuditEvent.entity_name).first()
 
                     if not kpi:
@@ -231,6 +236,8 @@ if _API_AVAILABLE:
                             "avg_duration_ms": round(kpi.avg_duration_ms, 1) if kpi.avg_duration_ms else 0,
                             "errors": kpi.errors or 0,
                             "error_rate": round((kpi.errors or 0) / kpi.total_events * 100, 2) if kpi.total_events > 0 else 0,
+                            "total_tokens": kpi.total_tokens or 0,
+                            "llm_cost": float(kpi.llm_cost) if kpi.llm_cost else 0.0,
                         },
                         "users": [
                             {
