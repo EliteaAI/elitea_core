@@ -172,4 +172,10 @@ Run admin task migrate_confluence_api_version with param: project_id=all
 # Applies only to toolkits/mappings that already store an explicit selected_tools list and are missing ask.
 # Empty/missing selected_tools is left untouched because that state is treated as unrestricted by current runtime flows.
 Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project_id=all;dry_run
+
+# ADR-0008: Add LLM token usage and cost tracking to audit_events
+ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS input_tokens INTEGER;
+ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS output_tokens INTEGER;
+ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS llm_cost NUMERIC(12, 8);
+CREATE INDEX IF NOT EXISTS ix_audit_events_model_name ON centry.audit_events (model_name);
 Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project_id=all
