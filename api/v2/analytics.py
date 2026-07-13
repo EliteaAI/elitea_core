@@ -19,8 +19,14 @@ if _API_AVAILABLE:
     from flask import request
     from sqlalchemy import func, case, cast, Float, Date, String, or_
 
+    from ...utils.constants import (
+        DEFAULT_DATE_RANGE_DAYS,
+        SYSTEM_USER_EMAILS,
+        SYSTEM_USER_EMAIL_PATTERN,
+    )
+
     def _parse_dates(args):
-        """Parse date_from / date_to from request args, default to last 30 days."""
+        """Parse date_from / date_to from request args, default to last 7 days."""
         date_from = args.get("date_from")
         date_to = args.get("date_to")
         try:
@@ -33,18 +39,15 @@ if _API_AVAILABLE:
             dt_to = None
         if not dt_from and not dt_to:
             dt_to = datetime.now(timezone.utc)
-            dt_from = dt_to - timedelta(days=7)
+            dt_from = dt_to - timedelta(days=DEFAULT_DATE_RANGE_DAYS)
         return dt_from, dt_to
 
     def _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to):
         """Build base query with project + date filters, excluding system users."""
         base = session.query(AuditEvent).filter(
             AuditEvent.project_id == project_id,
-            # Exclude system users from analytics
-            ~AuditEvent.user_email.in_([
-                'system@centry.user'
-            ]),
-            ~AuditEvent.user_email.like('system_user_%@centry.user'),
+            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
+            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
         )
         if dt_from:
             base = base.filter(AuditEvent.timestamp >= dt_from)
@@ -266,7 +269,7 @@ if _API_AVAILABLE:
                             filtered_users = [
                                 u for u in all_users
                                 if u and u.get('email')
-                                and u['email'] not in ('system@centry.user',)
+                                and u['email'] not in SYSTEM_USER_EMAILS
                                 and not (u['email'].startswith('system_user_') and u['email'].endswith('@centry.user'))
                             ]
                             total_project_users = len(filtered_users)

@@ -19,6 +19,12 @@ if _API_AVAILABLE:
     from flask import request
     from sqlalchemy import func, case, cast, Date, desc
 
+    from ...utils.constants import (
+        DEFAULT_DATE_RANGE_DAYS,
+        SYSTEM_USER_EMAILS,
+        SYSTEM_USER_EMAIL_PATTERN,
+    )
+
     def _parse_dates(args):
         date_from = args.get("date_from")
         date_to = args.get("date_to")
@@ -32,9 +38,9 @@ if _API_AVAILABLE:
             dt_to = None
         if not dt_from and not dt_to:
             dt_to = datetime.now(timezone.utc)
-            dt_from = dt_to - timedelta(days=7)
+            dt_from = dt_to - timedelta(days=DEFAULT_DATE_RANGE_DAYS)
         elif not dt_from:
-            dt_from = dt_to - timedelta(days=7)
+            dt_from = dt_to - timedelta(days=DEFAULT_DATE_RANGE_DAYS)
         elif not dt_to:
             dt_to = datetime.now(timezone.utc)
         return dt_from, dt_to
@@ -140,11 +146,11 @@ if _API_AVAILABLE:
                         AuditEvent.event_type == "llm",
                         or_(
                             AuditEvent.user_email.is_(None),
-                            ~AuditEvent.user_email.in_(['system@centry.user']),
+                            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
                         ),
                         or_(
                             AuditEvent.user_email.is_(None),
-                            ~AuditEvent.user_email.like('system_user_%@centry.user'),
+                            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
                         ),
                     )
                     if dt_from:
