@@ -15,8 +15,3 @@ HEAVY_META_KEYS: tuple = ('tool_calls', 'thinking_steps')
 def strip_heavy_meta_expr(meta_column):
     """SQL: meta with tool_calls / thinking_steps removed (jsonb `-` text[] operator)."""
     return meta_column.op('-')(cast(list(HEAVY_META_KEYS), ARRAY(Text)))
-
-
-def strip_heavy_meta_keys(meta: dict) -> dict:
-    """Python: drop tool_calls / thinking_steps; keep every other key."""
-    return {k: v for k, v in (meta or {}).items() if k not in HEAVY_META_KEYS}

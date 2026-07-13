@@ -17,11 +17,13 @@ from ..utils.meta_guard import strip_heavy_meta_expr
 MESSAGES_DISPLAY_COUNT: int = 100
 
 
-def _thinking_span_subquery(session: Session):
+def _thinking_span_subquery(session: Session, conversation_ids: list[int]):
     """Per-group thinking wall-clock (secs) from message_trace_step: max(finished) - min(started).
 
     Replaces the old meta['thinking_steps'][0/-1] timestamp math (steps now live in the table).
     Steps accumulate chronologically so min/max match the former first-start -> last-finish span.
+    Scoped to the target conversations (join message_group inside the aggregation) so the GROUP BY
+    only touches relevant groups, not the whole tenant schema.
     """
     return (
         session.query(
@@ -31,7 +33,12 @@ def _thinking_span_subquery(session: Session):
                 func.max(MessageTraceStep.finished_at) - func.min(MessageTraceStep.started_at),
             ).label('secs'),
         )
+        .join(
+            ConversationMessageGroup,
+            ConversationMessageGroup.id == MessageTraceStep.message_group_id,
+        )
         .filter(
+            ConversationMessageGroup.conversation_id.in_(conversation_ids),
             MessageTraceStep.kind == 'thinking_step',
             MessageTraceStep.started_at.isnot(None),
             MessageTraceStep.finished_at.isnot(None),
@@ -65,40 +72,18 @@ def _duration_expression(span):
     )
 
 
-def calculate_conversation_duration(conversation: Conversation, session: Session) -> float:
-    """Sum of message durations for a conversation (seconds). See _duration_expression."""
-    if session is None:
-        return 0.0
-
-    span = _thinking_span_subquery(session)
-    result = (
-        session.query(func.coalesce(func.sum(_duration_expression(span)), 0.0))
-        .select_from(ConversationMessageGroup)
-        .outerjoin(span, span.c.mg_id == ConversationMessageGroup.id)
-        .filter(
-            ConversationMessageGroup.conversation_id == conversation.id,
-            ConversationMessageGroup.reply_to_id.isnot(None),
-        )
-        .scalar()
-    )
-
-    return round(float(result or 0.0), 2)
-
-
 def calculate_conversation_durations_batch(
     conversation_ids: list[int],
     session: Session,
 ) -> dict[int, float]:
-    """
-    Batched variant of calculate_conversation_duration: returns
-    {conversation_id: duration_seconds} in a single GROUP BY query.
+    """Return {conversation_id: duration_seconds} in a single GROUP BY query.
 
-    Used by chat_list_conversations_rpc to avoid one query per row.
+    Used by chat_list_conversations_rpc to avoid one query per row. See _duration_expression.
     """
     if not conversation_ids or session is None:
         return {}
 
-    span = _thinking_span_subquery(session)
+    span = _thinking_span_subquery(session, conversation_ids)
     rows = (
         session.query(
             ConversationMessageGroup.conversation_id,
