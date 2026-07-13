@@ -7,6 +7,8 @@ safely coexist when both plugins are loaded in the same process.
 """
 
 from datetime import datetime
+from decimal import Decimal
+from typing import Optional
 
 from sqlalchemy import Integer, String, DateTime, SmallInteger, Float, Boolean, Numeric, func, Index
 from sqlalchemy.orm import Mapped, mapped_column
@@ -60,7 +62,7 @@ class AuditEvent(db.Base):
     # Token usage and cost (ADR-0008)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
-    llm_cost: Mapped[float] = mapped_column(Numeric(12, 8), nullable=True)
+    llm_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 8), nullable=True)
 
     # Trace linkage
     trace_id: Mapped[str] = mapped_column(String(32), nullable=True)

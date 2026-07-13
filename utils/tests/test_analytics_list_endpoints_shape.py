@@ -47,6 +47,10 @@ class TestAnalyticsToolsTokenColumns:
         src = _get_source("analytics_tools.py")
         assert "input_tokens" in src
 
+    def test_output_tokens_referenced(self):
+        src = _get_source("analytics_tools.py")
+        assert "output_tokens" in src
+
     def test_total_tokens_in_response(self):
         src = _get_source("analytics_tools.py")
         assert "total_tokens" in src
@@ -56,6 +60,10 @@ class TestAnalyticsUsersTokenColumns:
     def test_input_tokens_referenced(self):
         src = _get_source("analytics_users.py")
         assert "input_tokens" in src
+
+    def test_output_tokens_referenced(self):
+        src = _get_source("analytics_users.py")
+        assert "output_tokens" in src
 
     def test_llm_cost_in_response(self):
         src = _get_source("analytics_users.py")

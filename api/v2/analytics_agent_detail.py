@@ -194,7 +194,7 @@ if _API_AVAILABLE:
                     ).group_by(
                         AuditEvent.user_id,
                         AuditEvent.user_email,
-                    ).order_by(func.count().desc()).all()
+                    ).order_by(func.count().desc()).limit(50).all()
 
                     # Tools used by this agent (via trace_id correlation)
                     trace_subq = base.with_entities(

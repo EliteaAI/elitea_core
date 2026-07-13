@@ -253,23 +253,22 @@ if _API_AVAILABLE:
                     try:
                         project_user_data = auth.list_project_users(project_id)
                         if project_user_data:
-                            # project_user_data is a list of user IDs, need to get user details
-                            filtered_users = []
-                            for user_id in project_user_data:
-                                try:
-                                    # Get user details including email
-                                    user_details = auth.get_user(user_id)
-                                    user_email = user_details.get('email', '') if user_details else ''
-                                    
-                                    # Filter out system users by their email patterns
-                                    if user_email and not any([
-                                        user_email in ['system@centry.user'],
-                                        user_email.startswith('system_user_') and user_email.endswith('@centry.user')
-                                    ]):
-                                        filtered_users.append(user_id)
-                                except:
-                                    # If we can't get user details, skip this user
-                                    continue
+                            all_users = auth.get_users(project_user_data) if hasattr(auth, 'get_users') else None
+                            if all_users is None:
+                                all_users = []
+                                for uid in project_user_data:
+                                    try:
+                                        u = auth.get_user(uid)
+                                        if u:
+                                            all_users.append(u)
+                                    except Exception:
+                                        continue
+                            filtered_users = [
+                                u for u in all_users
+                                if u and u.get('email')
+                                and u['email'] not in ('system@centry.user',)
+                                and not (u['email'].startswith('system_user_') and u['email'].endswith('@centry.user'))
+                            ]
                             total_project_users = len(filtered_users)
                         else:
                             total_project_users = 0

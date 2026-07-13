@@ -33,6 +33,10 @@ if _API_AVAILABLE:
         if not dt_from and not dt_to:
             dt_to = datetime.now(timezone.utc)
             dt_from = dt_to - timedelta(days=7)
+        elif not dt_from:
+            dt_from = dt_to - timedelta(days=7)
+        elif not dt_to:
+            dt_to = datetime.now(timezone.utc)
         return dt_from, dt_to
 
     class PromptLibAPI(api_tools.APIModeHandler):
