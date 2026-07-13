@@ -1,7 +1,7 @@
 from pylon.core.tools import web, log
 from tools import db
 
-from sqlalchemy import asc
+from sqlalchemy import asc, and_, func, not_
 
 from ..models.message_trace_step import MessageTraceStep
 from ..models.message_group import ConversationMessageGroup
@@ -11,7 +11,8 @@ from ..models.pd.trace_step import TraceStepListItem, TraceStepDetail
 # flat list so a pathological conversation can't fan into an unbounded response.
 TRACE_STEPS_MAX_LIMIT = 2000
 
-# Light columns only — never select tool_output / text / thinking / attrs on the list path.
+# Light columns + the bounded attrs sidecar (chip icon/label the FE draws at rest). Never select the
+# heavy fields (tool_output / text / thinking / tool_inputs) on the list path — those are detail-only.
 _LIST_COLUMNS = (
     MessageTraceStep.id,
     MessageTraceStep.message_group_id,
@@ -25,6 +26,7 @@ _LIST_COLUMNS = (
     MessageTraceStep.step_type,
     MessageTraceStep.model_name,
     MessageTraceStep.finish_reason,
+    MessageTraceStep.attrs,
 )
 
 
@@ -43,7 +45,11 @@ class RPC:
 
         Batched by conversation in one query (no N+1). Ordered by (started_at, id) — render order
         is derived from timestamps, `seq` was dropped in TS-1. Rows carry message_group_id so the
-        FE groups them per message. No heavy fields (tool_inputs/tool_output/text/thinking/attrs).
+        FE groups them per message. Light fields + the bounded attrs sidecar only; no heavy fields
+        (tool_inputs/tool_output/text/thinking).
+
+        Blank thinking steps (transition markers the SDK emits with an action but no text, e.g. a
+        tool-call-start) are excluded so the FE draws no empty pins — it renders every row it gets.
         """
         limit = min(max(int(limit or 0), 1), TRACE_STEPS_MAX_LIMIT)
         offset = max(int(offset or 0), 0)
@@ -56,6 +62,10 @@ class RPC:
                     ConversationMessageGroup.id == MessageTraceStep.message_group_id,
                 )
                 .filter(ConversationMessageGroup.conversation_id == conversation_id)
+                .filter(not_(and_(
+                    MessageTraceStep.kind == 'thinking_step',
+                    func.trim(func.coalesce(MessageTraceStep.text, '')) == '',
+                )))
             )
             if message_group_id is not None:
                 query = query.filter(MessageTraceStep.message_group_id == message_group_id)
