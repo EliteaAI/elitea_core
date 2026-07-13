@@ -52,4 +52,10 @@ def test_api_class_defined():
     tree = ast.parse(src)
     class_names = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
     assert "API" in class_names, "API class not defined"
-    assert "PromptLibAPI" in class_names, "PromptLibAPI class not defined"
+
+
+def test_prompt_lib_api_handler_defined():
+    src = _get_source()
+    tree = ast.parse(src)
+    class_names = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+    assert "PromptLibAPI" in class_names, "PromptLibAPI handler not defined"

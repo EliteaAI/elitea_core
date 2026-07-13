@@ -99,7 +99,7 @@ if _API_AVAILABLE:
                         "enum": [
                             "total_events", "active_days", "llm_events",
                             "tool_events", "agent_events", "chat_events",
-                            "errors", "user_email",
+                            "errors", "user_email", "total_tokens", "llm_cost",
                         ],
                         "default": "total_events",
                     },
@@ -131,6 +131,8 @@ if _API_AVAILABLE:
                                         "agent_events": 60,
                                         "chat_events": 45,
                                         "errors": 5,
+                                        "total_tokens": 84500,
+                                        "llm_cost": 0.00845,
                                     },
                                     {
                                         "user_id": 55,
@@ -142,6 +144,8 @@ if _API_AVAILABLE:
                                         "agent_events": 30,
                                         "chat_events": 25,
                                         "errors": 2,
+                                        "total_tokens": 52000,
+                                        "llm_cost": 0.0052,
                                     },
                                 ],
                             }

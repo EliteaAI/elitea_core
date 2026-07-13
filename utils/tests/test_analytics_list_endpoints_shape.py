@@ -55,6 +55,11 @@ class TestAnalyticsToolsTokenColumns:
         src = _get_source("analytics_tools.py")
         assert "total_tokens" in src
 
+    def test_llm_cost_intentionally_omitted(self):
+        """Tools are not LLM calls; llm_cost is intentionally not tracked per-tool (ADR-0008 P3-T02)."""
+        src = _get_source("analytics_tools.py")
+        assert "llm_cost" not in src, "llm_cost should not be in tools endpoint (tools are not LLM calls)"
+
 
 class TestAnalyticsUsersTokenColumns:
     def test_input_tokens_referenced(self):
@@ -64,6 +69,10 @@ class TestAnalyticsUsersTokenColumns:
     def test_output_tokens_referenced(self):
         src = _get_source("analytics_users.py")
         assert "output_tokens" in src
+
+    def test_total_tokens_in_response(self):
+        src = _get_source("analytics_users.py")
+        assert "total_tokens" in src
 
     def test_llm_cost_in_response(self):
         src = _get_source("analytics_users.py")

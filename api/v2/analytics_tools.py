@@ -95,7 +95,7 @@ if _API_AVAILABLE:
                     "required": False,
                     "schema": {
                         "type": "string",
-                        "enum": ["calls", "users", "avg_duration_ms", "errors", "tool_name"],
+                        "enum": ["calls", "users", "avg_duration_ms", "errors", "tool_name", "total_tokens"],
                         "default": "calls",
                     },
                     "description": "Column to sort by.",
@@ -122,6 +122,7 @@ if _API_AVAILABLE:
                                         "users": 6,
                                         "avg_duration_ms": 310.0,
                                         "errors": 3,
+                                        "total_tokens": 12000,
                                     },
                                     {
                                         "tool_name": "github_create_pr",
@@ -129,6 +130,7 @@ if _API_AVAILABLE:
                                         "users": 4,
                                         "avg_duration_ms": 420.0,
                                         "errors": 1,
+                                        "total_tokens": 8500,
                                     },
                                 ],
                             }

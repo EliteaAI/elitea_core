@@ -73,3 +73,23 @@ class TestEstimateCostEdgeCases:
     def test_empty_model_name_returns_none(self):
         assert m.estimate_cost("", input_tokens=1000, output_tokens=500) is None
         assert m.estimate_cost(None, input_tokens=1000, output_tokens=500) is None
+
+    def test_invalidate_cache_clears_state(self):
+        """invalidate_cache must clear both the loaded flag and the cache dict."""
+        assert m._CACHE_LOADED is True
+        assert len(m._PRICE_CACHE) > 0
+        m.invalidate_cache()
+        assert m._CACHE_LOADED is False
+        assert len(m._PRICE_CACHE) == 0
+
+    def test_result_rounded_to_8_decimal_places(self):
+        """Cost results must not exceed 8 decimal places."""
+        # 1500 * 0.003/1K + 250 * 0.015/1K = 0.0045 + 0.00375 = 0.00825
+        result = m.estimate_cost("claude-3-5-sonnet", input_tokens=1500, output_tokens=250)
+        assert len(str(result).split('.')[-1]) <= 8
+
+    def test_none_pricing_tuple_returns_none(self):
+        """If the pricing tuple contains None values, estimate_cost should handle gracefully."""
+        m._PRICE_CACHE["broken-model"] = (None, None)
+        result = m.estimate_cost("broken-model", input_tokens=1000, output_tokens=500)
+        assert result is None
