@@ -36,6 +36,7 @@ if _API_AVAILABLE:
 
     _SORT_WHITELIST = frozenset([
         "events", "users", "avg_duration_ms", "errors", "entity_name",
+        "total_tokens", "llm_cost",
     ])
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -94,7 +95,7 @@ if _API_AVAILABLE:
                     "required": False,
                     "schema": {
                         "type": "string",
-                        "enum": ["events", "users", "avg_duration_ms", "errors", "entity_name"],
+                        "enum": ["events", "users", "avg_duration_ms", "errors", "entity_name", "total_tokens", "llm_cost"],
                         "default": "events",
                     },
                     "description": "Column to sort by.",
@@ -122,6 +123,8 @@ if _API_AVAILABLE:
                                         "users": 5,
                                         "avg_duration_ms": 1200.0,
                                         "errors": 4,
+                                        "total_tokens": 84500,
+                                        "llm_cost": 0.00845,
                                     },
                                     {
                                         "entity_name": "SQL Assistant",
@@ -130,6 +133,8 @@ if _API_AVAILABLE:
                                         "users": 3,
                                         "avg_duration_ms": 740.0,
                                         "errors": 1,
+                                        "total_tokens": 42000,
+                                        "llm_cost": 0.0042,
                                     },
                                 ],
                                 "chat_daily": [
@@ -211,6 +216,11 @@ if _API_AVAILABLE:
                     errors_col = func.sum(case(
                         (AuditEvent.is_error.is_(True), 1), else_=0,
                     )).label("errors")
+                    total_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.input_tokens, 0)
+                        + func.coalesce(AuditEvent.output_tokens, 0)
+                    ).label("total_tokens")
+                    llm_cost_col = func.sum(AuditEvent.llm_cost).label("llm_cost")
 
                     query = base.with_entities(
                         AuditEvent.entity_name,
@@ -219,6 +229,8 @@ if _API_AVAILABLE:
                         users_col,
                         avg_dur_col,
                         errors_col,
+                        total_tokens_col,
+                        llm_cost_col,
                     ).group_by(
                         AuditEvent.entity_name,
                         AuditEvent.entity_id,
@@ -236,6 +248,8 @@ if _API_AVAILABLE:
                         "avg_duration_ms": avg_dur_col,
                         "errors": errors_col,
                         "entity_name": AuditEvent.entity_name,
+                        "total_tokens": total_tokens_col,
+                        "llm_cost": llm_cost_col,
                     }
                     col = sort_map.get(sort_by, events_col)
                     order_fn = desc if sort_order == "desc" else asc
@@ -269,6 +283,8 @@ if _API_AVAILABLE:
                                 "users": r.users,
                                 "avg_duration_ms": round(r.avg_duration_ms, 1) if r.avg_duration_ms else 0,
                                 "errors": r.errors or 0,
+                                "total_tokens": r.total_tokens or 0,
+                                "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
                             }
                             for r in rows
                         ],
