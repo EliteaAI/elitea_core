@@ -130,11 +130,18 @@ if _API_AVAILABLE:
 
             try:
                 with db.with_project_schema_session(None) as session:
+                    from sqlalchemy import or_
                     base = session.query(AuditEvent).filter(
                         AuditEvent.project_id == project_id,
                         AuditEvent.event_type == "llm",
-                        ~AuditEvent.user_email.in_(['system@centry.user']),
-                        ~AuditEvent.user_email.like('system_user_%@centry.user'),
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.in_(['system@centry.user']),
+                        ),
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.like('system_user_%@centry.user'),
+                        ),
                     )
                     if dt_from:
                         base = base.filter(AuditEvent.timestamp >= dt_from)

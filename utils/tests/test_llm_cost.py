@@ -81,3 +81,17 @@ def test_invalidate_cache():
     assert not m._PRICE_CACHE
     # Re-load for subsequent tests
     setup_function()
+
+
+def test_none_pricing_tuple_returns_none():
+    """A model with (None, None) pricing must return None, not raise."""
+    m._PRICE_CACHE["broken-model"] = (None, None)
+    result = m.estimate_cost("broken-model", input_tokens=100, output_tokens=50)
+    assert result is None, f"expected None, got {result}"
+
+
+def test_partial_none_pricing_returns_none():
+    """A model with partial None pricing (only one cost is None) must return None."""
+    m._PRICE_CACHE["half-priced"] = (0.005, None)
+    result = m.estimate_cost("half-priced", input_tokens=100, output_tokens=50)
+    assert result is None, f"expected None, got {result}"
