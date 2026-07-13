@@ -104,6 +104,8 @@ if _API_AVAILABLE:
                                     "tool_runs": 340,
                                     "chat_msgs": 210,
                                     "agent_runs": 95,
+                                    "total_tokens": 1250000,
+                                    "total_llm_cost": 1.25,
                                 },
                                 "event_type_breakdown": [
                                     {"event_type": "llm", "count": 780},
@@ -223,6 +225,11 @@ if _API_AVAILABLE:
                         func.sum(case(
                             (AuditEvent.entity_type == "application", 1), else_=0,
                         )).label("agent_runs"),
+                        func.sum(
+                            func.coalesce(AuditEvent.input_tokens, 0)
+                            + func.coalesce(AuditEvent.output_tokens, 0)
+                        ).label("total_tokens"),
+                        func.sum(AuditEvent.llm_cost).label("total_llm_cost"),
                     ).first()
 
                     total_events = kpi_row.total_events or 0
@@ -288,6 +295,8 @@ if _API_AVAILABLE:
                         "tool_runs": kpi_row.tool_runs or 0,
                         "chat_msgs": kpi_row.chat_msgs or 0,
                         "agent_runs": kpi_row.agent_runs or 0,
+                        "total_tokens": kpi_row.total_tokens or 0,
+                        "total_llm_cost": float(kpi_row.total_llm_cost) if kpi_row.total_llm_cost else 0.0,
                     }
 
                     # 2. Event type breakdown
