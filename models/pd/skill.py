@@ -182,6 +182,56 @@ class MultipleSkillListModel(BaseModel):
         return self
 
 
+class PublicSkillListModel(SkillListModel):
+    likes_count: Optional[int] = Field(default=0, validation_alias='likes')
+    is_liked: Optional[bool] = None
+    trending_likes: Optional[int] = None
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    @field_validator('is_liked')
+    @classmethod
+    def is_liked_field(cls, v):
+        return False if v is None else v
+
+    @field_validator('likes_count')
+    @classmethod
+    def likes_count_field(cls, v):
+        return 0 if v is None else v
+
+
+class MultiplePublicSkillListModel(BaseModel):
+    skills: List[PublicSkillListModel]
+
+    @model_validator(mode='after')
+    def parse_authors_data(self):
+        if not self.skills:
+            return self
+        all_authors = set()
+        for skill in self.skills:
+            all_authors.update(skill.author_ids)
+        if not all_authors:
+            return self
+        users = get_authors_data(list(all_authors))
+        user_map = {i['id']: i for i in users}
+        for skill in self.skills:
+            skill.set_authors(user_map)
+        return self
+
+
+class AgentsWithSkillItemModel(BaseModel):
+    application_id: int
+    name: str
+    entity_version_id: int
+    icon_meta: Optional[dict] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentsWithSkillListModel(BaseModel):
+    rows: List[AgentsWithSkillItemModel] = Field(default_factory=list)
+
+
 class SkillDetailModel(BaseModel):
     id: int
     name: str
@@ -192,6 +242,9 @@ class SkillDetailModel(BaseModel):
     version_details: Optional[SkillVersionDetailModel] = None
     meta: Optional[dict] = None
     is_pinned: bool = False
+    likes_count: int = 0
+    is_liked: bool = False
+    icon_meta: Optional[dict] = {}
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -202,6 +255,38 @@ class SkillDetailModel(BaseModel):
             )
         except Empty:
             self.is_pinned = False
+        return self
+
+    def get_likes(self, project_id: int) -> None:
+        try:
+            likes_data = rpc_tools.RpcMixin().rpc.timeout(2).social_get_likes(
+                project_id=project_id, entity='skill', entity_id=self.id
+            )
+            self.likes_count = likes_data['total']
+        except Empty:
+            self.likes_count = 0
+
+    def check_is_liked(self, project_id: int) -> None:
+        try:
+            self.is_liked = rpc_tools.RpcMixin().rpc.timeout(2).social_is_liked(
+                project_id=project_id, entity='skill', entity_id=self.id
+            )
+        except Empty:
+            self.is_liked = False
+
+    @model_validator(mode='after')
+    def set_icon_meta(self):
+        if not self.versions:
+            return self
+        default_id = (self.meta or {}).get('default_version_id')
+        selected = (
+            next((v for v in self.versions if v.status == 'published'), None)
+            or next((v for v in self.versions if v.id == default_id), None)
+            or next((v for v in self.versions if v.name == 'base'), None)
+            or min(self.versions, key=lambda version: version.created_at)
+        )
+        if selected and (selected.meta or {}).get('icon_meta'):
+            self.icon_meta = selected.meta['icon_meta']
         return self
 
 
