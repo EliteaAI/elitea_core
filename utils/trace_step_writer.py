@@ -144,11 +144,8 @@ def _row_to_thinking_step(row: MessageTraceStep) -> dict:
     }
 
 
-def load_accumulated_from_rows(session, msg_group_id: int):
-    """Reconstruct (tool_calls dict keyed by run_id, thinking_steps list) from existing rows."""
-    rows = session.query(MessageTraceStep).filter(
-        MessageTraceStep.message_group_id == msg_group_id
-    ).all()
+def _reconstruct(rows) -> tuple[dict, list]:
+    """(tool_calls dict keyed by run_id, thinking_steps list) from a set of rows."""
     tool_calls = {}
     thinking_steps = []
     for row in rows:
@@ -157,6 +154,43 @@ def load_accumulated_from_rows(session, msg_group_id: int):
         elif row.kind == KIND_THINKING_STEP:
             thinking_steps.append(_row_to_thinking_step(row))
     return tool_calls, thinking_steps
+
+
+def load_accumulated_from_rows(session, msg_group_id: int):
+    """Reconstruct (tool_calls dict keyed by run_id, thinking_steps list) from existing rows."""
+    rows = session.query(MessageTraceStep).filter(
+        MessageTraceStep.message_group_id == msg_group_id
+    ).all()
+    return _reconstruct(rows)
+
+
+# Columns synced from a freshly-built row onto an existing one during reconcile (id and
+# message_group_id are the identity/parent and never change).
+_SYNCED_COLUMNS = (
+    'kind', 'run_id', 'parent_agent_name', 'parent_agent_call_id',
+    'started_at', 'finished_at', 'is_error', 'tool_name', 'tool_inputs',
+    'tool_output', 'finish_reason', 'step_type', 'text', 'thinking',
+    'model_name', 'attrs',
+)
+
+
+def _row_key(row: MessageTraceStep):
+    """Stable natural key: run_id for tool_calls, started_at for thinking steps.
+
+    Thinking steps are deduped by timestamp_start upstream, so started_at is their identity. A step
+    with no started_at can't be matched safely — key it by python identity so it never collapses
+    with another (rare/never in practice; mirrors the upstream dedup that only keys truthy stamps).
+    """
+    if row.kind == KIND_TOOL_CALL:
+        return (KIND_TOOL_CALL, row.run_id)
+    if row.started_at is None:
+        return (KIND_THINKING_STEP, id(row))
+    return (KIND_THINKING_STEP, row.started_at)
+
+
+def _apply_row_values(target: MessageTraceStep, source: MessageTraceStep) -> None:
+    for col in _SYNCED_COLUMNS:
+        setattr(target, col, getattr(source, col))
 
 
 def _merge_thinking_steps(old_steps: list, new_steps: list) -> list:
@@ -175,26 +209,42 @@ def _merge_thinking_steps(old_steps: list, new_steps: list) -> list:
 
 
 def sync_trace_steps(session, msg_group_id: int, delta_tool_calls: dict, delta_thinking_steps: list):
-    """Merge a delta into the group's accumulated steps and rewrite its rows.
+    """Merge a delta into the group's accumulated steps and reconcile its rows in place.
 
     The table is the accumulator: load existing rows, merge the incoming delta (run_id keyed for
     tool_calls, timestamp-deduped for thinking_steps), collapse HITL replays with the audited
-    _dedupe_replayed_tool_calls, then delete + reinsert the group's rows. No render-order sort:
-    reads order by (started_at, id).
+    _dedupe_replayed_tool_calls, then reconcile by natural key — UPDATE matched rows in place,
+    INSERT new ones, DELETE only those that dropped out (e.g. a collapsed HITL replay). Keeping
+    ids stable across the on_tool_start -> on_tool_end update avoids 404s on the detail endpoint
+    (which reads by id) while a turn streams, and avoids rewriting every row on each partial.
+    Render order is derived from (started_at, id) at read time.
     """
-    old_tool_calls, old_thinking_steps = load_accumulated_from_rows(session, msg_group_id)
+    existing = session.query(MessageTraceStep).filter(
+        MessageTraceStep.message_group_id == msg_group_id
+    ).all()
+    old_tool_calls, old_thinking_steps = _reconstruct(existing)
 
     merged_tool_calls = {**old_tool_calls, **(delta_tool_calls or {})}
     merged_tool_calls = _dedupe_replayed_tool_calls(merged_tool_calls)
     merged_thinking_steps = _merge_thinking_steps(old_thinking_steps, delta_thinking_steps or [])
 
-    session.query(MessageTraceStep).filter(
-        MessageTraceStep.message_group_id == msg_group_id
-    ).delete(synchronize_session=False)
+    desired = [tool_call_to_row(msg_group_id, run_id, tc) for run_id, tc in merged_tool_calls.items()]
+    desired.extend(thinking_step_to_row(msg_group_id, step) for step in merged_thinking_steps)
 
-    rows = [tool_call_to_row(msg_group_id, run_id, tc) for run_id, tc in merged_tool_calls.items()]
-    rows.extend(thinking_step_to_row(msg_group_id, step) for step in merged_thinking_steps)
-    if rows:
-        session.add_all(rows)
+    existing_by_key = {_row_key(r): r for r in existing}
+    seen_keys = set()
+    for new_row in desired:
+        key = _row_key(new_row)
+        current = existing_by_key.get(key)
+        if current is not None:
+            _apply_row_values(current, new_row)  # update in place, id preserved
+        else:
+            session.add(new_row)
+        seen_keys.add(key)
+
+    for key, row in existing_by_key.items():
+        if key not in seen_keys:
+            session.delete(row)
+
     log.debug("sync_trace_steps: group %s -> %s tool_calls, %s thinking_steps",
               msg_group_id, len(merged_tool_calls), len(merged_thinking_steps))
