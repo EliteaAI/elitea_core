@@ -8,7 +8,7 @@ safely coexist when both plugins are loaded in the same process.
 
 from datetime import datetime
 
-from sqlalchemy import Integer, String, DateTime, SmallInteger, Float, Boolean, func, Index
+from sqlalchemy import Integer, String, DateTime, SmallInteger, Float, Boolean, Numeric, func, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tools import db, config as c
@@ -56,6 +56,11 @@ class AuditEvent(db.Base):
     # Agent/tool details
     tool_name: Mapped[str] = mapped_column(String(256), nullable=True)
     model_name: Mapped[str] = mapped_column(String(256), nullable=True)
+
+    # Token usage and cost (ADR-0008)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
+    llm_cost: Mapped[float] = mapped_column(Numeric(12, 8), nullable=True)
 
     # Trace linkage
     trace_id: Mapped[str] = mapped_column(String(32), nullable=True)
