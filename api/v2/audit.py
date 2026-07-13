@@ -20,7 +20,7 @@ if _API_AVAILABLE:
     # Allowed sort fields (whitelist to prevent SQL injection via column names)
     _SORT_WHITELIST = frozenset([
         "timestamp", "user_email", "event_type", "action", "http_method",
-        "status_code", "duration_ms", "project_id",
+        "status_code", "duration_ms", "project_id", "entity_name",
     ])
 
     class AdminAPI(api_tools.APIModeHandler):
@@ -42,7 +42,7 @@ if _API_AVAILABLE:
                 sort_by (str): column to sort, default "timestamp"
                 sort_order (str): "asc" or "desc", default "desc"
                 search (str): free-text on action, tool_name, user_email
-                event_type (str): filter by event_type (api, socketio, rpc, agent, tool, llm)
+                event_type (str): filter by event_type (api, socketio, rpc, agent, tool, llm, lifecycle)
                 http_method (str): filter by HTTP method
                 is_error (str): "true" to show only errors
                 user_id (int): filter by user
@@ -50,6 +50,8 @@ if _API_AVAILABLE:
                 trace_id (str): filter by trace
                 date_from (str): ISO datetime lower bound
                 date_to (str): ISO datetime upper bound
+                entity_name (str): partial match on entity name (e.g., pylon-main)
+                action (str): partial match on action (e.g., pylon_started)
             """
             from tools import db
             from ...models.audit_event import AuditEvent
@@ -155,6 +157,16 @@ if _API_AVAILABLE:
                         except (ValueError, TypeError):
                             pass
 
+                    entity_name = request.args.get("entity_name")
+                    if entity_name:
+                        pattern = f"%{entity_name}%"
+                        query = query.filter(AuditEvent.entity_name.ilike(pattern))
+
+                    action = request.args.get("action")
+                    if action:
+                        pattern = f"%{action}%"
+                        query = query.filter(AuditEvent.action.ilike(pattern))
+
                     # -- Count --
                     total = query.count()
 
@@ -191,6 +203,7 @@ if _API_AVAILABLE:
                 "status_code": row.status_code,
                 "duration_ms": round(row.duration_ms, 2) if row.duration_ms is not None else None,
                 "is_error": row.is_error,
+                "entity_name": row.entity_name,
                 "tool_name": row.tool_name,
                 "model_name": row.model_name,
                 "trace_id": row.trace_id,
