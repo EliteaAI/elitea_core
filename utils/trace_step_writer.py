@@ -46,6 +46,16 @@ def _parent_call_id(entry: dict) -> str:
     return meta.get('parent_agent_call_id')
 
 
+def _tool_call_attrs(entry: dict) -> dict | None:
+    """Bounded display-only sidecar: the metadata/tool_meta sub-objects the FE draws."""
+    attrs = {}
+    if isinstance(entry.get('metadata'), dict):
+        attrs['metadata'] = entry['metadata']
+    if isinstance(entry.get('tool_meta'), dict):
+        attrs['tool_meta'] = entry['tool_meta']
+    return attrs or None
+
+
 def tool_call_to_row(msg_group_id: int, run_id: str, entry: dict) -> MessageTraceStep:
     """Map one accumulated tool_call entry (ToolCallPayload shape) to a row."""
     return MessageTraceStep(
@@ -63,6 +73,7 @@ def tool_call_to_row(msg_group_id: int, run_id: str, entry: dict) -> MessageTrac
         tool_inputs=entry.get('tool_inputs') if isinstance(entry.get('tool_inputs'), (dict, list)) else None,
         tool_output=entry.get('tool_output'),
         finish_reason=entry.get('finish_reason'),
+        attrs=_tool_call_attrs(entry),
     )
 
 
@@ -85,24 +96,26 @@ def thinking_step_to_row(msg_group_id: int, entry: dict) -> MessageTraceStep:
         text=entry.get('text'),
         thinking=entry.get('thinking'),
         model_name=resp_meta.get('model_name'),
+        attrs={'response_metadata': resp_meta} if resp_meta else None,
     )
 
 
 def _row_to_tool_call(row: MessageTraceStep) -> dict:
     """Reconstruct a meta-shaped tool_call entry from a row, enough for dedup + re-mapping.
 
-    checkpoint_ns/tool_meta are not persisted, so the reconstructed identity uses
-    (tool_name, parent_agent_name, tool_inputs) — the node component of the original heuristic
-    is unavailable off-table. See dedup note in sync_trace_steps.
+    metadata/tool_meta round-trip through the attrs sidecar, so checkpoint_ns / langgraph_node
+    (the node component of the dedup identity) are recovered off-table; promoted columns remain
+    the source of truth for the fields they hold.
     """
-    return {
+    attrs = row.attrs if isinstance(row.attrs, dict) else {}
+    metadata = dict(attrs.get('metadata') or {})
+    metadata['parent_agent_name'] = row.parent_agent_name
+    metadata['parent_agent_call_id'] = row.parent_agent_call_id
+    entry = {
         'run_id': row.run_id,
         'tool_run_id': row.run_id,
         'tool_name': row.tool_name,
-        'metadata': {
-            'parent_agent_name': row.parent_agent_name,
-            'parent_agent_call_id': row.parent_agent_call_id,
-        },
+        'metadata': metadata,
         'tool_inputs': row.tool_inputs,
         'tool_output': row.tool_output,
         'finish_reason': row.finish_reason,
@@ -110,9 +123,15 @@ def _row_to_tool_call(row: MessageTraceStep) -> dict:
         'timestamp_start': row.started_at.isoformat() if row.started_at else None,
         'timestamp_finish': row.finished_at.isoformat() if row.finished_at else None,
     }
+    if attrs.get('tool_meta'):
+        entry['tool_meta'] = attrs['tool_meta']
+    return entry
 
 
 def _row_to_thinking_step(row: MessageTraceStep) -> dict:
+    attrs = row.attrs if isinstance(row.attrs, dict) else {}
+    resp_meta = dict(attrs.get('response_metadata') or {})
+    resp_meta['model_name'] = row.model_name  # promoted column is source of truth
     return {
         'tool_run_id': row.run_id,
         'parent_agent_name': row.parent_agent_name,
@@ -122,7 +141,7 @@ def _row_to_thinking_step(row: MessageTraceStep) -> dict:
         'thinking': row.thinking,
         'timestamp_start': row.started_at.isoformat() if row.started_at else None,
         'timestamp_finish': row.finished_at.isoformat() if row.finished_at else None,
-        'message': {'response_metadata': {'model_name': row.model_name}},
+        'message': {'response_metadata': resp_meta},
     }
 
 

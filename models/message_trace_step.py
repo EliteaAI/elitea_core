@@ -48,6 +48,11 @@ class MessageTraceStep(db.Base):
     thinking: Mapped[str] = mapped_column(Text, nullable=True)
     model_name: Mapped[str] = mapped_column(Text, nullable=True)
 
+    # Small, bounded display-only sub-objects the FE draws but that aren't promoted columns:
+    # tool_call -> {'metadata': {...}, 'tool_meta': {...}}; thinking -> {'response_metadata': {...}}.
+    # Never holds tool_output (its own column), so it cannot grow into a freeze-class blob.
+    attrs: Mapped[dict] = mapped_column(JSONB, nullable=True)
+
     message_group: Mapped['ConversationMessageGroup'] = relationship(
         'ConversationMessageGroup',
         foreign_keys=[message_group_id],
