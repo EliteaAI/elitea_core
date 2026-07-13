@@ -12,10 +12,6 @@ add_admin_roles:
 
 max_published_versions_per_agent: 3
 
-# Epic #5724 / TS-2: tool_calls & thinking_steps storage (platform-wide).
-# false (default) -> message_trace_step table only; true -> legacy meta blob (pre-epic).
-legacy_meta_tool_calls_storage: false
-
 scheduler:
   pipeline_scheduling:
     enabled: true
