@@ -228,10 +228,6 @@ class AgentsWithSkillItemModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class AgentsWithSkillListModel(BaseModel):
-    rows: List[AgentsWithSkillItemModel] = Field(default_factory=list)
-
-
 class SkillDetailModel(BaseModel):
     id: int
     name: str

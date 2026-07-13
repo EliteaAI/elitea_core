@@ -31,7 +31,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 q=request.args.get('query'),
                 tags=request.args.get('tags'),
                 category=request.args.get('category'),
-                my_liked=request.args.get('my_liked', False),
+                my_liked=str(request.args.get('my_liked', '')).lower() in ('true', '1'),
                 trend_start_period=request.args.get('trend_start_period'),
                 trend_end_period=request.args.get('trend_end_period'),
                 limit=request.args.get("limit", default=10, type=int),

@@ -465,7 +465,6 @@ def list_public_skills_api(
 def get_agents_with_skill(
     project_id: int,
     public_skill_id: int,
-    session=None,
 ) -> List[AgentsWithSkillItemModel]:
     with db.with_project_schema_session(project_id) as s:
         # All local skills forked from this public skill (any version).
@@ -595,6 +594,13 @@ def attach_public_skill_to_agents(
             # Call import_wizard directly on the module (as the /fork endpoint does),
             # NOT via the RPC bus: an in-request synchronous RPC round-trip to the same
             # process deadlocks the worker while the outer session is held open.
+            #
+            # Two-transaction ownership: import_wizard commits the forked skill in its
+            # OWN transaction, independent of the caller's outer session. If the
+            # per-agent loop below (or the endpoint's session.commit()) then fails, the
+            # fork persists with no mapping — an orphan local skill. This is
+            # self-healing: the resolve-or-fork lookup above reuses that orphan on the
+            # next attach of the same (skill, version), so no cleanup is required.
             result, _errors = this.module.import_wizard(
                 [payload], project_id, author_id,
             )
