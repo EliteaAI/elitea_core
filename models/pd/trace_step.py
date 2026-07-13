@@ -5,7 +5,13 @@ from pydantic import BaseModel, ConfigDict
 
 
 class TraceStepListItem(BaseModel):
-    """Light projection for the pin list: labels + ordering only, no heavy fields."""
+    """Light projection for the pin list: labels + ordering + the bounded display sidecar.
+
+    Carries `attrs` (small metadata/tool_meta sub-objects the FE draws on the resting chip — icon,
+    display name, toolkit type) so a reloaded chip renders correctly without a detail fetch. `attrs`
+    never holds the heavy fields (tool_output/text/thinking/tool_inputs), so it stays inline and never
+    detoasts — those remain detail-only.
+    """
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -20,6 +26,7 @@ class TraceStepListItem(BaseModel):
     step_type: Optional[str] = None
     model_name: Optional[str] = None
     finish_reason: Optional[str] = None
+    attrs: Optional[dict] = None
 
 
 class TraceStepDetail(TraceStepListItem):
@@ -28,4 +35,3 @@ class TraceStepDetail(TraceStepListItem):
     tool_output: Optional[str] = None
     text: Optional[str] = None
     thinking: Optional[str] = None
-    attrs: Optional[dict] = None
