@@ -1,7 +1,6 @@
-"""Write tool_calls / thinking_steps as normalized message_trace_step rows (TS-2, Epic #5724).
+"""Write tool_calls / thinking_steps as normalized message_trace_step rows (Epic #5724).
 
-Under the table-storage flag (see get_legacy_meta_tool_calls_storage_flag) the two heavy
-meta keys are no longer written to chat_message_group.meta; each step becomes one row.
+The two heavy meta keys are no longer written to chat_message_group.meta; each step becomes one row.
 
 Since #5731 the indexer emits DELTAS (one changed entry per event), not the full accumulated
 state, so meta can no longer reconstruct a turn. The table is therefore the accumulator: each
