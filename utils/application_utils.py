@@ -1462,9 +1462,9 @@ def get_application_version_details_expanded(
         if not result.get('skills'):
             result.pop('skills', None)
 
-        # Agent-only subtree depth (issue #5778), counting this version as tier 1. The UI
-        # add-guard uses it to allow nesting only while host_tier + candidate depth stays within
-        # MAX_AGENT_NESTING_TIERS. Derived from the same walker as the authoritative validator so
+        # Agent-only subtree contribution (issue #5778); a pipeline root contributes zero. The UI
+        # add-guard allows nesting only while host current tier + candidate contribution stays
+        # within MAX_AGENT_NESTING_TIERS. Derived from the authoritative validator's walker so
         # the two can't drift. Cheap (tools already selectin-loaded on the root; children are a
         # bounded walk) and off the chat hot path — this is the edit/detail path.
         try:

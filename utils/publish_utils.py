@@ -71,12 +71,12 @@ _MAX_SUB_AGENT_DEPTH = 3
 # tier 2, but a tier-3 node MUST be a leaf. Pipelines are exempt — they remain the sanctioned
 # deep-composition primitive (see is_container_version / _validate_child_subtree).
 #
-# Depth↔tier convention: the validation walk assigns depth=1 to the root's DIRECT children
-# (see _assert_no_invalid_nesting_in_session), so tier = depth + 1. A non-pipeline container is
-# therefore forbidden once depth >= MAX_AGENT_NESTING_TIERS - 1 (i.e. depth >= 2 = tier 3).
+# The validation walk carries the absolute number of agent tiers consumed. Each non-pipeline node
+# contributes one and every pipeline contributes zero. A non-pipeline container is forbidden when
+# its current contribution reaches MAX_AGENT_NESTING_TIERS because an agent child would be tier 4.
 # This is DISTINCT from _MAX_SUB_AGENT_DEPTH (publish walker, pipeline-inclusive, no leaf rule):
 # both permit 3 levels, but that walker counts the root as level 1 while this validator counts
-# the root's first child as depth 1 — do not conflate the two counters.
+# the agent contract is pipeline-transparent — do not conflate the two counters.
 MAX_AGENT_NESTING_TIERS = 3
 
 # Anti-runaway backstop for the VALIDATION walk (cycle + leaf-rule mode), where legitimate
@@ -386,6 +386,10 @@ def collect_sub_agent_tree(
     the publish-time collector only — one name, one meaning. The leaf-only / cycle enforcement
     used at bind-time and chat-resolution lives in ``assert_no_invalid_nesting`` (issue #5680).
     """
+    # Publishing and chat/bind resolution must enforce the same topology contract. The collector
+    # still skips pipeline materialization, but the validator walks through pipelines first so a
+    # hidden tier-4 agent or cycle cannot be published.
+    assert_no_invalid_nesting(project_id, version_id, session=session)
     visited: set = set()
     return _collect_sub_agents_recursive(
         project_id, version_id, max_depth, depth=0, visited=visited,
@@ -526,6 +530,16 @@ def is_container_version(version) -> bool:
     return any(t.type == 'application' for t in (version.tools or []))
 
 
+def agent_tier_contribution(version) -> int:
+    """Return the number of agent tiers consumed by ``version``.
+
+    Pipelines are composition primitives, not agent tiers. Keeping this rule in one helper makes
+    bind-time validation, publish validation, and the UI depth calculation agree on paths such as
+    ``Agent -> Pipeline -> Sub-orchestrator -> Leaf``.
+    """
+    return 0 if version.agent_type == AgentTypes.pipeline.value else 1
+
+
 def assert_no_invalid_nesting(
     project_id: int,
     version_id: int,
@@ -548,11 +562,10 @@ def assert_no_invalid_nesting(
     on any violation, ``ValueError`` on a missing/incomplete sub-agent reference. Returns ``None`` —
     it is an assertion, not a collector; callers that need the tree use ``collect_sub_agent_tree``.
 
-    ``start_depth`` is the depth assigned to ``version_id``'s DIRECT children (default 1 = the
-    version is the selected/root agent at tier 1). The bind path passes ``start_depth=2`` because
-    the child being bound is already tier 2 under an assumed tier-1 parent, so its own children
-    must land at tier 3 (leaves) — see the depth-aware leaf rule in ``_validate_child_subtree`` and
-    ``MAX_AGENT_NESTING_TIERS`` (issue #5778).
+    ``start_depth`` is the tier at which a non-pipeline ``version_id`` would be placed (default 1
+    for a selected/root agent; bind-time uses 2 for a candidate below a tier-1 parent). Pipelines
+    consume zero tiers, so a bound pipeline starts with one ancestor tier and its first agent child
+    is tier 2, not tier 3.
     """
     if session is not None:
         _assert_no_invalid_nesting_in_session(project_id, version_id, session, max_depth, start_depth)
@@ -580,12 +593,14 @@ def _assert_no_invalid_nesting_in_session(
 ) -> None:
     """Session-bound driver: load the root once, then walk each top-level tool's subtree.
 
-    ``start_depth`` is the depth of the root's DIRECT children (1 = root is tier 1; the bind path
-    passes 2 to validate a subtree that is already one level deep). See ``MAX_AGENT_NESTING_TIERS``.
+    ``start_depth`` is the tier at which a non-pipeline root would be placed. Its ancestor count is
+    therefore ``start_depth - 1``; the root adds one tier only when it is not a pipeline.
     """
     root = _load_version_with_tools(session, version_id)
     if root is None:
         raise ValueError(f"Version {version_id} not found in project {project_id}")
+
+    root_agent_tiers = max(start_depth - 1, 0) + agent_tier_contribution(root)
 
     for tool in (t for t in (root.tools or []) if t.type == 'application'):
         child_app_id = (tool.settings or {}).get('application_id')
@@ -607,7 +622,7 @@ def _assert_no_invalid_nesting_in_session(
                 child_app_id=child_app_id,
                 child_ver_id=child_ver_id,
                 tool_name=tool_name,
-                depth=start_depth,
+                agent_tiers=root_agent_tiers,
                 max_depth=max_depth,
                 path=set(),
             )
@@ -624,7 +639,7 @@ def _validate_child_subtree(
     child_app_id: int,
     child_ver_id: int,
     tool_name: str,
-    depth: int,
+    agent_tiers: int,
     max_depth: int,
     path: Set[tuple],
     child_version=None,
@@ -632,10 +647,9 @@ def _validate_child_subtree(
 ) -> None:
     """Recursively validate one sub-agent and everything beneath it.
 
-    ``depth`` is the AGENT-TIER depth of this node: it counts only agent→agent hops. A pipeline
-    hop is TRANSPARENT (issue #5778 decision) — pipelines are the exempt deep-composition
-    primitive and do NOT consume an agent tier — so descending through a pipeline passes ``depth``
-    through unchanged. ``raw_depth`` counts EVERY hop (agents and pipelines) purely as the
+    ``agent_tiers`` is the number of agent nodes already consumed by ancestors of this node. A
+    pipeline hop is TRANSPARENT (issue #5778 decision), while an agent node increments the count.
+    ``raw_depth`` counts EVERY hop (agents and pipelines) purely as the
     anti-runaway backstop, so a pathological pipeline-of-pipeline chain still can't walk unbounded
     even though it consumes no agent tiers.
 
@@ -672,18 +686,18 @@ def _validate_child_subtree(
         )
 
     is_pipeline_child = child_version.agent_type == AgentTypes.pipeline.value
+    current_agent_tiers = agent_tiers + agent_tier_contribution(child_version)
 
     # Depth-aware leaf rule (issue #5778, relaxing #5680's absolute ban): a non-pipeline agent
-    # child may itself be a container ONLY while there is still agent-tier budget below it — i.e.
-    # at tier 2 (depth == 1), where its own children land at tier 3 (leaves). Once depth >= 2
-    # (this node is already tier 3), a container is forbidden because its children would be tier 4.
-    # tier = depth + 1, so the container is allowed iff depth <= MAX_AGENT_NESTING_TIERS - 2.
+    # child may itself be a container ONLY while there is still agent-tier budget below it. Once
+    # the current node is already tier 3, a container is forbidden because its agent child would
+    # be tier 4.
     # Pipelines stay exempt — the sanctioned deep-composition primitive, still walked below, and
     # transparent to the agent-tier count (they don't push agent children deeper).
     if (
         not is_pipeline_child
         and is_container_version(child_version)
-        and depth > MAX_AGENT_NESTING_TIERS - 2
+        and current_agent_tiers >= MAX_AGENT_NESTING_TIERS
     ):
         raise SubAgentTreeError(
             f"Agent '{tool_name}' (version {child_ver_id}) uses other agents and is nested too "
@@ -697,14 +711,13 @@ def _validate_child_subtree(
         )
 
     # Descend. Add to the ancestor path for the duration of the subtree, then backtrack so a
-    # sibling reuse of the same leaf is not mistaken for a cycle. A pipeline hop is transparent to
-    # the agent-tier depth (pass `depth` through); an agent hop consumes one tier (`depth + 1`).
-    # `raw_depth` always increments (backstop only).
+    # sibling reuse of the same leaf is not mistaken for a cycle. The current tier count is passed
+    # to every child; each child contributes zero (pipeline) or one (agent). `raw_depth` always
+    # increments (backstop only).
     grandchild_tools = [t for t in (child_version.tools or []) if t.type == 'application']
     if not grandchild_tools:
         return
 
-    child_tier_depth = depth if is_pipeline_child else depth + 1
     path.add(key)
     for tool in grandchild_tools:
         gc_app_id = (tool.settings or {}).get('application_id')
@@ -720,7 +733,7 @@ def _validate_child_subtree(
             child_app_id=gc_app_id,
             child_ver_id=gc_ver_id,
             tool_name=gc_name,
-            depth=child_tier_depth,
+            agent_tiers=current_agent_tiers,
             max_depth=max_depth,
             path=path,
             raw_depth=raw_depth + 1,
@@ -777,24 +790,34 @@ def collect_reachable_version_ids(
 def compute_agent_subtree_tiers(
     project_id: int,
     version_id: int,
-    session,
+    session=None,
     max_depth: int = MAX_SUB_AGENT_VALIDATION_DEPTH,
 ) -> int:
-    """Return the AGENT-only nesting depth of a version's subtree, counting the version as tier 1.
+    """Return the AGENT-only nesting depth of a version's subtree.
 
-    Issue #5778: the UI add-guard needs to know "if I nest this candidate under a host, will the
-    combined tree stay within MAX_AGENT_NESTING_TIERS?" — which it computes as
-    ``host_tier + candidate_subtree_tiers <= MAX_AGENT_NESTING_TIERS``. This returns the candidate
-    side: 1 for a leaf (no sub-agents), 2 for a container whose children are all leaves, etc.
+    Issue #5778: the canonical add-guard is
+    ``host_current_tier + candidate_agent_tier_contribution <= MAX_AGENT_NESTING_TIERS``. This
+    returns that candidate contribution: 1 for an agent leaf, 2 for an agent container whose
+    children are leaves, and 0 for an empty pipeline (pipelines themselves consume no tier).
 
     Counting rules (must match ``_validate_child_subtree``'s notion of the agent budget):
-    * The version itself is tier 1.
+    * A non-pipeline version itself is tier 1; a pipeline root consumes zero tiers.
     * PIPELINE hops are TRANSPARENT (issue #5778 decision) — a pipeline does NOT consume an agent
       tier, but we DO descend THROUGH it so an agent nested below a pipeline is still counted at
       the correct agent-tier (``Agent → Pipeline → Agent`` = agent-tier 2, not 3).
     * Path-based guard prevents a cycle from inflating the count; ``max_depth`` (raw-hop backstop)
       caps a pathological config. On hitting either guard we stop descending that branch.
     """
+    if session is None:
+        with db.get_session(project_id) as project_session:
+            return compute_agent_subtree_tiers(
+                project_id, version_id, session=project_session, max_depth=max_depth,
+            )
+
+    root = _load_version_with_tools(session, version_id)
+    if root is None:
+        raise ValueError(f"Version {version_id} not found in project {project_id}")
+
     def _tiers(vid: int, agent_level: int, raw_level: int, path: Set[tuple]) -> int:
         if raw_level >= max_depth:
             return agent_level
@@ -815,14 +838,13 @@ def compute_agent_subtree_tiers(
                 continue
             # Pipeline hop: transparent to the agent tier (pass agent_level through) but still
             # descended so agents beneath it are counted; agent hop consumes one tier.
-            is_pipeline = child.agent_type == AgentTypes.pipeline.value
-            child_agent_level = agent_level if is_pipeline else agent_level + 1
+            child_agent_level = agent_level + agent_tier_contribution(child)
             path.add(key)
             deepest = max(deepest, _tiers(ver_id, child_agent_level, raw_level + 1, path))
             path.discard(key)
         return deepest
 
-    return _tiers(version_id, 1, 1, set())
+    return _tiers(version_id, agent_tier_contribution(root), 1, set())
 
 
 # ---------------------------------------------------------------------------

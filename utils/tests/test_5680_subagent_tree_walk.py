@@ -373,6 +373,28 @@ def test_bind_path_start_depth_2_allows_leaf_child_5778(pu):
     assert _assert(pu, registry, 2, start_depth=2) is None
 
 
+def test_bind_path_pipeline_is_tier_transparent_5778(pu):
+    # A(tier 1) binds P; P consumes no tier, so B is tier 2 and C is tier 3.
+    registry = {
+        2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+        4: FakeVersion(4, tools=[]),
+    }
+    assert _assert(pu, registry, 2, start_depth=2) is None
+
+
+def test_bind_path_pipeline_still_rejects_fourth_agent_tier_5778(pu):
+    registry = {
+        2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+        4: FakeVersion(4, tools=[FakeTool(5, 5)]),
+        5: FakeVersion(5, tools=[]),
+    }
+    with pytest.raises(pu.SubAgentTreeError) as ei:
+        _assert(pu, registry, 2, start_depth=2)
+    assert ei.value.error_code == 'container_child_forbidden'
+
+
 # --------------------------------------------------------------------------- #
 # #5778 — agent-subtree tier depth helper (drives the UI add-guard)
 # --------------------------------------------------------------------------- #
@@ -411,6 +433,20 @@ def test_compute_tiers_pipeline_transparent(pu):
         3: FakeVersion(3, tools=[]),
     }
     assert _tiers(pu, registry, 1) == 2
+
+
+def test_compute_tiers_pipeline_root_consumes_zero_tiers_5778(pu):
+    registry = {
+        1: FakeVersion(1, agent_type='pipeline', tools=[FakeTool(2, 2)]),
+        2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+        3: FakeVersion(3, tools=[]),
+    }
+    assert _tiers(pu, registry, 1) == 2
+
+
+def test_compute_tiers_empty_pipeline_contributes_zero_5778(pu):
+    registry = {1: FakeVersion(1, agent_type='pipeline', tools=[])}
+    assert _tiers(pu, registry, 1) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -471,18 +507,19 @@ def test_validation_walk_queries_each_node_once(pu):
 
 
 # --------------------------------------------------------------------------- #
-# Publish path (collect_sub_agent_tree) unchanged: pipelines skipped, not walked
+# Publish path: pipelines are not materialized, but topology is validated first
 # --------------------------------------------------------------------------- #
 
 def test_publish_path_skips_pipeline_children(pu):
-    # A(v1)->P(v2, pipeline)->A(v1). In PUBLISH mode the pipeline is skipped, so the
-    # back-reference is NOT walked and no cycle is raised — matches prior behavior.
+    # Materialization still skips pipelines, but the centralized validator catches the hidden
+    # cycle before publishing.
     registry = {
         1: FakeVersion(1, tools=[FakeTool(2, 2)]),
         2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(1, 1)]),
     }
-    tree = _collect(pu, registry, 1)
-    assert tree == []  # pipeline child skipped, nothing collected
+    with pytest.raises(pu.SubAgentTreeError) as ei:
+        _collect(pu, registry, 1)
+    assert ei.value.error_code == 'cycle_detected'
 
 
 def test_publish_path_collects_agent_tree(pu):

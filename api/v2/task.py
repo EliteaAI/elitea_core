@@ -7,10 +7,12 @@ from ...models.enums.all import ParticipantTypes
 from ...models.pd.message import MessageGroupDetail
 from ...models.message_items.text import TextMessageItem
 from ...models.message_group import ConversationMessageGroup
+from sqlalchemy.orm.attributes import flag_modified
 
 from ...utils.sio_utils import get_chat_room
 from ...utils.sio_utils import SioEvents
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.parallel_hitl import retire_all_interrupts
 
 
 from pylon.core.tools import log
@@ -35,7 +37,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         with db.get_session(project_id) as session:
             msg_group = session.query(ConversationMessageGroup).filter(
                 ConversationMessageGroup.uuid == message_group_uuid
-            ).first()
+            ).with_for_update(of=ConversationMessageGroup).first()
 
             user_id = auth.current_user().get('id')
             if user_id != msg_group.conversation.author_id:
@@ -56,6 +58,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             self.module.mark_chat_run_stopped(message_group_uuid)
 
             msg_group.is_streaming = False
+            if msg_group.meta:
+                msg_group.meta = retire_all_interrupts(msg_group.meta)
+                flag_modified(msg_group, 'meta')
             msg_group_deleted = False
             thinking_steps = msg_group.meta.get('thinking_steps', [])
 

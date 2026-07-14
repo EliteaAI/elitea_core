@@ -3,7 +3,7 @@
 Run standalone (no pylon runtime needed) with the project venv:
 
     source projects/venv/bin/activate
-    pytest utils/tests/test_tool_call_dedup.py -v
+    pytest --rootdir=utils/tests --import-mode=importlib utils/tests/test_tool_call_dedup.py -v
 
 The module under test imports only ``json`` so it loads in isolation; we add the
 parent ``utils/`` dir to sys.path and import it directly.
@@ -184,6 +184,22 @@ def test_parallel_same_args_two_survivors():
         assert tc['tool_output'], f'survivor {run_id} should be a real completion'
 
 
+def test_parallel_same_args_in_different_root_instances_do_not_collapse():
+    """In-flight B1 and B2 may run the same leaf with identical input.
+
+    Both placeholders must remain visible before either completion; completion
+    epochs alone cannot distinguish parallel invocations at that point.
+    """
+    first = _wrapper('A', 'u-a', '2024-01-01T00:00:01', tool_output=None)
+    second = _wrapper('B', 'u-b', '2024-01-01T00:00:02', tool_output=None)
+    first['metadata']['child_thread_id'] = 'child-B1'
+    second['metadata']['child_thread_id'] = 'child-B2'
+
+    result = d._dedupe_replayed_tool_calls({'A': first, 'B': second})
+
+    assert list(result) == ['A', 'B']
+
+
 # --------------------------------------------------------------------------- #
 # Genuinely distinct calls — never merged
 # --------------------------------------------------------------------------- #
@@ -208,7 +224,7 @@ def test_distinct_inputs_not_merged():
 def test_identity_tolerates_non_dict_meta_fields():
     """A corrupt/partial entry whose ``metadata`` or ``tool_meta`` round-tripped
     as a non-dict (stray string/number/list/None) must still yield a 4-tuple
-    identity instead of raising AttributeError on the ``.get()`` calls — dedup
+        identity instead of raising AttributeError on the ``.get()`` calls — dedup
     runs on every partial save and must not break the persist path."""
     for bad in ('oops', 42, ['x'], None):
         tc = {
@@ -218,7 +234,7 @@ def test_identity_tolerates_non_dict_meta_fields():
             'tool_inputs': {'task': 'Resolve name Roman'},
         }
         identity = d._tool_call_identity(tc)
-        assert isinstance(identity, tuple) and len(identity) == 4, identity
+        assert isinstance(identity, tuple) and len(identity) == 5, identity
         # name falls back to tool_name when tool_meta is unusable.
         assert identity[0] == 'Name Resolver', identity
 
@@ -233,7 +249,7 @@ def test_identity_tolerates_non_dict_nested_tool_meta_metadata():
         'tool_inputs': {'q': 1},
     }
     identity = d._tool_call_identity(tc)
-    assert isinstance(identity, tuple) and len(identity) == 4, identity
+    assert isinstance(identity, tuple) and len(identity) == 5, identity
     assert identity[0] == 'inner_tool', identity
 
 

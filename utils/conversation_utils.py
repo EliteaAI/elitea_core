@@ -389,7 +389,7 @@ def get_conversation_details(
             # depth-aware (rpc/chat_all.generate_toolkit_payload skips only when the bound subtree
             # exceeds the tier budget). This flag is retained as a factual "uses other agents"
             # signal for the participant chip; consumers deciding whether it can be nested should
-            # use the version_details.agent_subtree_tiers depth field, not this boolean.
+            # use the version_details.agent_subtree_tiers contribution field, not this boolean.
             # Pipelines are the sanctioned deep-composition primitive and are never flagged.
             participant['meta']['is_container'] = (
                 version_details.get('agent_type') != AgentTypes.pipeline.value
@@ -398,6 +398,33 @@ def get_conversation_details(
                     for t in (version_details.get('tools') or [])
                 )
             )
+            # Agent-only subtree contribution (issue #5778); a pipeline participant contributes
+            # zero for itself. The chat UI participant gate uses it to decide whether a
+            # container can still be nested (host current tier + candidate contribution within
+            # MAX_AGENT_NESTING_TIERS) instead of the blunt is_container ban —
+            # mirrors application_utils.get_application_version_details_expanded so
+            # the two can't drift. Advisory: never fail conversation fetch over it,
+            # and the UI degrades gracefully (defers to backend) when absent.
+            try:
+                from .publish_utils import (
+                    compute_agent_subtree_tiers,
+                    MAX_AGENT_NESTING_TIERS,
+                )
+                participant['meta']['agent_subtree_tiers'] = compute_agent_subtree_tiers(
+                    participant['entity_meta']['project_id'],
+                    participant['entity_settings']['version_id'],
+                    session=(
+                        session
+                        if participant['entity_meta']['project_id'] == project_id
+                        else None
+                    ),
+                )
+                participant['meta']['max_agent_nesting_tiers'] = MAX_AGENT_NESTING_TIERS
+            except Exception as depth_err:
+                log.warning(
+                    "Could not compute agent_subtree_tiers for participant version "
+                    f"{participant['entity_settings'].get('version_id')}: {depth_err}"
+                )
 
     return ConversationDetails.model_validate(conversation_dict)
 
