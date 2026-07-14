@@ -253,6 +253,25 @@ class Module(module.ModuleModel):
                  self.is_publish_blocked, self.publish_whitelist_project_ids,
                  bool(self.publish_validation_rules))
 
+    def _init_skill_publishing_guardrail(self):
+        """Cache skill publishing guardrail settings from config."""
+        guardrail = self.descriptor.config.get('skill_publishing_guardrail', {})
+        self.is_skill_publish_blocked = guardrail.get('is_publish_blocked', False)
+        self.skill_publish_whitelist_project_ids = set(
+            int(x) for x in guardrail.get('whitelist_project_ids', [])
+            if isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit())
+        )
+        self.skill_publish_validation_rules = guardrail.get(
+            'publish_validation_rules', '',
+        )
+        # Extra admin-added skill categories (on top of DEFAULT_SKILL_CATEGORIES).
+        # The active list is resolved live by skill_category_utils.get_active_skill_categories();
+        # this attribute is cached only for logging visibility at init / reload.
+        self.extra_skill_categories = guardrail.get('skill_categories', [])
+        log.info("Skill publishing guardrail: blocked=%s, whitelist=%s, custom_rules=%s",
+                 self.is_skill_publish_blocked, self.skill_publish_whitelist_project_ids,
+                 bool(self.skill_publish_validation_rules))
+
     def preload(self):
         """Preload handler - download UI bundle if needed"""
         log.info("Preloading UI bundle")
@@ -347,6 +366,12 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_skill_publish_columns", self.migrate_skill_publish_columns, group="R-2.0.5",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "rename_skill_category", self.rename_skill_category,
+            )
+            this.for_module("admin").module.register_admin_task(
+                "reassign_skill_category", self.reassign_skill_category,
             )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
@@ -596,6 +621,7 @@ class Module(module.ModuleModel):
 
         # Publishing guardrail (environment-wide block)
         self._init_publishing_guardrail()
+        self._init_skill_publishing_guardrail()
 
         from .models import all, folder, message_group, participants
         from .models.message_items import base, text, canvas, context

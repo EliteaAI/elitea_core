@@ -38,6 +38,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "publish_whitelist_project_ids": list(
                 getattr(this.module, 'publish_whitelist_project_ids', set())
             ),
+            "is_skill_publish_blocked": getattr(this.module, 'is_skill_publish_blocked', False),
+            "skill_publish_whitelist_project_ids": list(
+                getattr(this.module, 'skill_publish_whitelist_project_ids', set())
+            ),
         }, 200
 
 
