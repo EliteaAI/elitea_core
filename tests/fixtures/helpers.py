@@ -36,19 +36,29 @@ def load_module_with_stubs(
     return module
 
 
-def load_utils_module(utils_path: pathlib.Path, module_name: str, stubs: Optional[Dict[str, Any]] = None):
+def load_utils_module(
+    utils_path: pathlib.Path,
+    module_name: str,
+    stubs: Optional[Dict[str, Any]] = None,
+    extra_stubs: Optional[Dict[str, Any]] = None
+):
     """Convenience wrapper for loading utils modules.
 
     Args:
         utils_path: Path to the utils/ directory
         module_name: Module name without path (e.g., 'tool_call_dedup')
-        stubs: Optional dict of stub modules
+        stubs: Optional dict of stub modules (replaces defaults)
+        extra_stubs: Additional stubs to merge with defaults
 
     Returns:
         The loaded module
     """
+    final_stubs = stubs or {}
+    if extra_stubs:
+        final_stubs = {**final_stubs, **extra_stubs}
+
     return load_module_with_stubs(
         utils_path / f'{module_name}.py',
         f'plugins.elitea_core.utils.{module_name}',
-        stubs
+        final_stubs if final_stubs else None
     )

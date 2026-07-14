@@ -30,7 +30,7 @@ def application_tools_module():
         mod = sys.modules.setdefault(name, types.ModuleType(name))
         mod.__path__ = []
 
-    # Pylon stubs
+    # Pylon stubs - use setdefault to not overwrite run_tests.py stubs
     pylon = types.ModuleType("pylon")
     core = types.ModuleType("pylon.core")
     tools_mod = types.ModuleType("pylon.core.tools")
@@ -38,11 +38,12 @@ def application_tools_module():
         info=lambda *a, **k: None,
         warning=lambda *a, **k: None,
         error=lambda *a, **k: None,
+        debug=lambda *a, **k: None,
         exception=lambda *a, **k: None,
     )
     sys.modules.setdefault("pylon", pylon)
     sys.modules.setdefault("pylon.core", core)
-    sys.modules["pylon.core.tools"] = tools_mod
+    sys.modules.setdefault("pylon.core.tools", tools_mod)
 
     # tools package stub - must have proper attributes for `from tools import ...`
     tools_pkg = types.ModuleType("tools")

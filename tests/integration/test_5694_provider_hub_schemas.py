@@ -27,8 +27,15 @@ def provider_hub_module():
 
     class _Log:
         @staticmethod
-        def exception(*_args, **_kwargs):
-            pass
+        def info(*_args, **_kwargs): pass
+        @staticmethod
+        def debug(*_args, **_kwargs): pass
+        @staticmethod
+        def warning(*_args, **_kwargs): pass
+        @staticmethod
+        def error(*_args, **_kwargs): pass
+        @staticmethod
+        def exception(*_args, **_kwargs): pass
 
     class _Web:
         def __getattr__(self, _name):
@@ -42,7 +49,7 @@ def provider_hub_module():
     tools_mod.web = _Web()
     sys.modules.setdefault("pylon", pylon)
     sys.modules.setdefault("pylon.core", core)
-    sys.modules["pylon.core.tools"] = tools_mod
+    sys.modules.setdefault("pylon.core.tools", tools_mod)
 
     tools_pkg = types.ModuleType("tools")
     tools_pkg.auth = types.SimpleNamespace(decorators=types.SimpleNamespace())

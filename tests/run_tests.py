@@ -35,9 +35,13 @@ def install_minimal_stubs():
         @staticmethod
         def warning(*a, **k): pass
         @staticmethod
+        def warn(*a, **k): pass
+        @staticmethod
         def error(*a, **k): pass
         @staticmethod
         def debug(*a, **k): pass
+        @staticmethod
+        def trace(*a, **k): pass
         @staticmethod
         def exception(*a, **k): pass
         @staticmethod
