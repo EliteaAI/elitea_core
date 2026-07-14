@@ -6,11 +6,7 @@ from ..models.message_group import ConversationMessageGroup
 
 from pylon.core.tools import log
 
-# HITL-replay tool_call dedup (identity + completion-epoch grouping) lives in a
-# pure, dependency-free module so it can be unit-tested without the pylon
-# runtime (see utils/tests/test_tool_call_dedup.py). Re-imported here so the
-# call site below keeps working unchanged.
-from .tool_call_dedup import _dedupe_replayed_tool_calls
+from .trace_step_writer import sync_trace_steps
 
 
 def safe_decode_bytes_in_dict(obj):
@@ -78,49 +74,22 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
     }
     new_meta.update({k: v for k, v in response_meta_fields.items() if v is not None})
 
-    # Merge tool_calls to preserve tools from previous "Continue" runs
-    # Tool calls are dicts keyed by run_id (UUID), use run_id for deduplication
-    # IMPORTANT: Update existing entries to capture tool_output from full_message events
+    # tool_calls / thinking_steps storage (Epic #5724). Since #5731 the indexer sends DELTAS
+    # (one changed entry per event), not the full accumulated state, so these are the incoming
+    # delta. The message_trace_step table is the accumulator: write the delta as rows (dedup
+    # against existing rows happens there) and keep the two heavy keys OUT of meta.
     new_tool_calls = response_meta.get('tool_calls') or {}
-    old_tool_calls = old_meta.get('tool_calls', {})
-
-    if old_tool_calls and new_tool_calls:
-        # Merge old and new, with new values taking precedence (to capture tool_output updates)
-        merged_tool_calls = {**old_tool_calls, **new_tool_calls}
-        new_meta['tool_calls'] = merged_tool_calls
-    elif old_tool_calls:
-        new_meta['tool_calls'] = old_tool_calls
-    elif new_tool_calls:
-        new_meta['tool_calls'] = new_tool_calls
-    else:
-        new_meta['tool_calls'] = {}
-
-    # Collapse HITL-replay duplicate chips (#4993). A pipeline sub-agent with N
-    # sensitive tool calls pauses N times; each resume replays the graph from its
-    # checkpoint and re-fires on_tool_start for the embedded agent node with a
-    # fresh run_id + checkpoint uuid, so the parent meta accumulates N near-empty
-    # invocation chips, only the last of which completes. Keep the completed entry
-    # per identity; real distinct tool calls differ by inputs and are untouched.
-    new_meta['tool_calls'] = _dedupe_replayed_tool_calls(new_meta['tool_calls'])
-
     new_thinking_steps = response_meta.get('thinking_steps') or []
-    old_thinking_steps = old_meta.get('thinking_steps', [])
 
-    if old_thinking_steps and new_thinking_steps:
-        old_timestamps = {
-            step.get('timestamp_start')
-            for step in old_thinking_steps
-            if isinstance(step, dict) and step.get('timestamp_start')
-        }
-        unique_new_steps = [
-            step for step in new_thinking_steps
-            if not isinstance(step, dict) or step.get('timestamp_start') not in old_timestamps
-        ]
-        new_meta['thinking_steps'] = old_thinking_steps + unique_new_steps
-    elif old_thinking_steps:
-        new_meta['thinking_steps'] = old_thinking_steps
+    if session is not None:
+        sync_trace_steps(session, msg_group.id, new_tool_calls, new_thinking_steps)
     else:
-        new_meta['thinking_steps'] = new_thinking_steps
+        log.warning(
+            'update_message_group_meta: no session; skipping trace-step write for group %s',
+            msg_group.id
+        )
+    new_meta.pop('tool_calls', None)
+    new_meta.pop('thinking_steps', None)
 
     new_invoked_skills = response_meta.get('invoked_skills') or []
     old_invoked_skills = old_meta.get('invoked_skills', [])

@@ -1,12 +1,12 @@
 from flask import request
 from uuid import uuid4
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm.attributes import flag_modified
 from pydantic import ValidationError
 
 from tools import api_tools, auth, db, config as c, serialize, register_openapi
 
 from ...models.message_group import ConversationMessageGroup
+from ...models.message_trace_step import MessageTraceStep
 from ...models.message_items.attachment import AttachmentMessageItem
 from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
@@ -155,10 +155,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             msg_group.meta = begin_execution_generation(
                 retire_all_interrupts(msg_group.meta), execution_generation,
             )
-            msg_group.meta['thinking_steps'] = []
-            msg_group.meta['tool_calls'] = {}
+            # Clear the group's trace steps (rows are the accumulator; regenerate starts fresh).
+            session.query(MessageTraceStep).filter(
+                MessageTraceStep.message_group_id == msg_group.id
+            ).delete(synchronize_session=False)
             msg_group.is_streaming = True
-            flag_modified(msg_group, 'meta')
             session.commit()
             session.refresh(msg_group)
 
