@@ -254,21 +254,18 @@ class Module(module.ModuleModel):
                  bool(self.publish_validation_rules))
 
     def _init_skill_publishing_guardrail(self):
-        """Cache skill publishing guardrail settings from config."""
+        """Log skill publishing guardrail settings.
+
+        The block toggle, whitelist and validation rules are read live from
+        config at use time (see skill_publish_utils), so admin changes take
+        effect without a reload. Skill categories reuse the shared agent
+        category list (publishing_guardrail.agent_categories).
+        """
         guardrail = self.descriptor.config.get('skill_publishing_guardrail', {})
-        self.is_skill_publish_blocked = guardrail.get('is_publish_blocked', False)
-        self.skill_publish_whitelist_project_ids = set(
-            int(x) for x in guardrail.get('whitelist_project_ids', [])
-            if isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit())
-        )
-        self.skill_publish_validation_rules = guardrail.get(
-            'publish_validation_rules', '',
-        )
-        # Skill categories reuse the shared agent category list (publishing_guardrail.agent_categories);
-        # there is no separate skill-category config.
-        log.info("Skill publishing guardrail: blocked=%s, whitelist=%s, custom_rules=%s",
-                 self.is_skill_publish_blocked, self.skill_publish_whitelist_project_ids,
-                 bool(self.skill_publish_validation_rules))
+        log.info("Skill publishing guardrail (live): blocked=%s, whitelist=%s, custom_rules=%s",
+                 bool(guardrail.get('is_publish_blocked', False)),
+                 guardrail.get('whitelist_project_ids', []),
+                 bool(guardrail.get('publish_validation_rules', '')))
 
     def preload(self):
         """Preload handler - download UI bundle if needed"""

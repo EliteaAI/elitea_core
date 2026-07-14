@@ -398,7 +398,7 @@ DEFAULT_SKILL_VALIDATION_PROMPT = _SKILL_VALIDATION_PROMPT_TEMPLATE.format(
 
 
 def _build_skill_validation_prompt() -> str:
-    custom_rules = (getattr(this.module, 'skill_publish_validation_rules', '') or '').strip()
+    custom_rules = get_skill_publish_validation_rules().strip()
     if custom_rules:
         return _SKILL_VALIDATION_PROMPT_TEMPLATE.format(
             skill_validation_rules=custom_rules,
@@ -626,12 +626,32 @@ def validate_skill_for_publish(
     return merged
 
 
+def _skill_guardrail_config() -> dict:
+    """Live guardrail config (read each call so admin changes need no reload)."""
+    return this.descriptor.config.get('skill_publishing_guardrail', {}) or {}
+
+
+def get_skill_publish_blocked() -> bool:
+    return bool(_skill_guardrail_config().get('is_publish_blocked', False))
+
+
+def get_skill_publish_whitelist() -> set:
+    raw = _skill_guardrail_config().get('whitelist_project_ids', []) or []
+    return set(
+        int(x) for x in raw
+        if isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit())
+    )
+
+
+def get_skill_publish_validation_rules() -> str:
+    return _skill_guardrail_config().get('publish_validation_rules', '') or ''
+
+
 def is_skill_publish_blocked_for_project(project_id: int) -> bool:
     """Platform guardrail; defaults to not-blocked until admin config exists."""
-    if not getattr(this.module, 'is_skill_publish_blocked', False):
+    if not get_skill_publish_blocked():
         return False
-    whitelist = getattr(this.module, 'skill_publish_whitelist_project_ids', set()) or set()
-    return project_id not in whitelist
+    return project_id not in get_skill_publish_whitelist()
 
 
 def create_skill_publish_snapshot(
