@@ -32,3 +32,11 @@ class ContinuePredictPayload(BaseModel):
         if self.hitl_resume and self.hitl_action is None:
             raise ValueError("hitl_action is required when hitl_resume is true")
         return self
+
+    @model_validator(mode='after')
+    def require_hitl_value_for_text_actions(self):
+        # 'edit' needs the replacement text; 'block_with_comment' needs the note.
+        # Without this the resume proceeds silently on a downstream fallback.
+        if self.hitl_action in ("edit", "block_with_comment") and not self.hitl_value:
+            raise ValueError(f"hitl_value is required when hitl_action is '{self.hitl_action}'")
+        return self

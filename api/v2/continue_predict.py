@@ -5,17 +5,13 @@ from pylon.core.tools import log
 
 from ...models.conversation import Conversation
 from ...models.message_group import ConversationMessageGroup
-from ...models.pd.message import MessageGroupDetail
 from ...models.pd.continue_predict import ContinuePredictPayload
-from ...utils.conversation_utils import _message_group_columns, fetch_guarded_message_groups
+from ...utils.conversation_utils import (
+    _message_group_columns, fetch_guarded_message_groups, _serialize_guarded_groups,
+)
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.sio_utils import SioValidationError
 from ...utils.exceptions import PoolSaturationError
-
-
-def _serialize_guarded_groups(group_dicts: list) -> list:
-    """Validate guarded message-group dicts through MessageGroupDetail to the JSON output shape."""
-    return [MessageGroupDetail.model_validate(g).model_dump(mode='json') for g in group_dicts]
 
 
 class PromptLibAPI(api_tools.APIModeHandler):

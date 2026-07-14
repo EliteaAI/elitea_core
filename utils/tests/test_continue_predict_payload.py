@@ -1,10 +1,10 @@
 """Unit tests for ContinuePredictPayload (HITL resume / continue).
 
 The model imports only pydantic + stdlib, so it loads in isolation; we add the
-parent ``models/pd/`` dir to sys.path and import it directly.
+``models/pd/`` dir to sys.path and import it directly.
 
-    python3 -m pytest --rootdir=models/pd/tests --import-mode=importlib \
-        models/pd/tests/test_continue_predict_payload.py -v
+    python3 -m pytest --rootdir=utils/tests --import-mode=importlib \
+        utils/tests/test_continue_predict_payload.py -v
 """
 
 import importlib
@@ -14,7 +14,8 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+_MODELS_PD = pathlib.Path(__file__).resolve().parents[2] / "models" / "pd"
+sys.path.insert(0, str(_MODELS_PD))
 
 ContinuePredictPayload = importlib.import_module("continue_predict").ContinuePredictPayload
 
@@ -35,15 +36,19 @@ def test_valid_approve_defaults():
     assert m.await_task_timeout == 30
 
 
-def test_edit_with_value():
-    m = ContinuePredictPayload.model_validate(_base(hitl_action="edit", hitl_value="use v2"))
-    assert m.hitl_action == "edit"
-    assert m.hitl_value == "use v2"
-
-
-@pytest.mark.parametrize("action", ["approve", "reject", "edit", "block_with_comment"])
-def test_all_valid_actions(action):
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_value_free_actions_ok_without_value(action):
     assert ContinuePredictPayload.model_validate(_base(hitl_action=action)).hitl_action == action
+
+
+@pytest.mark.parametrize("action", ["edit", "block_with_comment"])
+def test_text_actions_require_value(action):
+    # without hitl_value -> rejected
+    with pytest.raises(ValidationError):
+        ContinuePredictPayload.model_validate(_base(hitl_action=action))
+    # with hitl_value -> ok
+    m = ContinuePredictPayload.model_validate(_base(hitl_action=action, hitl_value="some text"))
+    assert m.hitl_value == "some text"
 
 
 def test_invalid_action_rejected():
