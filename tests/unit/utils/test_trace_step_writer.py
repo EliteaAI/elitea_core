@@ -1,9 +1,53 @@
-from plugins.elitea_core.utils.trace_step_writer import (
-    _merge_thinking_steps,
-    _row_key,
-    thinking_step_to_row,
-    tool_call_to_row,
+import importlib.util
+import pathlib
+import sys
+import types
+
+
+PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+
+def _load_module(name, relative_path):
+    spec = importlib.util.spec_from_file_location(name, PLUGIN_ROOT / relative_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+for package_name in (
+    'plugins',
+    'plugins.elitea_core',
+    'plugins.elitea_core.models',
+    'plugins.elitea_core.utils',
+):
+    package = types.ModuleType(package_name)
+    package.__path__ = []
+    sys.modules.setdefault(package_name, package)
+
+
+class _MessageTraceStep:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+message_trace_step = types.ModuleType('plugins.elitea_core.models.message_trace_step')
+message_trace_step.MessageTraceStep = _MessageTraceStep
+sys.modules['plugins.elitea_core.models.message_trace_step'] = message_trace_step
+
+_load_module(
+    'plugins.elitea_core.utils.tool_call_dedup',
+    'utils/tool_call_dedup.py',
 )
+trace_step_writer = _load_module(
+    'plugins.elitea_core.utils.trace_step_writer',
+    'utils/trace_step_writer.py',
+)
+
+_merge_thinking_steps = trace_step_writer._merge_thinking_steps
+_row_key = trace_step_writer._row_key
+thinking_step_to_row = trace_step_writer.thinking_step_to_row
+tool_call_to_row = trace_step_writer.tool_call_to_row
 
 
 def test_tool_attrs_keep_display_lineage_and_drop_arbitrary_metadata():

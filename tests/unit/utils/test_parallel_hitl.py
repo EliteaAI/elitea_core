@@ -5,7 +5,8 @@ import pathlib
 
 
 _SPEC = importlib.util.spec_from_file_location(
-    'parallel_hitl', pathlib.Path(__file__).resolve().parents[1] / 'parallel_hitl.py',
+    'parallel_hitl',
+    pathlib.Path(__file__).resolve().parents[3] / 'utils' / 'parallel_hitl.py',
 )
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
@@ -289,7 +290,7 @@ def test_child_decisions_require_exact_unique_identities_and_valid_actions():
 
 
 def test_regenerate_clears_stopped_flag_but_continue_does_not():
-    plugin_root = pathlib.Path(__file__).resolve().parents[2]
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
     regenerate_source = (plugin_root / 'api' / 'v2' / 'regenerate.py').read_text()
     continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
     authorization_index = regenerate_source.index('auth.current_user().get("id") not in')
@@ -303,7 +304,7 @@ def test_regenerate_clears_stopped_flag_but_continue_does_not():
 
 
 def test_all_hitl_jsonb_mutations_lock_the_message_row_and_stop_clears_cards():
-    plugin_root = pathlib.Path(__file__).resolve().parents[2]
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
     event_source = (plugin_root / 'events' / 'message_stream.py').read_text()
     continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
     stop_source = (plugin_root / 'api' / 'v2' / 'task.py').read_text()

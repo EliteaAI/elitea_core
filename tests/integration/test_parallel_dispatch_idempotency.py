@@ -1,6 +1,16 @@
 """Launch-once regression tests for durable parallel dispatch."""
 
-from methods.parallel_dispatch import Method
+import importlib.util
+import pathlib
+
+
+_SPEC = importlib.util.spec_from_file_location(
+    'parallel_dispatch',
+    pathlib.Path(__file__).resolve().parents[2] / 'methods' / 'parallel_dispatch.py',
+)
+_MODULE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_MODULE)
+Method = _MODULE.Method
 
 
 class _Redis:
