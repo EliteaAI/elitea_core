@@ -44,16 +44,19 @@ class TestAnalyticsAgentsTokenColumns:
 
 class TestAnalyticsToolsTokenColumns:
     def test_input_tokens_referenced(self):
+        """Tool events never carry token counts — input_tokens must NOT be in tools source."""
         src = _get_source("analytics_tools.py")
-        assert "input_tokens" in src
+        assert "input_tokens" not in src, "input_tokens should not be in tools endpoint (tool events never carry tokens)"
 
     def test_output_tokens_referenced(self):
+        """Tool events never carry token counts — output_tokens must NOT be in tools source."""
         src = _get_source("analytics_tools.py")
-        assert "output_tokens" in src
+        assert "output_tokens" not in src, "output_tokens should not be in tools endpoint (tool events never carry tokens)"
 
     def test_total_tokens_in_response(self):
+        """Tool events never carry token counts — total_tokens must NOT be in tools source."""
         src = _get_source("analytics_tools.py")
-        assert "total_tokens" in src
+        assert "total_tokens" not in src, "total_tokens should not be in tools endpoint (tool events never carry tokens)"
 
     def test_llm_cost_intentionally_omitted(self):
         """Tools are not LLM calls; llm_cost is intentionally not tracked per-tool (ADR-0008 P3-T02)."""
