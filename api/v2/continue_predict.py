@@ -105,7 +105,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         # Blocking path: the resumed response message (message_id) is complete. Return it plus its
         # question in the same {"message_groups": [...]} shape as Send Message.
         with db.get_session(project_id) as session:
-            response_group = session.query(ConversationMessageGroup).filter(
+            response_group = session.query(
+                ConversationMessageGroup.id, ConversationMessageGroup.reply_to_id
+            ).filter(
                 ConversationMessageGroup.uuid == parsed.message_id
             ).first()
             if response_group is None:
