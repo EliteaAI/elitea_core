@@ -149,9 +149,9 @@ class SkillIconChecker(BaseChecker):
         icon_meta = data.get('icon_meta')
         if not icon_meta or not isinstance(icon_meta, dict):
             result.issue(
-                'warnings', 'icon',
+                'critical', 'icon',
                 'No custom icon set',
-                'Add a custom icon to improve marketplace visibility', context,
+                'Add a custom icon before publishing', context,
             )
 
 
