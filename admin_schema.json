@@ -150,7 +150,7 @@
       "type": "array",
       "items": { "type": "string" },
       "title": "Agent Categories",
-      "description": "Additional agent categories available in the publish modal and Agent Studio filter bar, on top of the built-in defaults. Built-in defaults (including \"Other\") cannot be removed here. New categories take effect immediately without a restart. Use the \"Rename agent category\" admin task to rename a category across already published agents.",
+      "description": "Additional categories available in the agent and skill publish modals and catalog filter bars, on top of the built-in defaults. Agents and skills share one category list. Built-in defaults (including \"Other\") cannot be removed here. New categories take effect immediately without a restart. Use the \"Rename agent category\" admin task to rename a category across already published agents.",
       "path": "publishing_guardrail.agent_categories",
       "section": "guardrails",
       "default": [],
@@ -186,16 +186,6 @@
       "section": "guardrails",
       "default": "",
       "requires_restart": true
-    },
-    "skill_categories": {
-      "type": "array",
-      "items": { "type": "string" },
-      "title": "Skill Categories",
-      "description": "Additional skill categories available in the publish modal and Skills Studio filter bar, on top of the built-in defaults. Built-in defaults (Code & Development, Writing & Communication, Analysis & Research, Data & Transformation, Productivity & Automation, Creative & Design, Testing & QA, Documentation, Security & Compliance, Other) cannot be removed here. New categories take effect immediately without a restart. Use the \"Rename skill category\" admin task to rename a category across already published skills.",
-      "path": "skill_publishing_guardrail.skill_categories",
-      "section": "guardrails",
-      "default": [],
-      "requires_restart": false
     },
     "ai_project_id": {
       "type": "integer",

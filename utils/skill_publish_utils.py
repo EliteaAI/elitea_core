@@ -12,8 +12,10 @@ from tools import db, this, rpc_tools
 
 from ..models.all import Tag
 from ..models.enums.all import NotificationEventTypes, PublishStatus
+from ..models.pd.collection_base import TagBaseModel
 from ..models.pd.publish import VERSION_NAME_PATTERN
 from ..models.pd.skill_publish import SkillPublishAIResult
+from ..models.pd.skill_version import SkillVersionCreateModel
 from ..models.skill import Skill, SkillVersion
 from .publish_utils import (
     ACTION_VERB_RE,
@@ -891,6 +893,42 @@ def _guard_additional_publish(
     return None
 
 
+def _clone_source_version_for_publish(
+    project_id: int,
+    skill_id: int,
+    version_id: int,
+    version_name: str,
+    user_id: int,
+) -> int:
+    """Materialise a new source ``SkillVersion`` named ``version_name`` copied
+    from ``version_id``, and return its id.
+
+    Mirrors agent publishing (``clone_version``): publishing snapshots a fresh
+    version rather than mutating the one the user is editing. Raises
+    ``SkillVersionConflictError`` if ``version_name`` is already taken.
+    """
+    from .skill_utils import create_skill_version
+
+    with db.get_session(project_id) as session:
+        src = (
+            session.query(SkillVersion)
+            .filter(SkillVersion.skill_id == skill_id, SkillVersion.id == version_id)
+            .first()
+        )
+        if src is None:
+            raise ValueError(f"Skill version {version_id} not found for skill {skill_id}")
+        version_data = SkillVersionCreateModel(
+            name=version_name,
+            instructions=src.instructions or '',
+            author_id=user_id,
+            tags=[TagBaseModel(name=t.name, data=t.data or {}) for t in (src.tags or [])],
+            meta=src.meta or {},
+        )
+
+    result = create_skill_version(project_id, skill_id, version_data)
+    return result['id']
+
+
 def user_publish_skill(
     project_id: int,
     skill_id: int,
@@ -901,6 +939,8 @@ def user_publish_skill(
     max_versions: int,
     category: Optional[str] = None,
 ) -> tuple:
+    from .skill_utils import SkillVersionConflictError
+
     twin_id = find_public_skill_twin(public_project_id, project_id, skill_id)
 
     if twin_id is not None:
@@ -908,7 +948,19 @@ def user_publish_skill(
         if guard is not None:
             return guard
 
-    snapshot = create_skill_publish_snapshot(project_id, skill_id, version_id, user_id)
+    # Create a new source version (the published snapshot), leaving the version
+    # the user is editing untouched — the same way agent publishing clones.
+    try:
+        publish_version_id = _clone_source_version_for_publish(
+            project_id, skill_id, version_id, version_name, user_id,
+        )
+    except SkillVersionConflictError:
+        return {
+            "error": "version_name_conflict",
+            "msg": f"Version name '{version_name}' already exists on this skill",
+        }, 400
+
+    snapshot = create_skill_publish_snapshot(project_id, skill_id, publish_version_id, user_id)
     _apply_category_to_snapshot(snapshot, category)
     source = snapshot['source']
 
@@ -933,14 +985,14 @@ def user_publish_skill(
                 public_project_id, twin_id, snapshot, version_name, user_id, source,
             )
 
-    sync_source_skill_version_status(project_id, version_id, PublishStatus.published)
+    sync_source_skill_version_status(project_id, publish_version_id, PublishStatus.published)
 
     return {
         "msg": "Successfully published",
         "public_skill_id": result['skill_id'],
         "public_version_id": result['version_id'],
         "version_name": version_name,
-        "source_version_id": version_id,
+        "source_version_id": publish_version_id,
     }, 200
 
 

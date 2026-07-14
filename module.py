@@ -264,10 +264,8 @@ class Module(module.ModuleModel):
         self.skill_publish_validation_rules = guardrail.get(
             'publish_validation_rules', '',
         )
-        # Extra admin-added skill categories (on top of DEFAULT_SKILL_CATEGORIES).
-        # The active list is resolved live by skill_category_utils.get_active_skill_categories();
-        # this attribute is cached only for logging visibility at init / reload.
-        self.extra_skill_categories = guardrail.get('skill_categories', [])
+        # Skill categories reuse the shared agent category list (publishing_guardrail.agent_categories);
+        # there is no separate skill-category config.
         log.info("Skill publishing guardrail: blocked=%s, whitelist=%s, custom_rules=%s",
                  self.is_skill_publish_blocked, self.skill_publish_whitelist_project_ids,
                  bool(self.skill_publish_validation_rules))
