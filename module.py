@@ -283,6 +283,12 @@ class Module(module.ModuleModel):
             log.exception("Failed to preload UI bundle")
 
     def ready(self):
+        # ORM create_all() creates missing tenant tables but never expands an
+        # existing one. Apply the transactionally committed compatibility guard
+        # before any chat callback can write the normalized step rows.
+        from .utils.trace_step_schema import ensure_trace_step_schema
+        ensure_trace_step_schema(db.engine)
+
         try:
             from tools import this
             this.for_module("admin").module.register_admin_task(
