@@ -1,4 +1,5 @@
 from flask import request
+from pylon.core.tools import log
 from tools import api_tools, auth, db, config as c, MinioClient, rpc_tools, register_openapi
 from tools import serialize
 
@@ -12,6 +13,7 @@ from ...utils.conversation_utils import get_conversation_details
 from ...utils.participant_utils import add_participant_to_conversation
 from ...utils.chat_feature_flags import get_context_manager_feature_flag
 from ...utils.context_analytics import set_context_strategy
+from ...utils.distributed_lock import LockNotAcquired
 from ...utils.constants import PROMPT_LIB_MODE
 
 
@@ -137,6 +139,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not parsed.is_private and public_project_id == project_id:
             return {"error": "Public conversation can not exist in public project"}, 400
 
+        lock_name = f"conversation_create:{project_id}:{user_id}"
+        lock = getattr(self.module, 'distributed_lock', None)
+        lock_token = None
+        if lock:
+            try:
+                lock_token = lock.acquire_blocking(lock_name, ttl=10, wait_timeout=5, poll_interval=0.2)
+            except LockNotAcquired:
+                log.warning("Conversation creation lock contention: %s", lock_name)
+                return {"error": "Concurrent conversation creation in progress", "retry_after": 2}, 409
+
+        try:
+            return self._create_conversation(project_id, user_id, parsed)
+        finally:
+            if lock and lock_token:
+                lock.release(lock_name, lock_token)
+
+    def _create_conversation(self, project_id, user_id, parsed):
         # Fetch user's personalization settings
         user_personalization = None
         user_context_defaults = None
@@ -154,12 +173,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if parsed.meta is None:
             parsed.meta = {}
         if user_personalization:
-            # Set persona directly (not default_persona) - this is what the chat system expects
             if user_personalization.get('persona'):
                 parsed.meta['persona'] = user_personalization['persona']
             if user_personalization.get('default_instructions'):
                 parsed.meta['default_instructions'] = user_personalization['default_instructions']
-                # Initialize instructions from default_instructions when not explicitly provided
                 if not parsed.instructions:
                     parsed.instructions = user_personalization['default_instructions']
 
@@ -201,22 +218,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 )
 
             session.commit()
-            # Expire all cached objects to ensure we get fresh data from DB
             session.expire_all()
             conversation: ConversationDetails = get_conversation_details(
                 session, new_conversation.id, project_id, user_id
             )
             serialized = serialize(conversation)
-            # Ensure context_strategy is included in response (may have been set by RPC after session cache)
             if context_strategy and 'meta' in serialized:
                 serialized['meta']['context_strategy'] = context_strategy
 
-            # room = get_chat_room(new_conversation.uuid)
-            # self.module.context.sio.emit(
-            #     event=SioEvents.chat_conversation_create,
-            #     data=serialized,
-            #     room=room,
-            # )
             return serialized, 201
 
 class API(api_tools.APIBase):

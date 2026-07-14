@@ -406,6 +406,13 @@ class Module(module.ModuleModel):
                 'cron': '* * * * *',
                 'active': True
             })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                'rpc_func': 'chat_canvas_autosave',
+                'rpc_kwargs': {},
+                'name': 'canvas_autosave',
+                'cron': '*/5 * * * *',
+                'active': True
+            })
         except Empty:
             log.warning('No scheduling plugin found')
 
@@ -421,6 +428,18 @@ class Module(module.ModuleModel):
             )
         except Exception as e:
             log.warning('Failed to register provider RPC method: %s', e)
+
+        try:
+            from .utils.state_reconstruction import StateReconstruction
+            reconstruction = StateReconstruction(
+                redis_client=self.get_redis_client(),
+                event_node=self.event_node,
+            )
+            reconstruction.run()
+        except Exception as exc:
+            log.warning("State reconstruction failed (non-fatal): %s", exc)
+
+        self._scaling_ready = True
 
     def init(self):
         self.bp = self.descriptor.init_all(url_prefix="/app")
@@ -554,6 +573,12 @@ class Module(module.ModuleModel):
         log.info(f"Making webhook API url public: {self.webhook_api_url_re}")
         auth.add_public_rule({"uri": self.webhook_api_url_re})
 
+        # Health endpoints (must be accessible without auth for k8s probes)
+        auth.add_public_rule({"uri": "/app/health/live"})
+        auth.add_public_rule({"uri": "/app/health/ready"})
+        # Metrics endpoint (must be accessible for Prometheus scraping / HPA)
+        auth.add_public_rule({"uri": "/app/metrics"})
+
         # Provider Hub initialization
         self.provider_hub_init()
 
@@ -565,6 +590,16 @@ class Module(module.ModuleModel):
 
         from .models import all, folder, message_group, message_trace_step, participants
         from .models.message_items import base, text, canvas, context
+
+        from .utils.distributed_lock import DistributedLock
+        self.distributed_lock = DistributedLock(self.get_redis_client())
+
+        from .utils.cookie_hardening import register_cookie_hardening
+        register_cookie_hardening(self.descriptor.app)
+
+        from .utils.tmp_cleanup import TmpCleanup
+        self.tmp_cleanup = TmpCleanup()
+        self.tmp_cleanup.start()
 
         self.thread = Thread(
             target=self.listen_in_memory_event
@@ -673,6 +708,22 @@ class Module(module.ModuleModel):
 
     def deinit(self):
         log.info('De-initializing')
+
+        # Graceful shutdown: disconnect Socket.IO clients and flush Redis
+        try:
+            from .utils.graceful_shutdown import GracefulShutdown
+            shutdown_handler = GracefulShutdown(
+                sio=self.context.sio,
+                redis_client=self.get_redis_client(),
+                drain_timeout=15,
+            )
+            shutdown_handler.execute()
+        except Exception as e:
+            log.warning("Graceful shutdown handler failed: %s", e)
+
+        if hasattr(self, 'tmp_cleanup'):
+            self.tmp_cleanup.stop()
+
         self.thread._stop()
 
         # MCP SSE deinitialization

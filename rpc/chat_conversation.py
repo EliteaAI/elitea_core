@@ -19,6 +19,7 @@ from ..utils.conversation_utils import (
 from ..utils.participant_utils import add_participant_to_conversation
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import set_context_strategy
+from ..utils.distributed_lock import LockNotAcquired
 from ..utils.exceptions import PoolSaturationError
 
 # Hard cap on page size: defence-in-depth against unbounded IN(...) lists in
@@ -267,6 +268,46 @@ class RPC:
         - support_assistant plugin
         - Future embedded assistants
         """
+        lock_name = f"conversation_create:{project_id}:{user_id}"
+        lock = getattr(self, 'distributed_lock', None)
+        lock_token = None
+        if lock:
+            try:
+                lock_token = lock.acquire_blocking(lock_name, ttl=10, wait_timeout=5, poll_interval=0.2)
+            except LockNotAcquired:
+                log.warning("Conversation creation lock contention (RPC): %s", lock_name)
+                return {'error': 'Concurrent conversation creation in progress', 'retry_after': 2}
+
+        try:
+            return self._do_create_conversation(
+                project_id=project_id,
+                user_id=user_id,
+                name=name,
+                source=source,
+                is_private=is_private,
+                meta=meta,
+                instructions=instructions,
+                add_dummy_participant=add_dummy_participant,
+                apply_user_personalization=apply_user_personalization,
+                apply_context_strategy=apply_context_strategy,
+            )
+        finally:
+            if lock and lock_token:
+                lock.release(lock_name, lock_token)
+
+    def _do_create_conversation(
+        self,
+        project_id: int,
+        user_id: int,
+        name: str = None,
+        source: str = 'elitea',
+        is_private: bool = True,
+        meta: dict = None,
+        instructions: str = None,
+        add_dummy_participant: bool = True,
+        apply_user_personalization: bool = True,
+        apply_context_strategy: bool = True,
+    ) -> dict:
         user_personalization = None
         user_context_defaults = None
         user_summarization_defaults = None
