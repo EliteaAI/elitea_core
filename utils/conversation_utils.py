@@ -325,20 +325,12 @@ def get_conversation_details(
             # the two can't drift. Advisory: never fail conversation fetch over it,
             # and the UI degrades gracefully (defers to backend) when absent.
             try:
-                from .publish_utils import (
-                    compute_agent_subtree_tiers,
-                    MAX_AGENT_NESTING_TIERS,
-                )
-                participant['meta']['agent_subtree_tiers'] = compute_agent_subtree_tiers(
+                from .publish_utils import get_agent_nesting_metadata
+                participant['meta'].update(get_agent_nesting_metadata(
                     participant['entity_meta']['project_id'],
                     participant['entity_settings']['version_id'],
-                    session=(
-                        session
-                        if participant['entity_meta']['project_id'] == project_id
-                        else None
-                    ),
-                )
-                participant['meta']['max_agent_nesting_tiers'] = MAX_AGENT_NESTING_TIERS
+                    session=session if participant['entity_meta']['project_id'] == project_id else None,
+                ))
             except Exception as depth_err:
                 log.warning(
                     "Could not compute agent_subtree_tiers for participant version "

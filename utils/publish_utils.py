@@ -559,6 +559,7 @@ def _walk_sub_agent_tree_in_session(
     max_depth: int,
     start_depth: int = 1,
     enforce_constraints: bool = True,
+    root_version=None,
 ) -> Tuple[int, List[_SubAgentWalkNode]]:
     """Load one nesting tree with canonical tier, cycle, and backstop semantics.
 
@@ -568,7 +569,7 @@ def _walk_sub_agent_tree_in_session(
     ``enforce_constraints=False`` is the advisory tier-calculation mode: malformed, missing,
     cyclic, or over-backstop branches are ignored rather than making a detail response fail.
     """
-    cache: Dict[int, object] = {}
+    cache: Dict[int, object] = {version_id: root_version} if root_version is not None else {}
     root = _load_version_with_tools(session, version_id, cache)
     if root is None:
         raise ValueError(f"Version {version_id} not found in project {project_id}")
@@ -783,6 +784,7 @@ def compute_agent_subtree_tiers(
     version_id: int,
     session=None,
     max_depth: int = MAX_SUB_AGENT_VALIDATION_DEPTH,
+    root_version=None,
 ) -> int:
     """Return the AGENT-only nesting depth of a version's subtree.
 
@@ -802,7 +804,11 @@ def compute_agent_subtree_tiers(
     if session is None:
         with db.get_session(project_id) as project_session:
             return compute_agent_subtree_tiers(
-                project_id, version_id, session=project_session, max_depth=max_depth,
+                project_id,
+                version_id,
+                session=project_session,
+                max_depth=max_depth,
+                root_version=root_version,
             )
 
     root_tiers, walked = _walk_sub_agent_tree_in_session(
@@ -812,6 +818,7 @@ def compute_agent_subtree_tiers(
         max_depth=max_depth,
         start_depth=1,
         enforce_constraints=False,
+        root_version=root_version,
     )
 
     def _deepest(nodes: List[_SubAgentWalkNode], current: int) -> int:
@@ -821,6 +828,24 @@ def compute_agent_subtree_tiers(
         return current
 
     return _deepest(walked, root_tiers)
+
+
+def get_agent_nesting_metadata(
+    project_id: int,
+    version_id: int,
+    session=None,
+    root_version=None,
+) -> dict:
+    """Return the shared application-detail contract for the UI nesting guard."""
+    return {
+        'agent_subtree_tiers': compute_agent_subtree_tiers(
+            project_id,
+            version_id,
+            session=session,
+            root_version=root_version,
+        ),
+        'max_agent_nesting_tiers': MAX_AGENT_NESTING_TIERS,
+    }
 
 
 # ---------------------------------------------------------------------------

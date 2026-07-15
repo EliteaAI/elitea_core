@@ -394,6 +394,26 @@ class TestQueryEfficiency:
         assert tiers == 2
         assert session.query_count == 3
 
+    def test_tier_calculation_reuses_preloaded_root(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, tools=[]),
+        }
+        session = FakeSession(registry)
+
+        metadata = pu.get_agent_nesting_metadata(
+            1,
+            1,
+            session=session,
+            root_version=registry[1],
+        )
+
+        assert metadata == {
+            'agent_subtree_tiers': 2,
+            'max_agent_nesting_tiers': 3,
+        }
+        assert session.query_count == 1
+
 
 class TestAgentSubtreeTiers:
     """Depth helper used by the UI add guard."""
