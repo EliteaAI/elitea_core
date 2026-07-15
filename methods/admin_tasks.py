@@ -25,11 +25,6 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401,W0611
 from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
 from tools import db  # pylint: disable=E0401
 
-try:
-    import gevent  # pylint: disable=C0413
-except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
-    gevent = None
-
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
 from ..utils.toolkit_migration import run_selected_tools_migration
 from ..utils.llm_migration_utils import (
@@ -46,7 +41,7 @@ from ..utils.embedding_migration_utils import (
     migrate_toolkit_embedding_models,
 )
 from ..utils.trace_step_backfill_utils import parse_backfill_params, backfill_project
-from ..utils.utils import get_public_project_id
+from ..utils.utils import get_public_project_id, make_yield_to_hub
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -1208,12 +1203,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.error("backfill_legacy_trace_steps: invalid params: %s", exc)
             return {"error": str(exc)}
 
-        # No-op under non-gevent web runtimes.
-        yield_to_hub = (
-            (lambda: gevent.sleep(0))
-            if (gevent is not None and self.context.web_runtime == "gevent")
-            else (lambda: None)
-        )
+        yield_to_hub = make_yield_to_hub(self.context.web_runtime)
 
         prefix = "[DRY RUN] " if parsed['dry_run'] else ""
         log.info(

@@ -7,17 +7,13 @@ from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, rpc_tools, this
 
-try:
-    import gevent  # pylint: disable=C0413
-except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
-    gevent = None
-
 from ..models.elitea_tools import EliteATool
 from ..models.indexer import EmbeddingStore
 from ..models.enums import InitiatorType
 from ..models.enums.indexer import IndexingSchedule
 from ..models.pd.index import ToolkitIndexingSchedule
 from ..utils.application_tools import get_session_for_schema, start_index_task, update_toolkit_index_meta_history_with_failed_state
+from ..utils.utils import make_yield_to_hub
 from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
 from ..utils.index_scheduling import resolve_credentials, handle_failed_index_schedule
@@ -52,13 +48,7 @@ class RPC:
             f"check_index_scheduling tick started at {datetime.now(UTC).isoformat()}"
         )
         try:
-            # Cooperative yield only when gevent is the actual web runtime;
-            # under flask/waitress/hypercorn this is a no-op.
-            yield_to_hub = (
-                (lambda: gevent.sleep(0))
-                if (gevent is not None and self.context.web_runtime == "gevent")
-                else (lambda: None)
-            )
+            yield_to_hub = make_yield_to_hub(self.context.web_runtime)
 
             all_project_ids = [
                 project_['id'] for project_ in rpc_tools.RpcMixin().rpc.timeout(3).project_list(

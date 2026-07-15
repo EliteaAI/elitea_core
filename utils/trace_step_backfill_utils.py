@@ -23,6 +23,7 @@ from sqlalchemy import text
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
+from .llm_migration_utils import parse_project_id_spec
 from .trace_step_writer import sync_trace_steps
 
 # Mirrors pylon_indexer/plugins/indexer_worker/methods/agent_common.py:441
@@ -41,23 +42,7 @@ def parse_backfill_params(raw_param: str) -> dict:
         key, _, value = token.partition('=')
         params[key.strip()] = value.strip()
 
-    project_id_raw = params.get('project_ids', 'all').strip()
-    if project_id_raw == 'all':
-        project_id_spec = ('all', None)
-    elif '-' in project_id_raw:
-        parts = project_id_raw.split('-', 1)
-        try:
-            lo, hi = int(parts[0]), int(parts[1])
-        except ValueError:
-            raise ValueError(f"Invalid project_ids range: {project_id_raw!r}")  # pylint: disable=W0707
-        if lo > hi:
-            raise ValueError(f"Invalid project_ids range: {lo} > {hi}")
-        project_id_spec = ('range', (lo, hi))
-    else:
-        try:
-            project_id_spec = ('single', int(project_id_raw))
-        except ValueError:
-            raise ValueError(f"Invalid project_ids: {project_id_raw!r}")  # pylint: disable=W0707
+    project_id_spec = parse_project_id_spec(params.get('project_ids', 'all'), 'project_ids')
 
     cutoff_raw = params.get('cutoff_days', '180').strip().lower()
     if cutoff_raw == 'all':
@@ -86,15 +71,17 @@ def parse_backfill_params(raw_param: str) -> dict:
 
 
 # Truncation runs in the Postgres backend (CASE/left()/||) so only bounded JSON reaches Python.
+# NOT EXISTS against the trace-step table both implements resumability and lets Postgres skip the
+# truncation subqueries below for already-migrated rows entirely, instead of a per-row round trip.
 _CANDIDATE_SQL = """
 SELECT
-    id,
+    g.id,
     (SELECT jsonb_object_agg(
         key,
         CASE WHEN length(value->>'tool_output') > :cap
             THEN jsonb_set(value, '{{tool_output}}', to_jsonb(left(value->>'tool_output', :cap) || :suffix))
             ELSE value END)
-     FROM jsonb_each(meta->'tool_calls')) AS tool_calls,
+     FROM jsonb_each(g.meta->'tool_calls')) AS tool_calls,
     (SELECT jsonb_agg(
         CASE WHEN length(elem->>'text') > :cap
             THEN jsonb_set(elem, '{{text}}', to_jsonb(left(elem->>'text', :cap) || :suffix))
@@ -102,17 +89,18 @@ SELECT
         || CASE WHEN length(elem->>'thinking') > :cap
             THEN jsonb_build_object('thinking', left(elem->>'thinking', :cap) || :suffix)
             ELSE '{{}}'::jsonb END)
-     FROM jsonb_array_elements(meta->'thinking_steps') elem) AS thinking_steps,
+     FROM jsonb_array_elements(g.meta->'thinking_steps') elem) AS thinking_steps,
     (
-        EXISTS (SELECT 1 FROM jsonb_each(meta->'tool_calls') v
+        EXISTS (SELECT 1 FROM jsonb_each(g.meta->'tool_calls') v
                 WHERE length(v.value->>'tool_output') > :cap)
-        OR EXISTS (SELECT 1 FROM jsonb_array_elements(meta->'thinking_steps') e
+        OR EXISTS (SELECT 1 FROM jsonb_array_elements(g.meta->'thinking_steps') e
                    WHERE length(e->>'text') > :cap OR length(e->>'thinking') > :cap)
     ) AS any_truncated
-FROM {table}
-WHERE is_streaming = false AND (meta ? 'tool_calls' OR meta ? 'thinking_steps')
+FROM {table} g
+WHERE g.is_streaming = false AND (g.meta ? 'tool_calls' OR g.meta ? 'thinking_steps')
 {cutoff_clause}
-ORDER BY created_at DESC
+AND NOT EXISTS (SELECT 1 FROM {trace_table} t WHERE t.message_group_id = g.id)
+ORDER BY g.created_at DESC
 """  # nosec B608 - project_id is platform-resolved (resolve_target_project_ids), not user input
 
 _STREAMING_SKIP_COUNT_SQL = """
@@ -121,7 +109,14 @@ WHERE is_streaming = true AND (meta ? 'tool_calls' OR meta ? 'thinking_steps')
 {cutoff_clause}
 """  # nosec B608
 
-_TRACE_STEP_EXISTS_SQL = "SELECT 1 FROM {table} WHERE message_group_id = :group_id LIMIT 1"  # nosec B608
+# Mirrors _STREAMING_SKIP_COUNT_SQL's shape: a cheap count for the census, since already-migrated
+# rows are now excluded from _CANDIDATE_SQL itself rather than checked one-by-one.
+_ALREADY_MIGRATED_COUNT_SQL = """
+SELECT count(*) FROM {table} g
+WHERE g.is_streaming = false AND (g.meta ? 'tool_calls' OR g.meta ? 'thinking_steps')
+{cutoff_clause}
+AND EXISTS (SELECT 1 FROM {trace_table} t WHERE t.message_group_id = g.id)
+"""  # nosec B608
 
 _STRIP_AND_MARK_SQL = """
 UPDATE {table}
@@ -163,21 +158,18 @@ def backfill_project(session, project_id: int, cutoff_days, dry_run: bool, yield
         cutoff_params,
     ).scalar() or 0
 
+    counters['skipped_already_migrated'] = session.execute(
+        text(_ALREADY_MIGRATED_COUNT_SQL.format(table=group_table, trace_table=trace_step_table, cutoff_clause=cutoff_clause)),
+        cutoff_params,
+    ).scalar() or 0
+
     candidates = session.execute(
-        text(_CANDIDATE_SQL.format(table=group_table, cutoff_clause=cutoff_clause)),
+        text(_CANDIDATE_SQL.format(table=group_table, trace_table=trace_step_table, cutoff_clause=cutoff_clause)),
         {'cap': MAX_TOOL_OUTPUT_CHARS, 'suffix': TRUNCATION_SUFFIX, **cutoff_params},
     ).fetchall()
 
     for row in candidates:
         yield_to_hub()
-
-        already_migrated = session.execute(
-            text(_TRACE_STEP_EXISTS_SQL.format(table=trace_step_table)),
-            {'group_id': row.id},
-        ).first()
-        if already_migrated:
-            counters['skipped_already_migrated'] += 1
-            continue
 
         tool_calls = row.tool_calls or {}
         thinking_steps = row.thinking_steps or []
