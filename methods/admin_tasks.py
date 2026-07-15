@@ -23,6 +23,7 @@ from functools import partial
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401,W0611
 from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
+from tools import db  # pylint: disable=E0401
 
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
 from ..utils.toolkit_migration import run_selected_tools_migration
@@ -39,7 +40,8 @@ from ..utils.embedding_migration_utils import (
     validate_target_embedding_model,
     migrate_toolkit_embedding_models,
 )
-from ..utils.utils import get_public_project_id
+from ..utils.trace_step_backfill_utils import parse_backfill_params, backfill_project
+from ..utils.utils import get_public_project_id, make_yield_to_hub
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -1185,6 +1187,64 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "projects_scanned": projects_scanned,
             "groups_flagged": groups_flagged,
             "groups_pruned": groups_pruned,
+            "by_project": by_project,
+        }
+
+    @web.method()
+    def backfill_legacy_trace_steps(self, *args, **kwargs):
+        """Backfill legacy meta.tool_calls/thinking_steps into message_trace_step.
+
+        Param: "project_ids=<all|N|lo-hi>;cutoff_days=<180|all>;dry_run=<true|false>" (dry_run defaults true).
+        """
+        raw_param = kwargs.get("param", "") or ""
+        try:
+            parsed = parse_backfill_params(raw_param)
+        except ValueError as exc:
+            log.error("backfill_legacy_trace_steps: invalid params: %s", exc)
+            return {"error": str(exc)}
+
+        yield_to_hub = make_yield_to_hub(self.context.web_runtime)
+
+        prefix = "[DRY RUN] " if parsed['dry_run'] else ""
+        log.info(
+            "%sStarting backfill_legacy_trace_steps (project_ids=%s, cutoff_days=%s, dry_run=%s)",
+            prefix, parsed['project_id_spec'], parsed['cutoff_days'], parsed['dry_run'],
+        )
+        start_ts = time.time()
+
+        try:
+            project_ids = resolve_target_project_ids(parsed['project_id_spec'])
+        except ValueError as exc:
+            log.error("backfill_legacy_trace_steps: project resolution failed: %s", exc)
+            return {"error": str(exc)}
+
+        by_project = {}
+        totals = {}
+        for project_id in project_ids:
+            yield_to_hub()
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    counters = backfill_project(
+                        session, project_id, parsed['cutoff_days'], parsed['dry_run'], yield_to_hub,
+                    )
+            except Exception:  # pylint: disable=W0703
+                log.exception("backfill_legacy_trace_steps: error in project %s", project_id)
+                continue
+
+            by_project[project_id] = counters
+            for key, value in counters.items():
+                totals[key] = totals.get(key, 0) + value
+            log.info("%sbackfill_legacy_trace_steps: project %s — %s", prefix, project_id, counters)
+
+        duration = round(time.time() - start_ts, 2)
+        log.info(
+            "%sExiting backfill_legacy_trace_steps — projects=%s totals=%s (duration=%ss)",
+            prefix, len(project_ids), totals, duration,
+        )
+        return {
+            "dry_run": parsed['dry_run'],
+            "cutoff_days": parsed['cutoff_days'],
+            "totals": totals,
             "by_project": by_project,
         }
 
