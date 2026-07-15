@@ -3,6 +3,7 @@ from pylon.core.tools import log, web
 from tools import VaultClient, serialize, this
 
 from ..models.pd.chat import ApplicationChatRequest
+from ..models.pd.llm import llm_settings_family_conflict
 from ..utils.pipeline_utils import validate_yaml_from_str
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError
 from ..utils.application_utils import validate_and_resolve_llm_settings
@@ -49,9 +50,13 @@ class Method:
 
         # Normalize temperature/reasoning_effort against the resolved model's actual
         # capabilities, and re-resolve if model_name is no longer available (issue #5821).
-        # Never blindly default temperature — a reasoning model settings dict must not get a
-        # stray temperature injected alongside its reasoning_effort.
-        llm_settings = validate_and_resolve_llm_settings(project_id, llm_settings) or llm_settings
+        # Only pay the RPC cost when something actually needs fixing (missing model_name or a
+        # family conflict) — same reasoning as predict_sio's gate: don't call an uncached RPC
+        # unconditionally on a path that's exercised by every ad-hoc pipeline run.
+        if not llm_settings.get("model_name") or llm_settings_family_conflict(
+            llm_settings.get("temperature"), llm_settings.get("reasoning_effort")
+        ):
+            llm_settings = validate_and_resolve_llm_settings(project_id, llm_settings) or llm_settings
         llm_settings.setdefault("max_tokens", 4096)
         if not llm_settings.get("reasoning_effort"):
             llm_settings.setdefault("temperature", 0.7)

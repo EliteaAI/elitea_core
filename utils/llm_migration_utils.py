@@ -294,23 +294,7 @@ def parse_heal_params(raw_param: str) -> dict:
         key, _, value = token.partition('=')
         params[key.strip()] = value.strip()
 
-    project_id_raw = params.get('project_id', 'all').strip()
-    if project_id_raw == 'all':
-        project_id_spec = ('all', None)
-    elif '-' in project_id_raw:
-        parts = project_id_raw.split('-', 1)
-        try:
-            lo, hi = int(parts[0]), int(parts[1])
-        except ValueError:
-            raise ValueError(f"Invalid project_id range: {project_id_raw!r}")  # pylint: disable=W0707
-        if lo > hi:
-            raise ValueError(f"Invalid project_id range: {lo} > {hi}")
-        project_id_spec = ('range', (lo, hi))
-    else:
-        try:
-            project_id_spec = ('single', int(project_id_raw))
-        except ValueError:
-            raise ValueError(f"Invalid project_id: {project_id_raw!r}")  # pylint: disable=W0707
+    project_id_spec = parse_project_id_spec(params.get('project_id', 'all'), 'project_id')
 
     dry_run_raw = params.get('dry_run', 'true').strip().lower()
     if dry_run_raw in ('true', '1', 'yes'):

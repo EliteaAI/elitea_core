@@ -343,6 +343,9 @@ class Module(module.ModuleModel):
                 "backfill_legacy_trace_steps", self.backfill_legacy_trace_steps, group="R-2.0.5"
             )
             this.for_module("admin").module.register_admin_task(
+                "heal_llm_settings_family_conflicts", self.heal_llm_settings_family_conflicts, group="R-2.0.5"
+            )
+            this.for_module("admin").module.register_admin_task(
                 "reassign_agent_category", self.reassign_agent_category,
             )
             this.for_module("admin").module.register_admin_task(
@@ -761,6 +764,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "backfill_legacy_trace_steps", self.backfill_legacy_trace_steps
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "heal_llm_settings_family_conflicts", self.heal_llm_settings_family_conflicts
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
