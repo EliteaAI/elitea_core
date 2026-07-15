@@ -35,6 +35,9 @@ from ..utils.llm_migration_utils import (
     build_new_llm_settings,
     migrate_application_versions,
     migrate_participant_mappings,
+    parse_heal_params,
+    heal_family_conflict_versions,
+    heal_family_conflict_mappings,
 )
 from ..utils.embedding_migration_utils import (
     validate_target_embedding_model,
@@ -1993,6 +1996,84 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 log.exception("Error processing project %s, skipping", project_id)
 
         # ── 7. Summary ───────────────────────────────────────────────────
+        duration = time.time() - start_ts
+        log.info(
+            "Done%s. Projects scanned: %s, touched: %s. "
+            "ApplicationVersions: %s, ParticipantMappings: %s. Duration: %.1fs",
+            " [DRY RUN]" if dry_run else "",
+            total_projects, projects_touched,
+            total_versions, total_mappings,
+            duration,
+        )
+
+    # pylint: disable=R,W0613
+    @web.method()
+    def heal_llm_settings_family_conflicts(self, *args, **kwargs):
+        """One-time backfill for issue #5821: fix ApplicationVersion/ParticipantMapping rows
+        whose llm_settings has both a custom temperature AND an active reasoning_effort set
+        (invalid combo -- reasoning models reject a custom temperature). Does NOT change
+        model_name/model_project_id, only normalizes temperature/reasoning_effort against each
+        row's own model's real supports_reasoning. Idempotent -- safe to re-run.
+
+        Dry-run is ON by default (unlike migrate_llm_model) since this task has no from/to
+        model boundary and scans every project. Pass dry_run=false to apply changes.
+
+        Params (semicolon-separated):
+            project_id=<int|X-Y|all>      (optional, default: all)
+            dry_run=<true|false>           (optional, default: true)
+
+        Examples:
+            (no params)                          - dry run across all projects
+            dry_run=false                        - live run across all projects
+            project_id=42;dry_run=false           - live run on project 42 only
+            project_id=1-1000;dry_run=true        - dry run on projects 1-1000
+        """
+        from tools import db  # pylint: disable=C0415
+
+        start_ts = time.time()
+
+        raw_param = kwargs.get("param", "")
+        try:
+            params = parse_heal_params(raw_param)
+        except ValueError as exc:
+            log.error("Invalid params: %s", exc)
+            return
+
+        dry_run = params['dry_run']
+        log.info("Params: project_id=%s  dry_run=%s", params['project_id_spec'], dry_run)
+
+        try:
+            project_ids = resolve_target_project_ids(params['project_id_spec'])
+        except ValueError as exc:
+            log.error("Project resolution failed: %s", exc)
+            return
+
+        total_projects = len(project_ids)
+        total_versions = 0
+        total_mappings = 0
+        projects_touched = 0
+
+        for idx, project_id in enumerate(project_ids, 1):
+            try:
+                with db.get_session(project_id) as session:
+                    v_count = heal_family_conflict_versions(session, project_id, dry_run)
+                    m_count = heal_family_conflict_mappings(session, project_id, dry_run)
+
+                    if v_count or m_count:
+                        if not dry_run:
+                            session.commit()
+                        projects_touched += 1
+                        total_versions += v_count
+                        total_mappings += m_count
+                        log.info(
+                            "Project %s (%s/%s): %s versions, %s mappings %s",
+                            project_id, idx, total_projects,
+                            v_count, m_count,
+                            "[dry_run]" if dry_run else "[committed]",
+                        )
+            except Exception:  # pylint: disable=W0702
+                log.exception("Error processing project %s, skipping", project_id)
+
         duration = time.time() - start_ts
         log.info(
             "Done%s. Projects scanned: %s, touched: %s. "

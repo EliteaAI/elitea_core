@@ -141,29 +141,33 @@ class RPC:
                         message_id=data.get("message_id")
                     )
 
-                # Always resolve/normalize llm_settings — not just when empty. A non-empty
-                # llm_settings can still reference an unavailable model, or a temperature/
-                # reasoning_effort combo that conflicts with the resolved model's capabilities
-                # (issue #5821); validate_and_resolve_llm_settings cheaply no-ops when the
-                # existing model_name/model_project_id pair is already valid and consistent.
-                resolve_project_id = chat_project_id or parsed.project_id
-                resolved = validate_and_resolve_llm_settings(
-                    resolve_project_id, application_version.llm_settings,
-                    application_id=parsed.application_id, version_id=parsed.version_id
-                )
-                if resolved and resolved.get('model_name'):
-                    application_version.llm_settings = resolved
-                else:
-                    raise SioValidationError(
-                        sio=self.context.sio,
-                        sid=sid,
-                        event=sio_event,
-                        error={'error': f"Application version with id '{parsed.version_id}' "
-                                    f"has no LLM settings and no default LLM model is configured "
-                                    f"for the project"},
-                        stream_id=data.get("stream_id"),
-                        message_id=data.get("message_id")
+                # Resolve llm_settings only when completely missing (original behavior). The
+                # family-conflict case (issue #5821) is handled by write-time rejection
+                # (LLMSettingsWriteModel/EntitySettingsLlmWrite) and the one-time
+                # heal_llm_settings_family_conflicts admin backfill — not here. This mutation
+                # is never committed (session just closes below), so re-checking on every
+                # message would re-run the expensive RPC forever for any still-broken row
+                # instead of getting cheaper over time; the hottest path in the platform must
+                # not carry that cost.
+                if not application_version.llm_settings:
+                    resolve_project_id = chat_project_id or parsed.project_id
+                    resolved = validate_and_resolve_llm_settings(
+                        resolve_project_id, application_version.llm_settings,
+                        application_id=parsed.application_id, version_id=parsed.version_id
                     )
+                    if resolved and resolved.get('model_name'):
+                        application_version.llm_settings = resolved
+                    else:
+                        raise SioValidationError(
+                            sio=self.context.sio,
+                            sid=sid,
+                            event=sio_event,
+                            error={'error': f"Application version with id '{parsed.version_id}' "
+                                        f"has no LLM settings and no default LLM model is configured "
+                                        f"for the project"},
+                            stream_id=data.get("stream_id"),
+                            message_id=data.get("message_id")
+                        )
                 application_version.project_id = parsed.project_id  # compatibility with pd model
                 parsed_db = ApplicationChatRequest.from_orm(
                     application_version
