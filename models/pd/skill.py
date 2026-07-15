@@ -115,9 +115,26 @@ class SkillListModel(BaseModel):
     tags: List[TagDetailModel] = Field(default_factory=list)
     meta: Optional[dict] = None
     icon_meta: Optional[dict] = {}
+    is_forked: bool = False
     is_pinned: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='after')
+    def set_is_forked(self):
+        for v in self.versions:
+            meta = v.meta or {}
+            if meta.get('parent_entity_id') is not None and meta.get('parent_project_id') is not None:
+                self.is_forked = True
+                self.meta = {
+                    **(self.meta or {}),
+                    'parent_entity_id': meta['parent_entity_id'],
+                    'parent_project_id': meta['parent_project_id'],
+                    **({'parent_version_id': meta['parent_version_id']}
+                       if meta.get('parent_version_id') is not None else {}),
+                }
+                break
+        return self
 
     @model_validator(mode='after')
     def parse_versions_data(self):

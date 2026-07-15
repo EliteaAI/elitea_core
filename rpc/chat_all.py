@@ -1242,6 +1242,7 @@ class RPC:
                             await_task_timeout=await_task_timeout,
                             user_id=current_user['id'],
                             return_chat_history=return_chat_history,
+                            eligible_for_autoapproval=eligible_for_autoapproval,
                         )
                     except PoolSaturationError:
                         # Mark the response placeholder as not streaming to avoid stuck chat entry

@@ -34,8 +34,9 @@ from ..models.elitea_tools import EliteATool, EntityToolMapping
 
 USAGE_HINT = (
     'Format: "<toolkit_type>;<operations>;project_id=<all|N>[;dry_run]"\n'
-    'Operations (comma-separated): tool_name (remove) or old>new (rename)\n'
+    'Operations (comma-separated): +tool_name (add), tool_name (remove), or old>new (rename)\n'
     'Examples:\n'
+    '  "inventory;+ask;project_id=all"\n'
     '  "github;index_data>indexData,search_index;project_id=all"\n'
     '  "artifact;read_file_chunk;project_id=all;dry_run"\n'
     '  "gitlab;list_repos;project_id=34"\n'
@@ -88,6 +89,13 @@ def parse_migration_args(param):
                     f"Rename operation has empty name: '{op_str}'.\n{USAGE_HINT}"
                 )
             operations.append({"action": "rename", "old_name": old_name, "new_name": new_name})
+        elif op_str.startswith("+"):
+            tool_name = op_str[1:].strip()
+            if not tool_name:
+                raise ValueError(
+                    f"Add operation has empty tool name: '{op_str}'.\n{USAGE_HINT}"
+                )
+            operations.append({"action": "add", "tool_name": tool_name})
         else:
             operations.append({"action": "remove", "tool_name": op_str})
     #
@@ -135,19 +143,33 @@ def parse_migration_args(param):
 
 
 def apply_operations_to_selected_tools(selected_tools, operations):
-    """Apply remove/rename operations to a selected_tools list.
+    """Apply add/remove/rename operations to a selected_tools list.
 
     Pure function - no DB access.
-    Returns (new_selected_tools, changes_log, tools_removed, tools_renamed).
+    Returns (
+        new_selected_tools,
+        changes_log,
+        tools_added,
+        tools_removed,
+        tools_renamed,
+    ).
     Idempotent: running twice with same input produces same result.
     """
     result = list(selected_tools)
     changes = []
+    tools_added = 0
     tools_removed = 0
     tools_renamed = 0
     #
     for op in operations:
-        if op["action"] == "remove":
+        if op["action"] == "add":
+            tool_name = op["tool_name"]
+            if tool_name not in result:
+                result.append(tool_name)
+                changes.append(f"added '{tool_name}'")
+                tools_added += 1
+        #
+        elif op["action"] == "remove":
             tool_name = op["tool_name"]
             if tool_name in result:
                 result.remove(tool_name)
@@ -174,7 +196,7 @@ def apply_operations_to_selected_tools(selected_tools, operations):
                 changes.append(f"renamed '{old_name}' -> '{new_name}'")
                 tools_renamed += 1
     #
-    return result, changes, tools_removed, tools_renamed
+    return result, changes, tools_added, tools_removed, tools_renamed
 
 
 def apply_rename_to_instructions(instructions_text, operations):
@@ -285,8 +307,8 @@ def migrate_project_toolkits(project_id, toolkit_type, operations, dry_run):
     """Migrate selected_tools for all toolkits of given type in a project.
 
     Returns summary dict with project_id, toolkits_found, toolkits_affected,
-    entity_mappings_affected, tools_removed, tools_renamed,
-    tool_mappings_removed, tool_mappings_renamed, details.
+    entity_mappings_affected, tools_added, tools_removed, tools_renamed,
+    tool_mappings_added, tool_mappings_removed, tool_mappings_renamed, details.
     """
     prefix = "[DRY RUN] " if dry_run else ""
     summary = {
@@ -294,8 +316,10 @@ def migrate_project_toolkits(project_id, toolkit_type, operations, dry_run):
         "toolkits_found": 0,
         "toolkits_affected": 0,
         "entity_mappings_affected": 0,
+        "tools_added": 0,
         "tools_removed": 0,
         "tools_renamed": 0,
+        "tool_mappings_added": 0,
         "tool_mappings_removed": 0,
         "tool_mappings_renamed": 0,
         "pipeline_versions_scanned": 0,
@@ -325,12 +349,14 @@ def migrate_project_toolkits(project_id, toolkit_type, operations, dry_run):
                 continue
             #
             current_selected = settings.get("selected_tools")
+            # Missing/empty selected_tools means "unrestricted" for existing runtime flows.
+            # Do not materialize a new restricted list during migration.
             if not current_selected:
                 continue
             #
             # Apply operations to EliteATool.settings['selected_tools']
             #
-            new_selected, tool_changes, removed_count, renamed_count = apply_operations_to_selected_tools(
+            new_selected, tool_changes, added_count, removed_count, renamed_count = apply_operations_to_selected_tools(
                 current_selected, operations
             )
             #
@@ -346,6 +372,7 @@ def migrate_project_toolkits(project_id, toolkit_type, operations, dry_run):
                     "changes": tool_changes,
                 })
                 summary["toolkits_affected"] += 1
+                summary["tools_added"] += added_count
                 summary["tools_removed"] += removed_count
                 summary["tools_renamed"] += renamed_count
                 #
@@ -366,7 +393,7 @@ def migrate_project_toolkits(project_id, toolkit_type, operations, dry_run):
                 if not mapping.selected_tools:
                     continue
                 #
-                new_mapping_selected, mapping_changes, mapping_removed_count, mapping_renamed_count = apply_operations_to_selected_tools(
+                new_mapping_selected, mapping_changes, mapping_added_count, mapping_removed_count, mapping_renamed_count = apply_operations_to_selected_tools(
                     mapping.selected_tools, operations
                 )
                 #
@@ -377,6 +404,7 @@ def migrate_project_toolkits(project_id, toolkit_type, operations, dry_run):
                         prefix, mapping.id, mapping.entity_version_id, mapping_changes_str
                     )
                     summary["entity_mappings_affected"] += 1
+                    summary["tool_mappings_added"] += mapping_added_count
                     summary["tool_mappings_removed"] += mapping_removed_count
                     summary["tool_mappings_renamed"] += mapping_renamed_count
                     #
@@ -411,7 +439,8 @@ def run_selected_tools_migration(param):
     prefix = "[DRY RUN] " if dry_run else ""
     #
     ops_desc = ", ".join(
-        f"rename {op['old_name']}->{op['new_name']}" if op["action"] == "rename"
+        f"add {op['tool_name']}" if op["action"] == "add"
+        else f"rename {op['old_name']}->{op['new_name']}" if op["action"] == "rename"
         else f"remove {op['tool_name']}"
         for op in operations
     )
@@ -435,8 +464,10 @@ def run_selected_tools_migration(param):
         "projects_scanned": 0,
         "toolkits_affected": 0,
         "entity_mappings_affected": 0,
+        "tools_added": 0,
         "tools_removed": 0,
         "tools_renamed": 0,
+        "tool_mappings_added": 0,
         "tool_mappings_removed": 0,
         "tool_mappings_renamed": 0,
         "pipeline_versions_scanned": 0,
@@ -465,8 +496,10 @@ def run_selected_tools_migration(param):
             )
             total_summary["toolkits_affected"] += result["toolkits_affected"]
             total_summary["entity_mappings_affected"] += result["entity_mappings_affected"]
+            total_summary["tools_added"] += result["tools_added"]
             total_summary["tools_removed"] += result["tools_removed"]
             total_summary["tools_renamed"] += result["tools_renamed"]
+            total_summary["tool_mappings_added"] += result["tool_mappings_added"]
             total_summary["tool_mappings_removed"] += result["tool_mappings_removed"]
             total_summary["tool_mappings_renamed"] += result["tool_mappings_renamed"]
             total_summary["pipeline_versions_scanned"] += result["pipeline_versions_scanned"]
@@ -482,12 +515,13 @@ def run_selected_tools_migration(param):
         total_summary["entity_mappings_affected"]
     )
     log.info(
-        "%sTools removed: %s, Tools renamed: %s",
-        prefix, total_summary["tools_removed"], total_summary["tools_renamed"]
+        "%sTools added: %s, Tools removed: %s, Tools renamed: %s",
+        prefix, total_summary["tools_added"], total_summary["tools_removed"], total_summary["tools_renamed"]
     )
     log.info(
-        "%sTool mappings removed: %s, Tool mappings renamed: %s",
-        prefix, total_summary["tool_mappings_removed"], total_summary["tool_mappings_renamed"],
+        "%sTool mappings added: %s, Tool mappings removed: %s, Tool mappings renamed: %s",
+        prefix, total_summary["tool_mappings_added"], total_summary["tool_mappings_removed"],
+        total_summary["tool_mappings_renamed"],
     )
     log.info(
         "%sPipeline versions scanned: %s, Pipeline versions affected: %s",

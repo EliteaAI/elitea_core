@@ -307,6 +307,7 @@ def _export_skills_main(
                 skill_dict['versions'].append(version_dict)
             export_model = SkillExportModel.model_validate(skill_dict)
             export_dict = export_model.model_dump(mode='json')
+            export_dict['owner_id'] = skill.owner_id
             skill_uuid_by_id[skill.id] = export_dict['import_uuid']
             skills_serialized.append(export_dict)
 
