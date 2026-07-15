@@ -22,6 +22,7 @@ from ..models.pd.application import (
     ApplicationUpdateModel
 )
 from ..models.pd.version import ApplicationVersionDetailToolValidatedModel
+from ..models.pd.llm import llm_settings_family_conflict
 from ..models.all import Tag
 from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
@@ -1314,6 +1315,27 @@ def list_applications_api(
     }
 
 
+def _normalize_llm_settings_family(llm_settings: dict, supports_reasoning: bool) -> dict:
+    """Reset temperature/reasoning_effort to match a model's actual reasoning support.
+
+    Shared by all branches of validate_and_resolve_llm_settings (available model, unavailable
+    model, and unavailable-model-with-no-name-at-all fallback) so the reset logic lives in one
+    place (issue #5821).
+    """
+    resolved = dict(llm_settings)
+    if supports_reasoning:
+        # Reasoning models ignore temperature; promote to reasoning_effort if not already set.
+        resolved['temperature'] = None
+        if not resolved.get('reasoning_effort'):
+            resolved['reasoning_effort'] = 'medium'
+    else:
+        # Non-reasoning models ignore reasoning_effort.
+        resolved['reasoning_effort'] = None
+        if resolved.get('temperature') is None:
+            resolved['temperature'] = 0.7
+    return resolved
+
+
 def validate_and_resolve_llm_settings(
     project_id: int,
     llm_settings: Optional[dict],
@@ -1322,6 +1344,12 @@ def validate_and_resolve_llm_settings(
     include_openai_compatible: bool = False,
 ) -> Optional[dict]:
     """Check if llm_settings.model_name is available; fall back to the project's default LLM if not.
+
+    Also corrects a temperature/reasoning_effort family conflict (both set at once — invalid
+    for reasoning models) against the resolved model's actual supports_reasoning capability,
+    even when the model itself is available (issue #5821). Callers must invoke this
+    unconditionally, not only when llm_settings is empty — a non-empty-but-corrupted or
+    unavailable-model llm_settings is exactly the case this function needs to fix.
 
     openai_compatible is a derived model-config property, added to the result only when
     include_openai_compatible is True (response paths such as the SDK building sub-agents).
@@ -1340,15 +1368,26 @@ def validate_and_resolve_llm_settings(
 
             if model_project_id is not None:
                 if (model_project_id, model_name) in available:
+                    config = available[(model_project_id, model_name)]
+                    result = llm_settings
+                    if llm_settings_family_conflict(
+                        llm_settings.get('temperature'), llm_settings.get('reasoning_effort')
+                    ):
+                        result = _normalize_llm_settings_family(
+                            llm_settings, bool(config.get('supports_reasoning', False))
+                        )
+                        log.warning(
+                            f"LLM settings family conflict corrected for model {model_name!r} "
+                            f"(project_id={model_project_id}, application_id={application_id} "
+                            f"version_id={version_id}). Before: {llm_settings!r}. After: {result!r}"
+                        )
                     if not include_openai_compatible:
-                        return llm_settings
+                        return result
                     # Response-only: surface the model's openai_compatible flag so the SDK
                     # routes a sub-agent's Claude model through the correct client. Resolved
                     # from the config registry, never persisted (see docstring).
-                    stamped = dict(llm_settings)
-                    stamped['openai_compatible'] = bool(
-                        available[(model_project_id, model_name)].get('openai_compatible', False)
-                    )
+                    stamped = dict(result)
+                    stamped['openai_compatible'] = bool(config.get('openai_compatible', False))
                     return stamped
             else:
                 # null model_project_id: find the actual project that owns this model.
@@ -1359,12 +1398,23 @@ def validate_and_resolve_llm_settings(
                     None,
                 )
                 if resolved_project_id is not None:
+                    config = available[(resolved_project_id, model_name)]
                     stamped = dict(llm_settings)
                     stamped['model_project_id'] = resolved_project_id
-                    if include_openai_compatible:
-                        stamped['openai_compatible'] = bool(
-                            available[(resolved_project_id, model_name)].get('openai_compatible', False)
+                    if llm_settings_family_conflict(
+                        stamped.get('temperature'), stamped.get('reasoning_effort')
+                    ):
+                        stamped = _normalize_llm_settings_family(
+                            stamped, bool(config.get('supports_reasoning', False))
                         )
+                        stamped['model_project_id'] = resolved_project_id
+                        log.warning(
+                            f"LLM settings family conflict corrected for model {model_name!r} "
+                            f"(project_id={resolved_project_id}, application_id={application_id} "
+                            f"version_id={version_id}). Before: {llm_settings!r}. After: {stamped!r}"
+                        )
+                    if include_openai_compatible:
+                        stamped['openai_compatible'] = bool(config.get('openai_compatible', False))
                     return stamped
 
         default = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_default_model(
@@ -1388,19 +1438,9 @@ def validate_and_resolve_llm_settings(
         # — avoids an extra RPC call.
         default_model_config = available.get((default_model_project_id, default_model_name), {})
         supports_reasoning = bool(default_model_config.get('supports_reasoning', False))
+        resolved = _normalize_llm_settings_family(resolved, supports_reasoning)
         if include_openai_compatible:
             resolved['openai_compatible'] = bool(default_model_config.get('openai_compatible', False))
-
-        if supports_reasoning:
-            # Reasoning models ignore temperature; promote to reasoning_effort if not already set.
-            resolved['temperature'] = None
-            if not resolved.get('reasoning_effort'):
-                resolved['reasoning_effort'] = 'medium'
-        else:
-            # Non-reasoning models ignore reasoning_effort.
-            resolved['reasoning_effort'] = None
-            if resolved.get('temperature') is None:
-                resolved['temperature'] = 0.7
 
         ctx = f"application_id={application_id} version_id={version_id} " if (application_id or version_id) else ""
         log.warning(

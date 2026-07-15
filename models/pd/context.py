@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Dict, Any
 from datetime import datetime
 
-from .llm_settings_v2 import LLMSettingsModel
+from .llm import LLMSettingsModel
 
 
 class ContextStrategyUpdate(BaseModel):
