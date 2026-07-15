@@ -195,7 +195,9 @@ class Event:
                 ConversationMessageGroup.uuid == payload['message_id']
             ).first()
             if msg_group:
-                msg_group = update_message_group_meta(msg_group, payload)
+                # session is required so table-mode trace-step writes (TS-2) land;
+                # partial saves are where fan-out children stream their steps.
+                msg_group = update_message_group_meta(msg_group, payload, session=session)
                 flag_modified(msg_group, 'meta')
                 session.add(msg_group)
                 session.commit()
