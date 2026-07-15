@@ -312,7 +312,7 @@ def _export_skills_main(
             # fork.py stamps parent lineage from them (same patch-up as
             # build_skill_fork_payload) — without owner_id, forking an exported
             # agent that carries skills fails.
-            export_dict['owner_id'] = project_id
+            export_dict['owner_id'] = skill.owner_id
             export_dict['entity'] = 'skills'
             for version, version_export in zip(versions, export_dict['versions']):
                 version_export['id'] = version.id

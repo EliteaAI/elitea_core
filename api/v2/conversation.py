@@ -1,4 +1,4 @@
-from flask import request
+from flask import request, current_app
 from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 from pylon.core.tools import log
 
@@ -67,12 +67,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
             messages_limit=messages_limit,
             messages_offset=messages_offset,
             sort_order=sort_order,
+            return_json=True,
         )
 
         if not result:
             return {'error': f'No such conversation with id {conversation_id}'}, 400
 
-        return result, 200
+        # result is a pre-encoded JSON string; return a bare Response so flask_restful
+        # passes it through verbatim instead of re-serializing it.
+        return current_app.response_class(result, status=200, mimetype='application/json')
 
     @register_openapi(
         name="Update Conversation",

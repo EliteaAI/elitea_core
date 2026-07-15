@@ -151,6 +151,23 @@ def _expand_toolkit_reference(toolkit_id: int, project_id: int, user_id: int):
         session.close()
 
 
+def _expand_toolkit_reference_value(toolkit_reference, project_id: int, user_id: int):
+    """Expand a toolkit reference field that may be a scalar id or a list of ids."""
+    if toolkit_reference is None or toolkit_reference == "":
+        return toolkit_reference
+
+    if isinstance(toolkit_reference, list):
+        return [
+            _expand_toolkit_reference_value(item, project_id, user_id)
+            for item in toolkit_reference
+        ]
+
+    if isinstance(toolkit_reference, dict):
+        return toolkit_reference
+
+    return _expand_toolkit_reference(toolkit_reference, project_id, user_id)
+
+
 def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id: int):
     tk , _ = find_toolkit_schema_by_type_everywhere(type_, project_id, user_id)
     if tk is None:
@@ -234,10 +251,10 @@ def expand_toolkit_settings(type_: str, settings: dict, project_id: int, user_id
     # expand toolkit references
     for to_be_expanded_fieldname in to_be_expanded_toolkit_fieldnames:
         try:
-            toolkit_id = settings.get(to_be_expanded_fieldname)
-            if toolkit_id:  # toolkit reference might be Optional
-                settings[to_be_expanded_fieldname] = _expand_toolkit_reference(
-                    toolkit_id,
+            toolkit_reference = settings.get(to_be_expanded_fieldname)
+            if toolkit_reference not in (None, ""):  # toolkit reference might be Optional
+                settings[to_be_expanded_fieldname] = _expand_toolkit_reference_value(
+                    toolkit_reference,
                     project_id,
                     user_id
                 )
