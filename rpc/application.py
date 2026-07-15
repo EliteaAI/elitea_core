@@ -99,6 +99,7 @@ class RPC:
                     is_system_user: bool = False,
                     return_chat_history: bool = False,
                     non_interactive: Optional[bool] = None,
+                    eligible_for_autoapproval: bool = False,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -218,7 +219,7 @@ class RPC:
                     parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
         except PredictPayloadError as e:
             raise SioValidationError(
                 sio=self.context.sio,
@@ -228,6 +229,9 @@ class RPC:
                 stream_id=data.get("stream_id"),
                 message_id=data.get("message_id")
             )
+
+        if eligible_for_autoapproval:
+            payload['auto_approve_sensitive_actions'] = True
 
         if not user_context:
             user_context = {
@@ -314,6 +318,7 @@ class RPC:
                         is_system_user: bool = False,
                         return_chat_history: bool = False,
                         non_interactive: Optional[bool] = None,
+                        eligible_for_autoapproval: bool = False,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
@@ -1374,7 +1379,7 @@ class RPC:
 
         toolkit_config = data.get('toolkit_config', {})
         toolkit_type = toolkit_config.get('type', 'unknown')
-        if toolkit_type != 'mcp':
+        if not toolkit_type.startswith('mcp'):
             raise ValueError(f"test_mcp_connection only works with MCP toolkits, got type: {toolkit_type}")
 
         project_id = data.get('project_id')

@@ -86,17 +86,21 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def migrate_toolkit_selected_tools(self, *args, **kwargs):
         """Admin task: migrate selected_tools in EliteATool.settings and EntityToolMapping.
 
-        Supports removing and renaming tool entries across all or specific projects,
+        Supports adding, removing, and renaming tool entries across all or specific projects,
         with an optional dry-run mode.
 
         Param format:
             "<toolkit_type>;<operations>;project_id=<all|N>[;dry_run]"
 
         Operations (comma-separated):
+            +tool_name          - add tool to selected_tools if missing
             tool_name           - remove tool from selected_tools
             old_name>new_name   - rename tool (remove old, append new)
 
         Examples:
+            "inventory;+ask;project_id=all;dry_run"
+                All projects, inventory toolkits: add ask where a persisted selection is missing it
+
             "github;index_data>indexData,search_index;project_id=all"
                 All projects, github toolkits: rename index_data->indexData, remove search_index
 

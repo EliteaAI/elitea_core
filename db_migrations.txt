@@ -167,3 +167,9 @@ Run admin task migrate_toolkit_selected_tools with params: artifact;get_file_typ
 # Idempotent; run dry_run first to verify expected changes.
 Run admin task migrate_confluence_api_version with param: project_id=all;dry_run
 Run admin task migrate_confluence_api_version with param: project_id=all
+
+# Issue #5694: Backfill inventory ask tool into persisted selected_tools for existing inventories.
+# Applies only to toolkits/mappings that already store an explicit selected_tools list and are missing ask.
+# Empty/missing selected_tools is left untouched because that state is treated as unrestricted by current runtime flows.
+Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project_id=all;dry_run
+Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project_id=all

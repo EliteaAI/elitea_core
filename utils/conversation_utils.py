@@ -1,6 +1,5 @@
-from sqlalchemy import and_, or_, asc, desc, Integer, Float, func, case, cast, TIMESTAMP, Text
+from sqlalchemy import and_, or_, asc, desc, Integer, Float, func, case, cast
 from sqlalchemy.orm import joinedload, selectinload, Session
-from sqlalchemy.dialects.postgresql import JSONB
 
 from tools import rpc_tools, this
 from pylon.core.tools import log
@@ -8,160 +7,97 @@ from pylon.core.tools import log
 from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes, AgentTypes
 from ..models.message_group import ConversationMessageGroup
+from ..models.message_trace_step import MessageTraceStep
 from ..models.message_items.base import MessageItem
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationDetailsOrm, ConversationDetails
 from ..utils.authors import get_authors_data
-from ..utils.meta_guard import (
-    META_SIZE_LIMIT_BYTES, RESPONSE_META_BUDGET_BYTES,
-    meta_bytes_expr, safe_meta_expr, strip_heavy_meta_keys,
-)
+from ..utils.meta_guard import strip_heavy_meta_expr
 
 MESSAGES_DISPLAY_COUNT: int = 100
 
 
-def calculate_conversation_duration(conversation: Conversation, session: Session) -> float:
+def _thinking_span_subquery(session: Session, conversation_ids: list[int]):
+    """Per-group thinking wall-clock (secs) from message_trace_step: max(finished) - min(started).
+
+    Replaces the old meta['thinking_steps'][0/-1] timestamp math (steps now live in the table).
+    Steps accumulate chronologically so min/max match the former first-start -> last-finish span.
+    Scoped to the target conversations (join message_group inside the aggregation) so the GROUP BY
+    only touches relevant groups, not the whole tenant schema.
     """
-    Calculate the sum of message durations for a conversation.
-
-    The duration calculation has three cases (in priority order):
-    1. Agent/LLM execution: Uses first_tool_timestamp_start and last thinking_step's timestamp_finish
-    2. Toolkit-only execution: Uses execution_time_seconds stored in meta (for standalone toolkit testing)
-    3. Fallback: Uses updated_at - created_at (for messages without timing metadata)
-
-    Returns:
-        Total duration in seconds (float)
-    """
-    if session is None:
-        return 0.0
-
-    duration_expression = case(
-        # Case 1: Agent/LLM execution with thinking_steps (most accurate for agent runs).
-        # Duration = first thinking step start -> last thinking step finish (full wall-clock,
-        # matching the chat "Thought for X"). Do NOT use meta['first_tool_timestamp_start']: it is
-        # overwritten on each partial save with the latest llm_start_timestamp, so sub-agent /
-        # multi-round / HITL-resume runs collapse it to only the final round (#5422). thinking_steps
-        # are accumulated, so [0]['timestamp_start'] preserves the true earliest start.
-        (
-            and_(
-                # Guard: only call jsonb_array_length when the value is actually a JSON array.
-                # coalesce(meta['thinking_steps'], cast('[]', JSONB)) passes '[]' as a JSON
-                # *string* "[]" (not an array), so jsonb_array_length crashes on any non-array
-                # value.  The nested case below guarantees jsonb_array_length is never called on
-                # a scalar or NULL.
-                case(
-                    (func.jsonb_typeof(ConversationMessageGroup.meta['thinking_steps']) == 'array',
-                     func.jsonb_array_length(ConversationMessageGroup.meta['thinking_steps'])),
-                    else_=0,
-                ) > 0,
-                ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start'].astext.isnot(None),
-                ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish'].astext.isnot(None)
-            ),
+    return (
+        session.query(
+            MessageTraceStep.message_group_id.label('mg_id'),
             func.extract(
                 'epoch',
-                cast(
-                    (ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish']).astext,
-                    TIMESTAMP
-                ) - cast(
-                    (ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start']).astext,
-                    TIMESTAMP
-                )
-            )
-        ),
-        # Case 2: Toolkit-only execution (uses execution_time_seconds from SDK response)
-        # This handles standalone toolkit testing where there's no LLM/thinking_steps
-        # Check both JSONB key existence (->  IS NOT NULL) and text value (-->> IS NOT NULL)
-        # to avoid matching JSON null values which would return SQL NULL after cast
+                func.max(MessageTraceStep.finished_at) - func.min(MessageTraceStep.started_at),
+            ).label('secs'),
+        )
+        .join(
+            ConversationMessageGroup,
+            ConversationMessageGroup.id == MessageTraceStep.message_group_id,
+        )
+        .filter(
+            ConversationMessageGroup.conversation_id.in_(conversation_ids),
+            MessageTraceStep.kind == 'thinking_step',
+            MessageTraceStep.started_at.isnot(None),
+            MessageTraceStep.finished_at.isnot(None),
+        )
+        .group_by(MessageTraceStep.message_group_id)
+        .subquery()
+    )
+
+
+def _duration_expression(span):
+    """Duration case over the thinking-span subquery, in priority order.
+
+    1. Agent/LLM run: thinking span from message_trace_step (full wall-clock, chat "Thought for X").
+    2. Toolkit-only: meta['execution_time_seconds'] (standalone toolkit testing, no thinking steps).
+    3. Fallback: updated_at - created_at.
+    """
+    return case(
+        (span.c.secs.isnot(None), span.c.secs),
         (
             and_(
                 ConversationMessageGroup.meta['execution_time_seconds'].isnot(None),
-                ConversationMessageGroup.meta['execution_time_seconds'].astext.isnot(None)
+                ConversationMessageGroup.meta['execution_time_seconds'].astext.isnot(None),
             ),
-            cast(ConversationMessageGroup.meta['execution_time_seconds'].astext, Float)
+            cast(ConversationMessageGroup.meta['execution_time_seconds'].astext, Float),
         ),
-        # Case 3: Fallback to updated_at - created_at
         else_=func.extract(
             'epoch',
-            func.coalesce(ConversationMessageGroup.updated_at, ConversationMessageGroup.created_at) - ConversationMessageGroup.created_at
-        )
+            func.coalesce(ConversationMessageGroup.updated_at, ConversationMessageGroup.created_at)
+            - ConversationMessageGroup.created_at,
+        ),
     )
-
-    result = session.query(
-        func.coalesce(func.sum(duration_expression), 0.0)
-    ).filter(
-        ConversationMessageGroup.conversation_id == conversation.id,
-        ConversationMessageGroup.reply_to_id.isnot(None)
-    ).scalar()
-
-    return round(float(result or 0.0), 2)
 
 
 def calculate_conversation_durations_batch(
     conversation_ids: list[int],
     session: Session,
 ) -> dict[int, float]:
-    """
-    Batched variant of calculate_conversation_duration: returns
-    {conversation_id: duration_seconds} in a single GROUP BY query.
+    """Return {conversation_id: duration_seconds} in a single GROUP BY query.
 
-    Used by chat_list_conversations_rpc to avoid one query per row.
+    Used by chat_list_conversations_rpc to avoid one query per row. See _duration_expression.
     """
     if not conversation_ids or session is None:
         return {}
 
-    duration_expression = case(
-        # Case 1: Agent/LLM duration = first thinking step start -> last thinking step finish
-        # (full wall-clock, matches chat "Thought for X"). meta['first_tool_timestamp_start'] is
-        # intentionally NOT used -- partial saves overwrite it with the latest llm_start_timestamp,
-        # collapsing multi-round / sub-agent / HITL durations to the final round only (#5422).
-        (
-            and_(
-                # Guard: only call jsonb_array_length when the value is actually a JSON array.
-                # coalesce(meta['thinking_steps'], cast('[]', JSONB)) passes '[]' as a JSON
-                # *string* "[]" (not an array), so jsonb_array_length crashes on any non-array
-                # value.  The nested case below guarantees jsonb_array_length is never called on
-                # a scalar or NULL.
-                case(
-                    (func.jsonb_typeof(ConversationMessageGroup.meta['thinking_steps']) == 'array',
-                     func.jsonb_array_length(ConversationMessageGroup.meta['thinking_steps'])),
-                    else_=0,
-                ) > 0,
-                ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start'].astext.isnot(None),
-                ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish'].astext.isnot(None)
-            ),
-            func.extract(
-                'epoch',
-                cast(
-                    (ConversationMessageGroup.meta['thinking_steps'][-1]['timestamp_finish']).astext,
-                    TIMESTAMP
-                ) - cast(
-                    (ConversationMessageGroup.meta['thinking_steps'][0]['timestamp_start']).astext,
-                    TIMESTAMP
-                )
-            )
-        ),
-        (
-            and_(
-                ConversationMessageGroup.meta['execution_time_seconds'].isnot(None),
-                ConversationMessageGroup.meta['execution_time_seconds'].astext.isnot(None)
-            ),
-            cast(ConversationMessageGroup.meta['execution_time_seconds'].astext, Float)
-        ),
-        else_=func.extract(
-            'epoch',
-            func.coalesce(ConversationMessageGroup.updated_at, ConversationMessageGroup.created_at) - ConversationMessageGroup.created_at
+    span = _thinking_span_subquery(session, conversation_ids)
+    rows = (
+        session.query(
+            ConversationMessageGroup.conversation_id,
+            func.coalesce(func.sum(_duration_expression(span)), 0.0),
         )
+        .select_from(ConversationMessageGroup)
+        .outerjoin(span, span.c.mg_id == ConversationMessageGroup.id)
+        .filter(
+            ConversationMessageGroup.conversation_id.in_(conversation_ids),
+            ConversationMessageGroup.reply_to_id.isnot(None),
+        )
+        .group_by(ConversationMessageGroup.conversation_id)
+        .all()
     )
-
-    rows = session.query(
-        ConversationMessageGroup.conversation_id,
-        func.coalesce(func.sum(duration_expression), 0.0),
-    ).filter(
-        ConversationMessageGroup.conversation_id.in_(conversation_ids),
-        ConversationMessageGroup.reply_to_id.isnot(None),
-    ).group_by(
-        ConversationMessageGroup.conversation_id,
-    ).all()
 
     return {cid: round(float(d or 0.0), 2) for cid, d in rows}
 
@@ -169,9 +105,9 @@ def calculate_conversation_durations_batch(
 MESSAGES_LIMIT_HARD_CAP: int = 100
 
 
-# Column list selected for every message-group read. meta is replaced by the server-side safe_meta
-# expression so an oversized blob is stripped inside Postgres and never crosses the wire / hits the
-# gevent hub; meta_bytes carries the real decompressed size for the cumulative budget below.
+# Column list selected for every message-group read. meta has tool_calls / thinking_steps stripped
+# in Postgres (strip_heavy_meta_expr) so an old group's monolithic blob is never detoasted onto the
+# gevent hub. New groups never carry those keys; steps are served from message_trace_step instead.
 def _message_group_columns():
     return [
         ConversationMessageGroup.id,
@@ -183,17 +119,15 @@ def _message_group_columns():
         ConversationMessageGroup.is_streaming,
         ConversationMessageGroup.task_id,
         ConversationMessageGroup.sent_to_id,
-        safe_meta_expr(ConversationMessageGroup.meta).label('meta'),
-        meta_bytes_expr(ConversationMessageGroup.meta).label('meta_bytes'),
+        strip_heavy_meta_expr(ConversationMessageGroup.meta).label('meta'),
     ]
 
 
 def fetch_guarded_message_groups(session, rows, log_label: str = 'message_groups') -> list[dict]:
-    """Build guarded message-group dicts from rows selected via _message_group_columns().
+    """Build message-group dicts from rows selected via _message_group_columns().
 
-    Applies the cumulative per-response budget (per-group oversize is already stripped in SQL),
-    loads message_items ordered by order_index, and resolves sent_to participants — shared by every
-    read path so the stall guard and item ordering stay consistent.
+    Loads message_items ordered by order_index and resolves sent_to participants — shared by every
+    read path so item ordering stays consistent. The heavy meta keys are already stripped in SQL.
     """
     group_ids = [r.id for r in rows]
     items_by_group = {}
@@ -210,22 +144,7 @@ def fetch_guarded_message_groups(session, rows, log_label: str = 'message_groups
             for p in session.query(Participant).filter(Participant.id.in_(sent_to_ids)).all():
                 sent_to_by_id[p.id] = p
     group_dicts = []
-    cumulative_meta_bytes = 0
     for r in rows:
-        meta = r.meta or {}
-        group_bytes = r.meta_bytes or 0
-        if meta.get('_oversized'):
-            # heavy keys already stripped in SQL; stripped group is tiny, don't charge the budget
-            log.warning('%s: group %s meta %.1f MB > %d MB — stripped', log_label, r.id,
-                        group_bytes / 1024 / 1024, META_SIZE_LIMIT_BYTES // 1024 // 1024)
-            meta = strip_heavy_meta_keys(meta)
-        elif cumulative_meta_bytes + group_bytes > RESPONSE_META_BUDGET_BYTES:
-            # individually fine but the cumulative response would freeze the hub
-            log.warning('%s: group %s trimmed — response budget %d MB exhausted', log_label, r.id,
-                        RESPONSE_META_BUDGET_BYTES // 1024 // 1024)
-            meta = strip_heavy_meta_keys(meta)
-        else:
-            cumulative_meta_bytes += group_bytes
         group_dicts.append({
             'id': r.id,
             'uuid': r.uuid,
@@ -237,7 +156,7 @@ def fetch_guarded_message_groups(session, rows, log_label: str = 'message_groups
             'task_id': r.task_id,
             'sent_to_id': r.sent_to_id,
             'sent_to': sent_to_by_id.get(r.sent_to_id),
-            'meta': meta,
+            'meta': r.meta or {},
             'message_items': items_by_group.get(r.id, []),
         })
     return group_dicts
