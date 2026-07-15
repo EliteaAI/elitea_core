@@ -1,4 +1,16 @@
-"""Pure helpers for the durable parallel-child HITL persistence contract."""
+"""Pure helpers for the durable parallel-child HITL persistence contract.
+
+State ownership is intentionally split by meaning, not duplicated:
+
+* PostgreSQL message metadata is the durable source for pending approval cards, accepted-card
+  tombstones, and reload/replay behavior. ``retire_*`` means that an approval was accepted or
+  invalidated by a message lifecycle transition; it never means that a child execution finished.
+* The Redis gate in ``methods.parallel_dispatch`` is the sole source for child execution
+  completion and parent reconciliation. Nothing in this module decrements or reconstructs it.
+
+Keeping approval state durable is required because the Redis coordination epoch is transient and
+cannot reconstruct the UI after reload or reject a late duplicate pause callback.
+"""
 
 from copy import deepcopy
 
@@ -147,7 +159,7 @@ def remember_resolved_interrupts(meta, interrupts):
 
 
 def retire_all_interrupts(meta):
-    """Clear every pending card while retaining late-event resurrection guards."""
+    """Clear every pending card after a terminal message lifecycle transition."""
     updated = remember_resolved_interrupts(meta, pending_interrupts(meta))
     updated.pop('hitl_interrupts', None)
     updated.pop('hitl_interrupt', None)
@@ -161,6 +173,7 @@ def retire_interrupts(meta, interrupt_ids):
     thread to scope by.  Their stable public interrupt ids are the ownership
     boundary.  Keeping this separate from ``retire_child_interrupts`` avoids
     treating an absent child thread as a wildcard for every root interrupt.
+    This records accepted approval cards, not child execution completion.
     """
     updated = dict(meta or {})
     interrupt_ids = {
@@ -238,7 +251,11 @@ def validate_child_decisions(pending, decisions):
 
 
 def retire_child_interrupts(meta, child_thread_id, interrupt_ids=None):
-    """Return metadata with one resumed child's pending interrupt set retired."""
+    """Retire one resumed child's cards after its replacement task is accepted.
+
+    Sibling cards remain pending. The child itself remains open until the Redis terminal gate in
+    ``parallel_dispatch`` settles it; this helper does not represent or infer completion.
+    """
     updated = dict(meta or {})
     interrupt_ids = set(interrupt_ids or [])
     remaining = []

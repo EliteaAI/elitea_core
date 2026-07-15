@@ -40,6 +40,11 @@ history — it is deleted the instant an epoch reconciles):
 
 plus the pre-existing Redis keys (cancel flag, reconcile-payload stash, per-child
 launch stash, chat-run-stopped flag) — unchanged.
+
+This gate is the sole source of truth for execution completion. PostgreSQL message
+metadata deliberately stores a different domain: pending HITL approval cards and
+late-event tombstones needed for reload/replay. Accepting a card does not settle a
+child here; only its later non-paused terminal callback does.
 """
 
 import json

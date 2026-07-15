@@ -1,9 +1,8 @@
-"""Issue #5680 — sub-agent tree walkers: publish collector + validation assertion.
+"""Issues #5680/#5778 — canonical sub-agent traversal contracts.
 
-Exercises the pure decision logic of the two split walkers (``collect_sub_agent_tree`` for the
-publish path, ``assert_no_invalid_nesting`` for cycle + leaf-rule validation) against a fake
-in-memory session, without a real DB. Also covers the ``SubAgentTreeError -> toolkit_errors``
-UI-error shape and the offending-tool-id attribution that drives the red validation chip.
+Exercises publishing, validation, and tier calculation against a fake in-memory session, without
+a real DB. The three public operations share one cached path-local traversal. Also covers the
+``SubAgentTreeError -> toolkit_errors`` UI-error shape and offending-tool-id attribution.
 Heavy model/dep imports are stubbed so publish_utils loads standalone.
 
 Run via:
@@ -357,7 +356,7 @@ class TestUIErrorShape:
 
 
 class TestQueryEfficiency:
-    """Finding #4: one query per node (no double-fetch)."""
+    """One cached traversal: no per-node or validation/collection double-fetch."""
 
     def test_validation_walk_queries_each_node_once(self, pu):
         registry = {
@@ -367,6 +366,32 @@ class TestQueryEfficiency:
         }
         session = FakeSession(registry)
         _assert(pu, registry, 1, session=session)
+        assert session.query_count == 3
+
+    def test_publish_validation_and_collection_share_one_walk(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[]),
+        }
+        session = FakeSession(registry)
+
+        tree = pu.collect_sub_agent_tree(1, 1, session=session)
+
+        assert tree == []
+        assert session.query_count == 3
+
+    def test_tier_calculation_loads_each_version_once(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[]),
+        }
+        session = FakeSession(registry)
+
+        tiers = pu.compute_agent_subtree_tiers(1, 1, session=session)
+
+        assert tiers == 2
         assert session.query_count == 3
 
 
@@ -418,7 +443,7 @@ class TestAgentSubtreeTiers:
 
 
 class TestPublishPath:
-    """Publish path (collect_sub_agent_tree) unchanged: pipelines skipped, not walked."""
+    """Publish materialization excludes pipelines after the canonical validation walk."""
 
     def test_publish_path_skips_pipeline_children(self, pu):
         registry = {
@@ -436,6 +461,20 @@ class TestPublishPath:
         }
         tree = _collect(pu, registry, 1)
         assert [n.app_id for n in tree] == [2]
+
+    def test_publish_path_accepts_shared_leaf_and_reuses_its_load(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2), FakeTool(3, 3)]),
+            2: FakeVersion(2, tools=[FakeTool(4, 4)]),
+            3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+            4: FakeVersion(4, tools=[]),
+        }
+        session = FakeSession(registry)
+
+        tree = pu.collect_sub_agent_tree(1, 1, session=session)
+
+        assert [[child.app_id for child in node.children] for node in tree] == [[4], [4]]
+        assert session.query_count == 4
 
 
 class TestCollectReachableVersionIds:
