@@ -37,6 +37,26 @@ def _is_indexer_mcp_configuration(entry):
     )
 
 
+def _is_indexer_mcp_schema(name, schema):
+    """Return whether a toolkit schema comes from static indexer MCP config."""
+    metadata = schema.get("metadata", {}) if isinstance(schema, dict) else {}
+    return (
+        name.startswith("mcp_")
+        and metadata.get("section") == "toolkits"
+        and bool(metadata.get("mcp_server_name"))
+    )
+
+
+def _prepare_toolkit_schema(schema):
+    """Copy a collected schema and derive its toolkit naming requirement."""
+    schema = deepcopy(schema)
+    schema['name_required'] = not any(
+        value.get('toolkit_name') and isinstance(value['toolkit_name'], bool)
+        for value in schema.get('properties', {}).values()
+    )
+    return schema
+
+
 class Method:
     @web.method()
     def toolkits_collected(self, event, payload: list[dict]):
@@ -44,19 +64,38 @@ class Method:
         # toolkits/tools) are applied live at read time in get_toolkit_schemas,
         # so block/unblock take effect without a pylon restart. Filtering here
         # would be destructive — an unblocked toolkit could never be restored
-        # without rebuilding this startup-built registry.
+        # without rebuilding this indexer-owned registry.
+        toolkit_schemas = {}
         for schema in payload:
-            schema['name_required'] = not any(
-                v.get('toolkit_name') and isinstance(v['toolkit_name'], bool)
-                for v in schema.get('properties', {}).values()
-            )
-            self.toolkit_schemas[schema['title']] = schema
+            schema = _prepare_toolkit_schema(schema)
+            toolkit_schemas[schema['title']] = schema
+
+        # Each collection is a complete indexer snapshot. Replace it atomically
+        # so removed dynamic MCP definitions cannot survive in the picker.
+        self.toolkit_schemas = toolkit_schemas
 
         log.info("Toolkit schemas definitions collected successfully")
 
     @web.method()
     def toolkit_configurations_collected(self, event, payload: dict):
         self.configuration_schemas = deepcopy(payload)
+
+        # The generated MCP configuration models are also the schemas shown by
+        # the New Toolkit picker. Reconcile only this owned subset so a live
+        # admin save can add, edit, or remove MCP entries without rediscovering
+        # every server a second time.
+        if hasattr(self, "toolkit_schemas"):
+            toolkit_schemas = {
+                name: schema
+                for name, schema in self.toolkit_schemas.items()
+                if not _is_indexer_mcp_schema(name, schema)
+            }
+            toolkit_schemas.update({
+                name: _prepare_toolkit_schema(schema)
+                for name, schema in payload.items()
+                if _is_indexer_mcp_schema(name, schema)
+            })
+            self.toolkit_schemas = toolkit_schemas
 
         # Register configuration schemas directly without model generation
         RPC_CALL_TIMEOUT = 3

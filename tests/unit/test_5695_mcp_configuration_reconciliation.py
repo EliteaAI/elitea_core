@@ -99,6 +99,63 @@ def _method_instance(module, previous=None):
     return instance
 
 
+def test_toolkit_collection_replaces_snapshot_without_mutating_payload(monkeypatch):
+    rpc = _RpcManager([])
+    module = _load_method(monkeypatch, rpc)
+    instance = _method_instance(module)
+    instance.toolkit_schemas = {
+        "mcp_removed": {"title": "mcp_removed"},
+        "github": {"title": "github"},
+    }
+    payload = [{
+        "title": "mcp_new",
+        "properties": {"elitea_title": {"toolkit_name": True}},
+    }]
+
+    instance.toolkits_collected(None, payload)
+
+    assert instance.toolkit_schemas == {
+        "mcp_new": {
+            "title": "mcp_new",
+            "properties": {"elitea_title": {"toolkit_name": True}},
+            "name_required": False,
+        },
+    }
+    assert payload[0].get("name_required") is None
+
+
+def test_configuration_collection_reconciles_picker_mcp_subset(monkeypatch):
+    rpc = _RpcManager([])
+    module = _load_method(monkeypatch, rpc)
+    instance = _method_instance(module)
+    instance.toolkit_schemas = {
+        "github": {"title": "github", "metadata": {"section": "toolkits"}},
+        "mcp_removed": {
+            "title": "mcp_removed",
+            "metadata": {
+                "section": "toolkits",
+                "mcp_server_name": "Removed",
+            },
+        },
+    }
+    incoming = {
+        "mcp_new": {
+            "title": "mcp_new",
+            "properties": {"server_name": {"hidden": True}},
+            "metadata": {
+                "section": "toolkits",
+                "mcp_server_name": "New",
+            },
+        },
+    }
+
+    instance.toolkit_configurations_collected(None, incoming)
+
+    assert set(instance.toolkit_schemas) == {"github", "mcp_new"}
+    assert instance.toolkit_schemas["mcp_new"]["name_required"] is True
+    assert incoming["mcp_new"].get("name_required") is None
+
+
 def test_add_registers_new_mcp_configuration(monkeypatch):
     rpc = _RpcManager([])
     module = _load_method(monkeypatch, rpc)
