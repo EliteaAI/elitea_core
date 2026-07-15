@@ -12,7 +12,7 @@ from .tool import (
 )
 from ..enums.all import AgentTypes
 from ...models.enums.all import PublishStatus
-from ...models.pd.llm import LLMSettingsModel
+from ...models.pd.llm import LLMSettingsModel, LLMSettingsWriteModel
 from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel
 from ...models.pd.tag import TagDetailModel
 from ...utils.pipeline_utils import validate_yaml_from_str
@@ -144,6 +144,7 @@ class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVers
 
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
+    llm_settings: Optional[LLMSettingsWriteModel] = None
 
     @field_validator('conversation_starters', mode='before')
     @classmethod
@@ -189,7 +190,7 @@ class ApplicationVersionForkCreateModel(ApplicationVersionBaseModel, Application
 
 class ApplicationVersionBaseCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
     name: Literal['base'] = 'base'
-    llm_settings: LLMSettingsModel
+    llm_settings: LLMSettingsWriteModel
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
 
@@ -364,6 +365,7 @@ class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, Application
     variables: Optional[List[ApplicationVariableDetailedModel]] = None
     pipeline_settings: Optional[dict] = Field(default_factory=dict)
     meta: Optional[dict] = Field(default_factory=dict)
+    llm_settings: Optional[LLMSettingsWriteModel] = None
 
     project_id: int = Field(..., exclude=True)
     user_id: int = Field(..., exclude=True)
@@ -444,6 +446,7 @@ class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
     tags: Optional[List[PromptTagUpdateModel]] = []
     pipeline_settings: Optional[dict] = None
     meta: Optional[dict] = Field(default_factory=dict)
+    llm_settings: Optional[LLMSettingsWriteModel] = None
 
     project_id: int = Field(..., exclude=True)
 

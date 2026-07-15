@@ -10,7 +10,7 @@ from ...models.conversation import Conversation
 from ...models.enums.all import ParticipantTypes
 from ...models.participants import Participant, ParticipantMapping
 from ...models.pd.participant import ParticipantBase, ParticipantEntityUser
-from ...models.pd.participant_settings import EntitySettingsLlm, EntitySettingsApplication
+from ...models.pd.participant_settings import EntitySettingsLlm, EntitySettingsLlmWrite, EntitySettingsApplication
 from ...utils.participant_utils import make_query_filter_for_entity
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
@@ -39,7 +39,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         # Non-published agent: only reject if llm_settings actually
                         # differs from the target version baseline.
                         try:
-                            validated_request = EntitySettingsLlm.model_validate(llm_settings_data)
+                            validated_request = EntitySettingsLlmWrite.model_validate(llm_settings_data)
                             request_llm = validated_request.model_dump(exclude_none=True)
                         except ValidationError as e:
                             return {"error": f"Invalid LLM settings: {str(e)}"}, 400
@@ -67,13 +67,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     else:
                         # Published agent from public project -> validate and store
                         try:
-                            validated_settings = EntitySettingsLlm.model_validate(llm_settings_data)
+                            validated_settings = EntitySettingsLlmWrite.model_validate(llm_settings_data)
                             data['llm_settings'] = validated_settings.model_dump()
                         except ValidationError as e:
                             return {"error": f"Invalid LLM settings: {str(e)}"}, 400
                 else:
                     try:
-                        validated_settings = EntitySettingsLlm.model_validate(llm_settings_data)
+                        validated_settings = EntitySettingsLlmWrite.model_validate(llm_settings_data)
                         data['llm_settings'] = validated_settings.model_dump()
                     except ValidationError as e:
                         return {"error": f"Invalid LLM settings: {str(e)}"}, 400

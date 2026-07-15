@@ -276,3 +276,119 @@ def migrate_participant_mappings(session, from_model, settings_factory, dry_run)
             mapping.entity_settings = entity_settings
 
     return len(rows)
+
+
+def parse_heal_params(raw_param: str) -> dict:
+    """Parse semicolon-separated key=value params for heal_llm_settings_family_conflicts.
+
+    Optional: ``project_id`` (int | "X-Y" | "all", default "all"),
+              ``dry_run`` ("true"/"false", default "true" -- conservative default since this
+              task scans ALL projects with no from/to model boundary).
+    Raises ``ValueError`` on bad input.
+    """
+    tokens = [t.strip() for t in raw_param.split(';') if t.strip()]
+    params = {}
+    for token in tokens:
+        if '=' not in token:
+            raise ValueError(f"Invalid param token (expected key=value): {token!r}")
+        key, _, value = token.partition('=')
+        params[key.strip()] = value.strip()
+
+    project_id_spec = parse_project_id_spec(params.get('project_id', 'all'), 'project_id')
+
+    dry_run_raw = params.get('dry_run', 'true').strip().lower()
+    if dry_run_raw in ('true', '1', 'yes'):
+        dry_run = True
+    elif dry_run_raw in ('false', '0', 'no'):
+        dry_run = False
+    else:
+        raise ValueError(f"Invalid dry_run value: {dry_run_raw!r} (expected true/false)")
+
+    return {'project_id_spec': project_id_spec, 'dry_run': dry_run}
+
+
+def heal_family_conflict_versions(session, project_id: int, dry_run: bool) -> int:
+    """Fix ApplicationVersion rows with a temperature/reasoning_effort family conflict
+    (issue #5821), using each row's own model's real supports_reasoning. Unlike
+    migrate_application_versions, this does NOT change model_name/model_project_id — only the
+    conflicting temperature/reasoning_effort pair is normalized.
+
+    Returns the count of matched rows.
+    """
+    # pylint: disable=C0415
+    from .application_utils import _normalize_llm_settings_family
+
+    rows = session.query(ApplicationVersion).filter(
+        ApplicationVersion.llm_settings.op("->>")("temperature").isnot(None),
+        ApplicationVersion.llm_settings.op("->>")("reasoning_effort").isnot(None),
+        ApplicationVersion.llm_settings.op("->>")("reasoning_effort") != 'none',
+    ).all()
+
+    if not rows:
+        return 0
+
+    available = rpc_tools.RpcMixin().rpc.timeout(10).configurations_get_available_models(
+        project_id=project_id, section='llm', include_shared=True
+    )
+
+    for i, version in enumerate(rows):
+        llm_settings = version.llm_settings or {}
+        model_name = llm_settings.get('model_name')
+        model_project_id = llm_settings.get('model_project_id')
+        config = available.get((model_project_id, model_name), {}) if model_name else {}
+        supports_reasoning = bool(config.get('supports_reasoning', False))
+        new_settings = _normalize_llm_settings_family(llm_settings, supports_reasoning)
+        if dry_run and i < 5:
+            log.info(
+                "  [dry_run] ApplicationVersion id=%s (supports_reasoning=%s): %r -> %r",
+                version.id, supports_reasoning, llm_settings, new_settings,
+            )
+        if not dry_run:
+            version.llm_settings = new_settings
+
+    return len(rows)
+
+
+def heal_family_conflict_mappings(session, project_id: int, dry_run: bool) -> int:
+    """Fix ParticipantMapping rows with a temperature/reasoning_effort family conflict in
+    entity_settings.llm_settings (issue #5821). Same non-destructive semantics as
+    heal_family_conflict_versions — only the conflicting pair is normalized.
+
+    Returns the count of matched rows.
+    """
+    # pylint: disable=C0415
+    from .application_utils import _normalize_llm_settings_family
+
+    rows = session.query(ParticipantMapping).filter(
+        ParticipantMapping.entity_settings.op("->")("llm_settings").op("->>")("temperature").isnot(None),
+        ParticipantMapping.entity_settings.op("->")("llm_settings").op("->>")("reasoning_effort").isnot(None),
+        ParticipantMapping.entity_settings.op("->")("llm_settings").op("->>")("reasoning_effort") != 'none',
+    ).all()
+
+    if not rows:
+        return 0
+
+    available = rpc_tools.RpcMixin().rpc.timeout(10).configurations_get_available_models(
+        project_id=project_id, section='llm', include_shared=True
+    )
+
+    for i, mapping in enumerate(rows):
+        entity_settings = dict(mapping.entity_settings) if mapping.entity_settings else {}
+        old_llm = entity_settings.get('llm_settings')
+        if not old_llm:
+            continue
+        model_name = old_llm.get('model_name')
+        model_project_id = old_llm.get('model_project_id')
+        config = available.get((model_project_id, model_name), {}) if model_name else {}
+        supports_reasoning = bool(config.get('supports_reasoning', False))
+        new_llm = _normalize_llm_settings_family(old_llm, supports_reasoning)
+        if dry_run and i < 5:
+            log.info(
+                "  [dry_run] ParticipantMapping id=%s (supports_reasoning=%s): %r -> %r",
+                mapping.id, supports_reasoning, old_llm, new_llm,
+            )
+        if not dry_run:
+            entity_settings['llm_settings'] = new_llm
+            mapping.entity_settings = entity_settings
+
+    return len(rows)

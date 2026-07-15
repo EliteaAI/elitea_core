@@ -141,6 +141,14 @@ class RPC:
                         message_id=data.get("message_id")
                     )
 
+                # Resolve llm_settings only when completely missing (original behavior). The
+                # family-conflict case (issue #5821) is handled by write-time rejection
+                # (LLMSettingsWriteModel/EntitySettingsLlmWrite) and the one-time
+                # heal_llm_settings_family_conflicts admin backfill — not here. This mutation
+                # is never committed (session just closes below), so re-checking on every
+                # message would re-run the expensive RPC forever for any still-broken row
+                # instead of getting cheaper over time; the hottest path in the platform must
+                # not carry that cost.
                 if not application_version.llm_settings:
                     resolve_project_id = chat_project_id or parsed.project_id
                     resolved = validate_and_resolve_llm_settings(
@@ -160,7 +168,6 @@ class RPC:
                             stream_id=data.get("stream_id"),
                             message_id=data.get("message_id")
                         )
-
                 application_version.project_id = parsed.project_id  # compatibility with pd model
                 parsed_db = ApplicationChatRequest.from_orm(
                     application_version

@@ -385,8 +385,12 @@ def generate_predict_payload(
             llm_settings['temperature'] =  parsed.llm_settings.temperature
             llm_settings['reasoning_effort'] =  parsed.llm_settings.reasoning_effort
 
-            if supports_reasoning:
-                llm_settings['temperature'] = None
+            # Normalize against the model's actual capability using the shared helper
+            # (issue #5821) instead of a reasoning-only ad-hoc check -- this also clears a
+            # stale reasoning_effort for a non-reasoning model, which the previous inline
+            # check never handled.
+            from .application_utils import _normalize_llm_settings_family  # pylint: disable=C0415
+            llm_settings.update(_normalize_llm_settings_family(llm_settings, supports_reasoning))
             if llm_settings['max_tokens'] == -1:
                 llm_settings['max_tokens'] = get_default_max_tokens(supports_reasoning)
 
