@@ -22,6 +22,21 @@ from pylon.core.tools import web, log  # pylint: disable=E0611,E0401
 from tools import context
 
 
+_INDEXER_CONFIGURATION_VALIDATOR = "applications_configuration_validator"
+
+
+def _is_indexer_mcp_configuration(entry):
+    """Return whether a registry entry is owned by static indexer MCP config."""
+    schema = getattr(entry, "config_schema", None) or {}
+    metadata = schema.get("metadata", {}) if isinstance(schema, dict) else {}
+    return (
+        entry.type.startswith("mcp_")
+        and entry.section == "toolkits"
+        and entry.validation_func == _INDEXER_CONFIGURATION_VALIDATOR
+        and bool(metadata.get("mcp_server_name"))
+    )
+
+
 class Method:
     @web.method()
     def toolkits_collected(self, event, payload: list[dict]):
@@ -49,12 +64,43 @@ class Method:
         try:
             # Get existing registered configurations to avoid duplicates
             existing_configurations = context.rpc_manager.timeout(RPC_CALL_TIMEOUT).configurations_list_types()
-            existing_configuration_names = {config.type for config in existing_configurations}
+            existing_by_name = {config.type: config for config in existing_configurations}
+            incoming_mcp_names = {
+                name for name in payload if name.startswith("mcp_")
+            }
+
+            # Static MCP configuration types are generated from the current
+            # indexer definitions. Remove types that disappeared, including
+            # after an elitea_core reload where the prior in-memory payload is
+            # no longer available.
+            for configuration_type, entry in existing_by_name.items():
+                if (
+                    _is_indexer_mcp_configuration(entry)
+                    and configuration_type not in incoming_mcp_names
+                ):
+                    try:
+                        context.rpc_manager.timeout(
+                            RPC_CALL_TIMEOUT
+                        ).configurations_unregister(type_name=configuration_type)
+                    except Exception as ex:
+                        log.error(
+                            "Failed to unregister configuration %s: %s",
+                            configuration_type,
+                            ex,
+                        )
 
             for configuration_type, schema in payload.items():
-                # TODO: unregister and register new if needed
-                if configuration_type in existing_configuration_names:
+                existing = existing_by_name.get(configuration_type)
+                managed_mcp = existing is not None and _is_indexer_mcp_configuration(existing)
+                unchanged = (
+                    managed_mcp
+                    and getattr(existing, "config_schema", None) == schema
+                )
+
+                if existing is not None and not managed_mcp:
                     log.warning(f"Configuration {configuration_type} already registered")
+                    continue
+                if unchanged:
                     continue
 
                 if schema.get('metadata', {}).get('check_connection_supported'):
@@ -62,12 +108,17 @@ class Method:
                 else:
                     check_connection_func = None
                 try:
-                    context.rpc_manager.timeout(RPC_CALL_TIMEOUT).configurations_register(
+                    register_kwargs = dict(
                         type_name=configuration_type,
                         section=schema['metadata']['section'],
                         config_schema=schema,
-                        validation_func="applications_configuration_validator",
+                        validation_func=_INDEXER_CONFIGURATION_VALIDATOR,
                         check_connection_func=check_connection_func
+                    )
+                    if managed_mcp:
+                        register_kwargs["replace"] = True
+                    context.rpc_manager.timeout(RPC_CALL_TIMEOUT).configurations_register(
+                        **register_kwargs
                     )
 
                 except Exception as ex:
