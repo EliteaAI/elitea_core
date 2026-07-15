@@ -979,6 +979,34 @@ def get_skill_version_by_id(
         ).first()
 
 
+def _source_lineage(versions: list) -> Optional[tuple]:
+    """Extract (parent_project_id, parent_entity_id) from a forked skill's version
+    meta. Returns None for a plain (non-fork) import so dedup is skipped."""
+    for v in versions:
+        meta = v.get('meta') or {}
+        src_project = meta.get('parent_project_id')
+        src_entity = meta.get('parent_entity_id')
+        if src_project is not None and src_entity is not None:
+            return src_project, src_entity
+    return None
+
+
+def _find_forked_skill(session, project_id: int, source: tuple) -> Optional[Skill]:
+    """Find a skill in this project already forked from the same source skill,
+    matched on the (parent_project_id, parent_entity_id) lineage its versions carry."""
+    src_project, src_entity = source
+    return (
+        session.query(Skill)
+        .join(SkillVersion, SkillVersion.skill_id == Skill.id)
+        .filter(
+            Skill.owner_id == project_id,
+            SkillVersion.meta['parent_project_id'].astext == str(src_project),
+            SkillVersion.meta['parent_entity_id'].astext == str(src_entity),
+        )
+        .first()
+    )
+
+
 def import_skill(
     project_id: int,
     name: str,
@@ -990,6 +1018,17 @@ def import_skill(
 ) -> SkillImportResultModel:
     if not versions:
         raise ValueError(f"Skill '{name}' has no versions to import")
+
+    source = _source_lineage(versions)
+    if source:
+        with _skill_session(session, project_id) as s:
+            existing = _find_forked_skill(s, project_id, source)
+            if existing:
+                return SkillImportResultModel(
+                    id=existing.id,
+                    versions={v.name: v.id for v in existing.versions},
+                    reused=True,
+                )
 
     payloads = [
         {

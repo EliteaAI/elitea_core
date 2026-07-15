@@ -1,15 +1,16 @@
 from flask import request
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm.attributes import flag_modified
 from pydantic import ValidationError
 
 from tools import api_tools, auth, db, config as c, serialize, register_openapi
 
 from ...models.message_group import ConversationMessageGroup
+from ...models.message_trace_step import MessageTraceStep
+from ...models.message_items.attachment import AttachmentMessageItem
 from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
-from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError
+from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items
 from ...utils.chat_history import generate_chat_history
 from ...models.enums.all import ChatHistoryRole
 from ...utils.constants import PROMPT_LIB_MODE
@@ -70,6 +71,30 @@ class PromptLibAPI(api_tools.APIModeHandler):
             except ValidationError as e:
                 return {'error': 'Invalid prediction payload', 'details': e.errors()}, 400
 
+            if predict_payload.attachments_info:
+                existing_filepaths = {
+                    item.filepath
+                    for item in reply_msg.message_items
+                    if isinstance(item, AttachmentMessageItem)
+                }
+                new_attachments = [
+                    a for a in predict_payload.attachments_info
+                    if a.filepath not in existing_filepaths
+                ]
+                if new_attachments:
+                    try:
+                        reply_msg = process_attachment_message_items(
+                            session,
+                            predict_payload.project_id,
+                            reply_msg,
+                            new_attachments,
+                            llm_settings=predict_payload.llm_settings.dict() if predict_payload.llm_settings else None,
+                        )
+                        session.commit()
+                        session.refresh(reply_msg)
+                    except Exception as e:
+                        return {'error': f'Failed to process attachments: {str(e)}'}, 400
+
             try:
                 regenerate_payload: dict = generate_payload(session, msg_group=reply_msg, predict_payload=predict_payload)
             except PayloadGenerationError as e:
@@ -110,10 +135,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             for message_item in msg_group.message_items:
                 session.delete(message_item)
 
-            msg_group.meta['thinking_steps'] = []
-            msg_group.meta['tool_calls'] = {}
+            # Clear the group's trace steps (rows are the accumulator; regenerate starts fresh).
+            session.query(MessageTraceStep).filter(
+                MessageTraceStep.message_group_id == msg_group.id
+            ).delete(synchronize_session=False)
             msg_group.is_streaming = True
-            flag_modified(msg_group, 'meta')
             session.commit()
             session.refresh(msg_group)
 
