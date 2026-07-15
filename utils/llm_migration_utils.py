@@ -36,6 +36,30 @@ DEFAULT_REASONING_EFFORT = 'medium'
 DEFAULT_MAX_TOKENS = -1  # auto mode, same as UI's DEFAULT_MAX_TOKENS
 
 
+def parse_project_id_spec(raw: str, param_name: str = 'project_id') -> tuple:
+    """Parse a "<all|N|lo-hi>" project-id spec into ('all', None) / ('range', (lo, hi)) / ('single', int).
+
+    Shared by parse_migration_params and trace_step_backfill_utils.parse_backfill_params.
+    Raises ``ValueError`` (using ``param_name`` in the message) on bad input.
+    """
+    raw = raw.strip()
+    if raw == 'all':
+        return ('all', None)
+    if '-' in raw:
+        parts = raw.split('-', 1)
+        try:
+            lo, hi = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise ValueError(f"Invalid {param_name} range: {raw!r}")  # pylint: disable=W0707
+        if lo > hi:
+            raise ValueError(f"Invalid {param_name} range: {lo} > {hi}")
+        return ('range', (lo, hi))
+    try:
+        return ('single', int(raw))
+    except ValueError:
+        raise ValueError(f"Invalid {param_name}: {raw!r}")  # pylint: disable=W0707
+
+
 def parse_migration_params(raw_param: str) -> dict:
     """Parse semicolon-separated key=value migration params into a validated dict.
 
@@ -63,23 +87,7 @@ def parse_migration_params(raw_param: str) -> dict:
         raise ValueError(f"from and to must be different (both are {from_model!r})")
 
     # --- project_id --------------------------------------------------------
-    project_id_raw = params.get('project_id', 'all').strip()
-    if project_id_raw == 'all':
-        project_id_spec = ('all', None)
-    elif '-' in project_id_raw:
-        parts = project_id_raw.split('-', 1)
-        try:
-            lo, hi = int(parts[0]), int(parts[1])
-        except ValueError:
-            raise ValueError(f"Invalid project_id range: {project_id_raw!r}")  # pylint: disable=W0707
-        if lo > hi:
-            raise ValueError(f"Invalid project_id range: {lo} > {hi}")
-        project_id_spec = ('range', (lo, hi))
-    else:
-        try:
-            project_id_spec = ('single', int(project_id_raw))
-        except ValueError:
-            raise ValueError(f"Invalid project_id: {project_id_raw!r}")  # pylint: disable=W0707
+    project_id_spec = parse_project_id_spec(params.get('project_id', 'all'), 'project_id')
 
     # --- dry_run -----------------------------------------------------------
     dry_run_raw = params.get('dry_run', 'false').strip().lower()
