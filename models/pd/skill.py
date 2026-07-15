@@ -17,7 +17,7 @@ from tools import rpc_tools
 
 from .collection_base import AuthorBaseModel
 from .tag import TagDetailModel
-from ...models.enums.all import SkillEntityTypes
+from ...models.enums.all import PublishStatus, SkillEntityTypes
 from ...utils.authors import get_authors_data
 from ...utils.constants import ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API
 
@@ -117,8 +117,16 @@ class SkillListModel(BaseModel):
     icon_meta: Optional[dict] = {}
     is_forked: bool = False
     is_pinned: bool = False
+    has_published_version: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='after')
+    def set_has_published_version(self):
+        self.has_published_version = any(
+            v.status == PublishStatus.published for v in self.versions
+        )
+        return self
 
     @model_validator(mode='after')
     def set_is_forked(self):
