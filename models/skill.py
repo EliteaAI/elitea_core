@@ -9,6 +9,7 @@ from sqlalchemy import Integer, String, DateTime, func, ForeignKey, Text, Table,
 from sqlalchemy.ext.mutable import MutableDict
 
 from .enums.all import PublishStatus
+from .mixins import AbstractLikesMixin
 
 
 SKILL_TABLE_NAME = 'skills'
@@ -33,7 +34,7 @@ SkillVersionTagAssociation = Table(
 )
 
 
-class Skill(db_tools.AbstractBaseMixin, db.Base):
+class Skill(db_tools.AbstractBaseMixin, db.Base, AbstractLikesMixin):
     __tablename__ = SKILL_TABLE_NAME
     __table_args__ = (
         Index(
@@ -43,9 +44,10 @@ class Skill(db_tools.AbstractBaseMixin, db.Base):
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
-    # Entity name used by the social plugin's pin subquery
-    # (mirrors Application.pins_entity_name = 'application').
+    # Entity names used by the social plugin subqueries (mirror Application):
+    # pins for the studio pin feature, likes for the public catalog like route.
     pins_entity_name: str = 'skill'
+    likes_entity_name: str = 'skill'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)

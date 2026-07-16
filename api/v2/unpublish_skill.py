@@ -35,7 +35,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def post(self, project_id: int, skill_id: int, version_id: int, **kwargs):
         body = request.get_json(silent=True) or {}
         try:
-            SkillUnpublishRequest.model_validate(body)
+            parsed = SkillUnpublishRequest.model_validate(body)
         except ValidationError as e:
             return {"error": e.errors()}, 400
 
@@ -45,7 +45,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         try:
             if project_id == public_project_id:
                 return admin_unpublish_skill(
-                    project_id, skill_id, version_id, user_id,
+                    project_id, skill_id, version_id, user_id, parsed.reason,
                 )
             return user_unpublish_skill(
                 project_id, skill_id, version_id, user_id, public_project_id,

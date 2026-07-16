@@ -69,13 +69,21 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     log.warning("chat plugin is not available, related stats will be empty")
                     return {}
 
+            def fetch_skills_stats():
+                try:
+                    return module.get_skills_stats(author_project_id, author_id)
+                except Empty:
+                    log.warning("skills rpc is not available, related stats will be empty")
+                    return {}
+
             # Execute all stats calls in parallel
-            with ThreadPoolExecutor(max_workers=4) as executor:
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = {
                     executor.submit(fetch_toolkits_stats): 'toolkits',
                     executor.submit(fetch_applications_stats): 'applications',
                     executor.submit(fetch_pipelines_stats): 'pipelines',
                     executor.submit(fetch_chat_stats): 'chat',
+                    executor.submit(fetch_skills_stats): 'skills',
                 }
                 for future in as_completed(futures):
                     try:
