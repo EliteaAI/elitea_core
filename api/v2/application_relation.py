@@ -1,6 +1,7 @@
 from flask import request
 from pydantic.v1 import ValidationError
 
+from ...models.pd.application import ApplicationRelationModel
 from ...utils.application_tools import application_toolkit_change_relation, ToolkitChangeRelationError
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -26,6 +27,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         tags=["elitea_core/applications"],
         mcp_tool=True,
         available_to_users=True,
+        request_body=ApplicationRelationModel,
     )
     @auth.decorators.check_api(
         {
