@@ -489,13 +489,18 @@ def get_agents_with_skill(
     project_id: int,
     public_skill_id: int,
 ) -> List[AgentsWithSkillItemModel]:
+    public_project_id = get_public_project_id()
     with db.with_project_schema_session(project_id) as s:
         # All local skills forked from this public skill (any version).
+        # parent_project_id scoping is required: cross-project forks stamp the
+        # same bare keys with source-project ids, and per-schema sequences
+        # overlap numerically.
         local_skill_ids = [
             row[0]
             for row in s.query(SkillVersion.skill_id)
             .filter(
-                SkillVersion.meta['parent_entity_id'].astext == str(public_skill_id)
+                SkillVersion.meta['parent_project_id'].astext == str(public_project_id),
+                SkillVersion.meta['parent_entity_id'].astext == str(public_skill_id),
             )
             .distinct()
             .all()
@@ -576,6 +581,7 @@ def attach_public_skill_to_agents(
         local = (
             s.query(SkillVersion.skill_id, SkillVersion.id)
             .filter(
+                SkillVersion.meta['parent_project_id'].astext == str(public_project_id),
                 SkillVersion.meta['parent_entity_id'].astext == str(public_skill_id),
                 SkillVersion.meta['parent_version_id'].astext == str(public_version_id),
             )
@@ -660,7 +666,8 @@ def attach_public_skill_to_agents(
             row[0]
             for row in s.query(SkillVersion.skill_id)
             .filter(
-                SkillVersion.meta['parent_entity_id'].astext == str(public_skill_id)
+                SkillVersion.meta['parent_project_id'].astext == str(public_project_id),
+                SkillVersion.meta['parent_entity_id'].astext == str(public_skill_id),
             )
             .distinct()
             .all()
