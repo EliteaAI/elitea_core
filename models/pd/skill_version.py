@@ -27,6 +27,7 @@ class SkillVersionCreateModel(BaseModel):
 class SkillVersionListModel(BaseModel):
     id: int
     name: str
+    status: Optional[str] = None
     created_at: datetime
     author_id: int = Field(..., exclude=True)
     tags: List[TagDetailModel] = Field(default_factory=list, exclude=True)
@@ -39,6 +40,7 @@ class SkillVersionDetailModel(BaseModel):
     id: int
     name: str
     instructions: str
+    status: Optional[str] = None
     author_id: int
     author: Optional[AuthorBaseModel] = None
     tags: List[TagDetailModel] = Field(default_factory=list)

@@ -1,11 +1,13 @@
 from typing import List, Optional
 
+from sqlalchemy import and_
+
 from pylon.core.tools import web, log
 
 from tools import db, serialize
 
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
-from ..models.enums.all import SkillEntityTypes
+from ..models.enums.all import PublishStatus, SkillEntityTypes
 from ..models.pd.skill import SkillCreateModel
 from ..models.pd.search import MultipleApplicationSearchModel
 from ..utils.searches import get_search_options
@@ -178,3 +180,22 @@ class RPC:
             entity_version_id=entity_version_id,
             entity_type=entity_type,
         )
+
+    @web.rpc("skills_get_stats", "get_skills_stats")
+    def skills_get_stats(self, project_id: int, author_id: int) -> dict:
+        result = {}
+        with db.with_project_schema_session(project_id) as session:
+            result['total_skills'] = session.query(Skill).filter(
+                Skill.versions.any(SkillVersion.author_id == author_id)
+            ).count()
+            # Both conditions must hold on the SAME version: two separate any()
+            # clauses would count a skill whose published version belongs to
+            # someone else.
+            result['public_skills'] = session.query(Skill).filter(
+                Skill.versions.any(and_(
+                    SkillVersion.author_id == author_id,
+                    SkillVersion.status == PublishStatus.published,
+                ))
+            ).count()
+
+        return result

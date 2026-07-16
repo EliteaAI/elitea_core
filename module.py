@@ -253,6 +253,20 @@ class Module(module.ModuleModel):
                  self.is_publish_blocked, self.publish_whitelist_project_ids,
                  bool(self.publish_validation_rules))
 
+    def _init_skill_publishing_guardrail(self):
+        """Log skill publishing guardrail settings.
+
+        The block toggle, whitelist and validation rules are read live from
+        config at use time (see skill_publish_utils), so admin changes take
+        effect without a reload. Skill categories reuse the shared agent
+        category list (publishing_guardrail.agent_categories).
+        """
+        guardrail = self.descriptor.config.get('skill_publishing_guardrail', {})
+        log.info("Skill publishing guardrail (live): blocked=%s, whitelist=%s, custom_rules=%s",
+                 bool(guardrail.get('is_publish_blocked', False)),
+                 guardrail.get('whitelist_project_ids', []),
+                 bool(guardrail.get('publish_validation_rules', '')))
+
     def preload(self):
         """Preload handler - download UI bundle if needed"""
         log.info("Preloading UI bundle")
@@ -357,10 +371,50 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "rename_agent_category", self.rename_agent_category,
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_skill_publish_columns", self.migrate_skill_publish_columns, group="R-2.0.5",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "rename_skill_category", self.rename_skill_category,
+            )
+            this.for_module("admin").module.register_admin_task(
+                "reassign_skill_category", self.reassign_skill_category,
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
+        self._ensure_skill_publish_schema()
+
         self.handle_pylon_modules_initialized()
+
+    def _ensure_skill_publish_schema(self):
+        """Startup safety net: apply the skill-publishing columns to any project
+        schema that predates them, so a deploy provisions the environment without
+        an operator having to run the migration task. Runs off-thread; guarded by a
+        catalog check so steady-state boots issue no DDL. New projects are already
+        covered by create_all."""
+        if not self.descriptor.config.get("skill_publish_auto_migrate", True):
+            return
+
+        def _run():
+            try:
+                from .utils.skill_publish_schema import (
+                    project_ids_missing_skill_columns,
+                    apply_skill_publish_columns,
+                )
+                pending = project_ids_missing_skill_columns()
+                if not pending:
+                    return
+                log.info("skill publish schema: auto-migrating %s project(s)", len(pending))
+                migrated, failed = apply_skill_publish_columns(pending)
+                log.info(
+                    "skill publish schema: auto-migration done (migrated=%s failed=%s)",
+                    len(migrated), len(failed),
+                )
+            except Exception:  # pylint: disable=W0703
+                log.exception("skill publish schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
 
         try:
             scheduler_cfg = self.descriptor.config.get('scheduler', {}) or {}
@@ -574,6 +628,7 @@ class Module(module.ModuleModel):
 
         # Publishing guardrail (environment-wide block)
         self._init_publishing_guardrail()
+        self._init_skill_publishing_guardrail()
 
         from .models import all, folder, message_group, message_trace_step, participants
         from .models.message_items import base, text, canvas, context

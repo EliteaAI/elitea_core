@@ -51,16 +51,25 @@ def pu():
     enums.AgentTypes = _AgentTypes
     enums.NotificationEventTypes = type('N', (), {})
     enums.PublishStatus = type('P', (), {})
+    enums.SkillEntityTypes = type('S', (), {'agent': 'agent'})
     enums.ToolEntityTypes = type('T', (), {})
 
     for modname, attrs in {
         'plugins.elitea_core.models.pd.application': {'ApplicationImportModel': object},
         'plugins.elitea_core.models.pd.version': {'ApplicationVersionForkCreateModel': object},
         'plugins.elitea_core.models.pd.publish': {'PublishAIResult': object},
+        'plugins.elitea_core.models.skill': {
+            'EntitySkillMapping': type('EntitySkillMapping', (), {}),
+            'Skill': type('Skill', (), {}),
+            'SkillVersion': type('SkillVersion', (), {}),
+        },
         'plugins.elitea_core.utils.create_utils': {'create_application': None, 'create_version': None},
         'plugins.elitea_core.utils.utils': {'get_public_project_id': None},
         'plugins.elitea_core.utils.category_utils': {
             'apply_category_to_tag_dicts': None, 'is_valid_category': None},
+        'plugins.elitea_core.utils.application_utils': {'build_skill_mappings_list': None},
+        'plugins.elitea_core.utils.skill_export_import': {'build_skill_fork_payload': None},
+        'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_agent': None},
     }.items():
         mod = types.ModuleType(modname)
         for k, v in attrs.items():
