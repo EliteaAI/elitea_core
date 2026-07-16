@@ -552,9 +552,13 @@ def generate_application_version_payload(
     # Rejects a poisoned config here instead of forwarding it to the SDK (which would recurse).
     from ..utils.publish_utils import assert_no_invalid_nesting, SubAgentTreeError, MAX_SUB_AGENT_VALIDATION_DEPTH
     try:
+        # The ambient session is bound to the CONVERSATION's project schema; a
+        # cross-project participant (e.g. a catalog agent chatted from another
+        # project) must be validated against its OWN schema, so let the guard
+        # open its own session in that case.
         assert_no_invalid_nesting(
             project_id, entity_settings.version_id,
-            session=session,
+            session=session if project_id == predict_payload.project_id else None,
             max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
         )
     except SubAgentTreeError as tree_err:
@@ -562,6 +566,10 @@ def generate_application_version_payload(
             f"Agent version {entity_settings.version_id} has an invalid sub-agent "
             f"configuration: {tree_err}"
         ) from tree_err
+    except ValueError as tree_err:
+        # A missing/incomplete sub-agent reference: surface it to the user
+        # instead of killing the socket handler.
+        raise PayloadGenerationError(str(tree_err)) from tree_err
 
 
     # Get internal_tools from agent version meta for attachment injection decision

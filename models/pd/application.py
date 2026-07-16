@@ -200,10 +200,19 @@ class ApplicationListModel(BaseModel):
 
     @model_validator(mode='after')
     def set_meta(self) -> 'ApplicationListModel':
+        # Merge the forked version's lineage keys into the application meta
+        # instead of replacing it — replacing would drop application-level keys
+        # like default_version_id, which consumers use to resolve the version.
         for v in self.versions:
             meta = v.meta or {}
             if 'parent_entity_id' in meta and 'parent_project_id' in meta:
-                self.meta = meta
+                self.meta = {
+                    **(self.meta or {}),
+                    'parent_entity_id': meta['parent_entity_id'],
+                    'parent_project_id': meta['parent_project_id'],
+                    **({'parent_version_id': meta['parent_version_id']}
+                       if meta.get('parent_version_id') is not None else {}),
+                }
                 return self
         return self
 

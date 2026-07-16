@@ -80,6 +80,15 @@ class SkillVersionInUseError(SkillError):
         self.usage_count = usage_count
 
 
+class SkillVersionPublishedError(SkillError):
+    """Raised when deleting a version that is still published or embedded."""
+    http_status = 409
+
+    def __init__(self, version_id: int):
+        super().__init__('Cannot delete a published version. Unpublish it first.')
+        self.version_id = version_id
+
+
 class SkillLimitExceededError(SkillError):
     http_status = 400
 
@@ -242,6 +251,7 @@ def list_skills_api(
     tags: str | list | None = None,
     author_id: int | None = None,
     q: str | None = None,
+    statuses: str | list | None = None,
     limit: int = 10,
     offset: int = 0,
     sort_by: str = 'created_at',
@@ -256,6 +266,7 @@ def list_skills_api(
         tags: Tag IDs to filter by (comma-separated string or list)
         author_id: Filter by author ID
         q: Search query for name/description
+        statuses: Version statuses to filter by (comma-separated string or list)
         limit: Maximum results
         offset: Results to skip
         sort_by: Sort field
@@ -292,6 +303,18 @@ def list_skills_api(
                 Skill.description.ilike(f"%{q}%")
             )
         )
+
+    # Status filter; unknown values are dropped so a bad status can't error
+    # the whole request against the enum-typed column
+    if statuses:
+        if isinstance(statuses, str):
+            statuses = statuses.split(',')
+        known_statuses = {s.value for s in PublishStatus}
+        statuses = [s for s in statuses if s in known_statuses]
+        if statuses:
+            filters.append(
+                Skill.versions.any(SkillVersion.status.in_(statuses))
+            )
 
     total, skills = list_skills(
         project_id=project_id,
@@ -952,6 +975,10 @@ def delete_skill_version(
                 'Cannot delete the only version of a skill. Delete the skill instead.',
                 version_id=version_id,
             )
+
+        # Block deletion of published or embedded versions
+        if version.status in (PublishStatus.published, PublishStatus.embedded):
+            raise SkillVersionPublishedError(version_id)
 
         # Check if version is in use by any agents
         usage_count = s.query(EntitySkillMapping).filter(
