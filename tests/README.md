@@ -95,7 +95,7 @@ def feature_module():
     models = types.ModuleType("plugins.elitea_core.models.all")
     models.MyModel = type("MyModel", (), {})
     sys.modules["plugins.elitea_core.models.all"] = models
-    
+
     # Load the module under test
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.feature",
@@ -122,7 +122,7 @@ def test_with_fake_db():
         2: FakeVersion(2, tools=[]),
     }
     session = FakeSession(registry)
-    
+
     # Your test logic using session.query()
     result = session.query(None).filter(...).first()
 ```

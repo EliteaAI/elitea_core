@@ -1,3 +1,4 @@
+from flask import request
 from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
@@ -7,16 +8,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Message Trace",
         description="Retrieve a single trace step (tool call or thinking step) with its full inputs/outputs",
-        mcp_description="""
-        USE when a trace pin is expanded and you need one step's full detail — tool_inputs, tool_output,
-        thinking text, and the display metadata sidecar.
-
-        DO NOT USE to list a conversation's steps → use list_message_traces.
-
-        Examples:
-        1. Get one step: GET .../message_trace/prompt_lib/1/98765
-        """,
-        mcp_tool=True,
+        parameters=[
+            {"name": "message_group_id", "in": "query", "required": True, "schema": {"type": "integer"},
+             "description": "Owning message group from the trace-list row."},
+        ],
         tags=["elitea_core/chat"],
         available_to_users=True,
     )
@@ -29,9 +24,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
     })
     @api_tools.endpoint_metrics
     def get(self, project_id: int, step_id: int, **kwargs):
+        message_group_id = request.args.get('message_group_id', type=int)
+        if not message_group_id or message_group_id < 1:
+            return {'error': 'message_group_id is required'}, 400
         result = rpc_tools.RpcMixin().rpc.timeout(5).chat_get_trace_step(
             project_id=project_id,
             step_id=step_id,
+            message_group_id=message_group_id,
         )
         if result is None:
             return {"error": f"No such trace step with id {step_id}"}, 404

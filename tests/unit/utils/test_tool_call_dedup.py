@@ -152,6 +152,16 @@ class TestParallelInvocations:
         for run_id, tc in result.items():
             assert tc['tool_output'], f'survivor {run_id} should be a real completion'
 
+    def test_parallel_same_args_in_different_root_instances_do_not_collapse(self, dedup_module):
+        first = _wrapper('A', 'u-a', '2024-01-01T00:00:01', tool_output=None)
+        second = _wrapper('B', 'u-b', '2024-01-01T00:00:02', tool_output=None)
+        first['metadata']['child_thread_id'] = 'child-B1'
+        second['metadata']['child_thread_id'] = 'child-B2'
+
+        result = dedup_module._dedupe_replayed_tool_calls({'A': first, 'B': second})
+
+        assert list(result) == ['A', 'B']
+
 
 class TestDistinctInputs:
     """Genuinely distinct calls - never merged."""
@@ -172,7 +182,7 @@ class TestMalformedEntries:
     """Malformed entries must not crash the persist path."""
 
     def test_identity_tolerates_non_dict_meta_fields(self, dedup_module):
-        """Corrupt entries with non-dict metadata must still yield a 4-tuple identity."""
+        """Corrupt entries with non-dict metadata must still yield a stable identity."""
         for bad in ('oops', 42, ['x'], None):
             tc = {
                 'tool_name': 'Name Resolver',
@@ -181,7 +191,7 @@ class TestMalformedEntries:
                 'tool_inputs': {'task': 'Resolve name Roman'},
             }
             identity = dedup_module._tool_call_identity(tc)
-            assert isinstance(identity, tuple) and len(identity) == 4, identity
+            assert isinstance(identity, tuple) and len(identity) == 5, identity
             assert identity[0] == 'Name Resolver', identity
 
     def test_identity_tolerates_non_dict_nested_tool_meta_metadata(self, dedup_module):
@@ -193,7 +203,7 @@ class TestMalformedEntries:
             'tool_inputs': {'q': 1},
         }
         identity = dedup_module._tool_call_identity(tc)
-        assert isinstance(identity, tuple) and len(identity) == 4, identity
+        assert isinstance(identity, tuple) and len(identity) == 5, identity
         assert identity[0] == 'inner_tool', identity
 
 

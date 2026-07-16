@@ -40,6 +40,11 @@ history — it is deleted the instant an epoch reconciles):
 
 plus the pre-existing Redis keys (cancel flag, reconcile-payload stash, per-child
 launch stash, chat-run-stopped flag) — unchanged.
+
+This gate is the sole source of truth for execution completion. PostgreSQL message
+metadata deliberately stores a different domain: pending HITL approval cards and
+late-event tombstones needed for reload/replay. Accepting a card does not settle a
+child here; only its later non-paused terminal callback does.
 """
 
 import json
@@ -54,6 +59,17 @@ from pylon.core.tools import web, log  # pylint: disable=E0401,E0611
 # normally deleted on reconcile — the TTL is only a backstop against a crash
 # between launch and reconcile.
 _RECONCILE_PAYLOAD_TTL = 6 * 60 * 60
+
+# Per-parent fan-out width cap (issue #5778). A single parent turn that fans out to more than this
+# many parallel sub-agents is rejected at mint time with a clear error, rather than relying on the
+# blunt global pool limit (agents_task_limit) and its reactive PoolSaturationError retry loop. This
+# bounds K (the tier-2 fan-out width) directly at the point the fan-out is created, independent of
+# the shared pool's current saturation, so one runaway tree can't starve every other tenant's chat.
+# Depth-3 worst case is roughly K (durable tier-2 children) since tier-2→tier-3 runs in-process
+# (Option B), so this cap on K is the primary durable-pool defense. Sized for local dev; tune per
+# deployment. NOTE: unlike the global agents_task_limit (held back per team decision), this
+# mint-time cap IS committable — it is the safe, targeted bound.
+_MAX_PARALLEL_CHILDREN_PER_PARENT = 16
 
 # Atomic reconcile-gate settle. KEYS[1]=done set, KEYS[2]=remaining counter,
 # ARGV[1]=child_thread_id, ARGV[2]=TTL. SADD is the per-child idempotency guard:
@@ -88,8 +104,22 @@ def _k_tasks(parent_thread_id, epoch):
     return f"parallel_run_tasks:{parent_thread_id}:{epoch}"
 
 
+def _k_terminal_errors(parent_thread_id, epoch):
+    return f"parallel_run_errors:{parent_thread_id}:{epoch}"
+
+
 def _k_parent_task(parent_task_id):
     return f"parallel_parent_task:{parent_task_id}"
+
+
+def _k_dispatch_claim(parent_thread_id, epoch):
+    """Long-lived launch-once tombstone for one SDK dispatch epoch."""
+    return f"parallel_dispatch_claim:{parent_thread_id}:{epoch}"
+
+
+def _k_child_resume_claim(child_thread_id, interrupt_ids):
+    fingerprint = json.dumps(sorted(str(item) for item in interrupt_ids), separators=(',', ':'))
+    return f"parallel_child_resume_claim:{child_thread_id}:{fingerprint}"
 
 
 def _epoch_ref(parent_thread_id, epoch):
@@ -113,6 +143,36 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     """ Parallel dispatch coordination methods (same-pylon @web.method). """
 
     @web.method()
+    def parallel_dispatch_claim_child_resume(self, child_thread_id, interrupt_ids):
+        """Atomically claim one submitted child-interrupt set.
+
+        Socket retries and double clicks can race before the database card is
+        retired. This Redis tombstone guarantees only one replay task starts.
+        """
+        if not child_thread_id or not interrupt_ids:
+            return False
+        try:
+            return bool(self.get_redis_client().set(  # pylint: disable=E1101
+                _k_child_resume_claim(child_thread_id, interrupt_ids),
+                'claimed', nx=True, ex=60,
+            ))
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] failed to claim child resume %s", child_thread_id)
+            return False
+
+    @web.method()
+    def parallel_dispatch_release_child_resume(self, child_thread_id, interrupt_ids):
+        """Release a claim when no resume task could be launched."""
+        if not child_thread_id or not interrupt_ids:
+            return
+        try:
+            self.get_redis_client().delete(  # pylint: disable=E1101
+                _k_child_resume_claim(child_thread_id, interrupt_ids)
+            )
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] failed to release child resume %s", child_thread_id)
+
+    @web.method()
     def parallel_dispatch_launch_children(self, parent_task_id, parent_meta, parent_result):
         """Launch one durable indexer_agent per parked child spec.
 
@@ -127,6 +187,22 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         specs = parent_result.get('parallel_dispatch') or []
         if not specs:
             return
+        # Per-parent fan-out width cap (issue #5778). The parent has already parked and split into
+        # specs, so we cannot silently drop back to in-process — we must honour the gate invariant
+        # (exactly len(specs) settles → one reconcile). When the roster exceeds the cap we still
+        # prime + reconcile, but launch NO children: every child is settled as an error via the
+        # same compensation path used for pool saturation, so the reconcile re-invoke fires once
+        # and the parent surfaces a clear "too many parallel sub-agents" failure instead of
+        # fork-bombing the pool or hanging. Truncating to the first N would be a silent partial
+        # result — worse than a clean rejection.
+        _over_cap = len(specs) > _MAX_PARALLEL_CHILDREN_PER_PARENT
+        if _over_cap:
+            log.warning(
+                "[PARALLEL] fan-out of %d children exceeds cap %d for parent_thread_id=%s — "
+                "rejecting the whole batch (settling all as error)",
+                len(specs), _MAX_PARALLEL_CHILDREN_PER_PARENT,
+                parent_result.get('thread_id'),
+            )
         parent_thread_id = parent_result.get('thread_id')
         reconcile_payload = parent_result.get('reconcile_payload') or {}
         project_id = parent_meta.get('project_id')
@@ -156,7 +232,30 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         parent_chat_project_id = parent_meta.get('chat_project_id')
         parent_user_context = parent_meta.get('user_context')
 
-        epoch = uuid4().hex
+        # The SDK epoch is immutable for one parked fan-out. A repeated stopped
+        # callback or a nonterminal reconcile can advertise the same roster
+        # again; claim it atomically so those deliveries never launch duplicate
+        # workers on the same child checkpoints.
+        epoch = parent_result.get('dispatch_epoch') or uuid4().hex
+        try:
+            claimed = self.get_redis_client().set(  # pylint: disable=E1101
+                _k_dispatch_claim(parent_thread_id, epoch),
+                str(parent_task_id or 'claimed'),
+                nx=True,
+                ex=_RECONCILE_PAYLOAD_TTL,
+            )
+        except Exception:  # pylint: disable=W0703
+            log.exception(
+                "[PARALLEL] failed to claim dispatch parent=%s epoch=%s",
+                parent_thread_id, epoch,
+            )
+            return
+        if not claimed:
+            log.info(
+                "[PARALLEL] duplicate dispatch ignored parent=%s epoch=%s",
+                parent_thread_id, epoch,
+            )
+            return
 
         # Stash the self-contained reconcile re-invoke payload in Redis, keyed by
         # (parent_thread_id, epoch). parent_task_id is carried so the reconcile
@@ -198,9 +297,23 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         for i, spec in enumerate(specs):
             child_thread_id = spec.get('child_thread_id')
             child_payload = spec.get('child_payload')
+            # Over-cap: launch nothing, settle every child so the gate drains to a single
+            # reconcile that reports the rejection (see the _over_cap comment above).
+            if _over_cap:
+                self._parallel_settle_child(
+                    parent_thread_id, epoch, child_thread_id,
+                    terminal_error=(
+                        f"Parallel fan-out exceeds the configured limit of "
+                        f"{_MAX_PARALLEL_CHILDREN_PER_PARENT} children"
+                    ),
+                )
+                continue
             if not child_payload:
                 log.warning("[PARALLEL] spec %s missing child_payload; settling as error", child_thread_id)
-                self._parallel_settle_child(parent_thread_id, epoch, child_thread_id)
+                self._parallel_settle_child(
+                    parent_thread_id, epoch, child_thread_id,
+                    terminal_error="Parallel child launch payload is missing",
+                )
                 continue
             child_meta = {
                 'task_name': 'indexer_agent',
@@ -219,7 +332,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 'parent_thread_id': parent_thread_id,
                 'child_thread_id': child_thread_id,
                 'child_index': spec.get('index', i),
+                'sibling_ordinal': spec.get('sibling_ordinal', i + 1),
                 'reconcile_epoch': epoch,
+                'dispatch_id': spec.get('dispatch_id'),
                 # Child identity for the indexer to stamp onto every event this
                 # child emits (so the UI attributes the child's live chips +
                 # HITL card to its own sub-agent accordion) and for HITL-resume
@@ -227,6 +342,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 # the chip parenthetical the in-process path stamps as
                 # parent_agent_name (#4993 Track 2).
                 'tool_call_id': spec.get('tool_call_id'),
+                'parent_agent_call_id': (
+                    spec.get('parent_agent_call_id') or spec.get('tool_call_id')
+                ),
+                'parent_agent_path': spec.get('parent_agent_path') or [],
                 'subagent_name': spec.get('display_name') or spec.get('name'),
             }
             # Stash the child's launch payload + linkage meta so a HITL pause on
@@ -254,7 +373,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # gate does not wait forever on an undispatched child.
             if child_task_id is None:
                 log.warning("[PARALLEL] child %s not dispatched (saturation?); settling as error", child_thread_id)
-                self._parallel_settle_child(parent_thread_id, epoch, child_thread_id)
+                self._parallel_settle_child(
+                    parent_thread_id, epoch, child_thread_id,
+                    terminal_error="Parallel child could not be dispatched",
+                )
             else:
                 # Record the child's own arbiter task_id so a chat stop can
                 # stop_task() each live child, not just the parent.
@@ -289,11 +411,21 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return
 
         # HITL-paused child: still open, not terminal.
-        if isinstance(child_result, dict) and child_result.get('hitl_interrupt'):
+        if isinstance(child_result, dict) and (
+            child_result.get('hitl_interrupt')
+            or child_result.get('hitl_interrupts')
+            or child_result.get('paused')
+        ):
             log.info("[PARALLEL] child %s paused for HITL; gate not advanced", child_thread_id)
             return
 
-        self._parallel_settle_child(parent_thread_id, epoch, child_thread_id)
+        terminal_error = None
+        if isinstance(child_result, dict) and child_result.get('error'):
+            terminal_error = child_result.get('error')
+        self._parallel_settle_child(
+            parent_thread_id, epoch, child_thread_id,
+            terminal_error=terminal_error,
+        )
 
     # -- Reconcile gate (atomic Redis, no DB, no lease) -----------------------
 
@@ -318,7 +450,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.exception("[PARALLEL] prime gate failed (parent=%s epoch=%s)", parent_thread_id, epoch)
 
     @web.method()
-    def _parallel_settle_child(self, parent_thread_id, epoch, child_thread_id):
+    def _parallel_settle_child(
+        self, parent_thread_id, epoch, child_thread_id, terminal_error=None,
+    ):
         """Atomically settle one child; reconcile iff it was the last.
 
         Single Lua round-trip (SADD-done idempotency + DECR-remaining). The
@@ -328,6 +462,25 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         if not (parent_thread_id and epoch and child_thread_id):
             return
+        if terminal_error:
+            try:
+                client = self.get_redis_client()  # pylint: disable=E1101
+                pipe = client.pipeline(transaction=False)
+                pipe.hset(
+                    _k_terminal_errors(parent_thread_id, epoch),
+                    child_thread_id,
+                    json.dumps({'error': str(terminal_error)}),
+                )
+                pipe.expire(
+                    _k_terminal_errors(parent_thread_id, epoch),
+                    _RECONCILE_PAYLOAD_TTL,
+                )
+                pipe.execute()
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "[PARALLEL] failed to record child terminal error (%s)",
+                    child_thread_id,
+                )
         try:
             client = self.get_redis_client()  # pylint: disable=E1101
             remaining = client.eval(
@@ -359,6 +512,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             pipe = client.pipeline(transaction=False)
             pipe.hset(_k_tasks(parent_thread_id, epoch), mapping=dict(task_id_map))
             pipe.expire(_k_tasks(parent_thread_id, epoch), _RECONCILE_PAYLOAD_TTL)
+            # A resumed child becomes message_group.task_id. Register every current child task as
+            # an alias owner of the epoch so Stop can still discover and cancel ALL siblings.
+            epoch_ref = _epoch_ref(parent_thread_id, epoch)
+            for task_id in task_id_map.values():
+                pipe.sadd(_k_parent_task(task_id), epoch_ref)
+                pipe.expire(_k_parent_task(task_id), _RECONCILE_PAYLOAD_TTL)
             pipe.execute()
         except Exception:  # pylint: disable=W0703
             log.exception("[PARALLEL] set child task ids failed (parent=%s epoch=%s)", parent_thread_id, epoch)
@@ -373,6 +532,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 _k_remaining(parent_thread_id, epoch),
                 _k_done(parent_thread_id, epoch),
                 _k_tasks(parent_thread_id, epoch),
+                _k_terminal_errors(parent_thread_id, epoch),
             )
             if parent_task_id:
                 pipe.srem(_k_parent_task(parent_task_id), _epoch_ref(parent_thread_id, epoch))
@@ -402,6 +562,22 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         payload = dict(stash.get('reconcile_payload') or {})
         payload['parallel_reconcile'] = epoch
         payload['thread_id'] = parent_thread_id
+        try:
+            raw_errors = self.get_redis_client().hgetall(  # pylint: disable=E1101
+                _k_terminal_errors(parent_thread_id, epoch)
+            )
+            terminal_errors = {}
+            for child_id, raw_error in (raw_errors or {}).items():
+                child_id = child_id.decode() if isinstance(child_id, bytes) else str(child_id)
+                raw_error = raw_error.decode() if isinstance(raw_error, bytes) else raw_error
+                terminal_errors[child_id] = json.loads(raw_error)
+            if terminal_errors:
+                payload['parallel_terminal_errors'] = terminal_errors
+        except Exception:  # pylint: disable=W0703
+            log.exception(
+                "[PARALLEL] failed to read child terminal errors parent=%s epoch=%s",
+                parent_thread_id, epoch,
+            )
         parent_task_name = stash.get('parent_task_name', 'indexer_agent')
         project_id = stash.get('project_id')
 
@@ -433,16 +609,43 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 pool="agents",
                 meta=meta,
             )
+            if task_id is None:
+                # start_task saturation is retryable. Put the consumed stash back and retain the
+                # epoch keys; deleting them here would permanently strand the parked parent.
+                self._parallel_reconcile_stash(parent_thread_id, epoch, stash)
+                log.warning(
+                    "[PARALLEL] reconcile saturated; state preserved parent=%s epoch=%s",
+                    parent_thread_id, epoch,
+                )
+                # The settle gate already reached zero, so no later child event
+                # can wake reconciliation again. Schedule a bounded-delay retry
+                # on the Pylon gevent hub while the preserved stash/TTL remains.
+                import gevent  # pylint: disable=C0415,E0401
+                gevent.spawn_later(
+                    1.0, self._parallel_reinvoke_parent, parent_thread_id, epoch,
+                )
+                return
+            chat_project_id = stash.get('chat_project_id')
+            parent_message_id = stash.get('parent_message_id')
+            if chat_project_id and parent_message_id:
+                self.context.event_manager.fire_event(
+                    'applications_predict_task_id',
+                    {
+                        'task_id': task_id,
+                        'project_id': chat_project_id,
+                        'message_group_id': parent_message_id,
+                    },
+                )
             log.info(
                 "[PARALLEL] reconcile re-invoke parent_thread_id=%s epoch=%s task_id=%s",
                 parent_thread_id, epoch, task_id,
             )
         except Exception:  # pylint: disable=W0703
+            self._parallel_reconcile_stash(parent_thread_id, epoch, stash)
             log.exception("[PARALLEL] failed to re-invoke parent for epoch %s", epoch)
-        finally:
-            # Coordination state is consumed regardless: a failed re-invoke must
-            # not leave a stuck epoch that blocks future fan-outs on this thread.
-            self._parallel_epoch_cleanup(parent_thread_id, epoch, parent_task_id)
+            return
+
+        self._parallel_epoch_cleanup(parent_thread_id, epoch, parent_task_id)
 
     # -- Stop fan-out (chat stop button) --------------------------------------
 

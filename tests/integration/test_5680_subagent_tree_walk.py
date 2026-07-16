@@ -1,9 +1,8 @@
-"""Issue #5680 — sub-agent tree walkers: publish collector + validation assertion.
+"""Issues #5680/#5778 — canonical sub-agent traversal contracts.
 
-Exercises the pure decision logic of the two split walkers (``collect_sub_agent_tree`` for the
-publish path, ``assert_no_invalid_nesting`` for cycle + leaf-rule validation) against a fake
-in-memory session, without a real DB. Also covers the ``SubAgentTreeError -> toolkit_errors``
-UI-error shape and the offending-tool-id attribution that drives the red validation chip.
+Exercises publishing, validation, and tier calculation against a fake in-memory session, without
+a real DB. The three public operations share one cached path-local traversal. Also covers the
+``SubAgentTreeError -> toolkit_errors`` UI-error shape and offending-tool-id attribution.
 Heavy model/dep imports are stubbed so publish_utils loads standalone.
 
 Run via:
@@ -141,10 +140,11 @@ def _collect(pu, registry, root_id):
     )
 
 
-def _assert(pu, registry, root_id, session=None):
+def _assert(pu, registry, root_id, session=None, start_depth=1):
     """VALIDATION walker — returns None, raises on violation."""
     return pu.assert_no_invalid_nesting(
         project_id=1, version_id=root_id, session=session or FakeSession(registry),
+        start_depth=start_depth,
     )
 
 
@@ -170,11 +170,11 @@ class TestCycleDetection:
             _assert(pu, registry, 1)
         assert ei.value.error_code == 'cycle_detected'
 
-    def test_self_referencing_agent_rejected_as_container(self, pu):
+    def test_self_referencing_agent_rejected_as_cycle(self, pu):
         registry = {1: FakeVersion(1, tools=[FakeTool(1, 1)])}
         with pytest.raises(pu.SubAgentTreeError) as ei:
             _assert(pu, registry, 1)
-        assert ei.value.error_code == 'container_child_forbidden'
+        assert ei.value.error_code == 'cycle_detected'
 
     def test_agent_two_hop_cycle_rejected_as_container(self, pu):
         registry = {
@@ -206,11 +206,20 @@ class TestLeafOnlyRule:
         }
         assert _assert(pu, registry, 1) is None
 
-    def test_container_agent_child_rejected(self, pu):
+    def test_container_agent_child_at_tier2_allowed(self, pu):
         registry = {
             1: FakeVersion(1, tools=[FakeTool(2, 2)]),
             2: FakeVersion(2, tools=[FakeTool(3, 3)]),
             3: FakeVersion(3, tools=[]),
+        }
+        assert _assert(pu, registry, 1) is None
+
+    def test_container_agent_child_at_tier3_rejected(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+            4: FakeVersion(4, tools=[]),
         }
         with pytest.raises(pu.SubAgentTreeError) as ei:
             _assert(pu, registry, 1)
@@ -233,6 +242,55 @@ class TestLeafOnlyRule:
         }
         assert _assert(pu, registry, 1) is None
 
+    def test_pipeline_is_transparent_to_agent_tier_count(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+            4: FakeVersion(4, tools=[]),
+        }
+        assert _assert(pu, registry, 1) is None
+
+
+class TestBindPathDepth:
+    """Binding a subtree starts the child at agent tier two."""
+
+    def test_rejects_container_at_tier3(self, pu):
+        registry = {
+            2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+            4: FakeVersion(4, tools=[]),
+        }
+        with pytest.raises(pu.SubAgentTreeError) as ei:
+            _assert(pu, registry, 2, start_depth=2)
+        assert ei.value.error_code == 'container_child_forbidden'
+
+    def test_allows_leaf_at_tier3(self, pu):
+        registry = {
+            2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[]),
+        }
+        assert _assert(pu, registry, 2, start_depth=2) is None
+
+    def test_pipeline_remains_tier_transparent(self, pu):
+        registry = {
+            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+            4: FakeVersion(4, tools=[]),
+        }
+        assert _assert(pu, registry, 2, start_depth=2) is None
+
+    def test_pipeline_does_not_hide_a_fourth_agent_tier(self, pu):
+        registry = {
+            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+            4: FakeVersion(4, tools=[FakeTool(5, 5)]),
+            5: FakeVersion(5, tools=[]),
+        }
+        with pytest.raises(pu.SubAgentTreeError) as ei:
+            _assert(pu, registry, 2, start_depth=2)
+        assert ei.value.error_code == 'container_child_forbidden'
+
 
 class TestToolIdAttribution:
     """Validation walker — offending top-level tool id (finding #1: red-UI attribution)."""
@@ -244,7 +302,8 @@ class TestToolIdAttribution:
             1: FakeVersion(1, tools=[leaf_tool, bad_tool]),
             2: FakeVersion(2, tools=[]),
             3: FakeVersion(3, tools=[FakeTool(4, 4)]),
-            4: FakeVersion(4, tools=[]),
+            4: FakeVersion(4, tools=[FakeTool(5, 5)]),
+            5: FakeVersion(5, tools=[]),
         }
         with pytest.raises(pu.SubAgentTreeError) as ei:
             _assert(pu, registry, 1)
@@ -257,7 +316,8 @@ class TestToolIdAttribution:
             1: FakeVersion(1, tools=[top_tool]),
             2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
             3: FakeVersion(3, tools=[FakeTool(4, 4)]),
-            4: FakeVersion(4, tools=[]),
+            4: FakeVersion(4, tools=[FakeTool(5, 5)]),
+            5: FakeVersion(5, tools=[]),
         }
         with pytest.raises(pu.SubAgentTreeError) as ei:
             _assert(pu, registry, 1)
@@ -296,7 +356,7 @@ class TestUIErrorShape:
 
 
 class TestQueryEfficiency:
-    """Finding #4: one query per node (no double-fetch)."""
+    """One cached traversal: no per-node or validation/collection double-fetch."""
 
     def test_validation_walk_queries_each_node_once(self, pu):
         registry = {
@@ -308,14 +368,108 @@ class TestQueryEfficiency:
         _assert(pu, registry, 1, session=session)
         assert session.query_count == 3
 
+    def test_publish_validation_and_collection_share_one_walk(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[]),
+        }
+        session = FakeSession(registry)
+
+        tree = pu.collect_sub_agent_tree(1, 1, session=session)
+
+        assert tree == []
+        assert session.query_count == 3
+
+    def test_tier_calculation_loads_each_version_once(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[]),
+        }
+        session = FakeSession(registry)
+
+        tiers = pu.compute_agent_subtree_tiers(1, 1, session=session)
+
+        assert tiers == 2
+        assert session.query_count == 3
+
+    def test_tier_calculation_reuses_preloaded_root(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, tools=[]),
+        }
+        session = FakeSession(registry)
+
+        metadata = pu.get_agent_nesting_metadata(
+            1,
+            1,
+            session=session,
+            root_version=registry[1],
+        )
+
+        assert metadata == {
+            'agent_subtree_tiers': 2,
+            'max_agent_nesting_tiers': 3,
+        }
+        assert session.query_count == 1
+
+
+class TestAgentSubtreeTiers:
+    """Depth helper used by the UI add guard."""
+
+    @staticmethod
+    def _tiers(pu, registry, root_id):
+        return pu.compute_agent_subtree_tiers(1, root_id, session=FakeSession(registry))
+
+    def test_leaf_is_one_tier(self, pu):
+        assert self._tiers(pu, {1: FakeVersion(1, tools=[])}, 1) == 1
+
+    def test_container_of_leaves_is_two_tiers(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, tools=[]),
+        }
+        assert self._tiers(pu, registry, 1) == 2
+
+    def test_two_hop_agent_tree_is_three_tiers(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[]),
+        }
+        assert self._tiers(pu, registry, 1) == 3
+
+    def test_pipeline_is_transparent(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[]),
+        }
+        assert self._tiers(pu, registry, 1) == 2
+
+    def test_pipeline_root_consumes_no_tier(self, pu):
+        registry = {
+            1: FakeVersion(1, agent_type='pipeline', tools=[FakeTool(2, 2)]),
+            2: FakeVersion(2, tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[]),
+        }
+        assert self._tiers(pu, registry, 1) == 2
+
+    def test_empty_pipeline_has_zero_tiers(self, pu):
+        assert self._tiers(
+            pu, {1: FakeVersion(1, agent_type='pipeline', tools=[])}, 1,
+        ) == 0
+
 
 class TestPublishPath:
-    """Publish path (collect_sub_agent_tree) unchanged: pipelines skipped, not walked."""
+    """Publish materialization excludes pipelines after the canonical validation walk."""
 
     def test_publish_path_skips_pipeline_children(self, pu):
         registry = {
             1: FakeVersion(1, tools=[FakeTool(2, 2)]),
-            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(1, 1)]),
+            2: FakeVersion(2, agent_type='pipeline', tools=[FakeTool(3, 3)]),
+            3: FakeVersion(3, tools=[]),
         }
         tree = _collect(pu, registry, 1)
         assert tree == []
@@ -327,6 +481,20 @@ class TestPublishPath:
         }
         tree = _collect(pu, registry, 1)
         assert [n.app_id for n in tree] == [2]
+
+    def test_publish_path_accepts_shared_leaf_and_reuses_its_load(self, pu):
+        registry = {
+            1: FakeVersion(1, tools=[FakeTool(2, 2), FakeTool(3, 3)]),
+            2: FakeVersion(2, tools=[FakeTool(4, 4)]),
+            3: FakeVersion(3, tools=[FakeTool(4, 4)]),
+            4: FakeVersion(4, tools=[]),
+        }
+        session = FakeSession(registry)
+
+        tree = pu.collect_sub_agent_tree(1, 1, session=session)
+
+        assert [[child.app_id for child in node.children] for node in tree] == [[4], [4]]
+        assert session.query_count == 4
 
 
 class TestCollectReachableVersionIds:

@@ -36,9 +36,12 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
     # Import here to avoid circular imports
     old_meta = msg_group.meta or {}
     new_meta = {**old_meta}
-    thread_id_value = payload['response_metadata'].get(
+    # The message group belongs to the root chat run. Durable children save
+    # partial traces into that same row using their own checkpoint thread ids;
+    # once the root id is established, a child must not replace it.
+    thread_id_value = old_meta.get('thread_id') or payload['response_metadata'].get(
         'thread_id'
-    ) if payload['response_metadata'].get('thread_id') else old_meta.get('thread_id')
+    )
     meta_update = {
         'thread_id': thread_id_value,
         'references': payload.get('references', []),

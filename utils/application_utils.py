@@ -685,7 +685,22 @@ def get_application_details(project_id: int, application_id: int,
             i.set_online(project_id, mcp_schemas=mcp_schemas)
             i.set_agent_meta_and_fields(project_id)
 
-    return {'ok': True, 'data': result.model_dump(mode='json')}
+        data = result.model_dump(mode='json')
+        try:
+            from .publish_utils import get_agent_nesting_metadata
+            data['version_details'].update(get_agent_nesting_metadata(
+                project_id,
+                application_version.id,
+                session=session,
+                root_version=application_version,
+            ))
+        except Exception as depth_err:  # never fail detail fetch over advisory fields
+            log.warning(
+                f"Could not compute agent nesting metadata for version "
+                f"{application_version.id}: {depth_err}"
+            )
+
+    return {'ok': True, 'data': data}
 
 
 def application_ids_to_names(session, application_id: int, version_id: int) -> Tuple[str, str]:
@@ -1501,6 +1516,22 @@ def get_application_version_details_expanded(
 
         if not result.get('skills'):
             result.pop('skills', None)
+
+        # Agent-only subtree contribution (issue #5778); a pipeline root contributes zero. The UI
+        # add-guard allows nesting only while host current tier + candidate contribution stays
+        # within MAX_AGENT_NESTING_TIERS. Derived from the authoritative validator's walker so
+        # the two can't drift. Cheap (tools already selectin-loaded on the root; children are a
+        # bounded walk) and off the chat hot path — this is the edit/detail path.
+        try:
+            from .publish_utils import get_agent_nesting_metadata
+            result.update(get_agent_nesting_metadata(
+                project_id,
+                version_id,
+                session=session,
+                root_version=application_version,
+            ))
+        except Exception as depth_err:  # never fail detail fetch over an advisory field
+            log.warning(f"Could not compute agent_subtree_tiers for version {version_id}: {depth_err}")
 
         if result.get('llm_settings'):
             # Response-only path (never persisted): include openai_compatible so the SDK

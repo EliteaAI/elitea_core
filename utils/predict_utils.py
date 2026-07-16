@@ -238,6 +238,7 @@ def generate_predict_payload(
         'hitl_action': getattr(parsed, 'hitl_action', None),
         'hitl_value': getattr(parsed, 'hitl_value', None),
         'hitl_decisions': getattr(parsed, 'hitl_decisions', None),
+        'execution_generation': getattr(parsed, 'execution_generation', None),
         'is_regenerate': getattr(parsed, 'is_regenerate', False),
         'meta': parsed.meta,
         'conversation_id': getattr(parsed, 'conversation_id', None) or parsed.stream_id,  # For planning toolkit scoping (fallback to stream_id)
