@@ -22,7 +22,7 @@ from ..models.pd.application import (
     ApplicationUpdateModel
 )
 from ..models.pd.version import ApplicationVersionDetailToolValidatedModel
-from ..models.pd.llm import llm_settings_family_conflict
+from ..models.pd.llm import llm_settings_family_conflict, _normalize_llm_settings_family
 from ..models.all import Tag
 from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
@@ -1328,27 +1328,6 @@ def list_applications_api(
         'total': total,
         'applications': applications,
     }
-
-
-def _normalize_llm_settings_family(llm_settings: dict, supports_reasoning: bool) -> dict:
-    """Reset temperature/reasoning_effort to match a model's actual reasoning support.
-
-    Shared by all branches of validate_and_resolve_llm_settings (available model, unavailable
-    model, and unavailable-model-with-no-name-at-all fallback) so the reset logic lives in one
-    place (issue #5821).
-    """
-    resolved = dict(llm_settings)
-    if supports_reasoning:
-        # Reasoning models ignore temperature; promote to reasoning_effort if not already set.
-        resolved['temperature'] = None
-        if not resolved.get('reasoning_effort'):
-            resolved['reasoning_effort'] = 'medium'
-    else:
-        # Non-reasoning models ignore reasoning_effort.
-        resolved['reasoning_effort'] = None
-        if resolved.get('temperature') is None:
-            resolved['temperature'] = 0.7
-    return resolved
 
 
 def validate_and_resolve_llm_settings(
