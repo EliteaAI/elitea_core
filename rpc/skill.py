@@ -5,7 +5,7 @@ from pylon.core.tools import web, log
 from tools import db, serialize
 
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
-from ..models.enums.all import SkillEntityTypes
+from ..models.enums.all import PublishStatus, SkillEntityTypes
 from ..models.pd.skill import SkillCreateModel
 from ..models.pd.search import MultipleApplicationSearchModel
 from ..utils.searches import get_search_options
@@ -178,3 +178,18 @@ class RPC:
             entity_version_id=entity_version_id,
             entity_type=entity_type,
         )
+
+    @web.rpc("skills_get_stats", "get_skills_stats")
+    def skills_get_stats(self, project_id: int, author_id: int) -> dict:
+        result = {}
+        with db.with_project_schema_session(project_id) as session:
+            query = session.query(Skill).filter(
+                Skill.versions.any(SkillVersion.author_id == author_id)
+            )
+            result['total_skills'] = query.count()
+            query = query.filter(
+                Skill.versions.any(SkillVersion.status == PublishStatus.published)
+            )
+            result['public_skills'] = query.count()
+
+        return result
