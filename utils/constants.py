@@ -21,16 +21,18 @@ DEFAULT_AGENT_CATEGORIES: list = [
     'Other',
 ]
 
+# Skills keep their OWN category list, independently managed from agents. It is
+# seeded as a duplicate of DEFAULT_AGENT_CATEGORIES so the two start identical,
+# but they can diverge (admins manage each list separately).
 DEFAULT_SKILL_CATEGORIES: list = [
-    'Code & Development',
-    'Writing & Communication',
-    'Analysis & Research',
-    'Data & Transformation',
-    'Productivity & Automation',
-    'Creative & Design',
-    'Testing & QA',
-    'Documentation',
-    'Security & Compliance',
+    'Business Analyst',
+    'Quality Assurance',
+    'Development',
+    'DevOps',
+    'Project Management',
+    'Knowledge & Documentation',
+    'Elitea',
+    'Epam',
     'Other',
 ]
 

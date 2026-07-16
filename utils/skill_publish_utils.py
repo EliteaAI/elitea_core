@@ -11,9 +11,11 @@ from sqlalchemy.exc import IntegrityError
 from tools import db, this, rpc_tools
 
 from ..models.all import Tag
-from ..models.enums.all import PublishStatus
+from ..models.enums.all import NotificationEventTypes, PublishStatus
+from ..models.pd.collection_base import TagBaseModel
 from ..models.pd.publish import VERSION_NAME_PATTERN
 from ..models.pd.skill_publish import SkillPublishAIResult
+from ..models.pd.skill_version import SkillVersionCreateModel
 from ..models.skill import Skill, SkillVersion
 from .publish_utils import (
     ACTION_VERB_RE,
@@ -32,8 +34,7 @@ from .publish_utils import (
     generate_validation_token,
     verify_validation_token,
 )
-from .category_utils import apply_category_to_tag_dicts
-from .skill_category_utils import validate_skill_category
+from .skill_category_utils import apply_skill_category_to_tag_dicts, validate_skill_category
 
 SKILL_VERSION_NAME_RE = re.compile(VERSION_NAME_PATTERN)
 
@@ -148,9 +149,9 @@ class SkillIconChecker(BaseChecker):
         icon_meta = data.get('icon_meta')
         if not icon_meta or not isinstance(icon_meta, dict):
             result.issue(
-                'warnings', 'icon',
+                'critical', 'icon',
                 'No custom icon set',
-                'Add a custom icon to improve marketplace visibility', context,
+                'Add a custom icon before publishing', context,
             )
 
 
@@ -397,7 +398,7 @@ DEFAULT_SKILL_VALIDATION_PROMPT = _SKILL_VALIDATION_PROMPT_TEMPLATE.format(
 
 
 def _build_skill_validation_prompt() -> str:
-    custom_rules = (getattr(this.module, 'skill_publish_validation_rules', '') or '').strip()
+    custom_rules = get_skill_publish_validation_rules().strip()
     if custom_rules:
         return _SKILL_VALIDATION_PROMPT_TEMPLATE.format(
             skill_validation_rules=custom_rules,
@@ -625,12 +626,32 @@ def validate_skill_for_publish(
     return merged
 
 
+def _skill_guardrail_config() -> dict:
+    """Live guardrail config (read each call so admin changes need no reload)."""
+    return this.descriptor.config.get('skill_publishing_guardrail', {}) or {}
+
+
+def get_skill_publish_blocked() -> bool:
+    return bool(_skill_guardrail_config().get('is_publish_blocked', False))
+
+
+def get_skill_publish_whitelist() -> set:
+    raw = _skill_guardrail_config().get('whitelist_project_ids', []) or []
+    return set(
+        int(x) for x in raw
+        if isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit())
+    )
+
+
+def get_skill_publish_validation_rules() -> str:
+    return _skill_guardrail_config().get('publish_validation_rules', '') or ''
+
+
 def is_skill_publish_blocked_for_project(project_id: int) -> bool:
     """Platform guardrail; defaults to not-blocked until admin config exists."""
-    if not getattr(this.module, 'is_skill_publish_blocked', False):
+    if not get_skill_publish_blocked():
         return False
-    whitelist = getattr(this.module, 'skill_publish_whitelist_project_ids', set()) or set()
-    return project_id not in whitelist
+    return project_id not in get_skill_publish_whitelist()
 
 
 def create_skill_publish_snapshot(
@@ -866,7 +887,7 @@ def _apply_category_to_snapshot(snapshot: dict, category: Optional[str]) -> None
     if not category:
         return
     tag_dicts = [{'name': n, 'data': {}} for n in (snapshot['version'].get('tags') or [])]
-    updated = apply_category_to_tag_dicts(tag_dicts, category)
+    updated = apply_skill_category_to_tag_dicts(tag_dicts, category)
     snapshot['version']['tags'] = [t['name'] for t in updated]
 
 
@@ -892,6 +913,42 @@ def _guard_additional_publish(
     return None
 
 
+def _clone_source_version_for_publish(
+    project_id: int,
+    skill_id: int,
+    version_id: int,
+    version_name: str,
+    user_id: int,
+) -> int:
+    """Materialise a new source ``SkillVersion`` named ``version_name`` copied
+    from ``version_id``, and return its id.
+
+    Mirrors agent publishing (``clone_version``): publishing snapshots a fresh
+    version rather than mutating the one the user is editing. Raises
+    ``SkillVersionConflictError`` if ``version_name`` is already taken.
+    """
+    from .skill_utils import create_skill_version
+
+    with db.get_session(project_id) as session:
+        src = (
+            session.query(SkillVersion)
+            .filter(SkillVersion.skill_id == skill_id, SkillVersion.id == version_id)
+            .first()
+        )
+        if src is None:
+            raise ValueError(f"Skill version {version_id} not found for skill {skill_id}")
+        version_data = SkillVersionCreateModel(
+            name=version_name,
+            instructions=src.instructions or '',
+            author_id=user_id,
+            tags=[TagBaseModel(name=t.name, data=t.data or {}) for t in (src.tags or [])],
+            meta=src.meta or {},
+        )
+
+    result = create_skill_version(project_id, skill_id, version_data)
+    return result['id']
+
+
 def user_publish_skill(
     project_id: int,
     skill_id: int,
@@ -902,6 +959,8 @@ def user_publish_skill(
     max_versions: int,
     category: Optional[str] = None,
 ) -> tuple:
+    from .skill_utils import SkillVersionConflictError
+
     twin_id = find_public_skill_twin(public_project_id, project_id, skill_id)
 
     if twin_id is not None:
@@ -909,7 +968,19 @@ def user_publish_skill(
         if guard is not None:
             return guard
 
-    snapshot = create_skill_publish_snapshot(project_id, skill_id, version_id, user_id)
+    # Create a new source version (the published snapshot), leaving the version
+    # the user is editing untouched — the same way agent publishing clones.
+    try:
+        publish_version_id = _clone_source_version_for_publish(
+            project_id, skill_id, version_id, version_name, user_id,
+        )
+    except SkillVersionConflictError:
+        return {
+            "error": "version_name_conflict",
+            "msg": f"Version name '{version_name}' already exists on this skill",
+        }, 400
+
+    snapshot = create_skill_publish_snapshot(project_id, skill_id, publish_version_id, user_id)
     _apply_category_to_snapshot(snapshot, category)
     source = snapshot['source']
 
@@ -934,7 +1005,44 @@ def user_publish_skill(
                 public_project_id, twin_id, snapshot, version_name, user_id, source,
             )
 
-    sync_source_skill_version_status(project_id, version_id, PublishStatus.published)
+    sync_source_skill_version_status(project_id, publish_version_id, PublishStatus.published)
+
+    return {
+        "msg": "Successfully published",
+        "public_skill_id": result['skill_id'],
+        "public_version_id": result['version_id'],
+        "version_name": version_name,
+        "source_version_id": publish_version_id,
+    }, 200
+
+
+def admin_publish_skill(
+    project_id: int,
+    skill_id: int,
+    version_id: int,
+    version_name: str,
+    user_id: int,
+    max_versions: int,
+    category: Optional[str] = None,
+) -> tuple:
+    guard = _guard_additional_publish(project_id, skill_id, version_name, max_versions)
+    if guard is not None:
+        return guard
+
+    snapshot = create_skill_publish_snapshot(project_id, skill_id, version_id, user_id)
+    _apply_category_to_snapshot(snapshot, category)
+
+    result = publish_skill_additional_version(
+        project_id, skill_id, snapshot, version_name, user_id, snapshot['source'],
+    )
+
+    # Skills created directly in the public project get no default version at
+    # creation; point it at the first published version so fork/export resolve.
+    with db.get_session(project_id) as session:
+        skill = session.query(Skill).get(skill_id)
+        if skill is not None and not (skill.meta or {}).get('default_version_id'):
+            skill.meta = {**(skill.meta or {}), 'default_version_id': result['version_id']}
+            session.commit()
 
     return {
         "msg": "Successfully published",
@@ -943,13 +1051,6 @@ def user_publish_skill(
         "version_name": version_name,
         "source_version_id": version_id,
     }, 200
-
-
-def admin_publish_skill(*args, **kwargs) -> tuple:
-    return {
-        "error": "not_implemented",
-        "msg": "Admin in-place skill publish is not supported.",
-    }, 403
 
 
 def delete_public_skill_version(
@@ -984,16 +1085,31 @@ def delete_public_skill_version(
             .all()
         )
         shell_deleted = False
+        skill = session.query(Skill).get(public_skill_id)
         if not remaining_versions:
-            # ORM cascade drops skill_versions and any entity_skill_mapping rows in
-            # the public project schema only; consuming-agent mappings live in other
-            # project schemas and are untouched.
-            skill = session.query(Skill).get(public_skill_id)
-            if skill is not None:
+            if skill is not None and skill.shared_owner_id is not None:
+                # ORM cascade drops skill_versions and any entity_skill_mapping rows in
+                # the public project schema only; consuming-agent mappings live in other
+                # project schemas and are untouched.
                 session.delete(skill)
                 shell_deleted = True
+            elif skill is not None and (skill.meta or {}).get('default_version_id') == deleted_version_id:
+                # In-place original (no shared link): keep the skill and its drafts
+                # (skills analogue of agent Bug #4643); repoint the default at the
+                # newest remaining version of any status, or drop it.
+                remaining_any = (
+                    session.query(SkillVersion)
+                    .filter(SkillVersion.skill_id == public_skill_id)
+                    .order_by(SkillVersion.id.desc())
+                    .first()
+                )
+                meta = dict(skill.meta or {})
+                if remaining_any is not None:
+                    meta['default_version_id'] = remaining_any.id
+                else:
+                    meta.pop('default_version_id', None)
+                skill.meta = meta
         else:
-            skill = session.query(Skill).get(public_skill_id)
             if skill is not None and (skill.meta or {}).get('default_version_id') == deleted_version_id:
                 # The default pointed at the version just removed; repoint it so the
                 # public skill still resolves a version (skills have no 'base' fallback).
@@ -1068,8 +1184,81 @@ def user_unpublish_skill(
     return {"msg": "Successfully unpublished", "status": "deleted"}, 200
 
 
-def admin_unpublish_skill(*args, **kwargs) -> tuple:
-    return {
-        "error": "not_implemented",
-        "msg": "Admin in-place skill unpublish is not supported.",
-    }, 403
+def notify_skill_author_unpublished(
+    source_project_id: int,
+    author_id: int,
+    source_skill_id: Optional[int],
+    source_version_id: Optional[int],
+    reason: Optional[str],
+) -> None:
+    """Fire a notification event when an admin unpublishes a user's skill."""
+    try:
+        skill_name = str(source_skill_id)
+        version_name = str(source_version_id)
+        with db.get_session(source_project_id) as session:
+            version = (
+                session.query(SkillVersion).get(source_version_id)
+                if source_version_id else None
+            )
+            if version is not None:
+                version_name = version.name
+                skill = session.query(Skill).get(version.skill_id)
+                if skill is not None:
+                    skill_name = skill.name
+        reason_suffix = f' Reason: {reason}' if reason else ''
+        meta = {
+            'source_version_id': source_version_id,
+            'source_skill_id': source_skill_id,
+            'reason': reason or '',
+            'status': PublishStatus.draft.value,
+            # Plain text: the notifications UI has no skill href resolver, so
+            # agent-style [id]() link syntax would render as literal brackets.
+            'message': (
+                f"Your skill '{skill_name}' version '{version_name}' has been "
+                f"unpublished by an administrator.{reason_suffix}"
+            ),
+        }
+        event_manager = rpc_tools.EventManagerMixin().event_manager
+        event_manager.fire_event(
+            'notifications_stream',
+            {
+                'event_type': NotificationEventTypes.skill_unpublished,
+                'project_id': source_project_id,
+                'user_id': author_id,
+                'meta': meta,
+            },
+        )
+    except Exception as e:
+        log.warning("[SKILL_UNPUBLISH] Failed to fire notification: %s", e)
+
+
+def admin_unpublish_skill(
+    project_id: int,
+    skill_id: int,
+    version_id: int,
+    user_id: int,
+    reason: Optional[str] = None,
+) -> tuple:
+    result = delete_public_skill_version(project_id, version_id)
+    if result.get('not_published'):
+        return {"error": "not_published", "msg": "Skill version is not currently published"}, 409
+
+    # Cross-project notification path is only meaningful when source != public.
+    # For in-place admin publishes the source IS the public project, so the
+    # author-notification step is skipped (admin published their own work).
+    source_project_id = result.get('source_project_id')
+    source_skill_id = result.get('source_skill_id')
+    source_version_id = result.get('source_version_id')
+    source_author_id = result.get('source_author_id')
+
+    if source_project_id and source_version_id and source_project_id != project_id:
+        sync_source_skill_version_status(source_project_id, source_version_id, PublishStatus.draft)
+        if result.get('shell_deleted') and source_skill_id:
+            clear_source_shared_link(source_project_id, source_skill_id)
+        if source_author_id:
+            notify_skill_author_unpublished(
+                source_project_id, source_author_id, source_skill_id,
+                source_version_id, reason,
+            )
+
+    return {"msg": "Successfully unpublished", "status": "deleted"}, 200

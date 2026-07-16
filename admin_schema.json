@@ -156,6 +156,47 @@
       "default": [],
       "requires_restart": false
     },
+    "is_skill_publish_blocked": {
+      "type": "boolean",
+      "title": "Block Skill Publishing",
+      "description": "When enabled, skill publishing is blocked platform-wide except for whitelisted projects. Admin publishes from the public project are always exempt.",
+      "path": "skill_publishing_guardrail.is_publish_blocked",
+      "section": "guardrails",
+      "default": false,
+      "requires_restart": false
+    },
+    "skill_publish_whitelist_project_ids": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "title": "Skill Publishing Allowed Projects",
+      "description": "Projects where skill publishing remains allowed when blocked globally. If empty, skill publishing is blocked for all projects.",
+      "path": "skill_publishing_guardrail.whitelist_project_ids",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false,
+      "enum_source": "projects",
+      "visible_when": { "field": "is_skill_publish_blocked", "value": true }
+    },
+    "skill_publish_validation_rules": {
+      "type": "string",
+      "format": "textarea",
+      "title": "Skill Publish Validation Rules",
+      "description": "Custom evaluation criteria for AI validation of skills before publishing. Leave empty to use built-in rules. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
+      "path": "skill_publishing_guardrail.publish_validation_rules",
+      "section": "guardrails",
+      "default": "",
+      "requires_restart": false
+    },
+    "skill_categories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "title": "Skill Categories",
+      "description": "Additional skill categories available in the skill publish modal and catalog filter bar, on top of the built-in defaults. Managed independently from Agent Categories. Built-in defaults (including \"Other\") cannot be removed here. New categories take effect immediately without a restart.",
+      "path": "skill_publishing_guardrail.skill_categories",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false
+    },
     "ai_project_id": {
       "type": "integer",
       "title": "Public Project ID",
