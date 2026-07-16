@@ -25,6 +25,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, *, project_id: int | None = None, **kwargs):
+        # limit=0 is falsy downstream and would drop the LIMIT clause entirely,
+        # dumping the whole catalog in one response.
+        limit = request.args.get("limit", default=10, type=int)
+        if limit <= 0:
+            limit = 10
         with db.with_project_schema_session(project_id) as session:
             result = list_public_skills_api(
                 project_id=project_id,
@@ -34,7 +39,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 my_liked=str(request.args.get('my_liked', '')).lower() in ('true', '1'),
                 trend_start_period=request.args.get('trend_start_period'),
                 trend_end_period=request.args.get('trend_end_period'),
-                limit=request.args.get("limit", default=10, type=int),
+                limit=limit,
                 offset=request.args.get("offset", default=0, type=int),
                 sort_by=request.args.get("sort_by", default="created_at"),
                 sort_order=request.args.get("sort_order", default='desc'),

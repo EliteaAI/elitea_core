@@ -4,6 +4,7 @@ from flask import request
 
 from tools import api_tools, config as c, db, auth
 
+from ...models.enums.all import SkillEntityTypes
 from ...utils.skill_utils import attach_public_skill_to_agents
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -32,6 +33,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {
                 'error': 'public_skill_id, public_version_id and agent_version_ids are required'
             }, 400
+
+        try:
+            entity_type = SkillEntityTypes(entity_type).value
+        except ValueError:
+            return {'error': f"invalid entity_type '{entity_type}'"}, 400
 
         try:
             with db.get_session(project_id) as session:

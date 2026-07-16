@@ -1,5 +1,7 @@
 from typing import List, Optional
 
+from sqlalchemy import and_
+
 from pylon.core.tools import web, log
 
 from tools import db, serialize
@@ -183,13 +185,17 @@ class RPC:
     def skills_get_stats(self, project_id: int, author_id: int) -> dict:
         result = {}
         with db.with_project_schema_session(project_id) as session:
-            query = session.query(Skill).filter(
+            result['total_skills'] = session.query(Skill).filter(
                 Skill.versions.any(SkillVersion.author_id == author_id)
-            )
-            result['total_skills'] = query.count()
-            query = query.filter(
-                Skill.versions.any(SkillVersion.status == PublishStatus.published)
-            )
-            result['public_skills'] = query.count()
+            ).count()
+            # Both conditions must hold on the SAME version: two separate any()
+            # clauses would count a skill whose published version belongs to
+            # someone else.
+            result['public_skills'] = session.query(Skill).filter(
+                Skill.versions.any(and_(
+                    SkillVersion.author_id == author_id,
+                    SkillVersion.status == PublishStatus.published,
+                ))
+            ).count()
 
         return result

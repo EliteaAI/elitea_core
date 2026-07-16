@@ -44,7 +44,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if not skill_version:
                 return {
                     'error': f"No skill found with id '{skill_id}' or no published version"
-                }, 400
+                }, 404
 
             result = SkillDetailModel.model_validate(skill_version.skill)
             # Public catalog must only expose published versions (mirrors the
@@ -54,6 +54,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ]
             # Version details carry the instructions the catalog modal renders inline.
             result.version_details = SkillVersionDetailModel.model_validate(skill_version)
+            # Version meta carries source-project lineage ids stamped at publish;
+            # the public payload only needs presentation keys (icon_meta).
+            if result.version_details.meta:
+                result.version_details.meta = {
+                    k: v for k, v in result.version_details.meta.items()
+                    if not k.startswith(('parent_', 'source_'))
+                }
             result.get_likes(project_id)
             result.check_is_liked(project_id)
 

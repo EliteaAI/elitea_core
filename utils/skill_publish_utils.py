@@ -584,10 +584,16 @@ def merge_skill_validation_results(deterministic: dict, ai_result: dict) -> dict
     }
 
 
-def compute_skill_content_hash(instructions: str) -> str:
-    # instructions-only: a skill has no vars/llm/sub-agents to fold in (agents do)
+def compute_skill_content_hash(instructions: str, name: str = '', description: str = '') -> str:
+    # The validation gate judges name and description too, so the token must pin
+    # them — an instructions-only hash lets metadata be swapped between validate
+    # and publish. (A skill has no vars/llm/sub-agents to fold in; agents do.)
     raw = json.dumps(
-        {'instructions': instructions or ''},
+        {
+            'instructions': instructions or '',
+            'name': name or '',
+            'description': description or '',
+        },
         sort_keys=True, separators=(',', ':'),
     )
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -616,6 +622,8 @@ def validate_skill_for_publish(
     if merged['status'] != 'FAIL':
         content_hash = compute_skill_content_hash(
             skill_data['skill'].get('instructions'),
+            skill_data['skill'].get('name'),
+            skill_data['skill'].get('description'),
         )
         secret = this.module._publish_validation_secret
         merged['validation_token'] = generate_validation_token(
@@ -875,10 +883,15 @@ def verify_skill_token_for_publish(
 ) -> tuple:
     with db.get_session(project_id) as session:
         version = session.query(SkillVersion).get(version_id)
-        instructions = version.instructions if version is not None else None
+        if version is None:
+            return False, "Failed to verify skill state."
+        skill = session.query(Skill).get(version.skill_id)
+        instructions = version.instructions
+        skill_name = skill.name if skill else ''
+        skill_description = skill.description if skill else ''
     if instructions is None:
         return False, "Failed to verify skill state."
-    content_hash = compute_skill_content_hash(instructions)
+    content_hash = compute_skill_content_hash(instructions, skill_name, skill_description)
     secret = this.module._publish_validation_secret
     ttl = int(this.descriptor.config.get(
         'publish_validation_token_ttl', DEFAULT_VALIDATION_TOKEN_TTL,
