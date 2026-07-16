@@ -34,7 +34,12 @@ from .publish_utils import (
     generate_validation_token,
     verify_validation_token,
 )
-from .skill_category_utils import apply_skill_category_to_tag_dicts, validate_skill_category
+from .constants import DEFAULT_FALLBACK_CATEGORY
+from .skill_category_utils import (
+    apply_skill_category_to_tag_dicts,
+    get_active_skill_categories,
+    validate_skill_category,
+)
 
 SKILL_VERSION_NAME_RE = re.compile(VERSION_NAME_PATTERN)
 
@@ -884,9 +889,15 @@ def verify_skill_token_for_publish(
 
 
 def _apply_category_to_snapshot(snapshot: dict, category: Optional[str]) -> None:
-    if not category:
-        return
     tag_dicts = [{'name': n, 'data': {}} for n in (snapshot['version'].get('tags') or [])]
+    if not category:
+        # The catalog's server-side category filter matches on an actual tag, so
+        # an uncategorized publish must land a real fallback tag. An existing
+        # category tag on the version wins over the fallback.
+        active = {c.lower() for c in get_active_skill_categories()}
+        if any((t['name'] or '').lower() in active for t in tag_dicts):
+            return
+        category = DEFAULT_FALLBACK_CATEGORY
     updated = apply_skill_category_to_tag_dicts(tag_dicts, category)
     snapshot['version']['tags'] = [t['name'] for t in updated]
 

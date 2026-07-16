@@ -89,6 +89,15 @@ class SkillVersionPublishedError(SkillError):
         self.version_id = version_id
 
 
+class SkillPublishedError(SkillError):
+    """Raised when deleting a skill that still has a published or embedded version."""
+    http_status = 409
+
+    def __init__(self, skill_id: int):
+        super().__init__('Cannot delete a skill with published versions. Unpublish them first.')
+        self.skill_id = skill_id
+
+
 class SkillLimitExceededError(SkillError):
     http_status = 400
 
@@ -867,6 +876,15 @@ def delete_skill(
 
         if not skill:
             raise SkillNotFoundError(skill_id)
+
+        # Mirror the version-level guard: a wholesale delete would otherwise
+        # strand the catalog entry with no source version left to unpublish.
+        published_version = s.query(SkillVersion.id).filter(
+            SkillVersion.skill_id == skill_id,
+            SkillVersion.status.in_((PublishStatus.published, PublishStatus.embedded)),
+        ).first()
+        if published_version:
+            raise SkillPublishedError(skill_id)
 
         s.query(EntitySkillMapping).filter(
             EntitySkillMapping.skill_id == skill_id
