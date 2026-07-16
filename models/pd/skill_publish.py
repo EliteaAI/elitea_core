@@ -18,6 +18,16 @@ class PublishSkillValidateRequest(BaseModel):
     )
 
 
+class SkillPublishRequest(BaseModel):
+    version_name: str = Field(..., pattern=VERSION_NAME_PATTERN)
+    category: str | None = None
+    validation_token: str | None = None
+
+
+class SkillUnpublishRequest(BaseModel):
+    reason: str | None = None
+
+
 SkillPublishAIResult = PublishAIResult
 
 
