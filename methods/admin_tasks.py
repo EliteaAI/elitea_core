@@ -2050,11 +2050,20 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     # pylint: disable=R,W0613
     @web.method()
     def heal_llm_settings_family_conflicts(self, *args, **kwargs):
-        """One-time backfill for issue #5821: fix ApplicationVersion/ParticipantMapping rows
-        whose llm_settings has both a custom temperature AND an active reasoning_effort set
-        (invalid combo -- reasoning models reject a custom temperature). Does NOT change
-        model_name/model_project_id, only normalizes temperature/reasoning_effort against each
-        row's own model's real supports_reasoning. Idempotent -- safe to re-run.
+        """Heal-all normalizer for family-misaligned llm_settings across ApplicationVersion and
+        ParticipantMapping rows (issues #5821 + #5858). Does NOT change model_name/model_project_id,
+        only aligns temperature/reasoning_effort against each row's own model's real
+        supports_reasoning. Idempotent -- safe to re-run.
+
+        Arms (all judged per-row against the resolved model's real supports_reasoning, looked up
+        per project via RPC):
+          - reasoning model + temperature + active effort  -> strip temperature (#5821)
+          - non-reasoning model + active effort            -> strip effort (impossible config)
+          - reasoning model + null effort                  -> set effort (#5858)
+
+        A bare null effort on a reasoning model is the unset/stale default and IS a defect (same
+        shape #5859 rejects at write time). An explicit reasoning_effort='none' is the deliberate
+        thinking-off escape hatch and is never touched.
 
         Dry-run is ON by default (unlike migrate_llm_model) since this task has no from/to
         model boundary and scans every project. Pass dry_run=false to apply changes.

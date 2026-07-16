@@ -28,12 +28,23 @@ from tools import context, rpc_tools  # pylint: disable=E0401
 
 from ..models.all import ApplicationVersion
 from ..models.participants import ParticipantMapping
+from ..models.pd.llm import decide_family_heal
 from .utils import get_public_project_id
 
 # Defaults matching UI behavior (llmSettings.constants.js / application_utils.py)
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_REASONING_EFFORT = 'medium'
 DEFAULT_MAX_TOKENS = -1  # auto mode, same as UI's DEFAULT_MAX_TOKENS
+
+
+def _parse_bool(raw: str, param_name: str) -> bool:
+    """Parse a "true"/"false"-ish flag, raising ``ValueError`` (naming ``param_name``) otherwise."""
+    value = raw.strip().lower()
+    if value in ('true', '1', 'yes'):
+        return True
+    if value in ('false', '0', 'no'):
+        return False
+    raise ValueError(f"Invalid {param_name} value: {value!r} (expected true/false)")
 
 
 def parse_project_id_spec(raw: str, param_name: str = 'project_id') -> tuple:
@@ -90,13 +101,7 @@ def parse_migration_params(raw_param: str) -> dict:
     project_id_spec = parse_project_id_spec(params.get('project_id', 'all'), 'project_id')
 
     # --- dry_run -----------------------------------------------------------
-    dry_run_raw = params.get('dry_run', 'false').strip().lower()
-    if dry_run_raw in ('true', '1', 'yes'):
-        dry_run = True
-    elif dry_run_raw in ('false', '0', 'no'):
-        dry_run = False
-    else:
-        raise ValueError(f"Invalid dry_run value: {dry_run_raw!r} (expected true/false)")
+    dry_run = _parse_bool(params.get('dry_run', 'false'), 'dry_run')
 
     return {
         'from_model': from_model,
@@ -295,33 +300,30 @@ def parse_heal_params(raw_param: str) -> dict:
         params[key.strip()] = value.strip()
 
     project_id_spec = parse_project_id_spec(params.get('project_id', 'all'), 'project_id')
-
-    dry_run_raw = params.get('dry_run', 'true').strip().lower()
-    if dry_run_raw in ('true', '1', 'yes'):
-        dry_run = True
-    elif dry_run_raw in ('false', '0', 'no'):
-        dry_run = False
-    else:
-        raise ValueError(f"Invalid dry_run value: {dry_run_raw!r} (expected true/false)")
+    dry_run = _parse_bool(params.get('dry_run', 'true'), 'dry_run')
 
     return {'project_id_spec': project_id_spec, 'dry_run': dry_run}
 
 
-def heal_family_conflict_versions(session, project_id: int, dry_run: bool) -> int:
-    """Fix ApplicationVersion rows with a temperature/reasoning_effort family conflict
-    (issue #5821), using each row's own model's real supports_reasoning. Unlike
-    migrate_application_versions, this does NOT change model_name/model_project_id — only the
-    conflicting temperature/reasoning_effort pair is normalized.
+def _candidate_filter(col):
+    """SQL pre-filter of rows to hand to decide_family_heal, given the llm_settings JSON column.
 
-    Returns the count of matched rows.
+    Any row carrying a model_name is a candidate: the reasoning family (hence whether a null
+    reasoning_effort is a defect) is only known after the per-project RPC capability lookup, so
+    null-effort rows can't be narrowed in SQL. decide_family_heal makes the per-row decision.
     """
-    # pylint: disable=C0415
-    from .application_utils import _normalize_llm_settings_family
+    return col.op("->>")("model_name").isnot(None)
 
+
+def heal_family_conflict_versions(session, project_id: int, dry_run: bool) -> int:
+    """Normalize family-misaligned ApplicationVersion.llm_settings rows against each row's own
+    model's real supports_reasoning (issues #5821 + #5858). Does NOT change
+    model_name/model_project_id — only the temperature/reasoning_effort pair is aligned.
+
+    Returns the count of rows actually healed (idempotent: aligned rows are skipped).
+    """
     rows = session.query(ApplicationVersion).filter(
-        ApplicationVersion.llm_settings.op("->>")("temperature").isnot(None),
-        ApplicationVersion.llm_settings.op("->>")("reasoning_effort").isnot(None),
-        ApplicationVersion.llm_settings.op("->>")("reasoning_effort") != 'none',
+        _candidate_filter(ApplicationVersion.llm_settings)
     ).all()
 
     if not rows:
@@ -331,38 +333,37 @@ def heal_family_conflict_versions(session, project_id: int, dry_run: bool) -> in
         project_id=project_id, section='llm', include_shared=True
     )
 
-    for i, version in enumerate(rows):
+    healed = 0
+    for version in rows:
         llm_settings = version.llm_settings or {}
         model_name = llm_settings.get('model_name')
         model_project_id = llm_settings.get('model_project_id')
         config = available.get((model_project_id, model_name), {}) if model_name else {}
         supports_reasoning = bool(config.get('supports_reasoning', False))
-        new_settings = _normalize_llm_settings_family(llm_settings, supports_reasoning)
-        if dry_run and i < 5:
+        new_settings = decide_family_heal(llm_settings, supports_reasoning)
+        if new_settings is None:
+            continue
+        if dry_run and healed < 5:
             log.info(
                 "  [dry_run] ApplicationVersion id=%s (supports_reasoning=%s): %r -> %r",
                 version.id, supports_reasoning, llm_settings, new_settings,
             )
         if not dry_run:
             version.llm_settings = new_settings
+        healed += 1
 
-    return len(rows)
+    return healed
 
 
 def heal_family_conflict_mappings(session, project_id: int, dry_run: bool) -> int:
-    """Fix ParticipantMapping rows with a temperature/reasoning_effort family conflict in
-    entity_settings.llm_settings (issue #5821). Same non-destructive semantics as
-    heal_family_conflict_versions — only the conflicting pair is normalized.
+    """Normalize family-misaligned ParticipantMapping.entity_settings->llm_settings rows
+    (issues #5821 + #5858). Same non-destructive, idempotent semantics as
+    heal_family_conflict_versions — only the temperature/reasoning_effort pair is aligned.
 
-    Returns the count of matched rows.
+    Returns the count of rows actually healed.
     """
-    # pylint: disable=C0415
-    from .application_utils import _normalize_llm_settings_family
-
     rows = session.query(ParticipantMapping).filter(
-        ParticipantMapping.entity_settings.op("->")("llm_settings").op("->>")("temperature").isnot(None),
-        ParticipantMapping.entity_settings.op("->")("llm_settings").op("->>")("reasoning_effort").isnot(None),
-        ParticipantMapping.entity_settings.op("->")("llm_settings").op("->>")("reasoning_effort") != 'none',
+        _candidate_filter(ParticipantMapping.entity_settings.op("->")("llm_settings"))
     ).all()
 
     if not rows:
@@ -372,7 +373,8 @@ def heal_family_conflict_mappings(session, project_id: int, dry_run: bool) -> in
         project_id=project_id, section='llm', include_shared=True
     )
 
-    for i, mapping in enumerate(rows):
+    healed = 0
+    for mapping in rows:
         entity_settings = dict(mapping.entity_settings) if mapping.entity_settings else {}
         old_llm = entity_settings.get('llm_settings')
         if not old_llm:
@@ -381,8 +383,10 @@ def heal_family_conflict_mappings(session, project_id: int, dry_run: bool) -> in
         model_project_id = old_llm.get('model_project_id')
         config = available.get((model_project_id, model_name), {}) if model_name else {}
         supports_reasoning = bool(config.get('supports_reasoning', False))
-        new_llm = _normalize_llm_settings_family(old_llm, supports_reasoning)
-        if dry_run and i < 5:
+        new_llm = decide_family_heal(old_llm, supports_reasoning)
+        if new_llm is None:
+            continue
+        if dry_run and healed < 5:
             log.info(
                 "  [dry_run] ParticipantMapping id=%s (supports_reasoning=%s): %r -> %r",
                 mapping.id, supports_reasoning, old_llm, new_llm,
@@ -390,5 +394,6 @@ def heal_family_conflict_mappings(session, project_id: int, dry_run: bool) -> in
         if not dry_run:
             entity_settings['llm_settings'] = new_llm
             mapping.entity_settings = entity_settings
+        healed += 1
 
-    return len(rows)
+    return healed
