@@ -11,11 +11,18 @@ from ...models.enums.all import ParticipantTypes
 from ...models.participants import Participant, ParticipantMapping
 from ...models.pd.participant import ParticipantBase, ParticipantEntityUser
 from ...models.pd.participant_settings import EntitySettingsLlm, EntitySettingsLlmWrite, EntitySettingsApplication
-from ...utils.participant_utils import make_query_filter_for_entity
+from ...utils.participant_utils import make_query_filter_for_entity, invalid_llm_settings_for_reasoning_model
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.sio_utils import SioEvents
 from ...utils.utils import get_public_project_id
+
+# A reasoning-capable model must run with a non-null reasoning_effort and no temperature; a stale
+# GPT-shaped default (temperature set, or effort null) silently runs it thinking-off (issue #5859).
+# Reject at write instead of persisting the invalid combo.
+INVALID_REASONING_MODEL_LLM_SETTINGS_ERROR = (
+    "a reasoning-capable model requires a reasoning_effort (low/medium/high) and no temperature"
+)
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -71,12 +78,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
                             data['llm_settings'] = validated_settings.model_dump()
                         except ValidationError as e:
                             return {"error": f"Invalid LLM settings: {str(e)}"}, 400
+                        if invalid_llm_settings_for_reasoning_model(project_id, data['llm_settings']):
+                            return {"error": INVALID_REASONING_MODEL_LLM_SETTINGS_ERROR}, 400
                 else:
                     try:
                         validated_settings = EntitySettingsLlmWrite.model_validate(llm_settings_data)
                         data['llm_settings'] = validated_settings.model_dump()
                     except ValidationError as e:
                         return {"error": f"Invalid LLM settings: {str(e)}"}, 400
+                    if invalid_llm_settings_for_reasoning_model(project_id, data['llm_settings']):
+                        return {"error": INVALID_REASONING_MODEL_LLM_SETTINGS_ERROR}, 400
 
             session.query(ParticipantMapping).filter(
                 ParticipantMapping.conversation_id == conversation_id,
