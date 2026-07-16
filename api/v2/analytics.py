@@ -19,8 +19,14 @@ if _API_AVAILABLE:
     from flask import request
     from sqlalchemy import func, case, cast, Float, Date, String, or_
 
+    from ...utils.constants import (
+        DEFAULT_DATE_RANGE_DAYS,
+        SYSTEM_USER_EMAILS,
+        SYSTEM_USER_EMAIL_PATTERN,
+    )
+
     def _parse_dates(args):
-        """Parse date_from / date_to from request args, default to last 30 days."""
+        """Parse date_from / date_to from request args, default to last 7 days."""
         date_from = args.get("date_from")
         date_to = args.get("date_to")
         try:
@@ -33,18 +39,15 @@ if _API_AVAILABLE:
             dt_to = None
         if not dt_from and not dt_to:
             dt_to = datetime.now(timezone.utc)
-            dt_from = dt_to - timedelta(days=7)
+            dt_from = dt_to - timedelta(days=DEFAULT_DATE_RANGE_DAYS)
         return dt_from, dt_to
 
     def _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to):
         """Build base query with project + date filters, excluding system users."""
         base = session.query(AuditEvent).filter(
             AuditEvent.project_id == project_id,
-            # Exclude system users from analytics
-            ~AuditEvent.user_email.in_([
-                'system@centry.user'
-            ]),
-            ~AuditEvent.user_email.like('system_user_%@centry.user'),
+            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
+            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
         )
         if dt_from:
             base = base.filter(AuditEvent.timestamp >= dt_from)
@@ -104,6 +107,8 @@ if _API_AVAILABLE:
                                     "tool_runs": 340,
                                     "chat_msgs": 210,
                                     "agent_runs": 95,
+                                    "total_tokens": 1250000,
+                                    "total_llm_cost": 1.25,
                                 },
                                 "event_type_breakdown": [
                                     {"event_type": "llm", "count": 780},
@@ -223,6 +228,11 @@ if _API_AVAILABLE:
                         func.sum(case(
                             (AuditEvent.entity_type == "application", 1), else_=0,
                         )).label("agent_runs"),
+                        func.sum(
+                            func.coalesce(AuditEvent.input_tokens, 0)
+                            + func.coalesce(AuditEvent.output_tokens, 0)
+                        ).label("total_tokens"),
+                        func.sum(AuditEvent.llm_cost).label("total_llm_cost"),
                     ).first()
 
                     total_events = kpi_row.total_events or 0
@@ -246,23 +256,22 @@ if _API_AVAILABLE:
                     try:
                         project_user_data = auth.list_project_users(project_id)
                         if project_user_data:
-                            # project_user_data is a list of user IDs, need to get user details
-                            filtered_users = []
-                            for user_id in project_user_data:
-                                try:
-                                    # Get user details including email
-                                    user_details = auth.get_user(user_id)
-                                    user_email = user_details.get('email', '') if user_details else ''
-                                    
-                                    # Filter out system users by their email patterns
-                                    if user_email and not any([
-                                        user_email in ['system@centry.user'],
-                                        user_email.startswith('system_user_') and user_email.endswith('@centry.user')
-                                    ]):
-                                        filtered_users.append(user_id)
-                                except:
-                                    # If we can't get user details, skip this user
-                                    continue
+                            all_users = auth.get_users(project_user_data) if hasattr(auth, 'get_users') else None
+                            if all_users is None:
+                                all_users = []
+                                for uid in project_user_data:
+                                    try:
+                                        u = auth.get_user(uid)
+                                        if u:
+                                            all_users.append(u)
+                                    except Exception:
+                                        continue
+                            filtered_users = [
+                                u for u in all_users
+                                if u and u.get('email')
+                                and u['email'] not in SYSTEM_USER_EMAILS
+                                and not (u['email'].startswith('system_user_') and u['email'].endswith('@centry.user'))
+                            ]
                             total_project_users = len(filtered_users)
                         else:
                             total_project_users = 0
@@ -288,6 +297,8 @@ if _API_AVAILABLE:
                         "tool_runs": kpi_row.tool_runs or 0,
                         "chat_msgs": kpi_row.chat_msgs or 0,
                         "agent_runs": kpi_row.agent_runs or 0,
+                        "total_tokens": kpi_row.total_tokens or 0,
+                        "total_llm_cost": float(kpi_row.total_llm_cost) if kpi_row.total_llm_cost else 0.0,
                     }
 
                     # 2. Event type breakdown
