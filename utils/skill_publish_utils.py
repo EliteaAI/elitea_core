@@ -660,6 +660,10 @@ def get_skill_publish_validation_rules() -> str:
     return _skill_guardrail_config().get('publish_validation_rules', '') or ''
 
 
+def get_default_skill_validation_rules() -> str:
+    return _DEFAULT_SKILL_VALIDATION_RULES
+
+
 def is_skill_publish_blocked_for_project(project_id: int) -> bool:
     """Platform guardrail; defaults to not-blocked until admin config exists."""
     if not get_skill_publish_blocked():
