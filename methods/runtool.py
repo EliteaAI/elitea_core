@@ -32,6 +32,7 @@ class Method:
                 "toolkit_id": toolkit_id,
                 "tool_name": tool_name,
                 "project_id": project_id,
+                "user_input_preview": f"test tool {tool_name} (toolkit {toolkit_id}): {tool_params}"[:100],
             },
         )
 

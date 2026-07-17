@@ -19,6 +19,27 @@ class PredictPayloadError(Exception):
     pass
 
 
+def user_input_preview(source, limit: int = 100) -> Optional[str]:
+    """Short text preview of a user message for the Active Tasks admin view.
+
+    Handles both API strings and the UI's list of content blocks
+    ({'type':'text','text':...}); skips the synthetic <runtime_context> block
+    so only the real user text shows. Returns None when no text is present.
+    """
+    if isinstance(source, str):
+        text = source
+    elif isinstance(source, list):
+        text = " ".join(
+            b["text"] for b in source
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+            and not b["text"].lstrip().startswith("<runtime_context>")
+        )
+    else:
+        return None
+    text = text.strip()
+    return text[:limit] if text else None
+
+
 def resolve_application_name(parsed: ApplicationChatRequest) -> Optional[str]:
     """Resolve application display name for downstream observability payloads.
 

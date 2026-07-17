@@ -5,7 +5,7 @@ from tools import VaultClient, serialize, this
 from ..models.pd.chat import ApplicationChatRequest
 from ..models.pd.llm import llm_settings_family_conflict
 from ..utils.pipeline_utils import validate_yaml_from_str
-from ..utils.predict_utils import generate_predict_payload, PredictPayloadError
+from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, user_input_preview
 from ..utils.application_utils import validate_and_resolve_llm_settings
 
 
@@ -115,6 +115,7 @@ class Method:
                 "task_name": "indexer_agent",
                 "project_id": project_id,
                 "user_context": serialize(user_context),
+                "user_input_preview": user_input_preview(payload.get("user_input")),
             }
         )
 
