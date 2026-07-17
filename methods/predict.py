@@ -7,7 +7,7 @@ from sqlalchemy.orm import joinedload
 from tools import VaultClient, db, serialize
 
 from ..models.pd.chat import ApplicationChatRequest, ContextStrategyModel
-from ..utils.predict_utils import generate_predict_payload, load_context_settings_from_conversation
+from ..utils.predict_utils import generate_predict_payload, load_context_settings_from_conversation, user_input_preview
 from ..models.all import ApplicationVersion
 from ..utils.utils import verify_signature
 from ..utils.exceptions import VerifySignatureError, PoolSaturationError
@@ -118,6 +118,7 @@ class Method:
                 "task_name": "indexer_agent",
                 "project_id": parsed.project_id,
                 'user_context': serialize(user_context),
+                'user_input_preview': user_input_preview(payload.get("user_input")),
                 # Pure REST predict (webhook / async / blocking API) — never has a
                 # Socket.IO consumer, so suppress streaming/UI-only events.
                 'non_interactive': True,

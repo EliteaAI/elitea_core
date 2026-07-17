@@ -40,7 +40,7 @@ from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.skill_utils import detach_skills_for_entity_versions
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
-    get_predict_token_and_session, load_context_settings_from_conversation
+    get_predict_token_and_session, load_context_settings_from_conversation, user_input_preview
 from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
@@ -264,7 +264,7 @@ class RPC:
                     "sio_event": f'{sio_event}',  # enums like this
                     'chat_project_id': chat_project_id,
                     'user_context': serialize(user_context),
-                    'user_input_preview': (parsed.user_input or "")[:100],
+                    'user_input_preview': user_input_preview(parsed.user_input),
                     'non_interactive': non_interactive,
                 }),
             )
@@ -458,7 +458,7 @@ class RPC:
                         "user_id": user_id,
                         "project_id": parsed.project_id,
                     },  # NOTE: needed for external providers to work!
-                    'user_input_preview': (parsed.user_input or "")[:100],
+                    'user_input_preview': user_input_preview(parsed.user_input),
                     'non_interactive': non_interactive,
                 }),
             )
@@ -995,6 +995,7 @@ class RPC:
             meta={
                 "task_name": "indexer_configuration_check_connection",
                 "configuration_type": type_,
+                "user_input_preview": f"check connection {type_}"[:100],
             },
         )
         return self.task_node.join_task(task_id, timeout=60)
@@ -1017,6 +1018,7 @@ class RPC:
                     "task_name": "indexer_validator",
                     "toolkit_type": type_,
                     "project_id": project_id,
+                    "user_input_preview": f"validate toolkit {type_}"[:100],
                 },
             )
             task_result = self.task_node.join_task(task_id, timeout=60)
@@ -1040,6 +1042,7 @@ class RPC:
             meta={
                 "task_name": "indexer_configuration_validator",
                 "configuration_type": type_,
+                "user_input_preview": f"validate configuration {type_}"[:100],
             },
         )
         task_result = self.task_node.join_task(task_id, timeout=60)
@@ -1076,6 +1079,7 @@ class RPC:
             meta={
                 "task_name": "indexer_toolkit_available_tools",
                 "toolkit_type": toolkit_type,
+                "user_input_preview": f"list tools {toolkit_type}"[:100],
             },
         )
         return self.task_node.join_task(task_id, timeout=60)
@@ -1110,6 +1114,7 @@ class RPC:
             meta={
                 "task_name": "indexer_configuration_check_connection",
                 "toolkit_type": toolkit_type,
+                "user_input_preview": f"discover MCP tools {toolkit_type}"[:100],
             },
         )
         return self.task_node.join_task(task_id, timeout=60)
@@ -1309,6 +1314,7 @@ class RPC:
                     "toolkit_config": task_kwargs.get('toolkit_config', {}),
                     "tool_name": task_kwargs.get('tool_name', ''),
                     "tool_params": task_kwargs.get('tool_params', {}),
+                    "user_input_preview": f"test tool {task_kwargs.get('tool_name', '')}: {task_kwargs.get('tool_params', {})}"[:100],
                     "user_id": task_kwargs.get('user_id', ''),
                     "deployment_url": task_kwargs.get('deployment_url', ''),
                     "project_auth_token": task_kwargs.get('project_auth_token', ''),
@@ -1490,6 +1496,7 @@ class RPC:
                 "message_id": data['message_id'],
                 "question_id": start_event_content.get('question_id') if start_event_content else None,
                 "sio_event": sio_event,
+                "user_input_preview": "test MCP connection",
                 "toolkit_config": task_kwargs.get('toolkit_config', {}),
                 "user_id": task_kwargs.get('user_id', ''),
                 "deployment_url": task_kwargs.get('deployment_url', ''),
@@ -1631,6 +1638,7 @@ class RPC:
                 "project_id": project_id,
                 "message_id": data['message_id'],
                 "sio_event": sio_event,
+                "user_input_preview": f"sync MCP tools {data.get('url', '')}"[:100],
                 "url": data.get('url', ''),
                 "user_id": task_kwargs.get('user_id', ''),
                 "user_context": {

@@ -1146,6 +1146,7 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
             "toolkit_config": toolkit_config,
             "tool_name": tool_name,
             "tool_params": tool_params,
+            "user_input_preview": f"test tool {tool_name} (toolkit {data.get('toolkit_id')}): {tool_params}"[:100],
             "user_id": task_kwargs.get('user_id', ''),
             "deployment_url": task_kwargs.get('deployment_url', ''),
             "project_auth_token": task_kwargs.get('project_auth_token', ''),

@@ -52,6 +52,8 @@ from uuid import uuid4
 
 from pylon.core.tools import web, log  # pylint: disable=E0401,E0611
 
+from ..utils.predict_utils import user_input_preview
+
 
 # Redis stash TTL (seconds) for ALL coordination keys. Must outlive
 # human-think-time on a child's HITL pause; a few hours is safe because the
@@ -319,6 +321,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 'task_name': 'indexer_agent',
                 'project_id': project_id,
                 'user_context': parent_meta.get('user_context'),
+                'user_input_preview': user_input_preview(child_payload.get('user_input')),
                 'chat_project_id': parent_meta.get('chat_project_id'),
                 # Route the child's live events to the SAME sio room the browser
                 # joined for the parent (chat_predict / parent stream). Without
@@ -597,6 +600,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # INSERT throws UndefinedTable and the answer is never stored (#4993).
             'chat_project_id': stash.get('chat_project_id'),
             'user_context': stash.get('user_context'),
+            'user_input_preview': user_input_preview(payload.get('user_input')),
             # Reconcile re-invoke is a normal parent run again — if it parks
             # AGAIN (nested fan-out) the parked-parent branch handles it; it is
             # NOT itself a child, so no reconcile_epoch in meta.
