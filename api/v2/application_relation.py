@@ -17,11 +17,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         mcp_description="""
         USE when you need to build a multi-agent system by linking or unlinking an agent as a sub-agent tool in another agent version.
 
-        To link: set has_relation=true and provide the sub-agent application_id and entity_version_id.
+        To link: set has_relation=true and provide the parent agent's entity_id and entity_version_id.
         To unlink: set has_relation=false.
 
-        REQUIRED path params: project_id, application_id (parent agent), version_id (parent agent version).
-        REQUIRED body: { 'application_id': <sub_agent_id>, 'has_relation': true/false, 'entity_version_id': <sub_agent_version_id> }.
+        REQUIRED path params: project_id, application_id (sub-agent to add), version_id (sub-agent version).
+        REQUIRED body: { 'entity_id': <parent_agent_id>, 'entity_version_id': <parent_agent_version_id>, 'has_relation': true/false }.
 
         Error: HTTP 400 if binding same agent to itself.""",
         tags=["elitea_core/applications"],

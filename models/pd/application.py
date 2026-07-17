@@ -460,6 +460,11 @@ class MultiplePublishedApplicationListModel(MultipleApplicationListModel):
 
 
 class ApplicationRelationModel(BaseModel):
-    application_id: int
-    version_id: int
+    # Parent agent fields (the agent receiving the sub-agent)
+    # Aliased as entity_* for MCP to avoid collision with path params (which are the child/sub-agent)
+    application_id: int = Field(..., alias='entity_id')
+    version_id: int = Field(..., alias='entity_version_id')
     has_relation: bool
+
+    class Config:
+        populate_by_name = True  # Allow both field name and alias

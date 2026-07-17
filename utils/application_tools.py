@@ -703,7 +703,7 @@ def application_toolkit_change_relation(
         ).first()
         if not parent_application_version:
             raise ToolkitChangeRelationError(
-                f'Application[{update_data.application_id}] version[{update_data.version.id}] not found'
+                f'Application[{update_data.application_id}] version[{update_data.version_id}] not found'
             )
 
         if parent_application_version.status in ('published', 'embedded'):
