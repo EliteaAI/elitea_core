@@ -635,6 +635,10 @@ def toolkits_listing(
         except Exception:
             log.exception("Failed to populate indexes_count on toolkit listing")
 
+        # Aggregate indexes total across the returned toolkits (companion to per-toolkit
+        # indexes_count) so the UI can render a "N toolkits · M indexes" summary footer.
+        indexes_total = sum((td.indexes_count or 0) for td in result)
+
         if sort_by == "name":
             reverse_name = sort_order.lower() == "desc"
             name_key = lambda x: (x.name or "").lower()
@@ -668,7 +672,11 @@ def toolkits_listing(
             result = pinned + non_pinned
             result = result[offset:offset + limit]
 
-        return {"rows": [serialize(i) for i in result], "total": total_count}
+        return {
+            "rows": [serialize(i) for i in result],
+            "total": total_count,
+            "indexes_total": indexes_total,
+        }
 
 
 def toolkit_change_relation(
