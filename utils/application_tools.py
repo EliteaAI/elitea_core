@@ -5,7 +5,7 @@ from typing import Optional, List
 from uuid import uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import asc, create_engine, desc, func, String, text, Integer, Boolean
+from sqlalchemy import asc, create_engine, desc, func, inspect, String, text, Integer, Boolean
 from sqlalchemy.orm import Session, selectinload
 from tools import auth, db, this, serialize, context
 
@@ -374,6 +374,76 @@ def wrap_provider_hub_secret_fields(type_: str, settings: dict, project_id: int)
             settings[fieldname] = s.store_secret()
 
 
+def _extract_pgvector_schema(toolkit_detail):
+    """Return schema_name (str of toolkit id) if toolkit has pgvector configuration in settings, else None.
+
+    The connection_string itself is a project-level Vault secret (pgvector_project_connstr) and
+    is NOT stored inline in the toolkit settings. This helper only signals index-capability.
+    """
+    settings = toolkit_detail.settings
+    if not isinstance(settings, dict):
+        try:
+            settings = serialize(settings)
+        except Exception:
+            return None
+    if not isinstance(settings, dict):
+        return None
+    pgconf = settings.get('pgvector_configuration')
+    if not isinstance(pgconf, dict) or not pgconf:
+        return None
+    try:
+        return str(int(toolkit_detail.id))
+    except (TypeError, ValueError):
+        return None
+
+
+def batch_count_toolkit_indexes(toolkit_conn_map: dict) -> dict:
+    """
+    Count index_meta rows per toolkit, grouped by connection string to minimize DB connections.
+
+    Args:
+        toolkit_conn_map: dict mapping schema_name (str of integer toolkit id) -> connection_string.
+
+    Returns:
+        dict mapping schema_name -> count (int). Missing entries indicate a count failure; caller may
+        treat those as unknown (None).
+    """
+    result = {}
+    by_conn = {}
+    for schema_name, conn_str in toolkit_conn_map.items():
+        by_conn.setdefault(conn_str, []).append(schema_name)
+
+    for conn_str, schema_names in by_conn.items():
+        engine = None
+        try:
+            engine = create_engine(conn_str)
+            inspector = inspect(engine)
+            with engine.connect() as conn:
+                for schema_name in schema_names:
+                    try:
+                        if not inspector.has_table("langchain_pg_embedding", schema=schema_name):
+                            result[schema_name] = 0
+                            continue
+                        # schema_name is validated as int-derived in _extract_pgvector_schema,
+                        # so it's safe to inline into the SQL identifier.
+                        count = conn.execute(text(
+                            f'SELECT COUNT(*) FROM "{schema_name}".langchain_pg_embedding '
+                            "WHERE cmetadata->>'type' = 'index_meta'"
+                        )).scalar()
+                        result[schema_name] = int(count or 0)
+                    except Exception:
+                        log.exception(f"Failed to count indexes for toolkit schema={schema_name}")
+        except Exception:
+            log.exception("Failed to open pgvector connection for index count")
+        finally:
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+    return result
+
+
 def toolkits_listing(
     project_id: int,
     query: str,
@@ -537,6 +607,33 @@ def toolkits_listing(
             toolkit_detail.is_pinned = getattr(toolkit, 'is_pinned', False)
 
             result.append(toolkit_detail)
+
+        # Populate indexes_count for pgvector-capable toolkits.
+        # Connection string is a project-level Vault secret; every capable toolkit in this
+        # project shares it, so fetch it once.
+        try:
+            capable_schemas = []
+            for td in result:
+                schema_name = _extract_pgvector_schema(td)
+                if schema_name:
+                    capable_schemas.append((td, schema_name))
+            if capable_schemas:
+                from .vectorstore import get_pgvector_connection_string
+                conn_str = get_pgvector_connection_string(project_id)
+                if conn_str:
+                    counts = batch_count_toolkit_indexes(
+                        {schema_name: conn_str for _td, schema_name in capable_schemas}
+                    )
+                    for td, schema_name in capable_schemas:
+                        if schema_name in counts:
+                            td.indexes_count = counts[schema_name]
+                else:
+                    log.warning(
+                        "No pgvector_project_connstr in vault for project_id=%s; "
+                        "skipping indexes_count enrichment", project_id
+                    )
+        except Exception:
+            log.exception("Failed to populate indexes_count on toolkit listing")
 
         if sort_by == "name":
             reverse_name = sort_order.lower() == "desc"
