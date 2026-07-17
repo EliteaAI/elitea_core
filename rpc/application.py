@@ -264,6 +264,7 @@ class RPC:
                     "sio_event": f'{sio_event}',  # enums like this
                     'chat_project_id': chat_project_id,
                     'user_context': serialize(user_context),
+                    'user_input_preview': (parsed.user_input or "")[:100],
                     'non_interactive': non_interactive,
                 }),
             )
@@ -457,6 +458,7 @@ class RPC:
                         "user_id": user_id,
                         "project_id": parsed.project_id,
                     },  # NOTE: needed for external providers to work!
+                    'user_input_preview': (parsed.user_input or "")[:100],
                     'non_interactive': non_interactive,
                 }),
             )
