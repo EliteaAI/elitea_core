@@ -16,7 +16,12 @@ except ImportError:
 if _API_AVAILABLE:
     from datetime import datetime, timedelta, timezone
     from flask import request
-    from sqlalchemy import func, case, cast, Date, desc, asc
+    from sqlalchemy import func, case, cast, Date, desc, asc, or_
+
+    from ...utils.constants import (
+        SYSTEM_USER_EMAILS,
+        SYSTEM_USER_EMAIL_PATTERN,
+    )
 
     def _parse_dates(args):
         date_from = args.get("date_from")
@@ -200,11 +205,15 @@ if _API_AVAILABLE:
                     base = session.query(AuditEvent).filter(
                         AuditEvent.project_id == project_id,
                         AuditEvent.user_id.isnot(None),
-                        # Exclude system users from analytics
-                        ~AuditEvent.user_email.in_([
-                            'system@centry.user'
-                        ]),
-                        ~AuditEvent.user_email.like('system_user_%@centry.user'),
+                        # Exclude system users from analytics (NULL-safe)
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
+                        ),
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
+                        ),
                     )
 
                     if dt_from:

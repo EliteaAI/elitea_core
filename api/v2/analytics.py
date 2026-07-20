@@ -40,14 +40,24 @@ if _API_AVAILABLE:
         if not dt_from and not dt_to:
             dt_to = datetime.now(timezone.utc)
             dt_from = dt_to - timedelta(days=DEFAULT_DATE_RANGE_DAYS)
+        elif not dt_from:
+            dt_from = dt_to - timedelta(days=DEFAULT_DATE_RANGE_DAYS)
+        elif not dt_to:
+            dt_to = datetime.now(timezone.utc)
         return dt_from, dt_to
 
     def _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to):
         """Build base query with project + date filters, excluding system users."""
         base = session.query(AuditEvent).filter(
             AuditEvent.project_id == project_id,
-            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
-            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
+            or_(
+                AuditEvent.user_email.is_(None),
+                ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
+            ),
+            or_(
+                AuditEvent.user_email.is_(None),
+                ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
+            ),
         )
         if dt_from:
             base = base.filter(AuditEvent.timestamp >= dt_from)
