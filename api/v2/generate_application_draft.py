@@ -30,11 +30,18 @@ from ...models.pd.generate_application_draft import (
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import PredictPayloadError
 from ...utils.exceptions import PoolSaturationError
-from ...utils.generate_application_utils import fetch_project_resources, build_system_prompt
+from ...utils.generate_application_utils import (
+    fetch_project_resources,
+    build_system_prompt,
+    fetch_application_for_edit,
+    build_edit_system_prompt,
+)
 from ...utils.service_prompt_utils import get_service_prompt
 from ...utils.utils import extract_json_from_text
 
-_SERVICE_PROMPT_KEY = "generate_application_draft"
+_SERVICE_PROMPT_KEY_CREATE = "generate_application_draft"
+_SERVICE_PROMPT_KEY_EDIT = "edit_application_draft"
+
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -76,7 +83,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 )
                 if not llm_settings or not llm_settings.get("model_name"):
                     return {"error": "No default LLM model configured for this project"}, 400
-                # Structured JSON generation — favour determinism and low cost
                 llm_settings.setdefault("temperature", 0.7)
                 llm_settings.setdefault("max_tokens", 4096)
                 if req.llm_settings:
@@ -86,16 +92,40 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 log.exception("generate_application_draft: failed to get default model")
                 return {"error": "Failed to resolve project default LLM model"}, 400
 
-        try:
-            toolkits, agents, skills = fetch_project_resources(project_id, req.user_description)
-        except Exception:
-            log.warning("generate_application_draft: failed to fetch project resources")
-            toolkits, agents, skills = [], [], []
+        if req.is_edit_mode:
+            # Edit mode: fetch existing application config, provide ALL available resources
+            current_config = fetch_application_for_edit(
+                project_id, req.application_id, req.version_id
+            )
+            if current_config is None:
+                return {"error": "Application or version not found"}, 404
 
-        template = get_service_prompt(_SERVICE_PROMPT_KEY)
-        if not template:
-            return {"error": "Service prompt 'generate_application_draft' is not configured"}, 500
-        system_prompt = build_system_prompt(template, toolkits, agents, skills)
+            log.debug("generate_application_draft: edit mode, current_config attached_toolkits=%s", current_config.get("attached_toolkits"))
+
+            try:
+                toolkits, agents, skills = fetch_project_resources(project_id, req.user_description)
+            except Exception:
+                log.warning("generate_application_draft: failed to fetch project resources")
+                toolkits, agents, skills = [], [], []
+
+            # LLM gets ALL available resources to decide what to keep/add/remove
+            template = get_service_prompt(_SERVICE_PROMPT_KEY_EDIT)
+            if not template:
+                return {"error": "Service prompt 'edit_application_draft' is not configured"}, 500
+            system_prompt = build_edit_system_prompt(template, current_config, toolkits, agents, skills)
+            log.debug("generate_application_draft: edit system_prompt length=%d", len(system_prompt))
+        else:
+            # Create mode: existing behavior
+            try:
+                toolkits, agents, skills = fetch_project_resources(project_id, req.user_description)
+            except Exception:
+                log.warning("generate_application_draft: failed to fetch project resources")
+                toolkits, agents, skills = [], [], []
+
+            template = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
+            if not template:
+                return {"error": "Service prompt 'generate_application_draft' is not configured"}, 500
+            system_prompt = build_system_prompt(template, toolkits, agents, skills)
 
         try:
             result = self.module.predict_sio_llm(
@@ -124,19 +154,29 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"error": "LLM generation failed"}, 500
 
         task_result = result.get("result") or {}
+        log.debug("generate_application_draft: result keys=%s", list(result.keys()) if result else None)
+        log.debug("generate_application_draft: task_result keys=%s", list(task_result.keys()) if isinstance(task_result, dict) else type(task_result))
         thinking_steps = task_result.get("thinking_steps", []) if isinstance(task_result, dict) else []
+        log.debug("generate_application_draft: thinking_steps count=%d", len(thinking_steps))
         raw_text = next(
             (s["text"] for s in reversed(thinking_steps) if s.get("text")),
             "",
         )
         if not raw_text:
+            log.warning("generate_application_draft: empty response, full result=%s", result)
             return {"error": "LLM returned an empty response"}, 500
 
         try:
-            parsed = json.loads(extract_json_from_text(raw_text))
-        except json.JSONDecodeError:
-            log.debug("generate_application_draft: LLM output is not valid JSON: %s", raw_text[:300])
-            return {"error": "LLM returned unparseable output"}, 422
+            extracted = extract_json_from_text(raw_text)
+            parsed = json.loads(extracted)
+        except json.JSONDecodeError as e:
+            log.debug("generate_application_draft: LLM output is not valid JSON: %s", raw_text[:500])
+            # Check if response was likely truncated (incomplete JSON)
+            if raw_text.count('{') > raw_text.count('}') or raw_text.count('[') > raw_text.count(']'):
+                return {
+                    "error": "LLM response was truncated. Increase max_tokens in llm_settings (recommended: 4096+)."
+                }, 422
+            return {"error": "LLM returned unparseable output", "parse_error": str(e)}, 422
 
         try:
             draft = GenerateApplicationDraftResponse.model_validate(parsed)
@@ -144,7 +184,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.warning("generate_application_draft: validation failed: %s", e.errors())
             return {"error": "Generated draft failed validation", "details": e.errors(), "raw": parsed}, 422
 
-        return draft.model_dump(), 200
+        return draft.model_dump(exclude_none=True), 200
 
 
 class API(api_tools.APIBase):
