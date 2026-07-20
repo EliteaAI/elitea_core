@@ -546,6 +546,43 @@ def toolkits_listing(
 
         total_count = q.count()
 
+        # Snapshot the pgvector-capable ids/schemas across the FULL filtered set (pre-pagination)
+        # so `indexes_total` reflects every matching toolkit — not just the page slice. Doing
+        # this here lets us call batch_count_toolkit_indexes once and reuse the counts for both
+        # the aggregate total and the per-toolkit `indexes_count` enrichment below.
+        all_schema_ids = []
+        try:
+            for row_id, row_settings in q.with_entities(EliteATool.id, EliteATool.settings).all():
+                settings_dict = row_settings if isinstance(row_settings, dict) else None
+                if settings_dict is None:
+                    continue
+                pgconf = settings_dict.get('pgvector_configuration')
+                if isinstance(pgconf, dict) and pgconf:
+                    try:
+                        all_schema_ids.append(str(int(row_id)))
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:
+            log.exception("Failed to prefetch pgvector schemas for indexes_total")
+            all_schema_ids = []
+
+        all_indexes_counts = {}
+        if all_schema_ids:
+            try:
+                from .vectorstore import get_pgvector_connection_string
+                conn_str = get_pgvector_connection_string(project_id)
+                if conn_str:
+                    all_indexes_counts = batch_count_toolkit_indexes(
+                        {schema_name: conn_str for schema_name in all_schema_ids}
+                    )
+                else:
+                    log.warning(
+                        "No pgvector_project_connstr in vault for project_id=%s; "
+                        "skipping pre-pagination indexes_total aggregation", project_id
+                    )
+            except Exception:
+                log.exception("Failed to compute pre-pagination indexes counts")
+
         if sort_by != "name" and not sort_by_author:
             tools = q.offset(offset).limit(limit).all()
         else:
@@ -608,36 +645,22 @@ def toolkits_listing(
 
             result.append(toolkit_detail)
 
-        # Populate indexes_count for pgvector-capable toolkits.
-        # Connection string is a project-level Vault secret; every capable toolkit in this
-        # project shares it, so fetch it once.
+        # Populate per-toolkit indexes_count from the pre-computed full-set counts
+        # (computed pre-pagination above). Reusing avoids a second batch DB round-trip
+        # and guarantees the paged rows agree with `indexes_total`.
         try:
-            capable_schemas = []
             for td in result:
                 schema_name = _extract_pgvector_schema(td)
-                if schema_name:
-                    capable_schemas.append((td, schema_name))
-            if capable_schemas:
-                from .vectorstore import get_pgvector_connection_string
-                conn_str = get_pgvector_connection_string(project_id)
-                if conn_str:
-                    counts = batch_count_toolkit_indexes(
-                        {schema_name: conn_str for _td, schema_name in capable_schemas}
-                    )
-                    for td, schema_name in capable_schemas:
-                        if schema_name in counts:
-                            td.indexes_count = counts[schema_name]
-                else:
-                    log.warning(
-                        "No pgvector_project_connstr in vault for project_id=%s; "
-                        "skipping indexes_count enrichment", project_id
-                    )
+                if schema_name and schema_name in all_indexes_counts:
+                    td.indexes_count = all_indexes_counts[schema_name]
         except Exception:
             log.exception("Failed to populate indexes_count on toolkit listing")
 
-        # Aggregate indexes total across the returned toolkits (companion to per-toolkit
-        # indexes_count) so the UI can render a "N toolkits · M indexes" summary footer.
-        indexes_total = sum((td.indexes_count or 0) for td in result)
+        # Aggregate indexes total across the FULL filtered set (not just the page).
+        # `all_indexes_counts` was populated pre-pagination above, so this is stable
+        # across sort_by=name / sort_by_author (which slice `result` after this line)
+        # and sort_by=created_at (which slices `tools` via q.offset().limit()).
+        indexes_total = sum(all_indexes_counts.values()) if all_indexes_counts else 0
 
         if sort_by == "name":
             reverse_name = sort_order.lower() == "desc"
