@@ -21,13 +21,32 @@ class GenerateApplicationDraftRequest(BaseModel):
     )
 
     user_description: str = Field(
-        description="Natural-language description of the desired agent"
+        description="Natural-language description of the desired agent or changes (edit mode)"
     )
     llm_settings: Optional[LLMSettingsRequest] = Field(
         default=None,
         description="LLM model override. If not provided, "
         "uses the project's default model with temperature=0 and max_tokens=2048.",
     )
+    application_id: Optional[int] = Field(
+        default=None,
+        description="Application ID to edit. When provided with version_id, enables edit mode.",
+    )
+    version_id: Optional[int] = Field(
+        default=None,
+        description="Version ID to edit. Required when application_id is provided.",
+    )
+
+    @model_validator(mode='after')
+    def validate_edit_params(self):
+        """Ensure both application_id and version_id are provided together."""
+        if (self.application_id is None) != (self.version_id is None):
+            raise ValueError("Both application_id and version_id must be provided for edit mode")
+        return self
+
+    @property
+    def is_edit_mode(self) -> bool:
+        return self.application_id is not None and self.version_id is not None
 
 
 class ToolkitSuggestion(BaseModel):
@@ -56,6 +75,11 @@ class SkillSuggestion(BaseModel):
 
 
 class GenerateApplicationDraftResponse(BaseModel):
+    """Response for both create and edit modes.
+
+    In CREATE mode: LLM suggests new resources to add.
+    In EDIT mode: LLM returns the complete modified configuration with final resource lists.
+    """
     name: str = Field(
         min_length=1, max_length=32, description="Agent name (1–32 characters)"
     )
@@ -75,12 +99,9 @@ class GenerateApplicationDraftResponse(BaseModel):
     def limit_conversation_starters(cls, v):
         if v is None:
             return v
-        # Filter out empty strings
         v = [s for s in v if s and s.strip()]
-        # Truncate list to max 4
         if len(v) > 4:
             v = v[:4]
-        # Truncate each starter to max 768 characters
         v = [s[:768] for s in v]
         return v
 
@@ -133,7 +154,6 @@ class GenerateApplicationDraftResponse(BaseModel):
             if item_type == "mcp":
                 mcp_items.append(item)
             elif item_type == "application":
-                # Convert toolkit format to ApplicationSuggestion format
                 pipeline_items.append(
                     {
                         "application_id": item.get("id"),
