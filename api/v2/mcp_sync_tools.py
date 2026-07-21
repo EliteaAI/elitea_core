@@ -80,6 +80,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # This will fill in any missing settings from the pylon config for pre-built MCP toolkits
             raw = self.module.resolve_mcp_prebuilt_settings(raw)
 
+        # Internal Elitea MCP endpoints need {project_id} substituted and the user's PAT
+        # injected. This is the last hop that still has the user session — the worker that
+        # opens the connection runs without one — so it must happen here. No-op for external
+        # servers and when there is no user (nothing to key the token on). Returns a fresh
+        # dict, so rebind rather than mutate the stored config.
+        current_user = auth.current_user()
+        current_user_id = current_user.get('id') if current_user else None
+        if current_user_id:
+            from ...utils.internal_tools import resolve_internal_mcp_settings
+            raw = resolve_internal_mcp_settings(raw, current_user_id, project_id)
+
         try:
             sync_data = McpSyncToolsInputModel.model_validate(raw)
         except ValidationError as e:

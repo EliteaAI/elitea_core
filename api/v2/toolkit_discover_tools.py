@@ -65,6 +65,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 except Exception as e:
                     log.warning(f"Error expanding settings for {toolkit_type}: {e}")
 
+            if user_id:
+                from ...utils.internal_tools import resolve_internal_mcp_settings
+                prebuilt_url = None
+                if not settings.get('url'):
+                    prebuilt_url = (self.module.get_mcp_prebuilt_config(toolkit_type) or {}).get('url')
+                settings = resolve_internal_mcp_settings(
+                    settings, user_id, project_id, prebuilt_url=prebuilt_url
+                )
+
             # Call RPC method which dispatches to indexer_worker
             result = self.module.discover_mcp_tools(
                 toolkit_type=toolkit_type,

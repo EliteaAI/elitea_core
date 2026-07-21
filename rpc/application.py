@@ -1240,6 +1240,12 @@ class RPC:
             # Continue with original config if expansion fails
             log.warning("Continuing with original toolkit configuration")
 
+        try:
+            from ..utils.internal_tools import resolve_internal_mcp_tools
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
+
         # Get project-specific auth_token from secrets (not exposed to user)
         try:
             data['project_auth_token'], _ = get_predict_token_and_session(project_id, data['user_id'], sid)

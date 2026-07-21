@@ -69,7 +69,7 @@ class Method:
         Returns:
             Dict with configuration settings if found, None otherwise
         """
-        log.info(f'LIST OF MCP PREBUILT CONFIGS: {list(self.mcp_prebuilt_configs.keys()) if hasattr(self, "mcp_prebuilt_configs") else "No configs loaded"}')
+        log.debug(f'LIST OF MCP PREBUILT CONFIGS: {list(self.mcp_prebuilt_configs.keys()) if hasattr(self, "mcp_prebuilt_configs") else "No configs loaded"}')
         if not hasattr(self, 'mcp_prebuilt_configs') or not self.mcp_prebuilt_configs:
             log.debug("No MCP prebuilt configurations available")
             return None

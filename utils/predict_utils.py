@@ -12,6 +12,7 @@ from ..models.elitea_tools import EliteATool
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
 from ..models.pd.tool import ToolDetails
 from ..utils.application_tools import expand_toolkit_settings
+from ..utils.internal_tools import resolve_internal_mcp_tools, dedupe_internal_mcp_tools
 
 
 class PredictPayloadError(Exception):
@@ -416,7 +417,23 @@ def generate_predict_payload(
             if llm_settings['max_tokens'] == -1:
                 llm_settings['max_tokens'] = get_default_max_tokens(supports_reasoning)
 
-    return serialize(payload)
+    # Serialize first so request-level tools (Pydantic ToolChatModel) become plain dicts before
+    # dedupe/resolve run — otherwise those tools are skipped and never get {project_id}/PAT filled.
+    payload = serialize(payload)
+
+    if not is_system_user:
+        try:
+            application = payload.get('application')
+            version_details_tools = application.get('version_details', {}).get('tools') if isinstance(application, dict) else None
+            for tool_list in (payload.get('tools'), version_details_tools):
+                if tool_list is None:
+                    continue
+                dedupe_internal_mcp_tools(tool_list)
+                resolve_internal_mcp_tools(tool_list, user_id, parsed.project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
+
+    return payload
 
 
 def get_toolkit_config(project_id: int, user_id: int, toolkit_id: int):
