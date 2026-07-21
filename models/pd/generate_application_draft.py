@@ -99,9 +99,11 @@ class GenerateApplicationDraftResponse(BaseModel):
     def limit_conversation_starters(cls, v):
         if v is None:
             return v
-        v = [s for s in v if s and s.strip()]
+        v = [s.strip() for s in v if s and s.strip()]
         if len(v) > 4:
-            v = v[:4]
+            raise ValueError(
+                f'conversation_starters cannot exceed 4 items, got {len(v)}'
+            )
         v = [s[:768] for s in v]
         return v
 

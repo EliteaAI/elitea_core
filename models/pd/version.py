@@ -38,11 +38,19 @@ def agent_root_pipeline_validator(values: dict):
     return values
 
 
+MAX_CONVERSATION_STARTERS = 4
+
+
 def conversation_starters_validator(value):
     if value is None:
         return None
     if not isinstance(value, list):
         raise ValueError('conversation_starters must be a list')
+
+    if len(value) > MAX_CONVERSATION_STARTERS:
+        raise ValueError(
+            f'conversation_starters cannot exceed {MAX_CONVERSATION_STARTERS} items, got {len(value)}'
+        )
 
     validated = []
     for i, item in enumerate(value):
