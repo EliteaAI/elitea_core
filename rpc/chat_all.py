@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from uuid import uuid4
 
 from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
@@ -36,6 +37,11 @@ from ..utils.attachments import NotSupportableProcessorExtension, read_file_cont
 from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.exceptions import PoolSaturationError
+from ..utils.parallel_hitl import (
+    EXECUTION_GENERATION_KEY, begin_execution_generation, decisions_for_child,
+    interrupt_identity, pending_interrupts,
+    retire_child_interrupts, retire_interrupts, validate_child_decisions,
+)
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
@@ -56,13 +62,21 @@ CHAT_PREDICT_MAPPER = {
 }
 
 
-def _get_agent_type(session, app_participant, app_version_id) -> str | None:
+def _get_agent_type(
+    session, app_participant, app_version_id, *, owner_project_id=None, chat_project_id=None,
+) -> str | None:
     agent_type = app_participant.meta.get('agent_type')
     if not agent_type and app_version_id:
         try:
-            version_row = session.query(ApplicationVersion.agent_type).filter(
-                ApplicationVersion.id == app_version_id
-            ).first()
+            if owner_project_id is not None and owner_project_id != chat_project_id:
+                with db.get_session(owner_project_id) as owner_session:
+                    version_row = owner_session.query(ApplicationVersion.agent_type).filter(
+                        ApplicationVersion.id == app_version_id
+                    ).first()
+            else:
+                version_row = session.query(ApplicationVersion.agent_type).filter(
+                    ApplicationVersion.id == app_version_id
+                ).first()
             if version_row:
                 agent_type = version_row[0]
         except Exception:
@@ -145,37 +159,41 @@ def generate_toolkit_payload(
 
             app_id = app_participant.entity_meta['id']
             app_version_id = participant_mapping.entity_settings.get('version_id')
+            owner_project_id = app_participant.entity_meta.get(
+                'project_id', conversation_project_id,
+            )
 
-            # --- Leaf-only guard for adhoc LLM-chat binding (issue #5680) ---
-            # In an LLM/dummy chat, the chat model is the orchestrator and each injected agent
-            # becomes its CHILD (level-2 nesting). A "container" agent (one that itself uses
-            # other agents) can't be nested there — it triggers the parallel-run/HITL restart
-            # bug. It runs correctly only as a DIRECT participant (selected as the active agent),
-            # which goes through generate_application_version_payload, NOT this loop.
+            # --- Depth-aware nesting guard for adhoc LLM-chat binding (issue #5778) ---
+            # In an LLM/dummy chat, the chat model is the tier-1 orchestrator and each injected
+            # agent becomes its CHILD at TIER 2. As of #5778 a container agent (one that itself
+            # uses other agents) is LEGAL here — the tier-1 → tier-2 container → tier-3 leaf shape
+            # is exactly what depth-3 nesting enables. What is NOT legal is a bound container whose
+            # OWN subtree busts the 3-tier budget (a tier-3 container → tier-4 leaves), which is
+            # what triggered the parallel-run/HITL restart problems #5680 originally banned wholesale.
             #
-            # SKIP it here rather than raising: this path runs on EVERY chat turn, so a raise
-            # would brick the whole conversation (even "Hi", even after the participant is
-            # removed) instead of just declining the one illegal tool. Skipping keeps the chat
-            # working with the base model; the agent simply isn't offered as a callable tool.
-            # The user runs it by selecting it as the active agent. Guidance/prevention lives at
-            # add-time in the UI (useAgentPipelineAssociation), not on the runtime hot path.
-            # This does NOT apply to swarm sibling injection (is_llm_chat=False), where agents
-            # are peer handoff targets, not nested children.
+            # So we validate the bound version's subtree as if rooted at tier 2 (start_depth=2) and
+            # SKIP (not raise) only when it violates. Skipping (rather than raising) is retained on
+            # purpose: this path runs on EVERY chat turn, so a raise would brick the whole
+            # conversation instead of just declining the one illegal tool. A legal tier-2 container
+            # falls through and is offered as a callable tool. This does NOT apply to swarm sibling
+            # injection (is_llm_chat=False), where agents are peer handoff targets, not children.
             if is_llm_chat and app_version_id is not None:
-                from ..utils.publish_utils import is_container_version
-                bound_version = session.query(ApplicationVersion).options(
-                    selectinload(ApplicationVersion.tools)
-                ).filter(ApplicationVersion.id == app_version_id).first()
-                if (
-                    bound_version is not None
-                    and bound_version.agent_type != AgentTypes.pipeline.value
-                    and is_container_version(bound_version)
-                ):
+                from ..utils.publish_utils import (
+                    assert_no_invalid_nesting, SubAgentTreeError,
+                    MAX_SUB_AGENT_VALIDATION_DEPTH,
+                )
+                try:
+                    assert_no_invalid_nesting(
+                        owner_project_id, app_version_id,
+                        session=session if owner_project_id == conversation_project_id else None,
+                        max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+                        start_depth=2,
+                    )
+                except SubAgentTreeError as tree_err:
                     log.warning(
-                        "Skipping container agent '%s' (ver=%s) as an adhoc tool for the chat "
-                        "model — it uses other agents and can only run as the active agent "
-                        "(orchestrator). Nesting it would be level-2 (unsupported).",
-                        app_participant.meta.get('name'), app_version_id,
+                        "Skipping agent '%s' (ver=%s) as an adhoc tool for the chat model — its "
+                        "sub-agent tree exceeds the supported nesting for a bound tool: %s",
+                        app_participant.meta.get('name'), app_version_id, tree_err,
                     )
                     continue
 
@@ -189,7 +207,7 @@ def generate_toolkit_payload(
                 "description": app_participant.meta.get('description', ''),
                 "author_id": user_id,
                 "participant_id": app_participant.id,  # For SDK to identify self
-                "project_id": app_participant.entity_meta.get('project_id'),
+                "project_id": owner_project_id,
                 "settings": {
                     "variables": [],
                     "application_id": app_id,
@@ -198,7 +216,11 @@ def generate_toolkit_payload(
                 },
                 "id": None,
                 "toolkit_name": app_participant.meta['name'],
-                "agent_type": _get_agent_type(session, app_participant, app_version_id),
+                "agent_type": _get_agent_type(
+                    session, app_participant, app_version_id,
+                    owner_project_id=owner_project_id,
+                    chat_project_id=conversation_project_id,
+                ),
                 "created_at": datetime.now(tz=timezone.utc).isoformat(),
             }
             tools.append(app_toolkit_details)
@@ -247,6 +269,7 @@ def generate_toolkit_payload(
         mcp_tools = inject_mcp_toolkits(
             user_id=user_id,
             internal_tools=internal_tools or [],
+            existing_tools=tools,
         )
         tools.extend(mcp_tools)
     except Exception as e:
@@ -552,9 +575,13 @@ def generate_application_version_payload(
     # Rejects a poisoned config here instead of forwarding it to the SDK (which would recurse).
     from ..utils.publish_utils import assert_no_invalid_nesting, SubAgentTreeError, MAX_SUB_AGENT_VALIDATION_DEPTH
     try:
+        # The ambient session is bound to the CONVERSATION's project schema; a
+        # cross-project participant (e.g. a catalog agent chatted from another
+        # project) must be validated against its OWN schema, so let the guard
+        # open its own session in that case.
         assert_no_invalid_nesting(
             project_id, entity_settings.version_id,
-            session=session,
+            session=session if project_id == predict_payload.project_id else None,
             max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
         )
     except SubAgentTreeError as tree_err:
@@ -562,6 +589,10 @@ def generate_application_version_payload(
             f"Agent version {entity_settings.version_id} has an invalid sub-agent "
             f"configuration: {tree_err}"
         ) from tree_err
+    except ValueError as tree_err:
+        # A missing/incomplete sub-agent reference: surface it to the user
+        # instead of killing the socket handler.
+        raise PayloadGenerationError(str(tree_err)) from tree_err
 
 
     # Get internal_tools from agent version meta for attachment injection decision
@@ -907,7 +938,7 @@ class RPC:
                 parsed.project_id,
             )
 
-            if parsed.participant_id is None and "@everyone" not in parsed.user_input.lower() and not parsed.user_ids:
+            if parsed.participant_id is None and not parsed.user_ids:
                 dummy_participant, _ = get_or_create_one(
                     session=session,
                     entity_name=ParticipantTypes.dummy,
@@ -1225,10 +1256,16 @@ class RPC:
                     }
                     if context_management_enabled:
                         context_meta['chat_history_group_ids'] = [g.id for g in chat_history_groups]
-                    response_msg.meta = context_meta if context_management_enabled else {}
+                    execution_generation = str(uuid4())
+                    context_meta = begin_execution_generation(
+                        context_meta if context_management_enabled else {},
+                        execution_generation,
+                    )
+                    response_msg.meta = context_meta
                     session.commit()
 
                     payload['message_id'] = str(response_msg.uuid)
+                    payload[EXECUTION_GENERATION_KEY] = execution_generation
 
                     # returns result only for applications
                     try:
@@ -1309,6 +1346,36 @@ class RPC:
         if child_resume is not None:
             return child_resume
 
+        # A durable child approval must never degrade into the ordinary parent
+        # continue path. Its Redis launch stash can expire while the approval
+        # card remains persisted in PostgreSQL; resuming the parent in that
+        # situation re-fans out already-completed siblings. Fail closed and let
+        # the UI present an expired-run recovery action instead.
+        if parsed.thread_id:
+            with db.get_session(parsed.project_id) as session:
+                persisted = session.query(ConversationMessageGroup).where(
+                    ConversationMessageGroup.uuid == parsed.message_id
+                ).first()
+                expired_child = any(
+                    item.get('resume_strategy') == 'aggregate_child'
+                    and (item.get('child_thread_id') or item.get('thread_id'))
+                    == parsed.thread_id
+                    for item in pending_interrupts(
+                        persisted.meta if persisted else None
+                    )
+                )
+            if expired_child:
+                raise SioValidationError(
+                    sio=self.context.sio, sid=sid,
+                    event=SioEvents.chat_predict.value,
+                    error=(
+                        'This sub-orchestrator approval expired and cannot be '
+                        'resumed safely. Regenerate the response.'
+                    ),
+                    stream_id=str(parsed.conversation_uuid),
+                    message_id=parsed.message_id,
+                )
+
         with db.get_session(parsed.project_id) as session:
             conversation: Conversation = session.query(Conversation).where(
                 Conversation.uuid == parsed.conversation_uuid
@@ -1329,7 +1396,7 @@ class RPC:
                 joinedload(ConversationMessageGroup.author_participant)
             ).filter(
                 ConversationMessageGroup.uuid == parsed.message_id
-            ).first()
+            ).with_for_update(of=ConversationMessageGroup).populate_existing().first()
 
             if not response_msg:
                 log.warning(f'Continue: No message found with id {parsed.message_id}')
@@ -1356,7 +1423,7 @@ class RPC:
                     joinedload(ConversationMessageGroup.author_participant)
                 ).filter(
                     ConversationMessageGroup.reply_to_id == response_msg.id
-                ).first()
+                ).with_for_update(of=ConversationMessageGroup).populate_existing().first()
 
                 if actual_response:
                     msg_group = response_msg  # The "response_msg" is actually the question
@@ -1371,6 +1438,74 @@ class RPC:
                         stream_id=str(parsed.conversation_uuid),
                         message_id=parsed.message_id,
                     )
+
+            # Retire the exact Track-1/root cards accepted by this resume before
+            # the resumed worker can emit its next pause.  Previously the live UI
+            # advanced, but the old cards remained in JSONB and all reappeared on
+            # refresh.  Tombstones also reject a queued late copy of a resolved
+            # pause.  Durable Track-2 children are handled by
+            # ``_continue_child_resume`` above.
+            if parsed.hitl_resume:
+                pending = pending_interrupts(response_msg.meta)
+                decisions = [
+                    dict(item) for item in (parsed.hitl_decisions or [])
+                    if isinstance(item, dict)
+                ]
+                if decisions:
+                    try:
+                        validate_child_decisions(pending, decisions)
+                    except ValueError as exc:
+                        raise SioValidationError(
+                            sio=self.context.sio, sid=sid,
+                            event=SioEvents.chat_predict.value,
+                            error=str(exc),
+                            stream_id=str(parsed.conversation_uuid),
+                            message_id=parsed.message_id,
+                        ) from exc
+                    resolved_ids = [interrupt_identity(item) for item in decisions]
+                else:
+                    if len(pending) != 1:
+                        raise SioValidationError(
+                            sio=self.context.sio, sid=sid,
+                            event=SioEvents.chat_predict.value,
+                            error=(
+                                'A scalar HITL resume requires exactly one '
+                                'pending interrupt'
+                            ),
+                            stream_id=str(parsed.conversation_uuid),
+                            message_id=parsed.message_id,
+                        )
+                    action = parsed.hitl_action
+                    available = pending[0].get('available_actions')
+                    if (
+                        isinstance(available, list) and available
+                        and action not in available
+                    ):
+                        raise SioValidationError(
+                            sio=self.context.sio, sid=sid,
+                            event=SioEvents.chat_predict.value,
+                            error=(
+                                f"Action '{action}' is not available for the "
+                                'pending interrupt'
+                            ),
+                            stream_id=str(parsed.conversation_uuid),
+                            message_id=parsed.message_id,
+                        )
+                    resolved_ids = [interrupt_identity(pending[0])]
+                response_msg.meta = retire_interrupts(
+                    response_msg.meta, resolved_ids,
+                )
+                flag_modified(response_msg, 'meta')
+
+            execution_generation = (response_msg.meta or {}).get(
+                EXECUTION_GENERATION_KEY,
+            )
+            if not execution_generation:
+                execution_generation = str(uuid4())
+                response_msg.meta = begin_execution_generation(
+                    response_msg.meta, execution_generation,
+                )
+                flag_modified(response_msg, 'meta')
 
             # Set streaming back to true
             response_msg.is_streaming = True
@@ -1425,6 +1560,7 @@ class RPC:
                     message_groups=chat_history_groups, summaries=summaries
                 )
                 payload['message_id'] = str(response_msg.uuid)
+                payload[EXECUTION_GENERATION_KEY] = execution_generation
 
                 context_management_enabled = get_context_manager_feature_flag(parsed.project_id)
                 if context_management_enabled and response_msg.meta is not None:
@@ -1482,22 +1618,113 @@ class RPC:
         if not child_payload:
             return None
 
-        # Pick this child's decision out of hitl_decisions (keyed by the parent
-        # tool_call_id == the child_thread_id's tool_call_id), else fall back to
-        # the scalar hitl_action/value on the request.
+        stream_id = stash.get('parent_stream_id')
+        message_id = stash.get('parent_message_id')
+        if (
+            str(message_id) != str(parsed.message_id)
+            or str(stream_id) != str(parsed.conversation_uuid)
+            or child_meta.get('chat_project_id') != parsed.project_id
+        ):
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
+                error='This child interrupt does not belong to the requested chat run',
+                stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+            )
+
+        # A Redis child-thread id is routing metadata, not authority. Confirm the tenant,
+        # conversation, message, and requesting user before replaying the stashed token/payload.
+        with db.get_session(parsed.project_id) as session:
+            conversation = session.query(Conversation).where(
+                Conversation.uuid == parsed.conversation_uuid
+            ).first()
+            response_msg = session.query(ConversationMessageGroup).where(
+                ConversationMessageGroup.uuid == parsed.message_id
+            ).first()
+            user_is_participant = conversation and any(
+                p.entity_name == ParticipantTypes.user.value
+                and (p.entity_meta or {}).get('id') == current_user['id']
+                for p in conversation.participants
+            )
+            if (
+                not conversation
+                or not response_msg
+                or response_msg.conversation_id != conversation.id
+                or (
+                    conversation.author_id != current_user['id']
+                    and not user_is_participant
+                )
+            ):
+                raise SioValidationError(
+                    sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
+                    error='Child interrupt ownership validation failed',
+                    stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+                )
+            persisted_meta = dict(response_msg.meta or {})
+
+        # Forward the COMPLETE aggregate decision list. Scalar action/value remain only as the
+        # single-interrupt compatibility path.
         action = getattr(parsed, 'hitl_action', None)
         value = getattr(parsed, 'hitl_value', None)
-        for decision in (getattr(parsed, 'hitl_decisions', None) or []):
-            if decision.get('thread_id') == thread_id or \
-                    decision.get('tool_call_id') == child_meta.get('tool_call_id'):
-                action = decision.get('action', action)
-                value = decision.get('value', value)
-                break
+        child_decisions = decisions_for_child(
+            getattr(parsed, 'hitl_decisions', None),
+            thread_id,
+            child_meta.get('tool_call_id'),
+        )
+        pending_for_child = [
+            item for item in pending_interrupts(persisted_meta)
+            if (item.get('child_thread_id') or item.get('thread_id')) == thread_id
+        ]
+        if not pending_for_child:
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
+                error='This sub-orchestrator interrupt was already resolved',
+                stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+            )
+        if child_decisions:
+            try:
+                validate_child_decisions(pending_for_child, child_decisions)
+            except ValueError as exc:
+                raise SioValidationError(
+                    sio=self.context.sio, sid=sid,
+                    event=SioEvents.chat_predict.value,
+                    error=str(exc),
+                    stream_id=str(parsed.conversation_uuid),
+                    message_id=parsed.message_id,
+                ) from exc
+        elif len(pending_for_child) > 1:
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid,
+                event=SioEvents.chat_predict.value,
+                error='All pending decisions for this sub-orchestrator must be submitted together',
+                stream_id=str(parsed.conversation_uuid),
+                message_id=parsed.message_id,
+            )
+        if child_decisions:
+            first_decision = child_decisions[0]
+            action = first_decision.get('action', action)
+            value = first_decision.get('value', value)
+
+        resume_interrupt_ids = [
+            interrupt_identity(item) for item in pending_for_child
+        ]
+        if not self.parallel_dispatch_claim_child_resume(
+            thread_id, resume_interrupt_ids,
+        ):
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
+                error='This sub-orchestrator interrupt is already resuming',
+                stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+            )
 
         child_payload['hitl_resume'] = True
         child_payload['hitl_action'] = action or 'approve'
         child_payload['hitl_value'] = value or ''
+        if child_decisions:
+            child_payload['hitl_decisions'] = child_decisions
         child_payload['should_continue'] = False
+        execution_generation = persisted_meta.get(EXECUTION_GENERATION_KEY)
+        if execution_generation:
+            child_payload[EXECUTION_GENERATION_KEY] = execution_generation
         child_payload.setdefault('thread_id', thread_id)
         child_payload.update({
             'mcp_tokens': getattr(parsed, 'mcp_tokens', None) or child_payload.get('mcp_tokens') or {},
@@ -1505,19 +1732,46 @@ class RPC:
             or child_payload.get('ignored_mcp_servers') or [],
         })
 
-        stream_id = stash.get('parent_stream_id')
-        message_id = stash.get('parent_message_id')
-
-        task_id = self.task_node.start_task(
-            "indexer_agent",
-            args=[stream_id, message_id],
-            kwargs=child_payload,
-            pool="agents",
-            meta=child_meta,
-        )
+        try:
+            task_id = self.task_node.start_task(
+                "indexer_agent",
+                args=[stream_id, message_id],
+                kwargs=child_payload,
+                pool="agents",
+                meta=child_meta,
+            )
+        except Exception:
+            self.parallel_dispatch_release_child_resume(
+                thread_id, resume_interrupt_ids,
+            )
+            raise
         if task_id is None:
+            self.parallel_dispatch_release_child_resume(
+                thread_id, resume_interrupt_ids,
+            )
             log.warning("[PARALLEL] child resume saturated for thread_id=%s", thread_id)
             raise PoolSaturationError(pool="agents", retry_after=5)
+
+        # The new task supersedes the stopped pre-HITL task for stop fan-out. Retire only this
+        # child's cards; sibling interrupts remain persisted and actionable.
+        self._parallel_set_child_task_ids(
+            child_meta.get('parent_thread_id'), child_meta.get('reconcile_epoch'),
+            {thread_id: task_id},
+        )
+        resolved_ids = [item.get('interrupt_id') for item in child_decisions]
+        with db.get_session(parsed.project_id) as session:
+            response_msg = session.query(ConversationMessageGroup).where(
+                ConversationMessageGroup.uuid == parsed.message_id
+            ).with_for_update(of=ConversationMessageGroup).first()
+            if response_msg:
+                response_msg.task_id = task_id
+                response_msg.is_streaming = True
+                response_msg.meta = retire_child_interrupts(
+                    response_msg.meta, thread_id, resolved_ids,
+                )
+                flag_modified(response_msg, 'meta')
+                session.add(response_msg)
+                session.commit()
         log.info("[PARALLEL] resumed child thread_id=%s task_id=%s", thread_id, task_id)
         return {"task_id": task_id}
 

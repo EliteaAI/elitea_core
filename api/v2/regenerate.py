@@ -1,4 +1,5 @@
 from flask import request
+from uuid import uuid4
 from sqlalchemy.orm import joinedload
 from pydantic import ValidationError
 
@@ -14,6 +15,9 @@ from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, g
 from ...utils.chat_history import generate_chat_history
 from ...models.enums.all import ChatHistoryRole
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.parallel_hitl import (
+    EXECUTION_GENERATION_KEY, begin_execution_generation, retire_all_interrupts,
+)
 from ...utils.sio_utils import SioEvents
 
 
@@ -131,10 +135,26 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if auth.current_user().get("id") not in (conversation_author_id, reply_msg_entity_meta.get("id")):
                 return {'error': f'You can not regenerate message group with uuid {message_group_uuid}'}, 400
 
+            # Fence late partial/pause callbacks from the superseded execution
+            # before mutating the reused response row. OF avoids PostgreSQL
+            # attempting to lock eagerly joined nullable relationships.
+            msg_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_group_uuid
+            ).with_for_update(of=ConversationMessageGroup).populate_existing().first()
+
+            # Regenerate is a legitimate fresh run on the same response UUID. A stopped-run flag
+            # must block stale Continue actions, but must not poison this new execution for six
+            # hours. Clear it only after ownership validation (never from Continue itself).
+            self.module.clear_chat_run_stopped(str(msg_group.uuid))
+
             # remove outdated message items
             for message_item in msg_group.message_items:
                 session.delete(message_item)
 
+            execution_generation = str(uuid4())
+            msg_group.meta = begin_execution_generation(
+                retire_all_interrupts(msg_group.meta), execution_generation,
+            )
             # Clear the group's trace steps (rows are the accumulator; regenerate starts fresh).
             session.query(MessageTraceStep).filter(
                 MessageTraceStep.message_group_id == msg_group.id
@@ -145,6 +165,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             rpc_func = CHAT_PREDICT_MAPPER.get(msg_group.author_participant.entity_name)
             if rpc_func:
+                regenerate_payload[EXECUTION_GENERATION_KEY] = execution_generation
                 getattr(self.module.context.rpc_manager.call, rpc_func)(
                     parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
                     start_event_content={

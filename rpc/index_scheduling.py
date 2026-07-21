@@ -7,17 +7,13 @@ from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, rpc_tools, this
 
-try:
-    import gevent  # pylint: disable=C0413
-except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
-    gevent = None
-
 from ..models.elitea_tools import EliteATool
 from ..models.indexer import EmbeddingStore
 from ..models.enums import InitiatorType
 from ..models.enums.indexer import IndexingSchedule
 from ..models.pd.index import ToolkitIndexingSchedule
 from ..utils.application_tools import get_session_for_schema, start_index_task, update_toolkit_index_meta_history_with_failed_state
+from ..utils.utils import make_yield_to_hub
 from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
 from ..utils.index_scheduling import resolve_credentials, handle_failed_index_schedule
@@ -52,13 +48,7 @@ class RPC:
             f"check_index_scheduling tick started at {datetime.now(UTC).isoformat()}"
         )
         try:
-            # Cooperative yield only when gevent is the actual web runtime;
-            # under flask/waitress/hypercorn this is a no-op.
-            yield_to_hub = (
-                (lambda: gevent.sleep(0))
-                if (gevent is not None and self.context.web_runtime == "gevent")
-                else (lambda: None)
-            )
+            yield_to_hub = make_yield_to_hub(self.context.web_runtime)
 
             all_project_ids = [
                 project_['id'] for project_ in rpc_tools.RpcMixin().rpc.timeout(3).project_list(
@@ -87,6 +77,9 @@ class RPC:
                             for user_id, user_config in schedules.items():
                                 yield_to_hub()
                                 init_issue = None
+                                # JSON serialises int keys as strings; team/shared schedules
+                                # are stored under user_id=-1 (see index_meta PATCH endpoint).
+                                is_team_schedule = str(user_id) == "-1"
 
                                 # Convert stored dict to ToolkitIndexingSchedule model
                                 try:
@@ -125,6 +118,7 @@ class RPC:
                                     toolkit_type=toolkit.type,
                                     user_config=user_config,
                                     project_id=project_id,
+                                    is_team_schedule=is_team_schedule,
                                 )
 
                                 if not init_issue and not should_trigger_by_credentials:
@@ -136,15 +130,20 @@ class RPC:
 
                                 if init_issue:
                                     handle_failed_index_schedule(
-                                        project_id, updated_settings, creator_id, toolkit, index_meta_id, init_issue
+                                        project_id, updated_settings, creator_id, toolkit,
+                                        index_meta_id, init_issue,
+                                        expand_user_id=creator_id,
                                     )
                                     continue
 
-                                # Expand the updated settings
+                                # Expand the updated settings. For team schedules (user_id=-1)
+                                # use the schedule creator to avoid get_personal_project_id(-1),
+                                # which raises when any nested config is private=True.
+                                expand_user_id = creator_id if is_team_schedule else user_id
                                 settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
                                     project_id=project_id,
                                     settings=updated_settings,
-                                    user_id=user_id,
+                                    user_id=expand_user_id,
                                     unsecret=True
                                 )
                                 connection_string = settings_expanded.get('pgvector_configuration').get('connection_string')

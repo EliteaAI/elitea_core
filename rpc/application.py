@@ -38,9 +38,10 @@ from ..utils.application_utils import (
 from ..utils.exceptions import PoolSaturationError, MaintenanceInProgressError
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
+from ..utils.publish_utils import get_default_agent_validation_rules
 from ..utils.skill_utils import detach_skills_for_entity_versions
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
-    get_predict_token_and_session, load_context_settings_from_conversation
+    get_predict_token_and_session, load_context_settings_from_conversation, user_input_preview
 from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
@@ -50,6 +51,13 @@ from ..utils.chat_feature_flags import get_context_manager_feature_flag
 
 
 class RPC:
+    @web.rpc(
+        "applications_get_default_publish_validation_rules",
+        "applications_get_default_publish_validation_rules",
+    )
+    def applications_get_default_publish_validation_rules(self, **kwargs) -> str:
+        return get_default_agent_validation_rules()
+
     @web.rpc("applications_get_application_by_id", "get_application_by_id")
     def get_application_by_id(self, project_id: int, application_id: int,
                               version_name: str = None, first_existing_version: bool = False, **kwargs) -> Optional[
@@ -141,6 +149,14 @@ class RPC:
                         message_id=data.get("message_id")
                     )
 
+                # Resolve llm_settings only when completely missing (original behavior). The
+                # family-conflict case (issue #5821) is handled by write-time rejection
+                # (LLMSettingsWriteModel/EntitySettingsLlmWrite) and the one-time
+                # heal_llm_settings_family_conflicts admin backfill — not here. This mutation
+                # is never committed (session just closes below), so re-checking on every
+                # message would re-run the expensive RPC forever for any still-broken row
+                # instead of getting cheaper over time; the hottest path in the platform must
+                # not carry that cost.
                 if not application_version.llm_settings:
                     resolve_project_id = chat_project_id or parsed.project_id
                     resolved = validate_and_resolve_llm_settings(
@@ -160,7 +176,6 @@ class RPC:
                             stream_id=data.get("stream_id"),
                             message_id=data.get("message_id")
                         )
-
                 application_version.project_id = parsed.project_id  # compatibility with pd model
                 parsed_db = ApplicationChatRequest.from_orm(
                     application_version
@@ -257,6 +272,7 @@ class RPC:
                     "sio_event": f'{sio_event}',  # enums like this
                     'chat_project_id': chat_project_id,
                     'user_context': serialize(user_context),
+                    'user_input_preview': user_input_preview(parsed.user_input),
                     'non_interactive': non_interactive,
                 }),
             )
@@ -450,6 +466,7 @@ class RPC:
                         "user_id": user_id,
                         "project_id": parsed.project_id,
                     },  # NOTE: needed for external providers to work!
+                    'user_input_preview': user_input_preview(parsed.user_input),
                     'non_interactive': non_interactive,
                 }),
             )
@@ -986,6 +1003,7 @@ class RPC:
             meta={
                 "task_name": "indexer_configuration_check_connection",
                 "configuration_type": type_,
+                "user_input_preview": f"check connection {type_}"[:100],
             },
         )
         return self.task_node.join_task(task_id, timeout=60)
@@ -1008,6 +1026,7 @@ class RPC:
                     "task_name": "indexer_validator",
                     "toolkit_type": type_,
                     "project_id": project_id,
+                    "user_input_preview": f"validate toolkit {type_}"[:100],
                 },
             )
             task_result = self.task_node.join_task(task_id, timeout=60)
@@ -1031,6 +1050,7 @@ class RPC:
             meta={
                 "task_name": "indexer_configuration_validator",
                 "configuration_type": type_,
+                "user_input_preview": f"validate configuration {type_}"[:100],
             },
         )
         task_result = self.task_node.join_task(task_id, timeout=60)
@@ -1067,6 +1087,7 @@ class RPC:
             meta={
                 "task_name": "indexer_toolkit_available_tools",
                 "toolkit_type": toolkit_type,
+                "user_input_preview": f"list tools {toolkit_type}"[:100],
             },
         )
         return self.task_node.join_task(task_id, timeout=60)
@@ -1101,6 +1122,7 @@ class RPC:
             meta={
                 "task_name": "indexer_configuration_check_connection",
                 "toolkit_type": toolkit_type,
+                "user_input_preview": f"discover MCP tools {toolkit_type}"[:100],
             },
         )
         return self.task_node.join_task(task_id, timeout=60)
@@ -1226,6 +1248,12 @@ class RPC:
             # Continue with original config if expansion fails
             log.warning("Continuing with original toolkit configuration")
 
+        try:
+            from ..utils.internal_tools import resolve_internal_mcp_tools
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
+
         # Get project-specific auth_token from secrets (not exposed to user)
         try:
             data['project_auth_token'], _ = get_predict_token_and_session(project_id, data['user_id'], sid)
@@ -1282,6 +1310,8 @@ class RPC:
             log.warning(f"Failed to unsecret task data: {e}")
 
         # Start the test toolkit tool task
+        from ..utils.internal_tools import redact_internal_mcp_secrets
+        meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         if tool_name == 'index_data':
             task_id = start_index_task(self.task_node, data, sio_event)
         else:
@@ -1297,9 +1327,10 @@ class RPC:
                     "message_id": data['message_id'],
                     "question_id": start_event_content.get('question_id') if start_event_content else None,
                     "sio_event": sio_event,
-                    "toolkit_config": task_kwargs.get('toolkit_config', {}),
+                    "toolkit_config": meta_toolkit_config,
                     "tool_name": task_kwargs.get('tool_name', ''),
                     "tool_params": task_kwargs.get('tool_params', {}),
+                    "user_input_preview": f"test tool {task_kwargs.get('tool_name', '')}: {task_kwargs.get('tool_params', {})}"[:100],
                     "user_id": task_kwargs.get('user_id', ''),
                     "deployment_url": task_kwargs.get('deployment_url', ''),
                     "project_auth_token": task_kwargs.get('project_auth_token', ''),
@@ -1442,6 +1473,12 @@ class RPC:
             log.error(f"Error expanding MCP toolkit configurations: {str(e)}")
             log.warning("Continuing with original toolkit configuration")
 
+        try:
+            from ..utils.internal_tools import resolve_internal_mcp_tools
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
+
         # Get project-specific auth_token from secrets
         try:
             data['project_auth_token'], _ = get_predict_token_and_session(project_id, data['user_id'], sid)
@@ -1469,6 +1506,8 @@ class RPC:
             log.warning(f"Failed to unsecret task data: {e}")
 
         # Start the test MCP connection task
+        from ..utils.internal_tools import redact_internal_mcp_secrets
+        meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         task_id = self.task_node.start_task(
             "indexer_test_mcp_connection",
             args=[data['stream_id'], data['message_id']],
@@ -1481,7 +1520,8 @@ class RPC:
                 "message_id": data['message_id'],
                 "question_id": start_event_content.get('question_id') if start_event_content else None,
                 "sio_event": sio_event,
-                "toolkit_config": task_kwargs.get('toolkit_config', {}),
+                "user_input_preview": "test MCP connection",
+                "toolkit_config": meta_toolkit_config,
                 "user_id": task_kwargs.get('user_id', ''),
                 "deployment_url": task_kwargs.get('deployment_url', ''),
                 "project_auth_token": task_kwargs.get('project_auth_token', ''),
@@ -1622,6 +1662,7 @@ class RPC:
                 "project_id": project_id,
                 "message_id": data['message_id'],
                 "sio_event": sio_event,
+                "user_input_preview": f"sync MCP tools {data.get('url', '')}"[:100],
                 "url": data.get('url', ''),
                 "user_id": task_kwargs.get('user_id', ''),
                 "user_context": {

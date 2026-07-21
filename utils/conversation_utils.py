@@ -17,6 +17,25 @@ from ..utils.meta_guard import strip_heavy_meta_expr
 MESSAGES_DISPLAY_COUNT: int = 100
 
 
+def resolve_persona_instructions(user_personalization: dict, persona: str) -> str:
+    """Resolve the instructions that apply to `persona` from a user's personalization (#5392).
+
+    Selection order:
+      1. personality_instructions[persona] non-empty  -> that persona's instructions.
+      2. personality_instructions present but entry empty/missing -> '' (NO override; must NOT
+         fall back to another persona's text, or per-persona isolation is defeated).
+      3. personality_instructions absent/not a dict (legacy/unmigrated row) -> flat
+         default_instructions, i.e. the pre-#5392 behavior, unchanged.
+    Returns '' when nothing applies (caller then leaves instructions untouched).
+    """
+    if not user_personalization:
+        return ''
+    instructions_map = user_personalization.get('personality_instructions')
+    if isinstance(instructions_map, dict):
+        return instructions_map.get(persona) or '' if persona else ''
+    return user_personalization.get('default_instructions') or ''
+
+
 def _thinking_span_subquery(session: Session, conversation_ids: list[int]):
     """Per-group thinking wall-clock (secs) from message_trace_step: max(finished) - min(started).
 
@@ -302,12 +321,13 @@ def get_conversation_details(
                 continue
             version_details = application_version_details['version_details']
             participant['meta']['tools'] = version_details['tools']
-            # "Container" flag (issue #5680): a non-pipeline agent that itself uses other agents
-            # (has an application-type tool) is SKIPPED as a callable tool in adhoc LLM chat — it
-            # can only run as the active agent (orchestrator). Surface it so the participant chip
-            # can explain that to the user instead of the skip looking like a silent no-op. Mirrors
-            # the skip rule in rpc/chat_all.generate_toolkit_payload (agent_type != pipeline AND
-            # is_container_version); computed here from already-fetched data (no extra query).
+            # "Container" flag: a non-pipeline agent that itself uses other agents (has an
+            # application-type tool). NOTE (issue #5778): a container is NO LONGER unconditionally
+            # skipped as an adhoc chat tool — a tier-2 container is now legal. The adhoc skip is
+            # depth-aware (rpc/chat_all.generate_toolkit_payload skips only when the bound subtree
+            # exceeds the tier budget). This flag is retained as a factual "uses other agents"
+            # signal for the participant chip; consumers deciding whether it can be nested should
+            # use the version_details.agent_subtree_tiers contribution field, not this boolean.
             # Pipelines are the sanctioned deep-composition primitive and are never flagged.
             participant['meta']['is_container'] = (
                 version_details.get('agent_type') != AgentTypes.pipeline.value
@@ -316,6 +336,25 @@ def get_conversation_details(
                     for t in (version_details.get('tools') or [])
                 )
             )
+            # Agent-only subtree contribution (issue #5778); a pipeline participant contributes
+            # zero for itself. The chat UI participant gate uses it to decide whether a
+            # container can still be nested (host current tier + candidate contribution within
+            # MAX_AGENT_NESTING_TIERS) instead of the blunt is_container ban —
+            # mirrors application_utils.get_application_version_details_expanded so
+            # the two can't drift. Advisory: never fail conversation fetch over it,
+            # and the UI degrades gracefully (defers to backend) when absent.
+            try:
+                from .publish_utils import get_agent_nesting_metadata
+                participant['meta'].update(get_agent_nesting_metadata(
+                    participant['entity_meta']['project_id'],
+                    participant['entity_settings']['version_id'],
+                    session=session if participant['entity_meta']['project_id'] == project_id else None,
+                ))
+            except Exception as depth_err:
+                log.warning(
+                    "Could not compute agent_subtree_tiers for participant version "
+                    f"{participant['entity_settings'].get('version_id')}: {depth_err}"
+                )
 
     return ConversationDetails.model_validate(conversation_dict)
 

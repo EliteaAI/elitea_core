@@ -28,12 +28,47 @@ from tools import context, rpc_tools  # pylint: disable=E0401
 
 from ..models.all import ApplicationVersion
 from ..models.participants import ParticipantMapping
+from ..models.pd.llm import decide_family_heal
 from .utils import get_public_project_id
 
 # Defaults matching UI behavior (llmSettings.constants.js / application_utils.py)
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_REASONING_EFFORT = 'medium'
 DEFAULT_MAX_TOKENS = -1  # auto mode, same as UI's DEFAULT_MAX_TOKENS
+
+
+def _parse_bool(raw: str, param_name: str) -> bool:
+    """Parse a "true"/"false"-ish flag, raising ``ValueError`` (naming ``param_name``) otherwise."""
+    value = raw.strip().lower()
+    if value in ('true', '1', 'yes'):
+        return True
+    if value in ('false', '0', 'no'):
+        return False
+    raise ValueError(f"Invalid {param_name} value: {value!r} (expected true/false)")
+
+
+def parse_project_id_spec(raw: str, param_name: str = 'project_id') -> tuple:
+    """Parse a "<all|N|lo-hi>" project-id spec into ('all', None) / ('range', (lo, hi)) / ('single', int).
+
+    Shared by parse_migration_params and trace_step_backfill_utils.parse_backfill_params.
+    Raises ``ValueError`` (using ``param_name`` in the message) on bad input.
+    """
+    raw = raw.strip()
+    if raw == 'all':
+        return ('all', None)
+    if '-' in raw:
+        parts = raw.split('-', 1)
+        try:
+            lo, hi = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise ValueError(f"Invalid {param_name} range: {raw!r}")  # pylint: disable=W0707
+        if lo > hi:
+            raise ValueError(f"Invalid {param_name} range: {lo} > {hi}")
+        return ('range', (lo, hi))
+    try:
+        return ('single', int(raw))
+    except ValueError:
+        raise ValueError(f"Invalid {param_name}: {raw!r}")  # pylint: disable=W0707
 
 
 def parse_migration_params(raw_param: str) -> dict:
@@ -63,32 +98,10 @@ def parse_migration_params(raw_param: str) -> dict:
         raise ValueError(f"from and to must be different (both are {from_model!r})")
 
     # --- project_id --------------------------------------------------------
-    project_id_raw = params.get('project_id', 'all').strip()
-    if project_id_raw == 'all':
-        project_id_spec = ('all', None)
-    elif '-' in project_id_raw:
-        parts = project_id_raw.split('-', 1)
-        try:
-            lo, hi = int(parts[0]), int(parts[1])
-        except ValueError:
-            raise ValueError(f"Invalid project_id range: {project_id_raw!r}")  # pylint: disable=W0707
-        if lo > hi:
-            raise ValueError(f"Invalid project_id range: {lo} > {hi}")
-        project_id_spec = ('range', (lo, hi))
-    else:
-        try:
-            project_id_spec = ('single', int(project_id_raw))
-        except ValueError:
-            raise ValueError(f"Invalid project_id: {project_id_raw!r}")  # pylint: disable=W0707
+    project_id_spec = parse_project_id_spec(params.get('project_id', 'all'), 'project_id')
 
     # --- dry_run -----------------------------------------------------------
-    dry_run_raw = params.get('dry_run', 'false').strip().lower()
-    if dry_run_raw in ('true', '1', 'yes'):
-        dry_run = True
-    elif dry_run_raw in ('false', '0', 'no'):
-        dry_run = False
-    else:
-        raise ValueError(f"Invalid dry_run value: {dry_run_raw!r} (expected true/false)")
+    dry_run = _parse_bool(params.get('dry_run', 'false'), 'dry_run')
 
     return {
         'from_model': from_model,
@@ -268,3 +281,119 @@ def migrate_participant_mappings(session, from_model, settings_factory, dry_run)
             mapping.entity_settings = entity_settings
 
     return len(rows)
+
+
+def parse_heal_params(raw_param: str) -> dict:
+    """Parse semicolon-separated key=value params for heal_llm_settings_family_conflicts.
+
+    Optional: ``project_id`` (int | "X-Y" | "all", default "all"),
+              ``dry_run`` ("true"/"false", default "true" -- conservative default since this
+              task scans ALL projects with no from/to model boundary).
+    Raises ``ValueError`` on bad input.
+    """
+    tokens = [t.strip() for t in raw_param.split(';') if t.strip()]
+    params = {}
+    for token in tokens:
+        if '=' not in token:
+            raise ValueError(f"Invalid param token (expected key=value): {token!r}")
+        key, _, value = token.partition('=')
+        params[key.strip()] = value.strip()
+
+    project_id_spec = parse_project_id_spec(params.get('project_id', 'all'), 'project_id')
+    dry_run = _parse_bool(params.get('dry_run', 'true'), 'dry_run')
+
+    return {'project_id_spec': project_id_spec, 'dry_run': dry_run}
+
+
+def _candidate_filter(col):
+    """SQL pre-filter of rows to hand to decide_family_heal, given the llm_settings JSON column.
+
+    Any row carrying a model_name is a candidate: the reasoning family (hence whether a null
+    reasoning_effort is a defect) is only known after the per-project RPC capability lookup, so
+    null-effort rows can't be narrowed in SQL. decide_family_heal makes the per-row decision.
+    """
+    return col.op("->>")("model_name").isnot(None)
+
+
+def heal_family_conflict_versions(session, project_id: int, dry_run: bool) -> int:
+    """Normalize family-misaligned ApplicationVersion.llm_settings rows against each row's own
+    model's real supports_reasoning (issues #5821 + #5858). Does NOT change
+    model_name/model_project_id — only the temperature/reasoning_effort pair is aligned.
+
+    Returns the count of rows actually healed (idempotent: aligned rows are skipped).
+    """
+    rows = session.query(ApplicationVersion).filter(
+        _candidate_filter(ApplicationVersion.llm_settings)
+    ).all()
+
+    if not rows:
+        return 0
+
+    available = rpc_tools.RpcMixin().rpc.timeout(10).configurations_get_available_models(
+        project_id=project_id, section='llm', include_shared=True
+    )
+
+    healed = 0
+    for version in rows:
+        llm_settings = version.llm_settings or {}
+        model_name = llm_settings.get('model_name')
+        model_project_id = llm_settings.get('model_project_id')
+        config = available.get((model_project_id, model_name), {}) if model_name else {}
+        supports_reasoning = bool(config.get('supports_reasoning', False))
+        new_settings = decide_family_heal(llm_settings, supports_reasoning)
+        if new_settings is None:
+            continue
+        if dry_run and healed < 5:
+            log.info(
+                "  [dry_run] ApplicationVersion id=%s (supports_reasoning=%s): %r -> %r",
+                version.id, supports_reasoning, llm_settings, new_settings,
+            )
+        if not dry_run:
+            version.llm_settings = new_settings
+        healed += 1
+
+    return healed
+
+
+def heal_family_conflict_mappings(session, project_id: int, dry_run: bool) -> int:
+    """Normalize family-misaligned ParticipantMapping.entity_settings->llm_settings rows
+    (issues #5821 + #5858). Same non-destructive, idempotent semantics as
+    heal_family_conflict_versions — only the temperature/reasoning_effort pair is aligned.
+
+    Returns the count of rows actually healed.
+    """
+    rows = session.query(ParticipantMapping).filter(
+        _candidate_filter(ParticipantMapping.entity_settings.op("->")("llm_settings"))
+    ).all()
+
+    if not rows:
+        return 0
+
+    available = rpc_tools.RpcMixin().rpc.timeout(10).configurations_get_available_models(
+        project_id=project_id, section='llm', include_shared=True
+    )
+
+    healed = 0
+    for mapping in rows:
+        entity_settings = dict(mapping.entity_settings) if mapping.entity_settings else {}
+        old_llm = entity_settings.get('llm_settings')
+        if not old_llm:
+            continue
+        model_name = old_llm.get('model_name')
+        model_project_id = old_llm.get('model_project_id')
+        config = available.get((model_project_id, model_name), {}) if model_name else {}
+        supports_reasoning = bool(config.get('supports_reasoning', False))
+        new_llm = decide_family_heal(old_llm, supports_reasoning)
+        if new_llm is None:
+            continue
+        if dry_run and healed < 5:
+            log.info(
+                "  [dry_run] ParticipantMapping id=%s (supports_reasoning=%s): %r -> %r",
+                mapping.id, supports_reasoning, old_llm, new_llm,
+            )
+        if not dry_run:
+            entity_settings['llm_settings'] = new_llm
+            mapping.entity_settings = entity_settings
+        healed += 1
+
+    return healed

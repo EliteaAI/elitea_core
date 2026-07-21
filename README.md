@@ -28,7 +28,7 @@ tests/
 
 ## Adding Tests
 
-- **Unit tests**: `tests/unit/test_<module>.py` — pure functions  
+- **Unit tests**: `tests/unit/test_<module>.py` — pure functions
 - **Integration tests**: `tests/integration/test_<feature>.py` — modules with imports
 
 Use `tests/run_tests.py` (not raw `pytest`) to ensure Pylon stubs are loaded.

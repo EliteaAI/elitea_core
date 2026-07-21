@@ -21,6 +21,21 @@ DEFAULT_AGENT_CATEGORIES: list = [
     'Other',
 ]
 
+# Skills keep their OWN category list, independently managed from agents. It is
+# seeded as a duplicate of DEFAULT_AGENT_CATEGORIES so the two start identical,
+# but they can diverge (admins manage each list separately).
+DEFAULT_SKILL_CATEGORIES: list = [
+    'Business Analyst',
+    'Quality Assurance',
+    'Development',
+    'DevOps',
+    'Project Management',
+    'Knowledge & Documentation',
+    'Elitea',
+    'Epam',
+    'Other',
+]
+
 # Permanent fallback category. Agents without any valid category are surfaced
 # under this filter in Agent Studio.
 DEFAULT_FALLBACK_CATEGORY: str = 'Other'

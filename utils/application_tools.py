@@ -1,11 +1,12 @@
 import json
+import threading
 import time
 from copy import deepcopy
 from typing import Optional, List
 from uuid import uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import asc, create_engine, desc, func, String, text, Integer, Boolean
+from sqlalchemy import asc, create_engine, desc, func, inspect, String, text, Integer, Boolean
 from sqlalchemy.orm import Session, selectinload
 from tools import auth, db, this, serialize, context
 
@@ -374,6 +375,102 @@ def wrap_provider_hub_secret_fields(type_: str, settings: dict, project_id: int)
             settings[fieldname] = s.store_secret()
 
 
+def _extract_pgvector_schema(toolkit_detail):
+    """Return schema_name (str of toolkit id) if toolkit has pgvector configuration in settings, else None.
+
+    The connection_string itself is a project-level Vault secret (pgvector_project_connstr) and
+    is NOT stored inline in the toolkit settings. This helper only signals index-capability.
+    """
+    settings = toolkit_detail.settings
+    if not isinstance(settings, dict):
+        try:
+            settings = serialize(settings)
+        except Exception:
+            return None
+    if not isinstance(settings, dict):
+        return None
+    pgconf = settings.get('pgvector_configuration')
+    if not isinstance(pgconf, dict) or not pgconf:
+        return None
+    try:
+        return str(int(toolkit_detail.id))
+    except (TypeError, ValueError):
+        return None
+
+
+# Process-wide cache of pgvector SQLAlchemy engines keyed by connection string.
+# Rebuilding a fresh engine per listing request was the hot path: for every
+# `toolkits_listing` call, `create_engine(conn_str)` + `engine.connect()` ran
+# once per distinct project connstr (in practice the same connstr for the
+# whole project). The engine's own connection pool was thrown away after each
+# call. This dict lets us reuse a single pooled engine across requests.
+_PGVECTOR_ENGINE_CACHE = {}
+_PGVECTOR_ENGINE_CACHE_LOCK = threading.Lock()
+
+
+def _get_pgvector_engine(conn_str: str):
+    """Return a cached SQLAlchemy engine for `conn_str`, creating it on first use.
+
+    Engines are safe to share across threads; connection pooling is delegated to
+    SQLAlchemy. We intentionally never call `engine.dispose()` here — the engine
+    lives for the process lifetime.
+    """
+    engine = _PGVECTOR_ENGINE_CACHE.get(conn_str)
+    if engine is not None:
+        return engine
+    with _PGVECTOR_ENGINE_CACHE_LOCK:
+        engine = _PGVECTOR_ENGINE_CACHE.get(conn_str)
+        if engine is None:
+            engine = create_engine(conn_str, pool_pre_ping=True)
+            _PGVECTOR_ENGINE_CACHE[conn_str] = engine
+    return engine
+
+
+def batch_count_toolkit_indexes(toolkit_conn_map: dict) -> dict:
+    """
+    Count index_meta rows per toolkit, grouped by connection string to minimize DB connections.
+
+    Args:
+        toolkit_conn_map: dict mapping schema_name (str of integer toolkit id) -> connection_string.
+
+    Returns:
+        dict mapping schema_name -> count (int). Missing entries indicate a count failure; caller may
+        treat those as unknown (None).
+    """
+    result = {}
+    by_conn = {}
+    for schema_name, conn_str in toolkit_conn_map.items():
+        by_conn.setdefault(conn_str, []).append(schema_name)
+
+    for conn_str, schema_names in by_conn.items():
+        try:
+            engine = _get_pgvector_engine(conn_str)
+            inspector = inspect(engine)
+            with engine.connect() as conn:
+                for schema_name in schema_names:
+                    try:
+                        # Defense-in-depth: schema_name is already validated as int-derived
+                        # in _extract_pgvector_schema, but this function is a general utility
+                        # and future callers may bypass that validation. Reject anything that
+                        # isn't a pure digit string before it reaches the SQL identifier.
+                        if not (isinstance(schema_name, str) and schema_name.isdigit()):
+                            log.error(f"Refusing to query pgvector schema with non-digit name: {schema_name!r}")
+                            continue
+                        if not inspector.has_table("langchain_pg_embedding", schema=schema_name):
+                            result[schema_name] = 0
+                            continue
+                        count = conn.execute(text(
+                            f'SELECT COUNT(*) FROM "{schema_name}".langchain_pg_embedding '
+                            "WHERE cmetadata->>'type' = 'index_meta'"
+                        )).scalar()
+                        result[schema_name] = int(count or 0)
+                    except Exception:
+                        log.exception(f"Failed to count indexes for toolkit schema={schema_name}")
+        except Exception:
+            log.exception("Failed to open pgvector connection for index count")
+    return result
+
+
 def toolkits_listing(
     project_id: int,
     query: str,
@@ -476,6 +573,60 @@ def toolkits_listing(
 
         total_count = q.count()
 
+        # Detect whether any user-supplied filter is active. The default toolkits
+        # view arrives from api/v2/tools.py with `filter_mcp=False` and
+        # `filter_application=False` (both are `.lower()=='true'` bool coercions
+        # of missing query params), so those default-off values are NOT treated as
+        # filters. Only opt-in modes (`filter_mcp=True`, `filter_application=True`)
+        # and text/id filters count.
+        has_filters = bool(
+            query
+            or search_artifact
+            or toolkit_type
+            or author_id
+            or filter_mcp
+            or filter_application is True
+        )
+
+        # Snapshot the pgvector-capable ids/schemas across the FULL filtered set (pre-pagination)
+        # so `indexes_total` reflects every matching toolkit — not just the page slice. This scan
+        # can be expensive on projects with thousands of toolkits, so we only run it for the
+        # default (unfiltered) listing. When any filter is active we return `indexes_total=None`
+        # and the UI hides the aggregate rather than pay for a full-set scan on every keystroke.
+        all_schema_ids = []
+        all_indexes_counts = {}
+        if not has_filters:
+            try:
+                for row_id, row_settings in q.with_entities(EliteATool.id, EliteATool.settings).all():
+                    settings_dict = row_settings if isinstance(row_settings, dict) else None
+                    if settings_dict is None:
+                        continue
+                    pgconf = settings_dict.get('pgvector_configuration')
+                    if isinstance(pgconf, dict) and pgconf:
+                        try:
+                            all_schema_ids.append(str(int(row_id)))
+                        except (TypeError, ValueError):
+                            pass
+            except Exception:
+                log.exception("Failed to prefetch pgvector schemas for indexes_total")
+                all_schema_ids = []
+
+            if all_schema_ids:
+                try:
+                    from .vectorstore import get_pgvector_connection_string
+                    conn_str = get_pgvector_connection_string(project_id)
+                    if conn_str:
+                        all_indexes_counts = batch_count_toolkit_indexes(
+                            {schema_name: conn_str for schema_name in all_schema_ids}
+                        )
+                    else:
+                        log.warning(
+                            "No pgvector_project_connstr in vault for project_id=%s; "
+                            "skipping pre-pagination indexes_total aggregation", project_id
+                        )
+                except Exception:
+                    log.exception("Failed to compute pre-pagination indexes counts")
+
         if sort_by != "name" and not sort_by_author:
             tools = q.offset(offset).limit(limit).all()
         else:
@@ -538,6 +689,45 @@ def toolkits_listing(
 
             result.append(toolkit_detail)
 
+        # Populate per-toolkit indexes_count. In the unfiltered branch we reuse the
+        # pre-pagination `all_indexes_counts` dict; in the filtered branch we run a
+        # smaller batch keyed off just the page slice so users still see per-row
+        # counts without paying for the full-set scan.
+        try:
+            page_schema_map = {}
+            for td in result:
+                schema_name = _extract_pgvector_schema(td)
+                if not schema_name:
+                    continue
+                if schema_name in all_indexes_counts:
+                    td.indexes_count = all_indexes_counts[schema_name]
+                elif has_filters:
+                    page_schema_map[schema_name] = td
+
+            if has_filters and page_schema_map:
+                try:
+                    from .vectorstore import get_pgvector_connection_string
+                    conn_str = get_pgvector_connection_string(project_id)
+                    if conn_str:
+                        page_counts = batch_count_toolkit_indexes(
+                            {sn: conn_str for sn in page_schema_map.keys()}
+                        )
+                        for sn, td in page_schema_map.items():
+                            if sn in page_counts:
+                                td.indexes_count = page_counts[sn]
+                except Exception:
+                    log.exception("Failed to populate page-slice indexes_count on filtered toolkit listing")
+        except Exception:
+            log.exception("Failed to populate indexes_count on toolkit listing")
+
+        # Aggregate indexes total across the FULL filtered set (not just the page).
+        # When any user filter is active we return `None` so the UI can hide the
+        # aggregate — computing it would require a full-set pgvector scan on every
+        # filter change, which is prohibitive on large projects.
+        indexes_total = None if has_filters else (
+            sum(all_indexes_counts.values()) if all_indexes_counts else 0
+        )
+
         if sort_by == "name":
             reverse_name = sort_order.lower() == "desc"
             name_key = lambda x: (x.name or "").lower()
@@ -571,7 +761,11 @@ def toolkits_listing(
             result = pinned + non_pinned
             result = result[offset:offset + limit]
 
-        return {"rows": [serialize(i) for i in result], "total": total_count}
+        return {
+            "rows": [serialize(i) for i in result],
+            "total": total_count,
+            "indexes_total": indexes_total,
+        }
 
 
 def toolkit_change_relation(
@@ -703,7 +897,7 @@ def application_toolkit_change_relation(
         ).first()
         if not parent_application_version:
             raise ToolkitChangeRelationError(
-                f'Application[{update_data.application_id}] version[{update_data.version.id}] not found'
+                f'Application[{update_data.application_id}] version[{update_data.version_id}] not found'
             )
 
         if parent_application_version.status in ('published', 'embedded'):
@@ -740,7 +934,6 @@ def application_toolkit_change_relation(
             from .publish_utils import (
                 assert_no_invalid_nesting,
                 collect_reachable_version_ids,
-                is_container_version,
                 SubAgentTreeError,
                 MAX_SUB_AGENT_VALIDATION_DEPTH,
             )
@@ -751,35 +944,21 @@ def application_toolkit_change_relation(
                     f"Cannot bind an agent to itself: application_id={application_id}"
                 )
 
-            # Load the child's tools so we can classify it directly.
-            child_with_tools = session.query(ApplicationVersion).options(
-                selectinload(ApplicationVersion.tools)
-            ).filter(ApplicationVersion.id == version_id).first()
-
-            # Leaf-only rule: a non-pipeline agent that itself contains sub-agents (a
-            # "container") may not be nested. Pipelines are exempt (deep-composition primitive)
-            # but are still walked below for cycle detection.
-            child_is_pipeline = (
-                child_with_tools is not None
-                and child_with_tools.agent_type == AgentTypes.pipeline.value
-            )
-            if (
-                child_with_tools is not None
-                and not child_is_pipeline
-                and is_container_version(child_with_tools)
-            ):
-                raise ToolkitChangeRelationError(
-                    f"'{child_application_version.name}' uses other agents and cannot be "
-                    f"added as a sub-agent. Run it directly as a chat participant, or add "
-                    f"only leaf agents (agents that do not themselves use other agents)."
-                )
-
-            # Surface any cycle/leaf violation already present deeper in the child's subtree.
+            # Depth-aware nesting rule (issue #5778, relaxing #5680's absolute container ban).
+            # The child being bound sits at TIER 2 under this (assumed tier-1) parent, so it MAY
+            # itself be a container — what must hold is that its OWN subtree stays within the
+            # 3-tier budget (its children must be tier-3 leaves). We validate the child's subtree
+            # starting at depth=2 so a tier-3 container inside it is still rejected. This is
+            # best-effort edit-time guidance; the authoritative gate is the version-resolution
+            # choke point (chat_all.generate_application_version_payload), which re-walks from the
+            # true selected root every turn and catches full-path violations the parent's real
+            # ancestry might introduce.
             try:
                 assert_no_invalid_nesting(
                     project_id, version_id,
                     session=session,
                     max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+                    start_depth=2,
                 )
             except SubAgentTreeError as exc:
                 raise ToolkitChangeRelationError(str(exc)) from exc
@@ -1161,6 +1340,7 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
             "toolkit_config": toolkit_config,
             "tool_name": tool_name,
             "tool_params": tool_params,
+            "user_input_preview": f"test tool {tool_name} (toolkit {data.get('toolkit_id')}): {tool_params}"[:100],
             "user_id": task_kwargs.get('user_id', ''),
             "deployment_url": task_kwargs.get('deployment_url', ''),
             "project_auth_token": task_kwargs.get('project_auth_token', ''),

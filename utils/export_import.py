@@ -307,7 +307,16 @@ def _export_skills_main(
                 skill_dict['versions'].append(version_dict)
             export_model = SkillExportModel.model_validate(skill_dict)
             export_dict = export_model.model_dump(mode='json')
+            # SkillExportModel excludes owner_id and has no entity field, and
+            # the version export model omits per-version id/author_id, but
+            # fork.py stamps parent lineage from them (same patch-up as
+            # build_skill_fork_payload) — without owner_id, forking an exported
+            # agent that carries skills fails.
             export_dict['owner_id'] = skill.owner_id
+            export_dict['entity'] = 'skills'
+            for version, version_export in zip(versions, export_dict['versions']):
+                version_export['id'] = version.id
+                version_export['author_id'] = version.author_id
             skill_uuid_by_id[skill.id] = export_dict['import_uuid']
             skills_serialized.append(export_dict)
 

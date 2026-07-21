@@ -173,3 +173,12 @@ Run admin task migrate_confluence_api_version with param: project_id=all
 # Empty/missing selected_tools is left untouched because that state is treated as unrestricted by current runtime flows.
 Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project_id=all;dry_run
 Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project_id=all
+
+# Issue #5701: Skill publishing schema — skills.shared_owner_id/shared_id (+ partial
+# unique index) and skill_versions.status (NOT NULL default 'draft', indexed).
+# The ORM selects status on every Skills read, so unmigrated schemas fail with
+# UndefinedColumn. Normally applied automatically at boot (config flag
+# skill_publish_auto_migrate, default on); run manually if that flag is disabled or
+# the boot log shows "skill publish schema: auto-migration failed".
+# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+Run admin task migrate_skill_publish_columns with param: project_id=all

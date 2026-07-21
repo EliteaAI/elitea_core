@@ -3,8 +3,10 @@ from pylon.core.tools import log, web
 from tools import VaultClient, serialize, this
 
 from ..models.pd.chat import ApplicationChatRequest
+from ..models.pd.llm import llm_settings_family_conflict
 from ..utils.pipeline_utils import validate_yaml_from_str
-from ..utils.predict_utils import generate_predict_payload, PredictPayloadError
+from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, user_input_preview
+from ..utils.application_utils import validate_and_resolve_llm_settings
 
 
 YAML_MAX_SIZE = 512 * 1024  # 512KB
@@ -46,8 +48,18 @@ class Method:
                 default_model.update({k: v for k, v in llm_settings.items() if v is not None})
             llm_settings = default_model
 
-        llm_settings.setdefault("temperature", 0.7)
+        # Normalize temperature/reasoning_effort against the resolved model's actual
+        # capabilities, and re-resolve if model_name is no longer available (issue #5821).
+        # Only pay the RPC cost when something actually needs fixing (missing model_name or a
+        # family conflict) — same reasoning as predict_sio's gate: don't call an uncached RPC
+        # unconditionally on a path that's exercised by every ad-hoc pipeline run.
+        if not llm_settings.get("model_name") or llm_settings_family_conflict(
+            llm_settings.get("temperature"), llm_settings.get("reasoning_effort")
+        ):
+            llm_settings = validate_and_resolve_llm_settings(project_id, llm_settings) or llm_settings
         llm_settings.setdefault("max_tokens", 4096)
+        if not llm_settings.get("reasoning_effort"):
+            llm_settings.setdefault("temperature", 0.7)
 
         variables = payload_in.get("variables") or []
         try:
@@ -103,6 +115,7 @@ class Method:
                 "task_name": "indexer_agent",
                 "project_id": project_id,
                 "user_context": serialize(user_context),
+                "user_input_preview": user_input_preview(payload.get("user_input")),
             }
         )
 

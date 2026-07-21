@@ -14,6 +14,16 @@ from .exceptions import VerifySignatureError
 from ..models.all import Tag
 from ..models.enums.all import PublishStatus
 
+try:
+    import gevent  # pylint: disable=C0413
+except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
+    gevent = None
+
+
+def make_yield_to_hub(web_runtime: str) -> Callable[[], None]:
+    """Cooperative yield only when gevent is the actual web runtime; no-op under flask/waitress/hypercorn."""
+    return (lambda: gevent.sleep(0)) if (gevent is not None and web_runtime == "gevent") else (lambda: None)
+
 
 # Redis cache for public project ID (ai_project_id)
 _PUBLIC_PROJECT_ID_CACHE_KEY = "elitea:config:ai_project_id"

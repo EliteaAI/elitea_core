@@ -1,21 +1,25 @@
 import re
+import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from typing import List, Optional, Tuple, Literal
 
 from sqlalchemy import func, or_, asc, desc
 from sqlalchemy.orm import selectinload
 
-from tools import db, auth, serialize, rpc_tools
+from tools import db, auth, serialize, rpc_tools, this
 
-from .utils import set_columns_as_attrs
+from .utils import set_columns_as_attrs, get_public_project_id
+from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
-from ..models.all import Tag, ApplicationVersion
-from ..models.enums.all import SkillEntityTypes
+from ..models.all import Tag, ApplicationVersion, Application
+from ..models.enums.all import SkillEntityTypes, PublishStatus, AgentTypes
 from ..models.pd.skill import (
     SkillCreateModel,
     SkillDetailModel,
     SkillUpdateModel,
     SkillImportResultModel,
+    AgentsWithSkillItemModel,
 )
 from ..models.pd.skill_version import (
     SkillVersionCreateModel,
@@ -74,6 +78,24 @@ class SkillVersionInUseError(SkillError):
         )
         self.version_id = version_id
         self.usage_count = usage_count
+
+
+class SkillVersionPublishedError(SkillError):
+    """Raised when deleting a version that is still published or embedded."""
+    http_status = 409
+
+    def __init__(self, version_id: int):
+        super().__init__('Cannot delete a published version. Unpublish it first.')
+        self.version_id = version_id
+
+
+class SkillPublishedError(SkillError):
+    """Raised when deleting a skill that still has a published or embedded version."""
+    http_status = 409
+
+    def __init__(self, skill_id: int):
+        super().__init__('Cannot delete a skill with published versions. Unpublish them first.')
+        self.skill_id = skill_id
 
 
 class SkillLimitExceededError(SkillError):
@@ -238,6 +260,7 @@ def list_skills_api(
     tags: str | list | None = None,
     author_id: int | None = None,
     q: str | None = None,
+    statuses: str | list | None = None,
     limit: int = 10,
     offset: int = 0,
     sort_by: str = 'created_at',
@@ -252,6 +275,7 @@ def list_skills_api(
         tags: Tag IDs to filter by (comma-separated string or list)
         author_id: Filter by author ID
         q: Search query for name/description
+        statuses: Version statuses to filter by (comma-separated string or list)
         limit: Maximum results
         offset: Results to skip
         sort_by: Sort field
@@ -289,6 +313,18 @@ def list_skills_api(
             )
         )
 
+    # Status filter; unknown values are dropped so a bad status can't error
+    # the whole request against the enum-typed column
+    if statuses:
+        if isinstance(statuses, str):
+            statuses = statuses.split(',')
+        known_statuses = {s.value for s in PublishStatus}
+        statuses = [s for s in statuses if s in known_statuses]
+        if statuses:
+            filters.append(
+                Skill.versions.any(SkillVersion.status.in_(statuses))
+            )
+
     total, skills = list_skills(
         project_id=project_id,
         limit=limit,
@@ -303,6 +339,394 @@ def list_skills_api(
         'total': total,
         'skills': skills,
     }
+
+
+def list_public_skills_api(
+    project_id: int,
+    q: str | None = None,
+    tags: str | list | None = None,
+    category: str | None = None,
+    my_liked: bool = False,
+    trend_start_period: str | None = None,
+    trend_end_period: str | None = None,
+    limit: int = 10,
+    offset: int = 0,
+    sort_by: str = 'created_at',
+    sort_order: Literal['asc', 'desc'] = 'desc',
+    session=None,
+) -> dict:
+    filters = [
+        Skill.versions.any(SkillVersion.status == PublishStatus.published),
+    ]
+
+    if tags:
+        if isinstance(tags, str):
+            tags = [int(tag) for tag in tags.split(',')]
+        for tag_id in tags:
+            filters.append(
+                Skill.versions.any(SkillVersion.tags.any(Tag.id == tag_id))
+            )
+
+    if category:
+        filters.append(
+            Skill.versions.any(
+                SkillVersion.tags.any(Tag.name == category)
+            )
+        )
+
+    if q:
+        filters.append(
+            or_(
+                Skill.name.ilike(f"%{q}%"),
+                Skill.description.ilike(f"%{q}%"),
+            )
+        )
+
+    trend_period = None
+    if trend_start_period:
+        if isinstance(trend_start_period, str):
+            trend_start_period = datetime.strptime(trend_start_period, "%Y-%m-%dT%H:%M:%S")
+        if not trend_end_period:
+            trend_end_period = datetime.utcnow()
+        if isinstance(trend_end_period, str):
+            trend_end_period = datetime.strptime(trend_end_period, "%Y-%m-%dT%H:%M:%S")
+        trend_period = (trend_start_period, trend_end_period)
+
+    with _skill_session(session, project_id) as s:
+        count_query = s.query(func.count(Skill.id)).filter(*filters)
+        if trend_period:
+            Like = get_like_model()
+            trend_ids = (
+                s.query(Like.entity_id)
+                .filter(
+                    Like.entity == Skill.likes_entity_name,
+                    Like.project_id == project_id,
+                    Like.created_at.between(*trend_period),
+                )
+                .distinct()
+                .subquery()
+            )
+            count_query = count_query.filter(Skill.id.in_(trend_ids.select()))
+        if my_liked:
+            Like = get_like_model()
+            user_id = auth.current_user().get('id')
+            my_liked_ids = (
+                s.query(Like.entity_id)
+                .filter(
+                    Like.entity == Skill.likes_entity_name,
+                    Like.project_id == project_id,
+                    Like.user_id == user_id,
+                )
+                .distinct()
+                .subquery()
+            )
+            count_query = count_query.filter(Skill.id.in_(my_liked_ids.select()))
+        total = count_query.scalar() or 0
+        if total == 0:
+            return {'total': 0, 'rows': []}
+
+        like_model = get_like_model()
+        extra_columns: List[str] = []
+
+        query = s.query(Skill).options(
+            selectinload(Skill.versions).selectinload(SkillVersion.tags)
+        )
+
+        sort_by_likes = sort_by == 'likes'
+        query, cols = add_likes(
+            original_query=query,
+            project_id=project_id,
+            entity=Skill,
+            sort_by_likes=sort_by_likes,
+            sort_order=sort_order,
+            like_model=like_model,
+        )
+        extra_columns.extend(cols)
+
+        if trend_period:
+            query, cols = add_trending_likes(
+                original_query=query,
+                project_id=project_id,
+                trend_period=trend_period,
+                filter_results=True,
+                entity=Skill,
+                like_model=like_model,
+            )
+            extra_columns.extend(cols)
+
+        query, cols = add_my_liked(
+            original_query=query,
+            project_id=project_id,
+            filter_results=my_liked,
+            entity=Skill,
+            like_model=like_model,
+        )
+        extra_columns.extend(cols)
+
+        # Project-wide pin priority (pinned skills surface first), same as list_skills.
+        add_pins_with_priority = rpc_tools.RpcMixin().rpc.timeout(2).social_add_pins_with_priority()
+        query, pin_cols = add_pins_with_priority(
+            original_query=query,
+            project_id=project_id,
+            entity=Skill,
+        )
+        extra_columns.extend(pin_cols)
+
+        query = query.filter(*filters)
+
+        if sort_by not in _SKILL_SORT_WHITELIST:
+            sort_by = 'created_at'
+        if not sort_by_likes:
+            sort_fn = asc if sort_order == 'asc' else desc
+            query = query.order_by(
+                desc(query.column_descriptions[-2]['expr']),  # is_pinned
+                desc(query.column_descriptions[-1]['expr']),  # pin_updated_at
+                sort_fn(getattr(Skill, sort_by, Skill.created_at)),
+                asc(Skill.id),
+            )
+
+        if limit:
+            query = query.limit(limit)
+        if offset:
+            query = query.offset(offset)
+
+        skills = list(set_columns_as_attrs(query.all(), extra_columns))
+        return {'total': total, 'rows': skills}
+
+
+def get_agents_with_skill(
+    project_id: int,
+    public_skill_id: int,
+) -> List[AgentsWithSkillItemModel]:
+    public_project_id = get_public_project_id()
+    with db.with_project_schema_session(project_id) as s:
+        # All local skills forked from this public skill (any version).
+        # parent_project_id scoping is required: cross-project forks stamp the
+        # same bare keys with source-project ids, and per-schema sequences
+        # overlap numerically.
+        local_skill_ids = [
+            row[0]
+            for row in s.query(SkillVersion.skill_id)
+            .filter(
+                SkillVersion.meta['parent_project_id'].astext == str(public_project_id),
+                SkillVersion.meta['parent_entity_id'].astext == str(public_skill_id),
+            )
+            .distinct()
+            .all()
+        ]
+        if not local_skill_ids:
+            return []
+
+        # Agent versions mapped to any of those local skills.
+        entity_version_ids = [
+            row[0]
+            for row in s.query(EntitySkillMapping.entity_version_id)
+            .filter(
+                EntitySkillMapping.skill_id.in_(local_skill_ids),
+                EntitySkillMapping.entity_type == SkillEntityTypes.agent,
+            )
+            .distinct()
+            .all()
+        ]
+        if not entity_version_ids:
+            return []
+
+        rows = (
+            s.query(
+                Application.id,
+                Application.name,
+                ApplicationVersion.id,
+                Application.meta,
+            )
+            .join(ApplicationVersion, ApplicationVersion.application_id == Application.id)
+            .filter(ApplicationVersion.id.in_(entity_version_ids))
+            .all()
+        )
+
+        result: List[AgentsWithSkillItemModel] = []
+        for app_id, app_name, version_id, app_meta in rows:
+            icon_meta = (app_meta or {}).get('icon_meta')
+            result.append(AgentsWithSkillItemModel(
+                application_id=app_id,
+                name=app_name,
+                entity_version_id=version_id,
+                icon_meta=icon_meta,
+            ))
+        return result
+
+
+def attach_public_skill_to_agents(
+    project_id: int,
+    public_skill_id: int,
+    public_version_id: int,
+    agent_version_ids: List[int],
+    entity_type: str = SkillEntityTypes.agent,
+    session=None,
+) -> List[dict]:
+    from .skill_export_import import build_skill_fork_payload  # avoid import cycle
+
+    agent_version_ids = list(dict.fromkeys(agent_version_ids or []))
+    if not agent_version_ids:
+        return []
+
+    author_id = auth.current_user().get('id')
+    public_project_id = get_public_project_id()
+
+    with _skill_session(session, project_id) as s:
+        # (0) Ownership: resolve every id to a CLASSIC agent version in THIS project.
+        owned_rows = (
+            s.query(ApplicationVersion.id)
+            .join(Application, ApplicationVersion.application_id == Application.id)
+            .filter(
+                ApplicationVersion.id.in_(agent_version_ids),
+                ApplicationVersion.agent_type != AgentTypes.pipeline.value,
+            )
+            .all()
+        )
+        owned_ids = {row[0] for row in owned_rows}
+
+        # (1) Resolve-or-fork ONCE: reuse an existing local copy of exactly this
+        # public (skill, version); else fork it in.
+        local = (
+            s.query(SkillVersion.skill_id, SkillVersion.id)
+            .filter(
+                SkillVersion.meta['parent_project_id'].astext == str(public_project_id),
+                SkillVersion.meta['parent_entity_id'].astext == str(public_skill_id),
+                SkillVersion.meta['parent_version_id'].astext == str(public_version_id),
+            )
+            .first()
+        )
+        if local:
+            local_skill_id, local_version_id = local[0], local[1]
+        else:
+            payload = build_skill_fork_payload(
+                public_project_id, public_skill_id, public_version_id,
+            )
+            if payload is None:
+                return [
+                    {'agent_version_id': vid, 'ok': False, 'http_status': 404,
+                     'error': 'public skill or version not found'}
+                    for vid in agent_version_ids
+                ]
+
+            # Stamp lineage on the version before import (build_skill_fork_payload does
+            # NOT stamp — fork.py does that in its endpoint loop).
+            version_payload = payload['versions'][0]
+            version_meta = version_payload.get('meta') or {}
+            version_meta.update({
+                'parent_entity_id': public_skill_id,
+                'parent_project_id': public_project_id,
+                'parent_version_id': public_version_id,
+                'parent_author_id': version_payload.get('author_id'),
+            })
+            version_payload['meta'] = version_meta
+
+            # Override the default import_uuid (which is version-INDEPENDENT and would
+            # collide across two published versions of the same skill) with a
+            # version-SPECIFIC seed, so each published version forks to its own copy.
+            payload['import_uuid'] = str(uuid.uuid5(
+                uuid.NAMESPACE_OID,
+                f"public_skill_attach:{public_project_id}:{public_skill_id}:{public_version_id}",
+            ))
+
+            # Call import_wizard directly on the module (as the /fork endpoint does),
+            # NOT via the RPC bus: an in-request synchronous RPC round-trip to the same
+            # process deadlocks the worker while the outer session is held open.
+            #
+            # Two-transaction ownership: import_wizard commits the forked skill in its
+            # OWN transaction, independent of the caller's outer session. If the
+            # per-agent loop below (or the endpoint's session.commit()) then fails, the
+            # fork persists with no mapping — an orphan local skill. This is
+            # self-healing: the resolve-or-fork lookup above reuses that orphan on the
+            # next attach of the same (skill, version), so no cleanup is required.
+            result, _errors = this.module.import_wizard(
+                [payload], project_id, author_id,
+            )
+            imported = (result.get('skills') or [])
+            if not imported:
+                return [
+                    {'agent_version_id': vid, 'ok': False, 'http_status': 400,
+                     'error': 'skill fork failed'}
+                    for vid in agent_version_ids
+                ]
+            local_skill_id = imported[0]['id']
+            # import_wizard pops 'versions' from the public result — re-fetch the
+            # created base version id directly.
+            base_version = (
+                s.query(SkillVersion.id)
+                .filter(
+                    SkillVersion.skill_id == local_skill_id,
+                    SkillVersion.name == 'base',
+                )
+                .first()
+            )
+            if not base_version:
+                base_version = (
+                    s.query(SkillVersion.id)
+                    .filter(SkillVersion.skill_id == local_skill_id)
+                    .order_by(SkillVersion.created_at.asc())
+                    .first()
+                )
+            local_version_id = base_version[0] if base_version else None
+
+        # (2) Lineage-dedup: an agent version is already-attached if ANY lineage copy
+        # of the public skill is mapped to it.
+        lineage_skill_ids = [
+            row[0]
+            for row in s.query(SkillVersion.skill_id)
+            .filter(
+                SkillVersion.meta['parent_project_id'].astext == str(public_project_id),
+                SkillVersion.meta['parent_entity_id'].astext == str(public_skill_id),
+            )
+            .distinct()
+            .all()
+        ]
+        already_attached = {
+            row[0]
+            for row in s.query(EntitySkillMapping.entity_version_id)
+            .filter(
+                EntitySkillMapping.entity_version_id.in_(agent_version_ids),
+                EntitySkillMapping.entity_type == entity_type,
+                EntitySkillMapping.skill_id.in_(lineage_skill_ids or [0]),
+            )
+            .all()
+        }
+
+        results: List[dict] = []
+        for vid in agent_version_ids:
+            if vid not in owned_ids:
+                results.append({'agent_version_id': vid, 'ok': False,
+                                'http_status': 404, 'error': 'agent not found'})
+                continue
+            if vid in already_attached:
+                results.append({'agent_version_id': vid, 'ok': False,
+                                'http_status': 409, 'error': 'already attached'})
+                continue
+            if not local_version_id:
+                results.append({'agent_version_id': vid, 'ok': False,
+                                'http_status': 400, 'error': 'skill fork failed'})
+                continue
+            # SAVEPOINT per agent: _skill_session only flushes (never rolls back), so
+            # one mid-batch IntegrityError would PendingRollbackError the whole commit.
+            # A nested savepoint isolates each failure to its own agent.
+            try:
+                with s.begin_nested():
+                    attach_skill_to_agent(
+                        project_id=project_id,
+                        entity_version_id=vid,
+                        skill_id=local_skill_id,
+                        skill_version_id=local_version_id,
+                        entity_type=entity_type,
+                        session=s,
+                    )
+                results.append({'agent_version_id': vid, 'ok': True})
+            except SkillLimitExceededError:
+                results.append({'agent_version_id': vid, 'ok': False,
+                                'http_status': 400, 'error': 'limit'})
+            except SkillAlreadyAttachedError:
+                results.append({'agent_version_id': vid, 'ok': False,
+                                'http_status': 409, 'error': 'already attached'})
+        return results
 
 
 def get_skill_details(
@@ -453,6 +877,15 @@ def delete_skill(
         if not skill:
             raise SkillNotFoundError(skill_id)
 
+        # Mirror the version-level guard: a wholesale delete would otherwise
+        # strand the catalog entry with no source version left to unpublish.
+        published_version = s.query(SkillVersion.id).filter(
+            SkillVersion.skill_id == skill_id,
+            SkillVersion.status.in_((PublishStatus.published, PublishStatus.embedded)),
+        ).first()
+        if published_version:
+            raise SkillPublishedError(skill_id)
+
         s.query(EntitySkillMapping).filter(
             EntitySkillMapping.skill_id == skill_id
         ).delete(synchronize_session=False)
@@ -567,6 +1000,10 @@ def delete_skill_version(
                 'Cannot delete the only version of a skill. Delete the skill instead.',
                 version_id=version_id,
             )
+
+        # Block deletion of published or embedded versions
+        if version.status in (PublishStatus.published, PublishStatus.embedded):
+            raise SkillVersionPublishedError(version_id)
 
         # Check if version is in use by any agents
         usage_count = s.query(EntitySkillMapping).filter(

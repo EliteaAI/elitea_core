@@ -23,6 +23,7 @@ from functools import partial
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401,W0611
 from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
+from tools import db  # pylint: disable=E0401
 
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
 from ..utils.toolkit_migration import run_selected_tools_migration
@@ -34,12 +35,16 @@ from ..utils.llm_migration_utils import (
     build_new_llm_settings,
     migrate_application_versions,
     migrate_participant_mappings,
+    parse_heal_params,
+    heal_family_conflict_versions,
+    heal_family_conflict_mappings,
 )
 from ..utils.embedding_migration_utils import (
     validate_target_embedding_model,
     migrate_toolkit_embedding_models,
 )
-from ..utils.utils import get_public_project_id
+from ..utils.trace_step_backfill_utils import parse_backfill_params, backfill_project
+from ..utils.utils import get_public_project_id, make_yield_to_hub
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -295,6 +300,47 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             total_migrated, end_ts - start_ts
         )
         return {"migrated": total_migrated}
+
+    @web.method()
+    def migrate_skill_publish_columns(self, *args, **kwargs):
+        """Admin task: add the skill-publishing columns to each project schema.
+
+        Adds ``shared_owner_id``/``shared_id`` to ``skills`` and ``status`` to
+        ``skill_versions`` (plus a status index) on every project schema.
+        Idempotent (``ADD COLUMN IF NOT EXISTS``): safe to run multiple times.
+
+        Param format (optional):
+            "project_id=<all|N>"
+        """
+        from ..utils.skill_publish_schema import apply_skill_publish_columns
+
+        param = kwargs.get("param", "") or ""
+        project_id_filter = None
+        for seg in [s.strip() for s in param.split(";")]:
+            if seg.lower().startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.warning(
+                            "migrate_skill_publish_columns: invalid project_id '%s', scanning all", value)
+
+        try:
+            if project_id_filter is not None:
+                project_ids = [project_id_filter]
+            else:
+                project_ids = [
+                    p["id"] for p in (
+                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                    )
+                ]
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_skill_publish_columns: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_skill_publish_columns(project_ids)
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
     def migrate_toolkit_settings_alita_title(self, *args, **kwargs):
@@ -1189,6 +1235,64 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         }
 
     @web.method()
+    def backfill_legacy_trace_steps(self, *args, **kwargs):
+        """Backfill legacy meta.tool_calls/thinking_steps into message_trace_step.
+
+        Param: "project_ids=<all|N|lo-hi>;cutoff_days=<180|all>;dry_run=<true|false>" (dry_run defaults true).
+        """
+        raw_param = kwargs.get("param", "") or ""
+        try:
+            parsed = parse_backfill_params(raw_param)
+        except ValueError as exc:
+            log.error("backfill_legacy_trace_steps: invalid params: %s", exc)
+            return {"error": str(exc)}
+
+        yield_to_hub = make_yield_to_hub(self.context.web_runtime)
+
+        prefix = "[DRY RUN] " if parsed['dry_run'] else ""
+        log.info(
+            "%sStarting backfill_legacy_trace_steps (project_ids=%s, cutoff_days=%s, dry_run=%s)",
+            prefix, parsed['project_id_spec'], parsed['cutoff_days'], parsed['dry_run'],
+        )
+        start_ts = time.time()
+
+        try:
+            project_ids = resolve_target_project_ids(parsed['project_id_spec'])
+        except ValueError as exc:
+            log.error("backfill_legacy_trace_steps: project resolution failed: %s", exc)
+            return {"error": str(exc)}
+
+        by_project = {}
+        totals = {}
+        for project_id in project_ids:
+            yield_to_hub()
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    counters = backfill_project(
+                        session, project_id, parsed['cutoff_days'], parsed['dry_run'], yield_to_hub,
+                    )
+            except Exception:  # pylint: disable=W0703
+                log.exception("backfill_legacy_trace_steps: error in project %s", project_id)
+                continue
+
+            by_project[project_id] = counters
+            for key, value in counters.items():
+                totals[key] = totals.get(key, 0) + value
+            log.info("%sbackfill_legacy_trace_steps: project %s — %s", prefix, project_id, counters)
+
+        duration = round(time.time() - start_ts, 2)
+        log.info(
+            "%sExiting backfill_legacy_trace_steps — projects=%s totals=%s (duration=%ss)",
+            prefix, len(project_ids), totals, duration,
+        )
+        return {
+            "dry_run": parsed['dry_run'],
+            "cutoff_days": parsed['cutoff_days'],
+            "totals": totals,
+            "by_project": by_project,
+        }
+
+    @web.method()
     def migrate_conversation_source_to_elitea(self, *args, **kwargs):
         """Admin task: rename legacy conversation source values to 'elitea'.
 
@@ -1933,6 +2037,93 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 log.exception("Error processing project %s, skipping", project_id)
 
         # ── 7. Summary ───────────────────────────────────────────────────
+        duration = time.time() - start_ts
+        log.info(
+            "Done%s. Projects scanned: %s, touched: %s. "
+            "ApplicationVersions: %s, ParticipantMappings: %s. Duration: %.1fs",
+            " [DRY RUN]" if dry_run else "",
+            total_projects, projects_touched,
+            total_versions, total_mappings,
+            duration,
+        )
+
+    # pylint: disable=R,W0613
+    @web.method()
+    def heal_llm_settings_family_conflicts(self, *args, **kwargs):
+        """Heal-all normalizer for family-misaligned llm_settings across ApplicationVersion and
+        ParticipantMapping rows (issues #5821 + #5858). Does NOT change model_name/model_project_id,
+        only aligns temperature/reasoning_effort against each row's own model's real
+        supports_reasoning. Idempotent -- safe to re-run.
+
+        Arms (all judged per-row against the resolved model's real supports_reasoning, looked up
+        per project via RPC):
+          - reasoning model + temperature + active effort  -> strip temperature (#5821)
+          - non-reasoning model + active effort            -> strip effort (impossible config)
+          - reasoning model + null effort                  -> set effort (#5858)
+
+        A bare null effort on a reasoning model is the unset/stale default and IS a defect (same
+        shape #5859 rejects at write time). An explicit reasoning_effort='none' is the deliberate
+        thinking-off escape hatch and is never touched.
+
+        Dry-run is ON by default (unlike migrate_llm_model) since this task has no from/to
+        model boundary and scans every project. Pass dry_run=false to apply changes.
+
+        Params (semicolon-separated):
+            project_id=<int|X-Y|all>      (optional, default: all)
+            dry_run=<true|false>           (optional, default: true)
+
+        Examples:
+            (no params)                          - dry run across all projects
+            dry_run=false                        - live run across all projects
+            project_id=42;dry_run=false           - live run on project 42 only
+            project_id=1-1000;dry_run=true        - dry run on projects 1-1000
+        """
+        from tools import db  # pylint: disable=C0415
+
+        start_ts = time.time()
+
+        raw_param = kwargs.get("param", "")
+        try:
+            params = parse_heal_params(raw_param)
+        except ValueError as exc:
+            log.error("Invalid params: %s", exc)
+            return
+
+        dry_run = params['dry_run']
+        log.info("Params: project_id=%s  dry_run=%s", params['project_id_spec'], dry_run)
+
+        try:
+            project_ids = resolve_target_project_ids(params['project_id_spec'])
+        except ValueError as exc:
+            log.error("Project resolution failed: %s", exc)
+            return
+
+        total_projects = len(project_ids)
+        total_versions = 0
+        total_mappings = 0
+        projects_touched = 0
+
+        for idx, project_id in enumerate(project_ids, 1):
+            try:
+                with db.get_session(project_id) as session:
+                    v_count = heal_family_conflict_versions(session, project_id, dry_run)
+                    m_count = heal_family_conflict_mappings(session, project_id, dry_run)
+
+                    if v_count or m_count:
+                        if not dry_run:
+                            session.commit()
+                        projects_touched += 1
+                        total_versions += v_count
+                        total_mappings += m_count
+                        log.info(
+                            "Project %s (%s/%s): %s versions, %s mappings %s",
+                            project_id, idx, total_projects,
+                            v_count, m_count,
+                            "[dry_run]" if dry_run else "[committed]",
+                        )
+            except Exception:  # pylint: disable=W0702
+                log.exception("Error processing project %s, skipping", project_id)
+
         duration = time.time() - start_ts
         log.info(
             "Done%s. Projects scanned: %s, touched: %s. "
