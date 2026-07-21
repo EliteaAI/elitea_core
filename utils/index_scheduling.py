@@ -6,7 +6,8 @@ from ..utils.application_tools import update_toolkit_index_meta_history_with_fai
 
 
 def resolve_credentials(project_settings: dict, toolkit_type: str,
-                                user_config: dict, project_id: int) -> bool:
+                                user_config: dict, project_id: int,
+                                is_team_schedule: bool = False) -> bool:
     """Apply user-provided credentials to project settings.
 
     Extracts credentials from user_config, validates them, and loads project-level configuration
@@ -18,6 +19,9 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
         toolkit_type (str): Type of the toolkit (e.g., 'github', 'pgvector')
         user_config (dict): User configuration that may contain 'credentials' key
         project_id (int): Project ID for configuration lookup
+        is_team_schedule (bool): True when the schedule is stored under user_id=-1 (team/shared).
+            Team schedules omit per-user credentials — the project-level configuration in
+            project_settings is authoritative and no override is required.
 
     Returns:
         bool: True if no credentials or successfully applied, False if validation/loading failed
@@ -38,6 +42,15 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
     # Extract credentials from user_config
     user_credentials = user_config.get('credentials')
     if not user_credentials:
+        if is_team_schedule:
+            # Team/shared schedules never carry per-user credentials — the project-level
+            # configuration already sitting in project_settings is authoritative.
+            log.debug(
+                f"Team schedule with no per-user credentials override for "
+                f"toolkit_type='{toolkit_type}', project_id={project_id}; "
+                f"using project-level configuration as-is"
+            )
+            return True
         log.warning(f"No credentials provided in user_config for toolkit_type='{toolkit_type}', project_id={project_id}")
         return False
 
@@ -97,9 +110,15 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
 
 
 def handle_failed_index_schedule(
-    project_id, updated_settings, user_id, toolkit, index_meta_id, init_issue
+    project_id, updated_settings, user_id, toolkit, index_meta_id, init_issue,
+    expand_user_id=None
 ):
-    """Handle failed index scheduling: update history and notify status."""
+    """Handle failed index scheduling: update history and notify status.
+
+    ``expand_user_id`` is the user_id used when expanding configurations. For team schedules
+    (``user_id == -1``) callers must pass the schedule's creator so ``get_personal_project_id``
+    is never invoked with ``-1``. Defaults to ``user_id`` when not provided.
+    """
     log.debug(
         f"Skip running by schedule due to {init_issue}: {index_meta_id}, "
         f"user {user_id} in project {project_id}, toolkit {toolkit.type} {toolkit.id}"
@@ -107,7 +126,7 @@ def handle_failed_index_schedule(
     pgv_settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
         project_id=project_id,
         settings=updated_settings.get('pgvector_configuration', {}),
-        user_id=user_id,
+        user_id=expand_user_id if expand_user_id is not None else user_id,
         unsecret=True
     )
     update_toolkit_index_meta_history_with_failed_state(
