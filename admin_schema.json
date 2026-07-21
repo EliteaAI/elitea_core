@@ -140,10 +140,11 @@
       "type": "string",
       "format": "textarea",
       "title": "Publish Validation Rules",
-      "description": "Custom evaluation criteria for AI validation of agents before publishing. Leave empty to use built-in rules. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
+      "description": "Custom evaluation criteria for AI validation of agents before publishing. Leave empty to use the built-in rules shown in grey below. Use the restore icon to load them into the editor as a starting point. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
       "path": "publishing_guardrail.publish_validation_rules",
       "section": "guardrails",
       "default": "",
+      "builtin_default_rpc": "applications_get_default_publish_validation_rules",
       "requires_restart": true
     },
     "agent_categories": {
