@@ -38,6 +38,7 @@ from ..utils.application_utils import (
 from ..utils.exceptions import PoolSaturationError, MaintenanceInProgressError
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
+from ..utils.publish_utils import get_default_agent_validation_rules
 from ..utils.skill_utils import detach_skills_for_entity_versions
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
     get_predict_token_and_session, load_context_settings_from_conversation, user_input_preview
@@ -50,6 +51,13 @@ from ..utils.chat_feature_flags import get_context_manager_feature_flag
 
 
 class RPC:
+    @web.rpc(
+        "applications_get_default_publish_validation_rules",
+        "applications_get_default_publish_validation_rules",
+    )
+    def applications_get_default_publish_validation_rules(self, **kwargs) -> str:
+        return get_default_agent_validation_rules()
+
     @web.rpc("applications_get_application_by_id", "get_application_by_id")
     def get_application_by_id(self, project_id: int, application_id: int,
                               version_name: str = None, first_existing_version: bool = False, **kwargs) -> Optional[

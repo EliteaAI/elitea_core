@@ -264,6 +264,10 @@ DEFAULT_VALIDATION_PROMPT = _VALIDATION_PROMPT_TEMPLATE.format(
 )
 
 
+def get_default_agent_validation_rules() -> str:
+    return _DEFAULT_VALIDATION_RULES
+
+
 def _build_validation_prompt() -> str:
     """Assemble the AI validation prompt from config or defaults."""
     custom_rules = getattr(this.module, 'publish_validation_rules', '').strip()
