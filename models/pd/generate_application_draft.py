@@ -59,7 +59,7 @@ class ToolkitSuggestion(BaseModel):
 class ApplicationSuggestion(BaseModel):
     application_id: int
     id: Optional[int] = None
-    name: str
+    name: Optional[str] = None
     description: Optional[str] = None
     type: Optional[str] = None
 
@@ -179,7 +179,7 @@ class GenerateApplicationDraftResponse(BaseModel):
         for item in all_app_items:
             # Skip items with missing required fields (name or application_id)
             if isinstance(item, dict):
-                if not item.get("application_id") or not item.get("name"):
+                if not item.get("application_id"):
                     continue
             item_type = (
                 item.get("type", "")
