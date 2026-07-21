@@ -1248,6 +1248,12 @@ class RPC:
             # Continue with original config if expansion fails
             log.warning("Continuing with original toolkit configuration")
 
+        try:
+            from ..utils.internal_tools import resolve_internal_mcp_tools
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
+
         # Get project-specific auth_token from secrets (not exposed to user)
         try:
             data['project_auth_token'], _ = get_predict_token_and_session(project_id, data['user_id'], sid)
@@ -1304,6 +1310,8 @@ class RPC:
             log.warning(f"Failed to unsecret task data: {e}")
 
         # Start the test toolkit tool task
+        from ..utils.internal_tools import redact_internal_mcp_secrets
+        meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         if tool_name == 'index_data':
             task_id = start_index_task(self.task_node, data, sio_event)
         else:
@@ -1319,7 +1327,7 @@ class RPC:
                     "message_id": data['message_id'],
                     "question_id": start_event_content.get('question_id') if start_event_content else None,
                     "sio_event": sio_event,
-                    "toolkit_config": task_kwargs.get('toolkit_config', {}),
+                    "toolkit_config": meta_toolkit_config,
                     "tool_name": task_kwargs.get('tool_name', ''),
                     "tool_params": task_kwargs.get('tool_params', {}),
                     "user_input_preview": f"test tool {task_kwargs.get('tool_name', '')}: {task_kwargs.get('tool_params', {})}"[:100],
@@ -1465,6 +1473,12 @@ class RPC:
             log.error(f"Error expanding MCP toolkit configurations: {str(e)}")
             log.warning("Continuing with original toolkit configuration")
 
+        try:
+            from ..utils.internal_tools import resolve_internal_mcp_tools
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
+
         # Get project-specific auth_token from secrets
         try:
             data['project_auth_token'], _ = get_predict_token_and_session(project_id, data['user_id'], sid)
@@ -1492,6 +1506,8 @@ class RPC:
             log.warning(f"Failed to unsecret task data: {e}")
 
         # Start the test MCP connection task
+        from ..utils.internal_tools import redact_internal_mcp_secrets
+        meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         task_id = self.task_node.start_task(
             "indexer_test_mcp_connection",
             args=[data['stream_id'], data['message_id']],
@@ -1505,7 +1521,7 @@ class RPC:
                 "question_id": start_event_content.get('question_id') if start_event_content else None,
                 "sio_event": sio_event,
                 "user_input_preview": "test MCP connection",
-                "toolkit_config": task_kwargs.get('toolkit_config', {}),
+                "toolkit_config": meta_toolkit_config,
                 "user_id": task_kwargs.get('user_id', ''),
                 "deployment_url": task_kwargs.get('deployment_url', ''),
                 "project_auth_token": task_kwargs.get('project_auth_token', ''),

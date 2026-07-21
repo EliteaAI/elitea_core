@@ -269,6 +269,7 @@ def generate_toolkit_payload(
         mcp_tools = inject_mcp_toolkits(
             user_id=user_id,
             internal_tools=internal_tools or [],
+            existing_tools=tools,
         )
         tools.extend(mcp_tools)
     except Exception as e:
