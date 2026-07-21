@@ -16,7 +16,7 @@ from ...utils.authors import get_authors_data
 
 class SkillVersionCreateModel(BaseModel):
     name: str = Field(default='base', min_length=1, max_length=128)
-    instructions: str = Field(min_length=1, max_length=2500)
+    instructions: str = Field(min_length=1, max_length=5000)
     author_id: Optional[int] = Field(None, exclude=True)
     tags: Optional[List[TagBaseModel]] = None
     meta: Optional[dict] = None
@@ -64,7 +64,7 @@ class SkillVersionDetailModel(BaseModel):
 
 class SkillVersionUpdateModel(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=128)
-    instructions: Optional[str] = Field(None, min_length=1, max_length=2500)
+    instructions: Optional[str] = Field(None, min_length=1, max_length=5000)
     tags: Optional[List[PromptTagUpdateModel]] = None
     meta: Optional[dict] = None
 
@@ -82,7 +82,7 @@ class SkillVersionExportModel(BaseModel):
 
 class SkillVersionImportModel(BaseModel):
     name: str = Field(default='base', min_length=1, max_length=128)
-    instructions: str = Field(min_length=1, max_length=2500)
+    instructions: str = Field(min_length=1, max_length=5000)
     tags: Optional[List[TagBaseModel]] = None
     meta: Optional[dict] = None
 

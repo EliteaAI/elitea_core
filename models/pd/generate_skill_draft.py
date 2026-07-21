@@ -8,7 +8,7 @@ from .skill import validate_skill_name
 
 NAME_MAX_LENGTH = 64
 DESCRIPTION_MAX_LENGTH = 2304
-INSTRUCTIONS_MAX_LENGTH = 2500
+INSTRUCTIONS_MAX_LENGTH = 5000
 
 
 def _slugify_skill_name(value: str) -> str:
