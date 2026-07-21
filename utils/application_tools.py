@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from copy import deepcopy
 from typing import Optional, List
@@ -397,6 +398,34 @@ def _extract_pgvector_schema(toolkit_detail):
         return None
 
 
+# Process-wide cache of pgvector SQLAlchemy engines keyed by connection string.
+# Rebuilding a fresh engine per listing request was the hot path: for every
+# `toolkits_listing` call, `create_engine(conn_str)` + `engine.connect()` ran
+# once per distinct project connstr (in practice the same connstr for the
+# whole project). The engine's own connection pool was thrown away after each
+# call. This dict lets us reuse a single pooled engine across requests.
+_PGVECTOR_ENGINE_CACHE = {}
+_PGVECTOR_ENGINE_CACHE_LOCK = threading.Lock()
+
+
+def _get_pgvector_engine(conn_str: str):
+    """Return a cached SQLAlchemy engine for `conn_str`, creating it on first use.
+
+    Engines are safe to share across threads; connection pooling is delegated to
+    SQLAlchemy. We intentionally never call `engine.dispose()` here — the engine
+    lives for the process lifetime.
+    """
+    engine = _PGVECTOR_ENGINE_CACHE.get(conn_str)
+    if engine is not None:
+        return engine
+    with _PGVECTOR_ENGINE_CACHE_LOCK:
+        engine = _PGVECTOR_ENGINE_CACHE.get(conn_str)
+        if engine is None:
+            engine = create_engine(conn_str, pool_pre_ping=True)
+            _PGVECTOR_ENGINE_CACHE[conn_str] = engine
+    return engine
+
+
 def batch_count_toolkit_indexes(toolkit_conn_map: dict) -> dict:
     """
     Count index_meta rows per toolkit, grouped by connection string to minimize DB connections.
@@ -414,18 +443,22 @@ def batch_count_toolkit_indexes(toolkit_conn_map: dict) -> dict:
         by_conn.setdefault(conn_str, []).append(schema_name)
 
     for conn_str, schema_names in by_conn.items():
-        engine = None
         try:
-            engine = create_engine(conn_str)
+            engine = _get_pgvector_engine(conn_str)
             inspector = inspect(engine)
             with engine.connect() as conn:
                 for schema_name in schema_names:
                     try:
+                        # Defense-in-depth: schema_name is already validated as int-derived
+                        # in _extract_pgvector_schema, but this function is a general utility
+                        # and future callers may bypass that validation. Reject anything that
+                        # isn't a pure digit string before it reaches the SQL identifier.
+                        if not (isinstance(schema_name, str) and schema_name.isdigit()):
+                            log.error(f"Refusing to query pgvector schema with non-digit name: {schema_name!r}")
+                            continue
                         if not inspector.has_table("langchain_pg_embedding", schema=schema_name):
                             result[schema_name] = 0
                             continue
-                        # schema_name is validated as int-derived in _extract_pgvector_schema,
-                        # so it's safe to inline into the SQL identifier.
                         count = conn.execute(text(
                             f'SELECT COUNT(*) FROM "{schema_name}".langchain_pg_embedding '
                             "WHERE cmetadata->>'type' = 'index_meta'"
@@ -435,12 +468,6 @@ def batch_count_toolkit_indexes(toolkit_conn_map: dict) -> dict:
                         log.exception(f"Failed to count indexes for toolkit schema={schema_name}")
         except Exception:
             log.exception("Failed to open pgvector connection for index count")
-        finally:
-            if engine is not None:
-                try:
-                    engine.dispose()
-                except Exception:
-                    pass
     return result
 
 
@@ -546,42 +573,59 @@ def toolkits_listing(
 
         total_count = q.count()
 
-        # Snapshot the pgvector-capable ids/schemas across the FULL filtered set (pre-pagination)
-        # so `indexes_total` reflects every matching toolkit — not just the page slice. Doing
-        # this here lets us call batch_count_toolkit_indexes once and reuse the counts for both
-        # the aggregate total and the per-toolkit `indexes_count` enrichment below.
-        all_schema_ids = []
-        try:
-            for row_id, row_settings in q.with_entities(EliteATool.id, EliteATool.settings).all():
-                settings_dict = row_settings if isinstance(row_settings, dict) else None
-                if settings_dict is None:
-                    continue
-                pgconf = settings_dict.get('pgvector_configuration')
-                if isinstance(pgconf, dict) and pgconf:
-                    try:
-                        all_schema_ids.append(str(int(row_id)))
-                    except (TypeError, ValueError):
-                        pass
-        except Exception:
-            log.exception("Failed to prefetch pgvector schemas for indexes_total")
-            all_schema_ids = []
+        # Detect whether any user-supplied filter is active. The default toolkits
+        # view arrives from api/v2/tools.py with `filter_mcp=False` and
+        # `filter_application=False` (both are `.lower()=='true'` bool coercions
+        # of missing query params), so those default-off values are NOT treated as
+        # filters. Only opt-in modes (`filter_mcp=True`, `filter_application=True`)
+        # and text/id filters count.
+        has_filters = bool(
+            query
+            or search_artifact
+            or toolkit_type
+            or author_id
+            or filter_mcp
+            or filter_application is True
+        )
 
+        # Snapshot the pgvector-capable ids/schemas across the FULL filtered set (pre-pagination)
+        # so `indexes_total` reflects every matching toolkit — not just the page slice. This scan
+        # can be expensive on projects with thousands of toolkits, so we only run it for the
+        # default (unfiltered) listing. When any filter is active we return `indexes_total=None`
+        # and the UI hides the aggregate rather than pay for a full-set scan on every keystroke.
+        all_schema_ids = []
         all_indexes_counts = {}
-        if all_schema_ids:
+        if not has_filters:
             try:
-                from .vectorstore import get_pgvector_connection_string
-                conn_str = get_pgvector_connection_string(project_id)
-                if conn_str:
-                    all_indexes_counts = batch_count_toolkit_indexes(
-                        {schema_name: conn_str for schema_name in all_schema_ids}
-                    )
-                else:
-                    log.warning(
-                        "No pgvector_project_connstr in vault for project_id=%s; "
-                        "skipping pre-pagination indexes_total aggregation", project_id
-                    )
+                for row_id, row_settings in q.with_entities(EliteATool.id, EliteATool.settings).all():
+                    settings_dict = row_settings if isinstance(row_settings, dict) else None
+                    if settings_dict is None:
+                        continue
+                    pgconf = settings_dict.get('pgvector_configuration')
+                    if isinstance(pgconf, dict) and pgconf:
+                        try:
+                            all_schema_ids.append(str(int(row_id)))
+                        except (TypeError, ValueError):
+                            pass
             except Exception:
-                log.exception("Failed to compute pre-pagination indexes counts")
+                log.exception("Failed to prefetch pgvector schemas for indexes_total")
+                all_schema_ids = []
+
+            if all_schema_ids:
+                try:
+                    from .vectorstore import get_pgvector_connection_string
+                    conn_str = get_pgvector_connection_string(project_id)
+                    if conn_str:
+                        all_indexes_counts = batch_count_toolkit_indexes(
+                            {schema_name: conn_str for schema_name in all_schema_ids}
+                        )
+                    else:
+                        log.warning(
+                            "No pgvector_project_connstr in vault for project_id=%s; "
+                            "skipping pre-pagination indexes_total aggregation", project_id
+                        )
+                except Exception:
+                    log.exception("Failed to compute pre-pagination indexes counts")
 
         if sort_by != "name" and not sort_by_author:
             tools = q.offset(offset).limit(limit).all()
@@ -645,22 +689,44 @@ def toolkits_listing(
 
             result.append(toolkit_detail)
 
-        # Populate per-toolkit indexes_count from the pre-computed full-set counts
-        # (computed pre-pagination above). Reusing avoids a second batch DB round-trip
-        # and guarantees the paged rows agree with `indexes_total`.
+        # Populate per-toolkit indexes_count. In the unfiltered branch we reuse the
+        # pre-pagination `all_indexes_counts` dict; in the filtered branch we run a
+        # smaller batch keyed off just the page slice so users still see per-row
+        # counts without paying for the full-set scan.
         try:
+            page_schema_map = {}
             for td in result:
                 schema_name = _extract_pgvector_schema(td)
-                if schema_name and schema_name in all_indexes_counts:
+                if not schema_name:
+                    continue
+                if schema_name in all_indexes_counts:
                     td.indexes_count = all_indexes_counts[schema_name]
+                elif has_filters:
+                    page_schema_map[schema_name] = td
+
+            if has_filters and page_schema_map:
+                try:
+                    from .vectorstore import get_pgvector_connection_string
+                    conn_str = get_pgvector_connection_string(project_id)
+                    if conn_str:
+                        page_counts = batch_count_toolkit_indexes(
+                            {sn: conn_str for sn in page_schema_map.keys()}
+                        )
+                        for sn, td in page_schema_map.items():
+                            if sn in page_counts:
+                                td.indexes_count = page_counts[sn]
+                except Exception:
+                    log.exception("Failed to populate page-slice indexes_count on filtered toolkit listing")
         except Exception:
             log.exception("Failed to populate indexes_count on toolkit listing")
 
         # Aggregate indexes total across the FULL filtered set (not just the page).
-        # `all_indexes_counts` was populated pre-pagination above, so this is stable
-        # across sort_by=name / sort_by_author (which slice `result` after this line)
-        # and sort_by=created_at (which slices `tools` via q.offset().limit()).
-        indexes_total = sum(all_indexes_counts.values()) if all_indexes_counts else 0
+        # When any user filter is active we return `None` so the UI can hide the
+        # aggregate — computing it would require a full-set pgvector scan on every
+        # filter change, which is prohibitive on large projects.
+        indexes_total = None if has_filters else (
+            sum(all_indexes_counts.values()) if all_indexes_counts else 0
+        )
 
         if sort_by == "name":
             reverse_name = sort_order.lower() == "desc"
