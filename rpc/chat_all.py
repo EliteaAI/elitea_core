@@ -937,7 +937,7 @@ class RPC:
                 parsed.project_id,
             )
 
-            if parsed.participant_id is None and "@everyone" not in parsed.user_input.lower() and not parsed.user_ids:
+            if parsed.participant_id is None and not parsed.user_ids:
                 dummy_participant, _ = get_or_create_one(
                     session=session,
                     entity_name=ParticipantTypes.dummy,
