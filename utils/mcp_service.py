@@ -248,7 +248,8 @@ class McpService:
                     version_id=version_id,
                     payload_in={"user_input": request.params.arguments["task"], "chat_history": []},
                     raw=None,
-                    webhook_signature=None
+                    webhook_signature=None,
+                    return_chat_history=True
                 )
                 #
                 if "error" not in result or result["error"] is None:
