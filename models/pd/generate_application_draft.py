@@ -177,6 +177,10 @@ class GenerateApplicationDraftResponse(BaseModel):
             all_app_items.extend(data.get(key) or [])
         agent_items = []
         for item in all_app_items:
+            # Skip items with missing required fields (name or application_id)
+            if isinstance(item, dict):
+                if not item.get("application_id") or not item.get("name"):
+                    continue
             item_type = (
                 item.get("type", "")
                 if isinstance(item, dict)
