@@ -17,6 +17,25 @@ from ..utils.meta_guard import strip_heavy_meta_expr
 MESSAGES_DISPLAY_COUNT: int = 100
 
 
+def resolve_persona_instructions(user_personalization: dict, persona: str) -> str:
+    """Resolve the instructions that apply to `persona` from a user's personalization (#5392).
+
+    Selection order:
+      1. personality_instructions[persona] non-empty  -> that persona's instructions.
+      2. personality_instructions present but entry empty/missing -> '' (NO override; must NOT
+         fall back to another persona's text, or per-persona isolation is defeated).
+      3. personality_instructions absent/not a dict (legacy/unmigrated row) -> flat
+         default_instructions, i.e. the pre-#5392 behavior, unchanged.
+    Returns '' when nothing applies (caller then leaves instructions untouched).
+    """
+    if not user_personalization:
+        return ''
+    instructions_map = user_personalization.get('personality_instructions')
+    if isinstance(instructions_map, dict):
+        return instructions_map.get(persona) or '' if persona else ''
+    return user_personalization.get('default_instructions') or ''
+
+
 def _thinking_span_subquery(session: Session, conversation_ids: list[int]):
     """Per-group thinking wall-clock (secs) from message_trace_step: max(finished) - min(started).
 
