@@ -77,6 +77,9 @@ class RPC:
                             for user_id, user_config in schedules.items():
                                 yield_to_hub()
                                 init_issue = None
+                                # JSON serialises int keys as strings; team/shared schedules
+                                # are stored under user_id=-1 (see index_meta PATCH endpoint).
+                                is_team_schedule = str(user_id) == "-1"
 
                                 # Convert stored dict to ToolkitIndexingSchedule model
                                 try:
@@ -115,6 +118,7 @@ class RPC:
                                     toolkit_type=toolkit.type,
                                     user_config=user_config,
                                     project_id=project_id,
+                                    is_team_schedule=is_team_schedule,
                                 )
 
                                 if not init_issue and not should_trigger_by_credentials:
@@ -126,15 +130,20 @@ class RPC:
 
                                 if init_issue:
                                     handle_failed_index_schedule(
-                                        project_id, updated_settings, creator_id, toolkit, index_meta_id, init_issue
+                                        project_id, updated_settings, creator_id, toolkit,
+                                        index_meta_id, init_issue,
+                                        expand_user_id=creator_id,
                                     )
                                     continue
 
-                                # Expand the updated settings
+                                # Expand the updated settings. For team schedules (user_id=-1)
+                                # use the schedule creator to avoid get_personal_project_id(-1),
+                                # which raises when any nested config is private=True.
+                                expand_user_id = creator_id if is_team_schedule else user_id
                                 settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
                                     project_id=project_id,
                                     settings=updated_settings,
-                                    user_id=user_id,
+                                    user_id=expand_user_id,
                                     unsecret=True
                                 )
                                 connection_string = settings_expanded.get('pgvector_configuration').get('connection_string')
