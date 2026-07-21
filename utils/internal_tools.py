@@ -490,7 +490,16 @@ def _get_internal_base_url() -> str:
 # whole shape (not just a trailing /mcp/<x> segment) is what distinguishes an internal endpoint
 # from an arbitrary external MCP server that happens to share a path segment.
 _INTERNAL_MCP_ENDPOINT_RE = re.compile(r'/app/(?:\{project_id\}|\d+)/mcp/(?P<suffix>[^?#]+)')
+# Deliberately narrower than _INTERNAL_MCP_ENDPOINT_RE: PAT injection fires only for the
+# unresolved {project_id} template. A URL that already carries a concrete integer project id is
+# never re-stamped with the caller's PAT, so a materialized or foreign-scoped endpoint cannot
+# borrow another user's token. Dedup uses the broader pattern on purpose — it must recognize a
+# manually-added toolkit even when its URL is already resolved to an integer.
 _INTERNAL_MCP_TEMPLATE_RE = re.compile(r'/app/\{project_id\}/mcp/')
+
+# Distinguishes "PAT not looked up yet" from "looked up, none found", so a user without a PAT
+# does not trigger a fresh token lookup for every tool in the payload.
+_TOKEN_UNSET = object()
 
 
 def _extract_internal_mcp_suffix(url: str) -> Optional[str]:
@@ -628,7 +637,7 @@ def _match_internal_mcp_template_url(settings: dict, prebuilt_url: str = None) -
 
 
 def resolve_internal_mcp_settings(settings: dict, user_id: int, project_id: int,
-                                  prebuilt_url: str = None, token: str = None) -> dict:
+                                  prebuilt_url: str = None, token=_TOKEN_UNSET) -> dict:
     """Fill project_id and the executing user's PAT into an internal MCP toolkit's config.
 
     The values land in the toolkit settings as `project_id`/`personal_token` so the SDK
@@ -643,7 +652,7 @@ def resolve_internal_mcp_settings(settings: dict, user_id: int, project_id: int,
 
     result = dict(settings)
     result['project_id'] = project_id
-    if token is None:
+    if token is _TOKEN_UNSET:
         token = _get_user_token(user_id)
     if token:
         result['personal_token'] = token
@@ -660,7 +669,35 @@ def resolve_internal_mcp_settings(settings: dict, user_id: int, project_id: int,
     return result
 
 
-_TOKEN_UNSET = object()
+def redact_internal_mcp_secrets(toolkit_config: dict) -> dict:
+    """Return a copy of a toolkit config with the injected personal token stripped.
+
+    Used when a resolved config is stored in task meta (a tracking surface), so the never-vaulted
+    PAT does not sit there in plaintext. The worker reads credentials from task kwargs, not meta,
+    so this does not affect dispatch. Leaves configs without an injected token untouched.
+    """
+    if not isinstance(toolkit_config, dict):
+        return toolkit_config
+    settings = toolkit_config.get('settings')
+    if not isinstance(settings, dict):
+        return toolkit_config
+    has_token = 'personal_token' in settings
+    headers = settings.get('headers')
+    has_auth_header = isinstance(headers, dict) and any(
+        isinstance(k, str) and k.lower() == 'authorization' for k in headers
+    )
+    if not has_token and not has_auth_header:
+        return toolkit_config
+    redacted_settings = dict(settings)
+    redacted_settings.pop('personal_token', None)
+    if has_auth_header:
+        redacted_settings['headers'] = {
+            k: ('***' if isinstance(k, str) and k.lower() == 'authorization' else v)
+            for k, v in headers.items()
+        }
+    result = dict(toolkit_config)
+    result['settings'] = redacted_settings
+    return result
 
 
 def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_id: int) -> None:
@@ -681,6 +718,11 @@ def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_
                 continue
             if token is _TOKEN_UNSET:
                 token = _get_user_token(user_id)
+                if not token:
+                    log.warning(
+                        f"[MCP] Internal MCP toolkit matched for user {user_id} with no valid "
+                        "personal token; dispatch will fail authentication"
+                    )
             owner_project_id = tool.get('project_id') or runtime_project_id
             tool['settings'] = resolve_internal_mcp_settings(
                 settings, user_id, owner_project_id, prebuilt_url=prebuilt_url, token=token
