@@ -710,22 +710,32 @@ def redact_internal_mcp_secrets(toolkit_config: dict) -> dict:
     return result
 
 
+def _match_internal_mcp(toolkit_config: dict) -> tuple[bool, str | None]:
+    """Single internal-MCP matcher shared by the resolver and the PAT gate so they can't drift.
+    Returns (is_internal, prebuilt_url); prebuilt_url is the admin-configured URL to substitute into
+    (None when the toolkit's own settings already carry the URL)."""
+    if not isinstance(toolkit_config, dict):
+        return False, None
+    type_ = toolkit_config.get('type', '')
+    settings = toolkit_config.get('settings')
+    if not type_.startswith('mcp_') or not isinstance(settings, dict):
+        return False, None
+    prebuilt_url = None
+    if not settings.get('url'):
+        prebuilt_url = (this.module.get_mcp_prebuilt_config(type_) or {}).get('url')
+    if _match_internal_mcp_template_url(settings, prebuilt_url) is None:
+        return False, None
+    return True, prebuilt_url
+
+
 def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_id: int) -> None:
     token = _TOKEN_UNSET
     for tool in tools or []:
         try:
-            if not isinstance(tool, dict):
+            matched, prebuilt_url = _match_internal_mcp(tool)
+            if not matched:
                 continue
-            type_ = tool.get('type', '')
             settings = tool.get('settings')
-            if not type_.startswith('mcp_') or not isinstance(settings, dict):
-                continue
-            prebuilt_url = None
-            if not settings.get('url'):
-                prebuilt = this.module.get_mcp_prebuilt_config(type_)
-                prebuilt_url = (prebuilt or {}).get('url')
-            if _match_internal_mcp_template_url(settings, prebuilt_url) is None:
-                continue
             if token is _TOKEN_UNSET:
                 token = _get_user_token(user_id)
                 if not token:
@@ -749,16 +759,7 @@ class InternalMcpPatError(Exception):
 
 
 def is_internal_mcp_toolkit(toolkit_config: dict) -> bool:
-    if not isinstance(toolkit_config, dict):
-        return False
-    type_ = toolkit_config.get('type', '')
-    settings = toolkit_config.get('settings')
-    if not type_.startswith('mcp_') or not isinstance(settings, dict):
-        return False
-    prebuilt_url = None
-    if not settings.get('url'):
-        prebuilt_url = (this.module.get_mcp_prebuilt_config(type_) or {}).get('url')
-    return _match_internal_mcp_template_url(settings, prebuilt_url) is not None
+    return _match_internal_mcp(toolkit_config)[0]
 
 
 def require_internal_mcp_pat(toolkit_config: dict, user_id: int) -> None:
