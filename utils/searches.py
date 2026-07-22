@@ -3,34 +3,26 @@ from typing import List
 
 from flask import request
 from sqlalchemy.orm import joinedload
-from sqlalchemy import or_, and_, not_
+from sqlalchemy import and_, not_, or_
 
-from ..utils.exceptions import NotFound
 from ..models.all import Tag
 from ..utils.utils import get_entities_by_tags
-from ..models.all import Collection
 from ..models.pd.misc import MultipleTagListModel
-from ..models.pd.collections import MultipleCollectionSearchModel
-from .collections import get_filter_collection_by_entity_tags_condition
 
 from tools import db, api_tools
 from pylon.core.tools import log
 
 
-def get_search_options(project_id, Model, PDModel, joinedload_, args_prefix, filters=None):
+def get_search_options(project_id, Model, PDModel, joinedload_, args_prefix, filters=None, search_fields=('name',)):
     query = request.args.get('query', '')
     search_query = f"%{query}%"
 
-    # filter_fields = ('name', 'title')
-    # conditions = []
-    # for field in filter_fields:
-    #     if hasattr(Model, field):
-    #         conditions.append(
-    #             getattr(Model, field).ilike(search_query)
-    #         )
-    # or_(*conditions)
-
-    filter_ = and_(getattr(Model, 'name').ilike(search_query), *filters)
+    conditions = [
+        getattr(Model, field).ilike(search_query)
+        for field in search_fields
+        if hasattr(Model, field)
+    ]
+    filter_ = and_(or_(*conditions), *filters)
     args_data = get_args(args_prefix)
     total, res = api_tools.get(
         project_id=project_id,
@@ -72,13 +64,6 @@ def get_search_options_one_entity(
             "args_prefix": args_prefix,
             "filters": [],
         },
-        "collection": {
-            "Model": Collection,
-            "PDModel": MultipleCollectionSearchModel,
-            "joinedload_": None,
-            "args_prefix": "col",
-            "filters": [],
-        },
         "tag": {
             "Model": Tag,
             "PDModel": MultipleTagListModel,
@@ -89,16 +74,6 @@ def get_search_options_one_entity(
     }
 
     if tags:
-        try:
-            data = get_filter_collection_by_entity_tags_condition(project_id, tags, entity_name)
-            meta_data['collection']['filters'].append(or_(*data))
-        except NotFound:
-            entities = [entity for entity in entities if entity != "collection"]
-            result['collection'] = {
-                "total": 0,
-                "rows": []
-            }
-
         entities_subq = get_entities_by_tags(project_id, tags, Model, ModelVersion)
         meta_data[entity_name]['filters'].append(
             Model.id.in_(entities_subq)
@@ -117,10 +92,6 @@ def get_search_options_one_entity(
         )
 
     if author_id:
-        meta_data['collection']['filters'].append(
-            Collection.author_id == author_id
-        )
-
         meta_data[entity_name]['filters'].append(
             Model.versions.any(ModelVersion.author_id == author_id)
         )
@@ -128,9 +99,6 @@ def get_search_options_one_entity(
     if statuses:
         meta_data[entity_name]['filters'].append(
             (Model.versions.any(ModelVersion.status.in_(statuses)))
-        )
-        meta_data['collection']['filters'].append(
-            Collection.status.in_(statuses)
         )
 
     meta_data['tag']['filters'].append(
@@ -143,7 +111,6 @@ def get_search_options_one_entity(
             author_id=author_id,
             statuses=statuses,
             tags=tags,
-
         )
     )
 

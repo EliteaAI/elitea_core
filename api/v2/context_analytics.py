@@ -1,6 +1,6 @@
 """Context Analytics API - Get context status from conversation meta."""
 
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 from pylon.core.tools import log
 
 from ...utils.context_analytics import get_context_data, build_context_response
@@ -8,6 +8,40 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get Conversation Context Analytics",
+        description=(
+            "Returns context utilisation analytics for a conversation: token counts, "
+            "context window usage percentage, active context strategy, and message breakdown."
+        ),
+        tags=["elitea_core/chat"],
+        responses={
+            "200": {
+                "description": "Conversation context analytics",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "used_tokens": 3200,
+                            "max_tokens": 8192,
+                            "usage_pct": 39.1,
+                            "strategy": "summarize",
+                            "messages": {
+                                "total": 24,
+                                "human": 12,
+                                "ai": 12,
+                            },
+                        }
+                    }
+                },
+            },
+            "401": {"description": "Unauthorized"},
+            "400": {"description": "Bad request"},
+            "403": {"description": "Forbidden"},
+            "404": {"description": "Not found"},
+            "500": {"description": "Internal server error"},
+        },
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.details"],
         "recommended_roles": {

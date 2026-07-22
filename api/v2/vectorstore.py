@@ -1,10 +1,10 @@
 from typing import Optional
 
 from flask import request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, ConfigDict
 
 from tools import VaultClient
-from tools import api_tools, auth, config as c, this
+from tools import api_tools, auth, config as c, this, register_openapi
 from ...rpc.vectorstore import VAULT_PGVECTOR_PASSWORD_KEY, VAULT_PGVECTOR_CONNSTR_KEY
 
 
@@ -14,8 +14,40 @@ class VectorStoreCreate(BaseModel):
     public_pgvector_title: str = 'elitea-pgvector'
     force_recreate: Optional[bool] = False
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "project_ids": [1, 2, 3],
+                    "concurrent_tasks": 20,
+                    "public_pgvector_title": "elitea-pgvector",
+                    "force_recreate": False,
+                }
+            ]
+        }
+    )
+
+
+class VectorStoreDelete(BaseModel):
+    project_ids: list[int] | None = None
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"project_ids": [1, 2, 3]},
+            ]
+        }
+    )
+
 
 class AdminAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Create VectorStore Credentials",
+        description="Create pgvector credentials for one or more projects and store connection strings in secrets.",
+        tags=["elitea_core/runtime"],
+        request_body=VectorStoreCreate,
+        available_to_users=False,
+    )
     @auth.decorators.check_api(["runtime.plugins"])
     def post(self, **kwargs):
         try:
@@ -43,10 +75,17 @@ class AdminAPI(api_tools.APIModeHandler):
 
         return {'errors': errors, 'success': success}, 200 if len(errors) == 0 else 207
 
+    @register_openapi(
+        name="Delete VectorStore Credentials",
+        description="Remove pgvector password and connection string secrets from specified projects (or all projects if none specified).",
+        tags=["elitea_core/runtime"],
+        request_body=VectorStoreDelete,
+        available_to_users=False,
+    )
     @auth.decorators.check_api(["runtime.plugins"])
     def delete(self, **kwargs):
         try:
-            parsed = VectorStoreCreate.model_validate(request.json)
+            parsed = VectorStoreDelete.model_validate(request.json or {})
         except ValidationError as e:
             return e.errors(), 400
 

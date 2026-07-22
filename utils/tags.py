@@ -8,9 +8,9 @@ from tools import db
 from pylon.core.tools import log
 
 from .like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
-from ..models.all import Collection
 from ..models.all import Tag
 from ..models.all import Application, ApplicationVersion, ApplicationVersionTagAssociation
+from ..models.skill import Skill, SkillVersion, SkillVersionTagAssociation
 
 
 class TagListABC(ABCMeta):
@@ -32,8 +32,6 @@ class TagList(metaclass=TagListABC):
         # trending period
         self._set_trending_info()
         self.session = db.get_project_schema_session(project_id)
-        self._is_collection = False
-
     def _set_general_query_info(self):
         self.limit = self.args.get("limit", 0)
         self.offset = self.args.get("offset", 0)
@@ -119,12 +117,6 @@ class TagList(metaclass=TagListABC):
         tag_filters = [getattr(self.Version, self.foriegn_key).in_(entity_subquery)]
         if search := self.args.get("search"):
             tag_filters.append(Tag.name.ilike(f"%{search}%"))
-        if self._is_collection:
-            all_prompt_ids = [
-                prompt['id'] for collection in self.session.query(Collection.prompts).all()
-                for prompt in next(iter(collection))
-            ]
-            tag_filters.append(getattr(self.Version, self.foriegn_key).in_(all_prompt_ids))
         return tag_filters
 
     def execute_main_query(self, tag_filters):
@@ -154,7 +146,7 @@ class TagList(metaclass=TagListABC):
         return total, query.all()
 
     def _as_dict(self, x):
-        result = {'id': x[0], 'name': x[1], 'data': loads(x[2])}
+        result = {'id': x[0], 'name': x[1], 'data': loads(x[2]) if x[2] else None}
         result[self.count_name] = x[3]
         return result
 
@@ -223,6 +215,34 @@ class PipelineTagList(TagList):
             self.Entity.versions.any(self.Version.agent_type == "pipeline")
         )
         return filters
+
+
+class SkillTagList(TagList):
+    def set_related_entity_info(self):
+        self.Entity = Skill
+        self.Version = SkillVersion
+        self.VersionTagAssociation = SkillVersionTagAssociation
+        self.foriegn_key = 'skill_id'
+        self.count_name = "skill_count"
+
+    def get_related_entity_filters(self):
+        filters = []
+        if author_id := self.args.get('author_id'):
+            filters.append(self.Entity.versions.any(self.Version.author_id == author_id))
+        if query := self.args.get('query'):
+            filters.append(
+                or_(
+                    self.Entity.name.ilike(f"%{query}%"),
+                    self.Entity.description.ilike(f"%{query}%")
+                )
+            )
+        return filters
+
+    def get_related_entity_query(self, filters):
+        entity_query = self.session.query(self.Entity)
+        if filters:
+            entity_query = entity_query.filter(*filters)
+        return entity_query.with_entities(self.Entity.id).subquery()
 
 
 class AllTagList(TagList):

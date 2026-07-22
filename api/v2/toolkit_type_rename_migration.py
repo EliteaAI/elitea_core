@@ -1,22 +1,54 @@
 from pylon.core.tools import log
 from flask import request
-from sqlalchemy import text
+from sqlalchemy.orm.attributes import flag_modified
 from tools import api_tools, auth, config as c, db
 
 from ...models.elitea_tools import EliteATool
 
 
-# Mapping of old toolkit types to new toolkit types
-# Format: "OldProviderName_OldToolkitName": ("NewProviderName_NewToolkitName", "OldToolkitName", "NewToolkitName")
-# The tuple contains: (new_type, old_settings_toolkit, new_settings_toolkit)
+# Mapping of old toolkit types to new toolkit types.
+#
+# Required fields per entry:
+#   new_type, old_toolkit, new_toolkit
+#
+# Optional (only when the provider slug itself changed, e.g. deepwiki ->
+# wikis). Both must be supplied together. When present, the migration
+# also rewrites settings.provider and the provider slug in
+# meta.interface.{app_url,create_url}:
+#   old_provider, new_provider
 TOOLKIT_TYPE_RENAMES = {
-    "SyngenServiceProvider_SyngenToolkit": ("SyngenServiceProvider_Syngen", "SyngenToolkit", "Syngen"),
-    "ClaudeServiceProvider_ClaudeToolkit": ("ClaudeServiceProvider_ClaudeCode", "ClaudeToolkit", "ClaudeCode"),
-    "SlidevServiceProvider_SlidevToolkit": ("SlidevServiceProvider_Slidev", "SlidevToolkit", "Slidev"),
-    "CodexServiceProvider_CodexToolkit": ("CodexServiceProvider_Codex", "CodexToolkit", "Codex"),
-    # Add more renames here as needed:
-    # "ProviderName_OldToolkitName": ("ProviderName_NewToolkitName", "OldToolkitName", "NewToolkitName"),
+    "SyngenServiceProvider_SyngenToolkit": {
+        "new_type": "SyngenServiceProvider_Syngen",
+        "old_toolkit": "SyngenToolkit",
+        "new_toolkit": "Syngen",
+    },
+    "ClaudeServiceProvider_ClaudeToolkit": {
+        "new_type": "ClaudeServiceProvider_ClaudeCode",
+        "old_toolkit": "ClaudeToolkit",
+        "new_toolkit": "ClaudeCode",
+    },
+    "SlidevServiceProvider_SlidevToolkit": {
+        "new_type": "SlidevServiceProvider_Slidev",
+        "old_toolkit": "SlidevToolkit",
+        "new_toolkit": "Slidev",
+    },
+    "CodexServiceProvider_CodexToolkit": {
+        "new_type": "CodexServiceProvider_Codex",
+        "old_toolkit": "CodexToolkit",
+        "new_toolkit": "Codex",
+    },
+    "deepwiki_Deepwiki": {
+        "new_type": "wikis_Wikis",
+        "old_toolkit": "Deepwiki",
+        "new_toolkit": "Wikis",
+        "old_provider": "deepwiki",
+        "new_provider": "wikis",
+    },
 }
+
+
+REQUIRED_RENAME_FIELDS = ("new_type", "old_toolkit", "new_toolkit")
+OPTIONAL_PROVIDER_FIELDS = ("old_provider", "new_provider")
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -30,24 +62,34 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def post(self):
         """
-        Migrate toolkit types when toolkits are renamed.
-        
+        Migrate toolkit types when toolkits (and optionally their providers)
+        are renamed.
+
+        Updates per tool: type, settings.toolkit, settings.provider,
+        meta.label, meta.interface.app_url, meta.interface.create_url.
+
+        Re-running is safe: each rename matches both the old and new type,
+        and only stale fields are touched, so partially-migrated rows from
+        prior runs get repaired without disturbing rows that already match
+        the new schema.
+
         Request body:
         {
-            "project_id": 0,  // 0 for all projects, or specific project_id
-            "dry_run": false,  // If true, only report what would be changed
-            "renames": {  // Optional: override default TOOLKIT_TYPE_RENAMES
-                "SyngenServiceProvider_SyngenToolkit": {
-                    "new_type": "SyngenServiceProvider_Syngen",
-                    "old_toolkit": "SyngenToolkit", 
-                    "new_toolkit": "Syngen"
+            "project_id": 0,                  # 0 = all projects
+            "dry_run": false,
+            "renames": {                      # optional - overrides defaults
+                "deepwiki_Deepwiki": {
+                    "new_type": "wikis_Wikis",
+                    "old_toolkit": "Deepwiki",
+                    "new_toolkit": "Wikis",
+                    "old_provider": "deepwiki",
+                    "new_provider": "wikis"
                 }
             }
         }
         """
         payload = dict(request.json) if request.json else {}
-        
-        # Validate project_id
+
         project_id = payload.get('project_id')
         if project_id is not None:
             try:
@@ -56,148 +98,192 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     return {"error": "Invalid project_id. Must be >= 0."}, 400
             except ValueError:
                 return {"error": "Invalid project_id. Must be an integer."}, 400
-        
+
         dry_run = payload.get('dry_run', False)
-        
-        # Get renames from payload or use defaults
+
         custom_renames = payload.get('renames', {})
-        renames = {}
-        
-        # Use custom renames if provided, otherwise use defaults
         if custom_renames:
-            required_fields = ('new_type', 'old_toolkit', 'new_toolkit')
+            renames = {}
             for old_type, rename_config in custom_renames.items():
-                # Validate old_type is non-empty string
                 if not old_type or not isinstance(old_type, str):
-                    return {"error": f"Invalid old_type key: must be a non-empty string"}, 400
-                
-                # Validate rename_config is a dict
+                    return {"error": "Invalid old_type key: must be a non-empty string"}, 400
                 if not isinstance(rename_config, dict):
                     return {"error": f"Invalid rename config for '{old_type}': must be an object"}, 400
-                
-                # Validate required fields exist
-                missing_fields = [f for f in required_fields if f not in rename_config]
-                if missing_fields:
-                    return {"error": f"Missing required fields for '{old_type}': {missing_fields}"}, 400
-                
-                # Validate all values are non-empty strings
-                for field in required_fields:
+
+                missing = [f for f in REQUIRED_RENAME_FIELDS if f not in rename_config]
+                if missing:
+                    return {"error": f"Missing required fields for '{old_type}': {missing}"}, 400
+
+                normalized = {}
+                for field in REQUIRED_RENAME_FIELDS:
                     value = rename_config[field]
                     if not value or not isinstance(value, str):
                         return {"error": f"Invalid '{field}' for '{old_type}': must be a non-empty string"}, 400
-                
-                renames[old_type] = (
-                    rename_config['new_type'],
-                    rename_config['old_toolkit'],
-                    rename_config['new_toolkit']
-                )
+                    normalized[field] = value
+
+                supplied_provider_fields = [f for f in OPTIONAL_PROVIDER_FIELDS if f in rename_config]
+                if supplied_provider_fields and len(supplied_provider_fields) != len(OPTIONAL_PROVIDER_FIELDS):
+                    return {"error": f"For '{old_type}': both 'old_provider' and 'new_provider' must be supplied together"}, 400
+                for field in supplied_provider_fields:
+                    value = rename_config[field]
+                    if not value or not isinstance(value, str):
+                        return {"error": f"Invalid '{field}' for '{old_type}': must be a non-empty string"}, 400
+                    normalized[field] = value
+
+                renames[old_type] = normalized
         else:
             renames = TOOLKIT_TYPE_RENAMES
-        
+
         if not renames:
             return {"error": "No renames configured. Provide 'renames' in request body or configure TOOLKIT_TYPE_RENAMES."}, 400
-        
-        # Get project IDs
+
         project_ids = [project_id] if project_id else [
             i['id'] for i in self.module.context.rpc_manager.call.project_list(
                 filter_={'create_success': True}
             )
         ]
-        
+
         log.info(f"{'[DRY RUN] ' if dry_run else ''}Migrating toolkit types for projects {project_ids}")
         log.info(f"Renames to apply: {renames}")
-        
-        # Track migration results
+
         results = {
             "migrated_tools": [],
             "failed_projects": [],
-            "summary_by_type": {}
+            "summary_by_type": {},
         }
-        
-        for old_type, (new_type, old_toolkit, new_toolkit) in renames.items():
+        for old_type, cfg in renames.items():
             results["summary_by_type"][old_type] = {
-                "new_type": new_type,
+                "new_type": cfg["new_type"],
                 "tools_found": 0,
-                "tools_migrated": 0
+                "tools_migrated": 0,
             }
-        
+
         for pid in project_ids:
             try:
                 with db.get_session(pid) as session:
-                    for old_type, (new_type, old_toolkit, new_toolkit) in renames.items():
-                        # Find tools with the old type
+                    for old_type, cfg in renames.items():
+                        new_type = cfg["new_type"]
+                        old_toolkit = cfg["old_toolkit"]
+                        new_toolkit = cfg["new_toolkit"]
+                        old_provider = cfg.get("old_provider")
+                        new_provider = cfg.get("new_provider")
+
+                        # Match both old and new type so partial migrations
+                        # from prior runs get repaired idempotently.
                         tools = session.query(EliteATool).filter(
-                            EliteATool.type == old_type
+                            EliteATool.type.in_([old_type, new_type])
                         ).all()
-                        
                         results["summary_by_type"][old_type]["tools_found"] += len(tools)
-                        
                         if tools:
-                            log.info(f"Found {len(tools)} tools with type '{old_type}' in project {pid}")
-                        
-                        for tool in tools:
-                            # Check if settings['toolkit'] needs update
-                            settings_needs_update = (
-                                tool.settings and 
-                                'toolkit' in tool.settings and 
-                                tool.settings['toolkit'] == old_toolkit
+                            log.info(
+                                f"Found {len(tools)} tool(s) matching rename "
+                                f"'{old_type}' -> '{new_type}' in project {pid}"
                             )
-                            current_settings_toolkit = tool.settings.get('toolkit') if tool.settings else None
-                            
+
+                        for tool in tools:
+                            settings = tool.settings or {}
+                            meta = tool.meta or {}
+                            interface = meta.get("interface") if isinstance(meta.get("interface"), dict) else None
+
+                            type_changed = tool.type == old_type
+                            toolkit_changed = settings.get("toolkit") == old_toolkit
+                            provider_changed = bool(
+                                old_provider and new_provider
+                                and settings.get("provider") == old_provider
+                            )
+                            label_changed = meta.get("label") == old_toolkit
+
+                            url_changes = {}
+                            if (
+                                old_provider and new_provider
+                                and old_provider != new_provider
+                                and interface is not None
+                            ):
+                                old_slug = f"/{old_provider}/"
+                                new_slug = f"/{new_provider}/"
+                                for url_key in ("app_url", "create_url"):
+                                    url = interface.get(url_key)
+                                    if isinstance(url, str) and old_slug in url:
+                                        url_changes[url_key] = url.replace(old_slug, new_slug)
+
+                            changes = []
+                            if type_changed:
+                                changes.append({"field": "type", "old": tool.type, "new": new_type})
+                            if toolkit_changed:
+                                changes.append({"field": "settings.toolkit", "old": settings["toolkit"], "new": new_toolkit})
+                            if provider_changed:
+                                changes.append({"field": "settings.provider", "old": settings["provider"], "new": new_provider})
+                            if label_changed:
+                                changes.append({"field": "meta.label", "old": meta["label"], "new": new_toolkit})
+                            for url_key, new_url in url_changes.items():
+                                changes.append({
+                                    "field": f"meta.interface.{url_key}",
+                                    "old": interface[url_key],
+                                    "new": new_url,
+                                })
+
                             tool_info = {
                                 "project_id": pid,
                                 "tool_id": tool.id,
                                 "tool_name": tool.name,
-                                "old_type": old_type,
-                                "new_type": new_type,
-                                "old_settings_toolkit": current_settings_toolkit,
-                                "new_settings_toolkit": new_toolkit if settings_needs_update else current_settings_toolkit,
-                                "settings_toolkit_will_update": settings_needs_update,
+                                "current_type": tool.type,
+                                "rename": f"{old_type} -> {new_type}",
+                                "changes": changes,
+                                "will_update": bool(changes),
                             }
-                            
-                            if not dry_run:
-                                # Update the type
-                                tool.type = new_type
-                                
-                                # Update settings['toolkit'] if it matches old toolkit name
-                                if settings_needs_update:
-                                    # Create new settings dict to trigger SQLAlchemy update
-                                    new_settings = dict(tool.settings)
-                                    new_settings['toolkit'] = new_toolkit
+
+                            if changes and not dry_run:
+                                if type_changed:
+                                    tool.type = new_type
+                                if toolkit_changed or provider_changed:
+                                    new_settings = dict(settings)
+                                    if toolkit_changed:
+                                        new_settings["toolkit"] = new_toolkit
+                                    if provider_changed:
+                                        new_settings["provider"] = new_provider
                                     tool.settings = new_settings
-                                    tool_info["settings_toolkit_updated"] = True
-                                
+                                    flag_modified(tool, "settings")
+                                if label_changed or url_changes:
+                                    new_meta = dict(meta)
+                                    if label_changed:
+                                        new_meta["label"] = new_toolkit
+                                    if url_changes:
+                                        new_meta["interface"] = {**interface, **url_changes}
+                                    tool.meta = new_meta
+                                    flag_modified(tool, "meta")
                                 results["summary_by_type"][old_type]["tools_migrated"] += 1
-                            
-                            results["migrated_tools"].append(tool_info)
-                    
+                                tool_info["updated"] = True
+
+                            # Skip already-clean rows (matched by type-IN filter for
+                            # idempotent re-run, but nothing to report). summary_by_type
+                            # still reflects the full match count via tools_found.
+                            if changes:
+                                results["migrated_tools"].append(tool_info)
+
                     if not dry_run:
                         session.commit()
                         log.info(f"Successfully migrated toolkit types for project {pid}")
-                        
             except Exception as e:
                 log.error(f"Error migrating project {pid}: {str(e)}")
                 results["failed_projects"].append({
                     "project_id": pid,
-                    "error": str(e)
+                    "error": str(e),
                 })
-        
-        # Build response
+
         response = {
             "message": f"{'[DRY RUN] ' if dry_run else ''}Toolkit type rename migration completed",
             "dry_run": dry_run,
-            "renames_applied": {k: v[0] for k, v in renames.items()},
+            "renames_applied": {k: v["new_type"] for k, v in renames.items()},
             "results": results,
             "summary": {
                 "total_projects": len(project_ids),
                 "failed_count": len(results["failed_projects"]),
                 "total_tools_found": sum(r["tools_found"] for r in results["summary_by_type"].values()),
                 "total_tools_migrated": sum(r["tools_migrated"] for r in results["summary_by_type"].values()),
-            }
+            },
         }
-        
-        status_code = 200 if len(results["failed_projects"]) == 0 else 207
-        
+
+        status_code = 200 if not results["failed_projects"] else 207
         return response, status_code
 
 

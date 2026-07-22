@@ -3,6 +3,7 @@ from pylon.core.tools import log, web
 from sqlalchemy.orm import joinedload
 
 from ..utils.predict_utils import generate_test_tool_payload
+from ..utils.exceptions import PoolSaturationError
 
 
 class Method:
@@ -26,8 +27,23 @@ class Method:
             args=[None, None],
             kwargs=payload,
             pool="agents",
-            meta={},
+            meta={
+                "task_name": "indexer_test_toolkit_tool",
+                "toolkit_id": toolkit_id,
+                "tool_name": tool_name,
+                "project_id": project_id,
+                "user_input_preview": f"test tool {tool_name} (toolkit {toolkit_id}): {tool_params}"[:100],
+            },
         )
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
+
         if webhook_signature is not None or not predict_wait:
             result = {
                 "message": "Task started",

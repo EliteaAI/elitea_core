@@ -5,10 +5,14 @@ Handles dynamic injection of internal tools (like image generation, attachments)
 into predict payloads based on conversation settings.
 """
 
+import re
+from datetime import datetime
 from typing import Optional
 
 from pylon.core.tools import log
-from tools import VaultClient, rpc_tools, this
+from tools import VaultClient, rpc_tools, this, config as c, auth
+
+from .mcp_config import is_mcp_exposure_enabled
 
 
 # ImageGen Constants
@@ -28,6 +32,20 @@ ATTACHMENT_DEFAULT_SELECTED_TOOLS = [
     'list_files',
     'read_file',
     'read_multiple_files',
+]
+
+# MCP Internal Tool Constants
+MCP_INTERNAL_TOOL_KEY = 'internal_mcp'
+MCP_PROJECT_ID_MARKER = '{project_id}'
+
+MCP_ENDPOINT_CONFIGS = [
+    {"suffix": "elitea_core/applications", "name": "Elitea Applications"},
+    {"suffix": "elitea_core/chat", "name": "Elitea Chat"},
+    {"suffix": "elitea_core/toolkits", "name": "Elitea Toolkits"},
+    {"suffix": "elitea_core/analytics", "name": "Elitea Analytics"},
+    {"suffix": "secrets", "name": "Secrets"},
+    {"suffix": "configurations", "name": "Configurations"},
+    {"suffix": "artifacts", "name": "Artifacts"},
 ]
 
 
@@ -442,4 +460,343 @@ def inject_internal_attachment_tool(
         f"pgvector={pgvector_config.get('elitea_title')}, embedding={embedding_model}"
     )
     return attachment_tool
+
+
+# =============================================================================
+# MCP Toolkit Injection
+# =============================================================================
+
+def resolve_user_token_state(user_id: int) -> tuple[str, str | None]:
+    """Return ('VALID', encoded_token) / ('EXPIRED', None) / ('MISSING', None). The token is
+    returned only when VALID; a token without an `expires` never expires."""
+    all_tokens = auth.list_tokens(user_id) if user_id else []
+    if not all_tokens:
+        return 'MISSING', None
+    for token in all_tokens:
+        expires = token.get('expires')
+        if not expires or expires > datetime.now():
+            return 'VALID', auth.encode_token(token['id'])
+    return 'EXPIRED', None
+
+
+def _get_user_token(user_id: int) -> str | None:
+    """Get the first non-expired access token for the user, or None if missing/expired."""
+    state, token = resolve_user_token_state(user_id)
+    if token is None:
+        log.warning(f"[MCP Injection] No valid token for user {user_id} (state={state})")
+    return token
+
+
+def _get_internal_base_url() -> str:
+    """Get internal base URL for container-to-container communication."""
+    base_url = c.APP_HOST
+    if not base_url or base_url in ('http://localhost', 'http://127.0.0.1'):
+        base_url = 'http://pylon_main:8080'
+    return base_url
+
+
+# Internal Elitea MCP endpoints always have the shape .../app/<project_id>/mcp/<suffix>, where
+# <project_id> is either the {project_id} template marker or a resolved integer. Matching this
+# whole shape (not just a trailing /mcp/<x> segment) is what distinguishes an internal endpoint
+# from an arbitrary external MCP server that happens to share a path segment.
+_INTERNAL_MCP_ENDPOINT_RE = re.compile(r'/app/(?:\{project_id\}|\d+)/mcp/(?P<suffix>[^?#]+)')
+# Deliberately narrower than _INTERNAL_MCP_ENDPOINT_RE: PAT injection fires only for the
+# unresolved {project_id} template. A URL that already carries a concrete integer project id is
+# never re-stamped with the caller's PAT, so a materialized or foreign-scoped endpoint cannot
+# borrow another user's token. Dedup uses the broader pattern on purpose — it must recognize a
+# manually-added toolkit even when its URL is already resolved to an integer.
+_INTERNAL_MCP_TEMPLATE_RE = re.compile(r'/app/\{project_id\}/mcp/')
+
+# Distinguishes "PAT not looked up yet" from "looked up, none found", so a user without a PAT
+# does not trigger a fresh token lookup for every tool in the payload.
+_TOKEN_UNSET = object()
+
+
+def _extract_internal_mcp_suffix(url: str) -> Optional[str]:
+    if not isinstance(url, str):
+        return None
+    match = _INTERNAL_MCP_ENDPOINT_RE.search(url)
+    return match.group('suffix').strip('/') if match else None
+
+
+def _collect_covered_internal_mcp_suffixes(existing_tools: list[dict]) -> set:
+    covered = set()
+    for tool in existing_tools or []:
+        try:
+            if not isinstance(tool, dict):
+                continue
+            settings = tool.get('settings') or {}
+            url = settings.get('url')
+            if not url and tool.get('type', '').startswith('mcp_'):
+                url = (this.module.get_mcp_prebuilt_config(tool['type']) or {}).get('url')
+            suffix = _extract_internal_mcp_suffix(url)
+            if suffix:
+                covered.add(suffix)
+        except Exception:
+            continue
+    return covered
+
+
+def dedupe_internal_mcp_tools(tools: list[dict]) -> None:
+    """Drop auto-injected internal MCP toolkits (id=None) whose endpoint is already covered by
+    a manually-added toolkit in the same list, so the same tools are not exposed twice."""
+    manual_suffixes = set()
+    for tool in tools or []:
+        if not isinstance(tool, dict) or tool.get('id') is None:
+            continue
+        settings = tool.get('settings') or {}
+        url = settings.get('url')
+        if not url and tool.get('type', '').startswith('mcp_'):
+            url = (this.module.get_mcp_prebuilt_config(tool['type']) or {}).get('url')
+        suffix = _extract_internal_mcp_suffix(url)
+        if suffix:
+            manual_suffixes.add(suffix)
+    if not manual_suffixes:
+        return
+    tools[:] = [
+        tool for tool in tools
+        if not isinstance(tool, dict)
+        or tool.get('id') is not None
+        or _extract_internal_mcp_suffix((tool.get('settings') or {}).get('url')) not in manual_suffixes
+    ]
+
+
+def inject_mcp_toolkits(
+    user_id: int,
+    internal_tools: list[str] = None,
+    existing_tools: list[dict] = None,
+) -> list[dict]:
+    """
+    Dynamically compute and inject MCP toolkits at runtime. No DB records created.
+
+    This function follows the same pattern as inject_internal_attachment_tool:
+    - Checks if MCP injection is enabled via internal_tools
+    - Computes MCP endpoints dynamically from user context
+    - Returns toolkit payloads with id=None
+
+    Groups already present as a manually-added toolkit (same MCP endpoint suffix) are skipped
+    to avoid exposing the same tools twice.
+
+    Args:
+        user_id: User ID for auth and project lookup
+        internal_tools: List of enabled internal tools from conversation/agent meta
+        existing_tools: Toolkits already in the payload, used to dedupe against manual toolkits
+
+    Returns:
+        List of MCP toolkit payloads with id=None, or empty list if not enabled
+    """
+    log.info(f"[MCP Injection] Checking internal_tools={internal_tools}, looking for key={MCP_INTERNAL_TOOL_KEY}")
+    if not is_mcp_exposure_enabled():
+        log.debug("MCP exposure is disabled, skipping MCP injection")
+        return []
+    if MCP_INTERNAL_TOOL_KEY not in (internal_tools or []):
+        log.debug("MCP internal tool not enabled, skipping auto-injection")
+        return []
+
+    user_project = rpc_tools.RpcMixin().rpc.timeout(5).admin_get_user_private_project(user_id)
+    if not user_project:
+        log.debug(f"[MCP Injection] Private project not found for user {user_id} — skipping MCP injection")
+        return []
+
+    system_token = _get_user_token(user_id)
+    if not system_token:
+        log.debug(f"[MCP Injection] No valid token for user {user_id} — skipping MCP injection")
+        return []
+
+    base_url = _get_internal_base_url()
+    covered_suffixes = _collect_covered_internal_mcp_suffixes(existing_tools)
+
+    tools = []
+    for ep in MCP_ENDPOINT_CONFIGS:
+        if ep['suffix'] in covered_suffixes:
+            log.debug(f"[MCP Injection] Skipping '{ep['name']}' — already added as a manual toolkit")
+            continue
+        url = f"{base_url}/app/{user_project.id}/mcp/{ep['suffix']}"
+        tool = {
+            'type': 'mcp',
+            'name': f'{ep["name"]}',
+            'toolkit_name': f'{ep["name"]}',
+            'description': f"Elitea platform MCP — {ep['suffix']}",
+            'settings': {
+                'url': url,
+                'headers': {'Authorization': f'Bearer {system_token}'},
+                'timeout': 300,
+                'cache_ttl': 300,
+            },
+            'id': None,
+            'agent_type': None,
+            'variables': [],
+            'meta': {
+                'mcp': True,
+                'support_auto': True,
+                'categories': ['other'],
+                'extra_categories': ['remote tools', 'sse', 'http'],
+            },
+        }
+        tools.append(tool)
+
+    log.info(f"[MCP Injection] Auto-injecting {len(tools)} MCP toolkits for user {user_id}")
+    return tools
+
+
+def _match_internal_mcp_template_url(settings: dict, prebuilt_url: str = None) -> str | None:
+    for candidate in ((settings or {}).get('url'), prebuilt_url):
+        if isinstance(candidate, str) and _INTERNAL_MCP_TEMPLATE_RE.search(candidate):
+            return candidate
+    return None
+
+
+def resolve_internal_mcp_settings(settings: dict, user_id: int, project_id: int,
+                                  prebuilt_url: str = None, token=_TOKEN_UNSET) -> dict:
+    """Fill project_id and the executing user's PAT into an internal MCP toolkit's config.
+
+    The values land in the toolkit settings as `project_id`/`personal_token` so the SDK
+    substitutes `{project_id}`/`{personal_token}` in the server URL and headers at runtime.
+    When settings already carry a materialized URL/headers (the sync-tools discovery path),
+    those are substituted here too. Returns a new dict; never mutates or persists. Only fires
+    for the internal Elitea `.../app/{project_id}/mcp/` endpoint shape, so a user's PAT is never
+    stamped onto an arbitrary external MCP server. Pass `token` to reuse a single PAT lookup.
+    """
+    if _match_internal_mcp_template_url(settings, prebuilt_url) is None:
+        return settings
+
+    result = dict(settings)
+    result['project_id'] = project_id
+    if token is _TOKEN_UNSET:
+        token = _get_user_token(user_id)
+    if token:
+        result['personal_token'] = token
+
+    if isinstance(result.get('url'), str):
+        result['url'] = result['url'].replace(MCP_PROJECT_ID_MARKER, str(project_id))
+        headers = dict(result.get('headers') or {})
+        for key, value in list(headers.items()):
+            if isinstance(value, str) and token:
+                headers[key] = value.replace('{personal_token}', token)
+        if token and '/mcp/' in result['url'] and not any(k.lower() == 'authorization' for k in headers):
+            headers['Authorization'] = f'Bearer {token}'
+        result['headers'] = headers
+    return result
+
+
+def redact_internal_mcp_secrets(toolkit_config: dict) -> dict:
+    """Return a copy of a toolkit config with the injected personal token stripped.
+
+    Used when a resolved config is stored in task meta (a tracking surface), so the never-vaulted
+    PAT does not sit there in plaintext. The worker reads credentials from task kwargs, not meta,
+    so this does not affect dispatch. Leaves configs without an injected token untouched.
+    """
+    if not isinstance(toolkit_config, dict):
+        return toolkit_config
+    settings = toolkit_config.get('settings')
+    if not isinstance(settings, dict):
+        return toolkit_config
+    has_token = 'personal_token' in settings
+    headers = settings.get('headers')
+    has_auth_header = isinstance(headers, dict) and any(
+        isinstance(k, str) and k.lower() == 'authorization' for k in headers
+    )
+    if not has_token and not has_auth_header:
+        return toolkit_config
+    redacted_settings = dict(settings)
+    redacted_settings.pop('personal_token', None)
+    if has_auth_header:
+        redacted_settings['headers'] = {
+            k: ('***' if isinstance(k, str) and k.lower() == 'authorization' else v)
+            for k, v in headers.items()
+        }
+    result = dict(toolkit_config)
+    result['settings'] = redacted_settings
+    return result
+
+
+def _match_internal_mcp(toolkit_config: dict) -> tuple[bool, str | None]:
+    """Single internal-MCP matcher shared by the resolver and the PAT gate so they can't drift.
+    Returns (is_internal, prebuilt_url); prebuilt_url is the admin-configured URL to substitute into
+    (None when the toolkit's own settings already carry the URL)."""
+    if not isinstance(toolkit_config, dict):
+        return False, None
+    type_ = toolkit_config.get('type', '')
+    settings = toolkit_config.get('settings')
+    if not type_.startswith('mcp_') or not isinstance(settings, dict):
+        return False, None
+    prebuilt_url = None
+    if not settings.get('url'):
+        try:
+            prebuilt_url = (this.module.get_mcp_prebuilt_config(type_) or {}).get('url')
+        except Exception as e:
+            # Fail open: treat as not-internal so the caller (gate/endpoint) doesn't raise on the
+            # SIO path; the internal endpoint still enforces auth if the toolkit really is internal.
+            log.warning(f"[MCP] prebuilt config lookup failed for {type_}: {e}")
+            return False, None
+    if _match_internal_mcp_template_url(settings, prebuilt_url) is None:
+        return False, None
+    return True, prebuilt_url
+
+
+def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_id: int) -> None:
+    token = _TOKEN_UNSET
+    for tool in tools or []:
+        try:
+            matched, prebuilt_url = _match_internal_mcp(tool)
+            if not matched:
+                continue
+            settings = tool.get('settings')
+            if token is _TOKEN_UNSET:
+                token = _get_user_token(user_id)
+                if not token:
+                    log.warning(
+                        f"[MCP] Internal MCP toolkit matched for user {user_id} with no valid "
+                        "personal token; dispatch will fail authentication"
+                    )
+            owner_project_id = tool.get('project_id') or runtime_project_id
+            tool['settings'] = resolve_internal_mcp_settings(
+                settings, user_id, owner_project_id, prebuilt_url=prebuilt_url, token=token
+            )
+        except Exception as e:
+            log.warning(f"[MCP] Failed to resolve internal MCP toolkit: {e}")
+
+
+class InternalMcpPatError(Exception):
+    def __init__(self, state: str):
+        self.state = state
+        self.error_code = 'pat_expired' if state == 'EXPIRED' else 'pat_missing'
+        super().__init__(f"Internal MCP personal access token is {state.lower()}")
+
+
+def is_internal_mcp_toolkit(toolkit_config: dict) -> bool:
+    return _match_internal_mcp(toolkit_config)[0]
+
+
+def require_internal_mcp_pat(toolkit_config: dict, user_id: int) -> None:
+    if not is_internal_mcp_toolkit(toolkit_config):
+        return
+    state, _ = resolve_user_token_state(user_id)
+    if state != 'VALID':
+        raise InternalMcpPatError(state)
+
+
+def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
+    """
+    Return a system-prompt addon that instructs the model to return entity links
+    after creating agents or pipelines via Elitea MCP Tools.
+
+    Returns empty string when MCP internal tool is not active.
+    """
+    if not is_mcp_exposure_enabled():
+        return ''
+    if MCP_INTERNAL_TOOL_KEY not in (internal_tools or []):
+        return ''
+    app_host = c.APP_HOST.rstrip('/')
+    return (
+        f"\n\nYou have access to Elitea MCP tools and may have project context available. "
+        f"Only use MCP tools and only reference project context when the user explicitly requests it. "
+        f"Do not proactively offer, suggest, or perform any MCP tool actions, and do not mention project details unless asked.\n"
+        f"When you use an Elitea MCP tool to create an entity, include a link to it in your response:\n"
+        f"- Agent: {app_host}/app/agents/all/<application_id>?viewMode=owner&name=<agent_name>\n"
+        f"- Pipeline: {app_host}/app/pipelines/all/<application_id>?viewMode=owner&name=<pipeline_name>\n"
+        f"- Tool: {app_host}/app/toolkits/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
+        f"- MCP: {app_host}/app/mcps/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
+        f"Where <application_id> is returned by the creation tool and <..._name> is the name provided in the request."
+    )
 

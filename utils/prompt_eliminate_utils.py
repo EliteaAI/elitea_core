@@ -16,7 +16,6 @@ from pylon.core.tools import log, web
 from tools import auth, db, serialize, db_tools, config as c, rpc_tools, this
 from plugins.admin.tasks.logs import make_logger
 
-from ..models.all import Collection
 from ..models.all import AbstractLikesMixin, Tag
 from ..models.all import Application, ApplicationVersion, ApplicationVariable, ApplicationVersionTagAssociation
 from ..models.enums.all import PublishStatus
@@ -214,7 +213,6 @@ def prompt_2_agent_migration(*args, payload: dict = None, **kwargs) -> dict:
                     )
                     session.commit()
                     prompt_query = session.query(Prompt)
-                    collection_query = session.query(Collection)
                     application_tags = []
                     for prompt in prompt_query.yield_per(100):
                         if prompt.new_agent_id:
@@ -226,7 +224,6 @@ def prompt_2_agent_migration(*args, payload: dict = None, **kwargs) -> dict:
                             shared_id=prompt.shared_id,
                             owner_id=prompt.owner_id,
                             shared_owner_id=prompt.shared_owner_id,
-                            collections=prompt.collections,
                         )
                         session.add(application)
                         for prompt_version in prompt.versions:
@@ -340,29 +337,6 @@ def prompt_2_agent_migration(*args, payload: dict = None, **kwargs) -> dict:
                             {"new_agent_id": application.id}
                         )
                         new_agent_ids[pid].append(application.id)
-
-                    # migrate collections
-                    for collection in collection_query.yield_per(100):
-                        if collection.prompts:
-                            new_application_items = []
-                            for prompt_entry in collection.prompts:
-                                prompt_id = prompt_entry.get("id")
-                                if prompt_id:
-                                    result = session.query(Prompt.new_agent_id).filter(Prompt.id == prompt_id).first()
-
-                                    if int(result.new_agent_id) not in new_agent_ids[pid]:
-                                        continue
-
-                                    # Check if the result exists and contains a valid new_agent_id
-                                    if result and result.new_agent_id:
-                                        new_application_items.append({
-                                            "id": result.new_agent_id,
-                                            "owner_id": prompt_entry.get("owner_id")
-                                        })
-
-                            new_application_items.extend(list(collection.applications))
-                            collection.applications = new_application_items
-                            session.add(collection)
 
                     if application_tags:
                         session.execute(application_tag_model.insert().values(application_tags))

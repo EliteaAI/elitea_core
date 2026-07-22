@@ -11,6 +11,7 @@ from ..models.all import Application, ApplicationVersion
 from ..utils.application_tools import toolkits_listing
 from ..utils.application_utils import list_applications_api
 from ..utils.toolkits_utils import get_toolkit_schemas
+from ..utils.exceptions import PoolSaturationError
 from .mcp_session import SseSession
 
 
@@ -55,7 +56,11 @@ class McpApiToolExecutor:
 
     @staticmethod
     def _parse_arguments(arguments: dict, parameters: list) -> tuple[dict, dict, dict]:
-        """Separate arguments into path, query, and body parameters."""
+        """Separate arguments into path, query, and body parameters.
+
+        For path parameters with schema defaults (e.g. 'mode'), applies the default
+        when the argument is not provided by the MCP client.
+        """
         path_params = {}
         query_params = {}
         body_params = {}
@@ -63,12 +68,15 @@ class McpApiToolExecutor:
         for param in parameters:
             param_name = param.get("name")
             param_in = param.get("in")
+            param_schema = param.get("schema", {})
 
             if param_name in arguments:
                 if param_in == "path":
                     path_params[param_name] = arguments[param_name]
                 elif param_in == "query":
                     query_params[param_name] = arguments[param_name]
+            elif param_in == "path" and "default" in param_schema:
+                path_params[param_name] = param_schema["default"]
 
         for key, value in arguments.items():
             if key not in path_params and key not in query_params:
@@ -142,7 +150,17 @@ class McpApiToolExecutor:
         from io import BytesIO
 
         if method in ("POST", "PUT", "PATCH") and body_params:
-            body_json = json.dumps(body_params)
+            # MCP clients may send nested objects as JSON strings; decode them back.
+            decoded = {}
+            for k, v in body_params.items():
+                if isinstance(v, str) and len(v) > 1 and v[0] in ('{', '['):
+                    try:
+                        decoded[k] = json.loads(v)
+                    except (ValueError, TypeError):
+                        decoded[k] = v
+                else:
+                    decoded[k] = v
+            body_json = json.dumps(decoded)
             body_bytes = body_json.encode('utf-8')
             environ['CONTENT_TYPE'] = 'application/json'
             environ['CONTENT_LENGTH'] = str(len(body_bytes))
@@ -189,7 +207,10 @@ class McpApiToolExecutor:
         else:
             try:
                 error_data = json.loads(body_data) if body_data else {}
-                error_msg = error_data.get("error") if isinstance(error_data, dict) else str(error_data)
+                if isinstance(error_data, dict):
+                    error_msg = error_data.get("message") or error_data.get("error") or str(error_data)
+                else:
+                    error_msg = str(error_data)
             except json.JSONDecodeError:
                 error_msg = body_data
             return {"error": error_msg or f"API call failed with status {status_code}"}
@@ -237,7 +258,8 @@ class McpService:
                     version_id=version_id,
                     payload_in={"user_input": request.params.arguments["task"], "chat_history": []},
                     raw=None,
-                    webhook_signature=None
+                    webhook_signature=None,
+                    return_chat_history=True
                 )
                 #
                 if "error" not in result or result["error"] is None:
@@ -269,6 +291,13 @@ class McpService:
                     response_content = json.dumps(result["result"])
             else:
                 result = {"error": f"Version matching failure for {request.params.name}"}
+        except PoolSaturationError as e:
+            log.warning("Pool saturation in MCP tool call: %s", e)
+            result = {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": e.retry_after,
+            }
         except Exception as exc:
             log.info(f"Error in do_predict: {exc}")
             log.error("Exception stack trace:")
@@ -292,6 +321,8 @@ class McpService:
         # Check if this is a resource-scoped request
         if self.session.resource_type and self.session.resource_id:
             tools = self.__get_scoped_tools()
+        elif self.session.entity_category:
+            tools = self.__get_category_tools(self.session.entity_category)
         else:
             tools = self.__get_all_tools()
         #
@@ -315,6 +346,31 @@ class McpService:
             tools = self.__get_toolkit_tools(self.session.resource_id)
         elif self.session.resource_type == "application":
             tools = self.__get_application_tools(self.session.resource_id)
+
+        return tools
+
+    def __get_category_tools(self, openapi_tag: str) -> list[types.Tool]:
+        """Get tools filtered by swagger section tag (e.g. elitea_core/applications).
+        For elitea_core/applications, also includes agents tagged with 'mcp'.
+        For elitea_core/toolkits, also includes toolkit instance tools marked available_by_mcp.
+        """
+        tools = []
+        known_tool_names = set()
+
+        if openapi_tag:
+            for api_tool in openapi_registry.get_mcp_api_tools(filter_tags=[openapi_tag]):
+                tool_name = _build_agent_identifier(api_tool.get("value", api_tool.get("label", "")))
+                if tool_name in known_tool_names:
+                    log.warning("Skipping API tool with colliding name: %s -> %s", api_tool.get("label"), tool_name)
+                    continue
+                known_tool_names.add(tool_name)
+                tools.append(
+                    types.Tool(
+                        name=tool_name,
+                        description=api_tool.get("description", ""),
+                        inputSchema=api_tool.get("args_schema", {})
+                    )
+                )
 
         return tools
 

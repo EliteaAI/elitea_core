@@ -16,12 +16,14 @@ class CommunicationsHandler:
         self.lock = threading.Lock()
 
     def create_session_and_stream(self, project_id: int, return_session=False, one_time=False,
-                                  resource_type: str = None, resource_id: int = None) -> tuple[Generator[str, Any, None] | None, tuple[dict, int] | None]:
+                                  resource_type: str = None, resource_id: int = None,
+                                  entity_category: str = None) -> tuple[Generator[str, Any, None] | None, tuple[dict, int] | None]:
         agents_tags = list_tags(project_id, {})["rows"]
         mcp_tag = [tag["id"] for tag in agents_tags if tag["name"] == "mcp"][:1]
         sid = uuid4()
         session = SseSession(sid, project_id, mcp_tag, one_time=one_time,
-                           resource_type=resource_type, resource_id=resource_id)
+                           resource_type=resource_type, resource_id=resource_id,
+                           entity_category=entity_category)
 
         with self.lock:
             self.sessions[sid] = session
@@ -42,12 +44,14 @@ class CommunicationsHandler:
         return stream(), None
 
     def create_http_session(self, project_id: int,
-                            resource_type: str = None, resource_id: int = None):
+                            resource_type: str = None, resource_id: int = None,
+                            entity_category: str = None):
         agents_tags = list_tags(project_id, {})["rows"]
         mcp_tag = [tag["id"] for tag in agents_tags if tag["name"] == "mcp"][:1]
         #
         session = HttpSession(project_id, mcp_tag,
-                            resource_type=resource_type, resource_id=resource_id)
+                            resource_type=resource_type, resource_id=resource_id,
+                            entity_category=entity_category)
         #
         return session, None
 

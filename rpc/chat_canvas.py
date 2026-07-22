@@ -11,6 +11,7 @@ from ..utils.canvas_utils import (get_list_canvas_details, get_canvas_details,
 from ..utils.participant_utils import get_entity_details
 from ..utils.sio_utils import get_chat_room
 from ..utils.sio_utils import SioEvents
+from ..utils.utils import make_yield_to_hub
 
 
 class RPC:
@@ -46,6 +47,8 @@ class RPC:
     @web.rpc("chat_canvas_save_versions")
     def chat_canvas_save_versions(self, **kwargs):
         # TODO keep the last N versions instead of all?
+        yield_to_hub = make_yield_to_hub(self.context.web_runtime)
+
         redis_client = self.get_redis_client()
         in_memory_canvas_keys: list[str] = redis_client.keys('canvas:*')
         parsed_in_memory_canvas_keys: list[dict] = get_list_canvas_details(in_memory_canvas_keys, shadow=False)
@@ -58,10 +61,16 @@ class RPC:
             })
 
         for project_id, canvas_details_list in grouped_canvases.items():
+            # Yield between projects so a heavy canvas-save tick does not
+            # starve the gevent hub and stall other greenlets.
+            yield_to_hub()
             with db.get_session(project_id) as session:
                 new_canvas_versions: list[CanvasVersionItem] = []
 
                 for canvas_details in canvas_details_list:
+                    # Cooperative yield per canvas; emit + content compare are
+                    # CPU-bound between DB lookups.
+                    yield_to_hub()
                     canvas: CanvasMessageItem = session.query(CanvasMessageItem).filter(
                         CanvasMessageItem.uuid == canvas_details["canvas_uuid"]
                     ).first()

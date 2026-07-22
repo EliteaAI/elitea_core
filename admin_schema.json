@@ -10,7 +10,7 @@
       "path": "toolkit_security.blocked_toolkits",
       "section": "guardrails",
       "default": [],
-      "requires_restart": true,
+      "requires_restart": false,
       "enum_source": "toolkit_names",
       "sync_targets": [
         {
@@ -31,7 +31,7 @@
       "path": "toolkit_security.blocked_tools",
       "section": "guardrails",
       "default": {},
-      "requires_restart": true,
+      "requires_restart": false,
       "enum_source_keys": "toolkit_names",
       "enum_source_values": "toolkit_tools",
       "sync_targets": [
@@ -53,7 +53,7 @@
       "path": "toolkit_security.sensitive_tools",
       "section": "guardrails",
       "default": {},
-      "requires_restart": true,
+      "requires_restart": false,
       "enum_source_keys": "toolkit_names",
       "enum_source_values": "toolkit_tools",
       "sync_targets": [
@@ -71,7 +71,7 @@
       "path": "toolkit_security.sensitive_action_company_name",
       "section": "guardrails",
       "default": "",
-      "requires_restart": true,
+      "requires_restart": false,
       "sync_targets": [
         {
           "pylon": "pylon-indexer",
@@ -87,7 +87,7 @@
       "path": "toolkit_security.sensitive_action_message_template",
       "section": "guardrails",
       "default": "",
-      "requires_restart": true,
+      "requires_restart": false,
       "sync_targets": [
         {
           "pylon": "pylon-indexer",
@@ -99,7 +99,7 @@
     "mcp_enabled": {
       "type": "boolean",
       "title": "Enable MCP",
-      "description": "Master switch for MCP (Model Context Protocol) exposure. When disabled, the MCP checkbox is hidden in toolkit UI and all MCP SSE endpoints return 403.",
+      "description": "Master switch for MCP (Model Context Protocol). When disabled, removes all MCP-related functionality across the entire application including API endpoints and all UI entry points.",
       "path": "mcp_exposure.enabled",
       "section": "guardrails",
       "default": true,
@@ -107,8 +107,8 @@
     },
     "mcp_in_menu": {
       "type": "boolean",
-      "title": "Show MCPs in Sidebar",
-      "description": "Controls whether the MCPs menu item is visible in sidebar navigation.",
+      "title": "Show MCPs in UI",
+      "description": "When disabled, hides all MCP entry points across the UI (sidebar, Agent Tools, Pipeline Tools, Toolkit creation, Chat options, Chat Participants) while keeping MCP API functionality intact.",
       "path": "mcp_exposure.in_menu",
       "section": "guardrails",
       "default": true,
@@ -140,11 +140,64 @@
       "type": "string",
       "format": "textarea",
       "title": "Publish Validation Rules",
-      "description": "Custom evaluation criteria for AI validation of agents before publishing. Leave empty to use built-in rules. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
+      "description": "Custom evaluation criteria for AI validation of agents before publishing. Leave empty to use the built-in rules shown in grey below. Use the restore icon to load them into the editor as a starting point. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
       "path": "publishing_guardrail.publish_validation_rules",
       "section": "guardrails",
       "default": "",
+      "builtin_default_rpc": "applications_get_default_publish_validation_rules",
       "requires_restart": true
+    },
+    "agent_categories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "title": "Agent Categories",
+      "description": "Additional agent categories available in the publish modal and Agent Studio filter bar, on top of the built-in defaults. Built-in defaults (including \"Other\") cannot be removed here. New categories take effect immediately without a restart. Use the \"Rename agent category\" admin task to rename a category across already published agents.",
+      "path": "publishing_guardrail.agent_categories",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false
+    },
+    "is_skill_publish_blocked": {
+      "type": "boolean",
+      "title": "Block Skill Publishing",
+      "description": "When enabled, skill publishing is blocked platform-wide except for whitelisted projects. Admin publishes from the public project are always exempt.",
+      "path": "skill_publishing_guardrail.is_publish_blocked",
+      "section": "guardrails",
+      "default": false,
+      "requires_restart": false
+    },
+    "skill_publish_whitelist_project_ids": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "title": "Skill Publishing Allowed Projects",
+      "description": "Projects where skill publishing remains allowed when blocked globally. If empty, skill publishing is blocked for all projects.",
+      "path": "skill_publishing_guardrail.whitelist_project_ids",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false,
+      "enum_source": "projects",
+      "visible_when": { "field": "is_skill_publish_blocked", "value": true }
+    },
+    "skill_publish_validation_rules": {
+      "type": "string",
+      "format": "textarea",
+      "title": "Skill Publish Validation Rules",
+      "description": "Custom evaluation criteria for AI validation of skills before publishing. Leave empty to use the built-in rules shown in grey below. Use the restore icon to load them into the editor as a starting point. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
+      "path": "skill_publishing_guardrail.publish_validation_rules",
+      "section": "guardrails",
+      "default": "",
+      "builtin_default_rpc": "skills_get_default_publish_validation_rules",
+      "requires_restart": false
+    },
+    "skill_categories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "title": "Skill Categories",
+      "description": "Additional skill categories available in the skill publish modal and catalog filter bar, on top of the built-in defaults. Managed independently from Agent Categories. Built-in defaults (including \"Other\") cannot be removed here. New categories take effect immediately without a restart.",
+      "path": "skill_publishing_guardrail.skill_categories",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false
     },
     "ai_project_id": {
       "type": "integer",
@@ -162,6 +215,40 @@
       "path": "ai_project_allowed_domains",
       "section": "runtime",
       "default": "centry.user"
+    },
+    "pipeline_scheduling_enabled": {
+      "type": "boolean",
+      "title": "Pipeline Scheduling Enabled",
+      "description": "Master switch for the per-tick check that triggers scheduled pipeline runs. Disable to pause all pipeline schedules platform-wide without losing their configuration.",
+      "path": "scheduler.pipeline_scheduling.enabled",
+      "section": "runtime",
+      "default": true
+    },
+    "pipeline_scheduling_cron": {
+      "type": "string",
+      "title": "Pipeline Scheduling Cron",
+      "description": "How often the pipeline scheduling tick fires. Standard 5-field cron expression (e.g. '* * * * *' = every minute, '*/15 * * * *' = every 15 minutes). Slowing this down reduces baseline platform load but delays scheduled pipeline starts by up to that interval.",
+      "path": "scheduler.pipeline_scheduling.cron",
+      "section": "runtime",
+      "default": "* * * * *",
+      "visible_when": { "field": "pipeline_scheduling_enabled", "value": true }
+    },
+    "index_scheduling_enabled": {
+      "type": "boolean",
+      "title": "Index Scheduling Enabled",
+      "description": "Master switch for the per-tick check that triggers scheduled toolkit index re-builds. Disable to pause all index schedules platform-wide without losing their configuration.",
+      "path": "scheduler.index_scheduling.enabled",
+      "section": "runtime",
+      "default": true
+    },
+    "index_scheduling_cron": {
+      "type": "string",
+      "title": "Index Scheduling Cron",
+      "description": "How often the index scheduling tick fires. Standard 5-field cron expression (e.g. '* * * * *' = every minute, '*/15 * * * *' = every 15 minutes). Slowing this down reduces baseline platform load but delays scheduled re-indexing by up to that interval.",
+      "path": "scheduler.index_scheduling.cron",
+      "section": "runtime",
+      "default": "* * * * *",
+      "visible_when": { "field": "index_scheduling_enabled", "value": true }
     },
     "analytics_enabled": {
       "type": "boolean",
@@ -221,22 +308,6 @@
       "path": "extra_ui_config.resources.information.enabled",
       "section": "resources",
       "default": true
-    },
-    "resources_information_title": {
-      "type": "string",
-      "title": "Information Card Title",
-      "description": "Title displayed in the Information card header.",
-      "path": "extra_ui_config.resources.information.title",
-      "section": "resources",
-      "default": "Information"
-    },
-    "resources_information_description": {
-      "type": "string",
-      "title": "Information Card Description",
-      "description": "Subtitle shown below the title in the Information card.",
-      "path": "extra_ui_config.resources.information.description",
-      "section": "resources",
-      "default": ""
     },
     "resources_information_version": {
       "type": "string",
@@ -410,6 +481,45 @@
       "section": "resources",
       "default": []
     },
+    "resources_interactive_tours_enabled": {
+      "type": "boolean",
+      "title": "Interactive Tours Card Enabled",
+      "description": "When disabled, the Interactive Tours card is hidden from the Resources page.",
+      "path": "extra_ui_config.resources.interactive_tours.enabled",
+      "section": "resources",
+      "default": true
+    },
+    "resources_interactive_tours_title": {
+      "type": "string",
+      "title": "Interactive Tours Card Title",
+      "description": "Title displayed in the Interactive Tours card header.",
+      "path": "extra_ui_config.resources.interactive_tours.title",
+      "section": "resources",
+      "default": "Interactive Tours"
+    },
+    "resources_interactive_tours_description": {
+      "type": "string",
+      "title": "Interactive Tours Card Description",
+      "description": "Subtitle shown below the title in the Interactive Tours card.",
+      "path": "extra_ui_config.resources.interactive_tours.description",
+      "section": "resources",
+      "default": "Guided tours to explore key features and workflows"
+    },
+    "resources_interactive_tours_links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "title": "Interactive Tours Links",
+      "description": "Links displayed inside the Interactive Tours card.",
+      "path": "extra_ui_config.resources.interactive_tours.links",
+      "section": "resources",
+      "default": []
+    },
     "vite_elitea_assistant": {
       "type": "string",
       "title": "Assistant Enabled",
@@ -417,6 +527,22 @@
       "path": "extra_ui_config.vite_elitea_assistant",
       "section": "support_assistant",
       "default": "0"
+    },
+    "vite_voice_features_enabled": {
+      "type": "boolean",
+      "title": "Voice Features Enabled",
+      "description": "When disabled, all voice features (V2V, T2V, V2T) are completely hidden for all users.",
+      "path": "extra_ui_config.vite_voice_features_enabled",
+      "section": "voice_features",
+      "default": true
+    },
+    "vite_voice_features_temporarily_disabled": {
+      "type": "boolean",
+      "title": "Disable Voice Controls but Keep Them Visible",
+      "description": "When enabled, voice buttons remain visible but are non-interactive with an admin tooltip.",
+      "path": "extra_ui_config.vite_voice_features_temporarily_disabled",
+      "section": "voice_features",
+      "default": false
     }
   }
 }

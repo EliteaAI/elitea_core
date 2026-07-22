@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from uuid import uuid4
 
 from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 from tools import db, auth, serialize, this, VaultClient, rpc_tools, config as c
 
 import redis
@@ -13,8 +14,9 @@ from sqlalchemy import asc, desc, String
 
 from ..utils.chat_constants import SUMMARIZATION_LOCKING_TTL
 from ..utils.conversation_utils import get_conversation_locked_key
+from ..models.all import ApplicationVersion
 from ..models.conversation import Conversation
-from ..models.enums.all import ParticipantTypes, ChatHistoryTemplates, PublishStatus
+from ..models.enums.all import AgentTypes, ParticipantTypes, ChatHistoryTemplates, PublishStatus
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
 from ..models.participants import ParticipantMapping, Participant
@@ -28,25 +30,58 @@ from ..utils.chat_history import (
 )
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.llm_settings import DEFAULT_REASONING_MODEL_MAX_TOKENS, DEFAULT_MAX_TOKENS
-from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation
+from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation, notify_user_mentioned_in_conversation
 from ..utils.sio_utils import get_chat_room
+from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
+from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
+from ..utils.exceptions import PoolSaturationError
+from ..utils.parallel_hitl import (
+    EXECUTION_GENERATION_KEY, begin_execution_generation, decisions_for_child,
+    interrupt_identity, pending_interrupts,
+    retire_child_interrupts, retire_interrupts, validate_child_decisions,
+)
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
-    inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY
+    inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
+    inject_mcp_toolkits, MCP_INTERNAL_TOOL_KEY,
+    get_mcp_entity_link_instructions,
 )
+from ..utils.utils import get_public_project_id
+from ..utils.predict_utils import get_project_context, prepend_project_context
 
 
 CHAT_PREDICT_MAPPER = {
     ParticipantTypes.dummy: 'applications_predict_sio_llm',
     ParticipantTypes.llm: 'applications_predict_sio_llm',
     ParticipantTypes.application: 'applications_predict_sio',
-    ParticipantTypes.datasource: 'datasources_predict_sio',
     ParticipantTypes.toolkit: 'applications_test_toolkit_tool_sio',
     # ParticipantTypes.pipeline: 'applications_predict_sio',
 }
+
+
+def _get_agent_type(
+    session, app_participant, app_version_id, *, owner_project_id=None, chat_project_id=None,
+) -> str | None:
+    agent_type = app_participant.meta.get('agent_type')
+    if not agent_type and app_version_id:
+        try:
+            if owner_project_id is not None and owner_project_id != chat_project_id:
+                with db.get_session(owner_project_id) as owner_session:
+                    version_row = owner_session.query(ApplicationVersion.agent_type).filter(
+                        ApplicationVersion.id == app_version_id
+                    ).first()
+            else:
+                version_row = session.query(ApplicationVersion.agent_type).filter(
+                    ApplicationVersion.id == app_version_id
+                ).first()
+            if version_row:
+                agent_type = version_row[0]
+        except Exception:
+            log.debug(f"Could not fetch agent_type for version {app_version_id}")
+    return agent_type
 
 
 def generate_toolkit_payload(
@@ -91,8 +126,23 @@ def generate_toolkit_payload(
             log.warning(f"Skipping toolkit id={participant_plus.entity_meta.get('id')} due to error: {str(e)}")
             continue
 
-    # Always include application participants - SDK handles swarm logic and filtering
-    participants_applications = [p for p in conversation.participants if p.entity_name == ParticipantTypes.application]
+    # When to inject sibling Application participants as callable handoff/sub-agent tools:
+    #
+    #   * Ad-hoc chat (is_llm_chat=True, the responder is a plain MODEL/dummy): ALWAYS.
+    #     This is the orchestration use case — the model is expected to delegate to the
+    #     agents/pipelines attached to the conversation.
+    #   * Selected agent/pipeline chat (is_llm_chat=False): ONLY in swarm mode. A directly
+    #     selected agent must run standalone; its OWN configured sub-agents arrive separately
+    #     via app_version_details['tools'] and are unaffected by this gate. Without this,
+    #     every conversation participant auto-binds as a handoff (the SDK force-binds all
+    #     Application tools regardless of swarm) and the selected agent fans out to its
+    #     siblings — most visibly after a HITL resume (#4993).
+    swarm_enabled = 'swarm' in (internal_tools or [])
+    inject_sibling_applications = is_llm_chat or swarm_enabled
+    participants_applications = (
+        [p for p in conversation.participants if p.entity_name == ParticipantTypes.application]
+        if inject_sibling_applications else []
+    )
     for app_participant in participants_applications:
         try:
             # Get application version from participant mapping
@@ -109,6 +159,43 @@ def generate_toolkit_payload(
 
             app_id = app_participant.entity_meta['id']
             app_version_id = participant_mapping.entity_settings.get('version_id')
+            owner_project_id = app_participant.entity_meta.get(
+                'project_id', conversation_project_id,
+            )
+
+            # --- Depth-aware nesting guard for adhoc LLM-chat binding (issue #5778) ---
+            # In an LLM/dummy chat, the chat model is the tier-1 orchestrator and each injected
+            # agent becomes its CHILD at TIER 2. As of #5778 a container agent (one that itself
+            # uses other agents) is LEGAL here — the tier-1 → tier-2 container → tier-3 leaf shape
+            # is exactly what depth-3 nesting enables. What is NOT legal is a bound container whose
+            # OWN subtree busts the 3-tier budget (a tier-3 container → tier-4 leaves), which is
+            # what triggered the parallel-run/HITL restart problems #5680 originally banned wholesale.
+            #
+            # So we validate the bound version's subtree as if rooted at tier 2 (start_depth=2) and
+            # SKIP (not raise) only when it violates. Skipping (rather than raising) is retained on
+            # purpose: this path runs on EVERY chat turn, so a raise would brick the whole
+            # conversation instead of just declining the one illegal tool. A legal tier-2 container
+            # falls through and is offered as a callable tool. This does NOT apply to swarm sibling
+            # injection (is_llm_chat=False), where agents are peer handoff targets, not children.
+            if is_llm_chat and app_version_id is not None:
+                from ..utils.publish_utils import (
+                    assert_no_invalid_nesting, SubAgentTreeError,
+                    MAX_SUB_AGENT_VALIDATION_DEPTH,
+                )
+                try:
+                    assert_no_invalid_nesting(
+                        owner_project_id, app_version_id,
+                        session=session if owner_project_id == conversation_project_id else None,
+                        max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+                        start_depth=2,
+                    )
+                except SubAgentTreeError as tree_err:
+                    log.warning(
+                        "Skipping agent '%s' (ver=%s) as an adhoc tool for the chat model — its "
+                        "sub-agent tree exceeds the supported nesting for a bound tool: %s",
+                        app_participant.meta.get('name'), app_version_id, tree_err,
+                    )
+                    continue
 
             # Include all application participants - SDK will handle:
             # - Whether to create handoff tools (based on internal_tools having 'swarm')
@@ -120,7 +207,7 @@ def generate_toolkit_payload(
                 "description": app_participant.meta.get('description', ''),
                 "author_id": user_id,
                 "participant_id": app_participant.id,  # For SDK to identify self
-                "project_id": app_participant.entity_meta.get('project_id'),
+                "project_id": owner_project_id,
                 "settings": {
                     "variables": [],
                     "application_id": app_id,
@@ -129,7 +216,11 @@ def generate_toolkit_payload(
                 },
                 "id": None,
                 "toolkit_name": app_participant.meta['name'],
-                "agent_type": app_participant.meta.get('agent_type'),
+                "agent_type": _get_agent_type(
+                    session, app_participant, app_version_id,
+                    owner_project_id=owner_project_id,
+                    chat_project_id=conversation_project_id,
+                ),
                 "created_at": datetime.now(tz=timezone.utc).isoformat(),
             }
             tools.append(app_toolkit_details)
@@ -172,7 +263,18 @@ def generate_toolkit_payload(
     except Exception as e:
         # Log but don't fail the entire payload generation for optional feature
         log.warning(f"Failed to inject internal attachment tool: {e}")
-    
+
+    # Inject MCP toolkits if enabled via internal_tools
+    try:
+        mcp_tools = inject_mcp_toolkits(
+            user_id=user_id,
+            internal_tools=internal_tools or [],
+            existing_tools=tools,
+        )
+        tools.extend(mcp_tools)
+    except Exception as e:
+        log.warning(f"Failed to inject internal MCP toolkits: {e}")
+
     return tools
 
 
@@ -186,7 +288,8 @@ def process_attachment_message_items(
     user_id=None,
     sid=None,
     collection_suffix="attach",
-    llm_settings=None
+    llm_settings=None,
+    pipeline_mode: bool = False,
 ):
     if not attachments_info:
         return message_group
@@ -210,6 +313,7 @@ def process_attachment_message_items(
                 order_index=order_index,
                 user_id=user_id,
                 collection_suffix=collection_suffix,
+                pipeline_mode=pipeline_mode,
             )
             
             session.add(attachment_msg)
@@ -240,8 +344,8 @@ def process_attachment_message_items(
         log.warning(f"{len(failed_attachments)} attachment(s) failed to process: {failed_attachments}")
 
     # Content extraction: read file content and enrich attachment messages
-    if items_needing_content:
-        log.debug(f"Starting content extraction for {len(items_needing_content)} documents in message group {message_group.uuid}")
+    if items_needing_content and not pipeline_mode:
+        log.debug("Starting content extraction for %d documents in message group %s", len(items_needing_content), message_group.uuid)
         try:
             if not llm_settings:
                 raise RuntimeError("LLM settings must be provided for reading attachment content")
@@ -275,13 +379,13 @@ def process_attachment_message_items(
                 else:
                     log.warning(f"No content returned for file {item.name}")
 
-            log.debug(f"Successfully enriched content for {len(items_needing_content)} documents")
+            log.debug("Successfully enriched content for %d documents", len(items_needing_content))
 
         except Exception as e:
             log.error(f"Content extraction failed for message group {message_group.uuid}: {e}")
             raise RuntimeError(f"Failed to read document content: {str(e)}") from None
 
-    log.debug(f"Processed {len(attachment_message_items)} attachment items for message group {message_group.uuid}")
+    log.debug("Processed %d attachment items for message group %s", len(attachment_message_items), message_group.uuid)
     return message_group
 
 
@@ -337,7 +441,7 @@ def generate_summary_payload(
             "variables": None,  # No variables needed
         }
 
-        log.debug(f"Chat history contains {len(chat_history)} messages")
+        log.debug("Chat history contains %d messages", len(chat_history))
         return payload
 
     except Exception as e:
@@ -450,9 +554,12 @@ def generate_application_version_payload(
         unsecret=True
     )
     if 'error' in app_version_details:
-        raise PayloadGenerationError(
-            f"Failed to get application version={entity_settings.version_id} details expanded: {app_version_details['error']}"
-        )
+        raise PayloadGenerationError(app_version_details['error'])
+
+    try:
+        validate_agent_skills(app_version_details.get('skills', []))
+    except SkillVersionDeletedError as skill_err:
+        raise PayloadGenerationError(str(skill_err)) from skill_err
 
     # Block prediction for unpublished or embedded-only versions
     version_status = app_version_details.get('status', '')
@@ -460,10 +567,43 @@ def generate_application_version_payload(
         raise PayloadGenerationError(
             f"Agent version {entity_settings.version_id} has status '{version_status}' and cannot be used directly"
         )
-    
+
+    # --- Authoritative sub-agent-tree gate (issue #5680) ---
+    # This runs every chat turn on the version ACTUALLY selected (top-level or switched via a
+    # per-subagent version dropdown), so it catches circular/over-nested references that
+    # bind-time and UI guards cannot — e.g. a leaf promoted to a container by a version switch.
+    # Rejects a poisoned config here instead of forwarding it to the SDK (which would recurse).
+    from ..utils.publish_utils import assert_no_invalid_nesting, SubAgentTreeError, MAX_SUB_AGENT_VALIDATION_DEPTH
+    try:
+        # The ambient session is bound to the CONVERSATION's project schema; a
+        # cross-project participant (e.g. a catalog agent chatted from another
+        # project) must be validated against its OWN schema, so let the guard
+        # open its own session in that case.
+        assert_no_invalid_nesting(
+            project_id, entity_settings.version_id,
+            session=session if project_id == predict_payload.project_id else None,
+            max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+        )
+    except SubAgentTreeError as tree_err:
+        raise PayloadGenerationError(
+            f"Agent version {entity_settings.version_id} has an invalid sub-agent "
+            f"configuration: {tree_err}"
+        ) from tree_err
+    except ValueError as tree_err:
+        # A missing/incomplete sub-agent reference: surface it to the user
+        # instead of killing the socket handler.
+        raise PayloadGenerationError(str(tree_err)) from tree_err
+
+
     # Get internal_tools from agent version meta for attachment injection decision
     agent_internal_tools = app_version_details.get('meta', {}).get('internal_tools', [])
-    
+
+    # Also get internal_tools from conversation meta and merge with agent's
+    # This allows conversation-level settings (like 'internal_mcp' from support assistant)
+    # to be applied even when chatting with agents
+    conversation_internal_tools = msg_group.conversation.meta.get('internal_tools', []) if msg_group.conversation.meta else []
+    merged_internal_tools = list(set(agent_internal_tools + conversation_internal_tools))
+
     # Get conversation participants as tools - SDK handles all filtering logic:
     # - Swarm mode detection (checks internal_tools for 'swarm')
     # - Self-handoff prevention (uses current_participant_id)
@@ -475,7 +615,7 @@ def generate_application_version_payload(
         user_id=msg_group.author_participant.entity_meta['id'],
         conversation_project_id=predict_payload.project_id,
         current_participant_id=msg_group.sent_to_id,
-        internal_tools=agent_internal_tools,
+        internal_tools=merged_internal_tools,
         is_llm_chat=False
     )
     if participants_toolkits:
@@ -484,9 +624,47 @@ def generate_application_version_payload(
     # Pass current participant ID so SDK can identify self for loop prevention
     app_version_details['current_participant_id'] = msg_group.sent_to_id
     log.debug(
-        f'Generated chat application version details payload for question_id={predict_payload.question_id}:\n{app_version_details}'
+        'Generated chat application version details payload for question_id=%s:\n%s',
+        predict_payload.question_id, app_version_details
     )
     return app_version_details
+
+
+def _resolve_application_llm_settings(
+    version_details: dict,
+    entity_settings: 'EntitySettingsApplication',
+    predict_payload: 'SioPredictModel',
+    agent_project_id: int | None,
+) -> dict:
+    """Resolve llm_settings for an application participant with clear precedence.
+
+    Precedence (highest wins):
+      1. predict_payload.llm_settings — one-shot transient override from the request
+      2. entity_settings.llm_settings — per-conversation stored override (published public agents only)
+      3. version_details.llm_settings — agent version baseline (source of truth)
+    """
+    # Start from version baseline
+    llm_settings = version_details.get('llm_settings', {})
+    if llm_settings:
+        llm_settings = dict(llm_settings)
+
+    # Per-conversation override for published agents from public project (whole-object replacement)
+    version_status = version_details.get('status', '')
+    if (
+        version_status == PublishStatus.published
+        and agent_project_id is not None
+        and agent_project_id == get_public_project_id()
+        and entity_settings.llm_settings
+    ):
+        override = entity_settings.llm_settings.dict(exclude_none=True)
+        if override:
+            llm_settings = override
+
+    # One-shot transient override from predict request (merge, not replace)
+    if predict_payload.llm_settings and predict_payload.llm_settings.model_name:
+        llm_settings.update(predict_payload.llm_settings.dict(exclude_unset=True))
+
+    return llm_settings
 
 
 def generate_payload(session, msg_group: ConversationMessageGroup, predict_payload: SioPredictModel) -> dict:
@@ -514,11 +692,13 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
         ),
         'mcp_tokens': predict_payload.mcp_tokens or {},
         'ignored_mcp_servers': predict_payload.ignored_mcp_servers or [],
+        'user_declined_mcp_servers': getattr(predict_payload, 'user_declined_mcp_servers', None) or [],
         'conversation_id': predict_payload.conversation_uuid,  # For planning toolkit scoping
         'should_continue': predict_payload.should_continue or False,
         'hitl_resume': bool(getattr(predict_payload, 'hitl_resume', False)),
         'hitl_action': getattr(predict_payload, 'hitl_action', None),
         'hitl_value': getattr(predict_payload, 'hitl_value', None),
+        'hitl_decisions': getattr(predict_payload, 'hitl_decisions', None),
         'thread_id': predict_payload.thread_id,
     }
 
@@ -529,10 +709,12 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             result['application_id'] = participant.entity_meta.get('id')
             result['entity_name'] = (participant.meta or {}).get('name', '')
 
-            # Merge entity_settings (now WITHOUT llm_settings for new participants)
-            result = deep_update(result, entity_settings.dict())
+            # Merge entity_settings into result, excluding llm_settings
+            # (llm_settings resolution is handled separately below)
+            es_dict = entity_settings.dict()
+            es_dict.pop('llm_settings', None)
+            result = deep_update(result, es_dict)
 
-            # Generate version payload which contains the source-of-truth llm_settings
             result['version_details'] = generate_application_version_payload(
                 session=session,
                 msg_group=msg_group,
@@ -540,25 +722,33 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 entity_settings=entity_settings
             )
 
-            # CRITICAL: Extract llm_settings from version_details (single source of truth)
-            # This handles both old participants (with cached llm_settings) and new ones (without)
-            if 'llm_settings' in result.get('version_details', {}):
-                result['llm_settings'] = result['version_details']['llm_settings'].copy()
+            # Resolve llm_settings with clear precedence in a single place
+            result['llm_settings'] = _resolve_application_llm_settings(
+                version_details=result.get('version_details', {}),
+                entity_settings=entity_settings,
+                predict_payload=predict_payload,
+                agent_project_id=participant.entity_meta.get('project_id'),
+            )
+
+            # Inject project context into agent instructions (skip for pipelines)
+            _vd = result.get('version_details') or {}
+            _is_pipeline = _vd.get('agent_type') == AgentTypes.pipeline.value
+            if not _is_pipeline:
+                _ctx_content, _ctx_enabled = get_project_context(predict_payload.project_id)
+                if _ctx_enabled and _ctx_content:
+                    _ignore = (_vd.get('meta') or {}).get('ignore_project_context', False)
+                    if not _ignore:
+                        _vd['instructions'] = prepend_project_context(_vd.get('instructions') or '', _ctx_content)
+                    result['version_details'] = _vd
 
             # IMPORTANT: Use offset(1) to retrieve the previous agent message, skipping the newly created response
             last_agent_message: ConversationMessageGroup = session.query(ConversationMessageGroup).where(
                 ConversationMessageGroup.author_participant_id == msg_group.sent_to_id,
                 ConversationMessageGroup.conversation_id == msg_group.conversation_id
             ).order_by(desc(ConversationMessageGroup.created_at)).offset(1).first()
-            log.debug(f'{serialize(last_agent_message)=}')
+            log.debug("last_agent_message=%s", serialize(last_agent_message))
             if last_agent_message:
                 result['thread_id'] = last_agent_message.meta.get('thread_id')
-
-            # Apply user override if provided (e.g., from UI temporary override)
-            if predict_payload.llm_settings and predict_payload.llm_settings.model_name:
-                if 'llm_settings' not in result:
-                    result['llm_settings'] = {}
-                result['llm_settings'].update(predict_payload.llm_settings.dict(exclude_unset=True))
 
             # Merge internal_tools from conversation (UI toggle) and agent version (stored config)
             conversation_internal_tools = msg_group.conversation.meta.get('internal_tools', []) if msg_group.conversation.meta else []
@@ -569,6 +759,14 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 if tool not in combined_tools:
                     combined_tools.append(tool)
             result['internal_tools'] = combined_tools
+
+            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
+            # Skip for pipelines: their instructions are YAML, not a text prompt
+            mcp_link_addon = get_mcp_entity_link_instructions(combined_tools)
+            if mcp_link_addon and not _is_pipeline:
+                _vd = result.get('version_details') or {}
+                _vd['instructions'] = (_vd.get('instructions') or '') + mcp_link_addon
+                result['version_details'] = _vd
         # case ParticipantTypes.pipeline:
         #     # TODO: handle as simplified application, but should not ?
         #     entity_settings = EntitySettingsApplication.parse_obj(participant_chat_settings.entity_settings)
@@ -592,6 +790,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             ).first()
             author_settings = EntitySettingsUser.parse_obj(author_participant_settings.entity_settings)
             result['llm_settings'] = author_settings.dict().get('llm_settings', {})
+            # Get internal_tools from conversation meta for LLM chats
+            llm_chat_internal_tools = msg_group.conversation.meta.get('internal_tools', []) if msg_group.conversation.meta else []
             # For LLM chats, always inject attachment toolkit (is_llm_chat=True)
             result['tools'] = generate_toolkit_payload(
                 session=session,
@@ -599,6 +799,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 user_id=msg_group.author_participant.entity_meta['id'],
                 conversation_project_id=predict_payload.project_id,
                 current_participant_id=msg_group.sent_to_id,
+                internal_tools=llm_chat_internal_tools,
                 is_llm_chat=True
             )
             # Pass current participant ID so SDK can identify self for loop prevention
@@ -613,9 +814,19 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             else:
                 result['instructions'] = base_instructions
 
+            # Inject project context into LLM chat instructions
+            _ctx_content, _ctx_enabled = get_project_context(predict_payload.project_id)
+            if _ctx_enabled and _ctx_content:
+                result['instructions'] = prepend_project_context(result.get('instructions') or '', _ctx_content)
+
+            # Append MCP entity-link instruction when Elitea MCP Tools are enabled
+            mcp_link_addon = get_mcp_entity_link_instructions(llm_chat_internal_tools)
+            if mcp_link_addon:
+                result['instructions'] = (result.get('instructions') or '') + mcp_link_addon
+
             if predict_payload.llm_settings:
                 result['llm_settings'].update(predict_payload.llm_settings.dict(exclude_none=True))
-            result['internal_tools'] = msg_group.conversation.meta.get('internal_tools', [])
+            result['internal_tools'] = llm_chat_internal_tools
             # Get persona from conversation settings (user's saved preference), default to 'generic'
             result['persona'] = msg_group.conversation.meta.get('persona', 'generic')
 
@@ -662,7 +873,9 @@ def prepare_conversation_history(
     )
 
     if last_summarized_group_id and last_summarization.get('summary_content'):
-        chat_history_groups = conversation.message_groups.where(
+        chat_history_groups = conversation.message_groups.options(
+            selectinload(ConversationMessageGroup.message_items)
+        ).where(
             ConversationMessageGroup.id > last_summarized_group_id,
             ConversationMessageGroup.created_at < msg_group.created_at,
         ).order_by(
@@ -673,13 +886,17 @@ def prepare_conversation_history(
         chat_history_template = ChatHistoryTemplates.all.value
         try:
             chat_history_template = int(chat_history_template)
-            chat_history_groups = list(reversed(conversation.message_groups.where(
+            chat_history_groups = list(reversed(conversation.message_groups.options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).where(
                 ConversationMessageGroup.created_at < msg_group.created_at,
             ).order_by(
                 desc(ConversationMessageGroup.created_at)
             ).limit(chat_history_template).all()))
         except ValueError:
-            chat_history_groups = conversation.message_groups.where(
+            chat_history_groups = conversation.message_groups.options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).where(
                 ConversationMessageGroup.created_at < msg_group.created_at
             ).order_by(
                 asc(ConversationMessageGroup.created_at)
@@ -691,7 +908,8 @@ def prepare_conversation_history(
 class RPC:
     @web.rpc("chat_predict_sio", "chat_predict_sio")
     def predict_sio(
-        self, sid: str | None, data: dict, await_task_timeout: int = -1, return_message_ids: bool = False
+        self, sid: str | None, data: dict, await_task_timeout: int = -1, return_message_ids: bool = False,
+        return_chat_history: bool = False, eligible_for_autoapproval: bool = False,
     ) -> Optional[str | dict]:
         try:
             parsed = SioPredictModel.model_validate(data)
@@ -712,7 +930,6 @@ class RPC:
         else:
             current_user = auth.current_user()
         
-        # log.info(f'chat {parsed=}')
         with db.get_session(parsed.project_id) as session:
             conversation: Conversation = session.query(Conversation).where(
                 Conversation.uuid == parsed.conversation_uuid
@@ -721,7 +938,7 @@ class RPC:
                 parsed.project_id,
             )
 
-            if parsed.participant_id is None and "@everyone" not in parsed.user_input.lower() and not parsed.user_ids:
+            if parsed.participant_id is None and not parsed.user_ids:
                 dummy_participant, _ = get_or_create_one(
                     session=session,
                     entity_name=ParticipantTypes.dummy,
@@ -857,6 +1074,28 @@ class RPC:
             )
             session.add(msg_group)
             session.add(msg)
+
+            # Inject context only when internal_mcp is enabled for this conversation.
+            # Support assistant conversations always have 'internal_mcp' in internal_tools.
+            conversation_internal_tools = (conversation.meta or {}).get('internal_tools', [])
+            if 'internal_mcp' in conversation_internal_tools:
+                effective_runtime_context = dict(parsed.runtime_context) if parsed.runtime_context else {}
+
+                # Always set server-side truth values
+                effective_runtime_context['user_id'] = current_user['id']
+                if 'project_id' not in effective_runtime_context:
+                    effective_runtime_context['project_id'] = parsed.project_id
+
+                from ..models.message_items.context import ContextMessageItem
+                context_msg = ContextMessageItem(
+                    message_group=msg_group,
+                    item_type=ContextMessageItem.__mapper_args__['polymorphic_identity'],
+                    order_index=-1,
+                    context_data=effective_runtime_context,
+                    context_type='support_assistant_context',
+                )
+                session.add(context_msg)
+
             session.flush()
 
             response_msg = None
@@ -871,8 +1110,22 @@ class RPC:
                 session.add(response_msg)
                 session.flush()
 
+            is_pipeline = False
+            pipeline_attachment_filepaths = []
+
             if parsed.attachments_info:
                 try:
+                    sent_to = msg_group.sent_to
+                    if (
+                        sent_to is not None
+                        and str(sent_to.entity_name) == ParticipantTypes.application.value
+                    ):
+                        app_id = sent_to.entity_meta.get('id')
+                        if app_id:
+                            is_pipeline = session.query(ApplicationVersion).filter(
+                                ApplicationVersion.application_id == app_id,
+                                ApplicationVersion.agent_type == AgentTypes.pipeline.value,
+                            ).first() is not None
                     msg_group = process_attachment_message_items(
                         session,
                         parsed.project_id,
@@ -882,8 +1135,16 @@ class RPC:
                         message_id=str(response_msg.uuid) if response_msg else None,
                         user_id=current_user['id'],
                         sid=sid,
-                        llm_settings=parsed.llm_settings.dict() if parsed.llm_settings else None
+                        llm_settings=parsed.llm_settings.dict() if parsed.llm_settings else None,
+                        pipeline_mode=is_pipeline,
                     )
+                    # Collect attachment filepaths from pipeline text chunks for graph state injection
+                    if is_pipeline:
+                        for item in msg_group.message_items:
+                            if isinstance(item, AttachmentMessageItem):
+                                for chunk in (item.content or []):
+                                    if isinstance(chunk, dict) and 'attachment_filepath' in chunk:
+                                        pipeline_attachment_filepaths.append(chunk['attachment_filepath'])
                 except Exception as e:
                     log.error(e)
                     room = get_chat_room(parsed.conversation_uuid)
@@ -916,10 +1177,29 @@ class RPC:
                 skip_sid=sid
             )
 
+            if parsed.user_ids:
+                mentioned_participants = session.query(Participant).filter(
+                    Participant.id.in_(parsed.user_ids),
+                    Participant.entity_name == ParticipantTypes.user
+                ).all()
+                for participant in mentioned_participants:
+                    auth_user_id = participant.entity_meta.get('id')
+                    if not auth_user_id:
+                        continue
+                    try:
+                        notify_user_mentioned_in_conversation(
+                            project_id=parsed.project_id,
+                            user_id=auth_user_id,
+                            conversation=conversation,
+                            initiator_id=current_user['id'],
+                            message_id=parsed.question_id
+                        )
+                    except Exception as e:
+                        log.warning(f'Failed to notify mentioned user (participant {participant.id}): {e}')
+
             if msg_group.sent_to_id:
                 # here we need to generate payload
                 if rpc_func := CHAT_PREDICT_MAPPER.get(msg_group.sent_to.entity_name):
-                    # log.info(f'{msg=} {parsed=}')
                     try:
                         payload: dict = generate_payload(session, msg_group=msg_group, predict_payload=parsed)
                     except PayloadGenerationError as e:
@@ -944,7 +1224,14 @@ class RPC:
                             room=room
                         )
                         return {"error": str(e)}
-                    # log.info(f'{payload=}')
+
+                    if eligible_for_autoapproval:
+                        payload['auto_approve_sensitive_actions'] = True
+                        log.debug('[SENSITIVE] Auto-approve sensitive actions enabled for SIO request (eligible_for_autoapproval)')
+
+                    # Pass pipeline attachment filepaths so the indexer can inject them into graph state
+                    if pipeline_attachment_filepaths:
+                        payload['input_attachments'] = pipeline_attachment_filepaths
 
                     chat_history_groups, summaries, preserve_instructions = prepare_conversation_history(
                         session, self.context.sio,
@@ -956,7 +1243,7 @@ class RPC:
                     payload['chat_history'] = generate_chat_history(
                         message_groups=chat_history_groups, summaries=summaries
                     )
-                    log.debug(f'chat {payload["chat_history"]=}')
+                    log.debug('chat payload["chat_history"]=%s', payload["chat_history"])
 
                     context_meta = {
                         'context': {
@@ -969,24 +1256,36 @@ class RPC:
                     }
                     if context_management_enabled:
                         context_meta['chat_history_group_ids'] = [g.id for g in chat_history_groups]
-                    response_msg.meta = context_meta if context_management_enabled else {}
+                    execution_generation = str(uuid4())
+                    context_meta = begin_execution_generation(
+                        context_meta if context_management_enabled else {},
+                        execution_generation,
+                    )
+                    response_msg.meta = context_meta
                     session.commit()
 
                     payload['message_id'] = str(response_msg.uuid)
-
-                    # log.info(f'chat2 {payload=}')
+                    payload[EXECUTION_GENERATION_KEY] = execution_generation
 
                     # returns result only for applications
-                    result = getattr(self.context.rpc_manager.call, rpc_func)(
-                        sid, payload, SioEvents.chat_predict.value,
-                        start_event_content={
-                            'participant_id': msg_group.sent_to_id,
-                            'question_id': str(msg_group.uuid),
-                        },
-                        chat_project_id=parsed.project_id,
-                        await_task_timeout=await_task_timeout,
-                        user_id=current_user['id']
-                    )
+                    try:
+                        result = getattr(self.context.rpc_manager.call, rpc_func)(
+                            sid, payload, SioEvents.chat_predict.value,
+                            start_event_content={
+                                'participant_id': msg_group.sent_to_id,
+                                'question_id': str(msg_group.uuid),
+                            },
+                            chat_project_id=parsed.project_id,
+                            await_task_timeout=await_task_timeout,
+                            user_id=current_user['id'],
+                            return_chat_history=return_chat_history,
+                            eligible_for_autoapproval=eligible_for_autoapproval,
+                        )
+                    except PoolSaturationError:
+                        # Mark the response placeholder as not streaming to avoid stuck chat entry
+                        response_msg.is_streaming = False
+                        session.commit()
+                        raise
 
                     if return_message_ids:
                         session.refresh(msg_group)
@@ -1009,10 +1308,10 @@ class RPC:
         - Has different validation requirements (message_id required, user_input not needed)
         - Shares minimal logic with the normal predict flow
         """
-        log.debug(f'Continue predict: received data: user_input={data.get("user_input")}')
+        log.debug("Continue predict: message_id=%s conversation_uuid=%s sid=%s user_input=%s",
+                  data.get("message_id"), data.get("conversation_uuid"), sid, data.get("user_input"))
         try:
             parsed = SioContinuePredictModel.model_validate(data)
-            log.debug(f'Continue predict: parsed model: user_input={parsed.user_input}')
         except ValidationError as e:
             raise SioValidationError(
                 sio=self.context.sio,
@@ -1027,6 +1326,55 @@ class RPC:
             current_user = auth.current_user(auth_data=auth.sio_users[sid])
         else:
             current_user = auth.current_user()
+
+        # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
+        # run. A stale HITL approval card left in the UI must NOT resume anything
+        # — without this, a fan-out child whose stash was cleared on stop falls
+        # through to the parent continue flow below and re-fans-out EVERY child,
+        # including ones that had already completed. Refuse the resume cleanly.
+        if self.is_chat_run_stopped(parsed.message_id):
+            log.info("[PARALLEL] continue refused — run stopped (message_id=%s)", parsed.message_id)
+            return {"stopped": True}
+
+        # Parallel sub-agent HITL (#4993 Track 2): if this resume targets a
+        # parked-fan-out child thread, replay that child directly (with
+        # hitl_resume) instead of regenerating the parent message's payload —
+        # the approval belongs to the child's own agent identity + checkpoint.
+        # The child resumes on its own thread; on completion it fires `stopped`
+        # and the reconcile gate wakes the parent.
+        child_resume = self._continue_child_resume(sid, parsed, current_user)
+        if child_resume is not None:
+            return child_resume
+
+        # A durable child approval must never degrade into the ordinary parent
+        # continue path. Its Redis launch stash can expire while the approval
+        # card remains persisted in PostgreSQL; resuming the parent in that
+        # situation re-fans out already-completed siblings. Fail closed and let
+        # the UI present an expired-run recovery action instead.
+        if parsed.thread_id:
+            with db.get_session(parsed.project_id) as session:
+                persisted = session.query(ConversationMessageGroup).where(
+                    ConversationMessageGroup.uuid == parsed.message_id
+                ).first()
+                expired_child = any(
+                    item.get('resume_strategy') == 'aggregate_child'
+                    and (item.get('child_thread_id') or item.get('thread_id'))
+                    == parsed.thread_id
+                    for item in pending_interrupts(
+                        persisted.meta if persisted else None
+                    )
+                )
+            if expired_child:
+                raise SioValidationError(
+                    sio=self.context.sio, sid=sid,
+                    event=SioEvents.chat_predict.value,
+                    error=(
+                        'This sub-orchestrator approval expired and cannot be '
+                        'resumed safely. Regenerate the response.'
+                    ),
+                    stream_id=str(parsed.conversation_uuid),
+                    message_id=parsed.message_id,
+                )
 
         with db.get_session(parsed.project_id) as session:
             conversation: Conversation = session.query(Conversation).where(
@@ -1043,14 +1391,12 @@ class RPC:
                     message_id=parsed.message_id,
                 )
 
-            log.debug(f'Continue: Looking up message with id {parsed.message_id}')
-            
             # Find the existing response message that was paused
             response_msg: ConversationMessageGroup = session.query(ConversationMessageGroup).options(
                 joinedload(ConversationMessageGroup.author_participant)
             ).filter(
                 ConversationMessageGroup.uuid == parsed.message_id
-            ).first()
+            ).with_for_update(of=ConversationMessageGroup).populate_existing().first()
 
             if not response_msg:
                 log.warning(f'Continue: No message found with id {parsed.message_id}')
@@ -1062,8 +1408,6 @@ class RPC:
                     stream_id=str(parsed.conversation_uuid),
                     message_id=parsed.message_id,
                 )
-
-            log.debug(f'Continue: Found message {response_msg.uuid}, reply_to_id={response_msg.reply_to_id}, author_participant_id={response_msg.author_participant_id}')
 
             # Get the question message (reply_to)
             msg_group = None
@@ -1079,10 +1423,9 @@ class RPC:
                     joinedload(ConversationMessageGroup.author_participant)
                 ).filter(
                     ConversationMessageGroup.reply_to_id == response_msg.id
-                ).first()
+                ).with_for_update(of=ConversationMessageGroup).populate_existing().first()
 
                 if actual_response:
-                    log.debug(f'Continue: Found actual response message {actual_response.uuid}')
                     msg_group = response_msg  # The "response_msg" is actually the question
                     response_msg = actual_response
                 else:
@@ -1095,6 +1438,74 @@ class RPC:
                         stream_id=str(parsed.conversation_uuid),
                         message_id=parsed.message_id,
                     )
+
+            # Retire the exact Track-1/root cards accepted by this resume before
+            # the resumed worker can emit its next pause.  Previously the live UI
+            # advanced, but the old cards remained in JSONB and all reappeared on
+            # refresh.  Tombstones also reject a queued late copy of a resolved
+            # pause.  Durable Track-2 children are handled by
+            # ``_continue_child_resume`` above.
+            if parsed.hitl_resume:
+                pending = pending_interrupts(response_msg.meta)
+                decisions = [
+                    dict(item) for item in (parsed.hitl_decisions or [])
+                    if isinstance(item, dict)
+                ]
+                if decisions:
+                    try:
+                        validate_child_decisions(pending, decisions)
+                    except ValueError as exc:
+                        raise SioValidationError(
+                            sio=self.context.sio, sid=sid,
+                            event=SioEvents.chat_predict.value,
+                            error=str(exc),
+                            stream_id=str(parsed.conversation_uuid),
+                            message_id=parsed.message_id,
+                        ) from exc
+                    resolved_ids = [interrupt_identity(item) for item in decisions]
+                else:
+                    if len(pending) != 1:
+                        raise SioValidationError(
+                            sio=self.context.sio, sid=sid,
+                            event=SioEvents.chat_predict.value,
+                            error=(
+                                'A scalar HITL resume requires exactly one '
+                                'pending interrupt'
+                            ),
+                            stream_id=str(parsed.conversation_uuid),
+                            message_id=parsed.message_id,
+                        )
+                    action = parsed.hitl_action
+                    available = pending[0].get('available_actions')
+                    if (
+                        isinstance(available, list) and available
+                        and action not in available
+                    ):
+                        raise SioValidationError(
+                            sio=self.context.sio, sid=sid,
+                            event=SioEvents.chat_predict.value,
+                            error=(
+                                f"Action '{action}' is not available for the "
+                                'pending interrupt'
+                            ),
+                            stream_id=str(parsed.conversation_uuid),
+                            message_id=parsed.message_id,
+                        )
+                    resolved_ids = [interrupt_identity(pending[0])]
+                response_msg.meta = retire_interrupts(
+                    response_msg.meta, resolved_ids,
+                )
+                flag_modified(response_msg, 'meta')
+
+            execution_generation = (response_msg.meta or {}).get(
+                EXECUTION_GENERATION_KEY,
+            )
+            if not execution_generation:
+                execution_generation = str(uuid4())
+                response_msg.meta = begin_execution_generation(
+                    response_msg.meta, execution_generation,
+                )
+                flag_modified(response_msg, 'meta')
 
             # Set streaming back to true
             response_msg.is_streaming = True
@@ -1149,6 +1560,7 @@ class RPC:
                     message_groups=chat_history_groups, summaries=summaries
                 )
                 payload['message_id'] = str(response_msg.uuid)
+                payload[EXECUTION_GENERATION_KEY] = execution_generation
 
                 context_management_enabled = get_context_manager_feature_flag(parsed.project_id)
                 if context_management_enabled and response_msg.meta is not None:
@@ -1181,6 +1593,187 @@ class RPC:
                     stream_id=str(parsed.conversation_uuid),
                     message_id=parsed.message_id,
                 )
+
+    @web.method()
+    def _continue_child_resume(self, sid, parsed, current_user):
+        """Resume a parked-fan-out child on its own thread, or None if N/A.
+
+        A parallel sub-agent child pauses for HITL on its OWN thread_id and emits
+        its own approval card. When the user approves, the continue request
+        carries that child thread_id — we replay the child's stashed launch
+        payload with hitl_resume set, on the agents pool, keeping the reconcile
+        linkage meta so the child's eventual completion wakes the parent gate.
+        Returns the start_task result dict, or None when thread_id is not a known
+        child (caller then falls through to the normal parent continue flow).
+        """
+        thread_id = getattr(parsed, 'thread_id', None)
+        if not thread_id:
+            return None
+        stash = self.parallel_dispatch_lookup_child(thread_id)
+        if not stash:
+            return None
+
+        child_payload = dict(stash.get('child_payload') or {})
+        child_meta = dict(stash.get('child_meta') or {})
+        if not child_payload:
+            return None
+
+        stream_id = stash.get('parent_stream_id')
+        message_id = stash.get('parent_message_id')
+        if (
+            str(message_id) != str(parsed.message_id)
+            or str(stream_id) != str(parsed.conversation_uuid)
+            or child_meta.get('chat_project_id') != parsed.project_id
+        ):
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
+                error='This child interrupt does not belong to the requested chat run',
+                stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+            )
+
+        # A Redis child-thread id is routing metadata, not authority. Confirm the tenant,
+        # conversation, message, and requesting user before replaying the stashed token/payload.
+        with db.get_session(parsed.project_id) as session:
+            conversation = session.query(Conversation).where(
+                Conversation.uuid == parsed.conversation_uuid
+            ).first()
+            response_msg = session.query(ConversationMessageGroup).where(
+                ConversationMessageGroup.uuid == parsed.message_id
+            ).first()
+            user_is_participant = conversation and any(
+                p.entity_name == ParticipantTypes.user.value
+                and (p.entity_meta or {}).get('id') == current_user['id']
+                for p in conversation.participants
+            )
+            if (
+                not conversation
+                or not response_msg
+                or response_msg.conversation_id != conversation.id
+                or (
+                    conversation.author_id != current_user['id']
+                    and not user_is_participant
+                )
+            ):
+                raise SioValidationError(
+                    sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
+                    error='Child interrupt ownership validation failed',
+                    stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+                )
+            persisted_meta = dict(response_msg.meta or {})
+
+        # Forward the COMPLETE aggregate decision list. Scalar action/value remain only as the
+        # single-interrupt compatibility path.
+        action = getattr(parsed, 'hitl_action', None)
+        value = getattr(parsed, 'hitl_value', None)
+        child_decisions = decisions_for_child(
+            getattr(parsed, 'hitl_decisions', None),
+            thread_id,
+            child_meta.get('tool_call_id'),
+        )
+        pending_for_child = [
+            item for item in pending_interrupts(persisted_meta)
+            if (item.get('child_thread_id') or item.get('thread_id')) == thread_id
+        ]
+        if not pending_for_child:
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
+                error='This sub-orchestrator interrupt was already resolved',
+                stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+            )
+        if child_decisions:
+            try:
+                validate_child_decisions(pending_for_child, child_decisions)
+            except ValueError as exc:
+                raise SioValidationError(
+                    sio=self.context.sio, sid=sid,
+                    event=SioEvents.chat_predict.value,
+                    error=str(exc),
+                    stream_id=str(parsed.conversation_uuid),
+                    message_id=parsed.message_id,
+                ) from exc
+        elif len(pending_for_child) > 1:
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid,
+                event=SioEvents.chat_predict.value,
+                error='All pending decisions for this sub-orchestrator must be submitted together',
+                stream_id=str(parsed.conversation_uuid),
+                message_id=parsed.message_id,
+            )
+        if child_decisions:
+            first_decision = child_decisions[0]
+            action = first_decision.get('action', action)
+            value = first_decision.get('value', value)
+
+        resume_interrupt_ids = [
+            interrupt_identity(item) for item in pending_for_child
+        ]
+        if not self.parallel_dispatch_claim_child_resume(
+            thread_id, resume_interrupt_ids,
+        ):
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
+                error='This sub-orchestrator interrupt is already resuming',
+                stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+            )
+
+        child_payload['hitl_resume'] = True
+        child_payload['hitl_action'] = action or 'approve'
+        child_payload['hitl_value'] = value or ''
+        if child_decisions:
+            child_payload['hitl_decisions'] = child_decisions
+        child_payload['should_continue'] = False
+        execution_generation = persisted_meta.get(EXECUTION_GENERATION_KEY)
+        if execution_generation:
+            child_payload[EXECUTION_GENERATION_KEY] = execution_generation
+        child_payload.setdefault('thread_id', thread_id)
+        child_payload.update({
+            'mcp_tokens': getattr(parsed, 'mcp_tokens', None) or child_payload.get('mcp_tokens') or {},
+            'ignored_mcp_servers': getattr(parsed, 'ignored_mcp_servers', None)
+            or child_payload.get('ignored_mcp_servers') or [],
+        })
+
+        try:
+            task_id = self.task_node.start_task(
+                "indexer_agent",
+                args=[stream_id, message_id],
+                kwargs=child_payload,
+                pool="agents",
+                meta=child_meta,
+            )
+        except Exception:
+            self.parallel_dispatch_release_child_resume(
+                thread_id, resume_interrupt_ids,
+            )
+            raise
+        if task_id is None:
+            self.parallel_dispatch_release_child_resume(
+                thread_id, resume_interrupt_ids,
+            )
+            log.warning("[PARALLEL] child resume saturated for thread_id=%s", thread_id)
+            raise PoolSaturationError(pool="agents", retry_after=5)
+
+        # The new task supersedes the stopped pre-HITL task for stop fan-out. Retire only this
+        # child's cards; sibling interrupts remain persisted and actionable.
+        self._parallel_set_child_task_ids(
+            child_meta.get('parent_thread_id'), child_meta.get('reconcile_epoch'),
+            {thread_id: task_id},
+        )
+        resolved_ids = [item.get('interrupt_id') for item in child_decisions]
+        with db.get_session(parsed.project_id) as session:
+            response_msg = session.query(ConversationMessageGroup).where(
+                ConversationMessageGroup.uuid == parsed.message_id
+            ).with_for_update(of=ConversationMessageGroup).first()
+            if response_msg:
+                response_msg.task_id = task_id
+                response_msg.is_streaming = True
+                response_msg.meta = retire_child_interrupts(
+                    response_msg.meta, thread_id, resolved_ids,
+                )
+                flag_modified(response_msg, 'meta')
+                session.add(response_msg)
+                session.commit()
+        log.info("[PARALLEL] resumed child thread_id=%s task_id=%s", thread_id, task_id)
+        return {"task_id": task_id}
 
     @web.rpc(f'chat_predict_summary_content', "predict_summary_content")
     def predict_summary_content(
@@ -1218,7 +1811,7 @@ class RPC:
                 raise Exception(f"No message groups found for summary generation")
 
             # Make the LLM prediction call
-            log.debug(f'chat generate_summary_payload {payload=}')
+            log.debug("chat generate_summary_payload payload=%s", payload)
 
             try:
                 client = self.get_redis_client()

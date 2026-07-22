@@ -7,7 +7,7 @@ Provides server-side pagination, search, and sorting for tool usage data.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c
+    from tools import api_tools, auth, config as c, register_openapi
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -41,6 +41,104 @@ if _API_AVAILABLE:
     class PromptLibAPI(api_tools.APIModeHandler):
         """Paginated tool usage for analytics."""
 
+        @register_openapi(
+            name="List Tool Analytics",
+            description=(
+                "Returns paginated tool usage statistics with optional date filtering, "
+                "search by tool name, and sorting."
+            ),
+            mcp_tool=True,
+            mcp_description="Use this tool when you need a project-wide ranking or paginated inventory of tool usage, including call volume and error counts. Do not use this tool when you need the detailed per-user/per-agent breakdown for one exact tool — use Get Tool Analytics Detail. Do not use for project dashboard KPIs. This is the main discovery/list endpoint for tool analytics.",
+            tags=["elitea_core/analytics"],
+            parameters=[
+                {
+                    "name": "date_from",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "Start datetime (ISO 8601). Defaults to 7 days ago.",
+                    "example": "2025-01-01T00:00:00",
+                },
+                {
+                    "name": "date_to",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "End datetime (ISO 8601). Defaults to now.",
+                    "example": "2025-01-31T23:59:59",
+                },
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                    "description": "Page size (max 100).",
+                },
+                {
+                    "name": "offset",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "default": 0, "minimum": 0},
+                    "description": "Pagination offset.",
+                },
+                {
+                    "name": "search",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": "Filter by tool name (case-insensitive partial match).",
+                },
+                {
+                    "name": "sort_by",
+                    "in": "query",
+                    "required": False,
+                    "schema": {
+                        "type": "string",
+                        "enum": ["calls", "users", "avg_duration_ms", "errors", "tool_name"],
+                        "default": "calls",
+                    },
+                    "description": "Column to sort by.",
+                },
+                {
+                    "name": "sort_order",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
+                    "description": "Sort direction.",
+                },
+            ],
+            responses={
+                "200": {
+                    "description": "Paginated tool analytics",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "total": 12,
+                                "rows": [
+                                    {
+                                        "tool_name": "jira_create_issue",
+                                        "calls": 120,
+                                        "users": 6,
+                                        "avg_duration_ms": 310.0,
+                                        "errors": 3,
+                                    },
+                                    {
+                                        "tool_name": "github_create_pr",
+                                        "calls": 85,
+                                        "users": 4,
+                                        "avg_duration_ms": 420.0,
+                                        "errors": 1,
+                                    },
+                                ],
+                            }
+                        }
+                    },
+                },
+                "401": {"description": "Unauthorized"},
+                "500": {"description": "Internal server error"},
+            },
+            available_to_users=True,
+        )
         @auth.decorators.check_api({
             "permissions": ["models.monitoring.tracing.view"],
             "recommended_roles": {

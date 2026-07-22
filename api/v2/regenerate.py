@@ -1,21 +1,34 @@
 from flask import request
+from uuid import uuid4
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm.attributes import flag_modified
 from pydantic import ValidationError
 
-from tools import api_tools, auth, db, config as c, serialize
+from tools import api_tools, auth, db, config as c, serialize, register_openapi
 
 from ...models.message_group import ConversationMessageGroup
+from ...models.message_trace_step import MessageTraceStep
+from ...models.message_items.attachment import AttachmentMessageItem
+from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
-from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload
+from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items
 from ...utils.chat_history import generate_chat_history
 from ...models.enums.all import ChatHistoryRole
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.parallel_hitl import (
+    EXECUTION_GENERATION_KEY, begin_execution_generation, retire_all_interrupts,
+)
 from ...utils.sio_utils import SioEvents
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Regenerate Message",
+        description="Regenerate assistant response for a message group.",
+        tags=["elitea_core/chat"],
+        request_body=SioRegenerateModel,
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversations.regenerate"],
         "recommended_roles": {
@@ -44,12 +57,53 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             msg_entity_meta = msg_group.author_participant.entity_meta
 
+            if parsed.updated_items:
+                for update in parsed.updated_items:
+                    item = next(
+                        (i for i in reply_msg.message_items if str(i.uuid) == update.get('uuid')),
+                        None,
+                    )
+                    if item and isinstance(item, TextMessageItem):
+                        item.content = update['content']
+                    # canvas and other item types: reserved for future support
+                session.commit()
+                session.refresh(reply_msg)
+
             raw_predict_payload = {**parsed.model_dump(), **parsed.payload}
             try:
                 predict_payload = SioPredictModel.model_validate(raw_predict_payload)
             except ValidationError as e:
                 return {'error': 'Invalid prediction payload', 'details': e.errors()}, 400
-            regenerate_payload: dict = generate_payload(session, msg_group=reply_msg, predict_payload=predict_payload)
+
+            if predict_payload.attachments_info:
+                existing_filepaths = {
+                    item.filepath
+                    for item in reply_msg.message_items
+                    if isinstance(item, AttachmentMessageItem)
+                }
+                new_attachments = [
+                    a for a in predict_payload.attachments_info
+                    if a.filepath not in existing_filepaths
+                ]
+                if new_attachments:
+                    try:
+                        reply_msg = process_attachment_message_items(
+                            session,
+                            predict_payload.project_id,
+                            reply_msg,
+                            new_attachments,
+                            llm_settings=predict_payload.llm_settings.dict() if predict_payload.llm_settings else None,
+                        )
+                        session.commit()
+                        session.refresh(reply_msg)
+                    except Exception as e:
+                        return {'error': f'Failed to process attachments: {str(e)}'}, 400
+
+            try:
+                regenerate_payload: dict = generate_payload(session, msg_group=reply_msg, predict_payload=predict_payload)
+            except PayloadGenerationError as e:
+                return {'error': str(e)}, 400
+
             regenerate_payload['is_regenerate'] = True
 
             chat_history_groups, summaries, preserve_instructions = prepare_conversation_history(
@@ -81,19 +135,37 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if auth.current_user().get("id") not in (conversation_author_id, reply_msg_entity_meta.get("id")):
                 return {'error': f'You can not regenerate message group with uuid {message_group_uuid}'}, 400
 
+            # Fence late partial/pause callbacks from the superseded execution
+            # before mutating the reused response row. OF avoids PostgreSQL
+            # attempting to lock eagerly joined nullable relationships.
+            msg_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_group_uuid
+            ).with_for_update(of=ConversationMessageGroup).populate_existing().first()
+
+            # Regenerate is a legitimate fresh run on the same response UUID. A stopped-run flag
+            # must block stale Continue actions, but must not poison this new execution for six
+            # hours. Clear it only after ownership validation (never from Continue itself).
+            self.module.clear_chat_run_stopped(str(msg_group.uuid))
+
             # remove outdated message items
             for message_item in msg_group.message_items:
                 session.delete(message_item)
 
-            msg_group.meta['thinking_steps'] = []
-            msg_group.meta['tool_calls'] = {}
+            execution_generation = str(uuid4())
+            msg_group.meta = begin_execution_generation(
+                retire_all_interrupts(msg_group.meta), execution_generation,
+            )
+            # Clear the group's trace steps (rows are the accumulator; regenerate starts fresh).
+            session.query(MessageTraceStep).filter(
+                MessageTraceStep.message_group_id == msg_group.id
+            ).delete(synchronize_session=False)
             msg_group.is_streaming = True
-            flag_modified(msg_group, 'meta')
             session.commit()
             session.refresh(msg_group)
 
             rpc_func = CHAT_PREDICT_MAPPER.get(msg_group.author_participant.entity_name)
             if rpc_func:
+                regenerate_payload[EXECUTION_GENERATION_KEY] = execution_generation
                 getattr(self.module.context.rpc_manager.call, rpc_func)(
                     parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
                     start_event_content={

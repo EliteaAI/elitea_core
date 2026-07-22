@@ -8,7 +8,7 @@ for the AI Adoption Analytics dashboard.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c
+    from tools import api_tools, auth, config as c, register_openapi
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -55,6 +55,129 @@ if _API_AVAILABLE:
     class PromptLibAPI(api_tools.APIModeHandler):
         """Project-level analytics for AI adoption dashboard."""
 
+        @register_openapi(
+            name="Get Project Analytics Overview",
+            description=(
+                "Returns project-level AI adoption KPIs, event type breakdown, "
+                "top active users, daily activity trend, tool usage, model usage, "
+                "agent activity, chat session stats, and per-event-type health metrics."
+            ),
+            mcp_tool=True,
+            mcp_description="Use this tool when you need the overall analytics dashboard view for a project: adoption KPIs, activity trends, top users, top tools, model usage, and general health metrics in one call. Do not use this tool when you need paginated rankings or one entity's details — use the dedicated user/agent/tool list or detail endpoints instead. This is the best first-step endpoint for broad project analytics and dashboard summaries.",
+            tags=["elitea_core/analytics"],
+            parameters=[
+                {
+                    "name": "date_from",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "Start datetime (ISO 8601). Defaults to 7 days ago.",
+                    "example": "2025-01-01T00:00:00",
+                },
+                {
+                    "name": "date_to",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "End datetime (ISO 8601). Defaults to now.",
+                    "example": "2025-01-31T23:59:59",
+                },
+            ],
+            responses={
+                "200": {
+                    "description": "Project analytics overview",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "kpis": {
+                                    "total_events": 1250,
+                                    "unique_users": 18,
+                                    "total_project_users": 25,
+                                    "ai_active_users": 15,
+                                    "adoption_rate": 60.0,
+                                    "avg_duration_ms": 432.5,
+                                    "error_rate": 2.4,
+                                    "error_count": 30,
+                                    "unique_tools": 12,
+                                    "unique_models": 4,
+                                    "llm_calls": 780,
+                                    "tool_runs": 340,
+                                    "chat_msgs": 210,
+                                    "agent_runs": 95,
+                                },
+                                "event_type_breakdown": [
+                                    {"event_type": "llm", "count": 780},
+                                    {"event_type": "tool", "count": 340},
+                                    {"event_type": "socketio", "count": 130},
+                                ],
+                                "top_ai_users": [
+                                    {
+                                        "user_id": 42,
+                                        "user_email": "alice@example.com",
+                                        "ai_events": 320,
+                                        "llm_calls": 200,
+                                        "tool_runs": 90,
+                                        "agent_runs": 30,
+                                    }
+                                ],
+                                "daily_activity": [
+                                    {"date": "2025-01-15", "events": 85, "users": 8, "errors": 2},
+                                    {"date": "2025-01-16", "events": 110, "users": 11, "errors": 1},
+                                ],
+                                "tools": [
+                                    {
+                                        "tool_name": "jira_create_issue",
+                                        "calls": 120,
+                                        "users": 6,
+                                        "avg_duration_ms": 310.0,
+                                        "errors": 3,
+                                    }
+                                ],
+                                "models": [
+                                    {
+                                        "model_name": "gpt-4o",
+                                        "display_name": "GPT-4o",
+                                        "calls": 450,
+                                        "users": 12,
+                                        "avg_duration_ms": 520.0,
+                                    }
+                                ],
+                                "agents": [
+                                    {
+                                        "entity_name": "Code Review Bot",
+                                        "entity_id": 7,
+                                        "events": 95,
+                                        "users": 5,
+                                        "avg_duration_ms": 1200.0,
+                                        "errors": 4,
+                                    }
+                                ],
+                                "chat_sessions": [
+                                    {
+                                        "action": "SIO chat_predict",
+                                        "sessions": 210,
+                                        "users": 14,
+                                        "avg_duration_ms": 850.0,
+                                    }
+                                ],
+                                "health": [
+                                    {
+                                        "event_type": "llm",
+                                        "total": 780,
+                                        "errors": 18,
+                                        "error_rate": 2.31,
+                                        "avg_duration_ms": 520.0,
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                },
+                "401": {"description": "Unauthorized"},
+                "500": {"description": "Internal server error"},
+            },
+            available_to_users=True,
+        )
         @auth.decorators.check_api({
             "permissions": ["models.monitoring.tracing.view"],
             "recommended_roles": {
@@ -76,31 +199,7 @@ if _API_AVAILABLE:
 
             try:
                 with db.with_project_schema_session(None) as session:
-                    # Get actual project members to filter cross-project events
-                    try:
-                        actual_project_members = set()
-                        project_user_data = auth.list_project_users(project_id)
-                        if project_user_data:
-                            for user_id in project_user_data:
-                                try:
-                                    user_details = auth.get_user(user_id)
-                                    user_email = user_details.get('email', '') if user_details else ''
-                                    # Only include non-system users
-                                    if user_email and not any([
-                                        user_email in ['system@centry.user'],
-                                        user_email.startswith('system_user_') and user_email.endswith('@centry.user')
-                                    ]):
-                                        actual_project_members.add(user_id)
-                                except:
-                                    continue
-                    except Exception:
-                        actual_project_members = set()
-
                     base = _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to)
-                    
-                    # Filter to only include events from actual project members
-                    if actual_project_members:
-                        base = base.filter(AuditEvent.user_id.in_(actual_project_members))
 
                     # 1. KPIs
                     kpi_row = base.with_entities(
@@ -169,6 +268,10 @@ if _API_AVAILABLE:
                             total_project_users = 0
                     except Exception:
                         total_project_users = 0
+
+                    # Ensure denominator is never less than numerator
+                    # (removed users still count in historical periods)
+                    total_project_users = max(total_project_users, unique_users)
 
                     kpis = {
                         "total_events": total_events,

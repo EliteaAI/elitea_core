@@ -24,6 +24,7 @@ from tools import this  # pylint: disable=E0401
 
 class ProviderDescriptor(this.db.Base):  # pylint: disable=C0111,R0903
     __tablename__ = f"{this.module_name}_descriptor"
+    __table_args__ = {"extend_existing": True}
 
     provider = Column(Text, primary_key=True)
     descriptor = Column(LargeBinary, unique=False, default=b"")

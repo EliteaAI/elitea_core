@@ -17,17 +17,28 @@
 
 """ API for MCP OAuth Token Exchange Proxy """
 from flask import request
-from tools import api_tools, auth, config as c, db, VaultClient
+from tools import api_tools, auth, config as c, db, VaultClient, register_openapi
 
 from pylon.core.tools import log
 
 from ...models.elitea_tools import EliteATool
 from ...models.pd.mcp_oauth import McpOAuthTokenRequest
+from ...utils.mcp_config import is_mcp_exposure_enabled
 from ...utils.mcp_oauth import exchange_token, refresh_token
 from ....configurations.utils import expand_configuration
 
 
 class ProjectAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="MCP OAuth Token Proxy",
+        description="Proxy OAuth token exchange (authorization_code or refresh_token grant) to avoid CORS issues. Optionally fetches credentials from a stored toolkit.",
+        tags=["elitea_core/mcp"],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
+        ],
+        request_body=McpOAuthTokenRequest,
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.patch"],
         "recommended_roles": {
@@ -42,6 +53,9 @@ class ProjectAPI(api_tools.APIModeHandler):
         Uses elitea_sdk's exchange_oauth_token function to perform the token exchange.
         If toolkit_id is provided, credentials are fetched from the database.
         """
+        if not is_mcp_exposure_enabled():
+            return {"error": "MCP exposure is disabled on this deployment"}, 403
+
         try:
             data = McpOAuthTokenRequest.model_validate(request.json)
         except Exception as e:
@@ -130,9 +144,16 @@ class ProjectAPI(api_tools.APIModeHandler):
                     else:
                         openapi_config = {}
 
-                    if not client_id:
+                    # FE always sends the DCR client_id in the same request, so the guard below
+                    # is not hit in practice, but is included for symmetry with the secret guard
+                    # to prevent a stale DB client_id from overwriting a DCR-registered one.
+                    if not client_id and not data.used_dcr:
                         client_id = settings.get('client_id') or sp_config.get('client_id') or openapi_config.get('client_id')
-                    if not client_secret:
+                    # When the client_id was obtained via DCR, the registered client is public
+                    # (token_endpoint_auth_method=none). Never load a client_secret from DB in
+                    # that case — sending a secret for a public client causes Aha (and others)
+                    # to reject the token request with "unknown client".
+                    if not client_secret and not data.used_dcr:
                         client_secret = settings.get('client_secret') or sp_config.get('client_secret') or openapi_config.get('client_secret')
                         log.debug(f"MCP OAuth proxy: extracted client_secret from DB: {bool(client_secret)}, preview: {client_secret[:8] if client_secret else 'None'}")
                     if not scope:

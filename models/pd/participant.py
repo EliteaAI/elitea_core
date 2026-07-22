@@ -30,11 +30,6 @@ class ParticipantEntityLlm(BaseModel):
     model_name: str
 
 
-class ParticipantEntityDatasource(BaseModel):
-    id: int
-    project_id: int
-
-
 class ParticipantEntityApplication(BaseModel):
     id: int
     project_id: int
@@ -52,7 +47,6 @@ EntityMetaType = Union[
     ParticipantEntityDummy,
     ParticipantEntityUser,
     ParticipantEntityLlm,
-    ParticipantEntityDatasource,
     ParticipantEntityApplication,
     ParticipantEntityToolkit
 ]
@@ -61,7 +55,6 @@ MappingValueType = Union[
     Type[ParticipantEntityDummy],
     Type[ParticipantEntityUser],
     Type[ParticipantEntityLlm],
-    Type[ParticipantEntityDatasource],
     Type[ParticipantEntityApplication],
     Type[ParticipantEntityToolkit]
 ]
@@ -70,7 +63,6 @@ entity_meta_mapping: Dict[ParticipantTypes, MappingValueType] = {
     ParticipantTypes.dummy: ParticipantEntityDummy,
     ParticipantTypes.user: ParticipantEntityUser,
     ParticipantTypes.llm: ParticipantEntityLlm,
-    ParticipantTypes.datasource: ParticipantEntityDatasource,
     ParticipantTypes.application: ParticipantEntityApplication,
     ParticipantTypes.toolkit: ParticipantEntityToolkit,
     # ParticipantTypes.pipeline: ParticipantEntityApplication,

@@ -36,81 +36,38 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     @web.method()
     def get_elitea_ui_config(self):
         """ Get config """
-        if self.standalone_mode:  # pylint: disable=R1705
-            vite_server_url = self.descriptor.config.get(
-                "vite_server_url",
-                flask.url_for(
-                    "elitea_core.route_elitea_ui",
-                    _external=True,
-                ).rstrip("/").replace("/app", "/api/v2"),
-            )
-            #
-            vite_base_uri = flask.url_for("elitea_core.route_elitea_ui").rstrip("/")
-            #
-            vite_public_project_id = self.descriptor.config.get("vite_public_project_id", 1)
-            vite_socket_path = self.descriptor.config.get("vite_socket_path", "/socket.io/")
-            vite_socket_server = self.descriptor.config.get("vite_socket_server", "/")
-            #
-            default_release = self.default_release
-            #
-            elitea_ui_config_data = {
-                "vite_server_url": vite_server_url,
-                "vite_base_uri": vite_base_uri,
-                "vite_public_project_id": vite_public_project_id,
-                "vite_socket_path": vite_socket_path,
-                "vite_socket_server": vite_socket_server,
-                "default_release": default_release,
-            }
-            #
-            additional_config_keys = [
-                "vite_gaid",
-            ]
-            #
-            for key in additional_config_keys:
-                if key in self.descriptor.config:
-                    elitea_ui_config_data[key] = self.descriptor.config.get(key)
-        else:
-            from tools import theme, VaultClient  # pylint: disable=E0611,E0401,W0611,C0415
-            #
-            secrets = VaultClient().get_all_secrets()
-            #
-            vite_server_url = flask.url_for(
-                "api.v2.elitea_core.elitea_ui_ci", _external=True
-            ).replace(
-                "elitea_core/elitea_ui_ci/", ""
-            ).replace(
-                "/promptlib_shared/elitea_ui_ci/", ""
-            )
-            #
-            vite_base_uri = flask.url_for("elitea_core.route_elitea_ui").rstrip("/")
-            vite_public_project_id = int(self.descriptor.config.get("ai_project_id", 1))
-            try:
-                vite_socket_path = flask.url_for("theme.socketio")
-            except:  # pylint: disable=W0702
-                vite_socket_path = "/socket.io/"
-            #
-            default_release = self.default_release
-            #
-            elitea_ui_config_data = {
-                "vite_server_url": vite_server_url,
-                "vite_base_uri": vite_base_uri,
-                "vite_public_project_id": vite_public_project_id,
-                "vite_socket_path": vite_socket_path,
-                "vite_socket_server": self.descriptor.config.get('vite_socket_server', '/'),
-                "default_release": default_release,
-            }
-            #
-            additional_config_keys = [
-                "vite_gaid",
-                #
-                "vite_server_url",
-            ]
-            #
-            for key in additional_config_keys:
-                if key in secrets:
-                    elitea_ui_config_data[key] = secrets.get(key)
-                elif key in self.descriptor.config:
-                    elitea_ui_config_data[key] = self.descriptor.config.get(key)
+        vite_server_url = self.descriptor.config.get(
+            "vite_server_url",
+            flask.url_for(
+                "elitea_core.route_elitea_ui",
+                _external=True,
+            ).rstrip("/").replace("/app", "/api/v2"),
+        )
+        #
+        vite_base_uri = flask.url_for("elitea_core.route_elitea_ui").rstrip("/")
+        #
+        vite_public_project_id = self.descriptor.config.get("vite_public_project_id", 1)
+        vite_socket_path = self.descriptor.config.get("vite_socket_path", "/socket.io/")
+        vite_socket_server = self.descriptor.config.get("vite_socket_server", "/")
+        #
+        default_release = self.default_release
+        #
+        elitea_ui_config_data = {
+            "vite_server_url": vite_server_url,
+            "vite_base_uri": vite_base_uri,
+            "vite_public_project_id": vite_public_project_id,
+            "vite_socket_path": vite_socket_path,
+            "vite_socket_server": vite_socket_server,
+            "default_release": default_release,
+        }
+        #
+        additional_config_keys = [
+            "vite_gaid",
+        ]
+        #
+        for key in additional_config_keys:
+            if key in self.descriptor.config:
+                elitea_ui_config_data[key] = self.descriptor.config.get(key)
         #
         # Add extra UI config
         #
@@ -132,5 +89,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 elitea_ui_config_data["allow_project_own_llms"] = True
         except:  # pylint: disable=W0702
             elitea_ui_config_data["allow_project_own_llms"] = True
+        #
+        # Expose blocked toolkit types so the UI can show a named warning when a
+        # configured toolkit has been blocked by org guardrails. Read live from
+        # the descriptor (blocked toolkits are otherwise omitted from the toolkit
+        # catalog, making them indistinguishable from deleted/renamed ones).
+        #
+        try:
+            toolkit_security = self.descriptor.config.get("toolkit_security", {}) or {}
+            elitea_ui_config_data["blocked_toolkits"] = list(
+                toolkit_security.get("blocked_toolkits") or []
+            )
+        except Exception as e:  # pylint: disable=W0703
+            log.warning("Failed to load blocked_toolkits from toolkit_security config: %s", e)
+            elitea_ui_config_data["blocked_toolkits"] = []
         #
         return elitea_ui_config_data

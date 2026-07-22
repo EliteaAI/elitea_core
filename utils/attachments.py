@@ -48,6 +48,7 @@ def process_single_attachment_file(
     user_id: int = None,
     collection_suffix: str | None = "attach",
     prompt: str = None,
+    pipeline_mode: bool = False,
     **kwargs,
 ) -> tuple['AttachmentMessageItem', bool]:
     """Process a single attachment file and create an AttachmentMessageItem.
@@ -67,6 +68,7 @@ def process_single_attachment_file(
             collection_suffix=collection_suffix,
             filepath=filepath,
             prompt=prompt,
+            pipeline_mode=pipeline_mode,
             **kwargs,
         )
 
@@ -138,6 +140,23 @@ class BaseFileToAIProcessor(ABC):
     def process(self, context: ProcessorContext) -> dict:
         pass
 
+    def pipeline_process(self, context: ProcessorContext) -> dict:
+        """Pipeline-mode processing — filepath-only, no content extraction.
+
+        Returns a text chunk with a structural ``attachment_filepath`` marker
+        that the indexer strips and injects into ``input_attachments`` state.
+        """
+        relative_path = (context.filepath or '').lstrip('/')
+        return {
+            "type": "text",
+            "content": [{
+                "type": "text",
+                "text": f"Attached file: {self._file_name} ({relative_path})",
+                "attachment_filepath": relative_path,
+            }],
+            "needs_content_extraction": False,
+        }
+
     def get_ai_payload_from_file(self, context: ProcessorContext) -> dict:
         try:
             return self.process(context)
@@ -148,6 +167,18 @@ class BaseFileToAIProcessor(ABC):
 
 
 class ImageToModelProcessor(BaseFileToAIProcessor):
+
+    def pipeline_process(self, context: ProcessorContext) -> dict:
+        relative_path = (context.filepath or '').lstrip('/')
+        return {
+            "type": "text",
+            "content": [{
+                "type": "text",
+                "text": f"Attached image: {self._file_name} ({relative_path})",
+                "attachment_filepath": relative_path,
+            }],
+            "needs_content_extraction": False,
+        }
 
     def process(self, context: ProcessorContext) -> dict:
         description_parts = [f"Image file: {context.filename}"]
@@ -239,6 +270,18 @@ class TextToModelProcessor(BaseFileToAIProcessor):
 
 
 class DocumentToModelProcessor(BaseFileToAIProcessor):
+    def pipeline_process(self, context: ProcessorContext) -> dict:
+        relative_path = (context.filepath or '').lstrip('/')
+        return {
+            "type": "text",
+            "content": [{
+                "type": "text",
+                "text": f"Attached document: {self._file_name} ({relative_path})",
+                "attachment_filepath": relative_path,
+            }],
+            "needs_content_extraction": False,
+        }
+
     def process(self, context: ProcessorContext) -> dict:
         description_parts = []
 
@@ -316,12 +359,19 @@ class FileToAIProcessorCollector:
         Processors are self-contained — each fetches its own data.
         Processor-specific kwargs (e.g. image_url_base64) flow
         through to ProcessorContext.additional_params.
+
+        When ``pipeline_mode=True``, routes to ``pipeline_process()``
+        which produces a filepath-only text chunk with an ``attachment_filepath``
+        marker instead of performing full content extraction.
         """
+        pipeline_mode = context_params.pop('pipeline_mode', False)
         processor = self.get_processor(filename)
         context = ProcessorContext(
             filename=filename,
             **context_params
         )
+        if pipeline_mode:
+            return processor.pipeline_process(context)
         return processor.get_ai_payload_from_file(context)
 
 
@@ -731,7 +781,7 @@ def handle_chunked_upload(
 
     except Exception as e:
         log.error(f"Error handling chunked upload: {str(e)}")
-        # Cleanup on error
-        cleanup_chunks(file_id)
+        # Cleanup on error (use the validated file_id from the payload)
+        cleanup_chunks(chunk_payload.file_id)
         return {"error": f"Failed to process chunked upload: {str(e)}"}, 500
 

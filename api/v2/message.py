@@ -1,11 +1,12 @@
 from flask import request
 
-from tools import api_tools, auth, db, config as c, MinioClient, serialize
+from tools import api_tools, auth, db, config as c, MinioClient, serialize, register_openapi
 from pylon.core.tools import log
 
 from ...models.enums.all import ParticipantTypes
 from ...models.message_group import ConversationMessageGroup
 from ...models.pd.message import MessageGroupDetail
+from ...utils.conversation_utils import _message_group_columns, fetch_guarded_message_groups
 from ...utils.context_analytics import update_context_analytics_after_message_delete
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
@@ -14,6 +15,26 @@ from ...models.message_items.attachment import AttachmentMessageItem
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get Message",
+        description="Retrieve the full details of a single message group by its string UUID — includes all message items (text, canvases, attachments)",
+        mcp_description="""
+        USE when you have a specific message uuid and need its full content and metadata — e.g., to check if
+        streaming is complete or to read message items.
+
+        DO NOT USE to list all messages in a conversation → use get_messages.
+        DO NOT USE with a numeric ID — this endpoint requires the string UUID of the message group.
+
+        Key field: is_streaming: true means the AI response is still being generated. Poll this endpoint until
+        is_streaming: false for complete content.
+
+        Examples:
+        1. Get message by UUID: GET .../message/prompt_lib/42/550e8400-e29b-41d4-a716-446655440000
+        2. Check streaming status: if response.is_streaming == true → wait and retry.
+        """,
+        tags=["elitea_core/chat"],
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.details"],
         "recommended_roles": {
@@ -25,12 +46,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, message_group_uid: str, **kwargs):
         with db.get_session(project_id) as session:
             try:
-                message_group: ConversationMessageGroup = session.query(ConversationMessageGroup).filter(
+                # Select safe (server-side stripped) meta columns so an oversized blob never crosses
+                # the wire / hits the gevent hub (same pattern as get_conversation_details).
+                rows = session.query(*_message_group_columns()).filter(
                     ConversationMessageGroup.uuid == message_group_uid,
-                ).first()
-                if message_group is None:
+                ).all()
+                if not rows:
                     return {"error": "Message group was not found"}, 400
-                result = serialize(MessageGroupDetail.from_orm(message_group))
+                group_dicts = fetch_guarded_message_groups(
+                    session, rows, log_label=f'message_group {message_group_uid}')
+                result = serialize(MessageGroupDetail.model_validate(group_dicts[0]))
             except Exception as ex:
                 log.debug(ex)
                 return {
@@ -38,6 +63,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 }, 400
             return result, 200
 
+    @register_openapi(
+        name="Delete Message",
+        description="Delete a single message by UUID.",
+        tags=["elitea_core/chat"],
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.messages.delete"],
         "recommended_roles": {

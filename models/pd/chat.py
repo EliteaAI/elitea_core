@@ -38,10 +38,16 @@ class ContextStrategyModel(BaseModel):
 
 class ApplicationChatRequest(MergeUpdateBase):
     application_id: Optional[int] = None
+    version_name: Optional[str] = Field(default=None, alias="name", description="Version name (e.g., 'v1.0', 'base')")
+    application_name: Optional[str] = Field(default=None, description="Agent/Application display name for observability traces")
     user_input: Optional[str | list] = None
     hitl_resume: Optional[bool] = False
     hitl_action: Optional[str] = None
     hitl_value: Optional[str] = None
+    # Parallel sub-agent fan-out (#4993): per-child HITL decisions keyed by the
+    # parent Application tool_call_id. {tool_call_id, action, value}.
+    hitl_decisions: Optional[List[Dict[str, Any]]] = None
+    execution_generation: Optional[str] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
     variables: Optional[List[ApplicationVariableModel]] = None
@@ -57,6 +63,10 @@ class ApplicationChatRequest(MergeUpdateBase):
     interaction_uuid: str | uuid.UUID | None = None
     version_details: Optional[dict] = None
     internal_tools: Optional[List[str]] = []
+    invoked_skills: Optional[List[dict]] = Field(
+        default=None,
+        description="Per-turn resolved skill bodies (from ~skill refs) injected at the LLM node",
+    )
     mcp_tokens: Optional[Dict[str, str | Dict[str, Any]]] = Field(
         default_factory=dict,
         description="MCP OAuth tokens by server URL (string for legacy, dict with access_token/session_id for new format)"
@@ -64,6 +74,10 @@ class ApplicationChatRequest(MergeUpdateBase):
     ignored_mcp_servers: Optional[List[str]] = Field(
         default_factory=list,
         description="List of MCP server URLs to ignore (user chose to continue without auth)"
+    )
+    user_declined_mcp_servers: Optional[List[dict]] = Field(
+        default_factory=list,
+        description="MCP servers the user explicitly declined this session, with full OAuth metadata"
     )
     should_continue: Optional[bool] = False
     meta: Optional[dict] = {}
@@ -95,6 +109,10 @@ class LLMChatRequest(MergeUpdateBase):
     hitl_resume: Optional[bool] = False
     hitl_action: Optional[str] = None
     hitl_value: Optional[str] = None
+    # Parallel sub-agent fan-out (#4993): per-child HITL decisions keyed by the
+    # parent Application tool_call_id. {tool_call_id, action, value}.
+    hitl_decisions: Optional[List[Dict[str, Any]]] = None
+    execution_generation: Optional[str] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
     tools: Optional[List[dict]] = []
@@ -106,6 +124,10 @@ class LLMChatRequest(MergeUpdateBase):
     checkpoint_id: Optional[str] = None
     interaction_uuid: str | uuid.UUID | None = None
     internal_tools: Optional[List[str]] = []
+    invoked_skills: Optional[List[dict]] = Field(
+        default=None,
+        description="Per-turn resolved skill bodies (from ~skill refs) injected at the LLM node",
+    )
     mcp_tokens: Optional[Dict[str, str | Dict[str, Any]]] = Field(
         default_factory=dict,
         description="MCP OAuth tokens by server URL (string for legacy, dict with access_token/session_id for new format)"
@@ -114,6 +136,10 @@ class LLMChatRequest(MergeUpdateBase):
         default_factory=list,
         description="List of MCP server URLs to ignore (user chose to continue without auth)"
     )
+    user_declined_mcp_servers: Optional[List[dict]] = Field(
+        default_factory=list,
+        description="MCP servers the user explicitly declined this session, with full OAuth metadata"
+    )
     should_continue: Optional[bool] = False
     conversation_id: Optional[str] = Field(
         default=None,
@@ -121,7 +147,12 @@ class LLMChatRequest(MergeUpdateBase):
     )
     persona: Optional[str] = Field(
         default="generic",
-        description="Default persona for chat: 'generic' or 'qa'"
+        description=(
+            "Default persona for chat. Accepted values: 'generic', 'qa', 'nerdy', "
+            "'quirky', 'cynical', 'none', 'bare'. Use 'bare' to bypass all "
+            "Elitea-injected identity/persona content and send only the user's own "
+            "instructions (plus tool-required guidance) to the model."
+        )
     )
     steps_limit: Optional[int] = Field(
         default=None,

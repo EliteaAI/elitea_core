@@ -38,6 +38,32 @@ def extract_user_id(received_auth_session: Optional[str]) -> int:
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Retrieve the complete configuration of a specific agent or pipeline version by numeric version ID — includes resolved tool metadata, LLM settings, and pipeline YAML graph",
+        description="Returns the full configuration of a specific agent or pipeline version, including toolkits, tools, tool mappings, and variables.",
+        mcp_description="""
+        USE when you have a numeric version_id and need full tool, configuration, or instruction details.
+        DO NOT USE when:
+        - You only know the version name → use get_agent_details with version_name
+        - You need application metadata (name, description) → use get_agent_details
+        - You need a list of all versions → use list_versions
+
+        Reading the response by type:
+        Agent: response.instructions = system prompt text; response.llm_settings = model config.
+        Pipeline: response.instructions = YAML string → parse to understand graph nodes and edges.
+
+        Examples:
+        1. Read agent system prompt: GET .../version/prompt_lib/42/7/101
+        → response.instructions = 'You are a code review expert...'
+
+        2. Inspect pipeline graph: GET .../15/202
+        → response.agent_type = 'pipeline' → parse response.instructions as YAML.
+
+        3. Check available tools: response.tools[].settings.selected_tools = restricted tool list for this version.""",
+        tags=["elitea_core/applications"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.details"],
         "recommended_roles": {
@@ -53,7 +79,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).options(
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
             if not application_version:
                 return {'error': f'Application[{application_id}] version[{version_id}] not found'}, 400
@@ -96,12 +123,61 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if 'error' in version_details:
             return {'error': version_details['error']}, 404
 
+        # #5267: MCP tools are computed at runtime, not stored in the DB. The direct-chat
+        # path injects them in generate_toolkit_payload(); the SDK sub-agent path fetches
+        # version details through this endpoint and never received them. Inject here, scoped
+        # to the resolved end-user (own private project + own token) — see
+        # inject_mcp_toolkits(). Guarded and non-fatal: agents without 'internal_mcp' return
+        # before any RPC/token work.
+        try:
+            from ...utils.internal_tools import inject_mcp_toolkits
+            agent_internal_tools = (version_details.get('meta') or {}).get('internal_tools', [])
+            mcp_tools = inject_mcp_toolkits(
+                user_id=user_id,
+                internal_tools=agent_internal_tools,
+                existing_tools=version_details.get('tools'),
+            )
+            if mcp_tools:
+                version_details.setdefault('tools', [])
+                version_details['tools'].extend(mcp_tools)
+        except Exception as e:
+            log.warning(f"[#5267] Failed to inject MCP toolkits into version details: {e}")
+
+        try:
+            from ...utils.internal_tools import dedupe_internal_mcp_tools, resolve_internal_mcp_tools
+            dedupe_internal_mcp_tools(version_details.get('tools'))
+            resolve_internal_mcp_tools(version_details.get('tools'), user_id, project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkits in version details: {e}")
+
         return version_details, 200
 
     @register_openapi(
-        name="Update Agent Version",
-        description="Update an existing agent version configuration.",
-        mcp_tool=True
+        name="Update the configuration of an existing draft agent or pipeline version — for agents updates LLM settings and system prompt, for pipelines updates the YAML graph",
+        description="Updates the configuration of an existing agent or pipeline version. Only versions that are not published state can be updated.",
+        request_body=ApplicationVersionUpdateModel,
+        mcp_description="""
+        USE to modify the configuration of an existing draft agent or pipeline version.
+        DO NOT USE when:
+        - Renaming application or changing description → use update_agent
+        - Version is published or embedded → will fail; unpublish first or use create_version
+        - Creating a new version → use create_version
+
+        REQUIRED path params: project_id, application_id, version_id (the numeric version ID).
+        REQUIRED body fields: `id` (must equal version_id), `application_id`, `name`, `author_id`.
+        Only pass fields you want to change — unset fields are NOT overwritten.
+
+        Agent update example:
+        { 'id': 101, 'application_id': 7, 'name': 'base', 'instructions': 'New system prompt...', 'llm_settings': { 'model_name': 'gpt-5-mini', 'temperature': 0.1 } }
+
+        Pipeline update example:
+        { 'id': 202, 'application_id': 15, 'name': 'base', 'agent_type': 'pipeline', 'instructions': 'nodes:\n  - id: start\n    type: llm\n...' }
+        → Omit pipeline_settings entirely to preserve the existing trigger.
+
+        Error: HTTP 400 'Version is published' → unpublish first, then update.""",
+        tags=["elitea_core/applications"],
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.update"],
@@ -133,6 +209,25 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return res['data'], 201
 
+    @register_openapi(
+        name="Delete a specific agent or pipeline version by numeric version ID — optionally reassign dependents to a replacement version",
+        description="Deletes a specific agent or pipeline version. If the version is referenced by other entities, provide a replacement_version_id to reassign dependents before deletion.",
+        mcp_description="""
+        USE to permanently delete a draft or unpublished agent or pipeline version.
+        DO NOT USE when:
+        - You want to archive or unpublish a version → use update_version instead
+        - The version is currently published or embedded and referenced — provide replacement_version_id to safely reassign dependents
+
+        REQUIRED path params: project_id, application_id, version_id (the numeric version ID).
+        OPTIONAL query param: replacement_version_id — numeric ID of the version to reassign dependents to before deleting.
+
+        Example: DELETE .../prompt_lib/42/7/101?replacement_version_id=99
+        → Reassigns all references from version 101 to version 99, then deletes version 101.
+
+        Error: HTTP 400 with 'error' field — e.g. version not found or deletion not allowed.""",
+        tags=["elitea_core/applications"],
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.version.delete"],
         "recommended_roles": {

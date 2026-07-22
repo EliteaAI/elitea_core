@@ -5,7 +5,7 @@ from datetime import date
 from flask import request, send_file, Response
 from pydantic.v1 import ValidationError
 from pylon.core.tools import log
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.export_import import (
@@ -13,7 +13,7 @@ from ...utils.export_import import (
     export_application_md,
     create_zip_archive
 )
-from ...utils.export_import import _slugify
+from ...utils.export_import_utils import slugify, content_disposition_attachment
 
 
 def _generate_export_filename(result, file_extension="zip"):
@@ -55,7 +55,7 @@ def _generate_export_filename(result, file_extension="zip"):
         elif 'applications' in result:  # JSON export result
             for app in result['applications']:
                 if app.get('original_exported', False) and app.get('name'):
-                    name = _slugify(app.get('name', ''))
+                    name = slugify(app.get('name', ''))
                     # Determine entity type
                     entity_type = app.get('entity_type', app.get('type', 'agent'))
                     original_apps.append(f"{name}.{entity_type}")
@@ -75,6 +75,35 @@ def _generate_export_filename(result, file_extension="zip"):
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Export one or more agents or pipelines to a JSON bundle or Markdown file — all version data included, returns a file download",
+        description="Export one or more agents or pipelines to a JSON bundle or Markdown file — all version data included, returns a file download.",
+        mcp_description="""
+        USE to back up agents/pipelines before changes, migrate to another project, or get human-readable pipeline documentation.
+        
+        DO NOT USE to execute an agent → use execute_agent. To get metadata without a file → use get_agent_details.
+        
+        Format choice:
+        - Agent/pipeline backup for re-import → format=json
+        - Human-readable pipeline graph review → format=md
+        
+        Examples:
+        1. Export agent as inline JSON: GET .../export_import/prompt_lib/42/7
+        2. Export as downloadable JSON file: GET .../7?as_file=true
+        3. Export pipeline as Markdown: GET .../15?format=md → downloads my-pipeline.pipeline.md
+        4. Export multiple (mixed types) as Markdown: GET .../7,15,22?format=md → downloads .zip with individual .md files
+        5. Export specific version only: GET .../15?follow_version_ids=101""",
+        tags=["elitea_core/applications"],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
+            {"name": "application_ids", "in": "path", "required": True, "schema": {"type": "string"}, "description": "Comma-separated application IDs to export."},
+            {"name": "format", "in": "query", "required": False, "schema": {"type": "string", "enum": ["json", "md"]}, "description": "Export format: json (default) or md (Markdown)."},
+            {"name": "fork", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Include fork parent metadata."},
+            {"name": "as_file", "in": "query", "required": False, "schema": {"type": "boolean"}, "description": "Return result as a downloadable file."},
+            {"name": "follow_version_ids", "in": "query", "required": False, "schema": {"type": "string"}, "description": "Comma-separated version IDs to follow during export."},
+        ],
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.export_import.export"],
         "recommended_roles": {
@@ -118,7 +147,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     files[0]['content'],
                     mimetype='text/markdown; charset=utf-8',
                     headers={
-                        'Content-Disposition': f'attachment; filename="{files[0]["filename"]}"',
+                        'Content-Disposition': content_disposition_attachment(files[0]["filename"]),
                         'Access-Control-Expose-Headers': 'Content-Disposition'
                     }
                 )

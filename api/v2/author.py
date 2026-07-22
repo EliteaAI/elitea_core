@@ -3,14 +3,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pylon.core.tools import log
 
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.utils import add_public_project_id
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.authors import get_stats, get_author_data
+from ...utils.authors import get_author_data
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get Author Profile",
+        description="Return author profile details and aggregated stats.",
+        tags=["elitea_core/authors"],
+        parameters=[
+            {"name": "author_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Author ID."},
+        ],
+        available_to_users=True,
+    )
     @add_public_project_id
     @auth.decorators.check_api(
         {
@@ -29,9 +38,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         try:
             author_project_id = self.module.context.rpc_manager.timeout(1).projects_get_personal_project_id(
                 author['id'])
-            stats = get_stats(author_project_id, author['id'])
-            author.update(stats)
-
             # Parallel stats fetching to reduce latency
             module = self.module
 
@@ -63,13 +69,21 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     log.warning("chat plugin is not available, related stats will be empty")
                     return {}
 
+            def fetch_skills_stats():
+                try:
+                    return module.get_skills_stats(author_project_id, author_id)
+                except Empty:
+                    log.warning("skills rpc is not available, related stats will be empty")
+                    return {}
+
             # Execute all stats calls in parallel
-            with ThreadPoolExecutor(max_workers=4) as executor:
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = {
                     executor.submit(fetch_toolkits_stats): 'toolkits',
                     executor.submit(fetch_applications_stats): 'applications',
                     executor.submit(fetch_pipelines_stats): 'pipelines',
                     executor.submit(fetch_chat_stats): 'chat',
+                    executor.submit(fetch_skills_stats): 'skills',
                 }
                 for future in as_completed(futures):
                     try:
@@ -81,6 +95,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         except Empty:
             ...
+
+        # In terms of https://github.com/EliteaAI/elitea_issues/issues/5394, description is set to None
+        author['description'] = None
+
         return author, 200
 
 

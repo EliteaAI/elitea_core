@@ -17,15 +17,26 @@
 
 """ API for MCP OAuth Dynamic Client Registration (DCR) Proxy """
 from flask import request
-from tools import api_tools, auth, config as c
+from tools import api_tools, auth, config as c, register_openapi
 
 from pylon.core.tools import log
 
 from ...models.pd.mcp_oauth import McpDynamicClientRegistrationRequest
+from ...utils.mcp_config import is_mcp_exposure_enabled
 from ...utils.mcp_oauth import register_dynamic_client
 
 
 class ProjectAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="MCP OAuth DCR Proxy",
+        description="Proxy RFC 7591 Dynamic Client Registration requests to OAuth servers to avoid CORS issues.",
+        tags=["elitea_core/mcp"],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
+        ],
+        request_body=McpDynamicClientRegistrationRequest,
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.patch"],
         "recommended_roles": {
@@ -40,6 +51,9 @@ class ProjectAPI(api_tools.APIModeHandler):
         This endpoint proxies RFC 7591 Dynamic Client Registration requests
         to OAuth authorization servers that support DCR.
         """
+        if not is_mcp_exposure_enabled():
+            return {"error": "MCP exposure is disabled on this deployment"}, 403
+
         try:
             data = McpDynamicClientRegistrationRequest.model_validate(request.json)
         except Exception as e:

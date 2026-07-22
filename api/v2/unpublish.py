@@ -18,9 +18,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
     """
 
     @register_openapi(
-        name="Unpublish Agent Version",
-        description="Unpublish an agent version from Agent Studio. Admin unpublish from public project; user unpublish from private project.",
+        name="Unpublish an agent version from Agent Studio",
+        description="Removes the published agent version from Agent Studio. Must be called from the same project the agent was originally published from. An optional reason can be provided. Applicable to agents only.",
         request_body=UnpublishRequest,
+        tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.unpublish.post"],

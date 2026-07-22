@@ -74,7 +74,6 @@ class ApplicationDetailModel(ApplicationBaseModel):
     versions: List[ApplicationVersionListModel]
     version_details: Optional[ApplicationVersionDetailModel] = None
     created_at: datetime
-    collections: Optional[list] = None
     is_pinned: bool = False
 
     def check_is_pinned(self, project_id: int):
@@ -201,10 +200,19 @@ class ApplicationListModel(BaseModel):
 
     @model_validator(mode='after')
     def set_meta(self) -> 'ApplicationListModel':
+        # Merge the forked version's lineage keys into the application meta
+        # instead of replacing it — replacing would drop application-level keys
+        # like default_version_id, which consumers use to resolve the version.
         for v in self.versions:
             meta = v.meta or {}
             if 'parent_entity_id' in meta and 'parent_project_id' in meta:
-                self.meta = meta
+                self.meta = {
+                    **(self.meta or {}),
+                    'parent_entity_id': meta['parent_entity_id'],
+                    'parent_project_id': meta['parent_project_id'],
+                    **({'parent_version_id': meta['parent_version_id']}
+                       if meta.get('parent_version_id') is not None else {}),
+                }
                 return self
         return self
 
@@ -227,8 +235,20 @@ class ApplicationListModel(BaseModel):
 
         selected_version = latest_version or versions[-1]
 
+        # Only pipeline agents can have interrupts/subgraphs; skip the YAML parse
+        # for every other agent type (the dominant case in list responses).
+        if selected_version.agent_type != AgentTypes.pipeline.value:
+            return self
+
         instructions = selected_version.instructions
         if not instructions:
+            return self
+
+        # Cheap pre-filter: if none of the keywords we look for appear anywhere
+        # in the raw text, parsing the YAML cannot produce a positive match.
+        if ('interrupt_' not in instructions
+                and 'pipeline' not in instructions
+                and 'subgraph' not in instructions):
             return self
 
         try:
@@ -306,9 +326,15 @@ class MultipleApplicationListModel(BaseModel):
 
     @model_validator(mode='after')
     def parse_authors_data(self):
+        if not self.applications:
+            return self
+
         all_authors = set()
         for i in self.applications:
             all_authors.update(i.author_ids)
+
+        if not all_authors:
+            return self
 
         users = get_authors_data(list(all_authors))
 
@@ -316,6 +342,8 @@ class MultipleApplicationListModel(BaseModel):
 
         for i in self.applications:
             i.set_authors(user_map)
+
+        return self
 
         return self
 
@@ -328,6 +356,40 @@ class ApplicationUpdateModel(ApplicationArgsForwardingModel):
 
 
 class ApplicationCreateModel(ApplicationBaseModel, ApplicationArgsForwardingModel):
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "summary": "Create classic agent",
+                    "value": {
+                        "name": "Code Reviewer",
+                        "owner_id": 42,
+                        "versions": [{
+                            "name": "base",
+                            "agent_type": "openai",
+                            "llm_settings": {"model_name": "gpt-5-mini", "temperature": 0.2},
+                            "instructions": "You are a senior code review engineer."
+                        }]
+                    }
+                },
+                {
+                    "summary": "Create pipeline",
+                    "value": {
+                        "name": "CI Pipeline",
+                        "owner_id": 42,
+                        "versions": [{
+                            "name": "base",
+                            "agent_type": "pipeline",
+                            "llm_settings": {"model_name": "gpt-5-mini"},
+                            "instructions": "nodes:\n  - id: start\n    type: llm\nedges:\n  - from: start\n    to: END"
+                        }]
+                    }
+                }
+            ]
+        }
+    )
+
     name: Optional[str] = Field(None, min_length=1, max_length=32)
     versions: List[ApplicationVersionBaseCreateModel]
 
@@ -398,6 +460,11 @@ class MultiplePublishedApplicationListModel(MultipleApplicationListModel):
 
 
 class ApplicationRelationModel(BaseModel):
-    application_id: int
-    version_id: int
+    # Parent agent fields (the agent receiving the sub-agent)
+    # Aliased as entity_* for MCP to avoid collision with path params (which are the child/sub-agent)
+    application_id: int = Field(..., alias='entity_id')
+    version_id: int = Field(..., alias='entity_version_id')
     has_relation: bool
+
+    class Config:
+        populate_by_name = True  # Allow both field name and alias

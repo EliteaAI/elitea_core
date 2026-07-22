@@ -81,6 +81,7 @@ class ToolDetails(ToolBase):
     icon_meta: Optional[dict] = None
     variables: Optional[List] = []
     is_pinned: bool = False
+    indexes_count: Optional[int] = None
 
     def check_is_pinned(self, project_id: int) -> 'ToolDetails':
         try:
@@ -126,13 +127,7 @@ class ToolDetails(ToolBase):
 
     @model_validator(mode='after')
     def set_toolkit_name(self) -> 'ToolDetails':
-        if self.type == 'datasource':
-            cleaned_string = re.sub(
-                sanitization_pattern, '', str(self.name)
-            ).replace('.', '_')
-            self.toolkit_name = cleaned_string
-            return self
-        elif self.type in {'application', 'prompt'}:
+        if self.type in {'application', 'prompt'}:
             return self
         
         from pylon.core.tools import log
@@ -271,7 +266,8 @@ class ToolValidatedDetails(ToolDetails):
         try:
             values['settings'] = expand_toolkit_settings(type_, settings, project_id, user_id)
         except ValidatorNotSupportedError as ex:
-            log.warning(ex)
+            if type_ != 'application':
+                log.warning(ex)
         except ConfigurationExpandError as ex:
             raise_validation_error_if_any(ex.errors, ToolValidatedDetails)
         except Exception as e:
@@ -424,7 +420,8 @@ class ToolCreateModel(ToolBase):
         try:
             settings = expand_toolkit_settings(type_, settings, project_id, user_id)
         except ValidatorNotSupportedError as ex:
-            log.warning(ex)
+            if type_ != 'application':
+                log.warning(ex)
         except ConfigurationExpandError as ex:
             raise_validation_error_if_any(ex.errors, ToolValidatedDetails)
         except Exception as e:

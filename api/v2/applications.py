@@ -25,9 +25,52 @@ from pylon.core.tools import log
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
-        name="Get Agents",
-        description="Get agents (applications) with filtering, sorting, and pagination.",
-        mcp_tool=True
+        name="List and search agents and pipelines in a project — paginated, filterable by type (agent vs. pipeline), tags, author, status, and free text",
+        description="Returns a paginated list of agents and pipelines in the project. Supports filtering by tags, author, status, type, and free-text search.",
+        mcp_description="""
+        USE to discover, search, or browse agents and pipelines, and to find application_id before calling other tools.
+        DO NOT USE when:
+        - Already have application_id and need full config → use get_agent_details
+        - Need tool or instruction details → use get_version_details
+        - Want to execute an agent → use execute_agent
+        
+        Filter guidance:
+        - All agents + pipelines: omit agents_type
+        - Only classic agents: agents_type=classic
+        - Only pipelines: agents_type=pipeline
+        - Only pipelines with interrupts: agents_type=pipeline then filter rows where has_interrupt == true
+        
+        Examples:
+        1. List all: GET .../applications/prompt_lib/42
+        2. Pipelines only: GET ...?agents_type=pipeline
+        3. Search by name: GET ...?query=code+review
+        4. Published agents only: GET ...?statuses=published
+        5. Page 2, 20 per page: GET ...?limit=20&offset=20""",
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
+        parameters=[
+            {"name": "query", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Free-text search filter on agent/pipeline name."},
+            {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 10},
+             "description": "Maximum number of results to return."},
+            {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer", "default": 0},
+             "description": "Pagination offset."},
+            {"name": "sort_by", "in": "query", "required": False, "schema": {"type": "string", "default": "created_at"},
+             "description": "Field to sort by."},
+            {"name": "sort_order", "in": "query", "required": False, "schema": {"type": "string", "default": "desc"},
+             "description": "Sort order (asc or desc)."},
+            {"name": "tags", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Filter by tag name(s)."},
+            {"name": "author_id", "in": "query", "required": False, "schema": {"type": "integer"},
+             "description": "Filter by author user ID."},
+            {"name": "statuses", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Filter by publication status (e.g. 'published', 'draft')."},
+            {"name": "agents_type", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Filter by agent type: 'pipeline' for pipelines, 'classic' for classic agents. Omit for all."},
+            {"name": "my_liked", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
+             "description": "If true, return only agents/pipelines liked by the current user."},
+        ],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {
@@ -40,10 +83,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int | None = None, **kwargs):
-        collection = {
-            "id": request.args.get('collection_id', type=int),
-            "owner_id": request.args.get('collection_owner_id', type=int)
-        }
         with db.get_session(project_id) as session:
             some_result = list_applications_api(
                 project_id=project_id,
@@ -58,7 +97,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 trend_start_period=request.args.get('trend_start_period'),
                 trend_end_period=request.args.get('trend_end_period'),
                 statuses=request.args.get('statuses'),
-                collection=collection,
                 agents_type=request.args.get('agents_type'),
                 without_tags=request.args.get('without_tags', False),
                 session=session
@@ -80,9 +118,35 @@ class PromptLibAPI(api_tools.APIModeHandler):
             }, 400
 
     @register_openapi(
-        name="Create Agent",
-        description="Create a new agent (application) with initial version and configuration.",
-        mcp_tool=True
+        name="Create a new agent or pipeline with a mandatory initial 'base' version — agent type is set by agent_type inside the version definition",
+        description="Creates a new agent or pipeline with an initial (base) version. The request must include agent or pipeline metadata and at least one version definition.",
+        request_body=ApplicationCreateModel,
+        mcp_description=f"""
+        USE to create a brand-new agent or pipeline from scratch.
+        DO NOT USE when:
+        - Adding a version to existing app → use create_version
+        - Forking an existing agent → use the fork endpoint
+        - Importing from JSON → use the import endpoint
+        
+        Classic agent payload:
+        {{"name": "Code Reviewer", "owner_id": 42, "versions": [{{"name": "base", "agent_type": "openai", "llm_settings": {{"model_name": "gpt-5-mini"}}, "instructions": "You are a senior engineer..."}}]}}
+        
+        Pipeline payload:
+        {{"name": "CI Pipeline", "owner_id": 42, "versions": [{{"name": "base", "agent_type": "pipeline", "llm_settings": {{"model_name": "gpt-5-mini"}}, "instructions": "nodes:\\n  - id: start\\n    type: llm\\nedges:\\n  ..."}}]}}
+        
+        Params and default values :
+        - owner_id is current project ID
+        - project_id is current project ID
+        - user_id is current user ID
+        
+        Key errors:
+        - versions[0].name != 'base' → HTTP 400
+        - len(versions) > 1 → HTTP 400
+        - Invalid YAML in pipeline instructions → HTTP 400
+        """,
+        mcp_tool=True,
+        tags=["elitea_core/applications"],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {
@@ -121,7 +185,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).options(
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
 
             result = ApplicationDetailModel.from_orm(application)

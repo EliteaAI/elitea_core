@@ -12,7 +12,7 @@ from .tool import (
 )
 from ..enums.all import AgentTypes
 from ...models.enums.all import PublishStatus
-from ...models.pd.llm import LLMSettingsModel
+from ...models.pd.llm import LLMSettingsModel, LLMSettingsWriteModel
 from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel
 from ...models.pd.tag import TagDetailModel
 from ...utils.pipeline_utils import validate_yaml_from_str
@@ -36,6 +36,38 @@ def agent_root_pipeline_validator(values: dict):
             # raise ValueError("YAML data is missing")
         validate_yaml_from_str(yaml_data)
     return values
+
+
+MAX_CONVERSATION_STARTERS = 4
+
+
+def conversation_starters_validator(value):
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError('conversation_starters must be a list')
+
+    if len(value) > MAX_CONVERSATION_STARTERS:
+        raise ValueError(
+            f'conversation_starters cannot exceed {MAX_CONVERSATION_STARTERS} items, got {len(value)}'
+        )
+
+    validated = []
+    for i, item in enumerate(value):
+        if item is None:
+            continue
+        if not isinstance(item, str):
+            raise ValueError(
+                f'conversation_starters[{i}] must be a string, got {type(item).__name__}'
+            )
+        item = item.strip()
+        if not item:
+            raise ValueError(
+                f'conversation_starters[{i}] cannot be empty or whitespace-only'
+            )
+        validated.append(item)
+
+    return validated or None
 
 
 class TagListModel(TagBaseModel):
@@ -70,7 +102,7 @@ class ApplicationVersionBaseModel(BaseModel):
     name: str = Field(min_length=1)
     author_id: int
     tags: Optional[List[TagBaseModel]] = None
-    instructions: Optional[str] = None
+    instructions: Optional[str] = ''
     application_id: Optional[int] = None
     shared_id: Optional[int] = None
     shared_owner_id: Optional[int] = None
@@ -81,13 +113,51 @@ class ApplicationVersionBaseModel(BaseModel):
     agent_type: AgentTypes = AgentTypes.openai.value
     welcome_message: Optional[str] = None
     pipeline_settings: Optional[dict] = Field(default_factory=dict)
+    notes: Optional[str] = Field(default=None, max_length=1000)
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator('instructions', mode='after')
+    @classmethod
+    def ensure_instructions_not_null(cls, v):
+        return v if v is not None else ''
+
 
 class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "summary": "New agent version",
+                    "value": {
+                        "name": "v2-strict",
+                        "agent_type": "openai",
+                        "llm_settings": {"model_name": "gpt-5-mini", "temperature": 0.0},
+                        "instructions": "Strict mode: respond with bullet points only."
+                    }
+                },
+                {
+                    "summary": "New pipeline version",
+                    "value": {
+                        "name": "v2-parallel",
+                        "agent_type": "pipeline",
+                        "llm_settings": {"model_name": "gpt-5-mini"},
+                        "instructions": "nodes:\n  - id: fetch\n    type: llm\n  - id: analyze\n    type: llm\nedges:\n  - from: fetch\n    to: analyze"
+                    }
+                }
+            ]
+        }
+    )
+
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
+    llm_settings: Optional[LLMSettingsWriteModel] = None
+
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod
@@ -120,12 +190,22 @@ class ApplicationVersionForkCreateModel(ApplicationVersionBaseModel, Application
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
 
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
+
 
 class ApplicationVersionBaseCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
     name: Literal['base'] = 'base'
-    llm_settings: LLMSettingsModel
+    llm_settings: LLMSettingsWriteModel
     tools: Optional[List[ToolCreateModel]] = None
     meta: Optional[dict] = {}
+
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod
@@ -214,9 +294,35 @@ class ApplicationVersionDetailModel(ApplicationVersionBaseModel):
 
         return self
 
+    @model_validator(mode='after')
+    def hydrate_notes_from_meta(self):
+        # Notes live inside the `meta` JSONB column (issue #5410: chosen over a dedicated column
+        # to avoid a per-tenant schema migration). Surface as a top-level field for the UI and
+        # remove from the meta copy so downstream consumers (predict payload, indexer) never
+        # receive it. The original ORM MutableDict is left untouched — we replace self.meta with
+        # a plain copy here.
+        if isinstance(self.meta, dict) and 'notes' in self.meta:
+            if self.notes is None:
+                self.notes = self.meta.get('notes')
+            self.meta = {k: v for k, v in self.meta.items() if k != 'notes'}
+        return self
+
+
+class AttachedSkillModel(BaseModel):
+    """Selected-version body of an attached skill carried in the runtime payload."""
+    skill_id: int
+    skill_version_id: Optional[int] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    version_name: Optional[str] = None
+    instructions: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
 
 class ApplicationVersionDetailToolValidatedModel(ApplicationVersionDetailModel, ApplicationVersionArgsForwardingModel):
     tools: Optional[List[ToolValidatedDetails]] = []
+    skills: Optional[List[AttachedSkillModel]] = []
 
 
 class ApplicationExportVersionDetailModel(ApplicationVersionDetailModel, ApplicationVersionArgsForwardingModel):
@@ -267,9 +373,15 @@ class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, Application
     variables: Optional[List[ApplicationVariableDetailedModel]] = None
     pipeline_settings: Optional[dict] = Field(default_factory=dict)
     meta: Optional[dict] = Field(default_factory=dict)
+    llm_settings: Optional[LLMSettingsWriteModel] = None
 
     project_id: int = Field(..., exclude=True)
     user_id: int = Field(..., exclude=True)
+
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod
@@ -310,13 +422,46 @@ class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, Application
 
 
 class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "summary": "Update agent system prompt",
+                    "value": {
+                        "id": 101,
+                        "application_id": 7,
+                        "agent_type": "openai",
+                        "instructions": "Updated system prompt: respond concisely.",
+                        "llm_settings": {"model_name": "gpt-5-mini", "temperature": 0.1}
+                    }
+                },
+                {
+                    "summary": "Update pipeline YAML graph",
+                    "value": {
+                        "id": 202,
+                        "application_id": 15,
+                        "agent_type": "pipeline",
+                        "instructions": "nodes:\n  - id: start\n    type: llm\nedges:\n  - from: start\n    to: END"
+                    }
+                }
+            ]
+        }
+    )
+
     id: int
     application_id: int
     tags: Optional[List[PromptTagUpdateModel]] = []
     pipeline_settings: Optional[dict] = None
     meta: Optional[dict] = Field(default_factory=dict)
+    llm_settings: Optional[LLMSettingsWriteModel] = None
 
     project_id: int = Field(..., exclude=True)
+
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
 
     @model_validator(mode='before')
     @classmethod

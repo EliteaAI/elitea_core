@@ -7,15 +7,53 @@ from tools import auth, rpc_tools, VaultClient, serialize, context
 from typing import Optional, Union
 
 from .llm_settings import get_default_max_tokens
+from .skill_utils import consume_invoked_skills, format_skills_section
 from ..models.elitea_tools import EliteATool
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
 from ..models.pd.tool import ToolDetails
 from ..utils.application_tools import expand_toolkit_settings
+from ..utils.internal_tools import resolve_internal_mcp_tools, dedupe_internal_mcp_tools
 
 
 class PredictPayloadError(Exception):
     """Custom exception for errors in generating predict payload."""
     pass
+
+
+def user_input_preview(source, limit: int = 100) -> Optional[str]:
+    """Short text preview of a user message for the Active Tasks admin view.
+
+    Handles both API strings and the UI's list of content blocks
+    ({'type':'text','text':...}); skips the synthetic <runtime_context> block
+    so only the real user text shows. Returns None when no text is present.
+    """
+    if isinstance(source, str):
+        text = source
+    elif isinstance(source, list):
+        text = " ".join(
+            b["text"] for b in source
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+            and not b["text"].lstrip().startswith("<runtime_context>")
+        )
+    else:
+        return None
+    text = text.strip()
+    return text[:limit] if text else None
+
+
+def resolve_application_name(parsed: ApplicationChatRequest) -> Optional[str]:
+    """Resolve application display name for downstream observability payloads.
+
+    Returns formatted string: "Agent Name (version)" if both present,
+    otherwise returns whichever is available.
+    """
+    application_name = parsed.application_name
+    version_name = parsed.version_name
+
+    if application_name and version_name:
+        return f'{application_name} ({version_name})'
+
+    return application_name or version_name
 
 
 def get_system_user_token(project_id: int, name: str = 'api', create_if_not_exists: bool = True) -> Optional[str]:
@@ -119,7 +157,8 @@ def load_context_settings_from_conversation(project_id: int, conversation_id: st
 def generate_predict_payload(
     parsed: Union[LLMChatRequest, ApplicationChatRequest],
     user_id: int, sid: str = None, is_system_user: bool = False,
-    eligible_for_autoapproval: bool = False
+    eligible_for_autoapproval: bool = False,
+    return_chat_history: bool = False,
 ) -> dict:
     """
     :param parsed: payload
@@ -140,6 +179,8 @@ def generate_predict_payload(
 
     # Get model configuration
     llm_project_id = getattr(parsed.llm_settings, 'model_project_id', None) or parsed.project_id
+    if parsed.llm_settings is None or not parsed.llm_settings.model_name:
+        raise PredictPayloadError("llm_settings with model_name is required")
     llm_model_configuration = rpc_tools.RpcMixin().rpc.call.configurations_get_configuration_model(
         llm_project_id, parsed.llm_settings.model_name
     )
@@ -165,6 +206,7 @@ def generate_predict_payload(
     user_input = parsed.user_input or 'continue'
 
     supports_vision = llm_model_configuration.get('supports_vision', True)
+    openai_compatible = llm_model_configuration.get('openai_compatible', False)
 
     # try:
     #     from tools import worker_client  # pylint: disable=E0401,C0415
@@ -188,12 +230,14 @@ def generate_predict_payload(
                 "model": parsed.llm_settings.model_name,
                 "api_key": token,
                 "project_id": parsed.project_id,
+                "openai_compatible": openai_compatible,
                 **model_parameters,
                 #
                 "stream": True,  # hardcoded
                 "api_extra_headers": {
                     'X-SECRET': all_secrets.get('secrets_header_value', 'secret'),
                     'X-USERSESSION': auth_session if auth_session else '-',
+                    'X-Project-Id': str(parsed.project_id),
                 }
             }
         },
@@ -210,16 +254,21 @@ def generate_predict_payload(
         'steps_limit': parsed.steps_limit if isinstance(parsed, LLMChatRequest) else None,
         'mcp_tokens': parsed.mcp_tokens or {},
         'ignored_mcp_servers': parsed.ignored_mcp_servers or [],
+        'user_declined_mcp_servers': getattr(parsed, 'user_declined_mcp_servers', None) or [],
         'should_continue': parsed.should_continue,
         'hitl_resume': bool(getattr(parsed, 'hitl_resume', False)),
         'hitl_action': getattr(parsed, 'hitl_action', None),
         'hitl_value': getattr(parsed, 'hitl_value', None),
+        'hitl_decisions': getattr(parsed, 'hitl_decisions', None),
+        'execution_generation': getattr(parsed, 'execution_generation', None),
         'is_regenerate': getattr(parsed, 'is_regenerate', False),
         'meta': parsed.meta,
         'conversation_id': getattr(parsed, 'conversation_id', None) or parsed.stream_id,  # For planning toolkit scoping (fallback to stream_id)
         'persona': getattr(parsed, 'persona', 'generic'),  # Default persona for chat
         'context_settings': parsed.context_settings.dict() if parsed.context_settings else {},
         'supports_vision': supports_vision,
+        'return_chat_history': return_chat_history,
+        'invoked_skills': getattr(parsed, 'invoked_skills', None) or [],
     }
 
     # Auto-approve sensitive actions for API requests when project secret is set.
@@ -247,12 +296,105 @@ def generate_predict_payload(
         if parsed.variables:
             payload_variables = {v.name: v.dict() for v in parsed.variables}
         #
+        version_details = dict(parsed.version_details) if parsed.version_details else {}
         payload['application'] = {
             "id": parsed.application_id,
+            "name": resolve_application_name(parsed),
             "version_id": parsed.version_id,
             "variables": payload_variables,
-            "version_details": parsed.version_details,
+            "version_details": version_details,
         }
+
+        attached_skills = version_details.get('skills') or []
+        is_pipeline = version_details.get('agent_type') == 'pipeline'
+
+        agent_instructions = version_details.get('instructions')
+        if isinstance(agent_instructions, str) and agent_instructions and not is_pipeline:
+            cleaned_instructions, instruction_skills = consume_invoked_skills(
+                agent_instructions, attached_skills
+            )
+            if instruction_skills:
+                version_details['instructions'] = (
+                    cleaned_instructions + format_skills_section(instruction_skills)
+                )
+            elif cleaned_instructions is not agent_instructions:
+                # Spans were stripped (e.g. blank-body ~ref) but nothing injected;
+                # still write the cleaned string so no ~name echoes.
+                version_details['instructions'] = cleaned_instructions
+        else:
+            instruction_skills = []
+
+        instruction_skill_ids = {s.get('skill_id') for s in instruction_skills}
+
+        # Message-referenced skills (per-turn): resolve + consume from the user's
+        # message and send via the dynamic invoked_skills channel (injected AFTER
+        # the cache breakpoint, correct for per-turn data). Strip the ~name from
+        # the payload's user_input ONLY (never the stored/displayed DB message).
+        # user_input is either a str (API) or the UI's list of content blocks
+        # ({'type':'text','text':...} plus image blocks). The list branch rebuilds
+        # a FRESH list — payload['user_input'] aliases the validated
+        # parsed.user_input, so we must not mutate blocks in place — and drops a
+        # text block emptied to just a ~token (Anthropic rejects empty text blocks
+        # in vision flows).
+        message_skills: list = []
+        message_content = payload.get('user_input')
+        if isinstance(message_content, str):
+            cleaned_message, message_skills = consume_invoked_skills(message_content, attached_skills)
+            payload['user_input'] = cleaned_message or 'continue'
+        elif isinstance(message_content, list):
+            rebuilt_blocks: list = []
+            for block in message_content:
+                if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
+                    cleaned_text, block_skills = consume_invoked_skills(block['text'], attached_skills)
+                    for skill in block_skills:
+                        if not any(existing.get('skill_id') == skill.get('skill_id') for existing in message_skills):
+                            message_skills.append(skill)
+                    if cleaned_text.strip():
+                        rebuilt_blocks.append({**block, 'text': cleaned_text})
+                else:
+                    rebuilt_blocks.append(block)
+            # If consumption emptied every text block, keep the turn valid.
+            if not any(
+                isinstance(b, dict) and b.get('type') == 'text' and (b.get('text') or '').strip()
+                for b in rebuilt_blocks
+            ):
+                rebuilt_blocks.append({'type': 'text', 'text': 'continue'})
+            payload['user_input'] = rebuilt_blocks
+
+        # A skill referenced in BOTH places applies ONCE via the agent-skills
+        # (cached instructions) block and is EXCLUDED from the dynamic channel to
+        # avoid double injection.
+        payload['invoked_skills'] = [
+            s for s in message_skills if s.get('skill_id') not in instruction_skill_ids
+        ]
+
+        # Progressive disclosure: attached skills become loadable on demand via the
+        # SDK's load_skill tool. Instruction-baked ids are excluded (already always-on
+        # in the cached prompt — re-advertising them would double-inject); pipelines
+        # are excluded so deterministic nodes gain no autonomous tool.
+        if attached_skills and not is_pipeline:
+            disclosable_skills = [
+                {
+                    'skill_id': s.get('skill_id'),
+                    'name': s.get('name'),
+                    'description': s.get('description'),
+                    'instructions': s.get('instructions'),
+                }
+                for s in attached_skills
+                if s.get('skill_id') not in instruction_skill_ids
+                and s.get('name')
+                and (s.get('instructions') or '').strip()
+            ]
+            if disclosable_skills:
+                payload['attached_skills'] = disclosable_skills
+            dropped = len(attached_skills) - len(disclosable_skills)
+            if dropped:
+                log.debug(
+                    '[Skills] Progressive disclosure dropped %d of %d attached skills '
+                    '(instruction-baked/blank-instructions/missing-name)',
+                    dropped, len(attached_skills),
+                )
+
         # Merge version_details tools (including nested agents) with request-level tools
         if parsed.version_details and parsed.version_details.get('tools'):
             version_tools = parsed.version_details.get('tools', [])
@@ -266,12 +408,32 @@ def generate_predict_payload(
             llm_settings['temperature'] =  parsed.llm_settings.temperature
             llm_settings['reasoning_effort'] =  parsed.llm_settings.reasoning_effort
 
-            if supports_reasoning:
-                llm_settings['temperature'] = None
+            # Normalize against the model's actual capability using the shared helper
+            # (issue #5821) instead of a reasoning-only ad-hoc check -- this also clears a
+            # stale reasoning_effort for a non-reasoning model, which the previous inline
+            # check never handled.
+            from ..models.pd.llm import _normalize_llm_settings_family  # pylint: disable=C0415
+            llm_settings.update(_normalize_llm_settings_family(llm_settings, supports_reasoning))
             if llm_settings['max_tokens'] == -1:
                 llm_settings['max_tokens'] = get_default_max_tokens(supports_reasoning)
 
-    return serialize(payload)
+    # Serialize first so request-level tools (Pydantic ToolChatModel) become plain dicts before
+    # dedupe/resolve run — otherwise those tools are skipped and never get {project_id}/PAT filled.
+    payload = serialize(payload)
+
+    if not is_system_user:
+        try:
+            application = payload.get('application')
+            version_details_tools = application.get('version_details', {}).get('tools') if isinstance(application, dict) else None
+            for tool_list in (payload.get('tools'), version_details_tools):
+                if tool_list is None:
+                    continue
+                dedupe_internal_mcp_tools(tool_list)
+                resolve_internal_mcp_tools(tool_list, user_id, parsed.project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
+
+    return payload
 
 
 def get_toolkit_config(project_id: int, user_id: int, toolkit_id: int):
@@ -294,6 +456,24 @@ def get_toolkit_config(project_id: int, user_id: int, toolkit_id: int):
     toolkit_config['settings'] = toolkit_settings_expanded
     #
     return toolkit_config
+
+
+def get_project_context(project_id: int) -> tuple[str, bool]:
+    try:
+        config = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_first_filtered_project(
+            project_id=project_id,
+            filter_fields={'type': 'project_context'},
+        )
+        if config:
+            data = config.get('data') or {}
+            return data.get('content', ''), data.get('enabled', True)
+    except Exception:
+        log.exception('Failed to fetch project context')
+    return '', False
+
+
+def prepend_project_context(instructions: str, ctx_content: str) -> str:
+    return f"# Project Context\n\n{ctx_content}\n\n---\n\n{instructions}"
 
 
 def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, tool_name: str, tool_params: dict, sid: str = None) -> dict:

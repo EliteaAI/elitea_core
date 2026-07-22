@@ -9,3 +9,4 @@ class RPC:
     @rpc_tools.wrap_exceptions(RuntimeError)
     def mcp_servers_handler(self):
         self.servers_storage.validate_all(is_client_connected)
+

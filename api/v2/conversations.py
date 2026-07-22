@@ -8,7 +8,7 @@ from ...models.conversation import Conversation
 from ...models.enums.all import ParticipantTypes
 from ...models.pd.conversation import ConversationCreate, ConversationDetails
 from ...models.pd.participant import ParticipantCreate, ParticipantEntityUser
-from ...utils.conversation_utils import get_conversation_details
+from ...utils.conversation_utils import get_conversation_details, resolve_persona_instructions
 from ...utils.participant_utils import add_participant_to_conversation
 from ...utils.chat_feature_flags import get_context_manager_feature_flag
 from ...utils.context_analytics import set_context_strategy
@@ -18,8 +18,41 @@ from ...utils.constants import PROMPT_LIB_MODE
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="List Conversations",
-        description="Get list of conversations with filtering, sorting, and pagination.",
-        mcp_tool=True
+        description="List conversations in a project with filtering by source, participant, entity name, and free-text search — paginated",
+        mcp_description="""
+        USE to browse or search conversations in a project, and to find a conversation_id or conversation_uuid
+        before calling other endpoints.
+
+        DO NOT USE for folder-organized conversation browsing → use list_folders_and_conversations instead.
+        DO NOT USE to get a single conversation with its messages → use get_conversation.
+
+        Examples:
+        1. List user's recent conversations: GET .../conversations/prompt_lib/42?limit=20
+        2. Search by name: GET ...?query=sprint+review
+        3. Filter by participant (agent): GET ...?participant_id=15
+        4. Support conversations: GET ...?source=support
+        """,
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
+        parameters=[
+            {"name": "source", "in": "query", "required": False, "schema": {"type": "string", "default": "elitea"},
+             "description": "Filter by conversation source (e.g. 'elitea', 'support')."},
+            {"name": "query", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Free-text search filter on conversation name."},
+            {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 10},
+             "description": "Maximum number of results to return."},
+            {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer", "default": 0},
+             "description": "Pagination offset."},
+            {"name": "sort_by", "in": "query", "required": False, "schema": {"type": "string", "default": "created_at"},
+             "description": "Field to sort by."},
+            {"name": "sort_order", "in": "query", "required": False, "schema": {"type": "string", "default": "desc"},
+             "description": "Sort order (asc or desc)."},
+            {"name": "participant_id", "in": "query", "required": False, "schema": {"type": "integer"},
+             "description": "Filter by participant entity meta ID (agent/toolkit ID)."},
+            {"name": "entity_name", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Filter by participant entity name (e.g. 'application', 'llm')."},
+        ],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": [
@@ -38,6 +71,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         user_is_admin: bool = rpc.timeout(3).admin_check_user_is_admin(project_id, user_id)
 
+        entity_meta_id = request.args.get('entity_meta_id', type=int) or request.args.get('participant_id', type=int)
+
         result = rpc.timeout(10).chat_list_conversations_rpc(
             project_id=project_id,
             user_id=user_id,
@@ -49,14 +84,35 @@ class PromptLibAPI(api_tools.APIModeHandler):
             sort_order=request.args.get('sort_order', default='desc'),
             include_hidden=False,
             is_admin=user_is_admin,
+            participant_id=entity_meta_id,
+            entity_name=request.args.get('entity_name'),
         )
 
         return result, 200
 
     @register_openapi(
         name="Create Conversation",
-        description="Create a new conversation for chat interactions.",
-        mcp_tool=True
+        description="Create a new chat conversation with optional initial participants, instructions, and metadata",
+        mcp_description="""
+        USE to start a new chat session — either a blank conversation or one pre-configured with specific agents,
+        toolkits, or LLMs.
+
+        DO NOT USE if a conversation already exists and you want to add a participant → use add_participants.
+        DO NOT USE to send a message → use send_message after creating the conversation.
+
+        Participant types you can add:
+        - Agent/pipeline: { 'entity_name': 'application', 'entity_meta': { 'id': 7, 'project_id': 42 } }
+        - LLM: { 'entity_name': 'llm', 'entity_meta': { 'model_name': 'gpt-4o' } }
+        - Toolkit: { 'entity_name': 'toolkit', 'entity_meta': { 'id': 5, 'project_id': 42 } }
+
+        Examples:
+        1. Blank conversation: { 'name': 'My Chat', 'is_private': true }
+        2. With agent pre-added: { 'name': 'Agent Chat', 'is_private': true, 'participants': [{ 'entity_name': 'application', 'entity_meta': { 'id': 7, 'project_id': 42 } }] }
+        """,
+        request_body=ConversationCreate,
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversations.create"],
@@ -99,13 +155,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
             parsed.meta = {}
         if user_personalization:
             # Set persona directly (not default_persona) - this is what the chat system expects
-            if user_personalization.get('persona'):
-                parsed.meta['persona'] = user_personalization['persona']
-            if user_personalization.get('default_instructions'):
-                parsed.meta['default_instructions'] = user_personalization['default_instructions']
+            persona = user_personalization.get('persona')
+            if persona:
+                parsed.meta['persona'] = persona
+            # Resolve the instructions for the selected persona (#5392); '' means no override.
+            selected_instructions = resolve_persona_instructions(user_personalization, persona)
+            if selected_instructions:
+                parsed.meta['default_instructions'] = selected_instructions
                 # Initialize instructions from default_instructions when not explicitly provided
                 if not parsed.instructions:
-                    parsed.instructions = user_personalization['default_instructions']
+                    parsed.instructions = selected_instructions
 
         user_participant_data = ParticipantCreate(
             entity_name=ParticipantTypes.user,
@@ -163,33 +222,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # )
             return serialized, 201
 
-    @auth.decorators.check_api({
-        "permissions": ["models.chat.conversations.delete"],
-        "recommended_roles": {
-            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
-            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
-        }})
-    @api_tools.endpoint_metrics
-    def delete(self, project_id: int, conversation_id: int):
-        rpc = rpc_tools.RpcMixin().rpc
-
-        result = rpc.timeout(5).chat_delete_conversation_rpc(
-            project_id=project_id,
-            conversation_id=conversation_id,
-        )
-
-        if not result.get('success'):
-            return {"error": result.get('error', 'Conversation not found')}, 404
-
-        return {}, 204
-
-
 class API(api_tools.APIBase):
     url_params = api_tools.with_modes([
         '<int:project_id>',
-        '<int:project_id>/<int:conversation_id>',
     ])
 
     mode_handlers = {
         PROMPT_LIB_MODE: PromptLibAPI
     }
+

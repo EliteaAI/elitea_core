@@ -1,3 +1,4 @@
+import json
 from typing import List, Dict, Any, Union
 
 from pylon.core.tools import log
@@ -5,6 +6,7 @@ from pylon.core.tools import log
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.attachment import AttachmentMessageItem
+from ..models.message_items.context import ContextMessageItem
 from ..models.message_items.text import TextMessageItem
 from ..models.message_items.canvas import CanvasMessageItem, CanvasVersionItem
 from ..models.enums.all import ChatHistoryRole
@@ -69,11 +71,53 @@ def generate_chat_history_from_message_items(role, message_items) -> dict:
             else:
                 # Fallback for any legacy data that might still be dict
                 chat_history_chunk.append(message.content)
-    
+        elif message.item_type == ContextMessageItem.__mapper_args__['polymorphic_identity']:
+            context_text = format_context_for_llm(message.context_data)
+            if context_text:
+                chat_history_chunk.append({"type": "text", "text": context_text})
+
     return ChatHistory(
         role=role,
         content=chat_history_chunk
     ).dict()
+
+
+def format_context_for_llm(context_data: dict) -> str:
+    if not context_data:
+        return ""
+
+    parts = []
+    if context_data.get('user_id'):
+        parts.append(f"  <user_id>{context_data['user_id']}</user_id>")
+    if context_data.get('project_id'):
+        parts.append(f"  <project_id>{context_data['project_id']}</project_id>")
+    if context_data.get('assistant_name'):
+        parts.append(f"  <assistant>{context_data['assistant_name']}</assistant>")
+    if context_data.get('assistant_version'):
+        parts.append(f"  <assistant_version>{context_data['assistant_version']}</assistant_version>")
+    if context_data.get('project_name'):
+        parts.append(f"  <project>{context_data['project_name']}</project>")
+    if context_data.get('current_page'):
+        parts.append(f"  <current_page>{context_data['current_page']}</current_page>")
+    if context_data.get('current_entity_id'):
+        parts.append(f"  <current_entity_id>{context_data['current_entity_id']}</current_entity_id>")
+    if context_data.get('current_entity_type'):
+        entity = context_data['current_entity_type']
+        if context_data.get('current_entity_name'):
+            entity += f" '{context_data['current_entity_name']}'"
+        parts.append(f"  <working_on>{entity}</working_on>")
+    if context_data.get('selected_provider'):
+        parts.append(f"  <provider>{context_data['selected_provider']}</provider>")
+    if context_data.get('selected_model'):
+        parts.append(f"  <model>{context_data['selected_model']}</model>")
+    if context_data.get('meta'):
+        parts.append(f"  <meta>{json.dumps(context_data['meta'])}</meta>")
+
+    if not parts:
+        return ""
+
+    inner = "\n".join(parts)
+    return f"<runtime_context>\n{inner}\n</runtime_context>"
 
 
 def generate_chat_history(message_groups: List[ConversationMessageGroup], summaries: List['dict'] = None) -> List[dict]:
@@ -128,7 +172,7 @@ def exclude_image_base64_content_from_chat_history(
     chat_history: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """Exclude image_url items from all messages in chat history."""
-    log.info("Filtering image content from chat history (model doesn't support vision)")
+    log.debug("Filtering image content from chat history (model doesn't support vision)")
     
     result = []
     for msg in chat_history:

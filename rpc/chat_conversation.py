@@ -1,8 +1,8 @@
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, or_
-from sqlalchemy.orm import joinedload
+from sqlalchemy import desc, asc, Integer, or_, func
+from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes
@@ -12,10 +12,21 @@ from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
-from ..utils.conversation_utils import get_conversation_details, calculate_conversation_duration
+from ..utils.conversation_utils import (
+    get_conversation_details,
+    calculate_conversation_durations_batch,
+    resolve_persona_instructions,
+)
 from ..utils.participant_utils import add_participant_to_conversation
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import set_context_strategy
+from ..utils.exceptions import PoolSaturationError
+
+# Hard cap on page size: defence-in-depth against unbounded IN(...) lists in
+# the per-page aggregation queries below. UI default is 10; support_assistant
+# and CLI tools may pass larger values, but anything above this is rejected
+# silently rather than fanning into a heavy GROUP BY.
+LIST_CONVERSATIONS_MAX_LIMIT = 100
 
 
 class RPC:
@@ -27,7 +38,12 @@ class RPC:
         user_id: int = None,
         include_participants: bool = True,
         include_message_groups: bool = True,
-    ) -> dict | None:
+        check_ownership: bool = True,
+        messages_limit: int = 100,
+        messages_offset: int = 0,
+        sort_order: str = 'acs',
+        return_json: bool = False,
+    ) -> dict | str | None:
         """
         Get full conversation details with participants and message groups.
 
@@ -44,6 +60,9 @@ class RPC:
             user_id: Optional user ID for access control (if None, no user-specific filtering)
             include_participants: Whether to include participant details (default True)
             include_message_groups: Whether to include message groups (default True)
+            messages_limit: Maximum number of message groups to return (default 15)
+            messages_offset: Number of message groups to skip (default 0)
+            sort_order: Sort order (default 'acs')
 
         Returns:
             Dict containing full conversation details or None if not found/unauthorized
@@ -54,20 +73,30 @@ class RPC:
                     session=session,
                     conversation_id=conversation_id,
                     project_id=project_id,
-                    user_id=user_id
+                    user_id=user_id,
+                    check_ownership=check_ownership,
+                    messages_limit=messages_limit,
+                    messages_offset=messages_offset,
+                    sort_order=sort_order,
                 )
 
                 if not result:
                     return None
 
-                serialized = serialize(result)
-
-                # Allow callers to skip heavy fields if not needed
+                # Heavy fields callers may opt out of.
+                exclude = set()
                 if not include_participants:
-                    serialized.pop('participants', None)
+                    exclude.add('participants')
                 if not include_message_groups:
-                    serialized.pop('message_groups', None)
+                    exclude.add('message_groups')
 
+                # Fast path: single pydantic-core (rust) pass, skips serialize() re-walk.
+                if return_json:
+                    return result.model_dump_json(exclude=exclude or None)
+
+                serialized = serialize(result)
+                for field in exclude:
+                    serialized.pop(field, None)
                 return serialized
 
             except Exception as e:
@@ -130,6 +159,8 @@ class RPC:
         is_hidden: bool = None,
         meta: dict = None,
         attachment_participant_id: int = None,
+        folder_id: int = None,
+        update_folder: bool = False,
     ) -> dict:
         """
         Update conversation fields.
@@ -192,12 +223,21 @@ class RPC:
                 if meta is not None:
                     conversation.meta = conversation.meta or {}
                     conversation.meta.update(meta)
+                    # #5392: instructions are per-persona now, but meta['default_instructions'] was
+                    # baked in at creation time from the then-active persona. When the persona
+                    # changes here, re-resolve it from the owner's personalization so a switched
+                    # conversation stops carrying the previous persona's instructions.
+                    if 'persona' in meta:
+                        self._reresolve_persona_instructions(session, conversation, meta['persona'])
                     flag_modified(conversation, 'meta')
 
                 if is_hidden is not None:
                     conversation.meta = conversation.meta or {}
                     conversation.meta['is_hidden'] = is_hidden
                     flag_modified(conversation, 'meta')
+
+                if folder_id is not None or update_folder:
+                    conversation.folder_id = folder_id
 
                 session.commit()
                 session.refresh(conversation)
@@ -211,6 +251,36 @@ class RPC:
                 session.rollback()
                 log.error(f"Error updating conversation: {str(e)}")
                 return {'success': False, 'error': 'Failed to update conversation'}
+
+    @staticmethod
+    def _reresolve_persona_instructions(session, conversation, persona) -> None:
+        """Re-derive conversation.meta['default_instructions'] for a new persona (#5392).
+
+        Looks up the conversation's user participant, re-fetches their personalization, and
+        resolves the instructions for `persona`. An empty result removes the key so the
+        conversation no longer carries the previous persona's instructions.
+        """
+        try:
+            owner = session.query(Participant).join(
+                ParticipantMapping, ParticipantMapping.participant_id == Participant.id
+            ).filter(
+                ParticipantMapping.conversation_id == conversation.id,
+                Participant.entity_name == ParticipantTypes.user.value,
+            ).first()
+            if not owner:
+                return
+            user_id = owner.entity_meta.get('id')
+            if not user_id:
+                return
+            social_user = rpc_tools.RpcMixin().rpc.timeout(2).social_get_user(user_id)
+            personalization = (social_user or {}).get('personalization') or {}
+            selected = resolve_persona_instructions(personalization, persona)
+            if selected:
+                conversation.meta['default_instructions'] = selected
+            else:
+                conversation.meta.pop('default_instructions', None)
+        except Exception as e:
+            log.warning(f"[#5392] Failed to re-resolve persona instructions: {e}")
 
     @web.rpc("chat_create_conversation_rpc", "create_conversation_rpc")
     def create_conversation_rpc(
@@ -252,12 +322,15 @@ class RPC:
         effective_instructions = instructions
 
         if user_personalization:
-            if user_personalization.get('persona'):
-                conversation_meta['persona'] = user_personalization['persona']
-            if user_personalization.get('default_instructions'):
-                conversation_meta['default_instructions'] = user_personalization['default_instructions']
+            persona = user_personalization.get('persona')
+            if persona:
+                conversation_meta['persona'] = persona
+            # Resolve the instructions for the selected persona (#5392); '' means no override.
+            selected_instructions = resolve_persona_instructions(user_personalization, persona)
+            if selected_instructions:
+                conversation_meta['default_instructions'] = selected_instructions
                 if not effective_instructions:
-                    effective_instructions = user_personalization['default_instructions']
+                    effective_instructions = selected_instructions
 
         with db.get_session(project_id) as session:
             conversation = Conversation(
@@ -333,6 +406,8 @@ class RPC:
         sort_order: str = 'desc',
         include_hidden: bool = False,
         is_admin: bool = False,
+        participant_id: int = None,
+        entity_name: str = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -340,6 +415,9 @@ class RPC:
         Shared RPC for conversation listing used by:
         - elitea_core conversations API
         - support_assistant plugin (with source='support', include_hidden=True)
+
+        Args:
+            participant_id: Optional participant ID to filter by single_participant in conversation meta
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -387,20 +465,77 @@ class RPC:
                     )
                 )
 
+            if participant_id is not None:
+                filters = [
+                    Conversation.meta.has_key('single_participant'),
+                    Conversation.meta['single_participant']['entity_meta']['id'].astext.cast(Integer) == participant_id,
+                ]
+                if entity_name:
+                    filters.append(
+                        Conversation.meta['single_participant']['entity_name'].astext == entity_name,
+                    )
+                base_query = base_query.filter(*filters)
+
             base_query = base_query.order_by(sorting(sorting_by))
+
+            # Cap page size: keeps the IN(...) lists in the aggregation queries
+            # below tightly bounded regardless of caller (audit issue #1).
+            limit = min(max(int(limit or 0), 1), LIST_CONVERSATIONS_MAX_LIMIT)
+            offset = max(int(offset or 0), 0)
 
             total = base_query.count()
             conversations = base_query.limit(limit).offset(offset).all()
 
+            if not conversations:
+                return {'total': total, 'rows': []}
+
+            conv_ids = [c.id for c in conversations]
+            skip_duration = bool(source and 'elitea' in source)
+
+            # Pre-aggregate per-conversation counts in two scalar GROUP BY queries
+            # instead of N per-row .count()/list accesses (audit issue #1).
+            # Both queries are bounded by len(conv_ids) <= LIST_CONVERSATIONS_MAX_LIMIT
+            # and project to scalar columns only — no ORM hydration.
+            mg_counts: dict[int, int] = dict(
+                session.query(
+                    ConversationMessageGroup.conversation_id,
+                    func.count(ConversationMessageGroup.id),
+                )
+                .filter(ConversationMessageGroup.conversation_id.in_(conv_ids))
+                .group_by(ConversationMessageGroup.conversation_id)
+                .all()
+            )
+
+            participants_count: dict[int, int] = {}
+            users_count: dict[int, int] = {}
+            for cid, ename, n in (
+                session.query(
+                    ParticipantMapping.conversation_id,
+                    Participant.entity_name,
+                    func.count(Participant.id),
+                )
+                .join(Participant, Participant.id == ParticipantMapping.participant_id)
+                .filter(ParticipantMapping.conversation_id.in_(conv_ids))
+                .group_by(ParticipantMapping.conversation_id, Participant.entity_name)
+                .all()
+            ):
+                participants_count[cid] = participants_count.get(cid, 0) + n
+                if ename == ParticipantTypes.user.value:
+                    users_count[cid] = n
+
+            durations = (
+                {} if skip_duration
+                else calculate_conversation_durations_batch(conv_ids, session)
+            )
+
             rows = []
             for conv in conversations:
-                duration = -1 if source and 'elitea' in source else calculate_conversation_duration(conv, session)
                 conv_dict = {
                     **serialize(conv),
-                    "duration": duration,
-                    "participants_count": len(conv.participants),
-                    "message_groups_count": conv.message_groups.count(),
-                    "users_count": sum(1 for p in conv.participants if p.entity_name == ParticipantTypes.user.value),
+                    "duration": -1 if skip_duration else durations.get(conv.id, 0.0),
+                    "participants_count": participants_count.get(conv.id, 0),
+                    "message_groups_count": mg_counts.get(conv.id, 0),
+                    "users_count": users_count.get(conv.id, 0),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 
@@ -528,7 +663,9 @@ class RPC:
             sorting_by = getattr(ConversationMessageGroup, sort_by, ConversationMessageGroup.created_at)
             sorting = desc if sort_order == 'desc' else asc
 
-            base_query = session.query(ConversationMessageGroup).filter(
+            base_query = session.query(ConversationMessageGroup).options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).filter(
                 ConversationMessageGroup.conversation_id == conversation_id
             )
 
@@ -541,7 +678,7 @@ class RPC:
             total = base_query.count()
             messages = base_query.order_by(sorting(sorting_by)).limit(limit).offset(offset).all()
 
-            rows = [serialize(MessageGroupDetail.from_orm(m)) for m in messages]
+            rows = [MessageGroupDetail.from_orm(m).model_dump(mode='json') for m in messages]
 
             return {'total': total, 'rows': rows}
 
@@ -768,6 +905,13 @@ class RPC:
             )
         except SioValidationError as e:
             return {'success': False, 'error': f'Wrong input data: {e.error}'}
+        except PoolSaturationError as e:
+            return {
+                'success': False,
+                'error': 'temporarily_unavailable',
+                'message': 'The service is busy processing other requests. Please try again in a few seconds.',
+                'retry_after': e.retry_after,
+            }
         except Exception as ex:
             log.error(f"Error in chat_predict_sio: {ex}")
             return {'success': False, 'error': 'Cannot create message'}
@@ -789,7 +933,9 @@ class RPC:
 
         status_code = 201
         with db.get_session(project_id) as session:
-            message_groups = session.query(ConversationMessageGroup).filter(
+            message_groups = session.query(ConversationMessageGroup).options(
+                selectinload(ConversationMessageGroup.message_items)
+            ).filter(
                 ConversationMessageGroup.id.in_(result.values())
             ).order_by(
                 ConversationMessageGroup.created_at.asc()
@@ -805,6 +951,6 @@ class RPC:
                     time.sleep(poll_timeout)
                 else:
                     status_code = 202
-            rows = [serialize(MessageGroupDetail.from_orm(i)) for i in message_groups]
+            rows = [MessageGroupDetail.from_orm(i).model_dump(mode='json') for i in message_groups]
 
         return {'success': True, 'data': {'message_groups': rows}, 'status_code': status_code}

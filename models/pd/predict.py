@@ -12,6 +12,27 @@ from .attachment import AttachmentMessageItemPredict
 from .participant_settings import EntitySettingsLlm
 
 
+class ApplicationPredictRequest(BaseModel):
+    project_id: Optional[int] = None
+    callback_url: Optional[str] = None
+    callback_headers: Optional[Dict[str, str]] = None
+    async_mode: Optional[bool] = False
+    user_input: Optional[str] = None
+    return_chat_history: bool = False
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "project_id": 1,
+                "user_input": "Hello world!",
+                "callback_url": "https://example.com/callback",
+                "callback_headers": {"Authorization": "Bearer <token>"},
+                "async_mode": False,
+            }
+        }
+    )
+
+
 class PredictPayload(BaseModel):
     stream_id: str
 
@@ -46,8 +67,17 @@ class SioPredictModel(BaseModel):
     ignored_mcp_servers: Optional[List[str]] = Field(default_factory=list, description="List of MCP server URLs to ignore (user chose to continue without auth)")
     # Keep for backwards compatibility - not used in normal flow, always False
     should_continue: Optional[bool] = Field(default=False, description="Deprecated: Use chat_continue_predict event instead")
+    runtime_context: Optional[Dict[str, Any]] = None
     thread_id: Optional[str] = Field(default=None, description="Thread ID for execution")
-    persona: Optional[str] = Field(default="generic", description="Default persona for chat: 'generic' or 'qa'")
+    persona: Optional[str] = Field(
+        default="generic",
+        description=(
+            "Default persona for chat. Accepted values: 'generic', 'qa', 'nerdy', "
+            "'quirky', 'cynical', 'none', 'bare'. Use 'bare' to bypass all "
+            "Elitea-injected identity/persona content and send only the user's own "
+            "instructions (plus tool-required guidance) to the model."
+        ),
+    )
 
     @model_validator(mode='after')
     def user_input_from_tool_call_input(self):
@@ -133,13 +163,20 @@ class SioContinuePredictModel(BaseModel):
     thread_id: Optional[str] = Field(default=None, description="Thread ID for continuing execution (optional, falls back to message meta)")
     mcp_tokens: Optional[Dict[str, str | Dict[str, Any]]] = Field(default_factory=dict, description="MCP OAuth tokens by server URL")
     ignored_mcp_servers: Optional[List[str]] = Field(default_factory=list, description="List of MCP server URLs to ignore")
+    user_declined_mcp_servers: Optional[List[dict]] = Field(default=None, description="MCP servers the user explicitly declined this session, with full OAuth metadata for LLM context and re-auth")
     # Always True for Continue flow - used by generate_payload to signal resume from checkpoint
     should_continue: bool = Field(default=True, description="Always True for Continue flow")
     # User input for continue flow - if provided, uses this instead of 'continue'
     user_input: Optional[str] = Field(default=None, description="User input to use instead of 'continue'")
     hitl_resume: bool = Field(default=False, description="Whether this continue request resumes a HITL interrupt")
-    hitl_action: Optional[str] = Field(default=None, description="HITL action: approve, reject, or edit")
-    hitl_value: Optional[str] = Field(default=None, description="Edited text for HITL edit resumes")
+    hitl_action: Optional[str] = Field(default=None, description="HITL action: approve, reject, edit, or block_with_comment")
+    hitl_value: Optional[str] = Field(default=None, description="Edited text for HITL edit resumes, or the user's note for block_with_comment")
+    # Parallel sub-agent fan-out (#4993): one decision per paused child, each
+    # keyed by the parent Application tool_call_id. {tool_call_id, action, value}.
+    hitl_decisions: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Per-child HITL decisions for a parallel sub-agent resume",
+    )
     # Fields needed for compatibility with generate_payload
     interaction_uuid: str | uuid.UUID | None = None
     llm_settings: Optional[EntitySettingsLlm] = None
@@ -152,6 +189,9 @@ class SioRegenerateModel(BaseModel):
     sid: str
     question_id: str
     conversation_uuid: Optional[str]
+    updated_items: Optional[List[dict]] = None
+    # Each entry: {"uuid": "<item uuid>", "content": "<new text content>"}
+    # Only TextMessageItem is supported for now;
 
 
 class SioPredictContinueModel(BaseModel):

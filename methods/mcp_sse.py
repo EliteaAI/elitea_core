@@ -51,11 +51,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         current_servers = self.servers_storage.get_servers_dict(project_id)
         result = list({**current_servers, **private_servers}.values())
         #
-        log.debug(f"[MCP_CLIENT] All Mcp Servers {self.servers_storage.status()}:")
-        log.debug(f"[MCP_CLIENT] Collect Mcp Servers for private {personal_project_id} ({user_id}) and current {project_id}:")
-        log.debug(f"[MCP_CLIENT] Mcp Servers for private :\n{_str_servers(private_servers.values())}")
-        log.debug(f"[MCP_CLIENT] Mcp Servers for current :\n{_str_servers(current_servers.values())}")
-        log.debug(f"[MCP_CLIENT] Mcp Servers joined :\n{_str_servers(result)}")
+        log.debug("[MCP_CLIENT] All Mcp Servers %s:", self.servers_storage.status())
+        log.debug("[MCP_CLIENT] Collect Mcp Servers for private %s (%s) and current %s:", personal_project_id, user_id, project_id)
+        log.debug("[MCP_CLIENT] Mcp Servers for private :\n%s", _str_servers(private_servers.values()))
+        log.debug("[MCP_CLIENT] Mcp Servers for current :\n%s", _str_servers(current_servers.values()))
+        log.debug("[MCP_CLIENT] Mcp Servers joined :\n%s", _str_servers(result))
         #
         return result
 

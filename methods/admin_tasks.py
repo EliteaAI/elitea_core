@@ -19,12 +19,32 @@
 
 import shutil
 import time
+from functools import partial
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401,W0611
 from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
+from tools import db  # pylint: disable=E0401
 
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
 from ..utils.toolkit_migration import run_selected_tools_migration
+from ..utils.llm_migration_utils import (
+    parse_migration_params,
+    resolve_target_project_ids,
+    validate_target_model,
+    lookup_source_model_capabilities,
+    build_new_llm_settings,
+    migrate_application_versions,
+    migrate_participant_mappings,
+    parse_heal_params,
+    heal_family_conflict_versions,
+    heal_family_conflict_mappings,
+)
+from ..utils.embedding_migration_utils import (
+    validate_target_embedding_model,
+    migrate_toolkit_embedding_models,
+)
+from ..utils.trace_step_backfill_utils import parse_backfill_params, backfill_project
+from ..utils.utils import get_public_project_id, make_yield_to_hub
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -71,17 +91,21 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def migrate_toolkit_selected_tools(self, *args, **kwargs):
         """Admin task: migrate selected_tools in EliteATool.settings and EntityToolMapping.
 
-        Supports removing and renaming tool entries across all or specific projects,
+        Supports adding, removing, and renaming tool entries across all or specific projects,
         with an optional dry-run mode.
 
         Param format:
             "<toolkit_type>;<operations>;project_id=<all|N>[;dry_run]"
 
         Operations (comma-separated):
+            +tool_name          - add tool to selected_tools if missing
             tool_name           - remove tool from selected_tools
             old_name>new_name   - rename tool (remove old, append new)
 
         Examples:
+            "inventory;+ask;project_id=all;dry_run"
+                All projects, inventory toolkits: add ask where a persisted selection is missing it
+
             "github;index_data>indexData,search_index;project_id=all"
                 All projects, github toolkits: rename index_data->indexData, remove search_index
 
@@ -276,6 +300,47 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             total_migrated, end_ts - start_ts
         )
         return {"migrated": total_migrated}
+
+    @web.method()
+    def migrate_skill_publish_columns(self, *args, **kwargs):
+        """Admin task: add the skill-publishing columns to each project schema.
+
+        Adds ``shared_owner_id``/``shared_id`` to ``skills`` and ``status`` to
+        ``skill_versions`` (plus a status index) on every project schema.
+        Idempotent (``ADD COLUMN IF NOT EXISTS``): safe to run multiple times.
+
+        Param format (optional):
+            "project_id=<all|N>"
+        """
+        from ..utils.skill_publish_schema import apply_skill_publish_columns
+
+        param = kwargs.get("param", "") or ""
+        project_id_filter = None
+        for seg in [s.strip() for s in param.split(";")]:
+            if seg.lower().startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.warning(
+                            "migrate_skill_publish_columns: invalid project_id '%s', scanning all", value)
+
+        try:
+            if project_id_filter is not None:
+                project_ids = [project_id_filter]
+            else:
+                project_ids = [
+                    p["id"] for p in (
+                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                    )
+                ]
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_skill_publish_columns: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_skill_publish_columns(project_ids)
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
     def migrate_toolkit_settings_alita_title(self, *args, **kwargs):
@@ -612,6 +677,146 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         }
 
     @web.method()
+    def migrate_confluence_api_version(self, *args, **kwargs):
+        """Admin task (Bug #5357): rewrite legacy Confluence ``api_version='3'``
+        to ``'2'`` in toolkit settings.
+
+        Background:
+            The Confluence toolkit's ``api_version`` Literal was renumbered in
+            elitea-sdk commit d99ff5a (EL-5179):
+
+                old ['Auto', '2', '3']   ->   new ['Auto', '1', '2']
+
+            Toolkits saved with ``api_version='3'`` (old Cloud V3) now fail
+            Pydantic ``Literal`` validation with "Input should be 'Auto', '1'
+            or '2'". This task rewrites those rows to ``'2'`` (Cloud V2), which
+            is the equivalent value under the new schema.
+
+            Scope is intentionally limited to the unambiguous ``'3' -> '2'``
+            case. The ``'2'`` value is left untouched because it is valid under
+            the new schema and cannot be safely disambiguated from its old
+            Server-V2 meaning at the row level.
+
+        Idempotent: safe to re-run. Already-migrated rows have no ``'3'`` left
+        to rewrite and are skipped.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+
+        Always run with dry_run first to verify expected changes.
+        """
+        from copy import deepcopy  # pylint: disable=C0415
+        from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import EliteATool  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_confluence_api_version: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error(
+                "migrate_confluence_api_version: project_id= is required. "
+                "Format: project_id=<all|N>[;dry_run]"
+            )
+            return {
+                "migrated": 0,
+                "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]",
+            }
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info(
+            "Starting migrate_confluence_api_version (dry_run=%s, project_id_filter=%s)",
+            dry_run, project_id_filter,
+        )
+        start_ts = time.time()
+
+        total_migrated = 0
+        failed_projects = 0
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_confluence_api_version: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    toolkits = session.query(EliteATool).filter(
+                        EliteATool.type == 'confluence'
+                    ).all()
+
+                    any_changed = False
+
+                    for toolkit in toolkits:
+                        settings = toolkit.settings or {}
+                        if settings.get('api_version') != '3':
+                            continue
+
+                        log.info(
+                            "%sproject %s, toolkit id=%s (confluence) name='%s': "
+                            "api_version '3' -> '2'",
+                            prefix, project_id, toolkit.id, toolkit.name,
+                        )
+
+                        if not dry_run:
+                            new_settings = deepcopy(settings)
+                            new_settings['api_version'] = '2'
+                            toolkit.settings = new_settings
+                            flag_modified(toolkit, 'settings')
+                            any_changed = True
+
+                        total_migrated += 1
+
+                    if any_changed and not dry_run:
+                        session.commit()
+
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "%smigrate_confluence_api_version: error in project %s", prefix, project_id
+                )
+                failed_projects += 1
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_confluence_api_version — %s %s toolkit(s) "
+            "(failed projects: %s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated", total_migrated,
+            failed_projects, round(end_ts - start_ts, 2),
+        )
+        return {
+            "migrated": total_migrated,
+            "failed_projects": failed_projects,
+            "dry_run": dry_run,
+        }
+
+    @web.method()
     def migrate_mcp_client_secrets(self, *args, **kwargs):
         """Admin task: vault-wrap plain-text client_secret in MCP toolkit settings.
 
@@ -824,6 +1029,270 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return result
 
     @web.method()
+    def cleanup_oversized_message_meta(self, *args, **kwargs):
+        """Admin task: find and prune oversized chat_message_group.meta JSONB blobs.
+
+        A tool result containing large content (e.g. a binary file dumped into an
+        error message) can be persisted into a message group's meta, producing
+        multi-MB rows. Loading such a conversation serializes the whole blob and
+        stalls the gevent hub, freezing the platform. This task detects oversized
+        rows and prunes the offending top-level keys, preserving the rest of meta.
+
+        SAFETY: the oversized meta value is NEVER loaded into memory. Detection and
+        pruning happen entirely SQL-side (length(meta::text), jsonb_each, meta-key
+        removal), so running this task cannot itself trigger the freeze.
+
+        Dry-run is ON by default — pass dry_run=false to actually prune.
+
+        Param format:
+            "project_id=<all|N>;threshold_bytes=<N>;per_key_bytes=<N>;dry_run=false"
+
+        Defaults: project_id=all, threshold_bytes=1000000 (1 MB row total),
+        per_key_bytes=262144 (256 KB per key), dry_run=true.
+
+        Examples:
+            ""                                          - dry-run census, all projects
+            "project_id=3"                              - dry-run census, project 3 only
+            "project_id=3;dry_run=false"                - prune oversized rows in project 3
+            "project_id=all;threshold_bytes=500000;dry_run=false"  - prune across all projects
+        """
+        import datetime  # pylint: disable=C0415
+        import json  # pylint: disable=C0415
+        from sqlalchemy import text  # pylint: disable=C0415
+        from tools import db  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = True
+        project_id_filter = None
+        threshold_bytes = 1_000_000
+        per_key_bytes = 262_144
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.warning(
+                            "cleanup_oversized_message_meta: invalid project_id '%s', scanning all",
+                            value,
+                        )
+            elif seg_lower.startswith("threshold_bytes="):
+                try:
+                    threshold_bytes = int(seg[len("threshold_bytes="):].strip())
+                except ValueError:
+                    log.warning("cleanup_oversized_message_meta: invalid threshold_bytes, using default")
+            elif seg_lower.startswith("per_key_bytes="):
+                try:
+                    per_key_bytes = int(seg[len("per_key_bytes="):].strip())
+                except ValueError:
+                    log.warning("cleanup_oversized_message_meta: invalid per_key_bytes, using default")
+            elif seg_lower.startswith("dry_run="):
+                dry_run = seg_lower[len("dry_run="):].strip() != "false"
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info(
+            "%sStarting cleanup_oversized_message_meta (project_id=%s, threshold_bytes=%s, "
+            "per_key_bytes=%s, dry_run=%s)",
+            prefix, project_id_filter if project_id_filter is not None else "all",
+            threshold_bytes, per_key_bytes, dry_run,
+        )
+        start_ts = time.time()
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("cleanup_oversized_message_meta: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        projects_scanned = 0
+        groups_flagged = 0
+        groups_pruned = 0
+        by_project = {}
+
+        for project in projects:
+            project_id = project["id"]
+            table = f"p_{project_id}.chat_message_group"
+            proj_flagged = 0
+            proj_pruned = 0
+            details = []
+
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    # Step A — detect. Reads only the SIZE of meta, never the value.
+                    flagged_rows = session.execute(
+                        text(
+                            f"SELECT id, conversation_id, length(meta::text) AS meta_size "  # nosec B608
+                            f"FROM {table} "
+                            f"WHERE length(meta::text) > :threshold "
+                            f"ORDER BY meta_size DESC"
+                        ),
+                        {"threshold": threshold_bytes},
+                    ).fetchall()
+
+                    projects_scanned += 1
+
+                    for row in flagged_rows:
+                        group_id = row.id
+                        conversation_id = row.conversation_id
+                        meta_size = row.meta_size
+
+                        # Per-key sizes — jsonb_each + length evaluated server-side;
+                        # only (key, size) pairs return, never the values.
+                        key_rows = session.execute(
+                            text(
+                                f"SELECT key, length(value::text) AS key_size "  # nosec B608
+                                f"FROM {table}, jsonb_each(meta) "
+                                f"WHERE id = :row_id AND length(value::text) > :per_key"
+                            ),
+                            {"row_id": group_id, "per_key": per_key_bytes},
+                        ).fetchall()
+
+                        oversized_keys = [k.key for k in key_rows]
+                        if not oversized_keys:
+                            # Row is large but no single key exceeds per_key_bytes;
+                            # report it but do not prune (no clear offender).
+                            log.warning(
+                                "%scleanup_oversized_message_meta: project %s group %s "
+                                "(conversation %s) meta_size=%s but no key over per_key_bytes=%s",
+                                prefix, project_id, group_id, conversation_id, meta_size, per_key_bytes,
+                            )
+                            continue
+
+                        proj_flagged += 1
+                        groups_flagged += 1
+                        sizes = {k.key: k.key_size for k in key_rows}
+                        details.append({
+                            "conversation_id": conversation_id,
+                            "group_id": group_id,
+                            "meta_size": meta_size,
+                            "oversized_keys": sizes,
+                        })
+                        log.info(
+                            "%scleanup_oversized_message_meta: project %s group %s "
+                            "(conversation %s) meta_size=%s oversized_keys=%s",
+                            prefix, project_id, group_id, conversation_id, meta_size, sizes,
+                        )
+
+                        # Step B — prune (only when not dry-run). Built server-side,
+                        # blob never enters Python.
+                        if not dry_run:
+                            marker = json.dumps({
+                                "keys": oversized_keys,
+                                "sizes_bytes": sizes,
+                                "reason": "oversized meta pruned by cleanup_oversized_message_meta",
+                                "pruned_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            })
+                            session.execute(
+                                text(
+                                    f"UPDATE {table} "  # nosec B608
+                                    f"SET meta = (meta - CAST(:keys AS text[])) "
+                                    f"           || jsonb_build_object('_pruned_keys', CAST(:marker AS jsonb)) "
+                                    f"WHERE id = :row_id"
+                                ),
+                                {
+                                    "keys": oversized_keys,
+                                    "marker": marker,
+                                    "row_id": group_id,
+                                },
+                            )
+                            proj_pruned += 1
+                            groups_pruned += 1
+
+                    if not dry_run and proj_pruned:
+                        session.commit()
+
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "%scleanup_oversized_message_meta: error in project %s", prefix, project_id
+                )
+                continue
+
+            if proj_flagged:
+                by_project[project_id] = {
+                    "flagged": proj_flagged,
+                    "pruned": proj_pruned,
+                    "details": details,
+                }
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting cleanup_oversized_message_meta — scanned=%s flagged=%s pruned=%s "
+            "(duration = %ss)",
+            prefix, projects_scanned, groups_flagged, groups_pruned, round(end_ts - start_ts, 2),
+        )
+        return {
+            "dry_run": dry_run,
+            "projects_scanned": projects_scanned,
+            "groups_flagged": groups_flagged,
+            "groups_pruned": groups_pruned,
+            "by_project": by_project,
+        }
+
+    @web.method()
+    def backfill_legacy_trace_steps(self, *args, **kwargs):
+        """Backfill legacy meta.tool_calls/thinking_steps into message_trace_step.
+
+        Param: "project_ids=<all|N|lo-hi>;cutoff_days=<180|all>;dry_run=<true|false>" (dry_run defaults true).
+        """
+        raw_param = kwargs.get("param", "") or ""
+        try:
+            parsed = parse_backfill_params(raw_param)
+        except ValueError as exc:
+            log.error("backfill_legacy_trace_steps: invalid params: %s", exc)
+            return {"error": str(exc)}
+
+        yield_to_hub = make_yield_to_hub(self.context.web_runtime)
+
+        prefix = "[DRY RUN] " if parsed['dry_run'] else ""
+        log.info(
+            "%sStarting backfill_legacy_trace_steps (project_ids=%s, cutoff_days=%s, dry_run=%s)",
+            prefix, parsed['project_id_spec'], parsed['cutoff_days'], parsed['dry_run'],
+        )
+        start_ts = time.time()
+
+        try:
+            project_ids = resolve_target_project_ids(parsed['project_id_spec'])
+        except ValueError as exc:
+            log.error("backfill_legacy_trace_steps: project resolution failed: %s", exc)
+            return {"error": str(exc)}
+
+        by_project = {}
+        totals = {}
+        for project_id in project_ids:
+            yield_to_hub()
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    counters = backfill_project(
+                        session, project_id, parsed['cutoff_days'], parsed['dry_run'], yield_to_hub,
+                    )
+            except Exception:  # pylint: disable=W0703
+                log.exception("backfill_legacy_trace_steps: error in project %s", project_id)
+                continue
+
+            by_project[project_id] = counters
+            for key, value in counters.items():
+                totals[key] = totals.get(key, 0) + value
+            log.info("%sbackfill_legacy_trace_steps: project %s — %s", prefix, project_id, counters)
+
+        duration = round(time.time() - start_ts, 2)
+        log.info(
+            "%sExiting backfill_legacy_trace_steps — projects=%s totals=%s (duration=%ss)",
+            prefix, len(project_ids), totals, duration,
+        )
+        return {
+            "dry_run": parsed['dry_run'],
+            "cutoff_days": parsed['cutoff_days'],
+            "totals": totals,
+            "by_project": by_project,
+        }
+
+    @web.method()
     def migrate_conversation_source_to_elitea(self, *args, **kwargs):
         """Admin task: rename legacy conversation source values to 'elitea'.
 
@@ -911,6 +1380,1081 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             prefix, "would migrate" if dry_run else "migrated", total_migrated, round(end_ts - start_ts, 2)
         )
         return {"migrated": total_migrated, "dry_run": dry_run}
+
+    @web.method()
+    def migrate_admin_shell_to_inplace(self, *args, **kwargs):
+        """Admin task (Bug #4643): merge legacy admin-publish "shell" applications
+        back into their original applications.
+
+        Background:
+            Before the in-place admin publish flow was introduced, publishing
+            an agent from inside the public project created a separate "shell"
+            Application (shared_id=original.id) that hosted the published
+            version.  This produced duplicate cards in the Admin agent listing.
+
+        What this task does (per shell):
+            1. Reassigns each ``published`` version's ``application_id`` from
+               the shell to the original application.  Version IDs are
+               preserved, so all references (sub-agent meta, AlitaTool
+               settings, EntityToolMapping, conversation participants by
+               version_id) keep working without changes.
+            2. Updates ``version.meta.source_application_id`` to the original
+               application id (was the shell id).
+            3. Repoints embedded sub-agent ``meta.parent_published_app_id``
+               from the shell to the original app id.
+               (``parent_published_version_id`` stays unchanged.)
+            4. Repoints ``Participant.entity_meta`` JSONB rows **across all
+               project schemas** that reference the shell ``application_id`` to
+               the original app id, so existing conversations in every project
+               keep their proper agent identity.
+            5. Merges ``application.meta.adoption`` from the shell into the
+               original (sum ``conversation_count``, union ``project_ids``,
+               recompute ``project_count``).
+            6. Deletes the shell application (cascades base version).
+
+        Version name collision handling:
+            If a published version's name already exists on the original app,
+            the migrating version is auto-renamed by appending
+            ``_migrated_<unix_ts>`` to avoid the UniqueConstraint.
+
+        Idempotent: re-running on already-migrated data finds zero shells
+        matching the detection criteria.  Safe to run multiple times.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+        """
+        from copy import deepcopy  # pylint: disable=C0415
+        from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import Application, ApplicationVersion  # pylint: disable=C0415
+        from ..models.participants import Participant  # pylint: disable=C0415
+        from ..models.enums.all import PublishStatus, ParticipantTypes  # pylint: disable=C0415
+        from ..utils.utils import get_public_project_id  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error(
+                            "migrate_admin_shell_to_inplace: invalid project_id '%s'", value
+                        )
+                        return {
+                            "migrated": 0,
+                            "error": f"invalid project_id: '{value}'",
+                        }
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error(
+                "migrate_admin_shell_to_inplace: project_id= is required. "
+                "Format: project_id=<all|N>[;dry_run]"
+            )
+            return {
+                "migrated": 0,
+                "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]",
+            }
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        public_project_id = get_public_project_id()
+        log.info(
+            "%sStarting migrate_admin_shell_to_inplace "
+            "(dry_run=%s, project_id_filter=%s, public_project_id=%s)",
+            prefix, dry_run, project_id_filter, public_project_id,
+        )
+        start_ts = time.time()
+
+        # Admin shells live ONLY in the public project.
+        if project_id_filter is not None and project_id_filter != public_project_id:
+            log.info(
+                "migrate_admin_shell_to_inplace: project_id_filter=%s != public_project_id=%s, "
+                "nothing to migrate",
+                project_id_filter, public_project_id,
+            )
+            return {"migrated": 0, "skipped": 0, "dry_run": dry_run}
+
+        migrated_shells = 0
+        skipped_shells = 0
+        migrated_versions = 0
+
+        try:
+            with db.with_project_schema_session(public_project_id) as session:
+                # Detect admin shells: same-project owner+shared, shared_id set
+                shells = session.query(Application).filter(
+                    Application.owner_id == public_project_id,
+                    Application.shared_owner_id == public_project_id,
+                    Application.shared_id.isnot(None),
+                ).all()
+
+                log.info(
+                    "%sFound %d admin shell application(s) in public project %s",
+                    prefix, len(shells), public_project_id,
+                )
+
+                for shell in shells:
+                    shell_id = shell.id
+                    original_id = shell.shared_id
+                    shell_name = shell.name
+
+                    # Original may have been deleted manually — guard
+                    original = session.query(Application).get(original_id)
+                    if original is None:
+                        log.warning(
+                            "%sshell id=%s (%s): original app %s not found, skipping",
+                            prefix, shell_id, shell_name, original_id,
+                        )
+                        skipped_shells += 1
+                        continue
+
+                    # Find published versions on the shell
+                    pub_versions = session.query(ApplicationVersion).filter(
+                        ApplicationVersion.application_id == shell_id,
+                        ApplicationVersion.status == PublishStatus.published,
+                    ).all()
+
+                    if not pub_versions:
+                        log.info(
+                            "%sshell id=%s (%s): no published versions, deleting empty shell",
+                            prefix, shell_id, shell_name,
+                        )
+                        if not dry_run:
+                            session.delete(shell)
+                            session.flush()
+                        migrated_shells += 1
+                        continue
+
+                    # Collision check: auto-rename colliding version names
+                    VERSION_NAME_MAX = ApplicationVersion.__table__.c.name.type.length
+                    original_names = {
+                        v.name for v in session.query(ApplicationVersion).filter(
+                            ApplicationVersion.application_id == original_id,
+                        ).all()
+                    }
+                    ts_suffix = f"_migrated_{int(start_ts)}"
+                    rename_failed = False
+                    for v in pub_versions:
+                        if v.name in original_names:
+                            new_name = f"{v.name}{ts_suffix}"
+                            if len(new_name) > VERSION_NAME_MAX:
+                                log.warning(
+                                    "%sshell id=%s ver id=%s: SKIP — renamed '%s' "
+                                    "would be %d chars (max %d)",
+                                    prefix, shell_id, v.id, v.name,
+                                    len(new_name), VERSION_NAME_MAX,
+                                )
+                                rename_failed = True
+                                break
+                            if new_name in original_names:
+                                log.warning(
+                                    "%sshell id=%s ver id=%s: SKIP — renamed '%s' "
+                                    "also collides on original app id=%s",
+                                    prefix, shell_id, v.id, new_name, original_id,
+                                )
+                                rename_failed = True
+                                break
+                            log.info(
+                                "%sshell id=%s ver id=%s: rename '%s' -> '%s' "
+                                "(collision with original app id=%s)",
+                                prefix, shell_id, v.id, v.name, new_name, original_id,
+                            )
+                            if not dry_run:
+                                v.name = new_name
+                    if rename_failed:
+                        skipped_shells += 1
+                        continue
+
+                    # 1+2. Reassign FK + fix source meta
+                    for v in pub_versions:
+                        log.info(
+                            "%sshell id=%s ver id=%s '%s': reassign application_id %s -> %s",
+                            prefix, shell_id, v.id, v.name, shell_id, original_id,
+                        )
+                        if not dry_run:
+                            v.application_id = original_id
+                            new_meta = deepcopy(v.meta or {})
+                            new_meta['source_application_id'] = original_id
+                            v.meta = new_meta
+                            flag_modified(v, 'meta')
+                        migrated_versions += 1
+
+                    # 3. Repoint embedded sub-agents (parent_published_app_id)
+                    embedded_versions = session.query(ApplicationVersion).filter(
+                        ApplicationVersion.status == PublishStatus.embedded,
+                        ApplicationVersion.meta['parent_published_app_id'].astext
+                        == str(shell_id),
+                    ).all()
+                    for ev in embedded_versions:
+                        log.info(
+                            "%sshell id=%s: embedded sub-agent ver id=%s parent_app %s -> %s",
+                            prefix, shell_id, ev.id, shell_id, original_id,
+                        )
+                        if not dry_run:
+                            new_meta = deepcopy(ev.meta or {})
+                            new_meta['parent_published_app_id'] = original_id
+                            ev.meta = new_meta
+                            flag_modified(ev, 'meta')
+
+                    # 4. Repoint Participant.entity_meta across ALL projects
+                    try:
+                        all_projects = self.context.rpc_manager.call.project_list() or []
+                    except Exception:  # pylint: disable=W0703
+                        log.exception(
+                            "%sshell id=%s: failed to list projects for participant fix",
+                            prefix, shell_id,
+                        )
+                        all_projects = []
+
+                    for proj in all_projects:
+                        pid = proj['id']
+                        try:
+                            with db.with_project_schema_session(pid) as p_session:
+                                participants = p_session.query(Participant).filter(
+                                    Participant.entity_name == ParticipantTypes.application,
+                                    Participant.entity_meta['id'].astext == str(shell_id),
+                                ).all()
+                                for p in participants:
+                                    log.info(
+                                        "%sshell id=%s: project %s participant id=%s "
+                                        "entity_meta.id %s -> %s",
+                                        prefix, shell_id, pid, p.id, shell_id, original_id,
+                                    )
+                                    if not dry_run:
+                                        new_em = deepcopy(p.entity_meta or {})
+                                        new_em['id'] = original_id
+                                        p.entity_meta = new_em
+                                        flag_modified(p, 'entity_meta')
+                                if not dry_run:
+                                    p_session.commit()
+                        except Exception:  # pylint: disable=W0703
+                            log.exception(
+                                "%sshell id=%s: error fixing participants in project %s",
+                                prefix, shell_id, pid,
+                            )
+
+                    # 5. Merge adoption counter
+                    shell_adoption = (shell.meta or {}).get('adoption') or {}
+                    if shell_adoption:
+                        orig_meta = deepcopy(original.meta or {})
+                        orig_adoption = orig_meta.get('adoption') or {
+                            'conversation_count': 0,
+                            'project_count': 0,
+                            'project_ids': [],
+                        }
+                        merged_ids = list({
+                            *(orig_adoption.get('project_ids') or []),
+                            *(shell_adoption.get('project_ids') or []),
+                        })
+                        merged = {
+                            'conversation_count': int(orig_adoption.get('conversation_count', 0))
+                            + int(shell_adoption.get('conversation_count', 0)),
+                            'project_count': len(merged_ids),
+                            'project_ids': merged_ids,
+                        }
+                        log.info(
+                            "%sshell id=%s: merge adoption %s + %s = %s into original id=%s",
+                            prefix, shell_id, orig_adoption, shell_adoption, merged, original_id,
+                        )
+                        if not dry_run:
+                            orig_meta['adoption'] = merged
+                            original.meta = orig_meta
+                            flag_modified(original, 'meta')
+
+                    # 6. Delete the shell (cascades base version row)
+                    log.info(
+                        "%sshell id=%s (%s): deleting shell application",
+                        prefix, shell_id, shell_name,
+                    )
+                    if not dry_run:
+                        session.delete(shell)
+                        session.flush()
+
+                    migrated_shells += 1
+
+                if not dry_run:
+                    session.commit()
+
+        except Exception:  # pylint: disable=W0703
+            log.exception(
+                "%smigrate_admin_shell_to_inplace: error in public project %s",
+                prefix, public_project_id,
+            )
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_admin_shell_to_inplace — "
+            "%s %s shell(s), %s version(s); skipped %s shell(s) (duration = %ss)",
+            prefix,
+            "would migrate" if dry_run else "migrated",
+            migrated_shells,
+            migrated_versions,
+            skipped_shells,
+            round(end_ts - start_ts, 2),
+        )
+        return {
+            "migrated_shells": migrated_shells,
+            "migrated_versions": migrated_versions,
+            "skipped_shells": skipped_shells,
+            "dry_run": dry_run,
+        }
+
+    @web.method()
+    def migrate_ado_project_to_toolkit(self, *args, **kwargs):
+        """Admin task: migrate 'project' from ADO configuration to toolkit settings.
+
+        Migration #3620: Move ADO project from configuration (credentials) to toolkit level.
+
+        This migration:
+        1. Finds ADO toolkits (ado_boards, ado_repos, ado_wiki, ado_plans)
+        2. For each toolkit without 'project' in settings:
+           - Looks up the referenced ADO configuration by elitea_title
+           - Copies 'project' from configuration.data to toolkit.settings
+        3. After ALL toolkits are updated, removes 'project' from ADO configurations
+
+        Transactional: if any toolkit fails to update, the entire project rolls back
+        and configurations are not modified (prevents data loss).
+
+        Idempotent: safe to run multiple times — skips toolkits that already have 'project'.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+
+        Always run with dry_run first to verify expected changes.
+        """
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import EliteATool  # pylint: disable=C0415
+
+        # Import Configuration model
+        try:
+            from plugins.configurations.models.configuration import Configuration  # pylint: disable=C0415
+        except ImportError:
+            log.error("migrate_ado_project_to_toolkit: configurations plugin not available")
+            return {"migrated": 0, "error": "configurations plugin not available"}
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_ado_project_to_toolkit: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error("migrate_ado_project_to_toolkit: project_id= is required. Format: project_id=<all|N>[;dry_run]")
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("Starting migrate_ado_project_to_toolkit (dry_run=%s, project_id_filter=%s)", dry_run, project_id_filter)
+        start_ts = time.time()
+
+        # Track migration results
+        total_results = {
+            "toolkits_migrated": 0,
+            "toolkits_skipped": 0,
+            "configurations_cleaned": 0,
+            "failed_projects": 0,
+            "errors": []
+        }
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_ado_project_to_toolkit: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+
+            try:
+                results = _run_ado_project_migration(
+                    project_id, dry_run, prefix,
+                    db, EliteATool, Configuration,
+                )
+                total_results["toolkits_migrated"] += results["toolkits_migrated"]
+                total_results["toolkits_skipped"] += results["toolkits_skipped"]
+                total_results["configurations_cleaned"] += results["configurations_cleaned"]
+                total_results["errors"].extend(results.get("errors", []))
+
+            except Exception as e:  # pylint: disable=W0703
+                log.exception(
+                    "%smigrate_ado_project_to_toolkit: error in project %s", prefix, project_id
+                )
+                total_results["failed_projects"] += 1
+                total_results["errors"].append({
+                    "project_id": project_id,
+                    "error": str(e)
+                })
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_ado_project_to_toolkit — %s %s toolkit(s), cleaned %s config(s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated",
+            total_results["toolkits_migrated"], total_results["configurations_cleaned"],
+            round(end_ts - start_ts, 2)
+        )
+
+        return {
+            "toolkits_migrated": total_results["toolkits_migrated"],
+            "toolkits_skipped": total_results["toolkits_skipped"],
+            "configurations_cleaned": total_results["configurations_cleaned"],
+            "failed_projects": total_results["failed_projects"],
+            "errors": total_results["errors"],
+            "dry_run": dry_run
+        }
+
+    @web.method()
+    def migrate_agent_version_null_instructions(self, *args, **kwargs):
+        """Admin task: fix agent versions where instructions is NULL instead of empty string.
+
+        Some agent versions have instructions=NULL which causes Pydantic validation errors
+        when the field expects a string type. This migration updates NULL to empty string ''.
+
+        Idempotent: safe to run multiple times — only updates rows where instructions IS NULL.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+        """
+        from tools import db
+        from ..models.all import ApplicationVersion
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_agent_version_null_instructions: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error("migrate_agent_version_null_instructions: project_id= is required. Format: project_id=<all|N>[;dry_run]")
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info("Starting migrate_agent_version_null_instructions (dry_run=%s, project_id_filter=%s)", dry_run, project_id_filter)
+        start_ts = time.time()
+        total_migrated = 0
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:
+            log.exception("migrate_agent_version_null_instructions: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    count = session.query(ApplicationVersion).filter(
+                        ApplicationVersion.instructions.is_(None)
+                    ).count()
+
+                    if count > 0:
+                        log.info(
+                            "%sproject %s: %d agent version(s) with instructions=NULL",
+                            prefix, project_id, count
+                        )
+                        if not dry_run:
+                            session.query(ApplicationVersion).filter(
+                                ApplicationVersion.instructions.is_(None)
+                            ).update({'instructions': ''}, synchronize_session=False)
+                            session.commit()
+                        total_migrated += count
+
+            except Exception:
+                log.exception(
+                    "%smigrate_agent_version_null_instructions: error in project %s", prefix, project_id
+                )
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_agent_version_null_instructions — %s %s version(s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated", total_migrated, round(end_ts - start_ts, 2)
+        )
+        return {"migrated": total_migrated, "dry_run": dry_run}
+
+    # pylint: disable=R,W0613
+    @web.method()
+    def migrate_llm_model(self, *args, **kwargs):
+        """Migrate stale LLM model_name references in ApplicationVersions and ParticipantMappings.
+
+        LLM section only. Idempotent — safe to re-run after interruption.
+        Dry-run is OFF by default — pass dry_run=true to preview changes without mutating.
+
+        Params (semicolon-separated):
+            from=<deprecated_model_name>  (required)
+            to=<new_model_name>           (required, must exist as shared LLM in public project)
+            project_id=<int|X-Y|all>      (optional, default: all)
+            dry_run=<true|false>           (optional, default: false)
+
+        Examples:
+            from=gpt-4;to=gpt-4o                   - live run (all projects)
+            from=gpt-4;to=gpt-4o;dry_run=true      - dry run to preview changes
+            from=claude-2;to=claude-3-5-sonnet;project_id=1-1000;dry_run=true  - dry run on projects 1-1000
+            from=o1-preview;to=gpt-4o;project_id=42  - live run on project 42 only
+        """
+        from tools import db  # pylint: disable=C0415
+
+        start_ts = time.time()
+
+        # ── 1. Parse and validate params ──────────────────────────────────
+        raw_param = kwargs.get("param", "")
+        try:
+            params = parse_migration_params(raw_param)
+        except ValueError as exc:
+            log.error("Invalid params: %s", exc)
+            return
+
+        from_model = params['from_model']
+        to_model = params['to_model']
+        dry_run = params['dry_run']
+
+        log.info(
+            "Params: from=%s  to=%s  project_id=%s  dry_run=%s",
+            from_model, to_model, params['project_id_spec'], dry_run,
+        )
+
+        # ── 2. Pre-flight: validate target model exists ───────────────────
+        try:
+            target_config = validate_target_model(to_model)
+        except ValueError as exc:
+            log.error("Pre-flight failed: %s", exc)
+            return
+
+        target_supports_reasoning = bool(target_config.get('supports_reasoning', False))
+        public_project_id = get_public_project_id()
+
+        # ── 3. Look up source model capabilities (best-effort) ────────────
+        source_supports_reasoning = lookup_source_model_capabilities(from_model)
+        if source_supports_reasoning is None:
+            log.info(
+                "Source model %s not found in available models (likely deleted). "
+                "Cross-family defaults will be applied.",
+                from_model,
+            )
+        else:
+            log.info(
+                "Source model %s: supports_reasoning=%s",
+                from_model, source_supports_reasoning,
+            )
+
+        # ── 4. Build settings factory closure ─────────────────────────────
+        settings_factory = partial(
+            build_new_llm_settings,
+            new_model_name=to_model,
+            new_model_project_id=public_project_id,
+            target_supports_reasoning=target_supports_reasoning,
+            source_supports_reasoning=source_supports_reasoning,
+        )
+
+        # ── 5. Resolve target projects ────────────────────────────────────
+        try:
+            project_ids = resolve_target_project_ids(params['project_id_spec'])
+        except ValueError as exc:
+            log.error("Project resolution failed: %s", exc)
+            return
+
+        # ── 6. Per-project migration ──────────────────────────────────────
+        total_projects = len(project_ids)
+        total_versions = 0
+        total_mappings = 0
+        projects_touched = 0
+
+        for idx, project_id in enumerate(project_ids, 1):
+            try:
+                with db.get_session(project_id) as session:
+                    v_count = migrate_application_versions(
+                        session, from_model, settings_factory, dry_run,
+                    )
+                    m_count = migrate_participant_mappings(
+                        session, from_model, settings_factory, dry_run,
+                    )
+
+                    if v_count or m_count:
+                        if not dry_run:
+                            session.commit()
+                        projects_touched += 1
+                        total_versions += v_count
+                        total_mappings += m_count
+                        log.info(
+                            "Project %s (%s/%s): %s versions, %s mappings %s",
+                            project_id, idx, total_projects,
+                            v_count, m_count,
+                            "[dry_run]" if dry_run else "[committed]",
+                        )
+            except Exception:  # pylint: disable=W0702
+                log.exception("Error processing project %s, skipping", project_id)
+
+        # ── 7. Summary ───────────────────────────────────────────────────
+        duration = time.time() - start_ts
+        log.info(
+            "Done%s. Projects scanned: %s, touched: %s. "
+            "ApplicationVersions: %s, ParticipantMappings: %s. Duration: %.1fs",
+            " [DRY RUN]" if dry_run else "",
+            total_projects, projects_touched,
+            total_versions, total_mappings,
+            duration,
+        )
+
+    # pylint: disable=R,W0613
+    @web.method()
+    def heal_llm_settings_family_conflicts(self, *args, **kwargs):
+        """Heal-all normalizer for family-misaligned llm_settings across ApplicationVersion and
+        ParticipantMapping rows (issues #5821 + #5858). Does NOT change model_name/model_project_id,
+        only aligns temperature/reasoning_effort against each row's own model's real
+        supports_reasoning. Idempotent -- safe to re-run.
+
+        Arms (all judged per-row against the resolved model's real supports_reasoning, looked up
+        per project via RPC):
+          - reasoning model + temperature + active effort  -> strip temperature (#5821)
+          - non-reasoning model + active effort            -> strip effort (impossible config)
+          - reasoning model + null effort                  -> set effort (#5858)
+
+        A bare null effort on a reasoning model is the unset/stale default and IS a defect (same
+        shape #5859 rejects at write time). An explicit reasoning_effort='none' is the deliberate
+        thinking-off escape hatch and is never touched.
+
+        Dry-run is ON by default (unlike migrate_llm_model) since this task has no from/to
+        model boundary and scans every project. Pass dry_run=false to apply changes.
+
+        Params (semicolon-separated):
+            project_id=<int|X-Y|all>      (optional, default: all)
+            dry_run=<true|false>           (optional, default: true)
+
+        Examples:
+            (no params)                          - dry run across all projects
+            dry_run=false                        - live run across all projects
+            project_id=42;dry_run=false           - live run on project 42 only
+            project_id=1-1000;dry_run=true        - dry run on projects 1-1000
+        """
+        from tools import db  # pylint: disable=C0415
+
+        start_ts = time.time()
+
+        raw_param = kwargs.get("param", "")
+        try:
+            params = parse_heal_params(raw_param)
+        except ValueError as exc:
+            log.error("Invalid params: %s", exc)
+            return
+
+        dry_run = params['dry_run']
+        log.info("Params: project_id=%s  dry_run=%s", params['project_id_spec'], dry_run)
+
+        try:
+            project_ids = resolve_target_project_ids(params['project_id_spec'])
+        except ValueError as exc:
+            log.error("Project resolution failed: %s", exc)
+            return
+
+        total_projects = len(project_ids)
+        total_versions = 0
+        total_mappings = 0
+        projects_touched = 0
+
+        for idx, project_id in enumerate(project_ids, 1):
+            try:
+                with db.get_session(project_id) as session:
+                    v_count = heal_family_conflict_versions(session, project_id, dry_run)
+                    m_count = heal_family_conflict_mappings(session, project_id, dry_run)
+
+                    if v_count or m_count:
+                        if not dry_run:
+                            session.commit()
+                        projects_touched += 1
+                        total_versions += v_count
+                        total_mappings += m_count
+                        log.info(
+                            "Project %s (%s/%s): %s versions, %s mappings %s",
+                            project_id, idx, total_projects,
+                            v_count, m_count,
+                            "[dry_run]" if dry_run else "[committed]",
+                        )
+            except Exception:  # pylint: disable=W0702
+                log.exception("Error processing project %s, skipping", project_id)
+
+        duration = time.time() - start_ts
+        log.info(
+            "Done%s. Projects scanned: %s, touched: %s. "
+            "ApplicationVersions: %s, ParticipantMappings: %s. Duration: %.1fs",
+            " [DRY RUN]" if dry_run else "",
+            total_projects, projects_touched,
+            total_versions, total_mappings,
+            duration,
+        )
+
+    # pylint: disable=R,W0613
+    @web.method()
+    def migrate_embedding_model(self, *args, **kwargs):
+        """Migrate stale embedding model references in toolkit settings.
+
+        Embedding section only. Embedding model names are stored as plain
+        strings in EliteATool.settings under the ``embedding_model`` and
+        ``toolkit_configuration_embedding_model`` fields; this task swaps a
+        deprecated name for a new one. Idempotent -- safe to re-run.
+
+        NOTE: changing the embedding model may require RE-INDEXING affected
+        datasources, as vectors produced by different models are not
+        interchangeable. Re-indexing is NOT performed by this task.
+
+        Dry-run is OFF by default -- pass dry_run=true to preview changes.
+
+        Params (semicolon-separated):
+            from=<deprecated_model_name>  (required)
+            to=<new_model_name>           (required, must exist as shared embedding in public project)
+            project_id=<int|X-Y|all>      (optional, default: all)
+            dry_run=<true|false>           (optional, default: false)
+
+        Examples:
+            from=text-embedding-ada-002;to=text-embedding-3-small                  - live run (all projects)
+            from=text-embedding-ada-002;to=text-embedding-3-small;dry_run=true     - dry run to preview changes
+            from=text-embedding-ada-002;to=text-embedding-3-small;project_id=42     - live run on project 42 only
+        """
+        from tools import db  # pylint: disable=C0415
+
+        start_ts = time.time()
+
+        # ── 1. Parse and validate params ──────────────────────────────────
+        raw_param = kwargs.get("param", "")
+        try:
+            params = parse_migration_params(raw_param)
+        except ValueError as exc:
+            log.error("Invalid params: %s", exc)
+            return
+
+        from_model = params['from_model']
+        to_model = params['to_model']
+        dry_run = params['dry_run']
+
+        log.info(
+            "Params: from=%s  to=%s  project_id=%s  dry_run=%s",
+            from_model, to_model, params['project_id_spec'], dry_run,
+        )
+
+        # ── 2. Pre-flight: validate target model exists ───────────────────
+        try:
+            validate_target_embedding_model(to_model)
+        except ValueError as exc:
+            log.error("Pre-flight failed: %s", exc)
+            return
+
+        # ── 3. Resolve target projects ────────────────────────────────────
+        try:
+            project_ids = resolve_target_project_ids(params['project_id_spec'])
+        except ValueError as exc:
+            log.error("Project resolution failed: %s", exc)
+            return
+
+        # ── 4. Per-project migration ──────────────────────────────────────
+        total_projects = len(project_ids)
+        total_toolkits = 0
+        projects_touched = 0
+
+        for idx, project_id in enumerate(project_ids, 1):
+            try:
+                with db.get_session(project_id) as session:
+                    t_count = migrate_toolkit_embedding_models(
+                        session, from_model, to_model, dry_run,
+                    )
+
+                    if t_count:
+                        if not dry_run:
+                            session.commit()
+                        projects_touched += 1
+                        total_toolkits += t_count
+                        log.info(
+                            "Project %s (%s/%s): %s toolkits %s",
+                            project_id, idx, total_projects, t_count,
+                            "[dry_run]" if dry_run else "[committed]",
+                        )
+            except Exception:  # pylint: disable=W0702
+                log.exception("Error processing project %s, skipping", project_id)
+
+        # ── 5. Summary ────────────────────────────────────────────────────
+        duration = time.time() - start_ts
+        log.info(
+            "Done%s. Projects scanned: %s, touched: %s. Toolkits: %s. Duration: %.1fs",
+            " [DRY RUN]" if dry_run else "",
+            total_projects, projects_touched, total_toolkits, duration,
+        )
+
+    @web.method("collections_removal_migration")
+    def collections_removal_migration(self, *args, **kwargs):
+        """Drop prompt_collections table and applications.collections column for all or specific projects.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all"          - migrate all projects
+            "project_id=all;dry_run"  - dry run across all projects (no DB writes)
+            "project_id=34"           - migrate project 34 only
+            "project_id=34;dry_run"   - dry run for project 34
+
+        Always run with dry_run first to verify expected changes.
+        """
+        from plugins.admin.tasks.logs import make_logger
+        from sqlalchemy import text
+        from tools import db, serialize
+
+        with make_logger() as log:
+            param = kwargs.get("param", "") or ""
+            dry_run = False
+            project_id_filter = None
+
+            for seg in [s.strip() for s in param.split(";")]:
+                seg_lower = seg.lower()
+                if seg_lower.startswith("project_id="):
+                    value = seg[len("project_id="):].strip()
+                    if value.lower() != "all":
+                        try:
+                            project_id_filter = int(value)
+                        except ValueError:
+                            log.warning(
+                                "collections_removal_migration: invalid project_id '%s', scanning all",
+                                value,
+                            )
+                elif seg_lower == "dry_run":
+                    dry_run = True
+
+            mode = "DRY RUN" if dry_run else "LIVE"
+            log.info(
+                "[collections_removal_migration] [%s] Starting. project_id=%s",
+                mode, project_id_filter if project_id_filter is not None else "all",
+            )
+
+            try:
+                if project_id_filter is not None:
+                    projects = [{"id": project_id_filter}]
+                else:
+                    projects = self.context.rpc_manager.timeout(120).project_list() or []
+            except Exception:  # pylint: disable=W0703
+                log.exception("collections_removal_migration: failed to list projects")
+                return serialize({"error": "failed to list projects"})
+
+            results = []
+            errors = []
+
+            for project in projects:
+                pid = project["id"]
+                try:
+                    with db.get_session(pid) as session:
+                        has_collections_table = session.execute(text(
+                            "SELECT EXISTS ("
+                            "  SELECT 1 FROM information_schema.tables"
+                            f"  WHERE table_schema = 'p_{pid}'"
+                            "  AND table_name = 'prompt_collections'"
+                            ")"
+                        )).scalar()
+
+                        has_collections_column = session.execute(text(
+                            "SELECT EXISTS ("
+                            "  SELECT 1 FROM information_schema.columns"
+                            f"  WHERE table_schema = 'p_{pid}'"
+                            "  AND table_name = 'applications'"
+                            "  AND column_name = 'collections'"
+                            ")"
+                        )).scalar()
+
+                        entry = {
+                            "project_id": pid,
+                            "prompt_collections_table_exists": has_collections_table,
+                            "applications_collections_column_exists": has_collections_column,
+                        }
+
+                        if not dry_run:
+                            if has_collections_table:
+                                session.execute(text(
+                                    f"DROP TABLE p_{pid}.prompt_collections"
+                                ))
+                            if has_collections_column:
+                                session.execute(text(
+                                    f"ALTER TABLE p_{pid}.applications DROP COLUMN collections"
+                                ))
+                            session.commit()
+                            entry["status"] = "migrated"
+                        else:
+                            entry["status"] = "dry_run"
+
+                    log.info("[collections_removal_migration] [%s] project_id=%s: %s", mode, pid, entry)
+                    results.append(entry)
+
+                except Exception as e:
+                    log.error("[collections_removal_migration] [%s] project_id=%s failed: %s", mode, pid, e)
+                    errors.append({"project_id": pid, "error": str(e)})
+
+            log.info(
+                "[collections_removal_migration] [%s] Finished: results=%s, errors=%s",
+                mode, results, errors,
+            )
+
+            return serialize({
+                "dry_run": dry_run,
+                "results": results,
+                "errors": errors,
+            })
+
+    @web.method("datasource_removal_migration")
+    def datasource_removal_migration(self, *args, **kwargs):
+        """Delete datasource participants and datasource-type tools for all or specific projects.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all"          - migrate all projects
+            "project_id=all;dry_run"  - dry run across all projects (no DB writes)
+            "project_id=34"           - migrate project 34 only
+            "project_id=34;dry_run"   - dry run for project 34
+
+        Always run with dry_run first to verify expected changes.
+        """
+        from plugins.admin.tasks.logs import make_logger
+        from sqlalchemy import text
+        from tools import db, serialize
+
+        with make_logger() as log:
+            param = kwargs.get("param", "") or ""
+            dry_run = False
+            project_id_filter = None
+
+            for seg in [s.strip() for s in param.split(";")]:
+                seg_lower = seg.lower()
+                if seg_lower.startswith("project_id="):
+                    value = seg[len("project_id="):].strip()
+                    if value.lower() != "all":
+                        try:
+                            project_id_filter = int(value)
+                        except ValueError:
+                            log.warning(
+                                "datasource_removal_migration: invalid project_id '%s', scanning all",
+                                value,
+                            )
+                elif seg_lower == "dry_run":
+                    dry_run = True
+
+            mode = "DRY RUN" if dry_run else "LIVE"
+            log.info(
+                "[datasource_removal_migration] [%s] Starting. project_id=%s",
+                mode, project_id_filter if project_id_filter is not None else "all",
+            )
+
+            try:
+                if project_id_filter is not None:
+                    projects = [{"id": project_id_filter}]
+                else:
+                    projects = self.context.rpc_manager.timeout(120).project_list() or []
+            except Exception:  # pylint: disable=W0703
+                log.exception("datasource_removal_migration: failed to list projects")
+                return serialize({"error": "failed to list projects"})
+
+            results = []
+            errors = []
+
+            for project in projects:
+                pid = project["id"]
+                try:
+                    with db.get_session(pid) as session:
+                        participants_count = session.execute(text(
+                            f"SELECT COUNT(*) FROM p_{pid}.chat_participants"
+                            " WHERE entity_name = 'datasource'"
+                        )).scalar()
+
+                        tools_count = session.execute(text(
+                            f"SELECT COUNT(*) FROM p_{pid}.elitea_tools"
+                            " WHERE type = 'datasource'"
+                        )).scalar()
+
+                        entry = {
+                            "project_id": pid,
+                            "participants_to_delete": participants_count,
+                            "tools_to_delete": tools_count,
+                        }
+
+                        if not dry_run:
+                            if participants_count:
+                                session.execute(text(
+                                    f"DELETE FROM p_{pid}.chat_participants"
+                                    " WHERE entity_name = 'datasource'"
+                                ))
+                            if tools_count:
+                                session.execute(text(
+                                    f"DELETE FROM p_{pid}.elitea_tools"
+                                    " WHERE type = 'datasource'"
+                                ))
+                            session.commit()
+                            entry["status"] = "migrated"
+                        else:
+                            entry["status"] = "dry_run"
+
+                    log.info("[datasource_removal_migration] [%s] project_id=%s: %s", mode, pid, entry)
+                    results.append(entry)
+
+                except Exception as e:
+                    log.error("[datasource_removal_migration] [%s] project_id=%s failed: %s", mode, pid, e)
+                    errors.append({"project_id": pid, "error": str(e)})
+
+            log.info(
+                "[datasource_removal_migration] [%s] Finished: results=%s, errors=%s",
+                mode, results, errors,
+            )
+
+            return serialize({
+                "dry_run": dry_run,
+                "results": results,
+                "errors": errors,
+            })
 
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
@@ -1086,3 +2630,142 @@ def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
             "messages_before": len(groups),
             "messages_after": len(groups) - len(remove_ids),
         }
+
+
+def _run_ado_project_migration(  # pylint: disable=R0913,R0914
+    project_id, dry_run, prefix,
+    db, EliteATool, Configuration,
+):
+    """Core logic for migrate_ado_project_to_toolkit, separated for readability.
+
+    Migration #3620: Move 'project' from ADO configuration to toolkit level.
+
+    This migration:
+    1. Finds ADO toolkits (ado_boards, ado_repos, ado_wiki, ado_plans, etc.)
+    2. For each toolkit without 'project' in settings:
+       - Looks up the referenced ADO configuration by elitea_title
+       - Copies 'project' from configuration.data to toolkit.settings
+    3. After ALL toolkits are updated, removes 'project' from ADO configurations
+
+    The migration is transactional per-project: if any toolkit fails to update,
+    the entire project is rolled back and configurations are not modified.
+    """
+    from copy import deepcopy  # pylint: disable=C0415
+    from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+
+    # ADO toolkit types that need project at toolkit level
+    ADO_TOOLKIT_TYPES = (
+        'ado_boards', 'ado_repos', 'ado_wiki', 'ado_plans',
+        'azure_devops_plans', 'azure_devops_wiki'
+    )
+
+    results = {
+        "toolkits_migrated": 0,
+        "toolkits_skipped": 0,
+        "configurations_cleaned": 0,
+        "errors": []
+    }
+
+    with db.with_project_schema_session(project_id) as session:
+        # Step 1: Find all ADO toolkits
+        toolkits = session.query(EliteATool).filter(
+            EliteATool.type.in_(ADO_TOOLKIT_TYPES)
+        ).all()
+
+        if not toolkits:
+            return results
+
+        # Track which configurations need cleanup (only after all toolkits succeed)
+        configs_to_clean = set()
+
+        # Step 2: Copy project from configuration to toolkit
+        for toolkit in toolkits:
+            settings = toolkit.settings or {}
+
+            # Skip if toolkit already has project
+            if settings.get('project'):
+                results["toolkits_skipped"] += 1
+                continue
+
+            # Get ADO configuration reference
+            ado_config_ref = settings.get('ado_configuration')
+            if not ado_config_ref:
+                log.warning(
+                    "%sproject %s, toolkit id=%s (%s): no ado_configuration reference, skipping",
+                    prefix, project_id, toolkit.id, toolkit.type
+                )
+                results["toolkits_skipped"] += 1
+                continue
+
+            elitea_title = ado_config_ref.get('elitea_title')
+            if not elitea_title:
+                log.warning(
+                    "%sproject %s, toolkit id=%s (%s): no elitea_title in ado_configuration, skipping",
+                    prefix, project_id, toolkit.id, toolkit.type
+                )
+                results["toolkits_skipped"] += 1
+                continue
+
+            # Find the configuration
+            configuration = session.query(Configuration).filter(
+                Configuration.elitea_title == elitea_title
+            ).first()
+
+            if not configuration:
+                log.warning(
+                    "%sproject %s, toolkit id=%s (%s): configuration '%s' not found, skipping",
+                    prefix, project_id, toolkit.id, toolkit.type, elitea_title
+                )
+                results["toolkits_skipped"] += 1
+                continue
+
+            config_data = configuration.data or {}
+            project_value = config_data.get('project')
+
+            if not project_value:
+                log.warning(
+                    "%sproject %s, toolkit id=%s (%s): configuration '%s' has no 'project' field, skipping",
+                    prefix, project_id, toolkit.id, toolkit.type, elitea_title
+                )
+                results["toolkits_skipped"] += 1
+                continue
+
+            log.info(
+                "%sproject %s, toolkit id=%s (%s): copying project='%s' from config '%s'",
+                prefix, project_id, toolkit.id, toolkit.type, project_value, elitea_title
+            )
+
+            if not dry_run:
+                new_settings = deepcopy(settings)
+                new_settings['project'] = project_value
+                toolkit.settings = new_settings
+                flag_modified(toolkit, 'settings')
+
+            results["toolkits_migrated"] += 1
+            configs_to_clean.add(configuration.id)
+
+        # Step 3: Remove 'project' from ADO configurations (only if all toolkits succeeded)
+        if configs_to_clean:
+            for config_id in configs_to_clean:
+                configuration = session.query(Configuration).filter(
+                    Configuration.id == config_id
+                ).first()
+
+                if configuration and configuration.data and 'project' in configuration.data:
+                    log.info(
+                        "%sproject %s, config id=%s ('%s'): removing 'project' field",
+                        prefix, project_id, configuration.id, configuration.elitea_title
+                    )
+
+                    if not dry_run:
+                        new_data = deepcopy(configuration.data)
+                        del new_data['project']
+                        configuration.data = new_data
+                        flag_modified(configuration, 'data')
+
+                    results["configurations_cleaned"] += 1
+
+        if not dry_run:
+            session.commit()
+
+    return results

@@ -16,6 +16,10 @@ class PublishValidateRequest(BaseModel):
         description="Version name to validate",
         pattern=VERSION_NAME_PATTERN,
     )
+    category: str | None = Field(
+        None,
+        description="Selected agent category (defaults to 'Other' when omitted)",
+    )
 
 
 class PublishRequest(BaseModel):
@@ -28,6 +32,10 @@ class PublishRequest(BaseModel):
     validation_token: str | None = Field(
         None,
         description="Token from a prior /publish_validate call (skips inline validation)",
+    )
+    category: str | None = Field(
+        None,
+        description="Selected agent category (defaults to 'Other' when omitted)",
     )
 
 

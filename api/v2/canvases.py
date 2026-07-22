@@ -6,7 +6,7 @@ import re
 
 from pylon.core.tools import log
 from sqlalchemy.orm import joinedload
-from tools import api_tools, auth, db, config as c, serialize
+from tools import api_tools, auth, db, config as c, serialize, register_openapi
 
 from ...models.message_items.canvas import CanvasMessageItem, CanvasVersionItem
 from ...models.message_items.text import TextMessageItem
@@ -20,6 +20,18 @@ markdown_pattern = re.compile(r"```(\w+)?\n(.*?)```\s*$", re.DOTALL)
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="List Canvases",
+        description="Get list of canvas items with pagination and sorting.",
+        parameters=[
+            {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 10}},
+            {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer", "default": 0}},
+            {"name": "sort_by", "in": "query", "required": False, "schema": {"type": "string", "default": "created_at"}},
+            {"name": "sort_order", "in": "query", "required": False, "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"}},
+        ],
+        tags=["elitea_core/chat"],
+        available_to_users=True,
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.chat.canvas.list"],
@@ -54,6 +66,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 'rows': rows
             }, 200
 
+    @register_openapi(
+        name="Create Canvas",
+        description="Create a new canvas from a message item.",
+        request_body=CanvasItemCreatePayload,
+        tags=["elitea_core/chat"],
+        available_to_users=True,
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.chat.canvas.create"],

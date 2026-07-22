@@ -16,7 +16,32 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="List Toolkits",
         description="Get project toolkits with tools, supporting filtering and pagination.",
-        mcp_tool=True
+        tags=["elitea_core/toolkits"],
+        mcp_tool=True,
+        parameters=[
+            {"name": "query", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Free-text search query to filter toolkits by name."},
+            {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 10},
+             "description": "Maximum number of results to return."},
+            {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer", "default": 0},
+             "description": "Pagination offset."},
+            {"name": "sort_by", "in": "query", "required": False, "schema": {"type": "string", "default": "created_at"},
+             "description": "Field to sort by."},
+            {"name": "sort_order", "in": "query", "required": False, "schema": {"type": "string", "default": "desc"},
+             "description": "Sort order (asc or desc)."},
+            {"name": "toolkit_type", "in": "query", "required": False,
+             "schema": {"type": "array", "items": {"type": "string"}},
+             "description": "Filter by one or more toolkit types. Repeat for multiple values."},
+            {"name": "mcp", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
+             "description": "Filter to MCP-enabled toolkits only."},
+            {"name": "application", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
+             "description": "Filter to application-type toolkits only."},
+            {"name": "author_id", "in": "query", "required": False, "schema": {"type": "integer"},
+             "description": "Filter by author user ID."},
+            {"name": "search_artifact", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Filter toolkits that reference a specific artifact."},
+        ],
+        available_to_users=True,
     )
     @auth.decorators.check_api(
         {
@@ -62,6 +87,21 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "error": "Failed to list toolkits"
             }, 400
 
+    @register_openapi(
+        name="Create Toolkit",
+        description="Create a new toolkit in the project.",
+        mcp_description="""
+        USE to create a new toolkit instance in the project for attaching to agent versions.
+
+        DO NOT USE when:
+        - You need to list existing toolkits → use get_elitea_core_tools
+        - You need to link a toolkit to an agent → use patch_elitea_core_tool after creating
+
+        REQUIRED body fields: type, name. Pass settings as required by the toolkit type schema.""",
+        tags=["elitea_core/toolkits"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.applications.tools.create"],

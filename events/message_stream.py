@@ -11,6 +11,10 @@ from ..models.pd.message import MessageGroupDetail
 
 from ..utils.sio_utils import get_chat_room
 from ..utils.message_stream import update_message_group_meta, safe_decode_bytes_in_dict
+from ..utils.parallel_hitl import (
+    is_current_execution, merge_interrupts, requires_plural_persistence,
+    retire_all_interrupts,
+)
 from ..utils.attachments import (
     process_single_attachment_file,
     is_multimodal_content,
@@ -30,8 +34,14 @@ class Event:
         with db.get_session(payload['response_metadata']['chat_project_id']) as session:
             msg_group: ConversationMessageGroup = session.query(ConversationMessageGroup).filter(
                 ConversationMessageGroup.uuid == payload['message_id']
-            ).first()
+            ).with_for_update(of=ConversationMessageGroup).first()
             if msg_group:
+                if not is_current_execution(msg_group.meta, payload):
+                    log.info(
+                        'chat_message_stream_end: ignoring superseded execution '
+                        'for message %s', payload['message_id'],
+                    )
+                    return
                 content = safe_decode_bytes_in_dict(payload['content'])
 
                 # Try to parse string content as JSON (may be stringified list from SDK)
@@ -127,6 +137,17 @@ class Event:
                 msg_group = update_message_group_meta(msg_group, payload, session=session)
                 # Set is_streaming to False after refresh to ensure it's persisted
                 msg_group.is_streaming = False
+                # Clear any HITL interrupt persisted at pause time (#4823). stream_end is
+                # the terminal path — it fires ONLY when the run has fully completed (a HITL
+                # pause skips it entirely, see chat_message_stream_pause), so reaching here
+                # means every interrupt is resolved and the resume buttons must not
+                # reconstruct on reload. This is the implicit-DELETE half of the persist->
+                # clear lifecycle; it rides this UPDATE, so no extra write. NOT done in
+                # update_message_group_meta (which also runs on partial_save): a sibling's
+                # partial save during a parallel run would otherwise wipe a still-pending
+                # child's card. A re-pause re-persists via chat_message_stream_pause.
+                if msg_group.meta:
+                    msg_group.meta = retire_all_interrupts(msg_group.meta)
                 flag_modified(msg_group, 'is_streaming')
                 flag_modified(msg_group, 'meta')
                 session.add(msg_group)
@@ -143,6 +164,15 @@ class Event:
 
                 room = get_chat_room(msg_group.conversation.uuid)
                 response_payload = serialize(MessageGroupDetail.model_validate(msg_group))
+                if msg_group.reply_to_id:
+                    reply_to = session.query(ConversationMessageGroup).filter(
+                        ConversationMessageGroup.id == msg_group.reply_to_id
+                    ).first()
+                    if reply_to:
+                        response_payload['reply_to_uuid'] = str(reply_to.uuid)
+                        non_context_items = [i for i in reply_to.message_items if getattr(i, 'item_type', None) != 'context_message']
+                        if non_context_items:
+                            response_payload['reply_to_first_message_item_uuid'] = str(non_context_items[0].uuid)
                 if msg_group.conversation and msg_group.conversation.meta:
                     context_analytics = msg_group.conversation.meta.get('context_analytics')
                     if context_analytics:
@@ -172,9 +202,17 @@ class Event:
         with db.get_session(payload['response_metadata']['chat_project_id']) as session:
             msg_group: ConversationMessageGroup = session.query(ConversationMessageGroup).filter(
                 ConversationMessageGroup.uuid == payload['message_id']
-            ).first()
+            ).with_for_update(of=ConversationMessageGroup).first()
             if msg_group:
-                msg_group = update_message_group_meta(msg_group, payload)
+                if not is_current_execution(msg_group.meta, payload):
+                    log.info(
+                        'chat_message_stream_partial_save: ignoring superseded '
+                        'execution for message %s', payload['message_id'],
+                    )
+                    return
+                # session is required so table-mode trace-step writes (TS-2) land;
+                # partial saves are where fan-out children stream their steps.
+                msg_group = update_message_group_meta(msg_group, payload, session=session)
                 flag_modified(msg_group, 'meta')
                 session.add(msg_group)
                 session.commit()
@@ -317,19 +355,28 @@ class Event:
     @web.event('chat_message_stream_pause')
     def chat_message_stream_pause(self, context, event, payload):
         """
-        Handle pausing the message stream when MCP authorization is required.
+        Handle pausing the message stream when MCP authorization is required OR a HITL
+        interrupt is raised.
+
         Sets is_streaming = False so UI shows the message is paused waiting for user action.
+
+        For a HITL pause (#4823) the interrupt is otherwise live-only — the indexer skips
+        the full_message/agent_response events on a pause, so chat_message_stream_end never
+        fires and the Approve/Edit/Reject state is never written to the DB. Here we persist
+        the interrupt into the message-group meta so it can be reconstructed on reload /
+        navigate-away. The persisted keys are cleared again when the resumed run completes
+        (see update_message_group_meta), so a resolved message shows no stale buttons.
         """
         log.debug(f'chat_message_stream_pause {event=}')
-        
+
         # Get project_id from response_metadata (set by indexer)
         response_metadata = payload.get('response_metadata', {})
         chat_project_id = response_metadata.get('chat_project_id')
-        
+
         if not chat_project_id:
             log.warning('chat_message_stream_pause: No chat_project_id in payload')
             return
-            
+
         message_id = payload.get('message_id')
         if not message_id:
             log.warning('chat_message_stream_pause: No message_id in payload')
@@ -338,9 +385,67 @@ class Event:
         with db.get_session(chat_project_id) as session:
             msg_group: ConversationMessageGroup = session.query(ConversationMessageGroup).filter(
                 ConversationMessageGroup.uuid == message_id
-            ).first()
+            ).with_for_update(of=ConversationMessageGroup).first()
             if msg_group:
-                msg_group.is_streaming = False
+                if not is_current_execution(msg_group.meta, payload):
+                    log.info(
+                        'chat_message_stream_pause: ignoring superseded execution '
+                        'for message %s', message_id,
+                    )
+                    return
+                # Stop owns the terminal state. A pause callback that was already
+                # queued when Stop ran must not resurrect its persisted cards.
+                is_stopped = getattr(self, 'is_chat_run_stopped', None)
+                if is_stopped and is_stopped(message_id):
+                    log.info(
+                        'chat_message_stream_pause: ignoring late pause for stopped message %s',
+                        message_id,
+                    )
+                    return
+                # Persist HITL interrupt state so the resume buttons survive reload (#4823).
+                # Present only on a HITL pause; the MCP-auth pause carries no interrupt and
+                # is unaffected.
+                hitl_interrupt = response_metadata.get('hitl_interrupt')
+                hitl_interrupts = response_metadata.get('hitl_interrupts')
+                if hitl_interrupt or hitl_interrupts:
+                    if msg_group.meta is None:
+                        msg_group.meta = {}
+                    merged = merge_interrupts(msg_group.meta, response_metadata)
+                    if not merged:
+                        log.info(
+                            'chat_message_stream_pause: ignoring late pause for '
+                            'resolved interrupts on message %s',
+                            message_id,
+                        )
+                        return
+                    msg_group.meta['hitl_interrupt'] = merged[0]
+                    if requires_plural_persistence(merged, response_metadata):
+                        msg_group.meta['hitl_interrupts'] = merged
+                    else:
+                        # Root/single Track-1 pauses must retain the legacy scalar reload shape;
+                        # sending a one-item hitl_decisions list trips scalar resume guardrails.
+                        msg_group.meta.pop('hitl_interrupts', None)
+                    # thread_id powers the single-pause resume. Don't clobber an existing one.
+                    thread_id = response_metadata.get('thread_id')
+                    if thread_id and not msg_group.meta.get('thread_id'):
+                        msg_group.meta['thread_id'] = thread_id
+                    flag_modified(msg_group, 'meta')
+
+                    # A parked child pause does not terminate the logical parent run: siblings may
+                    # still be executing and reconcile is still pending. Keep the parent streaming
+                    # while its routed child interrupts are open. Root/single pauses keep legacy
+                    # is_streaming=False behavior.
+                    msg_group.is_streaming = any(
+                        item.get('child_thread_id') for item in merged
+                    )
+                else:
+                    # MCP-auth pauses have no HITL interrupt object, but the durable-child
+                    # overlay still identifies an open parent epoch.
+                    msg_group.is_streaming = bool(
+                        (response_metadata.get('metadata') or {}).get('child_thread_id')
+                    )
+
                 session.add(msg_group)
                 session.commit()
-                log.debug(f'chat_message_stream_pause: Set is_streaming=False for message {message_id}')
+                log.debug(f'chat_message_stream_pause: Set is_streaming={msg_group.is_streaming} for message {message_id}'
+                          f'{" (HITL interrupt persisted)" if hitl_interrupt or hitl_interrupts else ""}')

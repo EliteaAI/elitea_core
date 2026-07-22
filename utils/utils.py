@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import re
 from functools import wraps
 from typing import Callable, List, Set, Generator, Optional
 
@@ -12,6 +13,16 @@ from .exceptions import VerifySignatureError
 
 from ..models.all import Tag
 from ..models.enums.all import PublishStatus
+
+try:
+    import gevent  # pylint: disable=C0413
+except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
+    gevent = None
+
+
+def make_yield_to_hub(web_runtime: str) -> Callable[[], None]:
+    """Cooperative yield only when gevent is the actual web runtime; no-op under flask/waitress/hypercorn."""
+    return (lambda: gevent.sleep(0)) if (gevent is not None and web_runtime == "gevent") else (lambda: None)
 
 
 # Redis cache for public project ID (ai_project_id)
@@ -227,3 +238,14 @@ def mask_secret(secret: str, visible_chars: int = 4) -> str:
     if len(secret) >= visible_chars:
         return '*' * (len(secret) - visible_chars) + secret[-visible_chars:]
     return '*' * len(secret)
+
+def extract_json_from_text(text: str) -> str:
+    """Extract a JSON object from text, stripping markdown fences if present."""
+    match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if match:
+        return match.group(1)
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start != -1 and end > start:
+        return text[start:end]
+    return text

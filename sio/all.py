@@ -63,9 +63,11 @@ class SIO:
             return  # FIXME: return valid error or raise SioValidationError
         #
         with db.get_session(parsed.project_id) as session:
-            conversation = session.query(
-                Conversation
-            ).filter(Conversation.id == parsed.conversation_id).first()
+            conv_id = parsed.conversation_id
+            if isinstance(conv_id, int):
+                conversation = session.query(Conversation).filter(Conversation.id == conv_id).first()
+            else:
+                conversation = session.query(Conversation).filter(Conversation.uuid == str(conv_id)).first()
             if conversation:
                 room = get_chat_room(conversation.uuid)
                 self.context.sio.enter_room(sid, room)

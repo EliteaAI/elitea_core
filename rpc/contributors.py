@@ -4,7 +4,7 @@ from sqlalchemy import func
 from pylon.core.tools import web, log
 from tools import db
 
-from ..models.all import ApplicationVersion, Collection
+from ..models.all import ApplicationVersion
 from ..models.elitea_tools import EliteATool
 
 
@@ -18,7 +18,7 @@ class RPC:
 
         Args:
             project_id: The project ID to query
-            entity_type: Type of entity to count ('application', 'toolkit', 'collection')
+            entity_type: Type of entity to count ('application', 'toolkit')
             limit: Maximum number of user IDs to return (default 5)
 
         Returns:
@@ -45,17 +45,6 @@ class RPC:
                     )
                     .group_by(EliteATool.author_id)
                     .order_by(func.count(EliteATool.id).desc())
-                    .limit(limit)
-                )
-            elif entity_type == 'collection':
-                # Count collections per author
-                query = (
-                    session.query(
-                        Collection.author_id,
-                        func.count(Collection.id).label('count')
-                    )
-                    .group_by(Collection.author_id)
-                    .order_by(func.count(Collection.id).desc())
                     .limit(limit)
                 )
             else:

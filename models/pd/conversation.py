@@ -1,8 +1,9 @@
+import re
 from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, constr, ConfigDict, computed_field
+from pydantic import BaseModel, Field, constr, ConfigDict, model_validator
 
 from .message import MessageGroupDetail
 from .participant import ParticipantBase, ParticipantCreate
@@ -12,6 +13,7 @@ from ...utils.chat_constants import CONVERSATION_NAME_MAX_LENGTH
 class ConversationBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: Optional[int] = None
+    uuid: Optional[str | UUID] = None
     name: str
     is_private: bool
     author_id: int
@@ -33,12 +35,17 @@ class ConversationListExtended(ConversationList):
     users_count: int
     duration: float = 0.0
 
+    @model_validator(mode='after')
+    def strip_support_user_prefix(self):
+        if self.source == 'support':
+            self.name = re.sub(r'^User ID \d+ - ', '', self.name)
+        return self
+
 
 class ConversationDetailsOrm(ConversationBase):
     model_config = ConfigDict(from_attributes=True)
 
     participants: List[ParticipantBase]
-    uuid: Optional[str | UUID] = None
 
 
 class ConversationDetails(ConversationDetailsOrm):

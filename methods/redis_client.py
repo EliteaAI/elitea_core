@@ -28,7 +28,21 @@ class Method:  # pylint: disable=R0903
 
     @web.method()
     def get_redis_client(self):
-        """ Create redis client """
+        """ Return a cached redis client (built once, reused thereafter).
+
+        A `redis.Redis(**config)` instantiation creates a NEW ConnectionPool and
+        does a blocking socket/TLS connect on first use. This method is hit on
+        the gevent hub (parallel-dispatch coordination calls it per Redis op —
+        ~2N+1 times per fan-out), so building a fresh client each call churned
+        connections on the hub and fed greenlet starvation. redis-py clients and
+        their pools are greenlet/thread-safe and meant to be long-lived, so we
+        cache one on the module instance. A build-race under gevent at worst
+        constructs two clients (the last attribute write wins) — harmless.
+        """
+        client = getattr(self, "_redis_client", None)  # pylint: disable=E1101
+        if client is not None:
+            return client
+        #
         redis_config = self.descriptor.config.get("redis_config", None)  # pylint: disable=E1101
         #
         if not redis_config:
@@ -56,4 +70,6 @@ class Method:  # pylint: disable=R0903
             #
             redis_config["credential_provider"] = credential_provider
         #
-        return redis.Redis(**redis_config)
+        client = redis.Redis(**redis_config)
+        self._redis_client = client  # pylint: disable=W0201
+        return client

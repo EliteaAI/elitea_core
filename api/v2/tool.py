@@ -9,7 +9,7 @@ from pylon.core.tools import log
 from ...models.all import ApplicationVersion
 from ...models.enums.events import ApplicationEvents
 from ...models.elitea_tools import EliteATool, EntityToolMapping
-from ...models.pd.tool import ToolDetails, ToolAPIUpdateModel
+from ...models.pd.tool import ToolDetails, ToolAPIUpdateModel, ToolUpdateRelationModel
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...models.enums.all import ToolEntityTypes
@@ -105,7 +105,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Link Agent to Toolkit",
         description="Link an agent (application) to a toolkit.",
-        mcp_tool=True
+        request_body=ToolUpdateRelationModel,
+        tags=["elitea_core/toolkits"],
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.patch"],
@@ -137,6 +140,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return result, 201
 
+    @register_openapi(
+        name="Update Toolkit",
+        description="Update an existing toolkit's configuration.",
+        mcp_description="""
+        USE to modify an existing toolkit instance — update its name, settings, or configuration references.
+
+        DO NOT USE when:
+        - Linking/unlinking a toolkit to an agent version → use patch (Link Agent to Toolkit)
+        - Creating a new toolkit → use post (Create Toolkit)
+
+        REQUIRED path params: project_id, tool_id (numeric toolkit ID).
+        Pass only the fields you want to change.""",
+        tags=["elitea_core/toolkits"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.applications.tool.update"],

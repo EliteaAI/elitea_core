@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from pylon.core.tools import web, log
 from sqlalchemy import Integer, and_
 from sqlalchemy.orm import joinedload, selectinload
-from tools import db, serialize, auth, store_secrets, VaultClient, this
+from tools import db, serialize, auth, store_secrets, VaultClient, this, rpc_tools
 
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.all import Application, ApplicationVersion, ApplicationVersionTagAssociation
@@ -35,19 +35,35 @@ from ..utils.application_utils import (
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
+from ..utils.exceptions import PoolSaturationError, MaintenanceInProgressError
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
+from ..utils.publish_utils import get_default_agent_validation_rules
+from ..utils.skill_utils import detach_skills_for_entity_versions
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
-    get_predict_token_and_session, load_context_settings_from_conversation
+    get_predict_token_and_session, load_context_settings_from_conversation, user_input_preview
 from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
 from ..utils.sio_utils import SioValidationError, get_event_room, SioEvents
+from ..utils.internal_tools import (
+    require_internal_mcp_pat,
+    InternalMcpPatError,
+    resolve_internal_mcp_tools,
+    redact_internal_mcp_secrets,
+)
 from ..utils.tracing_utils import add_trace_context_to_meta
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 
 
 class RPC:
+    @web.rpc(
+        "applications_get_default_publish_validation_rules",
+        "applications_get_default_publish_validation_rules",
+    )
+    def applications_get_default_publish_validation_rules(self, **kwargs) -> str:
+        return get_default_agent_validation_rules()
+
     @web.rpc("applications_get_application_by_id", "get_application_by_id")
     def get_application_by_id(self, project_id: int, application_id: int,
                               version_name: str = None, first_existing_version: bool = False, **kwargs) -> Optional[
@@ -94,10 +110,19 @@ class RPC:
                     chat_project_id: Optional[int] = None,
                     await_task_timeout: int = -1,
                     user_id: int = None,
-                    is_system_user: bool = False
+                    is_system_user: bool = False,
+                    return_chat_history: bool = False,
+                    non_interactive: Optional[bool] = None,
+                    eligible_for_autoapproval: bool = False,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
+        # A live UI consumer only exists when a socket joined the event room,
+        # which requires a real sid. No sid => nobody is listening => suppress
+        # UI-only events regardless of whether the caller blocks for the result.
+        # Callers may still force the flag either way.
+        if non_interactive is None:
+            non_interactive = sid is None
         data['message_id'] = data.get('message_id', str(uuid4()))
         data['stream_id'] = data.get('stream_id', data['message_id'])
         try:
@@ -117,6 +142,7 @@ class RPC:
             return  # FIXME: need some proper error?
 
         if parsed.version_id:
+            application_name = None
             with db.get_session(parsed.project_id) as session:
                 application_version: ApplicationVersion = session.query(ApplicationVersion).get(parsed.version_id)
                 if not application_version:
@@ -129,6 +155,14 @@ class RPC:
                         message_id=data.get("message_id")
                     )
 
+                # Resolve llm_settings only when completely missing (original behavior). The
+                # family-conflict case (issue #5821) is handled by write-time rejection
+                # (LLMSettingsWriteModel/EntitySettingsLlmWrite) and the one-time
+                # heal_llm_settings_family_conflicts admin backfill — not here. This mutation
+                # is never committed (session just closes below), so re-checking on every
+                # message would re-run the expensive RPC forever for any still-broken row
+                # instead of getting cheaper over time; the hottest path in the platform must
+                # not carry that cost.
                 if not application_version.llm_settings:
                     resolve_project_id = chat_project_id or parsed.project_id
                     resolved = validate_and_resolve_llm_settings(
@@ -148,13 +182,16 @@ class RPC:
                             stream_id=data.get("stream_id"),
                             message_id=data.get("message_id")
                         )
-
                 application_version.project_id = parsed.project_id  # compatibility with pd model
                 parsed_db = ApplicationChatRequest.from_orm(
                     application_version
                 )
+                application_name = application_version.application.name if application_version.application else None
 
             parsed: ApplicationChatRequest = parsed_db.merge_update(parsed)
+
+            # Set application_name AFTER merge to prevent client override (security)
+            parsed.application_name = application_name
 
         # TODO: fragile code: app itself and toolkits may be in different projects
         # in generated version_details payload
@@ -203,7 +240,7 @@ class RPC:
                     parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
         except PredictPayloadError as e:
             raise SioValidationError(
                 sio=self.context.sio,
@@ -213,7 +250,9 @@ class RPC:
                 stream_id=data.get("stream_id"),
                 message_id=data.get("message_id")
             )
-        log.debug(f'{payload=}')
+
+        if eligible_for_autoapproval:
+            payload['auto_approve_sensitive_actions'] = True
 
         if not user_context:
             user_context = {
@@ -225,21 +264,48 @@ class RPC:
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
-        task_id = self.task_node.start_task(
-            "indexer_agent",
-            args=[parsed.stream_id, parsed.message_id],
-            kwargs=payload,
-            pool="agents",
-            meta=add_trace_context_to_meta({
-                "task_name": "indexer_agent",
-                "project_id": parsed.project_id,
-                "message_id": parsed.message_id,
-                "question_id": start_event_content.get('question_id') if start_event_content else None,
-                "sio_event": f'{sio_event}',  # enums like this
-                'chat_project_id': chat_project_id,
-                'user_context': serialize(user_context)
-            }),
-        )
+        try:
+            task_id = self.task_node.start_task(
+                "indexer_agent",
+                args=[parsed.stream_id, parsed.message_id],
+                kwargs=payload,
+                pool="agents",
+                meta=add_trace_context_to_meta({
+                    "task_name": "indexer_agent",
+                    "project_id": parsed.project_id,
+                    "message_id": parsed.message_id,
+                    "question_id": start_event_content.get('question_id') if start_event_content else None,
+                    "sio_event": f'{sio_event}',  # enums like this
+                    'chat_project_id': chat_project_id,
+                    'user_context': serialize(user_context),
+                    'user_input_preview': user_input_preview(parsed.user_input),
+                    'non_interactive': non_interactive,
+                }),
+            )
+        except MaintenanceInProgressError:
+            error_payload = {
+                "error": "maintenance_in_progress",
+                "message": "The platform is currently in maintenance mode. Please try again later.",
+            }
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=error_payload,
+                    stream_id=parsed.stream_id,
+                    message_id=parsed.message_id,
+                )
+            return error_payload
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                parsed.project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
+
         if sio_event == SioEvents.chat_predict.value:
             self.context.event_manager.fire_event('applications_predict_task_id', {
                 "task_id": task_id,
@@ -271,7 +337,10 @@ class RPC:
                         chat_project_id: Optional[int] = None,
                         await_task_timeout: int = -1,
                         user_id: Optional[int] = None,
-                        is_system_user: bool = False
+                        is_system_user: bool = False,
+                        return_chat_history: bool = False,
+                        non_interactive: Optional[bool] = None,
+                        eligible_for_autoapproval: bool = False,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
@@ -300,6 +369,11 @@ class RPC:
 
         # Determine call type and validate arguments
         is_blocking = await_task_timeout > 0
+        # A live UI consumer only exists when a socket joined the event room,
+        # which requires a real sid. No sid => nobody is listening => suppress
+        # UI-only events regardless of whether the caller blocks for the result.
+        if non_interactive is None:
+            non_interactive = sid is None
 
         # Validate argument combinations
         if is_blocking and sid:
@@ -320,11 +394,14 @@ class RPC:
                     message_id=data.get("message_id")
                 )
             else:
-                raise ValidationError(e.errors())
+                raise
 
         if sid and not auth.is_sio_user_in_project(sid, parsed.project_id):
             log.warning("Sid %s is not in project %s", sid, parsed.project_id)
-            return  # FIXME: need some proper error?
+            raise PermissionError(
+                f"Socket session is not authorized for project {parsed.project_id}. "
+                "Please refresh the page and try again."
+            )
 
         room = get_event_room(
             event_name=sio_event,
@@ -360,7 +437,7 @@ class RPC:
                     parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history)
         except PredictPayloadError as e:
             if sid:
                 raise SioValidationError(
@@ -374,30 +451,54 @@ class RPC:
             else:
                 raise PredictPayloadError(str(e))
 
-        log.debug(f'{payload=}')
-
         # TODO probably better move to toolkits expand, check OpenAPI
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
-        task_id = self.task_node.start_task(
-            "indexer_predict_agent",
-            args=[parsed.stream_id, parsed.message_id],
-            kwargs=payload,
-            pool="agents",
-            meta=add_trace_context_to_meta({
-                "task_name": "indexer_predict_agent",
-                "project_id": parsed.project_id,
-                "message_id": parsed.message_id,
-                "question_id": start_event_content.get('question_id') if start_event_content else None,
-                "sio_event": f'{sio_event}',
-                'chat_project_id': chat_project_id,
-                'user_context': {
-                    "user_id": user_id,
+        try:
+            task_id = self.task_node.start_task(
+                "indexer_predict_agent",
+                args=[parsed.stream_id, parsed.message_id],
+                kwargs=payload,
+                pool="agents",
+                meta=add_trace_context_to_meta({
+                    "task_name": "indexer_predict_agent",
                     "project_id": parsed.project_id,
-                },  # NOTE: needed for external providers to work!
-            }),
-        )
+                    "message_id": parsed.message_id,
+                    "question_id": start_event_content.get('question_id') if start_event_content else None,
+                    "sio_event": f'{sio_event}',
+                    'chat_project_id': chat_project_id,
+                    'user_context': {
+                        "user_id": user_id,
+                        "project_id": parsed.project_id,
+                    },  # NOTE: needed for external providers to work!
+                    'user_input_preview': user_input_preview(parsed.user_input),
+                    'non_interactive': non_interactive,
+                }),
+            )
+        except MaintenanceInProgressError:
+            error_payload = {
+                "error": "maintenance_in_progress",
+                "message": "The platform is currently in maintenance mode. Please try again later.",
+            }
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=error_payload,
+                    stream_id=parsed.stream_id,
+                    message_id=parsed.message_id,
+                )
+            return error_payload
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                parsed.project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
 
         # Send SIO events only for SIO calls
         if sid:
@@ -634,6 +735,17 @@ class RPC:
             except Exception as e:
                 errors.append(str(e))
 
+            # Stamp resolved model_project_id for versions that arrived with null.
+            # validate_and_resolve_llm_settings returns a copy with model_project_id
+            # filled in when the model is found; persisting it here fixes the
+            # publish-time shared-LLM check for newly imported agents.
+            for version in application.versions:
+                ls = version.llm_settings
+                if ls and isinstance(ls, dict) and ls.get('model_name') and ls.get('model_project_id') is None:
+                    resolved = validate_and_resolve_llm_settings(project_id, ls)
+                    if resolved and resolved.get('model_project_id') is not None:
+                        version.llm_settings = resolved
+
             session.commit()
 
             # Explicitly load relationships for the first version since they are now lazy
@@ -642,7 +754,8 @@ class RPC:
             ).options(
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
 
             result = ApplicationDetailModel.from_orm(application)
@@ -719,6 +832,10 @@ class RPC:
                             'blocked_version_id': ver.id,
                             'blocked_status': ver.status,
                         }
+
+                detach_skills_for_entity_versions(
+                    session, [ver.id for ver in application.versions]
+                )
 
                 session.delete(application)
                 session.commit()
@@ -889,7 +1006,11 @@ class RPC:
                 "settings": settings
             },
             pool="indexer",
-            meta={}
+            meta={
+                "task_name": "indexer_configuration_check_connection",
+                "configuration_type": type_,
+                "user_input_preview": f"check connection {type_}"[:100],
+            },
         )
         return self.task_node.join_task(task_id, timeout=60)
 
@@ -907,7 +1028,12 @@ class RPC:
                     "settings": settings
                 },
                 pool="indexer",
-                meta={}
+                meta={
+                    "task_name": "indexer_validator",
+                    "toolkit_type": type_,
+                    "project_id": project_id,
+                    "user_input_preview": f"validate toolkit {type_}"[:100],
+                },
             )
             task_result = self.task_node.join_task(task_id, timeout=60)
             if "error" in task_result:
@@ -927,7 +1053,11 @@ class RPC:
                 "settings": settings
             },
             pool="indexer",
-            meta={}
+            meta={
+                "task_name": "indexer_configuration_validator",
+                "configuration_type": type_,
+                "user_input_preview": f"validate configuration {type_}"[:100],
+            },
         )
         task_result = self.task_node.join_task(task_id, timeout=60)
         if "error" in task_result:
@@ -960,7 +1090,11 @@ class RPC:
                 "settings": settings,
             },
             pool="indexer",
-            meta={},
+            meta={
+                "task_name": "indexer_toolkit_available_tools",
+                "toolkit_type": toolkit_type,
+                "user_input_preview": f"list tools {toolkit_type}"[:100],
+            },
         )
         return self.task_node.join_task(task_id, timeout=60)
 
@@ -991,7 +1125,11 @@ class RPC:
                 "settings": settings,
             },
             pool="indexer",
-            meta={},
+            meta={
+                "task_name": "indexer_configuration_check_connection",
+                "toolkit_type": toolkit_type,
+                "user_input_preview": f"discover MCP tools {toolkit_type}"[:100],
+            },
         )
         return self.task_node.join_task(task_id, timeout=60)
 
@@ -1089,10 +1227,23 @@ class RPC:
                 log.debug(f"No SID provided and no current user session available")
 
         user_id = data.get('user_id')
-        log.info(f"About to expand toolkit configurations: user_id={user_id}, project_id={project_id}")
+
         try:
-            log.info(f"Starting toolkit configuration expansion for user {user_id} in project {project_id}")
-            log.debug(f"Original toolkit_config: {data.get('toolkit_config', {})}")
+            require_internal_mcp_pat(data.get('toolkit_config', {}), user_id)
+        except InternalMcpPatError as pat_err:
+            log.info(f"[MCP] Blocking internal MCP tool test for user {user_id}: {pat_err.error_code}")
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=sio_event,
+                error=str(pat_err),
+                stream_id=data['stream_id'],
+                message_id=data['message_id'],
+            )
+
+        log.debug("Expanding toolkit configurations: user_id=%s, project_id=%s", user_id, project_id)
+        try:
+            log.debug("Original toolkit_config: %s", data.get('toolkit_config', {}))
 
             toolkit_config = data.get('toolkit_config', {})
             toolkit_type = toolkit_config.get('type', 'unknown_toolkit')
@@ -1111,12 +1262,16 @@ class RPC:
                 'settings': toolkit_settings_expanded
             }
 
-            log.info(f"Expanded toolkit configuration for user {user_id} in project {project_id}")
-            log.debug(f"Expanded toolkit_config: {data['toolkit_config']}")
+            log.debug("Expanded toolkit_config: %s", data['toolkit_config'])
         except Exception as e:
             log.error(f"Error expanding toolkit configurations: {str(e)}")
             # Continue with original config if expansion fails
             log.warning("Continuing with original toolkit configuration")
+
+        try:
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
 
         # Get project-specific auth_token from secrets (not exposed to user)
         try:
@@ -1124,6 +1279,30 @@ class RPC:
             data['deployment_url'] = get_predict_base_url(project_id)
         except Exception as e:
             log.warning(f"Failed to retrieve project secrets: {e}")
+
+        # Resolve openai_compatible from the model registry and stamp it into llm_settings so the
+        # SDK's get_llm picks the right provider (ChatOpenAI vs ChatAnthropic) for openai-compatible
+        # models whose name contains "claude"/"anthropic". The model may be owned by the project or
+        # shared into it from the public project (the test UI does not send model_project_id), so we
+        # resolve against the same visibility set the UI offered: private models plus public models
+        # with shared==True (configurations_get_models include_shared=True). A non-shared public
+        # model is correctly invisible here. Best-effort: on failure or no match, leave llm_settings
+        # as-is (get_llm defaults openai_compatible to False).
+        try:
+            llm_settings = data.get('llm_settings') or {}
+            if 'openai_compatible' not in llm_settings:
+                model_name = data.get('llm_model') or llm_settings.get('model_name')
+                if model_name:
+                    models_response = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_models(
+                        project_id=project_id, section='llm', include_shared=True
+                    ) or {}
+                    for model in models_response.get('items', []):
+                        if model.get('name') == model_name:
+                            llm_settings['openai_compatible'] = bool(model.get('openai_compatible', False))
+                            data['llm_settings'] = llm_settings
+                            break
+        except Exception as e:
+            log.warning(f"Failed to resolve openai_compatible for test_toolkit_tool: {e}")
 
         # Add authentication parameters to the data (don't expose auth_token to user)
 
@@ -1137,7 +1316,7 @@ class RPC:
             self.context.sio.enter_room(sid, room)
 
         # Log the parameters being passed to indexer for debugging
-        log.info(f"Testing toolkit tool: {tool_name} with toolkit_config keys: {list(data.get('toolkit_config', {}).keys())} and tool_params: {data.get('tool_params', {})}")
+        log.debug(f"Testing toolkit tool: {tool_name} with toolkit_config keys: {list(data.get('toolkit_config', {}).keys())} and tool_params: {data.get('tool_params', {})}")
 
         # Prepare kwargs without stream_id and message_id since they're passed as args
         task_kwargs = {k: v for k, v in data.items() if k not in ['stream_id', 'message_id']}
@@ -1150,6 +1329,7 @@ class RPC:
             log.warning(f"Failed to unsecret task data: {e}")
 
         # Start the test toolkit tool task
+        meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         if tool_name == 'index_data':
             task_id = start_index_task(self.task_node, data, sio_event)
         else:
@@ -1165,9 +1345,10 @@ class RPC:
                     "message_id": data['message_id'],
                     "question_id": start_event_content.get('question_id') if start_event_content else None,
                     "sio_event": sio_event,
-                    "toolkit_config": task_kwargs.get('toolkit_config', {}),
+                    "toolkit_config": meta_toolkit_config,
                     "tool_name": task_kwargs.get('tool_name', ''),
                     "tool_params": task_kwargs.get('tool_params', {}),
+                    "user_input_preview": f"test tool {task_kwargs.get('tool_name', '')}: {task_kwargs.get('tool_params', {})}"[:100],
                     "user_id": task_kwargs.get('user_id', ''),
                     "deployment_url": task_kwargs.get('deployment_url', ''),
                     "project_auth_token": task_kwargs.get('project_auth_token', ''),
@@ -1177,6 +1358,14 @@ class RPC:
                     },
                 },
             )
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
 
         # Send start event
         self.stream_response(sio_event, {
@@ -1239,7 +1428,7 @@ class RPC:
 
         toolkit_config = data.get('toolkit_config', {})
         toolkit_type = toolkit_config.get('type', 'unknown')
-        if toolkit_type != 'mcp':
+        if not toolkit_type.startswith('mcp'):
             raise ValueError(f"test_mcp_connection only works with MCP toolkits, got type: {toolkit_type}")
 
         project_id = data.get('project_id')
@@ -1283,6 +1472,19 @@ class RPC:
         user_id = data.get('user_id')
 
         try:
+            require_internal_mcp_pat(toolkit_config, user_id)
+        except InternalMcpPatError as pat_err:
+            log.info(f"[MCP] Blocking internal MCP connection test for user {user_id}: {pat_err.error_code}")
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=sio_event,
+                error=str(pat_err),
+                stream_id=data['stream_id'],
+                message_id=data['message_id'],
+            )
+
+        try:
 
             toolkit_settings_expanded = expand_toolkit_settings(
                 toolkit_type, toolkit_config.get('settings', {}), project_id=project_id, user_id=user_id
@@ -1301,6 +1503,11 @@ class RPC:
         except Exception as e:
             log.error(f"Error expanding MCP toolkit configurations: {str(e)}")
             log.warning("Continuing with original toolkit configuration")
+
+        try:
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
 
         # Get project-specific auth_token from secrets
         try:
@@ -1329,6 +1536,7 @@ class RPC:
             log.warning(f"Failed to unsecret task data: {e}")
 
         # Start the test MCP connection task
+        meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         task_id = self.task_node.start_task(
             "indexer_test_mcp_connection",
             args=[data['stream_id'], data['message_id']],
@@ -1341,7 +1549,8 @@ class RPC:
                 "message_id": data['message_id'],
                 "question_id": start_event_content.get('question_id') if start_event_content else None,
                 "sio_event": sio_event,
-                "toolkit_config": task_kwargs.get('toolkit_config', {}),
+                "user_input_preview": "test MCP connection",
+                "toolkit_config": meta_toolkit_config,
                 "user_id": task_kwargs.get('user_id', ''),
                 "deployment_url": task_kwargs.get('deployment_url', ''),
                 "project_auth_token": task_kwargs.get('project_auth_token', ''),
@@ -1351,6 +1560,14 @@ class RPC:
                 },
             },
         )
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
 
         # Send start event
         self.stream_response(sio_event, {
@@ -1451,7 +1668,7 @@ class RPC:
         if sid:
             self.context.sio.enter_room(sid, room)
 
-        log.info(f"MCP sync tools request: url={data.get('url')}, project_id={project_id}")
+        log.debug(f"MCP sync tools request: url={data.get('url')}, project_id={project_id}")
 
         # Prepare kwargs without stream_id and message_id since they're passed as args
         task_kwargs = {k: v for k, v in data.items() if k not in ['stream_id', 'message_id']}
@@ -1474,6 +1691,7 @@ class RPC:
                 "project_id": project_id,
                 "message_id": data['message_id'],
                 "sio_event": sio_event,
+                "user_input_preview": f"sync MCP tools {data.get('url', '')}"[:100],
                 "url": data.get('url', ''),
                 "user_id": task_kwargs.get('user_id', ''),
                 "user_context": {
@@ -1482,6 +1700,14 @@ class RPC:
                 },
             },
         )
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
 
         # Send start event
         self.stream_response(sio_event, {
@@ -1535,6 +1761,7 @@ class RPC:
                     version_data=new_version_pd,
                     application=application,
                     session=session,
+                    copy_skills_from_version_id=version_id,
                 )
                 session.commit()
 
@@ -1544,7 +1771,8 @@ class RPC:
                 ).options(
                     selectinload(ApplicationVersion.tools),
                     selectinload(ApplicationVersion.tool_mappings),
-                    selectinload(ApplicationVersion.variables)
+                    selectinload(ApplicationVersion.variables),
+                    selectinload(ApplicationVersion.tags)
                 ).first()
 
                 result = ApplicationVersionDetailModel.from_orm(version)
@@ -1730,6 +1958,8 @@ class RPC:
             }
 
             # Delete the version
+            detach_skills_for_entity_versions(session, [version_id])
+
             session.delete(version)
             session.commit()
 
@@ -1854,6 +2084,16 @@ class RPC:
             self,
             task_id: str
     ):
+        # Parallel fan-out (#4993 Track 2): a parked parent spawns N independent
+        # children whose task_ids the stop button never sees. Stop them first,
+        # keyed by this parent task_id, and flag their epoch cancelled so the
+        # reconcile gate won't re-invoke the parent. No-op for ordinary
+        # single-agent chats. Best-effort — never block the parent stop.
+        try:
+            self.parallel_dispatch_stop_children(task_id)
+        except Exception as e:  # pylint: disable=W0703
+            log.warning('Parallel child stop fan-out failed')
+            log.debug(f'Stop fan-out details {task_id}: {e}')
         try:
             self.task_node.stop_task(task_id)
         except Exception as e:

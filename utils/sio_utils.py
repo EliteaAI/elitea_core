@@ -15,9 +15,6 @@ class SioEvents(StrEnum):
     promptlib_predict = 'promptlib_predict'
     promptlib_leave_rooms = 'promptlib_leave_rooms'
 
-    datasource_predict = 'datasource_predict'
-    datasource_dataset_status = 'datasource_dataset_status'
-    datasource_leave_rooms = 'datasource_leave_rooms'
 
     application_predict = 'application_predict'
     application_continue_message = 'application_continue_message'
@@ -55,6 +52,22 @@ class SioEvents(StrEnum):
     chat_canvas_error = 'chat_canvas_error'
     chat_canvas_editors_change = 'chat_canvas_editors_change'
     chat_canvas_content_change = 'chat_canvas_content_change'
+
+    asr_start = 'asr_start'
+    asr_audio_chunk = 'asr_audio_chunk'
+    asr_stop = 'asr_stop'
+    asr_transcript_delta = 'asr_transcript_delta'
+    asr_transcript_done = 'asr_transcript_done'
+    asr_error = 'asr_error'
+    asr_speech_started = 'asr_speech_started'
+    asr_vad_flush = 'asr_vad_flush'
+
+    tts_start = 'tts_start'
+    tts_stop = 'tts_stop'
+    tts_audio_chunk = 'tts_audio_chunk'
+    tts_done = 'tts_done'
+    tts_error = 'tts_error'
+    tts_word_timings = 'tts_word_timings'
 
 
 class SioValidationError(Exception):

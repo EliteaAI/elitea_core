@@ -5,18 +5,13 @@ from typing import List, Optional
 from tools import db_tools, db, config as c
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Integer, String, DateTime, func, ForeignKey, JSON, Table, Column, UniqueConstraint, MetaData
+from sqlalchemy import Integer, String, DateTime, func, ForeignKey, JSON, Table, Column, UniqueConstraint
 from sqlalchemy.ext.mutable import MutableDict
 
-from .enums.all import ToolTypes, AgentTypes, PublishStatus, ToolEntityTypes
+from .enums.all import AgentTypes, PublishStatus, ToolEntityTypes, SkillEntityTypes
 from ..models.elitea_tools import EliteATool, EntityToolMapping
-
-
-# Merged from promptlib_shared.models.all
-class AbstractLikesMixin:
-    @property
-    def likes_entity_name(self):
-        raise NotImplementedError
+from ..models.skill import Skill, EntitySkillMapping
+from .mixins import AbstractLikesMixin
 
 
 class Tag(db_tools.AbstractBaseMixin, db.Base):
@@ -26,29 +21,6 @@ class Tag(db_tools.AbstractBaseMixin, db.Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     data: Mapped[dict] = mapped_column(JSON, nullable=True)
-
-
-class Collection(db_tools.AbstractBaseMixin, db.Base, AbstractLikesMixin):
-    __tablename__ = "prompt_collections"
-    __table_args__ = (
-        UniqueConstraint('shared_owner_id', 'shared_id', name='_collection_shared_origin'),
-        {"schema": c.POSTGRES_TENANT_SCHEMA},
-    )
-    likes_entity_name: str = 'collection'
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    description: Mapped[str] = mapped_column(String, nullable=True)
-    owner_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    author_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    prompts: Mapped[dict] = mapped_column(JSONB, nullable=True)
-    datasources: Mapped[dict] = mapped_column(JSONB, nullable=True)
-    applications: Mapped[dict] = mapped_column(JSONB, nullable=True)
-    status: Mapped[PublishStatus] = mapped_column(String, nullable=False, default=PublishStatus.draft)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
-    # reference fields to origin
-    shared_owner_id: Mapped[int] = mapped_column(Integer, nullable=True)
-    shared_id: Mapped[int] = mapped_column(Integer, nullable=True)
-    meta: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Application(db_tools.AbstractBaseMixin, db.Base, AbstractLikesMixin):
@@ -71,7 +43,6 @@ class Application(db_tools.AbstractBaseMixin, db.Base, AbstractLikesMixin):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     shared_owner_id: Mapped[int] = mapped_column(Integer, nullable=True)
     shared_id: Mapped[int] = mapped_column(Integer, nullable=True)
-    collections: Mapped[list] = mapped_column(JSONB, nullable=True, default=list)
 
     uuid: Mapped[str] = mapped_column(UUID(as_uuid=True), unique=True, default=uuid.uuid4)
 
@@ -126,7 +97,7 @@ class ApplicationVersion(db_tools.AbstractBaseMixin, db.Base):
     author_id: Mapped[int] = mapped_column(Integer, nullable=False)
 
     tags: Mapped[List[Tag]] = relationship(secondary=lambda: ApplicationVersionTagAssociation,
-                                           backref='application_versions', lazy='joined')
+                                           backref='application_versions', lazy='select')
     uuid: Mapped[str] = mapped_column(UUID(as_uuid=True), unique=True, default=uuid.uuid4)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
@@ -157,29 +128,49 @@ class ApplicationVersion(db_tools.AbstractBaseMixin, db.Base):
         viewonly=True,
         overlaps='tools'
     )
+
+    skills: Mapped[List['Skill']] = relationship(
+        secondary=EntitySkillMapping.__table__,
+        primaryjoin=f'and_(ApplicationVersion.id == EntitySkillMapping.entity_version_id, '
+                    f'EntitySkillMapping.entity_type == "{SkillEntityTypes.agent}")',
+        secondaryjoin=f'and_(Skill.id == EntitySkillMapping.skill_id, '
+                      f'EntitySkillMapping.entity_type == "{SkillEntityTypes.agent}")',
+        lazy=True,
+        viewonly=True
+    )
+    skill_mappings: Mapped[List['EntitySkillMapping']] = relationship(
+        'EntitySkillMapping',
+        primaryjoin=f'and_(ApplicationVersion.id == foreign(EntitySkillMapping.entity_version_id), '
+                    f'EntitySkillMapping.entity_type == "{SkillEntityTypes.agent}")',
+        lazy=True,
+        viewonly=True
+    )
+
     agent_type: Mapped[str] = mapped_column(String, nullable=False, default=AgentTypes.openai.value)
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
     pipeline_settings: Mapped[dict] = mapped_column(JSONB, default=dict)
 
     def to_dict(self):
-        from ..utils.application_utils import apply_selected_tools_intersection
-        
+        from ..utils.application_utils import apply_selected_tools_intersection, build_skill_mappings_list
+
         app_version_dict = self.to_json()
         app_version_dict['tools'] = []
         app_version_dict['variables'] = []
         app_version_dict['tags'] = []
-        
+
         for toolkit in self.tools:
             tool_dict = toolkit.to_json()
             app_version_dict['tools'].append(tool_dict)
-        
+
         # Apply selected_tools intersection using pre-loaded tool_mappings
         apply_selected_tools_intersection(app_version_dict['tools'], self.tool_mappings)
-        
+
         for variable in self.variables:
             app_version_dict['variables'].append(variable.to_json())
         for tag in self.tags:
             app_version_dict['tags'].append(tag.to_json())
+
+        app_version_dict['skills'] = build_skill_mappings_list(self.skill_mappings)
 
         return app_version_dict
 

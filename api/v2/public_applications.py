@@ -43,6 +43,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 statuses=[PublishStatus.published],
                 agents_type=request.args.get('agents_type'),
                 without_tags=request.args.get('without_tags', False),
+                category=request.args.get('category'),
                 session=session
             )
 

@@ -6,6 +6,9 @@ from ..models.message_group import ConversationMessageGroup
 
 from pylon.core.tools import log
 
+from .trace_step_writer import sync_trace_steps
+
+
 def safe_decode_bytes_in_dict(obj):
     if isinstance(obj, dict):
         return {key: safe_decode_bytes_in_dict(value) for key, value in obj.items()}
@@ -33,9 +36,12 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
     # Import here to avoid circular imports
     old_meta = msg_group.meta or {}
     new_meta = {**old_meta}
-    thread_id_value = payload['response_metadata'].get(
+    # The message group belongs to the root chat run. Durable children save
+    # partial traces into that same row using their own checkpoint thread ids;
+    # once the root id is established, a child must not replace it.
+    thread_id_value = old_meta.get('thread_id') or payload['response_metadata'].get(
         'thread_id'
-    ) if payload['response_metadata'].get('thread_id') else old_meta.get('thread_id')
+    )
     meta_update = {
         'thread_id': thread_id_value,
         'references': payload.get('references', []),
@@ -49,49 +55,52 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
     response_meta = payload['response_metadata']
     should_continue = payload['response_metadata'].get("should_continue")
 
+    # first_tool_timestamp_start must remain the EARLIEST llm start across all partial saves of
+    # this group. new_meta.update() below clobbers keys, and sub-agent / multi-round / HITL-resume
+    # saves each carry a fresh, LATER llm_start_timestamp; overwriting collapsed the recorded run
+    # duration to the final round only (#5422). ISO-8601 UTC strings sort chronologically -> keep min.
+    incoming_first_start = response_meta.get('llm_start_timestamp')
+    existing_first_start = old_meta.get('first_tool_timestamp_start')
+    if incoming_first_start and existing_first_start:
+        first_tool_timestamp_start = min(incoming_first_start, existing_first_start)
+    else:
+        first_tool_timestamp_start = incoming_first_start or existing_first_start
+
     response_meta_fields = {
-        'first_tool_timestamp_start': response_meta.get('llm_start_timestamp'),
+        'first_tool_timestamp_start': first_tool_timestamp_start,
         # Store execution_time_seconds for toolkit testing (no LLM/thinking_steps involved)
         'execution_time_seconds': response_meta.get('execution_time_seconds'),
         **payload['response_metadata'].get('additional_response_meta', {})
     }
     new_meta.update({k: v for k, v in response_meta_fields.items() if v is not None})
 
-    # Merge tool_calls to preserve tools from previous "Continue" runs
-    # Tool calls are dicts keyed by run_id (UUID), use run_id for deduplication
-    # IMPORTANT: Update existing entries to capture tool_output from full_message events
+    # tool_calls / thinking_steps storage (Epic #5724). Since #5731 the indexer sends DELTAS
+    # (one changed entry per event), not the full accumulated state, so these are the incoming
+    # delta. The message_trace_step table is the accumulator: write the delta as rows (dedup
+    # against existing rows happens there) and keep the two heavy keys OUT of meta.
     new_tool_calls = response_meta.get('tool_calls') or {}
-    old_tool_calls = old_meta.get('tool_calls', {})
-
-    if old_tool_calls and new_tool_calls:
-        # Merge old and new, with new values taking precedence (to capture tool_output updates)
-        merged_tool_calls = {**old_tool_calls, **new_tool_calls}
-        new_meta['tool_calls'] = merged_tool_calls
-    elif old_tool_calls:
-        new_meta['tool_calls'] = old_tool_calls
-    elif new_tool_calls:
-        new_meta['tool_calls'] = new_tool_calls
-    else:
-        new_meta['tool_calls'] = {}
-
     new_thinking_steps = response_meta.get('thinking_steps') or []
-    old_thinking_steps = old_meta.get('thinking_steps', [])
 
-    if old_thinking_steps and new_thinking_steps:
-        old_timestamps = {
-            step.get('timestamp_start')
-            for step in old_thinking_steps
-            if isinstance(step, dict) and step.get('timestamp_start')
-        }
-        unique_new_steps = [
-            step for step in new_thinking_steps
-            if not isinstance(step, dict) or step.get('timestamp_start') not in old_timestamps
-        ]
-        new_meta['thinking_steps'] = old_thinking_steps + unique_new_steps
-    elif old_thinking_steps:
-        new_meta['thinking_steps'] = old_thinking_steps
+    if session is not None:
+        sync_trace_steps(session, msg_group.id, new_tool_calls, new_thinking_steps)
     else:
-        new_meta['thinking_steps'] = new_thinking_steps
+        log.warning(
+            'update_message_group_meta: no session; skipping trace-step write for group %s',
+            msg_group.id
+        )
+    new_meta.pop('tool_calls', None)
+    new_meta.pop('thinking_steps', None)
+
+    new_invoked_skills = response_meta.get('invoked_skills') or []
+    old_invoked_skills = old_meta.get('invoked_skills', [])
+    if new_invoked_skills:
+        new_meta['invoked_skills'] = [
+            {'skill_id': e.get('skill_id'), 'name': e.get('name')}
+            for e in new_invoked_skills
+            if isinstance(e, dict)
+        ]
+    else:
+        new_meta['invoked_skills'] = old_invoked_skills
 
     # Ensure context metadata exists and is properly initialized
     if 'context' not in new_meta:
@@ -121,7 +130,7 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
         new_meta['context']['priority'] = 1.0
 
     new_meta = safe_decode_bytes_in_dict(new_meta)
-    
+
     msg_group.meta = new_meta
 
     # Update conversation meta with context analytics

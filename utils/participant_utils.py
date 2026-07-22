@@ -11,7 +11,7 @@ from ..models.enums.all import ParticipantTypes, ChatHistoryTemplates
 from ..models.message_group import ConversationMessageGroup
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.participant import ParticipantBase, ParticipantCreate, EntityMetaType, \
-    ParticipantEntityDatasource, ParticipantEntityDummy, ParticipantEntityApplication, \
+    ParticipantEntityDummy, ParticipantEntityApplication, \
     entity_meta_mapping, ParticipantEntityUser, ParticipantEntityToolkit
 from ..models.pd.participant_settings import EntitySettingsApplication, \
     EntitySettingsLlm, EntitySettingsUser
@@ -30,6 +30,43 @@ class ParticipantAlreadyAddedException(ValueError):
         super().__init__(message)
         self.participant_id = participant_id
         self.entity_settings = entity_settings or {}
+
+
+def invalid_llm_settings_for_reasoning_model(
+        project_id: int, llm_settings: dict
+) -> bool:
+    """True when llm_settings is invalid for a reasoning-capable model (issue #5859).
+
+    A reasoning model (Anthropic extended thinking, OpenAI o1/gpt-5) must run with a non-null
+    reasoning_effort and no temperature. Both a stale temperature and a null effort silently run
+    it thinking-off, which triggers the write-tool fabrication of #5826. The already-valid shape
+    (no temperature + an active effort) needs no model lookup, so a clean write pays no RPC. Fails
+    open (returns False) if the model can't be resolved — availability is enforced elsewhere; this
+    check must not block a write on a transient RPC error.
+    """
+    if not llm_settings:
+        return False
+    has_temperature = llm_settings.get('temperature') is not None
+    effort = llm_settings.get('reasoning_effort')
+    has_active_effort = effort not in (None, 'none')
+    # Valid for a reasoning model (and harmless for a non-reasoning one) — skip the lookup.
+    if not has_temperature and has_active_effort:
+        return False
+    model_name = llm_settings.get('model_name')
+    if not model_name:
+        return False
+    model_project_id = llm_settings.get('model_project_id') or project_id
+    try:
+        config = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_configuration_model(
+            model_project_id, model_name
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        log.warning(
+            f"Could not resolve model {model_name!r} (project_id={model_project_id}) to validate "
+            f"reasoning-family llm_settings: {exc}"
+        )
+        return False
+    return bool(config and config.get('supports_reasoning', False))
 
 
 def make_query_filter_for_entity(entity_name: ParticipantTypes, entity_meta: EntityMetaType) -> list:
@@ -81,10 +118,11 @@ def get_or_create_one(
         match entity_name:
             case ParticipantTypes.prompt:
                 meta = {'name': entity_details.get('name')}
-            case ParticipantTypes.datasource:
-                meta = {'name': entity_details.get('name')}
             case ParticipantTypes.application:
-                meta = {'name': entity_details.get('name')}
+                meta = {
+                    'name': entity_details.get('name'),
+                    'agent_type': entity_details.get('version_details', {}).get('agent_type')
+                }
             case ParticipantTypes.llm:
                 meta = {'name': entity_meta['model_name']}
             case ParticipantTypes.dummy:
@@ -236,22 +274,51 @@ def notify_user_added_to_conversation(
     )
 
 
+def notify_user_mentioned_in_conversation(
+        project_id: int,
+        user_id: int,
+        conversation: Conversation,
+        initiator_id: Optional[int] = None,
+        message_id: Optional[str] = None
+):
+    if user_id == initiator_id:
+        return
+
+    event_manager = rpc_tools.EventManagerMixin().event_manager
+
+    initiator_name = None
+    if initiator_id is not None:
+        try:
+            initiator_name = auth.get_user(user_id=initiator_id)['name']
+        except Exception as ex:
+            log.warning(ex)
+
+    event_manager.fire_event(
+        'notifications_stream', {
+            'project_id': project_id,
+            'user_id': user_id,
+            'meta': {
+                "conversation_id": conversation.id,
+                "conversation_name": conversation.name,
+                "initiator_name": initiator_name,
+                "message_id": message_id,
+                "message": (
+                    f"{initiator_name} mentioned you in [{conversation.name}]()"
+                    if initiator_name
+                    else f"You were mentioned in [{conversation.name}]()"
+                ),
+            },
+            'event_type': NotificationEventTypes.chat_user_mentioned
+        }
+    )
+
+
 def get_entity_details(
         entity_name: ParticipantTypes,
         entity_meta: EntityMetaType
 ) -> dict | None:
     match entity_name:
         # todo: handle some timeouts and empty responses
-        case ParticipantTypes.datasource:
-            meta: ParticipantEntityDatasource = ParticipantEntityDatasource.parse_obj(entity_meta)
-            return rpc_tools.RpcMixin().rpc.timeout(
-                5
-            ).datasources_get_datasource_by_id(
-                project_id=meta.project_id,
-                datasource_id=meta.id,
-                first_existing_version=True
-            )
-
         case ParticipantTypes.application:
             meta: ParticipantEntityApplication = ParticipantEntityApplication.parse_obj(entity_meta)
             return this.module.get_application_by_id(

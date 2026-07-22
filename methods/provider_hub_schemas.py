@@ -159,6 +159,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 prop_obj = {}
                 #
                 data_type = data.type.value
+                default_value = getattr(data, "default", None)
                 #
                 if data_type in ["Text"]:
                     prop_obj["type"] = "string"
@@ -174,6 +175,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     prop_obj["type"] = "integer"
                 elif data_type in ["Bool"]:
                     prop_obj["type"] = "boolean"
+                elif data_type in ["JSON"]:
+                    prop_obj["type"] = "array" if isinstance(default_value, list) else "object"
                 else:
                     prop_obj["type"] = "object"
                 prop_obj["title"] = prettify_title(key)
@@ -192,8 +195,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                             if shema_key in prop_obj:
                                 continue
                             prop_obj[shema_key] = shema_value
-                        # mark the individual property object as configuration to be able to handle it as other toolkits in the UI currently
-                        prop_obj["type"] = "configuration"
+                        is_reference_field = any(
+                            marker in schema_extra
+                            for marker in ("toolkit_types", "agent_tags", "pipeline_tags")
+                        )
+                        # Keep array semantics for reference pickers; other enriched fields are
+                        # still treated as configuration-aware properties by the UI.
+                        if not is_reference_field:
+                            prop_obj["type"] = "configuration"
                 except Exception:  # pylint: disable=broad-except
                     log.exception("Failed to merge json_schema_extra for %s", key)
                 #

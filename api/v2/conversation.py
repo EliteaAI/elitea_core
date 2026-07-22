@@ -1,15 +1,44 @@
-from flask import request
+from flask import request, current_app
 from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 from pylon.core.tools import log
 
+
+from ...models.pd.conversation import ConversationUpdate
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.support_utils import get_support_config
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Get Conversation",
-        description="Get detailed information about a specific conversation.",
-        mcp_tool=True
+        description="Retrieve full details of a specific conversation including participants and message history",
+        mcp_description="""
+        USE to retrieve the full conversation record including its participants and recent messages in a single call.
+
+        DO NOT USE when you only need the message list without conversation metadata → use get_messages.
+        DO NOT USE to list all conversations → use list_conversations.
+
+        Key distinction: this returns both the conversation record AND messages. get_messages returns only the
+        message list with richer filtering.
+
+        Examples:
+        1. Get conversation 42 with last 20 messages: GET .../conversation/prompt_lib/1/42?messages_limit=20&sort_order=desc
+        2. Get conversation with messages in chronological order: ?sort_order=acs (default).
+        """,
+        parameters=[
+            {"name": "messages_limit", "in": "query", "required": False,
+             "schema": {"type": "integer", "default": 100},
+             "description": "Maximum number of messages to include in the response."},
+            {"name": "messages_offset", "in": "query", "required": False,
+             "schema": {"type": "integer", "default": 0},
+             "description": "Offset for message pagination."},
+            {"name": "sort_order", "in": "query", "required": False,
+             "schema": {"type": "string", "default": "acs"},
+             "description": "Message sort order: 'acs' (chronological) or 'desc' (newest first)."},
+        ],
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.details"],
@@ -22,17 +51,56 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_id = auth.current_user().get("id")
         rpc = rpc_tools.RpcMixin().rpc
 
+        messages_limit = request.args.get('messages_limit', 100, type=int)
+        messages_offset = request.args.get('messages_offset', 0, type=int)
+
+        sort_order = request.args.get('sort_order', 'acs')
+
+        support_config = get_support_config()
+        is_support_project = support_config.get('project_id') == project_id
+
         result = rpc.timeout(5).chat_get_conversation_details(
             project_id=project_id,
             conversation_id=conversation_id,
             user_id=user_id,
+            check_ownership=not is_support_project,
+            messages_limit=messages_limit,
+            messages_offset=messages_offset,
+            sort_order=sort_order,
+            return_json=True,
         )
 
         if not result:
             return {'error': f'No such conversation with id {conversation_id}'}, 400
 
-        return result, 200
+        # result is a pre-encoded JSON string; return a bare Response so flask_restful
+        # passes it through verbatim instead of re-serializing it.
+        return current_app.response_class(result, status=200, mimetype='application/json')
 
+    @register_openapi(
+        name="Update Conversation",
+        description="Update a conversation's name, instructions, privacy, folder assignment, or metadata",
+        mcp_description="""
+        USE to rename a conversation, add/change its system instructions, move it into a folder, or change its
+        privacy setting.
+
+        DO NOT USE to send messages → use send_message.
+        DO NOT USE to change participant-level LLM settings → use configure_participant.
+
+        Folder movement: to move a conversation into folder 5: { 'folder_id': 5 }. To remove from folder:
+        { 'folder_id': null }.
+
+        Examples:
+        1. Rename: { 'name': 'Sprint 12 Review' }
+        2. Set system instructions: { 'instructions': 'Always respond in bullet points.' }
+        3. Make public: { 'is_private': false } (not allowed in public project).
+        4. Move to folder: { 'folder_id': 3 }
+        """,
+        request_body=ConversationUpdate,
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.update"],
         "recommended_roles": {
@@ -45,22 +113,54 @@ class PromptLibAPI(api_tools.APIModeHandler):
         log.debug(f"Update conversation {conversation_id} with data: {data}")
         rpc = rpc_tools.RpcMixin().rpc
 
-        result = rpc.timeout(5).chat_update_conversation_rpc(
-            project_id=project_id,
-            conversation_id=conversation_id,
-            name=data.get('name'),
-            instructions=data.get('instructions'),
-            is_private=data.get('is_private'),
-            is_hidden=data.get('is_hidden'),
-            meta=data.get('meta'),
-            attachment_participant_id=data.get('attachment_participant_id'),
-        )
+        kwargs = {
+            'project_id': project_id,
+            'conversation_id': conversation_id,
+            'name': data.get('name'),
+            'instructions': data.get('instructions'),
+            'is_private': data.get('is_private'),
+            'is_hidden': data.get('is_hidden'),
+            'meta': data.get('meta'),
+            'attachment_participant_id': data.get('attachment_participant_id'),
+        }
+
+        if 'folder_id' in data:
+            kwargs['folder_id'] = data['folder_id']
+            kwargs['update_folder'] = True
+
+        result = rpc.timeout(5).chat_update_conversation_rpc(**kwargs)
 
         if not result.get('success'):
             error = result.get('error', 'Failed to update conversation')
             return {"error": error}, 400
 
         return result.get('conversation'), 200
+
+    @register_openapi(
+        name="Delete Conversation",
+        description="Delete a conversation by ID.",
+        tags=["elitea_core/chat"],
+        available_to_users=True,
+    )
+    @auth.decorators.check_api({
+        "permissions": ["models.chat.conversations.delete"],
+        "recommended_roles": {
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
+        }})
+    @api_tools.endpoint_metrics
+    def delete(self, project_id: int, conversation_id: int):
+        rpc = rpc_tools.RpcMixin().rpc
+
+        result = rpc.timeout(5).chat_delete_conversation_rpc(
+            project_id=project_id,
+            conversation_id=conversation_id,
+        )
+
+        if not result.get('success'):
+            return {"error": result.get('error', 'Conversation not found')}, 404
+
+        return {}, 204
 
 
 class API(api_tools.APIBase):

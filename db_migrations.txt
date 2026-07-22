@@ -36,12 +36,23 @@ ALTER TABLE {pid}.application_version_tag_association ADD PRIMARY KEY (version_i
 
 
 # Toolkit type rename migration (for provider toolkit renames like SyngenToolkit -> Syngen)
-# Run with dry_run=true first to see what would be changed
-# There is a possibility to run a migration in DRY_RUN mode. For this pass in the payload dry_run=True. For all projects just left project_id value as 0.
+# Run with dry_run=true first to see what would be changed.
+# Pass project_id=0 to apply across all projects.
+# Updates per tool: type, settings.toolkit, settings.provider, meta.label,
+# meta.interface.app_url, meta.interface.create_url.
+# Idempotent: re-running matches both old and new type and only touches stale fields.
 curl -X POST https://<url>/api/v2/elitea_core/toolkit_type_rename_migration/administration \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"project_id": 0, "dry_run": true}'
+
+# Provider-slug rename (e.g. deepwiki -> wikis): pass old_provider/new_provider so
+# settings.provider and the slug inside meta.interface.{app_url,create_url} get rewritten too.
+# Already covered by defaults in TOOLKIT_TYPE_RENAMES, shown here as an explicit override example.
+curl -X POST https://<url>/api/v2/elitea_core/toolkit_type_rename_migration/administration \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": 0, "dry_run": false, "renames": {"deepwiki_Deepwiki": {"new_type": "wikis_Wikis", "old_toolkit": "Deepwiki", "new_toolkit": "Wikis", "old_provider": "deepwiki", "new_provider": "wikis"}}}'
 
 curl -X POST https://<url>/api/v2/elitea_core/index_features_migration/administration \
   -H "Authorization: Bearer <token>" \
@@ -132,3 +143,42 @@ Run admin task migrate_jira_confluence_hosting with param: project_id=all
 
 Run admin task migrate_toolkit_selected_tools with params: artifact;listFiles>list_files,createFile>create_file,readFile>read_file,deleteFile>delete_file,appendData>append_data,createNewBucket>create_new_bucket;project_id=all;dry_run
 Run admin task migrate_toolkit_selected_tools with params: artifact;listFiles>list_files,createFile>create_file,readFile>read_file,deleteFile>delete_file,appendData>append_data,createNewBucket>create_new_bucket;project_id=all
+
+# Merge legacy admin-publish "shell" applications back into their originals (Bug #4643)
+Run admin task migrate_admin_shell_to_inplace with param: project_id=all;dry_run
+Run admin task migrate_admin_shell_to_inplace with param: project_id=all
+
+# ADO project migration: Move project from configuration to toolkit level (Issue #3620)
+# Migrates 'project' field from ADO configuration to individual toolkit settings.
+# Run with dry_run first to verify expected changes.
+Run admin task migrate_ado_project_to_toolkit with param: project_id=all;dry_run
+Run admin task migrate_ado_project_to_toolkit with param: project_id=all
+
+# EL-4389: Rename get_file_type -> get_file_metadata in artifact toolkit
+# The tool was replaced by get_file_metadata (adds per-type read_file hints).
+# Run dry_run first to verify expected changes.
+Run admin task migrate_toolkit_selected_tools with params: artifact;get_file_type>get_file_metadata;project_id=all;dry_run
+Run admin task migrate_toolkit_selected_tools with params: artifact;get_file_type>get_file_metadata;project_id=all
+
+# Bug #5357: Rewrite legacy Confluence api_version='3' -> '2' in toolkit settings
+# The api_version Literal was renumbered (old ['Auto','2','3'] -> new ['Auto','1','2']),
+# so toolkits stored with api_version='3' now fail Pydantic validation in the UI.
+# Only the unambiguous '3' -> '2' case is migrated; existing '2' values are left alone.
+# Idempotent; run dry_run first to verify expected changes.
+Run admin task migrate_confluence_api_version with param: project_id=all;dry_run
+Run admin task migrate_confluence_api_version with param: project_id=all
+
+# Issue #5694: Backfill inventory ask tool into persisted selected_tools for existing inventories.
+# Applies only to toolkits/mappings that already store an explicit selected_tools list and are missing ask.
+# Empty/missing selected_tools is left untouched because that state is treated as unrestricted by current runtime flows.
+Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project_id=all;dry_run
+Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project_id=all
+
+# Issue #5701: Skill publishing schema — skills.shared_owner_id/shared_id (+ partial
+# unique index) and skill_versions.status (NOT NULL default 'draft', indexed).
+# The ORM selects status on every Skills read, so unmigrated schemas fail with
+# UndefinedColumn. Normally applied automatically at boot (config flag
+# skill_publish_auto_migrate, default on); run manually if that flag is disabled or
+# the boot log shows "skill publish schema: auto-migration failed".
+# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+Run admin task migrate_skill_publish_columns with param: project_id=all

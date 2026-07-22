@@ -1,19 +1,21 @@
 import os
 import re
 
+from collections import OrderedDict
 from json import dumps
 from pathlib import Path
 from queue import Empty
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 
 from pylon.core.tools import module, log
 
-from tools import db, theme, config as c, auth, context, this
+from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
 
 from .utils.sio_utils import SioEvents
 from .scripts.tool_icons import download_github_repo_zip, unzip_file
 from .utils.prompt_eliminate_utils import prompt_2_agent_migration
+from .sio.asr import on_whisper_call_done
 
 
 LEGACY_CONFIG_MODULES = ("elitea_ui", "promptlib_shared", "applications")
@@ -33,21 +35,6 @@ class Module(module.ModuleModel):
         #
         if event_node_config is not None:
             self.event_node = arbiter.make_event_node(config=event_node_config)
-        else:
-            module_manager = self.context.module_manager
-            #
-            for module_name in ["datasources"]:
-                if module_name in module_manager.modules:
-                    cfg_module = module_manager.modules[module_name].module
-                    #
-                    clone_config = cfg_module.event_node.clone_config
-                    if clone_config is None:
-                        continue
-                    #
-                    clone_config = clone_config.copy()
-                    #
-                    self.event_node = arbiter.make_event_node(config=clone_config)
-                    break
         #
         if self.event_node is None:
             raise ValueError("No event_node config")
@@ -75,6 +62,23 @@ class Module(module.ModuleModel):
             query_wait=5,
             watcher_max_wait=3,
         )
+        # Task callback state (used by task_status_changed in methods/task_callbacks.py).
+        # Must be initialized here in __init__ — the callback is registered in init() via
+        # task_node.subscribe_to_task_statuses, which can fire before ready() runs.
+        self.callback_tasks = {}
+        self.active_index_tasks = OrderedDict()
+        self.active_index_tasks_max = 4096
+        self.recently_stopped_index_tasks = OrderedDict()
+        # Marked for EVERY stopped task (a late in_progress can't be known in advance), so
+        # keep the cap generous to avoid churning out an index task's entry before its late
+        # in_progress event lands on a busy platform.
+        self.recently_stopped_index_tasks_max = 8192
+        # Guards active_index_tasks + recently_stopped_index_tasks: register (in_progress
+        # event) and mark+drain ('stopped' callback) run on different threads. Held only
+        # around dict ops, never during the cancel's DB/vault I/O.
+        self.active_index_tasks_lock = Lock()
+        self.not_starting_task_event = Event()
+        self.not_starting_task_event.set()
         # logs in-memory cache
         self.task_logs = {}
         #
@@ -85,6 +89,13 @@ class Module(module.ModuleModel):
         #
         self.application_icon_path = base_path.joinpath(
             config.get("application_icon_subpath", "application_icon")
+        )
+        #
+        self.skill_icon_path = base_path.joinpath(
+            config.get("skill_icon_subpath", "skill_icon")
+        )
+        self.project_icon_path = base_path.joinpath(
+            config.get("project_icon_subpath", "project_icon")
         )
         #
         self.application_tool_icon_path = base_path.joinpath(
@@ -103,7 +114,6 @@ class Module(module.ModuleModel):
             'commit_sha': '',
             'commit_ref': '',
         }
-        self.standalone_mode = False
         self.release_owner = None
         self.release_repo = None
         self.default_release = None
@@ -178,6 +188,40 @@ class Module(module.ModuleModel):
             plugin_name="elitea_core",
             version=self.descriptor.metadata.get("version", "1.0.0"),
             description="Elitea core API endpoints",
+            tags=[
+                {
+                    "name": "elitea_core/applications",
+                    "description": "Create, manage, execute, export, import, fork, and publish agents/pipelines and their versions within a project.",
+                },
+                {
+                    "name": "elitea_core/analytics",
+                    "description": "Project-level analytics for AI adoption: LLM usage, agent/pipelines runs, tools/toolkits runs, user engagement, and daily trends.",
+                },
+                {
+                    "name": "elitea_core/authors",
+                    "description": "Author profile and aggregated contribution statistics (agents, pipelines, toolkits, conversations).",
+                },
+                {
+                    "name": "elitea_core/chat",
+                    "description": "Manage conversations, send messages, upload attachments, edit canvases, and manage conversation participants.",
+                },
+                {
+                    "name": "elitea_core/discovery",
+                    "description": "Discover available tags and search filter options across agents, pipelines, toolkits, and credentials.",
+                },
+                {
+                    "name": "elitea_core/mcp",
+                    "description": "Sync tools from remote MCP servers and proxy OAuth token exchange for MCP integrations.",
+                },
+                {
+                    "name": "elitea_core/runtime",
+                    "description": "Runtime and infrastructure utility endpoints.",
+                },
+                {
+                    "name": "elitea_core/toolkits",
+                    "description": "Browse available toolkit types and manage installed toolkit instances within a project.",
+                },
+            ],
             api_module=api_v2,
         )
 
@@ -201,9 +245,27 @@ class Module(module.ModuleModel):
         self.publish_validation_rules = guardrail.get(
             'publish_validation_rules', '',
         )
+        # Extra admin-added agent categories (on top of DEFAULT_AGENT_CATEGORIES).
+        # The active list is resolved live by category_utils.get_active_categories();
+        # this attribute is cached only for logging visibility at init / reload.
+        self.extra_agent_categories = guardrail.get('agent_categories', [])
         log.info("Publishing guardrail: blocked=%s, whitelist=%s, custom_rules=%s",
                  self.is_publish_blocked, self.publish_whitelist_project_ids,
                  bool(self.publish_validation_rules))
+
+    def _init_skill_publishing_guardrail(self):
+        """Log skill publishing guardrail settings.
+
+        The block toggle, whitelist and validation rules are read live from
+        config at use time (see skill_publish_utils), so admin changes take
+        effect without a reload. Skill categories reuse the shared agent
+        category list (publishing_guardrail.agent_categories).
+        """
+        guardrail = self.descriptor.config.get('skill_publishing_guardrail', {})
+        log.info("Skill publishing guardrail (live): blocked=%s, whitelist=%s, custom_rules=%s",
+                 bool(guardrail.get('is_publish_blocked', False)),
+                 guardrail.get('whitelist_project_ids', []),
+                 bool(guardrail.get('publish_validation_rules', '')))
 
     def preload(self):
         """Preload handler - download UI bundle if needed"""
@@ -235,6 +297,12 @@ class Module(module.ModuleModel):
             log.exception("Failed to preload UI bundle")
 
     def ready(self):
+        # ORM create_all() creates missing tenant tables but never expands an
+        # existing one. Apply the transactionally committed compatibility guard
+        # before any chat callback can write the normalized step rows.
+        from .utils.trace_step_schema import ensure_trace_step_schema
+        ensure_trace_step_schema(db.engine)
+
         try:
             from tools import this
             this.for_module("admin").module.register_admin_task(
@@ -259,17 +327,100 @@ class Module(module.ModuleModel):
                 "migrate_jira_confluence_hosting", self.migrate_jira_confluence_hosting
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_confluence_api_version", self.migrate_confluence_api_version
+            )
+            this.for_module("admin").module.register_admin_task(
                 "migrate_mcp_client_secrets", self.migrate_mcp_client_secrets
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_conversation_source_to_elitea", self.migrate_conversation_source_to_elitea
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_admin_shell_to_inplace", self.migrate_admin_shell_to_inplace
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_agent_version_null_instructions", self.migrate_agent_version_null_instructions
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_ado_project_to_toolkit", self.migrate_ado_project_to_toolkit
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_llm_model", self.migrate_llm_model
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_embedding_model", self.migrate_embedding_model
+            )
+            this.for_module("admin").module.register_admin_task(
+                "collections_removal_migration", self.collections_removal_migration, group="R-2.0.4"
+            )
+            this.for_module("admin").module.register_admin_task(
+                "datasource_removal_migration", self.datasource_removal_migration, group="R-2.0.4"
+            )
+            this.for_module("admin").module.register_admin_task(
+                "cleanup_oversized_message_meta", self.cleanup_oversized_message_meta
+            )
+            this.for_module("admin").module.register_admin_task(
+                "backfill_legacy_trace_steps", self.backfill_legacy_trace_steps, group="R-2.0.5"
+            )
+            this.for_module("admin").module.register_admin_task(
+                "heal_llm_settings_family_conflicts", self.heal_llm_settings_family_conflicts, group="R-2.0.5"
+            )
+            this.for_module("admin").module.register_admin_task(
+                "reassign_agent_category", self.reassign_agent_category,
+            )
+            this.for_module("admin").module.register_admin_task(
+                "rename_agent_category", self.rename_agent_category,
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_skill_publish_columns", self.migrate_skill_publish_columns, group="R-2.0.5",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "rename_skill_category", self.rename_skill_category,
+            )
+            this.for_module("admin").module.register_admin_task(
+                "reassign_skill_category", self.reassign_skill_category,
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
+        self._ensure_skill_publish_schema()
+
         self.handle_pylon_modules_initialized()
 
+    def _ensure_skill_publish_schema(self):
+        """Startup safety net: apply the skill-publishing columns to any project
+        schema that predates them, so a deploy provisions the environment without
+        an operator having to run the migration task. Runs off-thread; guarded by a
+        catalog check so steady-state boots issue no DDL. New projects are already
+        covered by create_all."""
+        if not self.descriptor.config.get("skill_publish_auto_migrate", True):
+            return
+
+        def _run():
+            try:
+                from .utils.skill_publish_schema import (
+                    project_ids_missing_skill_columns,
+                    apply_skill_publish_columns,
+                )
+                pending = project_ids_missing_skill_columns()
+                if not pending:
+                    return
+                log.info("skill publish schema: auto-migrating %s project(s)", len(pending))
+                migrated, failed = apply_skill_publish_columns(pending)
+                log.info(
+                    "skill publish schema: auto-migration done (migrated=%s failed=%s)",
+                    len(migrated), len(failed),
+                )
+            except Exception:  # pylint: disable=W0703
+                log.exception("skill publish schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
+
         try:
+            scheduler_cfg = self.descriptor.config.get('scheduler', {}) or {}
+            idx_cfg = scheduler_cfg.get('index_scheduling', {}) or {}
+            pipe_cfg = scheduler_cfg.get('pipeline_scheduling', {}) or {}
+
             self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
                 'rpc_func': 'applications_empty_state',
                 'rpc_kwargs': {'days_to_retain': 1},
@@ -281,8 +432,8 @@ class Module(module.ModuleModel):
                 'rpc_func': 'applications_check_index_scheduling',
                 'rpc_kwargs': {},
                 'name': 'index_scheduling',
-                'cron': '* * * * *',
-                'active': True
+                'cron': idx_cfg.get('cron', '* * * * *'),
+                'active': bool(idx_cfg.get('enabled', True)),
             })
             self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
                 'rpc_func': 'elitea_core_cleanup_stale_chunks',
@@ -298,6 +449,16 @@ class Module(module.ModuleModel):
                 'cron': '0 * * * *',
                 'active': True
             })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                'rpc_func': 'pipelines_check_scheduling',
+                'rpc_kwargs': {},
+                'name': 'pipeline_scheduling',
+                'cron': pipe_cfg.get('cron', '* * * * *'),
+                'active': bool(pipe_cfg.get('enabled', True)),
+            })
+            # Reconcile existing rows with current config (handles the case
+            # where YAML was edited while pylon was down).
+            self._apply_scheduler_runtime_config()
         except Empty:
             log.warning('No scheduling plugin found')
 
@@ -332,51 +493,74 @@ class Module(module.ModuleModel):
 
         # Expose elitea_core config as a shared tool for cross-plugin access
         # Usage: from tools import elitea_config; elitea_config.get("ai_project_id", 1)
+        # Unregister first to handle hot-reload (pylon does not call deinit on old module)
+        try:
+            self.descriptor.unregister_tool('elitea_config')
+        except RuntimeError:
+            pass  # Not yet registered on first startup
         self.descriptor.register_tool('elitea_config', self.descriptor.config)
 
         # Initialize elitea_ui FIRST (it originally loaded before elitea_core)
         self.elitea_ui_init()
 
-        theme.register_mode_section(
-            "administration", "elitea", "EliteA",
-            kind="holder",
-            permissions={
-                "permissions": ["runtime.elitea"],
-                "recommended_roles": {
-                    "administration": {"admin": True, "viewer": False, "editor": False},
-                    "default": {"admin": True, "viewer": False, "editor": False},
-                    "developer": {"admin": True, "viewer": False, "editor": False},
-                }
-            },
-            location="left",
-            icon_class="fas fa-info-circle fa-fw",
-        )
-        theme.register_mode_subsection(
-            "administration", "elitea",
-            "ui", "UI",
-            title="UI",
-            kind="slot",
-            permissions={
-                "permissions": ["runtime.elitea.ui"],
-                "recommended_roles": {
-                    "administration": {"admin": True, "viewer": False, "editor": False},
-                    "default": {"admin": True, "viewer": False, "editor": False},
-                    "developer": {"admin": True, "viewer": False, "editor": False},
-                }
-            },
-            prefix="admin_elitea_ui_",
-            icon_class="fas fa-server fa-fw",
-        )
+        auth.register_permissions({
+            "permissions": ["runtime.elitea"],
+            "recommended_roles": {
+                "administration": {"admin": True, "viewer": False, "editor": False},
+                "default": {"admin": True, "viewer": False, "editor": False},
+                "developer": {"admin": True, "viewer": False, "editor": False},
+            }
+        })
+        auth.register_permissions({
+            "permissions": ["runtime.elitea.ui"],
+            "recommended_roles": {
+                "administration": {"admin": True, "viewer": False, "editor": False},
+                "default": {"admin": True, "viewer": False, "editor": False},
+                "developer": {"admin": True, "viewer": False, "editor": False},
+            }
+        })
 
         # self.init_db()
         # TaskNode
         self.task_node.start()
         self.task_node.subscribe_to_task_statuses(self.task_status_changed)
+        # Maintenance gate: one check at the shared dispatch point covers every
+        # start_task callsite (predicts, index, TTS/ASR, pipeline, parallel
+        # child dispatch). Structurally prevents a new predict entry point from
+        # being missed. Callers that want entry-point-specific error shapes
+        # catch MaintenanceInProgressError and translate; unhandled propagation
+        # is intentional and preferable to silently returning None (which is
+        # indistinguishable from pool saturation).
+        _original_start_task = self.task_node.start_task
+
+        def _maintenance_gated_start_task(*args, **kwargs):
+            from .utils.maintenance_gate import is_maintenance_active
+            from .utils.exceptions import MaintenanceInProgressError
+            if is_maintenance_active():
+                task_name = args[0] if args else kwargs.get("task_name") or "?"
+                log.info(
+                    "task_node.start_task: rejected — maintenance mode active (task=%s)",
+                    task_name,
+                )
+                raise MaintenanceInProgressError(task_name=task_name)
+            return _original_start_task(*args, **kwargs)
+
+        self.task_node.start_task = _maintenance_gated_start_task
         # Events
         self.event_node.subscribe("application_stream_response", self.stream_response)
         self.event_node.subscribe("application_full_response", self.conversation_message_proxy)
         self.event_node.subscribe("application_partial_response", self.conversation_partial_message_proxy)
         self.event_node.subscribe("application_child_message", self.child_message_proxy)
+        # Voice TTS events (indexer → pylon_main → browser)
+        self.event_node.subscribe("voice_tts_audio_chunk", self.voice_tts_audio_chunk)
+        self.event_node.subscribe("voice_tts_done", self.voice_tts_done)
+        self.event_node.subscribe("voice_tts_error", self.voice_tts_error)
+        # Voice ASR events (indexer → pylon_main → browser)
+        self.event_node.subscribe("voice_asr_transcript_delta", self.voice_asr_transcript_delta)
+        self.event_node.subscribe("voice_asr_transcript_done", self.voice_asr_transcript_done)
+        self.event_node.subscribe("voice_asr_error", self.voice_asr_error)
+        self.event_node.subscribe("voice_asr_speech_started", self.voice_asr_speech_started)
+        self.event_node.subscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
         # self.event_node.subscribe("log_data", self.log_data)
         # configurations
         self.event_node.subscribe("application_toolkit_configurations_collected", self.toolkit_configurations_collected)
@@ -395,6 +579,7 @@ class Module(module.ModuleModel):
         self.event_node.emit("application_mcp_prebuilt_config_request", dict())
         #
         self.application_icon_path.mkdir(parents=True, exist_ok=True)
+        self.skill_icon_path.mkdir(parents=True, exist_ok=True)
         self.application_tool_icon_path.mkdir(parents=True, exist_ok=True)
         self.default_entity_icons_path.mkdir(parents=True, exist_ok=True)
         #
@@ -428,6 +613,13 @@ class Module(module.ModuleModel):
         # MCP SSE initialization
         self.mcp_sse_init()
 
+        # Webhook public URL registration
+        # URL pattern: /api/v2/{module_name}/webhook/prompt_lib/{project_id}/{version_id}/{webhook_type}
+        self.webhook_api_url_re = \
+            f"/api/v2/{this.module_name}/webhook/prompt_lib/[0-9]+/[0-9]+/(github|gitlab|custom)"
+        log.info(f"Making webhook API url public: {self.webhook_api_url_re}")
+        auth.add_public_rule({"uri": self.webhook_api_url_re})
+
         # Provider Hub initialization
         self.provider_hub_init()
 
@@ -436,9 +628,10 @@ class Module(module.ModuleModel):
 
         # Publishing guardrail (environment-wide block)
         self._init_publishing_guardrail()
+        self._init_skill_publishing_guardrail()
 
-        from .models import all, folder, message_group, participants
-        from .models.message_items import base, text, canvas
+        from .models import all, folder, message_group, message_trace_step, participants
+        from .models.message_items import base, text, canvas, context
 
         self.thread = Thread(
             target=self.listen_in_memory_event
@@ -485,6 +678,66 @@ class Module(module.ModuleModel):
         if payload.get('sio_event') == SioEvents.chat_predict.value:
             self.context.event_manager.fire_event('chat_child_message_save', payload)
 
+    # ------------------------------------------------------------------
+    # Voice TTS/ASR event_node handlers (indexer → pylon_main → browser)
+    # ------------------------------------------------------------------
+
+    def voice_tts_audio_chunk(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        audio = payload.get("audio")
+        sample_rate = payload.get("sample_rate", 24000)
+        if not sid or not audio:
+            return
+        self.context.sio.emit(
+            SioEvents.tts_audio_chunk,
+            {"audio": audio, "sample_rate": sample_rate},
+            to=sid,
+        )
+
+    def voice_tts_done(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        if sid:
+            data = {}
+            char_end = payload.get("char_end")
+            if char_end is not None:
+                data["char_end"] = char_end
+            self.context.sio.emit(SioEvents.tts_done, data, to=sid)
+
+    def voice_tts_error(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        error = payload.get("error", "TTS error")
+        if sid:
+            self.context.sio.emit(SioEvents.tts_error, {"error": error}, to=sid)
+
+    def voice_asr_transcript_delta(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        delta = payload.get("delta", "")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_transcript_delta, {"delta": delta}, to=sid)
+
+    def voice_asr_transcript_done(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        transcript = payload.get("transcript", "")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_transcript_done, {"transcript": transcript}, to=sid)
+            on_whisper_call_done(sid)
+
+    def voice_asr_error(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        error = payload.get("error", "ASR error")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_error, {"error": error}, to=sid)
+
+    def voice_asr_speech_started(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_speech_started, {}, to=sid)
+
+    def voice_asr_vad_flush(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        if sid:
+            self.context.sio.emit(SioEvents.asr_vad_flush, {}, to=sid)
+
     def deinit(self):
         log.info('De-initializing')
         self.thread._stop()
@@ -505,6 +758,15 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("application_toolkits_collected", self.toolkits_collected)
         self.event_node.unsubscribe("application_file_loaders_collected", self.index_types_collected)
         self.event_node.unsubscribe("application_mcp_prebuilt_config_collected", self.mcp_prebuilt_config_collected)
+        # Voice TTS/ASR events
+        self.event_node.unsubscribe("voice_tts_audio_chunk", self.voice_tts_audio_chunk)
+        self.event_node.unsubscribe("voice_tts_done", self.voice_tts_done)
+        self.event_node.unsubscribe("voice_tts_error", self.voice_tts_error)
+        self.event_node.unsubscribe("voice_asr_transcript_delta", self.voice_asr_transcript_delta)
+        self.event_node.unsubscribe("voice_asr_transcript_done", self.voice_asr_transcript_done)
+        self.event_node.unsubscribe("voice_asr_error", self.voice_asr_error)
+        self.event_node.unsubscribe("voice_asr_speech_started", self.voice_asr_speech_started)
+        self.event_node.unsubscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
 
         # TaskNode
         self.task_node.stop()
@@ -529,10 +791,43 @@ class Module(module.ModuleModel):
                 "migrate_jira_confluence_hosting", self.migrate_jira_confluence_hosting
             )
             this.for_module("admin").module.unregister_admin_task(
+                "migrate_confluence_api_version", self.migrate_confluence_api_version
+            )
+            this.for_module("admin").module.unregister_admin_task(
                 "migrate_mcp_client_secrets", self.migrate_mcp_client_secrets
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_conversation_source_to_elitea", self.migrate_conversation_source_to_elitea
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_admin_shell_to_inplace", self.migrate_admin_shell_to_inplace
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_agent_version_null_instructions", self.migrate_agent_version_null_instructions
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_ado_project_to_toolkit", self.migrate_ado_project_to_toolkit
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_llm_model", self.migrate_llm_model
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_embedding_model", self.migrate_embedding_model
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "collections_removal_migration", self.collections_removal_migration
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "datasource_removal_migration", self.datasource_removal_migration
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "cleanup_oversized_message_meta", self.cleanup_oversized_message_meta
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "backfill_legacy_trace_steps", self.backfill_legacy_trace_steps
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "heal_llm_settings_family_conflicts", self.heal_llm_settings_family_conflicts
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
@@ -544,6 +839,43 @@ class Module(module.ModuleModel):
         """Re-config"""
         # Reconfigure elitea_ui settings
         self._configure_elitea_ui()
+        # Push admin-configured cron / enabled flag to the scheduling plugin
+        # so cadence and disable changes apply without a pylon restart.
+        self._apply_scheduler_runtime_config()
+        # Refresh cached MCP exposure settings so admin toggle changes take
+        # effect immediately without requiring a container restart.
+        mcp_config = self.descriptor.config.get('mcp_exposure', {})
+        self.mcp_exposure_enabled = mcp_config.get('enabled', True)
+        self.mcp_in_menu_enabled = mcp_config.get('in_menu', True)
+        log.info(f"MCP config reloaded: exposure={self.mcp_exposure_enabled}, in_menu={self.mcp_in_menu_enabled}")
+
+    def _apply_scheduler_runtime_config(self):
+        """Push admin-configured scheduler cron/enabled flags into DB rows.
+
+        Scheduler reads cron/active live from the schedule table on each
+        poll.
+        """
+        scheduler_cfg = self.descriptor.config.get('scheduler', {}) or {}
+        targets = (
+            ('index_scheduling', scheduler_cfg.get('index_scheduling', {}) or {}),
+            ('pipeline_scheduling', scheduler_cfg.get('pipeline_scheduling', {}) or {}),
+        )
+        for name, sub in targets:
+            cron = sub.get('cron')
+            enabled = sub.get('enabled')
+            if cron is None and enabled is None:
+                continue
+            try:
+                self.context.rpc_manager.timeout(5).scheduling_update_schedule(
+                    name=name,
+                    cron=cron,
+                    active=bool(enabled) if enabled is not None else None,
+                )
+            except Exception as e:
+                log.error(
+                    "scheduling_update_schedule failed: name=%s error=%r",
+                    name, e,
+                )
 
     def create_scheduling(self):
         schedule1_data = {
@@ -594,7 +926,7 @@ class Module(module.ModuleModel):
 
     @auth.decorators.sio_disconnect()
     def sio_disconnect(self, sid, *args, **kwargs):
-        """Handle SocketIO disconnect for MCP servers"""
+        """Handle SocketIO disconnect for MCP servers, ASR and TTS"""
         removed_servers = self.servers_storage.remove_servers(sid)
         for server in removed_servers:
             log.debug(f"[MCP_CLIENT] Server {server['name']} disconnected")
@@ -602,6 +934,10 @@ class Module(module.ModuleModel):
                 event=SioEvents.mcp_status,
                 data={"connected": False, "project_id": server['project_id'], "type": server['name']},
             )
+        # Cancel any in-progress ASR / TTS tasks for the disconnected sid
+        from .sio.asr import _close_session as _asr_close_session
+        _asr_close_session(self, sid)
+        self.event_node.emit("voice_events", {"type": "tts_cancel", "sid": sid})
 
     def schedule_mcp_servers_handler(self):
         """Schedule periodic MCP server validation task"""
@@ -615,37 +951,22 @@ class Module(module.ModuleModel):
     # Provider Hub Methods
     def provider_hub_init(self):
         """Initialize Provider Hub functionality"""
-        # Register admin sections
-        theme.register_mode_section(
-            "administration", "airun", "AI/Run",
-            kind="holder",
-            permissions={
-                "permissions": ["runtime.airun"],
-                "recommended_roles": {
-                    "administration": {"admin": True, "viewer": False, "editor": False},
-                    "default": {"admin": True, "viewer": False, "editor": False},
-                    "developer": {"admin": True, "viewer": False, "editor": False},
-                }
-            },
-            location="left",
-            icon_class="fas fa-info-circle fa-fw",
-        )
-        theme.register_mode_subsection(
-            "administration", "airun",
-            "serviceproviders", "ServiceProviders",
-            title="ServiceProviders",
-            kind="slot",
-            permissions={
-                "permissions": ["runtime.airun.serviceproviders"],
-                "recommended_roles": {
-                    "administration": {"admin": True, "viewer": False, "editor": False},
-                    "default": {"admin": True, "viewer": False, "editor": False},
-                    "developer": {"admin": True, "viewer": False, "editor": False},
-                }
-            },
-            prefix="admin_airun_serviceproviders_",
-            icon_class="fas fa-server fa-fw",
-        )
+        auth.register_permissions({
+            "permissions": ["runtime.airun"],
+            "recommended_roles": {
+                "administration": {"admin": True, "viewer": False, "editor": False},
+                "default": {"admin": True, "viewer": False, "editor": False},
+                "developer": {"admin": True, "viewer": False, "editor": False},
+            }
+        })
+        auth.register_permissions({
+            "permissions": ["runtime.airun.serviceproviders"],
+            "recommended_roles": {
+                "administration": {"admin": True, "viewer": False, "editor": False},
+                "default": {"admin": True, "viewer": False, "editor": False},
+                "developer": {"admin": True, "viewer": False, "editor": False},
+            }
+        })
 
     def provider_hub_deinit(self):
         """Deinitialize Provider Hub functionality"""
@@ -660,151 +981,113 @@ class Module(module.ModuleModel):
         """Initialize elitea_ui functionality (migrated from elitea_ui plugin)"""
         log.info("Initializing elitea_ui")
         #
-        # Determine mode
-        #
-        module_manager = self.context.module_manager
-        self.standalone_mode = "theme" not in module_manager.modules
-        #
         # Blueprint already initialized by descriptor.init_all()
         # Just ensure we have it
         if not hasattr(self, 'bp') or self.bp is None:
             log.warning("Blueprint not initialized, cannot complete elitea_ui_init")
             return
         #
-        if self.standalone_mode:
-            import flask as _flask  # pylint: disable=C0415
-            from pylon.core.tools.context import Context as Holder  # pylint: disable=C0415
-            #
-            # Register "default" mode landing with the framework router
-            # so "/" redirects to the EliteA UI at /app/
-            # (the framework router already handles "/" in app_router)
-            #
-            from tools import router  # pylint: disable=E0401,C0415
-            router.register_mode(
-                kind="route",
-                route="elitea_core.route_elitea_ui",
+        import flask as _flask  # pylint: disable=C0415
+        #
+        # Register "default" mode landing with the framework router
+        # so "/" redirects to the EliteA UI at /app/
+        # (the framework router already handles "/" in app_router)
+        #
+        from tools import router  # pylint: disable=E0401,C0415
+        router.register_mode(
+            kind="route",
+            route="elitea_core.route_elitea_ui",
+        )
+        #
+        # SocketIO connect handler (save auth data for SID)
+        #
+        def _standalone_sio_connect(sid, environ, *args, **kwargs):
+            auth.sio_users[sid] = auth.sio_make_auth_data(environ)
+            log.debug("SIO connect (standalone): %s", sid)
+        self.context.sio.on("connect", handler=_standalone_sio_connect)
+        #
+        # Public auth rules (moved from theme)
+        #
+        auth.add_public_rule({"uri": f'{re.escape("/socket.io/")}.*'})
+        auth.add_public_rule({"uri": re.escape("/robots.txt")})
+        auth.add_public_rule({"uri": re.escape("/favicon.ico")})
+        auth.add_public_rule({"uri": re.escape("/app/access_denied")})
+        #
+        # Set auth denied URL to styled access denied page
+        #
+        auth.descriptor.config["auth_denied_url"] = "/app/access_denied"
+        #
+        # Global error handler for styled error pages
+        # (uses app shim → register_app_hook → applies to every Flask app)
+        #
+        import traceback as _tb  # pylint: disable=C0415
+        from werkzeug.exceptions import HTTPException  # pylint: disable=C0415
+        #
+        _error_pages = {
+            400: (
+                "Bad Request",
+                "The server couldn't understand your request.",
+                ["Check that the URL is correct", "Try refreshing the page"],
+            ),
+            403: (
+                "Access Denied",
+                "Sorry, you don't have permission to access this resource.",
+                ["Your session may have expired", "You may lack the required permissions"],
+            ),
+            404: (
+                "Page Not Found",
+                "The page you're looking for doesn't exist or has been moved.",
+                ["Check that the URL is correct", "The page may have been moved or deleted"],
+            ),
+            405: (
+                "Method Not Allowed",
+                "The request method is not supported for this resource.",
+                ["Check the API documentation for allowed methods"],
+            ),
+            500: (
+                "Internal Server Error",
+                "Something went wrong on our end.",
+                ["Try again in a few moments", "If the problem persists, contact your administrator"],
+            ),
+            502: (
+                "Bad Gateway",
+                "The server received an invalid response from an upstream service.",
+                ["Try again in a few moments", "The service may be temporarily unavailable"],
+            ),
+            503: (
+                "Service Unavailable",
+                "The service is temporarily unavailable.",
+                ["Try again in a few moments", "The service may be undergoing maintenance"],
+            ),
+        }
+        _descriptor = self.descriptor
+        #
+        def _error_handler(error):
+            code = error.code if isinstance(error, HTTPException) else 500
+            log.error(
+                "Error: (%s) %s:\n%s",
+                type(error), error,
+                "".join(_tb.format_tb(error.__traceback__)),
             )
-            #
-            # Set g.theme on ALL apps for auth compatibility
-            # (uses app shim → register_app_hook → applies to every Flask app)
-            #
-            def _set_g_theme():
-                _flask.g.theme = Holder()
-                _flask.g.theme.active_section = None
-                _flask.g.theme.active_subsection = None
-                _flask.g.theme.active_mode = c.DEFAULT_MODE
-                _flask.g.theme.active_parameter = None
-            self.context.app.before_request(_set_g_theme)
-            #
-            # SocketIO connect handler (save auth data for SID)
-            #
-            def _standalone_sio_connect(sid, environ, *args, **kwargs):
-                auth.sio_users[sid] = auth.sio_make_auth_data(environ)
-                log.debug("SIO connect (standalone): %s", sid)
-            self.context.sio.on("connect", handler=_standalone_sio_connect)
-            #
-            # Public auth rules (moved from theme)
-            #
-            auth.add_public_rule({"uri": f'{re.escape("/socket.io/")}.*'})
-            auth.add_public_rule({"uri": re.escape("/robots.txt")})
-            auth.add_public_rule({"uri": re.escape("/favicon.ico")})
-            auth.add_public_rule({"uri": re.escape("/app/access_denied")})
-            #
-            # Set auth denied URL to styled access denied page
-            #
-            auth.descriptor.config["auth_denied_url"] = "/app/access_denied"
-            #
-            # Global error handler for styled error pages
-            # (uses app shim → register_app_hook → applies to every Flask app)
-            #
-            import traceback as _tb  # pylint: disable=C0415
-            from werkzeug.exceptions import HTTPException  # pylint: disable=C0415
-            #
-            _error_pages = {
-                400: (
-                    "Bad Request",
-                    "The server couldn't understand your request.",
-                    ["Check that the URL is correct", "Try refreshing the page"],
-                ),
-                403: (
-                    "Access Denied",
-                    "Sorry, you don't have permission to access this resource.",
-                    ["Your session may have expired", "You may lack the required permissions"],
-                ),
-                404: (
-                    "Page Not Found",
-                    "The page you're looking for doesn't exist or has been moved.",
-                    ["Check that the URL is correct", "The page may have been moved or deleted"],
-                ),
-                405: (
-                    "Method Not Allowed",
-                    "The request method is not supported for this resource.",
-                    ["Check the API documentation for allowed methods"],
-                ),
-                500: (
-                    "Internal Server Error",
-                    "Something went wrong on our end.",
-                    ["Try again in a few moments", "If the problem persists, contact your administrator"],
-                ),
-                502: (
-                    "Bad Gateway",
-                    "The server received an invalid response from an upstream service.",
-                    ["Try again in a few moments", "The service may be temporarily unavailable"],
-                ),
-                503: (
-                    "Service Unavailable",
-                    "The service is temporarily unavailable.",
-                    ["Try again in a few moments", "The service may be undergoing maintenance"],
-                ),
-            }
-            _descriptor = self.descriptor
-            #
-            def _error_handler(error):
-                code = error.code if isinstance(error, HTTPException) else 500
-                log.error(
-                    "Error: (%s) %s:\n%s",
-                    type(error), error,
-                    "".join(_tb.format_tb(error.__traceback__)),
-                )
-                # Return JSON for API requests
-                if _flask.request.path.startswith("/api/"):
-                    msg = str(error)
-                    if isinstance(error, HTTPException):
-                        msg = error.description
-                    return _flask.jsonify({"error": msg}), code
-                # Render styled HTML page for browser requests
-                title, message, hints = _error_pages.get(
-                    code,
-                    ("Error", "An unexpected error occurred.", ["Try again or go back to the main page"]),
-                )
-                return _descriptor.render_template(
-                    "error.html",
-                    error_code=code,
-                    error_title=title,
-                    error_message=message,
-                    error_hints=hints,
-                ), code
-            self.context.app.errorhandler(Exception)(_error_handler)
-        else:
-            #
-            # Register a mode (for admin UI switch-back)
-            #
-            from tools import theme  # pylint: disable=E0401,C0415
-            #
-            try:
-                theme.register_mode(
-                    "elitea", "EliteA",
-                    public=True,
-                )
-            except:  # pylint: disable=W0702
-                log.warning("Failed to register EliteA mode, assuming present")
-            #
-            # IMPORTANT: Change route reference from elitea_ui to elitea_core
-            theme.register_mode_landing(
-                mode="elitea",
-                kind="route",
-                route="elitea_core.route_elitea_ui",  # Changed from elitea_ui.route_elitea_ui
+            # Return JSON for API requests
+            if _flask.request.path.startswith("/api/"):
+                msg = str(error)
+                if isinstance(error, HTTPException):
+                    msg = error.description
+                return _flask.jsonify({"error": msg}), code
+            # Render styled HTML page for browser requests
+            title, message, hints = _error_pages.get(
+                code,
+                ("Error", "An unexpected error occurred.", ["Try again or go back to the main page"]),
             )
+            return _descriptor.render_template(
+                "error.html",
+                error_code=code,
+                error_title=title,
+                error_message=message,
+                error_hints=hints,
+            ), code
+        self.context.app.errorhandler(Exception)(_error_handler)
         #
         # Download UI if needed for first time
         #

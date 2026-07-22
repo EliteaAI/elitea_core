@@ -7,7 +7,7 @@ Provides server-side pagination, search, and sorting for user activity data.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c
+    from tools import api_tools, auth, config as c, register_openapi
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -42,6 +42,116 @@ if _API_AVAILABLE:
     class PromptLibAPI(api_tools.APIModeHandler):
         """Paginated user activity for analytics."""
 
+        @register_openapi(
+            name="List User Analytics",
+            description=(
+                "Returns paginated user activity statistics broken down by LLM calls, "
+                "tool runs, agent interactions, and chat events, with sorting and search."
+            ),
+            mcp_tool=True,
+            mcp_description="Use this tool when you need a paginated leaderboard or searchable list of user activity across a project. Do not use this tool when you need the detailed model/tool/agent breakdown for one individual — use Get User Analytics Detail. Do not use for project-level KPI dashboards. This is the primary list/discovery endpoint for user analytics.",
+            tags=["elitea_core/analytics"],
+            parameters=[
+                {
+                    "name": "date_from",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "Start datetime (ISO 8601). Defaults to 7 days ago.",
+                    "example": "2025-01-01T00:00:00",
+                },
+                {
+                    "name": "date_to",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "date-time"},
+                    "description": "End datetime (ISO 8601). Defaults to now.",
+                    "example": "2025-01-31T23:59:59",
+                },
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                    "description": "Page size (max 100).",
+                },
+                {
+                    "name": "offset",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "default": 0, "minimum": 0},
+                    "description": "Pagination offset.",
+                },
+                {
+                    "name": "search",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": "Filter by user email (case-insensitive partial match).",
+                },
+                {
+                    "name": "sort_by",
+                    "in": "query",
+                    "required": False,
+                    "schema": {
+                        "type": "string",
+                        "enum": [
+                            "total_events", "active_days", "llm_events",
+                            "tool_events", "agent_events", "chat_events",
+                            "errors", "user_email",
+                        ],
+                        "default": "total_events",
+                    },
+                    "description": "Column to sort by.",
+                },
+                {
+                    "name": "sort_order",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
+                    "description": "Sort direction.",
+                },
+            ],
+            responses={
+                "200": {
+                    "description": "Paginated user analytics",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "total": 18,
+                                "rows": [
+                                    {
+                                        "user_id": 42,
+                                        "user_email": "alice@example.com",
+                                        "total_events": 320,
+                                        "active_days": 14,
+                                        "llm_events": 200,
+                                        "tool_events": 90,
+                                        "agent_events": 60,
+                                        "chat_events": 45,
+                                        "errors": 5,
+                                    },
+                                    {
+                                        "user_id": 55,
+                                        "user_email": "bob@example.com",
+                                        "total_events": 180,
+                                        "active_days": 10,
+                                        "llm_events": 120,
+                                        "tool_events": 40,
+                                        "agent_events": 30,
+                                        "chat_events": 25,
+                                        "errors": 2,
+                                    },
+                                ],
+                            }
+                        }
+                    },
+                },
+                "401": {"description": "Unauthorized"},
+                "500": {"description": "Internal server error"},
+            },
+            available_to_users=True,
+        )
         @auth.decorators.check_api({
             "permissions": ["models.monitoring.tracing.view"],
             "recommended_roles": {
@@ -82,31 +192,6 @@ if _API_AVAILABLE:
 
             try:
                 with db.with_project_schema_session(None) as session:
-                    # Get actual project members to filter cross-project events
-                    actual_project_members = set()
-                    try:
-                        project_user_data = auth.list_project_users(project_id)
-                        if project_user_data:
-                            for user_id_item in project_user_data:
-                                try:
-                                    user_details = auth.get_user(user_id_item)
-                                    user_email = user_details.get('email', '') if user_details else ''
-                                    if user_email and not any([
-                                        user_email in ['system@centry.user'],
-                                        user_email.startswith('system_user_') and user_email.endswith('@centry.user')
-                                    ]):
-                                        actual_project_members.add(user_id_item)
-                                except Exception:
-                                    continue
-                    except Exception as e:
-                        log.error(f"Failed to get project users for project {project_id}: {e}")
-                        from flask import g
-                        try:
-                            if hasattr(g, 'auth') and g.auth and hasattr(g.auth, 'user_id'):
-                                actual_project_members = {g.auth.user_id}
-                        except Exception:
-                            actual_project_members = set()
-
                     base = session.query(AuditEvent).filter(
                         AuditEvent.project_id == project_id,
                         AuditEvent.user_id.isnot(None),
@@ -116,12 +201,6 @@ if _API_AVAILABLE:
                         ]),
                         ~AuditEvent.user_email.like('system_user_%@centry.user'),
                     )
-
-                    # Filter to only actual project members
-                    if actual_project_members:
-                        base = base.filter(AuditEvent.user_id.in_(actual_project_members))
-                    else:
-                        base = base.filter(AuditEvent.user_id.is_(None))
 
                     if dt_from:
                         base = base.filter(AuditEvent.timestamp >= dt_from)

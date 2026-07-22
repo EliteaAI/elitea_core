@@ -1,7 +1,11 @@
+from typing import Optional
+
 from pydantic import ValidationError
 from sqlalchemy import Integer
 
 from ..models.pd.import_wizard import IMPORT_MODEL_ENTITY_MAPPER, DEPRECATED_ENTITIES
+from ..models.pd.skill import SkillImportResultModel
+from ..utils.skill_utils import attach_skill_to_agent, SkillError
 from ..utils.export_import_utils import (
     ENTITY_IMPORT_MAPPER, _wrap_import_error,
     _wrap_import_result
@@ -213,6 +217,94 @@ def _sanitize_credential_settings(settings: dict, project_id: int = None) -> dic
     return sanitized
 
 
+def _collect_agent_skill_attachments(item: dict, app_name: str, item_index: int) -> Optional[tuple]:
+    """Return this agent's deferred skill-attachment record."""
+    if any((v or {}).get('skills') for v in item.get('versions', [])):
+        return (item_index, app_name, item)
+    return None
+
+
+def _resolve_and_attach_skill(
+    project_id,
+    agent_name,
+    version_name,
+    app_version_id,
+    skill_ref,
+    skill_id_mapper,
+    session,
+) -> Optional[str]:
+    """Resolve one skill reference (import_uuid -> id, version_name -> version id) and
+    attach it to the agent version."""
+
+    import_uuid = skill_ref.get('import_uuid')
+    skill_info = skill_id_mapper.get(import_uuid)
+    if not skill_info:
+        return (f"Agent '{agent_name}' references skill (uuid={import_uuid}) that "
+                f"was not imported - skill attachment skipped")
+
+    ref_version_name = skill_ref.get('version_name') or 'base'
+    skill_version_id = skill_info.versions.get(ref_version_name)
+    if not skill_version_id:
+        skill_version_id = (skill_info.versions.get('base')
+                            or next(iter(skill_info.versions.values()), None))
+        if not skill_version_id:
+            return (f"Skill version '{ref_version_name}' for skill (uuid={import_uuid}) "
+                    f"attached to agent '{agent_name}' is missing - attachment skipped")
+
+    try:
+        attach_skill_to_agent(
+            project_id=project_id,
+            entity_version_id=app_version_id,
+            skill_id=skill_info.id,
+            skill_version_id=skill_version_id,
+            session=session,
+        )
+    except SkillError as ex:
+        # max-5 exceeded / already attached / not found -> non-fatal warning.
+        return (f"Skill not attached to agent '{agent_name}' version "
+                f"'{version_name}': {ex}")
+    except Exception as ex:
+        log.error(f"[IMPORT] Error attaching skill {skill_info.id} to agent version "
+                  f"{app_version_id}: {ex}")
+        return f"Failed to attach skill to agent '{agent_name}': {ex}"
+
+    log.info(f"[IMPORT] Attached skill {skill_info.id} (v{skill_version_id}) to agent "
+             f"'{agent_name}' version {app_version_id}")
+    return None
+
+
+def _attach_imported_skills(project_id, agents_with_skills, skill_id_mapper,
+                            application_version_mapper, errors):
+    """Attach previously-imported skills to newly-created agent versions."""
+
+    with db.get_session(project_id) as s:
+        for item_index, agent_name, raw_item in agents_with_skills:
+            for version in raw_item.get('versions', []):
+                skill_refs = (version or {}).get('skills') or []
+                if not skill_refs:
+                    continue
+                version_name = version.get('name', 'base')
+                target = (application_version_mapper.get((agent_name, version_name))
+                          or application_version_mapper.get((agent_name, 'base')))
+                if not target:
+                    # base-version synthesis may have renamed a sole version.
+                    errors['skills'].append(_wrap_import_error(
+                        item_index,
+                        f"Could not locate imported agent '{agent_name}' version "
+                        f"'{version_name}' to attach skills"
+                    ))
+                    continue
+                _app_id, app_version_id = target
+
+                for skill_ref in skill_refs:
+                    err = _resolve_and_attach_skill(
+                        project_id, agent_name, version_name, app_version_id, skill_ref, skill_id_mapper, s,
+                    )
+                    if err:
+                        errors['skills'].append(_wrap_import_error(item_index, err))
+        s.commit()
+
+
 class RPC:
     @web.rpc('applications_import_wizard', 'import_wizard')
     def import_wizard(self, import_data: dict, project_id: int, author_id: int):
@@ -243,14 +335,16 @@ class RPC:
         # Collect embedded toolkits from all agents - process AFTER all agents are imported
         # This is critical because embedded toolkits may reference OTHER agents via application_import_uuid
         all_embedded_toolkits = []  # List of (model, embedded_toolkit) tuples
+        agents_with_skills = []
+        skill_id_mapper = {}
         for item_index, item in enumerate(import_data):
-            log.info(f"[IMPORT DEBUG] Processing item {item_index}: entity={item.get('entity')}")
-            log.info(f"[IMPORT DEBUG] Item keys: {item.keys()}")
+            log.debug(f"[IMPORT DEBUG] Processing item {item_index}: entity={item.get('entity')}")
+            log.debug(f"[IMPORT DEBUG] Item keys: {item.keys()}")
             if 'versions' in item and item['versions']:
                 for v_idx, version in enumerate(item['versions']):
-                    log.info(f"[IMPORT DEBUG] Version {v_idx}: tools count = {len(version.get('tools', []))}")
+                    log.debug(f"[IMPORT DEBUG] Version {v_idx}: tools count = {len(version.get('tools', []))}")
                     if version.get('tools'):
-                        log.info(f"[IMPORT DEBUG] First tool: {version['tools'][0] if version['tools'] else 'N/A'}")
+                        log.debug(f"[IMPORT DEBUG] First tool: {version['tools'][0] if version['tools'] else 'N/A'}")
             has_postponed_toolkits = False
             entity = item['entity']
             if entity in DEPRECATED_ENTITIES:
@@ -292,13 +386,23 @@ class RPC:
                     log.error(ex)
                     e = ["Import function has been failed"]
                 if r:
+                    if entity == 'skills':
+                        # Build the uuid -> (id, versions) mapper the post-loop attach
+                        # needs; pop 'versions' so the public result entry matches the
+                        # shape other skill results use (id/name/reused).
+                        skill_id_mapper[model.import_uuid] = SkillImportResultModel(
+                            id=r['id'],
+                            versions=r.get('versions') or {},
+                            reused=r.get('reused', False),
+                        )
+                        r.pop('versions', None)
                     if entity == 'agents':
                         has_postponed_toolkits = model.has_postponed_toolkits()
                         has_embedded_toolkits = model.has_embedded_toolkits()
-                        log.info(f"[IMPORT DEBUG] Agent imported: has_postponed_toolkits={has_postponed_toolkits}, has_embedded_toolkits={has_embedded_toolkits}")
-                        log.info(f"[IMPORT DEBUG] Model versions count: {len(model.versions)}")
+                        log.debug(f"[IMPORT DEBUG] Agent imported: has_postponed_toolkits={has_postponed_toolkits}, has_embedded_toolkits={has_embedded_toolkits}")
+                        log.debug(f"[IMPORT DEBUG] Model versions count: {len(model.versions)}")
                         for v in model.versions:
-                            log.info(f"[IMPORT DEBUG] Version '{v.name}': postponed_tools={len(v.postponed_tools)}, embedded_toolkits={len(v.embedded_toolkits)}")
+                            log.debug(f"[IMPORT DEBUG] Version '{v.name}': postponed_tools={len(v.postponed_tools)}, embedded_toolkits={len(v.embedded_toolkits)}")
 
                         # Collect embedded toolkits for deferred processing (after ALL agents are imported)
                         # This is critical because embedded toolkits may reference OTHER agents via application_import_uuid
@@ -318,6 +422,8 @@ class RPC:
                         app_name = r['name']
                         app_id = r['id']
                         application_name_mapper[app_name] = app_id
+                        if cap := _collect_agent_skill_attachments(item, app_name, item_index):
+                            agents_with_skills.append(cap)
                         # Also map each version for version-aware matching
                         for ver in r.get('versions', []):
                             ver_name = ver.get('name', 'base')
@@ -686,5 +792,14 @@ class RPC:
                 log.error(ex)
                 e = f"Can not get detail for {application_id=}"
                 errors['agents'].append(_wrap_import_error(item_index, e))
+
+        if agents_with_skills and skill_id_mapper:
+            _attach_imported_skills(
+                project_id=project_id,
+                agents_with_skills=agents_with_skills,
+                skill_id_mapper=skill_id_mapper,
+                application_version_mapper=application_version_mapper,
+                errors=errors,
+            )
 
         return result, errors

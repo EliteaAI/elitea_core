@@ -19,8 +19,28 @@ from pylon.core.tools import log
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Add Participants",
-        description="Add participants (users, agents, toolkits) to a conversation.",
-        mcp_tool=True
+        description="Add one or more participants (users, agents, pipelines, LLMs, toolkits) to an existing conversation",
+        mcp_description="""
+        USE to add agents, pipelines, LLMs, toolkits, or other users to an existing conversation so they can
+        participate in the chat.
+
+        DO NOT USE when creating a conversation from scratch with initial participants → use create_conversation
+        with the participants field instead.
+        DO NOT USE to update existing participant settings → use configure_participant.
+
+        Agent vs Pipeline: both use entity_name: 'application'. The type (agent or pipeline) is determined by
+        the application itself.
+
+        Examples:
+        1. Add an agent: [{ 'entity_name': 'application', 'entity_meta': { 'id': 7, 'project_id': 42 } }]
+        2. Add an LLM: [{ 'entity_name': 'llm', 'entity_meta': { 'model_name': 'gpt-4o' } }]
+        3. Add multiple participants: send array with multiple objects in one call.
+        4. Add a toolkit: [{ 'entity_name': 'toolkit', 'entity_meta': { 'id': 3, 'project_id': 42 } }]
+        """,
+        request_body=ParticipantCreate,
+        mcp_tool=True,
+        tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.participants.create"],

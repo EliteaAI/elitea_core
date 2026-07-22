@@ -18,10 +18,12 @@
 """API for Syncing/Fetching Tools from Remote MCP Server (v2)"""
 from flask import request
 from pydantic import ValidationError
-from tools import api_tools, auth, config as c, serialize
+from tools import api_tools, auth, config as c, serialize, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.mcp_config import is_mcp_exposure_enabled
 from ...utils.sio_utils import SioValidationError
+from ...utils.exceptions import PoolSaturationError
 
 from ...models.pd.mcp_sync_tools import McpSyncToolsInputModel
 
@@ -29,6 +31,18 @@ from pylon.core.tools import log
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="MCP Sync Tools",
+        description="Discover and sync available tools from a remote MCP server. Supports async mode via Socket.IO.",
+        tags=["elitea_core/mcp"],
+        parameters=[
+            {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project ID."},
+            {"name": "await_response", "in": "query", "required": False, "schema": {"type": "boolean", "default": True}, "description": "Wait for the result synchronously (default: true)."},
+            {"name": "timeout", "in": "query", "required": False, "schema": {"type": "integer", "default": 120}, "description": "Timeout in seconds (default: 120 for sync, -1 for async)."},
+        ],
+        request_body=McpSyncToolsInputModel,
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.applications.tool.patch"],
         "recommended_roles": {
@@ -50,6 +64,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         Returns:
             Dictionary with tools list or task ID for async operation
         """
+        if not is_mcp_exposure_enabled():
+            return {"error": "MCP exposure is disabled on this deployment"}, 403
+
         raw = dict(request.json)
         await_response = request.args.get('await_response', 'true').lower() == 'true'
         # Configurable timeout with sensible default (2 minutes for sync, no timeout for async)
@@ -62,6 +79,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.debug(f"Resolving MCP toolkit settings for toolkit_type={raw.get('toolkit_type')}")
             # This will fill in any missing settings from the pylon config for pre-built MCP toolkits
             raw = self.module.resolve_mcp_prebuilt_settings(raw)
+
+        # Internal Elitea MCP endpoints need {project_id} substituted and the user's PAT
+        # injected. This is the last hop that still has the user session — the worker that
+        # opens the connection runs without one — so it must happen here. No-op for external
+        # servers and when there is no user (nothing to key the token on). Returns a fresh
+        # dict, so rebind rather than mutate the stored config.
+        current_user = auth.current_user()
+        current_user_id = current_user.get('id') if current_user else None
+        if current_user_id:
+            from ...utils.internal_tools import resolve_internal_mcp_settings
+            raw = resolve_internal_mcp_settings(raw, current_user_id, project_id)
 
         try:
             sync_data = McpSyncToolsInputModel.model_validate(raw)
@@ -83,6 +111,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
         except SioValidationError as e:
             return {'error': str(e.error)}, 400
+        except PoolSaturationError as e:
+            return {
+                "error": "temporarily_unavailable",
+                "message": "The service is busy processing other requests. Please try again in a few seconds.",
+                "retry_after": e.retry_after,
+            }, 503
         except Exception as e:
             log.error(f"Error in mcp_sync_tools API: {str(e)}")
             return {'error': str(e)}, 500

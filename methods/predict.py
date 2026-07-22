@@ -7,10 +7,10 @@ from sqlalchemy.orm import joinedload
 from tools import VaultClient, db, serialize
 
 from ..models.pd.chat import ApplicationChatRequest, ContextStrategyModel
-from ..utils.predict_utils import generate_predict_payload, load_context_settings_from_conversation
+from ..utils.predict_utils import generate_predict_payload, load_context_settings_from_conversation, user_input_preview
 from ..models.all import ApplicationVersion
 from ..utils.utils import verify_signature
-from ..utils.exceptions import VerifySignatureError
+from ..utils.exceptions import VerifySignatureError, PoolSaturationError
 from ..utils.sio_utils import SioEvents
 
 class Method:
@@ -27,6 +27,7 @@ class Method:
         webhook_type="github",
         predict_wait=True,
         predict_timeout=float(60*60),  # 1 hour
+        return_chat_history: bool = False,
     ):
         with db.get_session(project_id) as session:
             application_version = session.query(ApplicationVersion).options(
@@ -90,6 +91,10 @@ class Method:
 
         parsed = application_version_pd.merge_update(parsed)
 
+        # Set application_name AFTER merge to prevent client override (security)
+        if version_id and application_version:
+            parsed.application_name = application_version.application.name if application_version.application else None
+
         # Load context_settings from conversation.meta if not provided
         if not parsed.context_settings:
             conversation_id = parsed.conversation_id or parsed.stream_id
@@ -97,7 +102,7 @@ class Method:
             if context_strategy:
                 parsed.context_settings = ContextStrategyModel(**context_strategy)
 
-        payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True)
+        payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
 
         user_context = {
             'user_id': user_id,
@@ -113,8 +118,21 @@ class Method:
                 "task_name": "indexer_agent",
                 "project_id": parsed.project_id,
                 'user_context': serialize(user_context),
+                'user_input_preview': user_input_preview(payload.get("user_input")),
+                # Pure REST predict (webhook / async / blocking API) — never has a
+                # Socket.IO consumer, so suppress streaming/UI-only events.
+                'non_interactive': True,
             }
         )
+
+        # Handle pool saturation: start_task returns None when no workers available
+        if task_id is None:
+            log.warning(
+                "Pool 'agents' saturated - no workers available for project_id=%s",
+                parsed.project_id
+            )
+            raise PoolSaturationError(pool="agents", retry_after=5)
+
         if webhook_signature is not None or not predict_wait:
             result = {
                 "message": "Task started",

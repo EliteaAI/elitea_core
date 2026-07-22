@@ -37,6 +37,6 @@ class AuthorDetailModel(AuthorBaseModel):
     public_pipelines: int = 0
     total_pipelines: int = 0
     total_toolkits: int = 0
-    public_collections: int = 0
-    total_collections: int = 0
+    public_skills: int = 0
+    total_skills: int = 0
     rewards: int = 0

@@ -162,6 +162,8 @@ def set_context_strategy(
     strategy_data = {}
 
     if user_context_defaults:
+        if 'enabled' in user_context_defaults:
+            strategy_data['enabled'] = user_context_defaults['enabled']
         if 'max_context_tokens' in user_context_defaults:
             strategy_data['max_context_tokens'] = user_context_defaults['max_context_tokens']
         if 'preserve_recent_messages' in user_context_defaults:

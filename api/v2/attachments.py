@@ -42,8 +42,64 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create Attachments",
-        description="Upload file attachments to a conversation.",
-        mcp_tool=True
+        description="Upload one or more file attachments to a conversation — supports both single upload and resumable chunked upload",
+        mcp_description="""
+        USE to attach files (documents, images, code) to a conversation before or during a chat session, so the
+        AI participant can reference them in its response.
+
+        DO NOT USE when you only want to send a text message → use send_message instead. Files must be attached
+        to a conversation before referencing them in a message.
+
+        Upload modes:
+        - Small files: send file in multipart/form-data directly.
+        - Large files: split into chunks and send each chunk with file_id, chunk_index, total_chunks, file_name.
+          All chunks must share the same file_id.
+
+        Examples:
+        1. Upload a single file: multipart POST with file=<file_data> → returns file metadata.
+        2. Resume large file upload: send 3 chunks with file_id='abc', chunk_index=0/1/2, total_chunks=3. Last chunk triggers assembly.
+        3. Overwrite existing: add overwrite_attachments=1 to form data.
+        """,
+        request_body={
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "file": {
+                                "type": "string",
+                                "format": "binary",
+                                "description": "File to upload (for single/direct upload).",
+                            },
+                            "file_id": {
+                                "type": "string",
+                                "description": "Unique file identifier for chunked uploads (shared across all chunks).",
+                            },
+                            "chunk_index": {
+                                "type": "integer",
+                                "description": "Zero-based chunk index for chunked uploads.",
+                            },
+                            "total_chunks": {
+                                "type": "integer",
+                                "description": "Total number of chunks for chunked uploads.",
+                            },
+                            "file_name": {
+                                "type": "string",
+                                "description": "Original file name for chunked uploads.",
+                            },
+                            "overwrite_attachments": {
+                                "type": "integer",
+                                "default": 0,
+                                "description": "Set to 1 to overwrite existing attachments with the same name.",
+                            },
+                        },
+                    }
+                }
+            },
+        },
+        tags=["elitea_core/chat"],
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.chat.attachments.create"],
@@ -93,6 +149,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
             user_id=user_id,
         )
 
+    @register_openapi(
+        name="Delete Attachments",
+        description="Delete one or more attachments from a conversation and optionally keep files in storage.",
+        tags=["elitea_core/chat"],
+        parameters=[
+            {"name": "filename", "in": "query", "required": True,
+             "schema": {"type": "array", "items": {"type": "string"}},
+             "style": "form", "explode": True,
+             "description": "Filename or filepath to delete. Repeat this parameter to delete multiple files at once."},
+            {"name": "keep_in_storage", "in": "query", "required": False, "schema": {"type": "boolean"},
+             "description": "If true, keep files in bucket and remove only DB attachment records."},
+        ],
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.chat.attachments.delete"],
         "recommended_roles": {

@@ -43,7 +43,7 @@ class Conversation(db.Base):
         'Participant',
         secondary=ParticipantMapping.__table__,
         back_populates='conversations',
-        lazy='joined',
+        lazy='selectin',
         foreign_keys=[ParticipantMapping.participant_id, ParticipantMapping.conversation_id]
     )
 

@@ -42,9 +42,11 @@ class NotificationEventTypes(StrEnum):
     prompt_moderation_approve = 'prompt_moderation_approve'
     prompt_moderation_reject = 'prompt_moderation_reject'
     chat_user_added = 'chat_user_added'
+    chat_user_mentioned = 'chat_user_mentioned'
     private_project_created = 'private_project_created'
     index_data_changed = 'index_data_changed'
     agent_unpublished = 'agent_unpublished'
+    skill_unpublished = 'skill_unpublished'
     bucket_expiration_warning = 'bucket_expiration_warning'
     personal_access_token_expiring = 'personal_access_token_expiring'
 
@@ -60,7 +62,11 @@ class IndexDataStatus(StrEnum):
 
 class ToolEntityTypes(StrEnum):
     agent = 'agent'
-    datasource = 'datasource'
+
+
+class SkillEntityTypes(StrEnum):
+    """Entity types that can have skills attached."""
+    agent = 'agent'
 
 
 class InitiatorType(StrEnum):
@@ -70,21 +76,14 @@ class InitiatorType(StrEnum):
     schedule = 'schedule'  # Schedule-initiated (cron jobs)
 
 
-class CollectionPatchOperations(StrEnum):
-    add = 'add'
-    remove = 'remove'
-
-
 class ToolTypes(StrEnum):
     prompt = 'prompt'
-    datasource = 'datasource'
     openapi = 'openapi'
     # custom = 'custom'
 
 
 class EntityTypes(StrEnum):
     prompt = 'prompt'
-    datasource = 'datasource'
     agent = 'agent'
 
 
@@ -92,7 +91,6 @@ class EntityTypes(StrEnum):
 class ParticipantTypes(StrEnum):
     user = 'user'
     prompt = 'prompt'
-    datasource = 'datasource'
     application = 'application'
     llm = 'llm'
     dummy = 'dummy'

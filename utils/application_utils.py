@@ -1,7 +1,7 @@
 from json import loads
 from datetime import datetime
 from typing import List, NamedTuple, Optional, Tuple, Literal, Generator
-from sqlalchemy import func, desc, or_, asc, distinct
+from sqlalchemy import func, desc, or_, and_, asc, distinct
 from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 from pydantic import ValidationError
@@ -11,7 +11,8 @@ from pylon.core.tools import log
 
 from .utils import get_public_project_id
 from ..models.enums.all import AgentTypes
-from ..models.all import Application, ApplicationVersion, ApplicationVariable, ApplicationVersionTagAssociation
+from ..models.enums.all import PublishStatus
+from ..models.all import Application, ApplicationVersion, ApplicationVariable
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.enums.events import ApplicationEvents
 from ..models.pd.application import (
@@ -21,10 +22,13 @@ from ..models.pd.application import (
     ApplicationUpdateModel
 )
 from ..models.pd.version import ApplicationVersionDetailToolValidatedModel
+from ..models.pd.llm import llm_settings_family_conflict, _normalize_llm_settings_family
 from ..models.all import Tag
 from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
 from ..models.pd.tool import ToolValidatedDetails
+from .category_utils import get_active_categories, resolve_category
+from .constants import DEFAULT_FALLBACK_CATEGORY
 
 
 class _AuthorSortRow(NamedTuple):
@@ -70,13 +74,34 @@ def apply_selected_tools_intersection(tools, tool_mappings):
 
             # Apply intersection if mapping exists
             if tool_selected_from_mapping:
-                settings['selected_tools'] = list(
-                    set(tool_selected_from_settings) & set(tool_selected_from_mapping)
-                )
+                settings_set = set(tool_selected_from_settings)
+                # Preserve the mapping's order so the resulting payload is deterministic.
+                intersection = [name for name in tool_selected_from_mapping if name in settings_set]
+                # Fail-open guard: downstream (SDK/indexer) treats an EMPTY
+                # selected_tools as "expose ALL tools". If the entity's explicit
+                # selection and the toolkit's enabled set are disjoint, a naive
+                # intersection collapses to [] and silently re-enables every tool the
+                # user explicitly disabled (e.g. SharePoint read_file_from_sharing_link).
+                # Honor the entity's explicit selection instead of failing open.
+                settings['selected_tools'] = intersection or tool_selected_from_mapping
         elif tool_selected_from_mapping:
             # No tools in toolkit settings, but mapping has selected tools
             # Use mapping directly (for toolkits that don't pre-define available tools)
             settings['selected_tools'] = tool_selected_from_mapping
+
+
+def build_skill_mappings_list(skill_mappings) -> list:
+    return [
+        {
+            'skill_id': mapping.skill_id,
+            'skill_version_id': mapping.skill_version_id,
+            'name': mapping.skill.name if mapping.skill else None,
+            'description': mapping.skill.description if mapping.skill else None,
+            'version_name': mapping.skill_version.name if mapping.skill_version else None,
+            'instructions': mapping.skill_version.instructions if mapping.skill_version else None,
+        }
+        for mapping in skill_mappings
+    ]
 
 
 class ApplicationVersionNonFoundError(Exception):
@@ -160,11 +185,36 @@ def applications_update_version(version_data, session) -> dict:
                 )
                 session.commit()
 
-    for key, value in version_data.model_dump(exclude={'tags', 'variables', 'tools'}).items():
+    dumped = version_data.model_dump(exclude={'tags', 'variables', 'tools'}, exclude_unset=True)
+
+    # `notes` is stored inside the `meta` JSONB column (issue #5410: avoids a per-tenant schema
+    # migration). Extract it from the top-level dump so the setattr loop below doesn't try to
+    # write it to a non-existent ORM attribute, then merge into meta AFTER meta itself is applied
+    # so a concurrent `meta` field in the same payload doesn't overwrite the notes value.
+    notes_provided = 'notes' in dumped
+    notes_value = dumped.pop('notes', None) if notes_provided else None
+
+    for key, value in dumped.items():
+        if key == 'pipeline_settings' and isinstance(value, dict) and 'trigger' not in value:
+            existing_trigger = (version.pipeline_settings or {}).get('trigger')
+            if existing_trigger:
+                value = {**value, 'trigger': existing_trigger}
         setattr(version, key, value)
 
+    if notes_provided:
+        merged_meta = dict(version.meta or {})
+        if notes_value is None:
+            merged_meta.pop('notes', None)
+        else:
+            merged_meta['notes'] = notes_value
+        version.meta = merged_meta
+
     try:
+        # Explicitly delete tag associations first to avoid unique constraint violations
+        session.flush()
         version.tags.clear()
+        session.flush()
+
         if version_data.tags:
             existing_tags = session.query(Tag).filter(
                 Tag.name.in_({i.name for i in version_data.tags})
@@ -357,7 +407,7 @@ def list_applications(
                     )
                     author_name_map[author['id']] = display.lower()
             except Exception as e:  # noqa: BLE001
-                log.warning(f"[sort_by=author] Failed to resolve author names: {e}")
+                log.debug(f"[sort_by=author] Failed to resolve author names: {e}")
 
         # Pinned items always first (sorted by pin_updated_at DESC among themselves),
         # then all non-pinned items sorted by author name.
@@ -483,48 +533,24 @@ def list_applications(
     # Extract application IDs
     application_ids = [app.id for app in applications_with_attrs]
 
-    # Step 3: Load versions for these applications in a separate query
+    # Step 3: Load versions with their tags in one batched query.
+    # selectinload issues a single follow-up SELECT against the tag association
+    # joined to tags, which is far cheaper than the historical lazy='joined' that
+    # multiplied version rows by tag count and required a redundant manual fetch.
     versions_query = (
         session.query(ApplicationVersion)
         .filter(ApplicationVersion.application_id.in_(application_ids))
+        .options(selectinload(ApplicationVersion.tags))
         .order_by(ApplicationVersion.application_id, ApplicationVersion.created_at.desc())
     )
     all_versions = versions_query.all()
 
     # Step 4: Build a mapping of application_id -> versions
     versions_by_app_id = {}
-    version_ids = []
     for version in all_versions:
-        if version.application_id not in versions_by_app_id:
-            versions_by_app_id[version.application_id] = []
-        versions_by_app_id[version.application_id].append(version)
-        version_ids.append(version.id)
+        versions_by_app_id.setdefault(version.application_id, []).append(version)
 
-    # Step 5: Load tags for these versions in a separate query
-    if version_ids:
-        # Query the association table to get version_id -> tag relationships
-        tags_query = (
-            session.query(
-                ApplicationVersionTagAssociation.c.version_id,
-                Tag
-            )
-            .join(Tag, Tag.id == ApplicationVersionTagAssociation.c.tag_id)
-            .filter(ApplicationVersionTagAssociation.c.version_id.in_(version_ids))
-        )
-        tag_associations = tags_query.all()
-
-        # Build a mapping of version_id -> tags
-        tags_by_version_id = {}
-        for version_id, tag in tag_associations:
-            if version_id not in tags_by_version_id:
-                tags_by_version_id[version_id] = []
-            tags_by_version_id[version_id].append(tag)
-
-        # Step 6: Assign tags to versions
-        for version in all_versions:
-            version.tags = tags_by_version_id.get(version.id, [])
-
-    # Step 7: Assign versions to applications
+    # Step 5: Assign versions to applications
     for app in applications_with_attrs:
         app.versions = versions_by_app_id.get(app.id, [])
 
@@ -560,7 +586,8 @@ def get_application_details(project_id: int, application_id: int,
                         joinedload(ApplicationVersion.application),
                         selectinload(ApplicationVersion.tools),
                         selectinload(ApplicationVersion.tool_mappings),
-                        selectinload(ApplicationVersion.variables)
+                        selectinload(ApplicationVersion.variables),
+                        selectinload(ApplicationVersion.tags)
                     ).first()
                 else:
                     application_version = None
@@ -578,7 +605,8 @@ def get_application_details(project_id: int, application_id: int,
                 joinedload(ApplicationVersion.application),
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
-                selectinload(ApplicationVersion.variables)
+                selectinload(ApplicationVersion.variables),
+                selectinload(ApplicationVersion.tags)
             ).first()
 
         # Fallback to first existing version if needed
@@ -590,7 +618,8 @@ def get_application_details(project_id: int, application_id: int,
                     joinedload(ApplicationVersion.application),
                     selectinload(ApplicationVersion.tools),
                     selectinload(ApplicationVersion.tool_mappings),
-                    selectinload(ApplicationVersion.variables)
+                    selectinload(ApplicationVersion.variables),
+                    selectinload(ApplicationVersion.tags)
                 )
                 .order_by(ApplicationVersion.created_at.desc())
             ).first()
@@ -656,7 +685,22 @@ def get_application_details(project_id: int, application_id: int,
             i.set_online(project_id, mcp_schemas=mcp_schemas)
             i.set_agent_meta_and_fields(project_id)
 
-    return {'ok': True, 'data': result.model_dump(mode='json')}
+        data = result.model_dump(mode='json')
+        try:
+            from .publish_utils import get_agent_nesting_metadata
+            data['version_details'].update(get_agent_nesting_metadata(
+                project_id,
+                application_version.id,
+                session=session,
+                root_version=application_version,
+            ))
+        except Exception as depth_err:  # never fail detail fetch over advisory fields
+            log.warning(
+                f"Could not compute agent nesting metadata for version "
+                f"{application_version.id}: {depth_err}"
+            )
+
+    return {'ok': True, 'data': data}
 
 
 def application_ids_to_names(session, application_id: int, version_id: int) -> Tuple[str, str]:
@@ -899,9 +943,18 @@ def _check_configurations_connection_from_expanded_settings(
             log.debug(f"Configuration type {config_type} does not support check_connection, skipping")
             continue
 
+        # Skip delegated OAuth configurations (e.g. SharePoint with oauth_discovery_endpoint):
+        # an access token is not available at validation time, so connection check would always
+        # fail with McpAuthorizationRequired — same skip pattern as MCP toolkits.
+        if config_data.get('oauth_discovery_endpoint') and not config_data.get('access_token'):
+            log.debug(
+                f"Skipping connection check for {config_type}/{config_title}: "
+                f"delegated OAuth configured, no token available at validation time"
+            )
+            continue
+
         # Inject OAuth tokens for configurations that need them
         config_data = _inject_oauth_tokens(config_data, mcp_tokens)
-        log.info(f"{config_data=} for connection check of {config_type}/{config_title}")
         try:
             # Call check_connection via RPC to indexer
             result = context.rpc_manager.timeout(30).applications_configuration_check_connection(
@@ -993,23 +1046,44 @@ def validate_application_version_details(
     _visited: set = None
 ) -> bool:
     # Initialize _visited set at the top level to share across all sibling toolkits
+    top_level = _visited is None
     if _visited is None:
         _visited = set()
 
-    # Skip if already validated in this chain (prevents circular references and duplicate work)
+    # Skip if already validated in this chain (dedup — a leaf legitimately reused by several
+    # parents is validated once). NOT the cycle guard; cycles are caught structurally below.
     key = (application_id, version_id)
     if key in _visited:
         return True
     _visited.add(key)
 
     with db.get_session(project_id) as session:
+        # Structural sub-agent-tree check (issue #5680): run ONCE at the top-level entry.
+        # Enforces the leaf-only rule and path-based cycle detection, recursing THROUGH
+        # pipelines to full depth. Raises SubAgentTreeError -> surfaced as a validation error
+        # by the caller. This is a deliberately SEPARATE pass from the per-toolkit field
+        # validation below: the two answer different questions (tree shape vs. each tool's
+        # config) and use different traversal semantics (path-based backtracking vs. global
+        # dedup, and pipeline recursion vs. per-tool descent), so merging them would tangle
+        # both. It reuses THIS session, so it is one transaction, not a second one (PR #203
+        # finding #5).
+        if top_level:
+            from .publish_utils import assert_no_invalid_nesting, MAX_SUB_AGENT_VALIDATION_DEPTH
+            assert_no_invalid_nesting(
+                project_id, version_id,
+                session=session,
+                max_depth=MAX_SUB_AGENT_VALIDATION_DEPTH,
+            )
+
         application_version = session.query(ApplicationVersion).filter(
             ApplicationVersion.id == version_id,
             ApplicationVersion.application_id == application_id
         ).options(
             selectinload(ApplicationVersion.tools),
             selectinload(ApplicationVersion.tool_mappings),
-            selectinload(ApplicationVersion.variables)
+            selectinload(ApplicationVersion.variables),
+            selectinload(ApplicationVersion.tags),
+            selectinload(ApplicationVersion.skill_mappings),
         ).first()
         if not application_version:
             raise ApplicationVersionNonFoundError(application_id, version_id)
@@ -1049,17 +1123,35 @@ def validate_application_version_details(
                 log.debug(f"Validating regular toolkit: {tool.get('id')}")
                 tool['project_id'] = project_id
                 tool['user_id'] = user_id
+                is_mcp = (
+                    tool.get('type') == 'mcp'
+                    or (isinstance(tool.get('meta'), dict) and tool['meta'].get('mcp') is True)
+                )
+                validation_context = {'check_connection': not is_mcp, 'mcp_tokens': {}}
                 try:
-                    ToolValidatedDetails.model_validate(tool)
+                    ToolValidatedDetails.model_validate(tool, context=validation_context)
                 except ValidationError as e:
-                    # re-wrap with new location
                     for err in e.errors():
-                        application_toolkit_errors.append({
-                            'type': err['type'],
-                            'loc': ('tools', tool['id'], '__root__'),
-                            'input': err.get('input'),
-                            'ctx': err.get('ctx', {'error': err.get('msg', 'Validation error')}),
-                        })
+                        # Intercept connection errors carried via the sentinel key
+                        if (
+                            err.get('type') == 'value_error'
+                            and isinstance(err.get('ctx', {}).get('error'), dict)
+                            and ToolValidatedDetails.CONNECTION_ERROR_SENTINEL
+                                in err['ctx']['error']
+                        ):
+                            application_toolkit_errors.append({
+                                'type': 'connection_error',
+                                'loc': ('tools', tool['id'], '__root__'),
+                                'input': err.get('input'),
+                                'ctx': err['ctx']['error'][ToolValidatedDetails.CONNECTION_ERROR_SENTINEL],
+                            })
+                        else:
+                            application_toolkit_errors.append({
+                                'type': err['type'],
+                                'loc': ('tools', tool['id'], '__root__'),
+                                'input': err.get('input'),
+                                'ctx': err.get('ctx', {'error': err.get('msg', 'Validation error')}),
+                            })
                 except Exception as ex:
                     application_toolkit_errors.append({
                         'type': 'value_error',
@@ -1107,9 +1199,9 @@ def list_applications_api(
         trend_start_period: str | None = None,
         trend_end_period: str | None = None,
         with_likes: bool = True,
-        collection: Optional[dict[str, int]] = None,
         agents_type: str = 'all',
         without_tags: bool = False,
+        category: str | None = None,
         session=None,
 ) -> dict:
     # OPTIMIZATION: Only include likes subqueries for Agent Studio (public library)
@@ -1145,6 +1237,41 @@ def list_applications_api(
             )
         )
 
+    if category:
+        canonical = resolve_category(category)
+        active_categories = get_active_categories()
+        if canonical == DEFAULT_FALLBACK_CATEGORY:
+            # "Other" is a catch-all: published agents tagged "Other" OR with no
+            # active-category tag at all (uncategorised legacy agents). The check
+            # is correlated with the published version so a tagless base/draft
+            # version cannot leak a categorised agent into this bucket.
+            # TODO: transition shim — the ~tags.any(name.in_(...)) leg exists only
+            # for agents published before categories were introduced. Once all legacy
+            # versions have been backfilled with the "Other" tag (reassign_agent_category
+            # admin task), simplify to a plain tags.any(name == "Other") like every
+            # other category filter.
+            other_active = [c for c in active_categories if c != DEFAULT_FALLBACK_CATEGORY]
+            filters.append(
+                Application.versions.any(
+                    and_(
+                        ApplicationVersion.status == PublishStatus.published,
+                        or_(
+                            ApplicationVersion.tags.any(Tag.name == DEFAULT_FALLBACK_CATEGORY),
+                            ~ApplicationVersion.tags.any(Tag.name.in_(other_active)),
+                        ),
+                    )
+                )
+            )
+        else:
+            filters.append(
+                Application.versions.any(
+                    and_(
+                        ApplicationVersion.status == PublishStatus.published,
+                        ApplicationVersion.tags.any(Tag.name == canonical),
+                    )
+                )
+            )
+
     if statuses:
         if isinstance(statuses, str):
             statuses = statuses.split(',')
@@ -1158,13 +1285,6 @@ def list_applications_api(
                 Application.description.ilike(f"%{q}%")
             )
         )
-
-    if collection and collection.get('id') and collection.get('owner_id'):
-        collection_value = {
-            "id": collection['id'],
-            "owner_id": collection['owner_id']
-        }
-        filters.append(Application.collections.contains([collection_value]))
 
     if agents_type:
         agents_type = agents_type.strip().lower()
@@ -1215,8 +1335,22 @@ def validate_and_resolve_llm_settings(
     llm_settings: Optional[dict],
     application_id: Optional[int] = None,
     version_id: Optional[int] = None,
+    include_openai_compatible: bool = False,
 ) -> Optional[dict]:
-    """Check if llm_settings.model_name is available; fall back to the project's default LLM if not."""
+    """Check if llm_settings.model_name is available; fall back to the project's default LLM if not.
+
+    Also corrects a temperature/reasoning_effort family conflict (both set at once — invalid
+    for reasoning models) against the resolved model's actual supports_reasoning capability,
+    even when the model itself is available (issue #5821). Callers must invoke this
+    unconditionally, not only when llm_settings is empty — a non-empty-but-corrupted or
+    unavailable-model llm_settings is exactly the case this function needs to fix.
+
+    openai_compatible is a derived model-config property, added to the result only when
+    include_openai_compatible is True (response paths such as the SDK building sub-agents).
+    It is omitted by default so the callers that persist this result back onto
+    ApplicationVersion.llm_settings do not store a value that goes stale when the model
+    configuration changes later.
+    """
     try:
         available = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_available_models(
             project_id=project_id, section='llm', include_shared=True
@@ -1224,10 +1358,58 @@ def validate_and_resolve_llm_settings(
 
         if llm_settings and llm_settings.get('model_name'):
             model_name = llm_settings['model_name']
-            model_project_id = llm_settings.get('model_project_id') or project_id
+            model_project_id = llm_settings.get('model_project_id')
 
-            if (model_project_id, model_name) in available:
-                return llm_settings
+            if model_project_id is not None:
+                if (model_project_id, model_name) in available:
+                    config = available[(model_project_id, model_name)]
+                    result = llm_settings
+                    if llm_settings_family_conflict(
+                        llm_settings.get('temperature'), llm_settings.get('reasoning_effort')
+                    ):
+                        result = _normalize_llm_settings_family(
+                            llm_settings, bool(config.get('supports_reasoning', False))
+                        )
+                        log.warning(
+                            f"LLM settings family conflict corrected for model {model_name!r} "
+                            f"(project_id={model_project_id}, application_id={application_id} "
+                            f"version_id={version_id}). Before: {llm_settings!r}. After: {result!r}"
+                        )
+                    if not include_openai_compatible:
+                        return result
+                    # Response-only: surface the model's openai_compatible flag so the SDK
+                    # routes a sub-agent's Claude model through the correct client. Resolved
+                    # from the config registry, never persisted (see docstring).
+                    stamped = dict(result)
+                    stamped['openai_compatible'] = bool(config.get('openai_compatible', False))
+                    return stamped
+            else:
+                # null model_project_id: find the actual project that owns this model.
+                # Private project is checked before public because fetch_private_configurations
+                # inserts its keys first, so next() naturally prefers it.
+                resolved_project_id = next(
+                    (proj_id for (proj_id, mn) in available if mn == model_name),
+                    None,
+                )
+                if resolved_project_id is not None:
+                    config = available[(resolved_project_id, model_name)]
+                    stamped = dict(llm_settings)
+                    stamped['model_project_id'] = resolved_project_id
+                    if llm_settings_family_conflict(
+                        stamped.get('temperature'), stamped.get('reasoning_effort')
+                    ):
+                        stamped = _normalize_llm_settings_family(
+                            stamped, bool(config.get('supports_reasoning', False))
+                        )
+                        stamped['model_project_id'] = resolved_project_id
+                        log.warning(
+                            f"LLM settings family conflict corrected for model {model_name!r} "
+                            f"(project_id={resolved_project_id}, application_id={application_id} "
+                            f"version_id={version_id}). Before: {llm_settings!r}. After: {stamped!r}"
+                        )
+                    if include_openai_compatible:
+                        stamped['openai_compatible'] = bool(config.get('openai_compatible', False))
+                    return stamped
 
         default = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_default_model(
             project_id=project_id, section='llm', include_shared=True
@@ -1250,17 +1432,9 @@ def validate_and_resolve_llm_settings(
         # — avoids an extra RPC call.
         default_model_config = available.get((default_model_project_id, default_model_name), {})
         supports_reasoning = bool(default_model_config.get('supports_reasoning', False))
-
-        if supports_reasoning:
-            # Reasoning models ignore temperature; promote to reasoning_effort if not already set.
-            resolved['temperature'] = None
-            if not resolved.get('reasoning_effort'):
-                resolved['reasoning_effort'] = 'medium'
-        else:
-            # Non-reasoning models ignore reasoning_effort.
-            resolved['reasoning_effort'] = None
-            if resolved.get('temperature') is None:
-                resolved['temperature'] = 0.7
+        resolved = _normalize_llm_settings_family(resolved, supports_reasoning)
+        if include_openai_compatible:
+            resolved['openai_compatible'] = bool(default_model_config.get('openai_compatible', False))
 
         ctx = f"application_id={application_id} version_id={version_id} " if (application_id or version_id) else ""
         log.warning(
@@ -1297,7 +1471,9 @@ def get_application_version_details_expanded(
         ).options(
             selectinload(ApplicationVersion.tools),
             selectinload(ApplicationVersion.tool_mappings),
-            selectinload(ApplicationVersion.variables)
+            selectinload(ApplicationVersion.variables),
+            selectinload(ApplicationVersion.tags),
+            selectinload(ApplicationVersion.skill_mappings),
         ).first()
         if not application_version:
             raise ApplicationVersionNonFoundError(application_id, version_id)
@@ -1311,12 +1487,38 @@ def get_application_version_details_expanded(
             tool.set_online(project_id)
             tool.set_agent_meta_and_fields(project_id)
 
-        result = version_details.model_dump(mode='json', exclude={'author_id'})
+        # `notes` is metadata-only and MUST stay out of the predict/SDK payload that flows from
+        # this dict into chat_all.generate_payload — otherwise it would leak into LLM context.
+        # Defense in depth: ApplicationVersionDetailModel.hydrate_notes_from_meta already strips
+        # `notes` from the `meta` dict copy; this exclude drops the surfaced top-level field too.
+        result = version_details.model_dump(mode='json', exclude={'author_id', 'notes'})
+
+        if not result.get('skills'):
+            result.pop('skills', None)
+
+        # Agent-only subtree contribution (issue #5778); a pipeline root contributes zero. The UI
+        # add-guard allows nesting only while host current tier + candidate contribution stays
+        # within MAX_AGENT_NESTING_TIERS. Derived from the authoritative validator's walker so
+        # the two can't drift. Cheap (tools already selectin-loaded on the root; children are a
+        # bounded walk) and off the chat hot path — this is the edit/detail path.
+        try:
+            from .publish_utils import get_agent_nesting_metadata
+            result.update(get_agent_nesting_metadata(
+                project_id,
+                version_id,
+                session=session,
+                root_version=application_version,
+            ))
+        except Exception as depth_err:  # never fail detail fetch over an advisory field
+            log.warning(f"Could not compute agent_subtree_tiers for version {version_id}: {depth_err}")
 
         if result.get('llm_settings'):
+            # Response-only path (never persisted): include openai_compatible so the SDK
+            # building sub-agents routes Claude models through the correct client.
             result['llm_settings'] = validate_and_resolve_llm_settings(
                 project_id, result['llm_settings'],
-                application_id=application_id, version_id=version_id
+                application_id=application_id, version_id=version_id,
+                include_openai_compatible=True,
             )
 
         log.debug(f"{result=}")
