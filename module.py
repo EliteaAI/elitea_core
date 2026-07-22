@@ -312,6 +312,10 @@ class Module(module.ModuleModel):
                 "migrate_toolkit_selected_tools", self.migrate_toolkit_selected_tools
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_list_collections_to_list_indexes",
+                self.migrate_list_collections_to_list_indexes,
+            )
+            this.for_module("admin").module.register_admin_task(
                 "migrate_provider_hub_secrets", self.migrate_provider_hub_secrets
             )
             this.for_module("admin").module.register_admin_task(
