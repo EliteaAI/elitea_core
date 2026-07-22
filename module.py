@@ -314,6 +314,7 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_list_collections_to_list_indexes",
                 self.migrate_list_collections_to_list_indexes,
+                group="R-2.0.5"
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_provider_hub_secrets", self.migrate_provider_hub_secrets
