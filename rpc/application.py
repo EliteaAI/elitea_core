@@ -46,6 +46,12 @@ from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
 from ..utils.sio_utils import SioValidationError, get_event_room, SioEvents
+from ..utils.internal_tools import (
+    require_internal_mcp_pat,
+    InternalMcpPatError,
+    resolve_internal_mcp_tools,
+    redact_internal_mcp_secrets,
+)
 from ..utils.tracing_utils import add_trace_context_to_meta
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 
@@ -1221,6 +1227,20 @@ class RPC:
                 log.debug(f"No SID provided and no current user session available")
 
         user_id = data.get('user_id')
+
+        try:
+            require_internal_mcp_pat(data.get('toolkit_config', {}), user_id)
+        except InternalMcpPatError as pat_err:
+            log.info(f"[MCP] Blocking internal MCP tool test for user {user_id}: {pat_err.error_code}")
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=sio_event,
+                error=str(pat_err),
+                stream_id=data['stream_id'],
+                message_id=data['message_id'],
+            )
+
         log.debug("Expanding toolkit configurations: user_id=%s, project_id=%s", user_id, project_id)
         try:
             log.debug("Original toolkit_config: %s", data.get('toolkit_config', {}))
@@ -1249,7 +1269,6 @@ class RPC:
             log.warning("Continuing with original toolkit configuration")
 
         try:
-            from ..utils.internal_tools import resolve_internal_mcp_tools
             resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
@@ -1310,7 +1329,6 @@ class RPC:
             log.warning(f"Failed to unsecret task data: {e}")
 
         # Start the test toolkit tool task
-        from ..utils.internal_tools import redact_internal_mcp_secrets
         meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         if tool_name == 'index_data':
             task_id = start_index_task(self.task_node, data, sio_event)
@@ -1454,6 +1472,19 @@ class RPC:
         user_id = data.get('user_id')
 
         try:
+            require_internal_mcp_pat(toolkit_config, user_id)
+        except InternalMcpPatError as pat_err:
+            log.info(f"[MCP] Blocking internal MCP connection test for user {user_id}: {pat_err.error_code}")
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=sio_event,
+                error=str(pat_err),
+                stream_id=data['stream_id'],
+                message_id=data['message_id'],
+            )
+
+        try:
 
             toolkit_settings_expanded = expand_toolkit_settings(
                 toolkit_type, toolkit_config.get('settings', {}), project_id=project_id, user_id=user_id
@@ -1474,7 +1505,6 @@ class RPC:
             log.warning("Continuing with original toolkit configuration")
 
         try:
-            from ..utils.internal_tools import resolve_internal_mcp_tools
             resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
@@ -1506,7 +1536,6 @@ class RPC:
             log.warning(f"Failed to unsecret task data: {e}")
 
         # Start the test MCP connection task
-        from ..utils.internal_tools import redact_internal_mcp_secrets
         meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         task_id = self.task_node.start_task(
             "indexer_test_mcp_connection",
