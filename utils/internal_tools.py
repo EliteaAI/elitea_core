@@ -722,7 +722,13 @@ def _match_internal_mcp(toolkit_config: dict) -> tuple[bool, str | None]:
         return False, None
     prebuilt_url = None
     if not settings.get('url'):
-        prebuilt_url = (this.module.get_mcp_prebuilt_config(type_) or {}).get('url')
+        try:
+            prebuilt_url = (this.module.get_mcp_prebuilt_config(type_) or {}).get('url')
+        except Exception as e:
+            # Fail open: treat as not-internal so the caller (gate/endpoint) doesn't raise on the
+            # SIO path; the internal endpoint still enforces auth if the toolkit really is internal.
+            log.warning(f"[MCP] prebuilt config lookup failed for {type_}: {e}")
+            return False, None
     if _match_internal_mcp_template_url(settings, prebuilt_url) is None:
         return False, None
     return True, prebuilt_url
