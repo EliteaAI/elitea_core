@@ -466,15 +466,25 @@ def inject_internal_attachment_tool(
 # MCP Toolkit Injection
 # =============================================================================
 
-def _get_user_token(user_id: int) -> str | None:
-    """Get the first non-expired access token for the user."""
-    all_tokens = auth.list_tokens(user_id)
+def resolve_user_token_state(user_id: int) -> tuple[str, str | None]:
+    """Return ('VALID', encoded_token) / ('EXPIRED', None) / ('MISSING', None). The token is
+    returned only when VALID; a token without an `expires` never expires."""
+    all_tokens = auth.list_tokens(user_id) if user_id else []
+    if not all_tokens:
+        return 'MISSING', None
     for token in all_tokens:
         expires = token.get('expires')
         if not expires or expires > datetime.now():
-            return auth.encode_token(token['id'])
-    log.warning(f"[MCP Injection] No valid (non-expired) token found for user {user_id}")
-    return None
+            return 'VALID', auth.encode_token(token['id'])
+    return 'EXPIRED', None
+
+
+def _get_user_token(user_id: int) -> str | None:
+    """Get the first non-expired access token for the user, or None if missing/expired."""
+    state, token = resolve_user_token_state(user_id)
+    if token is None:
+        log.warning(f"[MCP Injection] No valid token for user {user_id} (state={state})")
+    return token
 
 
 def _get_internal_base_url() -> str:
@@ -700,22 +710,38 @@ def redact_internal_mcp_secrets(toolkit_config: dict) -> dict:
     return result
 
 
+def _match_internal_mcp(toolkit_config: dict) -> tuple[bool, str | None]:
+    """Single internal-MCP matcher shared by the resolver and the PAT gate so they can't drift.
+    Returns (is_internal, prebuilt_url); prebuilt_url is the admin-configured URL to substitute into
+    (None when the toolkit's own settings already carry the URL)."""
+    if not isinstance(toolkit_config, dict):
+        return False, None
+    type_ = toolkit_config.get('type', '')
+    settings = toolkit_config.get('settings')
+    if not type_.startswith('mcp_') or not isinstance(settings, dict):
+        return False, None
+    prebuilt_url = None
+    if not settings.get('url'):
+        try:
+            prebuilt_url = (this.module.get_mcp_prebuilt_config(type_) or {}).get('url')
+        except Exception as e:
+            # Fail open: treat as not-internal so the caller (gate/endpoint) doesn't raise on the
+            # SIO path; the internal endpoint still enforces auth if the toolkit really is internal.
+            log.warning(f"[MCP] prebuilt config lookup failed for {type_}: {e}")
+            return False, None
+    if _match_internal_mcp_template_url(settings, prebuilt_url) is None:
+        return False, None
+    return True, prebuilt_url
+
+
 def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_id: int) -> None:
     token = _TOKEN_UNSET
     for tool in tools or []:
         try:
-            if not isinstance(tool, dict):
+            matched, prebuilt_url = _match_internal_mcp(tool)
+            if not matched:
                 continue
-            type_ = tool.get('type', '')
             settings = tool.get('settings')
-            if not type_.startswith('mcp_') or not isinstance(settings, dict):
-                continue
-            prebuilt_url = None
-            if not settings.get('url'):
-                prebuilt = this.module.get_mcp_prebuilt_config(type_)
-                prebuilt_url = (prebuilt or {}).get('url')
-            if _match_internal_mcp_template_url(settings, prebuilt_url) is None:
-                continue
             if token is _TOKEN_UNSET:
                 token = _get_user_token(user_id)
                 if not token:
@@ -729,6 +755,25 @@ def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_
             )
         except Exception as e:
             log.warning(f"[MCP] Failed to resolve internal MCP toolkit: {e}")
+
+
+class InternalMcpPatError(Exception):
+    def __init__(self, state: str):
+        self.state = state
+        self.error_code = 'pat_expired' if state == 'EXPIRED' else 'pat_missing'
+        super().__init__(f"Internal MCP personal access token is {state.lower()}")
+
+
+def is_internal_mcp_toolkit(toolkit_config: dict) -> bool:
+    return _match_internal_mcp(toolkit_config)[0]
+
+
+def require_internal_mcp_pat(toolkit_config: dict, user_id: int) -> None:
+    if not is_internal_mcp_toolkit(toolkit_config):
+        return
+    state, _ = resolve_user_token_state(user_id)
+    if state != 'VALID':
+        raise InternalMcpPatError(state)
 
 
 def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
