@@ -785,6 +785,16 @@ def toolkit_change_relation(
         session_is_created = True
 
     try:
+        parent_version = session.query(ApplicationVersion).filter(
+            ApplicationVersion.id == relation_data.entity_version_id,
+            ApplicationVersion.application_id == relation_data.entity_id,
+        ).first()
+        if parent_version and parent_version.status in ('published', 'embedded'):
+            raise ToolkitChangeRelationError(
+                f'Version id {parent_version.id} is {parent_version.status} '
+                f'and can not be updated'
+            )
+
         elitea_toolkit = session.query(EliteATool).filter(
             EliteATool.id == toolkit_id
         ).first()
