@@ -292,9 +292,12 @@ class RPC:
                     sio=self.context.sio,
                     sid=sid,
                     event=sio_event,
-                    error=error_payload,
+                    # content must be a string: emit_error() sends it verbatim and the
+                    # frontend renders it as-is (raw dict crashes React error #31)
+                    error=error_payload["message"],
                     stream_id=parsed.stream_id,
-                    message_id=parsed.message_id,
+                    # question_id matches the client's placeholder; message_id (response uuid) never got sent to it
+                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
                 )
             return error_payload
 
@@ -486,9 +489,12 @@ class RPC:
                     sio=self.context.sio,
                     sid=sid,
                     event=sio_event,
-                    error=error_payload,
+                    # content must be a string: emit_error() sends it verbatim and the
+                    # frontend renders it as-is (raw dict crashes React error #31)
+                    error=error_payload["message"],
                     stream_id=parsed.stream_id,
-                    message_id=parsed.message_id,
+                    # question_id matches the client's placeholder; message_id (response uuid) never got sent to it
+                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
                 )
             return error_payload
 

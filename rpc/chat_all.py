@@ -1281,7 +1281,7 @@ class RPC:
                             return_chat_history=return_chat_history,
                             eligible_for_autoapproval=eligible_for_autoapproval,
                         )
-                    except PoolSaturationError:
+                    except (PoolSaturationError, SioValidationError):
                         # Mark the response placeholder as not streaming to avoid stuck chat entry
                         response_msg.is_streaming = False
                         session.commit()
