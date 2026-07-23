@@ -853,6 +853,7 @@ class Module(module.ModuleModel):
         self.mcp_exposure_enabled = mcp_config.get('enabled', True)
         self.mcp_in_menu_enabled = mcp_config.get('in_menu', True)
         log.info(f"MCP config reloaded: exposure={self.mcp_exposure_enabled}, in_menu={self.mcp_in_menu_enabled}")
+        self._init_publishing_guardrail()
 
     def _apply_scheduler_runtime_config(self):
         """Push admin-configured scheduler cron/enabled flags into DB rows.
@@ -894,7 +895,8 @@ class Module(module.ModuleModel):
     # MCP SSE Methods
     def mcp_sse_init(self):
         """Initialize MCP SSE specific functionality"""
-        # Cache MCP exposure settings (read once at startup)
+        # Cache MCP exposure settings at startup; refreshed on reconfig so
+        # admin toggle changes apply without a restart.
         mcp_config = self.descriptor.config.get('mcp_exposure', {})
         self.mcp_exposure_enabled = mcp_config.get('enabled', True)
         self.mcp_in_menu_enabled = mcp_config.get('in_menu', True)

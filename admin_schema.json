@@ -103,7 +103,7 @@
       "path": "mcp_exposure.enabled",
       "section": "guardrails",
       "default": true,
-      "requires_restart": true
+      "requires_restart": false
     },
     "mcp_in_menu": {
       "type": "boolean",
@@ -112,7 +112,7 @@
       "path": "mcp_exposure.in_menu",
       "section": "guardrails",
       "default": true,
-      "requires_restart": true,
+      "requires_restart": false,
       "visible_when": { "field": "mcp_enabled", "value": true }
     },
     "is_publish_blocked": {
@@ -122,7 +122,7 @@
       "path": "publishing_guardrail.is_publish_blocked",
       "section": "guardrails",
       "default": false,
-      "requires_restart": true
+      "requires_restart": false
     },
     "publish_whitelist_project_ids": {
       "type": "array",
@@ -132,7 +132,7 @@
       "path": "publishing_guardrail.whitelist_project_ids",
       "section": "guardrails",
       "default": [],
-      "requires_restart": true,
+      "requires_restart": false,
       "enum_source": "projects",
       "visible_when": { "field": "is_publish_blocked", "value": true }
     },
@@ -145,7 +145,7 @@
       "section": "guardrails",
       "default": "",
       "builtin_default_rpc": "applications_get_default_publish_validation_rules",
-      "requires_restart": true
+      "requires_restart": false
     },
     "agent_categories": {
       "type": "array",
