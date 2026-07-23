@@ -115,6 +115,15 @@
       "requires_restart": false,
       "visible_when": { "field": "mcp_enabled", "value": true }
     },
+    "mcp_category_name": {
+      "type": "string",
+      "title": "MCP Category Name",
+      "description": "Label shown for the MCP toolkit category in the Toolkit type selection screen. Defaults to \"MCP\".",
+      "path": "mcp_exposure.category_name",
+      "section": "guardrails",
+      "default": "MCP",
+      "requires_restart": false
+    },
     "is_publish_blocked": {
       "type": "boolean",
       "title": "Block Agent Publishing",
