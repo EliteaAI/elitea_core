@@ -50,7 +50,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description=(
             "Generate a draft agent configuration from a plain-text description. "
             "Uses the project's default LLM. Returns a validated JSON payload with "
-            "name, instructions, welcome message, conversation starters, and resource suggestions."
+            "name, instructions, welcome message, conversation starters, and resource suggestions. "
+            "Add application_id and version_id to edit an existing application."
         ),
         request_body=GenerateApplicationDraftRequest,
         tags=["elitea_core/applications"],

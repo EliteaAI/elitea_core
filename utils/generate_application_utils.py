@@ -221,10 +221,11 @@ def fetch_application_for_edit(
                 settings = t.get("settings", {})
                 app_id = settings.get("application_id")
                 app_type = settings.get("agent_type", "agent")
+                linked_app = session.get(Application, app_id) if app_id else None
                 app_info = {
                     "application_id": app_id,
-                    "name": t["name"],
-                    "description": t.get("description"),
+                    "name": linked_app.name if linked_app else t["name"],
+                    "description": linked_app.description if linked_app else t.get("description"),
                     "type": app_type,
                 }
                 if app_type == "pipeline":

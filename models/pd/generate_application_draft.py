@@ -9,14 +9,26 @@ MAX_SUGGESTED_SKILLS = 5
 class GenerateApplicationDraftRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
-            "example": {
-                "user_description": "A code reviewer that checks GitHub merge requests and posts comments",
-                "llm_settings": {
-                    "model_name": "gpt-5-mini",
-                    "max_tokens": 2048,
-                    "temperature": 0,
+            "examples": [
+                {
+                    "user_description": "A code reviewer that checks GitHub merge requests and posts comments",
+                    "llm_settings": {
+                        "model_name": "gpt-5-mini",
+                        "max_tokens": 4096,
+                        "temperature": 0.7,
+                    }
                 },
-            }
+                {
+                    "user_description": "Improve my agent, suggest agents, pipelines, toolkits",
+                    "llm_settings": {
+                        "model_name": "gpt-5-mini",
+                        "max_tokens": 4096,
+                        "temperature": 0.7,
+                    },
+                    'application_id': 1,
+                    'version_id': 1
+                }
+            ]
         }
     )
 
@@ -140,58 +152,54 @@ class GenerateApplicationDraftResponse(BaseModel):
     def split_by_type(cls, data):
         if not isinstance(data, dict):
             return data
-        # Split suggested_toolkits by toolkit type
+
+        def _type(i):
+            return (
+                i.get("type", "") if isinstance(i, dict) else getattr(i, "type", "")
+            ).lower()
+
+        # --- Toolkits: collect from all toolkit-related keys the LLM may use ---
         all_toolkit_items = []
         for key in ("suggested_toolkits", "suggested_mcp"):
             all_toolkit_items.extend(data.get(key) or [])
+
         mcp_items = []
-        pipeline_items = []
-        remaining_toolkits = []
+        toolkit_items = []
         for item in all_toolkit_items:
-            item_type = (
-                item.get("type", "")
-                if isinstance(item, dict)
-                else getattr(item, "type", "")
-            ).lower()
-            if item_type == "mcp":
+            t = _type(item)
+            if t == "mcp":
                 mcp_items.append(item)
-            elif item_type == "application":
-                pipeline_items.append(
-                    {
-                        "application_id": item.get("id"),
-                        "id": item.get("id"),
-                        "name": item.get("name", ""),
-                        "description": item.get("description"),
-                        "type": "pipeline",
-                    }
-                )
-            else:
-                remaining_toolkits.append(item)
-        data["suggested_toolkits"] = remaining_toolkits
+            elif t != "application":
+                toolkit_items.append(item)
+
+        data["suggested_toolkits"] = toolkit_items
         data["suggested_mcp"] = mcp_items
-        # Split suggested_applications by application type into agents and pipelines
+
+        # --- Applications: collect from all app-related keys the LLM may use ---
         all_app_items = []
-        for key in (
-            "suggested_applications",
-            "suggested_agents",
-            "suggested_pipelines",
-        ):
+        for key in ("suggested_applications", "suggested_agents", "suggested_pipelines"):
             all_app_items.extend(data.get(key) or [])
+
         agent_items = []
+        pipeline_items = []
         for item in all_app_items:
-            # Skip items with missing required fields (name or application_id)
-            if isinstance(item, dict):
-                if not item.get("application_id"):
-                    continue
-            item_type = (
-                item.get("type", "")
-                if isinstance(item, dict)
-                else getattr(item, "type", "")
-            ).lower()
-            if item_type == "pipeline":
-                pipeline_items.append(item)
+            if not isinstance(item, dict):
+                continue
+            app_id = item.get("application_id")
+            if not app_id:
+                continue
+            normalized = {
+                "application_id": app_id,
+                "id": app_id,
+                "name": item.get("name"),
+                "description": item.get("description"),
+                "type": item.get("type"),
+            }
+            if _type(item) == "pipeline":
+                pipeline_items.append(normalized)
             else:
-                agent_items.append(item)
+                agent_items.append(normalized)
+
         data["suggested_agents"] = agent_items
         data["suggested_pipelines"] = pipeline_items
         data.pop("suggested_applications", None)
