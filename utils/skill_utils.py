@@ -154,6 +154,18 @@ class SkillVersionNotUpdatableError(SkillError):
         self.version_id = version_id
 
 
+class AgentVersionNotUpdatableError(SkillError):
+    """Raised when attaching/detaching a skill on a published or embedded agent version."""
+    http_status = 409
+
+    def __init__(self, entity_version_id: int, status: str):
+        super().__init__(
+            f'Agent version {entity_version_id} is {status} and can not be updated'
+        )
+        self.entity_version_id = entity_version_id
+        self.status = status
+
+
 @contextmanager
 def _skill_session(session, project_id):
     """Yield a usable session. Own commit/rollback/close ONLY when we created it.
@@ -1145,6 +1157,12 @@ def attach_skill_to_agent(
     """Attach a skill to an agent version."""
 
     with _skill_session(session, project_id) as s:
+        agent_version = s.query(ApplicationVersion).filter(
+            ApplicationVersion.id == entity_version_id
+        ).first()
+        if agent_version and agent_version.status in (PublishStatus.published, PublishStatus.embedded):
+            raise AgentVersionNotUpdatableError(entity_version_id, agent_version.status)
+
         # Validate skill limit (raises SkillLimitExceededError)
         validate_agent_skill_limit(s, entity_version_id, entity_type)
 
@@ -1198,6 +1216,12 @@ def detach_skill_from_agent(
 ) -> dict:
     """Detach a skill from an agent version."""
     with _skill_session(session, project_id) as s:
+        agent_version = s.query(ApplicationVersion).filter(
+            ApplicationVersion.id == entity_version_id
+        ).first()
+        if agent_version and agent_version.status in (PublishStatus.published, PublishStatus.embedded):
+            raise AgentVersionNotUpdatableError(entity_version_id, agent_version.status)
+
         mapping = s.query(EntitySkillMapping).filter(
             EntitySkillMapping.entity_version_id == entity_version_id,
             EntitySkillMapping.entity_type == entity_type,
