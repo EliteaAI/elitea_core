@@ -8,7 +8,7 @@ These settings are configured in elitea_core.yml and cached at startup.
 from tools import api_tools, auth, config as c, this
 
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.mcp_config import is_mcp_exposure_enabled, is_mcp_in_menu_enabled
+from ...utils.mcp_config import get_mcp_category_name, is_mcp_exposure_enabled, is_mcp_in_menu_enabled
 from ...utils.skill_publish_utils import get_skill_publish_blocked, get_skill_publish_whitelist
 
 
@@ -34,6 +34,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         return {
             "mcp_exposure_enabled": is_mcp_exposure_enabled(),
             "mcp_in_menu_enabled": is_mcp_in_menu_enabled(),
+            "mcp_category_name": get_mcp_category_name(),
             "analytics_enabled": _is_analytics_enabled(),
             "is_publish_blocked": getattr(this.module, 'is_publish_blocked', False),
             "publish_whitelist_project_ids": list(

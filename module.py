@@ -852,6 +852,7 @@ class Module(module.ModuleModel):
         mcp_config = self.descriptor.config.get('mcp_exposure', {})
         self.mcp_exposure_enabled = mcp_config.get('enabled', True)
         self.mcp_in_menu_enabled = mcp_config.get('in_menu', True)
+        self.mcp_category_name = mcp_config.get('category_name') or 'MCP'
         log.info(f"MCP config reloaded: exposure={self.mcp_exposure_enabled}, in_menu={self.mcp_in_menu_enabled}")
         self._init_publishing_guardrail()
 
@@ -900,6 +901,7 @@ class Module(module.ModuleModel):
         mcp_config = self.descriptor.config.get('mcp_exposure', {})
         self.mcp_exposure_enabled = mcp_config.get('enabled', True)
         self.mcp_in_menu_enabled = mcp_config.get('in_menu', True)
+        self.mcp_category_name = mcp_config.get('category_name') or 'MCP'
         log.info(f"MCP exposure enabled: {self.mcp_exposure_enabled}, in_menu: {self.mcp_in_menu_enabled}")
 
         # Add public messages route (optional)

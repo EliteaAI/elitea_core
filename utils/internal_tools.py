@@ -667,8 +667,12 @@ def resolve_internal_mcp_settings(settings: dict, user_id: int, project_id: int,
     if token:
         result['personal_token'] = token
 
-    if isinstance(result.get('url'), str):
-        result['url'] = result['url'].replace(MCP_PROJECT_ID_MARKER, str(project_id))
+    # Materialize from the toolkit's own url, else the admin-configured template, so
+    # paths that read settings.url directly (the connection test) get a resolved URL
+    # instead of an unsubstituted {project_id} marker.
+    base_url = result.get('url') or prebuilt_url
+    if isinstance(base_url, str):
+        result['url'] = base_url.replace(MCP_PROJECT_ID_MARKER, str(project_id))
         headers = dict(result.get('headers') or {})
         for key, value in list(headers.items()):
             if isinstance(value, str) and token:
