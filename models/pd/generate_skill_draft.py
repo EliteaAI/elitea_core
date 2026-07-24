@@ -1,7 +1,7 @@
 import re
 from typing import Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 from .predict_llm import LLMSettingsRequest
 from .skill import validate_skill_name
@@ -40,6 +40,25 @@ class GenerateSkillDraftRequest(BaseModel):
         description="LLM model override. If not provided, "
         "uses the project's default model with temperature=0.7 and max_tokens=4096.",
     )
+    skill_id: Optional[int] = Field(
+        default=None,
+        description="Skill ID to edit. When provided with version_id, enables edit mode.",
+    )
+    version_id: Optional[int] = Field(
+        default=None,
+        description="Version ID to edit. Required when skill_id is provided.",
+    )
+
+    @model_validator(mode="after")
+    def validate_edit_params(self):
+        """Ensure both skill_id and version_id are provided together."""
+        if (self.skill_id is None) != (self.version_id is None):
+            raise ValueError("Both skill_id and version_id must be provided for edit mode")
+        return self
+
+    @property
+    def is_edit_mode(self) -> bool:
+        return self.skill_id is not None and self.version_id is not None
 
 
 class GenerateSkillDraftResponse(BaseModel):
