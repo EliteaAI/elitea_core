@@ -181,6 +181,12 @@ def fetch_guarded_message_groups(session, rows, log_label: str = 'message_groups
     return group_dicts
 
 
+def _serialize_guarded_groups(group_dicts: list) -> list:
+    """Validate guarded message-group dicts through MessageGroupDetail to the JSON output shape."""
+    from ..models.pd.message import MessageGroupDetail  # local import avoids a models<->utils cycle
+    return [MessageGroupDetail.model_validate(g).model_dump(mode='json') for g in group_dicts]
+
+
 def get_conversation_details(
     session,
     conversation_id: int,
