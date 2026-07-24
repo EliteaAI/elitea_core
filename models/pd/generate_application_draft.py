@@ -147,60 +147,74 @@ class GenerateApplicationDraftResponse(BaseModel):
             v = v[:MAX_SUGGESTED_SKILLS]
         return v
 
-    @model_validator(mode="before")
+    @field_validator("suggested_toolkits", mode="before")
     @classmethod
-    def split_by_type(cls, data):
-        if not isinstance(data, dict):
-            return data
-
-        def _type(i):
-            return (
-                i.get("type", "") if isinstance(i, dict) else getattr(i, "type", "")
-            ).lower()
-
-        # --- Toolkits: collect from all toolkit-related keys the LLM may use ---
-        all_toolkit_items = []
-        for key in ("suggested_toolkits", "suggested_mcp"):
-            all_toolkit_items.extend(data.get(key) or [])
-
-        mcp_items = []
-        toolkit_items = []
-        for item in all_toolkit_items:
-            t = _type(item)
-            if t == "mcp":
-                mcp_items.append(item)
-            elif t != "application":
-                toolkit_items.append(item)
-
-        data["suggested_toolkits"] = toolkit_items
-        data["suggested_mcp"] = mcp_items
-
-        # --- Applications: collect from all app-related keys the LLM may use ---
-        all_app_items = []
-        for key in ("suggested_applications", "suggested_agents", "suggested_pipelines"):
-            all_app_items.extend(data.get(key) or [])
-
-        agent_items = []
-        pipeline_items = []
-        for item in all_app_items:
+    def validate_toolkits(cls, v):
+        if not v:
+            return []
+        result = []
+        for item in v:
             if not isinstance(item, dict):
                 continue
-            app_id = item.get("application_id")
-            if not app_id:
+            if item.get("type", "").lower() == "mcp":
                 continue
-            normalized = {
-                "application_id": app_id,
-                "id": app_id,
-                "name": item.get("name"),
-                "description": item.get("description"),
-                "type": item.get("type"),
-            }
-            if _type(item) == "pipeline":
-                pipeline_items.append(normalized)
-            else:
-                agent_items.append(normalized)
+            elif item.get("type", "").lower() == "application":
+                continue
+            elif item.get("type"):
+                result.append(item)
+        return result
 
-        data["suggested_agents"] = agent_items
-        data["suggested_pipelines"] = pipeline_items
-        data.pop("suggested_applications", None)
-        return data
+    @field_validator("suggested_mcp", mode="before")
+    @classmethod
+    def validate_mcp(cls, v):
+        if not v:
+            return []
+        result = []
+        for item in v:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type", "").lower() == "mcp":
+                result.append(item)
+        return result
+
+    @field_validator("suggested_agents", mode="before")
+    @classmethod
+    def validate_agents(cls, v):
+        if not v:
+            return []
+        result = []
+        for item in v:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type", "").lower() == "agent":
+                app_id = item.get("application_id")
+                if app_id:
+                    result.append({
+                        "application_id": app_id,
+                        "id": app_id,
+                        "name": item.get("name"),
+                        "description": item.get("description"),
+                        "type": "agent",
+                    })
+        return result
+
+    @field_validator("suggested_pipelines", mode="before")
+    @classmethod
+    def validate_pipelines(cls, v):
+        if not v:
+            return []
+        result = []
+        for item in v:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type", "").lower() == "pipeline":
+                app_id = item.get("application_id")
+                if app_id:
+                    result.append({
+                        "application_id": app_id,
+                        "id": app_id,
+                        "name": item.get("name"),
+                        "description": item.get("description"),
+                        "type": "pipeline",
+                    })
+        return result

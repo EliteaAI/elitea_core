@@ -104,29 +104,29 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.debug("generate_application_draft: edit mode, current_config attached_toolkits=%s", current_config.get("attached_toolkits"))
 
             try:
-                toolkits, agents, skills = fetch_project_resources(project_id, req.user_description)
+                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(project_id, req.user_description)
             except Exception:
                 log.warning("generate_application_draft: failed to fetch project resources")
-                toolkits, agents, skills = [], [], []
+                toolkits, mcp, agents, pipelines, skills = [], [], [], [], []
 
             # LLM gets ALL available resources to decide what to keep/add/remove
             template = get_service_prompt(_SERVICE_PROMPT_KEY_EDIT)
             if not template:
                 return {"error": "Service prompt 'edit_application_draft' is not configured"}, 500
-            system_prompt = build_edit_system_prompt(template, current_config, toolkits, agents, skills)
+            system_prompt = build_edit_system_prompt(template, current_config, toolkits, mcp, agents, pipelines, skills)
             log.debug("generate_application_draft: edit system_prompt length=%d", len(system_prompt))
         else:
             # Create mode: existing behavior
             try:
-                toolkits, agents, skills = fetch_project_resources(project_id, req.user_description)
+                toolkits, mcp, agents, pipelines, skills = fetch_project_resources(project_id, req.user_description)
             except Exception:
                 log.warning("generate_application_draft: failed to fetch project resources")
-                toolkits, agents, skills = [], [], []
+                toolkits, mcp, agents, pipelines, skills = [], [], [], [], []
 
             template = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
             if not template:
                 return {"error": "Service prompt 'generate_application_draft' is not configured"}, 500
-            system_prompt = build_system_prompt(template, toolkits, agents, skills)
+            system_prompt = build_system_prompt(template, toolkits, mcp, agents, pipelines, skills)
 
         try:
             result = self.module.predict_sio_llm(

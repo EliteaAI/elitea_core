@@ -8,8 +8,10 @@ from ..models.all import Application, ApplicationVersion
 from ..models.elitea_tools import EliteATool
 from ..models.skill import Skill
 
-_MAX_TOOLKITS = 20
-_MAX_APPLICATIONS = 5
+_MAX_TOOLKITS = 10
+_MAX_MCP = 10
+_MAX_AGENTS = 5
+_MAX_PIPELINES = 5
 _MAX_SKILLS = 10
 
 
@@ -25,11 +27,11 @@ def _tokenize(text: str) -> set:
 def fetch_project_resources(
     project_id: int,
     user_description: str,
-) -> Tuple[List[dict], List[dict], List[dict]]:
-    """Fetch toolkits, agents, and skills from the project.
+) -> Tuple[List[dict], List[dict], List[dict], List[dict], List[dict]]:
+    """Fetch project resources split by type.
 
     Returns:
-        Tuple of (toolkits, agents, skills) lists.
+        Tuple of (toolkits, mcp, agents, pipelines, skills).
     """
     query_tokens = _tokenize(user_description)
 
@@ -40,32 +42,25 @@ def fetch_project_resources(
         toolkits_scored = sorted(
             (
                 (
-                    _score_item(
-                        query_tokens, r.name or r.type, r.description or "", r.type
-                    ),
-                    {
-                        "id": r.id,
-                        "type": r.type,
-                        "name": r.name or r.type,
-                        "description": r.description,
-                    },
+                    _score_item(query_tokens, r.name or r.type, r.description or "", r.type),
+                    {"id": r.id, "type": r.type, "name": r.name or r.type, "description": r.description},
                 )
                 for r in toolkit_rows
             ),
             key=lambda x: x[0],
             reverse=True,
         )
-        toolkits = [item for _, item in toolkits_scored[:_MAX_TOOLKITS]]
+        toolkits = [item for _, item in toolkits_scored if item["type"] != "mcp"][:_MAX_TOOLKITS]
+        mcp = [item for _, item in toolkits_scored if item["type"] == "mcp"][:_MAX_MCP]
 
         agent_rows = (
             session.query(
                 Application.id,
                 Application.name,
                 Application.description,
-                ApplicationVersion.id.label("version_id"),
                 ApplicationVersion.agent_type,
             )
-            .outerjoin(
+            .join(
                 ApplicationVersion,
                 (ApplicationVersion.application_id == Application.id)
                 & (ApplicationVersion.name == "base"),
@@ -78,7 +73,6 @@ def fetch_project_resources(
                     _score_item(query_tokens, r.name or "", r.description or ""),
                     {
                         "application_id": r.id,
-                        "id": r.version_id,
                         "name": r.name,
                         "description": r.description,
                         "type": "pipeline" if r.agent_type == "pipeline" else "agent",
@@ -94,9 +88,9 @@ def fetch_project_resources(
         # that binding is now rejected at bind time (application_toolkit_change_relation) and
         # at chat resolution. If this endpoint ever gains an owner-application context, filter
         # it out here so an agent is never suggested as its own sub-agent.
-        agents = [item for _, item in agents_scored[:_MAX_APPLICATIONS]]
+        agents = [item for _, item in agents_scored if item["type"] == "agent"][:_MAX_AGENTS]
+        pipelines = [item for _, item in agents_scored if item["type"] == "pipeline"][:_MAX_PIPELINES]
 
-        # Fetch skills
         skill_rows = session.query(Skill.id, Skill.name, Skill.description).all()
         skills_scored = sorted(
             (
@@ -111,31 +105,46 @@ def fetch_project_resources(
         )
         skills = [item for _, item in skills_scored[:_MAX_SKILLS]]
 
-    return toolkits, agents, skills
+    return toolkits, mcp, agents, pipelines, skills
 
 
 def _format_toolkit_lines(toolkits: list) -> list:
-    """Format toolkit items for prompt."""
     if not toolkits:
-        return ["(none configured)"]
+        return ["(none)"]
     return [
         f'- id={t["id"]}  type="{t["type"]}"  name="{t["name"]}"  {(t["description"] or "")[:120]}'
         for t in toolkits
     ]
 
 
+def _format_mcp_lines(mcp: list) -> list:
+    if not mcp:
+        return ["(none)"]
+    return [
+        f'- id={t["id"]}  name="{t["name"]}"  {(t["description"] or "")[:120]}'
+        for t in mcp
+    ]
+
+
 def _format_agent_lines(agents: list) -> list:
-    """Format agent items for prompt."""
     if not agents:
         return ["(none)"]
     return [
-        f'- application_id={a["application_id"]}  type="{a["type"]}"  name="{a["name"]}"  {(a["description"] or "")[:100]}'
+        f'- application_id={a["application_id"]}  name="{a["name"]}"  {(a["description"] or "")[:100]}'
         for a in agents
     ]
 
 
+def _format_pipeline_lines(pipelines: list) -> list:
+    if not pipelines:
+        return ["(none)"]
+    return [
+        f'- application_id={a["application_id"]}  name="{a["name"]}"  {(a["description"] or "")[:100]}'
+        for a in pipelines
+    ]
+
+
 def _format_skill_lines(skills: list) -> list:
-    """Format skill items for prompt."""
     if not skills:
         return ["(none)"]
     return [
@@ -145,22 +154,18 @@ def _format_skill_lines(skills: list) -> list:
 
 
 def build_system_prompt(
-    template: str, toolkits: list, agents: list, skills: list | None = None
+    template: str,
+    toolkits: list,
+    mcp: list,
+    agents: list,
+    pipelines: list,
+    skills: list,
 ) -> str:
-    """Build the system prompt by formatting the template with available resources.
-
-    Args:
-        template: The prompt template with {toolkits}, {agents}, and optionally {skills} placeholders.
-        toolkits: List of toolkit dictionaries.
-        agents: List of agent dictionaries.
-        skills: List of skill dictionaries (optional for backward compatibility).
-    """
-    if skills is None:
-        skills = []
-
     return template.format(
         toolkits="\n".join(_format_toolkit_lines(toolkits)),
+        mcp="\n".join(_format_mcp_lines(mcp)),
         agents="\n".join(_format_agent_lines(agents)),
+        pipelines="\n".join(_format_pipeline_lines(pipelines)),
         skills="\n".join(_format_skill_lines(skills)),
     )
 
@@ -265,13 +270,16 @@ def build_edit_system_prompt(
     template: str,
     current_config: dict,
     toolkits: list,
+    mcp: list,
     agents: list,
-    skills: list
+    pipelines: list,
+    skills: list,
 ) -> str:
-    """Build the edit system prompt with current config and available resources."""
     return template.format(
         current_config=json.dumps(current_config, indent=2),
         toolkits="\n".join(_format_toolkit_lines(toolkits)),
+        mcp="\n".join(_format_mcp_lines(mcp)),
         agents="\n".join(_format_agent_lines(agents)),
+        pipelines="\n".join(_format_pipeline_lines(pipelines)),
         skills="\n".join(_format_skill_lines(skills)),
     )
