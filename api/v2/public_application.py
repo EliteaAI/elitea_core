@@ -1,13 +1,18 @@
 import json
 
-from sqlalchemy.orm import joinedload
+from flask import request
+from pylon.core.tools import log
+from sqlalchemy.orm import joinedload, selectinload
 from tools import api_tools, config as c, db, auth
 from ...models.all import ApplicationVersion, Application
 from ...models.pd.application import PublishedApplicationDetailModel
 from ...models.pd.version import ApplicationVersionDetailModel
 
 from ...models.enums.all import PublishStatus
+from ...utils.application_utils import build_skill_mappings_list
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.secrets import check_secret_header
+from ...utils.skill_utils import apply_runtime_skills
 from ...utils.utils import add_public_project_id
 
 
@@ -24,6 +29,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int, application_id: int, version_name: str = None, *args, **kwargs):
+        # Published skill twins are deliberately invisible in the catalog and this
+        # endpoint is viewer-readable, so the query param alone cannot decide it.
+        # The project stays server-derived: a client-supplied id would reach the vault
+        # lookup unbounded by any membership check. It still matches the caller's
+        # header, which a non-administration project inherits from administration.
+        serve_runtime_skills = False
+        if request.args.get('runtime') == 'true':
+            serve_runtime_skills = check_secret_header(
+                request.headers.get('X-SECRET'), project_id=project_id,
+            )
+            if not serve_runtime_skills:
+                log.warning(
+                    "Withholding runtime skills for public application %s: X-SECRET did "
+                    "not validate. A published agent's sub-agents will run without their "
+                    "skills — check secrets_header_value on the calling project.",
+                    application_id,
+                )
         with db.with_project_schema_session(project_id) as session:
             filters = [
                 ApplicationVersion.application_id == application_id,
@@ -34,12 +56,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if version_name:
                 filters.append(ApplicationVersion.name == version_name)
 
+            load_options = [
+                joinedload(ApplicationVersion.application).options(joinedload(Application.versions)),
+            ]
+            if serve_runtime_skills:
+                load_options.append(selectinload(ApplicationVersion.skill_mappings))
             query = (
                 session.query(ApplicationVersion)
                 .filter(*filters)
-                .options(
-                    joinedload(ApplicationVersion.application).options(joinedload(Application.versions)),
-                )
+                .options(*load_options)
                 .order_by(ApplicationVersion.created_at.desc())
             )
             application_version = query.first()
@@ -61,7 +86,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     tool.set_agent_meta_and_fields(project_id)
                     tool.set_online(project_id)
 
-        result_dict = result.model_dump(mode='json')
+            result_dict = result.model_dump(mode='json')
+            # The catalog view and the fork base read this same payload, so baking
+            # unconditionally would strip the ~ control token out of every fork.
+            if serve_runtime_skills:
+                version_details = result_dict['version_details']
+                version_details['skills'] = build_skill_mappings_list(
+                    application_version.skill_mappings
+                )
+                apply_runtime_skills(version_details)
+
         for tool in result_dict.get('version_details', {}).get('tools', []):
             tool['project_id'] = project_id
         return result_dict, 200

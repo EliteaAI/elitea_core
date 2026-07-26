@@ -1,6 +1,7 @@
 import re
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple, Literal
 
@@ -1146,6 +1147,26 @@ def validate_agent_skill_limit(
     return True
 
 
+def attach_skill_to_public_copy(
+    project_id: int,
+    entity_version_id: int,
+    skill_id: int,
+    skill_version_id: int,
+    entity_type: str = SkillEntityTypes.agent,
+    session=None,
+) -> dict:
+    """Attach a skill onto the public copy a publish run just created.
+
+    That copy is born ``published``/``embedded``, so the guard which stops a user
+    from editing an already-public version would reject the publish pipeline that
+    populates it.
+    """
+    with _skill_session(session, project_id) as s:
+        return _create_skill_mapping(
+            s, entity_version_id, skill_id, skill_version_id, entity_type,
+        )
+
+
 def attach_skill_to_agent(
     project_id: int,
     entity_version_id: int,
@@ -1163,48 +1184,54 @@ def attach_skill_to_agent(
         if agent_version and agent_version.status in (PublishStatus.published, PublishStatus.embedded):
             raise AgentVersionNotUpdatableError(entity_version_id, agent_version.status)
 
-        # Validate skill limit (raises SkillLimitExceededError)
-        validate_agent_skill_limit(s, entity_version_id, entity_type)
-
-        # Verify skill exists
-        skill = s.query(Skill).filter(Skill.id == skill_id).first()
-        if not skill:
-            raise SkillNotFoundError(skill_id)
-
-        # Verify version exists and belongs to skill
-        version = s.query(SkillVersion).filter(
-            SkillVersion.id == skill_version_id,
-            SkillVersion.skill_id == skill_id,
-        ).first()
-        if not version:
-            raise SkillVersionNotFoundError(skill_id, version_id=skill_version_id)
-
-        # Pre-check duplicate attach (the mapping unique key is
-        # (entity_version_id, skill_id, entity_type)). The DB unique constraint
-        # remains a backstop for a rare TOCTOU race.
-        existing_mapping = s.query(EntitySkillMapping.id).filter(
-            EntitySkillMapping.entity_version_id == entity_version_id,
-            EntitySkillMapping.entity_type == entity_type,
-            EntitySkillMapping.skill_id == skill_id,
-        ).first()
-        if existing_mapping:
-            raise SkillAlreadyAttachedError(skill_id, entity_version_id)
-
-        # Create mapping
-        mapping = EntitySkillMapping(
-            entity_version_id=entity_version_id,
-            entity_type=entity_type,
-            skill_id=skill_id,
-            skill_version_id=skill_version_id,
+        return _create_skill_mapping(
+            s, entity_version_id, skill_id, skill_version_id, entity_type,
         )
-        s.add(mapping)
 
-        return {
-            'skill_id': skill_id,
-            'skill_version_id': skill_version_id,
-            'skill_name': skill.name,
-            'version_name': version.name,
-        }
+
+def _create_skill_mapping(
+    s,
+    entity_version_id: int,
+    skill_id: int,
+    skill_version_id: int,
+    entity_type: str,
+) -> dict:
+    validate_agent_skill_limit(s, entity_version_id, entity_type)
+
+    skill = s.query(Skill).filter(Skill.id == skill_id).first()
+    if not skill:
+        raise SkillNotFoundError(skill_id)
+
+    version = s.query(SkillVersion).filter(
+        SkillVersion.id == skill_version_id,
+        SkillVersion.skill_id == skill_id,
+    ).first()
+    if not version:
+        raise SkillVersionNotFoundError(skill_id, version_id=skill_version_id)
+
+    # The DB unique constraint stays the backstop for a rare TOCTOU race.
+    existing_mapping = s.query(EntitySkillMapping.id).filter(
+        EntitySkillMapping.entity_version_id == entity_version_id,
+        EntitySkillMapping.entity_type == entity_type,
+        EntitySkillMapping.skill_id == skill_id,
+    ).first()
+    if existing_mapping:
+        raise SkillAlreadyAttachedError(skill_id, entity_version_id)
+
+    mapping = EntitySkillMapping(
+        entity_version_id=entity_version_id,
+        entity_type=entity_type,
+        skill_id=skill_id,
+        skill_version_id=skill_version_id,
+    )
+    s.add(mapping)
+
+    return {
+        'skill_id': skill_id,
+        'skill_version_id': skill_version_id,
+        'skill_name': skill.name,
+        'version_name': version.name,
+    }
 
 
 def detach_skill_from_agent(
@@ -1548,6 +1575,77 @@ def format_skills_section(skills: List[dict]) -> str:
         for s in skills
     ]
     return '\n\n' + AGENT_SKILLS_SECTION_HEADER + '\n\n' + '\n\n'.join(entries)
+
+
+@dataclass(frozen=True)
+class RuntimeSkills:
+    """``instruction_skill_ids`` lets a caller resolving message-level ``~skill``
+    drop what the instructions already bake, instead of injecting the body twice.
+    """
+
+    disclosable: List[dict]
+    instruction_skill_ids: frozenset
+
+
+def apply_runtime_skills(version_details: dict) -> None:
+    """Shape ``version_details`` for an endpoint that serves the SDK.
+
+    All three steps must move together or the child agent silently loses a channel.
+    The chat path calls ``resolve_runtime_skills`` directly instead: it still needs
+    the raw ``skills`` list afterwards to resolve message-level ``~skill``.
+    """
+    # An empty payload is the webhook/API/MCP predict shape, where the SDK refetches
+    # only while version_details stays falsy. Adding a key would strand it with a
+    # truthy dict that has no llm_settings.
+    if not version_details:
+        return
+
+    # Re-shaping finds no skills left to disclose and would blank the list.
+    if 'attached_skills' in version_details:
+        return
+
+    runtime_skills = resolve_runtime_skills(version_details)
+    version_details['attached_skills'] = runtime_skills.disclosable
+    version_details.pop('skills', None)
+
+
+def resolve_runtime_skills(version_details: dict) -> RuntimeSkills:
+    """Bake instruction-referenced skills into ``version_details['instructions']``.
+
+    Writes ``instructions`` back in place, and only when the resolved text
+    actually differs, so a payload that carries no instructions keeps no key.
+    """
+    attached_skills = (version_details or {}).get('skills') or []
+    is_pipeline = (version_details or {}).get('agent_type') == AgentTypes.pipeline.value
+    if is_pipeline:
+        return RuntimeSkills(disclosable=[], instruction_skill_ids=frozenset())
+
+    instructions = version_details.get('instructions')
+    instruction_skills = []
+    if isinstance(instructions, str) and instructions:
+        cleaned, instruction_skills = consume_invoked_skills(instructions, attached_skills)
+        resolved = cleaned + format_skills_section(instruction_skills)
+        if resolved != instructions:
+            version_details['instructions'] = resolved
+
+    instruction_skill_ids = frozenset(
+        s.get('skill_id') for s in instruction_skills
+    )
+    disclosable = [
+        {
+            'skill_id': s.get('skill_id'),
+            'name': s.get('name'),
+            'description': s.get('description'),
+            'instructions': s.get('instructions'),
+        }
+        for s in attached_skills
+        if s.get('skill_id') not in instruction_skill_ids
+        and s.get('name')
+        and (s.get('instructions') or '').strip()
+    ]
+    return RuntimeSkills(
+        disclosable=disclosable, instruction_skill_ids=instruction_skill_ids,
+    )
 
 
 def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:

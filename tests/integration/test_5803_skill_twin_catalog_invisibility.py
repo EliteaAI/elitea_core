@@ -166,7 +166,7 @@ def pu():
         },
         'plugins.elitea_core.utils.application_utils': {'build_skill_mappings_list': lambda ms: list(ms)},
         'plugins.elitea_core.utils.skill_export_import': {'build_skill_fork_payload': noop},
-        'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_agent': noop},
+        'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': noop},
     }
     for modname, attrs in stubs.items():
         sys.modules[modname] = _module(modname, **attrs)
@@ -308,7 +308,7 @@ def test_publish_attached_skills_is_noop_without_mappings(pu, monkeypatch):
         raise AssertionError('skill machinery must not run for zero attachments')
 
     monkeypatch.setattr(pu, 'build_skill_fork_payload', explode)
-    monkeypatch.setattr(pu, 'attach_skill_to_agent', explode)
+    monkeypatch.setattr(pu, 'attach_skill_to_public_copy', explode)
     monkeypatch.setattr(pu, 'this', types.SimpleNamespace(
         module=types.SimpleNamespace(import_wizard=explode)))
     monkeypatch.setattr(pu, 'db', _fake_db([FakeSession([[]])]))
