@@ -28,11 +28,20 @@ class GenerateProjectContextDraftRequest(BaseModel):
     user_description: str = Field(
         description="Natural-language description of the project (architecture, processes, constraints, etc.)"
     )
+    current_project_background: Optional[str] = Field(
+        default=None,
+        description="Existing Project Background to refine. When provided, the draft is generated in "
+        "edit mode (the suggestion refines this content) instead of create mode.",
+    )
     llm_settings: Optional[LLMSettingsRequest] = Field(
         default=None,
         description="LLM model override. If not provided, "
         "uses the project's default model with temperature=0.7 and max_tokens=4096.",
     )
+
+    @property
+    def is_edit_mode(self) -> bool:
+        return self.current_project_background is not None
 
 
 class GenerateProjectContextDraftResponse(BaseModel):
