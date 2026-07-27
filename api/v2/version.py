@@ -151,8 +151,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in version details: {e}")
 
-        # Not in get_application_version_details_expanded: the direct-chat path shares
-        # that helper and bakes its own instructions, so calling it there double-injects.
         apply_runtime_skills(version_details)
 
         return version_details, 200

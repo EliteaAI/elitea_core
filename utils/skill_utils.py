@@ -1155,11 +1155,10 @@ def attach_skill_to_public_copy(
     entity_type: str = SkillEntityTypes.agent,
     session=None,
 ) -> dict:
-    """Attach a skill onto the public copy a publish run just created.
+    """Attach a skill to the public copy that a publish run just created.
 
-    That copy is born ``published``/``embedded``, so the guard which stops a user
-    from editing an already-public version would reject the publish pipeline that
-    populates it.
+    That copy is already published or embedded. The guard that stops a user
+    editing a public version would therefore reject the publish run itself.
     """
     with _skill_session(session, project_id) as s:
         return _create_skill_mapping(
@@ -1209,7 +1208,8 @@ def _create_skill_mapping(
     if not version:
         raise SkillVersionNotFoundError(skill_id, version_id=skill_version_id)
 
-    # The DB unique constraint stays the backstop for a rare TOCTOU race.
+    # The database unique constraint still guards a rare race between the
+    # check above and the insert below.
     existing_mapping = s.query(EntitySkillMapping.id).filter(
         EntitySkillMapping.entity_version_id == entity_version_id,
         EntitySkillMapping.entity_type == entity_type,
@@ -1579,8 +1579,10 @@ def format_skills_section(skills: List[dict]) -> str:
 
 @dataclass(frozen=True)
 class RuntimeSkills:
-    """``instruction_skill_ids`` lets a caller resolving message-level ``~skill``
-    drop what the instructions already bake, instead of injecting the body twice.
+    """``instruction_skill_ids`` names the skills the instructions already bake.
+
+    A caller resolving ``~skill`` in the user message skips them, so their body
+    is not added a second time.
     """
 
     disclosable: List[dict]
@@ -1588,19 +1590,25 @@ class RuntimeSkills:
 
 
 def apply_runtime_skills(version_details: dict) -> None:
-    """Shape ``version_details`` for an endpoint that serves the SDK.
+    """Prepare ``version_details`` for the SDK.
 
-    All three steps must move together or the child agent silently loses a channel.
-    The chat path calls ``resolve_runtime_skills`` directly instead: it still needs
-    the raw ``skills`` list afterwards to resolve message-level ``~skill``.
+    Only runtime endpoints may call this. The chat path uses the same
+    version-details helper and bakes its own instructions. Calling this there
+    would add the same skills a second time.
+
+    The three steps below belong together. If one is skipped, the child agent
+    loses a skill channel and nothing reports it.
+
+    The chat path calls ``resolve_runtime_skills`` instead. It still needs the
+    raw ``skills`` list to resolve ``~skill`` written in the user message.
     """
-    # An empty payload is the webhook/API/MCP predict shape, where the SDK refetches
-    # only while version_details stays falsy. Adding a key would strand it with a
-    # truthy dict that has no llm_settings.
+    # Webhook, API and MCP requests carry no version_details. The SDK refetches
+    # them only while this stays empty. Adding a key here would stop the refetch,
+    # and the SDK would then fail on the missing llm_settings.
     if not version_details:
         return
 
-    # Re-shaping finds no skills left to disclose and would blank the list.
+    # A second call finds no skills left to disclose and would erase the list.
     if 'attached_skills' in version_details:
         return
 
@@ -1610,10 +1618,10 @@ def apply_runtime_skills(version_details: dict) -> None:
 
 
 def resolve_runtime_skills(version_details: dict) -> RuntimeSkills:
-    """Bake instruction-referenced skills into ``version_details['instructions']``.
+    """Bake the skills referenced by ``~name`` into ``instructions``.
 
-    Writes ``instructions`` back in place, and only when the resolved text
-    actually differs, so a payload that carries no instructions keeps no key.
+    Writes the result back in place, and only when the text changed. A payload
+    that carries no instructions therefore never gains the key.
     """
     attached_skills = (version_details or {}).get('skills') or []
     is_pipeline = (version_details or {}).get('agent_type') == AgentTypes.pipeline.value

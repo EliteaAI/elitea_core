@@ -29,8 +29,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int, application_id: int, version_name: str = None, *args, **kwargs):
-        # This endpoint is viewer-readable and published skill twins are deliberately
-        # hidden from the catalog, so the query param alone cannot gate skill bodies.
+        # Any viewer can read this endpoint, and published skill twins are hidden
+        # from the catalog on purpose. The query parameter alone is therefore not
+        # enough to release skill bodies.
         serve_runtime_skills = False
         if request.args.get('runtime') == 'true':
             serve_runtime_skills = check_secret_header(
@@ -84,8 +85,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     tool.set_online(project_id)
 
             result_dict = result.model_dump(mode='json')
-            # The catalog view and the fork base read this same payload, so baking
-            # unconditionally would strip the ~ control token out of every fork.
+            # The catalog view and the fork base read this same payload. Baking it
+            # for every caller would remove the ~ token from every fork.
             if serve_runtime_skills:
                 version_details = result_dict['version_details']
                 version_details['skills'] = build_skill_mappings_list(
