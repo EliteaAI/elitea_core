@@ -272,6 +272,18 @@ def generate_predict_payload(
         'invoked_skills': getattr(parsed, 'invoked_skills', None) or [],
     }
 
+    # Only the raw LLM chat shape stops here, and it has no agent instructions to bake.
+    # Every agent-backed shape reaches the branch below, which recomputes this.
+    payload['applied_skills'] = [
+        {
+            'skill_id': s.get('skill_id'),
+            'name': s.get('name'),
+            'icon_meta': s.get('icon_meta'),
+        }
+        for s in payload['invoked_skills']
+        if isinstance(s, dict) and s.get('name')
+    ]
+
     # Auto-approve sensitive actions for API requests when project secret is set.
     # Only honor the explicit server-side argument, never a client-provided model field.
     if eligible_for_autoapproval:
@@ -352,6 +364,18 @@ def generate_predict_payload(
         # avoid double injection.
         payload['invoked_skills'] = [
             s for s in message_skills if s.get('skill_id') not in instruction_skill_ids
+        ]
+
+        # Never the instruction bodies: they already ride the prompt or invoked_skills,
+        # so carrying them here would inject the same skill twice.
+        payload['applied_skills'] = runtime_skills.instruction_skills + [
+            {
+                'skill_id': s.get('skill_id'),
+                'name': s.get('name'),
+                'icon_meta': s.get('icon_meta'),
+            }
+            for s in payload['invoked_skills']
+            if s.get('name')
         ]
 
         # Progressive disclosure: attached skills become loadable on demand via the

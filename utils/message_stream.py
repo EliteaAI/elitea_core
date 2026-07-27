@@ -24,7 +24,9 @@ def safe_decode_bytes_in_dict(obj):
         return obj
 
 
-def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict, session=None) -> ConversationMessageGroup:
+def update_message_group_meta(
+    msg_group: ConversationMessageGroup, payload: dict, session=None, partial: bool = False,
+) -> ConversationMessageGroup:
     """
     This function merges the existing metadata with new metadata
     extracted from the provided payload attributes and response metadata, ensuring
@@ -94,11 +96,31 @@ def update_message_group_meta(msg_group: ConversationMessageGroup, payload: dict
     new_invoked_skills = response_meta.get('invoked_skills') or []
     old_invoked_skills = old_meta.get('invoked_skills', [])
     if new_invoked_skills:
-        new_meta['invoked_skills'] = [
-            {'skill_id': e.get('skill_id'), 'name': e.get('name')}
+        merged = [
+            {
+                'skill_id': e.get('skill_id'),
+                'name': e.get('name'),
+                'icon_meta': e.get('icon_meta'),
+            }
             for e in new_invoked_skills
             if isinstance(e, dict)
         ]
+        # A partial save and a resumed run each know only part of the turn, so replacing
+        # would drop what an earlier step or round applied. Regenerate deliberately falls
+        # through to replace: the discarded answer's skills did not shape the new one.
+        resumes_existing_turn = (
+            should_continue
+            or response_meta.get('hitl_resume')
+            # Forced off in build_parent_reconcile_payload, yet still the same turn.
+            or response_meta.get('parallel_reconcile')
+        )
+        if partial or resumes_existing_turn:
+            seen = {(e.get('name') or '').strip().lower() for e in merged}
+            merged += [
+                e for e in old_invoked_skills
+                if isinstance(e, dict) and (e.get('name') or '').strip().lower() not in seen
+            ]
+        new_meta['invoked_skills'] = merged
     else:
         new_meta['invoked_skills'] = old_invoked_skills
 

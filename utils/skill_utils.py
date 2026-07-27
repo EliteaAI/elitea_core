@@ -1529,6 +1529,7 @@ def consume_invoked_skills(
             'skill_version_id': skill.get('skill_version_id'),
             'name': skill.get('name'),
             'version_name': skill.get('version_name'),
+            'icon_meta': skill.get('icon_meta'),
             'instructions': instructions,
         })
         if len(invoked) >= MAX_SKILLS_PER_AGENT:
@@ -1587,6 +1588,7 @@ class RuntimeSkills:
 
     disclosable: List[dict]
     instruction_skill_ids: frozenset
+    instruction_skills: List[dict]
 
 
 def apply_runtime_skills(version_details: dict) -> None:
@@ -1626,7 +1628,9 @@ def resolve_runtime_skills(version_details: dict) -> RuntimeSkills:
     attached_skills = (version_details or {}).get('skills') or []
     is_pipeline = (version_details or {}).get('agent_type') == AgentTypes.pipeline.value
     if is_pipeline:
-        return RuntimeSkills(disclosable=[], instruction_skill_ids=frozenset())
+        return RuntimeSkills(
+            disclosable=[], instruction_skill_ids=frozenset(), instruction_skills=[],
+        )
 
     instructions = version_details.get('instructions')
     instruction_skills = []
@@ -1644,6 +1648,7 @@ def resolve_runtime_skills(version_details: dict) -> RuntimeSkills:
             'skill_id': s.get('skill_id'),
             'name': s.get('name'),
             'description': s.get('description'),
+            'icon_meta': s.get('icon_meta'),
             'instructions': s.get('instructions'),
         }
         for s in attached_skills
@@ -1652,7 +1657,17 @@ def resolve_runtime_skills(version_details: dict) -> RuntimeSkills:
         and (s.get('instructions') or '').strip()
     ]
     return RuntimeSkills(
-        disclosable=disclosable, instruction_skill_ids=instruction_skill_ids,
+        disclosable=disclosable,
+        instruction_skill_ids=instruction_skill_ids,
+        instruction_skills=[
+            {
+                'skill_id': s.get('skill_id'),
+                'name': s.get('name'),
+                'icon_meta': s.get('icon_meta'),
+            }
+            for s in instruction_skills
+            if s.get('name')
+        ],
     )
 
 
