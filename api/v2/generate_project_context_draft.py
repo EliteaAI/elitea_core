@@ -89,7 +89,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             template = get_service_prompt(_SERVICE_PROMPT_KEY_EDIT)
             if not template:
                 return {"error": "Service prompt 'edit_project_context_draft' is not configured"}, 500
-            system_prompt = build_edit_project_context_system_prompt(template, req.current_content)
+            system_prompt = build_edit_project_context_system_prompt(template, req.current_project_background)
         else:
             system_prompt = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
             if not system_prompt:
