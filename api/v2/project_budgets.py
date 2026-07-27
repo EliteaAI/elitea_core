@@ -58,6 +58,17 @@ class AdminAPI(api_tools.APIModeHandler):
         #
         budgets = rpc.timeout(10).elitea_core_list_project_budgets() or {}
         #
+        # A personal project is really that user's own budget, so resolve the owner
+        # to label it by identity rather than the opaque project_user_N name.
+        owner_ids = [p["owner_id"] for p in projects if p.get("owner_id") is not None]
+        #
+        try:
+            owners = rpc.timeout(15).auth_list_users(user_ids=owner_ids) if owner_ids else []
+        except Exception:  # pylint: disable=W0703
+            owners = []
+        #
+        owner_map = {int(user["id"]): user for user in owners or []}
+        #
         # One LiteLLM call for the whole page rather than one per row
         try:
             spend_map = rpc.timeout(30).litellm_get_projects_spend(
@@ -82,10 +93,17 @@ class AdminAPI(api_tools.APIModeHandler):
             effective = limit_map.get(project_id, limit_map.get(str(project_id)))
             spend = float(spend_map.get(project_id, spend_map.get(str(project_id), 0)) or 0)
             #
+            project_name = project.get("name") or ""
+            is_personal = project_name.startswith("project_user_")
+            owner = owner_map.get(project.get("owner_id")) or {}
+            owner_label = owner.get("email") or owner.get("name")
+            #
             rows.append({
                 "project_id": project_id,
-                "name": project.get("name"),
-                "is_personal": str(project.get("name", "")).startswith("project_user_"),
+                "name": project_name,
+                "display_name": owner_label if (is_personal and owner_label) else project_name,
+                "owner_email": owner.get("email"),
+                "is_personal": is_personal,
                 "monthly_limit": row.get("monthly_limit"),
                 "effective_limit": effective,
                 "limit_source": _limit_source(row, effective),
