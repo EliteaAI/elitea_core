@@ -66,6 +66,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int, user_id: int, **kwargs):
+        # Without this, any member could read another member's spend by editing the URL
+        current_user_id = auth.current_user().get("id")
+        #
+        if int(user_id) != int(current_user_id):
+            try:
+                is_admin = rpc_tools.RpcMixin().rpc.timeout(5).admin_check_user_is_admin(
+                    project_id, current_user_id,
+                )
+            except Exception:  # pylint: disable=W0703
+                is_admin = False
+            #
+            if not is_admin:
+                return {"error": "Forbidden"}, 403
+        #
         return _user_budget_state(project_id, user_id), 200
 
 

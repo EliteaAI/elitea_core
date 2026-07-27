@@ -5,7 +5,7 @@ Exposes deployment-level feature flags and settings to the UI.
 These settings are configured in elitea_core.yml and cached at startup.
 """
 
-from tools import api_tools, auth, config as c, this
+from tools import api_tools, auth, config as c, rpc_tools, this
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.mcp_config import get_mcp_category_name, is_mcp_exposure_enabled, is_mcp_in_menu_enabled
@@ -22,6 +22,16 @@ def _is_analytics_enabled():
     return True
 
 
+def _is_cost_budgets_enabled():
+    """True when cost tracking is on, so the Usage tab has data to show."""
+    try:
+        mode = rpc_tools.RpcMixin().rpc.timeout(5).litellm_budgets_mode()
+    except Exception:  # pylint: disable=W0703
+        return False
+    #
+    return mode in ("observe", "enforce")
+
+
 class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, **kwargs):
@@ -36,6 +46,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "mcp_in_menu_enabled": is_mcp_in_menu_enabled(),
             "mcp_category_name": get_mcp_category_name(),
             "analytics_enabled": _is_analytics_enabled(),
+            "cost_budgets_enabled": _is_cost_budgets_enabled(),
             "is_publish_blocked": getattr(this.module, 'is_publish_blocked', False),
             "publish_whitelist_project_ids": list(
                 getattr(this.module, 'publish_whitelist_project_ids', set())
