@@ -29,11 +29,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int, application_id: int, version_name: str = None, *args, **kwargs):
-        # Published skill twins are deliberately invisible in the catalog and this
-        # endpoint is viewer-readable, so the query param alone cannot decide it.
-        # The project stays server-derived: a client-supplied id would reach the vault
-        # lookup unbounded by any membership check. It still matches the caller's
-        # header, which a non-administration project inherits from administration.
+        # This endpoint is viewer-readable and published skill twins are deliberately
+        # hidden from the catalog, so the query param alone cannot gate skill bodies.
         serve_runtime_skills = False
         if request.args.get('runtime') == 'true':
             serve_runtime_skills = check_secret_header(
