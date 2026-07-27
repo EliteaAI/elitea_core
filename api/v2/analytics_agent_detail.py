@@ -170,23 +170,21 @@ if _API_AVAILABLE:
                     if dt_to:
                         base = base.filter(AuditEvent.timestamp <= dt_to)
 
-                    # KPIs
+                    # KPIs. Aggregate entity_name with func.max instead of
+                    # grouping by it: an agent renamed mid-window has application
+                    # events under both names, and grouping by entity_name would
+                    # split its KPIs across rows and .first() would return only one.
                     kpi = base.with_entities(
-                        AuditEvent.entity_name,
+                        func.max(AuditEvent.entity_name).label("entity_name"),
                         func.count().label("total_events"),
                         func.count(func.distinct(AuditEvent.user_id)).label("unique_users"),
                         func.avg(AuditEvent.duration_ms).label("avg_duration_ms"),
                         func.sum(case(
                             (AuditEvent.is_error.is_(True), 1), else_=0,
                         )).label("errors"),
-                        func.sum(
-                            func.coalesce(AuditEvent.input_tokens, 0)
-                            + func.coalesce(AuditEvent.output_tokens, 0)
-                        ).label("total_tokens"),
-                        func.sum(AuditEvent.llm_cost).label("llm_cost"),
-                    ).group_by(AuditEvent.entity_name).first()
+                    ).first()
 
-                    if not kpi:
+                    if not kpi or kpi.total_events == 0:
                         return {"error": "No data found for this agent"}, 404
 
                     # Users who interacted with this agent
@@ -204,6 +202,15 @@ if _API_AVAILABLE:
                         AuditEvent.user_id,
                         AuditEvent.user_email,
                     ).order_by(func.count().desc()).limit(50).all()
+
+                    # Total distinct users so the client can tell the 50-row user
+                    # list was truncated (unique_users KPI counts NULL user_id too;
+                    # this count matches the user_rows filter for an honest flag).
+                    users_total = base.with_entities(
+                        func.count(func.distinct(AuditEvent.user_id))
+                    ).filter(
+                        AuditEvent.user_id.isnot(None),
+                    ).scalar() or 0
 
                     # Tools used by this agent (via trace_id correlation)
                     trace_subq = base.with_entities(
@@ -227,6 +234,22 @@ if _API_AVAILABLE:
                         AuditEvent.tool_name,
                     ).order_by(func.count().desc()).limit(30).all()
 
+                    # LLM cost/tokens for this agent. Generation spans carry no
+                    # entity_id, so we sum llm events sharing the agent's trace_ids
+                    # (same correlation used for tool calls above).
+                    cost_row = session.query(
+                        func.sum(AuditEvent.llm_cost).label("llm_cost"),
+                        func.sum(
+                            func.coalesce(AuditEvent.input_tokens, 0)
+                            + func.coalesce(AuditEvent.output_tokens, 0)
+                        ).label("total_tokens"),
+                    ).filter(
+                        AuditEvent.trace_id.in_(
+                            session.query(trace_subq.c.trace_id)
+                        ),
+                        AuditEvent.event_type == "llm",
+                    ).first()
+
                     # Daily usage
                     daily_rows = base.with_entities(
                         cast(AuditEvent.timestamp, Date).label("day"),
@@ -245,9 +268,11 @@ if _API_AVAILABLE:
                             "avg_duration_ms": round(kpi.avg_duration_ms, 1) if kpi.avg_duration_ms else 0,
                             "errors": kpi.errors or 0,
                             "error_rate": round((kpi.errors or 0) / kpi.total_events * 100, 2) if kpi.total_events > 0 else 0,
-                            "total_tokens": kpi.total_tokens or 0,
-                            "llm_cost": float(kpi.llm_cost) if kpi.llm_cost else 0.0,
+                            "total_tokens": (cost_row.total_tokens if cost_row else 0) or 0,
+                            "llm_cost": float(cost_row.llm_cost) if cost_row and cost_row.llm_cost else 0.0,
                         },
+                        "users_total": users_total,
+                        "users_truncated": users_total > len(user_rows),
                         "users": [
                             {
                                 "user_id": r.user_id,

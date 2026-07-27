@@ -178,5 +178,5 @@ Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project
 # ADR-0008: Add LLM token usage and cost tracking to audit_events
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS input_tokens INTEGER;
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS output_tokens INTEGER;
-ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS llm_cost NUMERIC(12, 8);
+ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS llm_cost NUMERIC(18, 8);
 CREATE INDEX IF NOT EXISTS ix_audit_events_model_name ON centry.audit_events (model_name);

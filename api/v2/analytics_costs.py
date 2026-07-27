@@ -21,6 +21,7 @@ if _API_AVAILABLE:
 
     from ...utils.constants import (
         DEFAULT_DATE_RANGE_DAYS,
+        MAX_DATE_RANGE_DAYS,
         SYSTEM_USER_EMAILS,
         SYSTEM_USER_EMAIL_PATTERN,
     )
@@ -43,6 +44,10 @@ if _API_AVAILABLE:
             dt_from = dt_to - timedelta(days=DEFAULT_DATE_RANGE_DAYS)
         elif not dt_to:
             dt_to = datetime.now(timezone.utc)
+        # Clamp pathological spans so the unbounded daily-trend query can't
+        # return an unbounded number of per-day rows.
+        if dt_from and dt_to and (dt_to - dt_from).days > MAX_DATE_RANGE_DAYS:
+            dt_from = dt_to - timedelta(days=MAX_DATE_RANGE_DAYS)
         return dt_from, dt_to
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -220,20 +225,37 @@ if _API_AVAILABLE:
                         for r in model_rows
                     ]
 
-                    # Cost by agent (application)
-                    agent_rows = base.with_entities(
-                        AuditEvent.entity_name,
-                        AuditEvent.entity_id,
+                    # Cost by agent (application).
+                    # LLM events never carry entity_type/entity_id themselves —
+                    # cost/token data lives on generation spans that only record
+                    # user + model attrs. So we correlate each llm event to the
+                    # agent that produced it via shared trace_id (same approach the
+                    # agent-detail endpoint uses to attribute tool calls).
+                    app_trace_map = session.query(
+                        AuditEvent.trace_id.label("trace_id"),
+                        func.min(AuditEvent.entity_id).label("entity_id"),
+                        func.min(AuditEvent.entity_name).label("entity_name"),
+                    ).filter(
+                        AuditEvent.project_id == project_id,
+                        AuditEvent.entity_type == "application",
+                        AuditEvent.entity_id.isnot(None),
+                        AuditEvent.trace_id.isnot(None),
+                        AuditEvent.trace_id != "",
+                    ).group_by(AuditEvent.trace_id).subquery()
+
+                    agent_rows = base.join(
+                        app_trace_map,
+                        AuditEvent.trace_id == app_trace_map.c.trace_id,
+                    ).with_entities(
+                        app_trace_map.c.entity_id.label("entity_id"),
+                        func.min(app_trace_map.c.entity_name).label("entity_name"),
                         func.sum(AuditEvent.llm_cost).label("total_cost"),
                         func.sum(
                             func.coalesce(AuditEvent.input_tokens, 0)
                             + func.coalesce(AuditEvent.output_tokens, 0)
                         ).label("total_tokens"),
-                    ).filter(
-                        AuditEvent.entity_type == "application",
-                        AuditEvent.entity_id.isnot(None),
                     ).group_by(
-                        AuditEvent.entity_name, AuditEvent.entity_id
+                        app_trace_map.c.entity_id
                     ).order_by(func.sum(AuditEvent.llm_cost).desc()).limit(20).all()
 
                     by_agent = [
@@ -298,8 +320,8 @@ if _API_AVAILABLE:
                         "daily": daily,
                     }, 200
 
-            except Exception as e:
-                log.error(f"Analytics cost query failed: {e}")
+            except Exception:
+                log.error("Analytics cost query failed", exc_info=True)
                 return {"error": "Failed to query analytics costs"}, 500
 
 
