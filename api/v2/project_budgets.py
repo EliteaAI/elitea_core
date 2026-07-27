@@ -2,6 +2,10 @@ from flask import request
 from tools import api_tools, auth, config as c, rpc_tools
 
 
+# Columns derived after the DB query, so they cannot be sorted in SQL
+COMPUTED_SORT_FIELDS = ("spend", "percent_used", "effective_limit")
+
+
 def _limit_source(row: dict, effective):
     """Explain where the enforced limit came from, so an admin isn't surprised by it."""
     if row and not row.get("enabled", True):
@@ -32,13 +36,19 @@ class AdminAPI(api_tools.APIModeHandler):
         offset = int(request.args.get("offset", 0))
         search = request.args.get("search") or None
         project_type = request.args.get("project_type") or None
+        sort_by = request.args.get("sort_by", "name")
+        sort_order = request.args.get("sort_order", "asc")
+        #
+        # Spend/limit are computed after the query, so the DB keeps a stable order
+        # for those and the page is re-sorted below.
+        is_computed_sort = sort_by in COMPUTED_SORT_FIELDS
         #
         listing = rpc.timeout(15).project_list_paginated(
             limit=limit,
             offset=offset,
             search=search,
-            sort_by=request.args.get("sort_by", "name"),
-            sort_order=request.args.get("sort_order", "asc"),
+            sort_by="name" if is_computed_sort else sort_by,
+            sort_order="asc" if is_computed_sort else sort_order,
             project_type=project_type,
             owner_ids=None,
         ) or {}
@@ -86,9 +96,19 @@ class AdminAPI(api_tools.APIModeHandler):
                 "percent_used": None if not effective else round(spend / effective * 100, 2),
             })
         #
+        if is_computed_sort:
+            reverse = sort_order.lower() == "desc"
+            # Nulls (unlimited / no spend) sort last either way
+            rows.sort(
+                key=lambda row: (row.get(sort_by) is None, row.get(sort_by) or 0),
+                reverse=reverse,
+            )
+        #
         return {
             "rows": rows,
             "total": listing.get("total", len(rows)),
+            "counts": listing.get("counts") or {},
+            "sorted_within_page": is_computed_sort,
         }, 200
 
 
