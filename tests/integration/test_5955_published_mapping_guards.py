@@ -76,6 +76,25 @@ class FakeSession:
         self.closed = True
 
 
+def _heal_sqlalchemy_stubs():
+    """Earlier tests replace sqlalchemy with stubs missing names these modules
+    import at load time. The fixtures only need importability — behaviour is
+    monkeypatched per test."""
+    for modname, names in (
+        ('sqlalchemy', (
+            'func', 'or_', 'asc', 'desc', 'create_engine', 'inspect',
+            'String', 'text', 'Integer', 'Boolean',
+        )),
+        ('sqlalchemy.orm', ('selectinload', 'joinedload', 'Session')),
+    ):
+        stub = sys.modules.get(modname)
+        if stub is None:
+            continue
+        for attr in names:
+            if not hasattr(stub, attr):
+                setattr(stub, attr, lambda *a, **k: None)
+
+
 def _register(name, module):
     sys.modules[name] = module
     return module
@@ -176,6 +195,8 @@ def application_tools_module():
     models_pd_tool = types.ModuleType("plugins.elitea_core.models.pd.tool")
     models_pd_tool.ToolUpdateRelationModel = ToolUpdateRelationModel
     _register("plugins.elitea_core.models.pd.tool", models_pd_tool)
+
+    _heal_sqlalchemy_stubs()
 
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.application_tools",
@@ -373,6 +394,8 @@ def skill_utils_module():
         setattr(models_pd_skill_version, cls_name, type(cls_name, (_PdBase,), {}))
     _register("plugins.elitea_core.models.pd.skill_version", models_pd_skill_version)
 
+    _heal_sqlalchemy_stubs()
+
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.skill_utils",
         PLUGIN_ROOT / "utils" / "skill_utils.py",
@@ -394,6 +417,68 @@ class _FakeSkillSession:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         return False
+
+
+class TestPublishCopyBypassesPublishedGuard:
+    """The publish pipeline populates a copy that is born published/embedded.
+
+    Routing it through the editor guard silently dropped every sub-agent's skills,
+    because publish_attached_skills returns on the first failure.
+    """
+
+    @pytest.mark.parametrize("status", ["published", "embedded"])
+    def test_attach_to_public_copy_allows_public_version(
+        self, skill_utils_module, monkeypatch, status
+    ):
+        ApplicationVersion = skill_utils_module.ApplicationVersion
+        Skill = skill_utils_module.Skill
+        SkillVersion = skill_utils_module.SkillVersion
+
+        class _Mapping:
+            id = None
+            entity_version_id = None
+            entity_type = None
+            skill_id = None
+
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        monkeypatch.setattr(skill_utils_module, "EntitySkillMapping", _Mapping)
+
+        agent_version = ApplicationVersion()
+        agent_version.id = 5
+        agent_version.status = status
+        skill = Skill()
+        skill.id = 7
+        skill.name = 'pirate-tone'
+        skill_version = SkillVersion()
+        skill_version.id = 1
+        skill_version.name = 'base'
+
+        monkeypatch.setattr(
+            skill_utils_module,
+            "_skill_session",
+            lambda session, project_id: _FakeSkillSession({
+                ApplicationVersion: agent_version,
+                Skill: skill,
+                SkillVersion: skill_version,
+            }),
+        )
+        monkeypatch.setattr(
+            skill_utils_module, "validate_agent_skill_limit", lambda *a, **k: None
+        )
+
+        result = skill_utils_module.attach_skill_to_public_copy(
+            session=None,
+            project_id=1,
+            entity_version_id=5,
+            entity_type="agent",
+            skill_id=7,
+            skill_version_id=1,
+        )
+
+        assert result['skill_id'] == 7
+        assert result['skill_version_id'] == 1
 
 
 class TestSkillAttachDetachPublishedGuard:

@@ -7,8 +7,9 @@ from tools import auth, rpc_tools, VaultClient, serialize, context
 from typing import Optional, Union
 
 from .llm_settings import get_default_max_tokens
-from .skill_utils import consume_invoked_skills, format_skills_section
+from .skill_utils import consume_invoked_skills, resolve_runtime_skills
 from ..models.elitea_tools import EliteATool
+from ..models.enums.all import AgentTypes
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
 from ..models.pd.tool import ToolDetails
 from ..utils.application_tools import expand_toolkit_settings
@@ -306,25 +307,10 @@ def generate_predict_payload(
         }
 
         attached_skills = version_details.get('skills') or []
-        is_pipeline = version_details.get('agent_type') == 'pipeline'
+        is_pipeline = version_details.get('agent_type') == AgentTypes.pipeline.value
 
-        agent_instructions = version_details.get('instructions')
-        if isinstance(agent_instructions, str) and agent_instructions and not is_pipeline:
-            cleaned_instructions, instruction_skills = consume_invoked_skills(
-                agent_instructions, attached_skills
-            )
-            if instruction_skills:
-                version_details['instructions'] = (
-                    cleaned_instructions + format_skills_section(instruction_skills)
-                )
-            elif cleaned_instructions is not agent_instructions:
-                # Spans were stripped (e.g. blank-body ~ref) but nothing injected;
-                # still write the cleaned string so no ~name echoes.
-                version_details['instructions'] = cleaned_instructions
-        else:
-            instruction_skills = []
-
-        instruction_skill_ids = {s.get('skill_id') for s in instruction_skills}
+        runtime_skills = resolve_runtime_skills(version_details)
+        instruction_skill_ids = runtime_skills.instruction_skill_ids
 
         # Message-referenced skills (per-turn): resolve + consume from the user's
         # message and send via the dynamic invoked_skills channel (injected AFTER
@@ -373,18 +359,7 @@ def generate_predict_payload(
         # in the cached prompt — re-advertising them would double-inject); pipelines
         # are excluded so deterministic nodes gain no autonomous tool.
         if attached_skills and not is_pipeline:
-            disclosable_skills = [
-                {
-                    'skill_id': s.get('skill_id'),
-                    'name': s.get('name'),
-                    'description': s.get('description'),
-                    'instructions': s.get('instructions'),
-                }
-                for s in attached_skills
-                if s.get('skill_id') not in instruction_skill_ids
-                and s.get('name')
-                and (s.get('instructions') or '').strip()
-            ]
+            disclosable_skills = runtime_skills.disclosable
             if disclosable_skills:
                 payload['attached_skills'] = disclosable_skills
             dropped = len(attached_skills) - len(disclosable_skills)

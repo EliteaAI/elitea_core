@@ -20,6 +20,7 @@ from ...utils.application_utils import (
     applications_update_version,
     VersionNotUpdatableError
 )
+from ...utils.skill_utils import apply_runtime_skills
 from ...utils.utils import mask_secret
 from ....configurations.utils import expand_configuration
 from ...utils.constants import PROMPT_LIB_MODE
@@ -149,6 +150,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             resolve_internal_mcp_tools(version_details.get('tools'), user_id, project_id)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in version details: {e}")
+
+        apply_runtime_skills(version_details)
 
         return version_details, 200
 

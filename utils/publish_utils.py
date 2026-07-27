@@ -41,7 +41,7 @@ from .utils import get_public_project_id
 from .category_utils import apply_category_to_tag_dicts, is_valid_category
 from .application_utils import build_skill_mappings_list
 from .skill_export_import import build_skill_fork_payload
-from .skill_utils import attach_skill_to_agent
+from .skill_utils import attach_skill_to_public_copy
 
 
 def is_publishing_blocked_for_project(project_id: int) -> bool:
@@ -1839,7 +1839,7 @@ def publish_attached_skills(
                 twin_skill_id, twin_version_id = _resolve_or_fork_skill_twin(
                     source_project_id, public_project_id, sk, user_id,
                 )
-            attach_skill_to_agent(
+            attach_skill_to_public_copy(
                 project_id=public_project_id,
                 entity_version_id=public_version_id,
                 skill_id=twin_skill_id,
