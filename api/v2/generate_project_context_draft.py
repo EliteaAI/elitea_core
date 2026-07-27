@@ -30,10 +30,12 @@ from ...models.pd.generate_project_context_draft import (
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import PredictPayloadError
 from ...utils.exceptions import PoolSaturationError
+from ...utils.generate_project_context_utils import build_edit_project_context_system_prompt
 from ...utils.service_prompt_utils import get_service_prompt
 from ...utils.utils import extract_json_from_text
 
-_SERVICE_PROMPT_KEY = "project_context_generator"
+_SERVICE_PROMPT_KEY_CREATE = "project_context_generator"
+_SERVICE_PROMPT_KEY_EDIT = "edit_project_context_draft"
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -83,9 +85,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 log.exception("generate_project_context_draft: failed to get default model")
                 return {"error": "Failed to resolve project default LLM model"}, 400
 
-        system_prompt = get_service_prompt(_SERVICE_PROMPT_KEY)
-        if not system_prompt:
-            return {"error": "Service prompt 'project_context_generator' is not configured"}, 500
+        if req.is_edit_mode:
+            template = get_service_prompt(_SERVICE_PROMPT_KEY_EDIT)
+            if not template:
+                return {"error": "Service prompt 'edit_project_context_draft' is not configured"}, 500
+            system_prompt = build_edit_project_context_system_prompt(template, req.current_project_background)
+        else:
+            system_prompt = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
+            if not system_prompt:
+                return {"error": "Service prompt 'project_context_generator' is not configured"}, 500
 
         try:
             result = self.module.predict_sio_llm(

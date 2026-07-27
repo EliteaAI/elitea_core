@@ -175,6 +175,25 @@ Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project
 
 Run admin task migrate_toolkit_selected_tools with param: inventory;+ask;project_id=all
 
+# Rename indexer tool `list_collections` -> `list_indexes` across persisted toolkit data.
+# The ELITEA SDK renamed this indexer tool; DB references in three surfaces must follow:
+#   1. EliteATool.settings['selected_tools']
+#   2. EntityToolMapping.selected_tools
+#   3. ApplicationVersion.instructions (pipeline YAML)
+# Data-driven type discovery — no hardcoded list. Idempotent (word-boundary regex +
+# per-op guards). Always run dry_run first to verify expected changes.
+Run admin task migrate_list_collections_to_list_indexes with param: project_id=all;dry_run
+Run admin task migrate_list_collections_to_list_indexes with param: project_id=all
+
+# Issue #5701: Skill publishing schema — skills.shared_owner_id/shared_id (+ partial
+# unique index) and skill_versions.status (NOT NULL default 'draft', indexed).
+# The ORM selects status on every Skills read, so unmigrated schemas fail with
+# UndefinedColumn. Normally applied automatically at boot (config flag
+# skill_publish_auto_migrate, default on); run manually if that flag is disabled or
+# the boot log shows "skill publish schema: auto-migration failed".
+# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+Run admin task migrate_skill_publish_columns with param: project_id=all
+
 # ADR-0008: Add LLM token usage and cost tracking to audit_events
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS input_tokens INTEGER;
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS output_tokens INTEGER;

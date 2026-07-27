@@ -11,13 +11,7 @@ from sqlalchemy.ext.mutable import MutableDict
 from .enums.all import AgentTypes, PublishStatus, ToolEntityTypes, SkillEntityTypes
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.skill import Skill, EntitySkillMapping
-
-
-# Merged from promptlib_shared.models.all
-class AbstractLikesMixin:
-    @property
-    def likes_entity_name(self):
-        raise NotImplementedError
+from .mixins import AbstractLikesMixin
 
 
 class Tag(db_tools.AbstractBaseMixin, db.Base):

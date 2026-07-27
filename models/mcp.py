@@ -22,6 +22,7 @@ class McpServer(BaseModel):
     sio_sid: Optional[str] = None
     timeout_tools_list: Optional[int] = 90
     timeout_tools_call: Optional[int] = 90
+    group: Optional[str] = 'Other'
 
 
 class EliteaToolkitArgsSchema(BaseModel):
@@ -49,6 +50,7 @@ class EliteaToolkitMetadata(BaseModel):
     label: str
     has_function_validators: bool = False
     categories: tuple[str] = ('MCP',)
+    group: Optional[str] = 'Other'
 
 
 class EliteaMcpToolkit(BaseModel):

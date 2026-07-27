@@ -68,7 +68,13 @@ def _tool_call_identity(tc: dict) -> tuple:
     if cached is not None:
         # Reloaded from JSON: list, not tuple. Coerce so it stays hashable for
         # use as a dict key in _dedupe_replayed_tool_calls.
-        return tuple(cached) if isinstance(cached, list) else cached
+        cached_tuple = tuple(cached) if isinstance(cached, list) else cached
+        # The identity grew a canonical root-instance component for parallel
+        # sub-orchestrators. Recompute legacy four-part cache entries so B1 and
+        # B2 cannot be collapsed merely because an older partial save stamped
+        # them before lineage was available.
+        if isinstance(cached_tuple, tuple) and len(cached_tuple) == 5:
+            return cached_tuple
 
     meta = tc.get('metadata')
     meta = meta if isinstance(meta, dict) else {}
@@ -78,6 +84,15 @@ def _tool_call_identity(tc: dict) -> tuple:
     tm_meta = tm_meta if isinstance(tm_meta, dict) else {}
     name = tool_meta.get('name') or tc.get('tool_name') or ''
     parent = meta.get('parent_agent_name') or tm_meta.get('parent_agent_name') or ''
+    root_instance = meta.get('child_thread_id') or tm_meta.get('child_thread_id')
+    if not root_instance:
+        parent_path = meta.get('parent_agent_path') or tm_meta.get('parent_agent_path')
+        if isinstance(parent_path, list) and parent_path:
+            root_hop = parent_path[0] if isinstance(parent_path[0], dict) else {}
+            root_instance = root_hop.get('call_id') or (
+                f"{root_hop.get('name', '')}:{root_hop.get('sibling_ordinal', '')}"
+            )
+    root_instance = root_instance or ''
     raw_ns = meta.get('checkpoint_ns') or ''
     node = raw_ns.split(':', 1)[0] if raw_ns else (meta.get('langgraph_node') or '')
     raw_inputs = tc.get('tool_inputs')
@@ -89,9 +104,9 @@ def _tool_call_identity(tc: dict) -> tuple:
         inputs = json.dumps(stable_inputs, sort_keys=True, default=str)
     except (TypeError, ValueError):
         inputs = str(stable_inputs)
-    identity = (name, parent, node, inputs)
+    identity = (name, root_instance, parent, node, inputs)
     # Stamp the entry so subsequent saves reuse this without re-serializing.
-    # All four components are strings → JSON-safe; stored as a list and coerced
+    # All five components are strings → JSON-safe; stored as a list and coerced
     # back to a tuple on the cached-read path above.
     if isinstance(tc, dict):
         tc[_IDENTITY_CACHE_KEY] = list(identity)

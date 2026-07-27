@@ -221,8 +221,7 @@ def get_or_create_project_pgvector_connstr(
 
                 new_password = password_results['password']
                 if pgvector_password != new_password:
-                    project_secrets[VAULT_PGVECTOR_PASSWORD_KEY] = new_password
-                    vc.set_secrets(project_secrets)
+                    vc.update_secrets(add={VAULT_PGVECTOR_PASSWORD_KEY: new_password})
                     pgvector_password = new_password
         except KeyError:
             log.info(f'Creating pgvector creds: {project_id=} {pgvector_user=} {pgvector_db=}')
@@ -234,8 +233,7 @@ def get_or_create_project_pgvector_connstr(
             )
             result.update(password_results)
             pgvector_password = password_results['password']
-            project_secrets[VAULT_PGVECTOR_PASSWORD_KEY] = pgvector_password
-            vc.set_secrets(project_secrets)
+            vc.update_secrets(add={VAULT_PGVECTOR_PASSWORD_KEY: pgvector_password})
 
         use_existing_pgvector_user = this.descriptor.config.get("use_existing_pgvector_user", False)
 
@@ -251,8 +249,7 @@ def get_or_create_project_pgvector_connstr(
                 f'postgresql+psycopg://{db_user}:{db_pass}@{db_params["host"]}:{db_params["port"]}/{pgvector_db}'
 
         if save_connstr_to_secrets:
-            project_secrets[VAULT_PGVECTOR_CONNSTR_KEY] = result['connection_string']
-            vc.set_secrets(project_secrets)
+            vc.update_secrets(add={VAULT_PGVECTOR_CONNSTR_KEY: result['connection_string']})
 
         result.update(parse_postgres_connection_string(result['connection_string']))
 

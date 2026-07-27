@@ -2,11 +2,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Dict, Any
 from datetime import datetime
 
-from .llm_settings_v2 import LLMSettingsModel
+from .llm import LLMSettingsWriteModel
 
 
 class ContextStrategyUpdate(BaseModel):
-    summary_llm_settings: Optional[LLMSettingsModel] = None
+    summary_llm_settings: Optional[LLMSettingsWriteModel] = None
     max_context_tokens: Optional[int] = Field(None, ge=1000)
     preserve_recent_messages: Optional[int] = Field(None, ge=1)
     preserve_system_messages: Optional[bool] = None

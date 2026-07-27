@@ -57,6 +57,30 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return ProjectContextDetail.from_config(result).model_dump(mode='json'), 200
 
+    @auth.decorators.check_api({
+        "permissions": ["models.project_context.edit"],
+        "recommended_roles": {
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
+        }})
+    @api_tools.endpoint_metrics
+    def delete(self, project_id: int, **kwargs):
+        config = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_first_filtered_project(
+            project_id=project_id,
+            filter_fields={'type': 'project_context'},
+        )
+        if config is None:
+            return {'error': 'Project context not found'}, 404
+
+        deleted = rpc_tools.RpcMixin().rpc.timeout(5).configurations_delete(
+            project_id=project_id,
+            config_id=config['id'],
+        )
+        if not deleted:
+            return {'error': 'Project context not found'}, 404
+
+        return '', 204
+
 
 class API(api_tools.APIBase):
     url_params = api_tools.with_modes([

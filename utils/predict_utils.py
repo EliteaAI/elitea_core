@@ -12,11 +12,33 @@ from ..models.elitea_tools import EliteATool
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
 from ..models.pd.tool import ToolDetails
 from ..utils.application_tools import expand_toolkit_settings
+from ..utils.internal_tools import resolve_internal_mcp_tools, dedupe_internal_mcp_tools
 
 
 class PredictPayloadError(Exception):
     """Custom exception for errors in generating predict payload."""
     pass
+
+
+def user_input_preview(source, limit: int = 100) -> Optional[str]:
+    """Short text preview of a user message for the Active Tasks admin view.
+
+    Handles both API strings and the UI's list of content blocks
+    ({'type':'text','text':...}); skips the synthetic <runtime_context> block
+    so only the real user text shows. Returns None when no text is present.
+    """
+    if isinstance(source, str):
+        text = source
+    elif isinstance(source, list):
+        text = " ".join(
+            b["text"] for b in source
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+            and not b["text"].lstrip().startswith("<runtime_context>")
+        )
+    else:
+        return None
+    text = text.strip()
+    return text[:limit] if text else None
 
 
 def resolve_application_name(parsed: ApplicationChatRequest) -> Optional[str]:
@@ -238,6 +260,7 @@ def generate_predict_payload(
         'hitl_action': getattr(parsed, 'hitl_action', None),
         'hitl_value': getattr(parsed, 'hitl_value', None),
         'hitl_decisions': getattr(parsed, 'hitl_decisions', None),
+        'execution_generation': getattr(parsed, 'execution_generation', None),
         'is_regenerate': getattr(parsed, 'is_regenerate', False),
         'meta': parsed.meta,
         'conversation_id': getattr(parsed, 'conversation_id', None) or parsed.stream_id,  # For planning toolkit scoping (fallback to stream_id)
@@ -385,12 +408,32 @@ def generate_predict_payload(
             llm_settings['temperature'] =  parsed.llm_settings.temperature
             llm_settings['reasoning_effort'] =  parsed.llm_settings.reasoning_effort
 
-            if supports_reasoning:
-                llm_settings['temperature'] = None
+            # Normalize against the model's actual capability using the shared helper
+            # (issue #5821) instead of a reasoning-only ad-hoc check -- this also clears a
+            # stale reasoning_effort for a non-reasoning model, which the previous inline
+            # check never handled.
+            from ..models.pd.llm import _normalize_llm_settings_family  # pylint: disable=C0415
+            llm_settings.update(_normalize_llm_settings_family(llm_settings, supports_reasoning))
             if llm_settings['max_tokens'] == -1:
                 llm_settings['max_tokens'] = get_default_max_tokens(supports_reasoning)
 
-    return serialize(payload)
+    # Serialize first so request-level tools (Pydantic ToolChatModel) become plain dicts before
+    # dedupe/resolve run — otherwise those tools are skipped and never get {project_id}/PAT filled.
+    payload = serialize(payload)
+
+    if not is_system_user:
+        try:
+            application = payload.get('application')
+            version_details_tools = application.get('version_details', {}).get('tools') if isinstance(application, dict) else None
+            for tool_list in (payload.get('tools'), version_details_tools):
+                if tool_list is None:
+                    continue
+                dedupe_internal_mcp_tools(tool_list)
+                resolve_internal_mcp_tools(tool_list, user_id, parsed.project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
+
+    return payload
 
 
 def get_toolkit_config(project_id: int, user_id: int, toolkit_id: int):

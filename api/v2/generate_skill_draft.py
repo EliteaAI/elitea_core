@@ -30,10 +30,15 @@ from ...models.pd.generate_skill_draft import (
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import PredictPayloadError
 from ...utils.exceptions import PoolSaturationError
+from ...utils.generate_skill_utils import (
+    fetch_skill_for_edit,
+    build_edit_skill_system_prompt,
+)
 from ...utils.service_prompt_utils import get_service_prompt
 from ...utils.utils import extract_json_from_text
 
-_SERVICE_PROMPT_KEY = "skill_generator"
+_SERVICE_PROMPT_KEY_CREATE = "skill_generator"
+_SERVICE_PROMPT_KEY_EDIT = "edit_skill_draft"
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -42,7 +47,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description=(
             "Generate a draft skill (name, description, instructions) from a plain-text "
             "description. Uses the project's default LLM and the 'skill_generator' service "
-            "prompt. Returns a validated JSON payload; no toolkit/agent/pipeline/MCP suggestions."
+            "prompt. Returns a validated JSON payload; no toolkit/agent/pipeline/MCP suggestions. "
+            "Add skill_id and version_id to edit an existing skill (uses the 'edit_skill_draft' prompt)."
         ),
         request_body=GenerateSkillDraftRequest,
         tags=["elitea_core/skills"],
@@ -83,9 +89,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 log.exception("generate_skill_draft: failed to get default model")
                 return {"error": "Failed to resolve project default LLM model"}, 400
 
-        system_prompt = get_service_prompt(_SERVICE_PROMPT_KEY)
-        if not system_prompt:
-            return {"error": "Service prompt 'skill_generator' is not configured"}, 500
+        if req.is_edit_mode:
+            current_config = fetch_skill_for_edit(project_id, req.skill_id, req.version_id)
+            if current_config is None:
+                return {"error": "Skill or version not found"}, 404
+
+            template = get_service_prompt(_SERVICE_PROMPT_KEY_EDIT)
+            if not template:
+                return {"error": "Service prompt 'edit_skill_draft' is not configured"}, 500
+
+            system_prompt = build_edit_skill_system_prompt(template, current_config)
+        else:
+            system_prompt = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
+            if not system_prompt:
+                return {"error": "Service prompt 'skill_generator' is not configured"}, 500
 
         try:
             result = self.module.predict_sio_llm(

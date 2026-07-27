@@ -1,11 +1,3 @@
-from typing import Optional
-
-from pydantic import BaseModel, confloat
-
-
-class LLMSettingsModel(BaseModel):
-    temperature: Optional[confloat(gt=0, le=1)] = None
-    reasoning_effort: Optional[str] = None
-    max_tokens: Optional[int]
-    model_name: Optional[str]
-    model_project_id: Optional[int]
+# Deprecated duplicate of models/pd/llm.py::LLMSettingsModel (issue #5821 cleanup).
+# Kept as a re-export for backward-compat import paths; do not add new fields/logic here.
+from .llm import LLMSettingsModel  # noqa: F401

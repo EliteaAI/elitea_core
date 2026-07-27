@@ -2,7 +2,7 @@ from datetime import datetime
 
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import BigInteger, String, Text, Boolean, DateTime, ForeignKey, Index
+from sqlalchemy import BigInteger, Text, Boolean, DateTime, ForeignKey, Index
 
 from . import db, config as c, CONVERSATION_MESSAGE_GROUP_TABLE_NAME, MESSAGE_TRACE_STEP_TABLE_NAME
 
@@ -14,7 +14,6 @@ class MessageTraceStep(db.Base):
         # the SDK emits timestamps, never an ordinal, and the FE already sorts by timestamp.
         Index('ix_chat_message_trace_step_group_started', 'message_group_id', 'started_at'),
         Index('ix_chat_message_trace_step_group_kind', 'message_group_id', 'kind'),
-        Index('ix_chat_message_trace_step_run_id', 'run_id'),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
@@ -35,6 +34,14 @@ class MessageTraceStep(db.Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     is_error: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Cheap list-path predicate. Avoids trimming/detoasting the potentially large
+    # text/thinking columns merely to hide empty transition markers.
+    has_visible_content: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default='true',
+    )
 
     # tool_call hot fields (promoted; UI-drawn, user-queried)
     tool_name: Mapped[str] = mapped_column(Text, nullable=True)

@@ -84,7 +84,7 @@ def _mcp_server_to_toolkit(mcp_server):
     return EliteaMcpToolkit(
         title=mcp_server.name,
         properties={"selected_tools": selected_tools},
-        metadata=EliteaToolkitMetadata(label=mcp_server.name),
+        metadata=EliteaToolkitMetadata(label=mcp_server.name, group=mcp_server.group),
     ).model_dump()
 
 

@@ -8,7 +8,7 @@ from ...models.conversation import Conversation
 from ...models.enums.all import ParticipantTypes
 from ...models.pd.conversation import ConversationCreate, ConversationDetails
 from ...models.pd.participant import ParticipantCreate, ParticipantEntityUser
-from ...utils.conversation_utils import get_conversation_details
+from ...utils.conversation_utils import get_conversation_details, resolve_persona_instructions
 from ...utils.participant_utils import add_participant_to_conversation
 from ...utils.chat_feature_flags import get_context_manager_feature_flag
 from ...utils.context_analytics import set_context_strategy
@@ -155,13 +155,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
             parsed.meta = {}
         if user_personalization:
             # Set persona directly (not default_persona) - this is what the chat system expects
-            if user_personalization.get('persona'):
-                parsed.meta['persona'] = user_personalization['persona']
-            if user_personalization.get('default_instructions'):
-                parsed.meta['default_instructions'] = user_personalization['default_instructions']
+            persona = user_personalization.get('persona')
+            if persona:
+                parsed.meta['persona'] = persona
+            # Resolve the instructions for the selected persona (#5392); '' means no override.
+            selected_instructions = resolve_persona_instructions(user_personalization, persona)
+            if selected_instructions:
+                parsed.meta['default_instructions'] = selected_instructions
                 # Initialize instructions from default_instructions when not explicitly provided
                 if not parsed.instructions:
-                    parsed.instructions = user_personalization['default_instructions']
+                    parsed.instructions = selected_instructions
 
         user_participant_data = ParticipantCreate(
             entity_name=ParticipantTypes.user,

@@ -132,12 +132,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
         try:
             from ...utils.internal_tools import inject_mcp_toolkits
             agent_internal_tools = (version_details.get('meta') or {}).get('internal_tools', [])
-            mcp_tools = inject_mcp_toolkits(user_id=user_id, internal_tools=agent_internal_tools)
+            mcp_tools = inject_mcp_toolkits(
+                user_id=user_id,
+                internal_tools=agent_internal_tools,
+                existing_tools=version_details.get('tools'),
+            )
             if mcp_tools:
                 version_details.setdefault('tools', [])
                 version_details['tools'].extend(mcp_tools)
         except Exception as e:
             log.warning(f"[#5267] Failed to inject MCP toolkits into version details: {e}")
+
+        try:
+            from ...utils.internal_tools import dedupe_internal_mcp_tools, resolve_internal_mcp_tools
+            dedupe_internal_mcp_tools(version_details.get('tools'))
+            resolve_internal_mcp_tools(version_details.get('tools'), user_id, project_id)
+        except Exception as e:
+            log.warning(f"Failed to resolve internal MCP toolkits in version details: {e}")
 
         return version_details, 200
 

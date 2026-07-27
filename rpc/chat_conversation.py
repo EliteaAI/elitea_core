@@ -15,6 +15,7 @@ from ..models.message_items.text import TextMessageItem
 from ..utils.conversation_utils import (
     get_conversation_details,
     calculate_conversation_durations_batch,
+    resolve_persona_instructions,
 )
 from ..utils.participant_utils import add_participant_to_conversation
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
@@ -222,6 +223,12 @@ class RPC:
                 if meta is not None:
                     conversation.meta = conversation.meta or {}
                     conversation.meta.update(meta)
+                    # #5392: instructions are per-persona now, but meta['default_instructions'] was
+                    # baked in at creation time from the then-active persona. When the persona
+                    # changes here, re-resolve it from the owner's personalization so a switched
+                    # conversation stops carrying the previous persona's instructions.
+                    if 'persona' in meta:
+                        self._reresolve_persona_instructions(session, conversation, meta['persona'])
                     flag_modified(conversation, 'meta')
 
                 if is_hidden is not None:
@@ -244,6 +251,36 @@ class RPC:
                 session.rollback()
                 log.error(f"Error updating conversation: {str(e)}")
                 return {'success': False, 'error': 'Failed to update conversation'}
+
+    @staticmethod
+    def _reresolve_persona_instructions(session, conversation, persona) -> None:
+        """Re-derive conversation.meta['default_instructions'] for a new persona (#5392).
+
+        Looks up the conversation's user participant, re-fetches their personalization, and
+        resolves the instructions for `persona`. An empty result removes the key so the
+        conversation no longer carries the previous persona's instructions.
+        """
+        try:
+            owner = session.query(Participant).join(
+                ParticipantMapping, ParticipantMapping.participant_id == Participant.id
+            ).filter(
+                ParticipantMapping.conversation_id == conversation.id,
+                Participant.entity_name == ParticipantTypes.user.value,
+            ).first()
+            if not owner:
+                return
+            user_id = owner.entity_meta.get('id')
+            if not user_id:
+                return
+            social_user = rpc_tools.RpcMixin().rpc.timeout(2).social_get_user(user_id)
+            personalization = (social_user or {}).get('personalization') or {}
+            selected = resolve_persona_instructions(personalization, persona)
+            if selected:
+                conversation.meta['default_instructions'] = selected
+            else:
+                conversation.meta.pop('default_instructions', None)
+        except Exception as e:
+            log.warning(f"[#5392] Failed to re-resolve persona instructions: {e}")
 
     @web.rpc("chat_create_conversation_rpc", "create_conversation_rpc")
     def create_conversation_rpc(
@@ -285,12 +322,15 @@ class RPC:
         effective_instructions = instructions
 
         if user_personalization:
-            if user_personalization.get('persona'):
-                conversation_meta['persona'] = user_personalization['persona']
-            if user_personalization.get('default_instructions'):
-                conversation_meta['default_instructions'] = user_personalization['default_instructions']
+            persona = user_personalization.get('persona')
+            if persona:
+                conversation_meta['persona'] = persona
+            # Resolve the instructions for the selected persona (#5392); '' means no override.
+            selected_instructions = resolve_persona_instructions(user_personalization, persona)
+            if selected_instructions:
+                conversation_meta['default_instructions'] = selected_instructions
                 if not effective_instructions:
-                    effective_instructions = user_personalization['default_instructions']
+                    effective_instructions = selected_instructions
 
         with db.get_session(project_id) as session:
             conversation = Conversation(

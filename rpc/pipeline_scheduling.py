@@ -13,16 +13,12 @@ from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, rpc_tools
 
-try:
-    import gevent  # pylint: disable=C0413
-except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
-    gevent = None
-
 from ..models.all import Application, ApplicationVersion
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
 from ..utils.cron_utils import is_cron_due
 from ..utils.maintenance_gate import is_maintenance_active
+from ..utils.utils import make_yield_to_hub
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
@@ -280,13 +276,7 @@ class RPC:
             f"check_pipeline_scheduling tick started at {datetime.now(UTC).isoformat()}"
         )
         try:
-            # Cooperative yield only when gevent is the actual web runtime;
-            # under flask/waitress/hypercorn this is a no-op.
-            yield_to_hub = (
-                (lambda: gevent.sleep(0))
-                if (gevent is not None and self.context.web_runtime == "gevent")
-                else (lambda: None)
-            )
+            yield_to_hub = make_yield_to_hub(self.context.web_runtime)
 
             try:
                 all_project_ids = [

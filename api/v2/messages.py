@@ -15,8 +15,10 @@ from ...models.conversation import Conversation
 from ...models.message_group import ConversationMessageGroup
 from ...models.message_items.base import MessageItem
 from ...models.message_items.text import TextMessageItem
-from ...models.pd.message import MessageGroupDetail, MessagePostPayload
-from ...utils.conversation_utils import _message_group_columns, fetch_guarded_message_groups
+from ...models.pd.message import MessagePostPayload
+from ...utils.conversation_utils import (
+    _message_group_columns, fetch_guarded_message_groups, _serialize_guarded_groups,
+)
 from ...models.participants import Participant, ParticipantMapping
 from ...models.enums.all import ParticipantTypes
 from ...utils.sio_utils import get_chat_room
@@ -25,11 +27,6 @@ from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.context_analytics import update_conversation_meta
 from ...utils.sio_utils import SioEvents, SioValidationError
 from ...utils.exceptions import PoolSaturationError
-
-
-def _serialize_guarded_groups(group_dicts: list) -> list:
-    """Validate guarded message-group dicts through MessageGroupDetail to the JSON output shape."""
-    return [MessageGroupDetail.model_validate(g).model_dump(mode='json') for g in group_dicts]
 
 
 class PromptLibAPI(api_tools.APIModeHandler):

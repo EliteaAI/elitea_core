@@ -23,9 +23,13 @@ from functools import partial
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401,W0611
 from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
+from tools import db  # pylint: disable=E0401
 
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
-from ..utils.toolkit_migration import run_selected_tools_migration
+from ..utils.toolkit_migration import (
+    run_selected_tools_migration,
+    migrate_project_pipeline_instructions,
+)
 from ..utils.llm_migration_utils import (
     parse_migration_params,
     resolve_target_project_ids,
@@ -34,12 +38,16 @@ from ..utils.llm_migration_utils import (
     build_new_llm_settings,
     migrate_application_versions,
     migrate_participant_mappings,
+    parse_heal_params,
+    heal_family_conflict_versions,
+    heal_family_conflict_mappings,
 )
 from ..utils.embedding_migration_utils import (
     validate_target_embedding_model,
     migrate_toolkit_embedding_models,
 )
-from ..utils.utils import get_public_project_id
+from ..utils.trace_step_backfill_utils import parse_backfill_params, backfill_project
+from ..utils.utils import get_public_project_id, make_yield_to_hub
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -129,6 +137,223 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         end_ts = time.time()
         log.info("Exiting migrate_toolkit_selected_tools (duration = %s)", end_ts - start_ts)
+
+    @web.method()
+    def migrate_list_collections_to_list_indexes(self, *args, **kwargs):
+        """Admin task: rename indexer tool 'list_collections' -> 'list_indexes' across all
+        surfaces where a toolkit's selected tools are persisted.
+
+        The ELITEA SDK renamed the indexer tool from `list_collections` to `list_indexes`.
+        Persisted references in the DB must be updated on three surfaces:
+            1. EliteATool.settings['selected_tools']
+            2. EntityToolMapping.selected_tools
+            3. ApplicationVersion.instructions (pipeline YAML text)
+
+        This method:
+            - Discovers per project which toolkit types still hold a 'list_collections'
+              reference (data-driven — no hardcoded type list, so future indexer-derived
+              toolkits are covered automatically).
+            - Dispatches the existing rename engine `run_selected_tools_migration` for
+              each discovered (project, toolkit_type) pair.
+            - Runs an explicit safety-net pipeline sweep per project so pipeline-only
+              projects (no matching toolkit) are still covered.
+
+        Idempotent: word-boundary regex + per-op guards mean re-runs are no-ops.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"    - dry run across all projects (recommended first)
+            "project_id=all"            - migrate all projects
+            "project_id=34"             - migrate project 34 only
+            "project_id=34;dry_run"     - dry run for project 34
+
+        Always run with dry_run first to verify expected changes.
+        """
+        from sqlalchemy import cast, String  # pylint: disable=C0415
+        from ..models.elitea_tools import EliteATool, EntityToolMapping  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error(
+                            "migrate_list_collections_to_list_indexes: invalid project_id '%s'", value
+                        )
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error(
+                "migrate_list_collections_to_list_indexes: project_id= is required. "
+                "Format: project_id=<all|N>[;dry_run]"
+            )
+            return {
+                "migrated": 0,
+                "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]",
+            }
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info(
+            "Starting migrate_list_collections_to_list_indexes (dry_run=%s, project_id_filter=%s)",
+            dry_run, project_id_filter,
+        )
+        start_ts = time.time()
+
+        rename_ops = [{"action": "rename", "old_name": "list_collections", "new_name": "list_indexes"}]
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_list_collections_to_list_indexes: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        totals = {
+            "projects_scanned": 0,
+            "types_discovered": set(),
+            "toolkits_affected": 0,
+            "entity_mappings_affected": 0,
+            "tools_renamed": 0,
+            "tool_mappings_renamed": 0,
+            "pipeline_versions_scanned": 0,
+            "pipeline_versions_affected": 0,
+            "errors": 0,
+        }
+        per_project_details = []
+
+        for project in projects:
+            project_id = project['id']
+            totals["projects_scanned"] += 1
+            project_types = set()
+
+            try:
+                # Discover toolkit types still referencing 'list_collections'
+                # in selected_tools (either on the toolkit or on any entity mapping).
+                # ORM used so the per-project schema resolves via search_path.
+                pat = "%list_collections%"
+                with db.with_project_schema_session(project_id) as session:
+                    types_from_tools = {
+                        row[0] for row in session.query(EliteATool.type).filter(
+                            cast(EliteATool.settings, String).like(pat)
+                        ).distinct().all() if row[0]
+                    }
+                    types_from_mappings = {
+                        row[0] for row in session.query(EliteATool.type)
+                        .join(EntityToolMapping, EntityToolMapping.tool_id == EliteATool.id)
+                        .filter(cast(EntityToolMapping.selected_tools, String).like(pat))
+                        .distinct().all() if row[0]
+                    }
+                    project_types = types_from_tools | types_from_mappings
+
+                if project_types:
+                    log.info(
+                        "%sproject %s: discovered %d toolkit type(s) with 'list_collections': %s",
+                        prefix, project_id, len(project_types), sorted(project_types),
+                    )
+
+                totals["types_discovered"].update(project_types)
+
+                # Per-type dispatch through the existing rename engine.
+                per_type_summaries = []
+                for tk_type in sorted(project_types):
+                    param_str = f"{tk_type};list_collections>list_indexes;project_id={project_id}"
+                    if dry_run:
+                        param_str += ";dry_run"
+
+                    try:
+                        result = run_selected_tools_migration(param_str) or {}
+                    except Exception:  # pylint: disable=W0703
+                        log.exception(
+                            "%smigrate_list_collections_to_list_indexes: engine error "
+                            "for project %s, type %s", prefix, project_id, tk_type,
+                        )
+                        totals["errors"] += 1
+                        continue
+
+                    totals["toolkits_affected"] += result.get("toolkits_affected", 0)
+                    totals["entity_mappings_affected"] += result.get("entity_mappings_affected", 0)
+                    totals["tools_renamed"] += result.get("tools_renamed", 0)
+                    totals["tool_mappings_renamed"] += result.get("tool_mappings_renamed", 0)
+                    # Pipeline totals from the engine are captured by the safety-net
+                    # pass below to avoid double-counting.
+                    per_type_summaries.append({
+                        "toolkit_type": tk_type,
+                        "toolkits_affected": result.get("toolkits_affected", 0),
+                        "entity_mappings_affected": result.get("entity_mappings_affected", 0),
+                    })
+
+                # Safety-net pipeline sweep: handles pipeline-only projects (no matching
+                # toolkits) and is idempotent when the engine already ran.
+                try:
+                    pipeline_result = migrate_project_pipeline_instructions(
+                        project_id, rename_ops, dry_run,
+                    )
+                    totals["pipeline_versions_scanned"] += pipeline_result.get(
+                        "pipeline_versions_scanned", 0
+                    )
+                    totals["pipeline_versions_affected"] += pipeline_result.get(
+                        "pipeline_versions_affected", 0
+                    )
+                except Exception:  # pylint: disable=W0703
+                    log.exception(
+                        "%smigrate_list_collections_to_list_indexes: pipeline sweep error "
+                        "for project %s", prefix, project_id,
+                    )
+                    totals["errors"] += 1
+
+                per_project_details.append({
+                    "project_id": project_id,
+                    "types_discovered": sorted(project_types),
+                    "per_type": per_type_summaries,
+                })
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "%smigrate_list_collections_to_list_indexes: error in project %s",
+                    prefix, project_id,
+                )
+                totals["errors"] += 1
+
+        end_ts = time.time()
+        summary = {
+            "dry_run": dry_run,
+            "projects_scanned": totals["projects_scanned"],
+            "types_discovered": sorted(totals["types_discovered"]),
+            "toolkits_affected": totals["toolkits_affected"],
+            "entity_mappings_affected": totals["entity_mappings_affected"],
+            "tools_renamed": totals["tools_renamed"],
+            "tool_mappings_renamed": totals["tool_mappings_renamed"],
+            "pipeline_versions_scanned": totals["pipeline_versions_scanned"],
+            "pipeline_versions_affected": totals["pipeline_versions_affected"],
+            "errors": totals["errors"],
+            "duration_seconds": round(end_ts - start_ts, 2),
+        }
+        log.info(
+            "%sExiting migrate_list_collections_to_list_indexes — %s (projects_scanned=%s, "
+            "types_discovered=%s, toolkits_affected=%s, entity_mappings_affected=%s, "
+            "pipeline_versions_affected=%s, errors=%s, duration=%ss)",
+            prefix,
+            "would migrate" if dry_run else "migrated",
+            summary["projects_scanned"], summary["types_discovered"],
+            summary["toolkits_affected"], summary["entity_mappings_affected"],
+            summary["pipeline_versions_affected"], summary["errors"],
+            summary["duration_seconds"],
+        )
+        return summary
 
     @web.method()
     def migrate_provider_hub_secrets(self, *args, **kwargs):
@@ -295,6 +520,47 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             total_migrated, end_ts - start_ts
         )
         return {"migrated": total_migrated}
+
+    @web.method()
+    def migrate_skill_publish_columns(self, *args, **kwargs):
+        """Admin task: add the skill-publishing columns to each project schema.
+
+        Adds ``shared_owner_id``/``shared_id`` to ``skills`` and ``status`` to
+        ``skill_versions`` (plus a status index) on every project schema.
+        Idempotent (``ADD COLUMN IF NOT EXISTS``): safe to run multiple times.
+
+        Param format (optional):
+            "project_id=<all|N>"
+        """
+        from ..utils.skill_publish_schema import apply_skill_publish_columns
+
+        param = kwargs.get("param", "") or ""
+        project_id_filter = None
+        for seg in [s.strip() for s in param.split(";")]:
+            if seg.lower().startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.warning(
+                            "migrate_skill_publish_columns: invalid project_id '%s', scanning all", value)
+
+        try:
+            if project_id_filter is not None:
+                project_ids = [project_id_filter]
+            else:
+                project_ids = [
+                    p["id"] for p in (
+                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                    )
+                ]
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_skill_publish_columns: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_skill_publish_columns(project_ids)
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
     def migrate_toolkit_settings_alita_title(self, *args, **kwargs):
@@ -1189,6 +1455,64 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         }
 
     @web.method()
+    def backfill_legacy_trace_steps(self, *args, **kwargs):
+        """Backfill legacy meta.tool_calls/thinking_steps into message_trace_step.
+
+        Param: "project_ids=<all|N|lo-hi>;cutoff_days=<180|all>;dry_run=<true|false>" (dry_run defaults true).
+        """
+        raw_param = kwargs.get("param", "") or ""
+        try:
+            parsed = parse_backfill_params(raw_param)
+        except ValueError as exc:
+            log.error("backfill_legacy_trace_steps: invalid params: %s", exc)
+            return {"error": str(exc)}
+
+        yield_to_hub = make_yield_to_hub(self.context.web_runtime)
+
+        prefix = "[DRY RUN] " if parsed['dry_run'] else ""
+        log.info(
+            "%sStarting backfill_legacy_trace_steps (project_ids=%s, cutoff_days=%s, dry_run=%s)",
+            prefix, parsed['project_id_spec'], parsed['cutoff_days'], parsed['dry_run'],
+        )
+        start_ts = time.time()
+
+        try:
+            project_ids = resolve_target_project_ids(parsed['project_id_spec'])
+        except ValueError as exc:
+            log.error("backfill_legacy_trace_steps: project resolution failed: %s", exc)
+            return {"error": str(exc)}
+
+        by_project = {}
+        totals = {}
+        for project_id in project_ids:
+            yield_to_hub()
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    counters = backfill_project(
+                        session, project_id, parsed['cutoff_days'], parsed['dry_run'], yield_to_hub,
+                    )
+            except Exception:  # pylint: disable=W0703
+                log.exception("backfill_legacy_trace_steps: error in project %s", project_id)
+                continue
+
+            by_project[project_id] = counters
+            for key, value in counters.items():
+                totals[key] = totals.get(key, 0) + value
+            log.info("%sbackfill_legacy_trace_steps: project %s — %s", prefix, project_id, counters)
+
+        duration = round(time.time() - start_ts, 2)
+        log.info(
+            "%sExiting backfill_legacy_trace_steps — projects=%s totals=%s (duration=%ss)",
+            prefix, len(project_ids), totals, duration,
+        )
+        return {
+            "dry_run": parsed['dry_run'],
+            "cutoff_days": parsed['cutoff_days'],
+            "totals": totals,
+            "by_project": by_project,
+        }
+
+    @web.method()
     def migrate_conversation_source_to_elitea(self, *args, **kwargs):
         """Admin task: rename legacy conversation source values to 'elitea'.
 
@@ -1933,6 +2257,93 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 log.exception("Error processing project %s, skipping", project_id)
 
         # ── 7. Summary ───────────────────────────────────────────────────
+        duration = time.time() - start_ts
+        log.info(
+            "Done%s. Projects scanned: %s, touched: %s. "
+            "ApplicationVersions: %s, ParticipantMappings: %s. Duration: %.1fs",
+            " [DRY RUN]" if dry_run else "",
+            total_projects, projects_touched,
+            total_versions, total_mappings,
+            duration,
+        )
+
+    # pylint: disable=R,W0613
+    @web.method()
+    def heal_llm_settings_family_conflicts(self, *args, **kwargs):
+        """Heal-all normalizer for family-misaligned llm_settings across ApplicationVersion and
+        ParticipantMapping rows (issues #5821 + #5858). Does NOT change model_name/model_project_id,
+        only aligns temperature/reasoning_effort against each row's own model's real
+        supports_reasoning. Idempotent -- safe to re-run.
+
+        Arms (all judged per-row against the resolved model's real supports_reasoning, looked up
+        per project via RPC):
+          - reasoning model + temperature + active effort  -> strip temperature (#5821)
+          - non-reasoning model + active effort            -> strip effort (impossible config)
+          - reasoning model + null effort                  -> set effort (#5858)
+
+        A bare null effort on a reasoning model is the unset/stale default and IS a defect (same
+        shape #5859 rejects at write time). An explicit reasoning_effort='none' is the deliberate
+        thinking-off escape hatch and is never touched.
+
+        Dry-run is ON by default (unlike migrate_llm_model) since this task has no from/to
+        model boundary and scans every project. Pass dry_run=false to apply changes.
+
+        Params (semicolon-separated):
+            project_id=<int|X-Y|all>      (optional, default: all)
+            dry_run=<true|false>           (optional, default: true)
+
+        Examples:
+            (no params)                          - dry run across all projects
+            dry_run=false                        - live run across all projects
+            project_id=42;dry_run=false           - live run on project 42 only
+            project_id=1-1000;dry_run=true        - dry run on projects 1-1000
+        """
+        from tools import db  # pylint: disable=C0415
+
+        start_ts = time.time()
+
+        raw_param = kwargs.get("param", "")
+        try:
+            params = parse_heal_params(raw_param)
+        except ValueError as exc:
+            log.error("Invalid params: %s", exc)
+            return
+
+        dry_run = params['dry_run']
+        log.info("Params: project_id=%s  dry_run=%s", params['project_id_spec'], dry_run)
+
+        try:
+            project_ids = resolve_target_project_ids(params['project_id_spec'])
+        except ValueError as exc:
+            log.error("Project resolution failed: %s", exc)
+            return
+
+        total_projects = len(project_ids)
+        total_versions = 0
+        total_mappings = 0
+        projects_touched = 0
+
+        for idx, project_id in enumerate(project_ids, 1):
+            try:
+                with db.get_session(project_id) as session:
+                    v_count = heal_family_conflict_versions(session, project_id, dry_run)
+                    m_count = heal_family_conflict_mappings(session, project_id, dry_run)
+
+                    if v_count or m_count:
+                        if not dry_run:
+                            session.commit()
+                        projects_touched += 1
+                        total_versions += v_count
+                        total_mappings += m_count
+                        log.info(
+                            "Project %s (%s/%s): %s versions, %s mappings %s",
+                            project_id, idx, total_projects,
+                            v_count, m_count,
+                            "[dry_run]" if dry_run else "[committed]",
+                        )
+            except Exception:  # pylint: disable=W0702
+                log.exception("Error processing project %s, skipping", project_id)
+
         duration = time.time() - start_ts
         log.info(
             "Done%s. Projects scanned: %s, touched: %s. "

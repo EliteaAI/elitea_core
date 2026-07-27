@@ -81,6 +81,7 @@ class ToolDetails(ToolBase):
     icon_meta: Optional[dict] = None
     variables: Optional[List] = []
     is_pinned: bool = False
+    indexes_count: Optional[int] = None
 
     def check_is_pinned(self, project_id: int) -> 'ToolDetails':
         try:

@@ -200,10 +200,19 @@ class ApplicationListModel(BaseModel):
 
     @model_validator(mode='after')
     def set_meta(self) -> 'ApplicationListModel':
+        # Merge the forked version's lineage keys into the application meta
+        # instead of replacing it — replacing would drop application-level keys
+        # like default_version_id, which consumers use to resolve the version.
         for v in self.versions:
             meta = v.meta or {}
             if 'parent_entity_id' in meta and 'parent_project_id' in meta:
-                self.meta = meta
+                self.meta = {
+                    **(self.meta or {}),
+                    'parent_entity_id': meta['parent_entity_id'],
+                    'parent_project_id': meta['parent_project_id'],
+                    **({'parent_version_id': meta['parent_version_id']}
+                       if meta.get('parent_version_id') is not None else {}),
+                }
                 return self
         return self
 
@@ -451,6 +460,11 @@ class MultiplePublishedApplicationListModel(MultipleApplicationListModel):
 
 
 class ApplicationRelationModel(BaseModel):
-    application_id: int
-    version_id: int
+    # Parent agent fields (the agent receiving the sub-agent)
+    # Aliased as entity_* for MCP to avoid collision with path params (which are the child/sub-agent)
+    application_id: int = Field(..., alias='entity_id')
+    version_id: int = Field(..., alias='entity_version_id')
     has_relation: bool
+
+    class Config:
+        populate_by_name = True  # Allow both field name and alias

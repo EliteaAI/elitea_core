@@ -4,11 +4,6 @@ import redis
 from tools import db, config as c
 from pylon.core.tools import web, log
 
-try:
-    import gevent  # pylint: disable=C0413
-except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
-    gevent = None
-
 from ..models.enums.all import ParticipantTypes
 from ..models.message_items.canvas import CanvasMessageItem, CanvasVersionItem
 from ..utils.canvas_utils import (get_list_canvas_details, get_canvas_details,
@@ -16,6 +11,7 @@ from ..utils.canvas_utils import (get_list_canvas_details, get_canvas_details,
 from ..utils.participant_utils import get_entity_details
 from ..utils.sio_utils import get_chat_room
 from ..utils.sio_utils import SioEvents
+from ..utils.utils import make_yield_to_hub
 
 
 class RPC:
@@ -51,13 +47,7 @@ class RPC:
     @web.rpc("chat_canvas_save_versions")
     def chat_canvas_save_versions(self, **kwargs):
         # TODO keep the last N versions instead of all?
-        # Cooperative yield only when gevent is the actual web runtime;
-        # under flask/waitress/hypercorn this is a no-op.
-        yield_to_hub = (
-            (lambda: gevent.sleep(0))
-            if (gevent is not None and self.context.web_runtime == "gevent")
-            else (lambda: None)
-        )
+        yield_to_hub = make_yield_to_hub(self.context.web_runtime)
 
         redis_client = self.get_redis_client()
         in_memory_canvas_keys: list[str] = redis_client.keys('canvas:*')

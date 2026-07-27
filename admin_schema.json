@@ -103,7 +103,7 @@
       "path": "mcp_exposure.enabled",
       "section": "guardrails",
       "default": true,
-      "requires_restart": true
+      "requires_restart": false
     },
     "mcp_in_menu": {
       "type": "boolean",
@@ -112,8 +112,17 @@
       "path": "mcp_exposure.in_menu",
       "section": "guardrails",
       "default": true,
-      "requires_restart": true,
+      "requires_restart": false,
       "visible_when": { "field": "mcp_enabled", "value": true }
+    },
+    "mcp_category_name": {
+      "type": "string",
+      "title": "MCP Category Name",
+      "description": "Label shown for the MCP toolkit category in the Toolkit type selection screen. Defaults to \"MCP\".",
+      "path": "mcp_exposure.category_name",
+      "section": "guardrails",
+      "default": "MCP",
+      "requires_restart": false
     },
     "is_publish_blocked": {
       "type": "boolean",
@@ -122,7 +131,7 @@
       "path": "publishing_guardrail.is_publish_blocked",
       "section": "guardrails",
       "default": false,
-      "requires_restart": true
+      "requires_restart": false
     },
     "publish_whitelist_project_ids": {
       "type": "array",
@@ -132,7 +141,7 @@
       "path": "publishing_guardrail.whitelist_project_ids",
       "section": "guardrails",
       "default": [],
-      "requires_restart": true,
+      "requires_restart": false,
       "enum_source": "projects",
       "visible_when": { "field": "is_publish_blocked", "value": true }
     },
@@ -140,11 +149,12 @@
       "type": "string",
       "format": "textarea",
       "title": "Publish Validation Rules",
-      "description": "Custom evaluation criteria for AI validation of agents before publishing. Leave empty to use built-in rules. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
+      "description": "Custom evaluation criteria for AI validation of agents before publishing. Leave empty to use the built-in rules shown in grey below. Use the restore icon to load them into the editor as a starting point. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
       "path": "publishing_guardrail.publish_validation_rules",
       "section": "guardrails",
       "default": "",
-      "requires_restart": true
+      "builtin_default_rpc": "applications_get_default_publish_validation_rules",
+      "requires_restart": false
     },
     "agent_categories": {
       "type": "array",
@@ -152,6 +162,48 @@
       "title": "Agent Categories",
       "description": "Additional agent categories available in the publish modal and Agent Studio filter bar, on top of the built-in defaults. Built-in defaults (including \"Other\") cannot be removed here. New categories take effect immediately without a restart. Use the \"Rename agent category\" admin task to rename a category across already published agents.",
       "path": "publishing_guardrail.agent_categories",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false
+    },
+    "is_skill_publish_blocked": {
+      "type": "boolean",
+      "title": "Block Skill Publishing",
+      "description": "When enabled, skill publishing is blocked platform-wide except for whitelisted projects. Admin publishes from the public project are always exempt.",
+      "path": "skill_publishing_guardrail.is_publish_blocked",
+      "section": "guardrails",
+      "default": false,
+      "requires_restart": false
+    },
+    "skill_publish_whitelist_project_ids": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "title": "Skill Publishing Allowed Projects",
+      "description": "Projects where skill publishing remains allowed when blocked globally. If empty, skill publishing is blocked for all projects.",
+      "path": "skill_publishing_guardrail.whitelist_project_ids",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false,
+      "enum_source": "projects",
+      "visible_when": { "field": "is_skill_publish_blocked", "value": true }
+    },
+    "skill_publish_validation_rules": {
+      "type": "string",
+      "format": "textarea",
+      "title": "Skill Publish Validation Rules",
+      "description": "Custom evaluation criteria for AI validation of skills before publishing. Leave empty to use the built-in rules shown in grey below. Use the restore icon to load them into the editor as a starting point. Only the evaluation rules section is configurable; the system prompt preamble and output format are fixed.",
+      "path": "skill_publishing_guardrail.publish_validation_rules",
+      "section": "guardrails",
+      "default": "",
+      "builtin_default_rpc": "skills_get_default_publish_validation_rules",
+      "requires_restart": false
+    },
+    "skill_categories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "title": "Skill Categories",
+      "description": "Additional skill categories available in the skill publish modal and catalog filter bar, on top of the built-in defaults. Managed independently from Agent Categories. Built-in defaults (including \"Other\") cannot be removed here. New categories take effect immediately without a restart.",
+      "path": "skill_publishing_guardrail.skill_categories",
       "section": "guardrails",
       "default": [],
       "requires_restart": false

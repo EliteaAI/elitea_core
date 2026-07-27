@@ -1,4 +1,5 @@
-from datetime import datetime
+from sqlalchemy import func
+from sqlalchemy.orm.attributes import flag_modified
 
 from tools import serialize
 from tools import api_tools, auth, db, config as c, register_openapi
@@ -7,10 +8,12 @@ from ...models.enums.all import ParticipantTypes
 from ...models.pd.message import MessageGroupDetail
 from ...models.message_items.text import TextMessageItem
 from ...models.message_group import ConversationMessageGroup
+from ...models.message_trace_step import MessageTraceStep
 
 from ...utils.sio_utils import get_chat_room
 from ...utils.sio_utils import SioEvents
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.parallel_hitl import retire_all_interrupts
 
 
 from pylon.core.tools import log
@@ -35,7 +38,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         with db.get_session(project_id) as session:
             msg_group = session.query(ConversationMessageGroup).filter(
                 ConversationMessageGroup.uuid == message_group_uuid
-            ).first()
+            ).with_for_update(of=ConversationMessageGroup).first()
 
             user_id = auth.current_user().get('id')
             if user_id != msg_group.conversation.author_id:
@@ -56,26 +59,31 @@ class PromptLibAPI(api_tools.APIModeHandler):
             self.module.mark_chat_run_stopped(message_group_uuid)
 
             msg_group.is_streaming = False
+            if msg_group.meta:
+                msg_group.meta = retire_all_interrupts(msg_group.meta)
+                flag_modified(msg_group, 'meta')
             msg_group_deleted = False
-            thinking_steps = msg_group.meta.get('thinking_steps', [])
 
             room = get_chat_room(msg_group.conversation.uuid)
 
             if not msg_group.message_items:
-                filtered_steps = [
-                    s for s in thinking_steps
-                    if (txt := s.get('text')) and str(txt).strip()
-                ]
-                latest_step = max(
-                    filtered_steps,
-                    key=lambda step: datetime.fromisoformat(
-                        step['timestamp_finish'].replace('Z', '+00:00')
+                # Salvage the latest non-empty thinking text as the reply (steps live in the table now).
+                latest_text = (
+                    session.query(MessageTraceStep.text)
+                    .filter(
+                        MessageTraceStep.message_group_id == msg_group.id,
+                        MessageTraceStep.kind == 'thinking_step',
+                        MessageTraceStep.text.isnot(None),
+                        func.trim(MessageTraceStep.text) != '',
                     )
-                ) if filtered_steps else None
+                    .order_by(MessageTraceStep.finished_at.desc(), MessageTraceStep.id.desc())
+                    .limit(1)
+                    .scalar()
+                )
 
-                if latest_step:
+                if latest_text:
                     msg: TextMessageItem = TextMessageItem(
-                        content=str(latest_step.get('text')),
+                        content=str(latest_text),
                         message_group=msg_group,
                         order_index=0,
                     )

@@ -22,6 +22,7 @@ from ..models.pd.application import (
     ApplicationUpdateModel
 )
 from ..models.pd.version import ApplicationVersionDetailToolValidatedModel
+from ..models.pd.llm import llm_settings_family_conflict, _normalize_llm_settings_family
 from ..models.all import Tag
 from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
@@ -684,7 +685,22 @@ def get_application_details(project_id: int, application_id: int,
             i.set_online(project_id, mcp_schemas=mcp_schemas)
             i.set_agent_meta_and_fields(project_id)
 
-    return {'ok': True, 'data': result.model_dump(mode='json')}
+        data = result.model_dump(mode='json')
+        try:
+            from .publish_utils import get_agent_nesting_metadata
+            data['version_details'].update(get_agent_nesting_metadata(
+                project_id,
+                application_version.id,
+                session=session,
+                root_version=application_version,
+            ))
+        except Exception as depth_err:  # never fail detail fetch over advisory fields
+            log.warning(
+                f"Could not compute agent nesting metadata for version "
+                f"{application_version.id}: {depth_err}"
+            )
+
+    return {'ok': True, 'data': data}
 
 
 def application_ids_to_names(session, application_id: int, version_id: int) -> Tuple[str, str]:
@@ -1323,6 +1339,12 @@ def validate_and_resolve_llm_settings(
 ) -> Optional[dict]:
     """Check if llm_settings.model_name is available; fall back to the project's default LLM if not.
 
+    Also corrects a temperature/reasoning_effort family conflict (both set at once — invalid
+    for reasoning models) against the resolved model's actual supports_reasoning capability,
+    even when the model itself is available (issue #5821). Callers must invoke this
+    unconditionally, not only when llm_settings is empty — a non-empty-but-corrupted or
+    unavailable-model llm_settings is exactly the case this function needs to fix.
+
     openai_compatible is a derived model-config property, added to the result only when
     include_openai_compatible is True (response paths such as the SDK building sub-agents).
     It is omitted by default so the callers that persist this result back onto
@@ -1340,15 +1362,26 @@ def validate_and_resolve_llm_settings(
 
             if model_project_id is not None:
                 if (model_project_id, model_name) in available:
+                    config = available[(model_project_id, model_name)]
+                    result = llm_settings
+                    if llm_settings_family_conflict(
+                        llm_settings.get('temperature'), llm_settings.get('reasoning_effort')
+                    ):
+                        result = _normalize_llm_settings_family(
+                            llm_settings, bool(config.get('supports_reasoning', False))
+                        )
+                        log.warning(
+                            f"LLM settings family conflict corrected for model {model_name!r} "
+                            f"(project_id={model_project_id}, application_id={application_id} "
+                            f"version_id={version_id}). Before: {llm_settings!r}. After: {result!r}"
+                        )
                     if not include_openai_compatible:
-                        return llm_settings
+                        return result
                     # Response-only: surface the model's openai_compatible flag so the SDK
                     # routes a sub-agent's Claude model through the correct client. Resolved
                     # from the config registry, never persisted (see docstring).
-                    stamped = dict(llm_settings)
-                    stamped['openai_compatible'] = bool(
-                        available[(model_project_id, model_name)].get('openai_compatible', False)
-                    )
+                    stamped = dict(result)
+                    stamped['openai_compatible'] = bool(config.get('openai_compatible', False))
                     return stamped
             else:
                 # null model_project_id: find the actual project that owns this model.
@@ -1359,12 +1392,23 @@ def validate_and_resolve_llm_settings(
                     None,
                 )
                 if resolved_project_id is not None:
+                    config = available[(resolved_project_id, model_name)]
                     stamped = dict(llm_settings)
                     stamped['model_project_id'] = resolved_project_id
-                    if include_openai_compatible:
-                        stamped['openai_compatible'] = bool(
-                            available[(resolved_project_id, model_name)].get('openai_compatible', False)
+                    if llm_settings_family_conflict(
+                        stamped.get('temperature'), stamped.get('reasoning_effort')
+                    ):
+                        stamped = _normalize_llm_settings_family(
+                            stamped, bool(config.get('supports_reasoning', False))
                         )
+                        stamped['model_project_id'] = resolved_project_id
+                        log.warning(
+                            f"LLM settings family conflict corrected for model {model_name!r} "
+                            f"(project_id={resolved_project_id}, application_id={application_id} "
+                            f"version_id={version_id}). Before: {llm_settings!r}. After: {stamped!r}"
+                        )
+                    if include_openai_compatible:
+                        stamped['openai_compatible'] = bool(config.get('openai_compatible', False))
                     return stamped
 
         default = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_default_model(
@@ -1388,19 +1432,9 @@ def validate_and_resolve_llm_settings(
         # — avoids an extra RPC call.
         default_model_config = available.get((default_model_project_id, default_model_name), {})
         supports_reasoning = bool(default_model_config.get('supports_reasoning', False))
+        resolved = _normalize_llm_settings_family(resolved, supports_reasoning)
         if include_openai_compatible:
             resolved['openai_compatible'] = bool(default_model_config.get('openai_compatible', False))
-
-        if supports_reasoning:
-            # Reasoning models ignore temperature; promote to reasoning_effort if not already set.
-            resolved['temperature'] = None
-            if not resolved.get('reasoning_effort'):
-                resolved['reasoning_effort'] = 'medium'
-        else:
-            # Non-reasoning models ignore reasoning_effort.
-            resolved['reasoning_effort'] = None
-            if resolved.get('temperature') is None:
-                resolved['temperature'] = 0.7
 
         ctx = f"application_id={application_id} version_id={version_id} " if (application_id or version_id) else ""
         log.warning(
@@ -1461,6 +1495,22 @@ def get_application_version_details_expanded(
 
         if not result.get('skills'):
             result.pop('skills', None)
+
+        # Agent-only subtree contribution (issue #5778); a pipeline root contributes zero. The UI
+        # add-guard allows nesting only while host current tier + candidate contribution stays
+        # within MAX_AGENT_NESTING_TIERS. Derived from the authoritative validator's walker so
+        # the two can't drift. Cheap (tools already selectin-loaded on the root; children are a
+        # bounded walk) and off the chat hot path — this is the edit/detail path.
+        try:
+            from .publish_utils import get_agent_nesting_metadata
+            result.update(get_agent_nesting_metadata(
+                project_id,
+                version_id,
+                session=session,
+                root_version=application_version,
+            ))
+        except Exception as depth_err:  # never fail detail fetch over an advisory field
+            log.warning(f"Could not compute agent_subtree_tiers for version {version_id}: {depth_err}")
 
         if result.get('llm_settings'):
             # Response-only path (never persisted): include openai_compatible so the SDK

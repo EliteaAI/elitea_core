@@ -37,3 +37,13 @@ def is_mcp_in_menu_enabled() -> bool:
         True if MCPs menu should be visible, False otherwise
     """
     return getattr(_current_module(), 'mcp_in_menu_enabled', True)
+
+
+def get_mcp_category_name() -> str:
+    """
+    Admin-configured label for the MCP toolkit category in the toolkit picker.
+
+    Returns:
+        The configured category name, or 'MCP' by default.
+    """
+    return getattr(_current_module(), 'mcp_category_name', None) or 'MCP'

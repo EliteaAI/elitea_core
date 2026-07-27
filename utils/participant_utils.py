@@ -32,6 +32,43 @@ class ParticipantAlreadyAddedException(ValueError):
         self.entity_settings = entity_settings or {}
 
 
+def invalid_llm_settings_for_reasoning_model(
+        project_id: int, llm_settings: dict
+) -> bool:
+    """True when llm_settings is invalid for a reasoning-capable model (issue #5859).
+
+    A reasoning model (Anthropic extended thinking, OpenAI o1/gpt-5) must run with a non-null
+    reasoning_effort and no temperature. Both a stale temperature and a null effort silently run
+    it thinking-off, which triggers the write-tool fabrication of #5826. The already-valid shape
+    (no temperature + an active effort) needs no model lookup, so a clean write pays no RPC. Fails
+    open (returns False) if the model can't be resolved — availability is enforced elsewhere; this
+    check must not block a write on a transient RPC error.
+    """
+    if not llm_settings:
+        return False
+    has_temperature = llm_settings.get('temperature') is not None
+    effort = llm_settings.get('reasoning_effort')
+    has_active_effort = effort not in (None, 'none')
+    # Valid for a reasoning model (and harmless for a non-reasoning one) — skip the lookup.
+    if not has_temperature and has_active_effort:
+        return False
+    model_name = llm_settings.get('model_name')
+    if not model_name:
+        return False
+    model_project_id = llm_settings.get('model_project_id') or project_id
+    try:
+        config = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_configuration_model(
+            model_project_id, model_name
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        log.warning(
+            f"Could not resolve model {model_name!r} (project_id={model_project_id}) to validate "
+            f"reasoning-family llm_settings: {exc}"
+        )
+        return False
+    return bool(config and config.get('supports_reasoning', False))
+
+
 def make_query_filter_for_entity(entity_name: ParticipantTypes, entity_meta: EntityMetaType) -> list:
     match entity_name:
         case ParticipantTypes.llm:
