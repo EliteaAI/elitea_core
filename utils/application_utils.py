@@ -98,6 +98,7 @@ def build_skill_mappings_list(skill_mappings) -> list:
             'name': mapping.skill.name if mapping.skill else None,
             'description': mapping.skill.description if mapping.skill else None,
             'version_name': mapping.skill_version.name if mapping.skill_version else None,
+            'icon_meta': (mapping.skill_version.meta or {}).get('icon_meta') if mapping.skill_version else None,
             'instructions': mapping.skill_version.instructions if mapping.skill_version else None,
         }
         for mapping in skill_mappings

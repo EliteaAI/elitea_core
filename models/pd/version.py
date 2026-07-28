@@ -315,6 +315,7 @@ class AttachedSkillModel(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     version_name: Optional[str] = None
+    icon_meta: Optional[dict] = None
     instructions: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
