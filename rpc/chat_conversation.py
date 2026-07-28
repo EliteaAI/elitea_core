@@ -16,6 +16,7 @@ from ..utils.conversation_utils import (
     get_conversation_details,
     calculate_conversation_durations_batch,
     resolve_persona_instructions,
+    reresolve_persona_instructions
 )
 from ..utils.participant_utils import add_participant_to_conversation
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
@@ -228,7 +229,7 @@ class RPC:
                     # changes here, re-resolve it from the owner's personalization so a switched
                     # conversation stops carrying the previous persona's instructions.
                     if 'persona' in meta:
-                        self._reresolve_persona_instructions(session, conversation, meta['persona'])
+                        reresolve_persona_instructions(session, conversation, meta['persona'])
                     flag_modified(conversation, 'meta')
 
                 if is_hidden is not None:
@@ -251,36 +252,6 @@ class RPC:
                 session.rollback()
                 log.error(f"Error updating conversation: {str(e)}")
                 return {'success': False, 'error': 'Failed to update conversation'}
-
-    @web.method()
-    def _reresolve_persona_instructions(session, conversation, persona) -> None:
-        """Re-derive conversation.meta['default_instructions'] for a new persona (#5392).
-
-        Looks up the conversation's user participant, re-fetches their personalization, and
-        resolves the instructions for `persona`. An empty result removes the key so the
-        conversation no longer carries the previous persona's instructions.
-        """
-        try:
-            owner = session.query(Participant).join(
-                ParticipantMapping, ParticipantMapping.participant_id == Participant.id
-            ).filter(
-                ParticipantMapping.conversation_id == conversation.id,
-                Participant.entity_name == ParticipantTypes.user.value,
-            ).first()
-            if not owner:
-                return
-            user_id = owner.entity_meta.get('id')
-            if not user_id:
-                return
-            social_user = rpc_tools.RpcMixin().rpc.timeout(2).social_get_user(user_id)
-            personalization = (social_user or {}).get('personalization') or {}
-            selected = resolve_persona_instructions(personalization, persona)
-            if selected:
-                conversation.meta['default_instructions'] = selected
-            else:
-                conversation.meta.pop('default_instructions', None)
-        except Exception as e:
-            log.warning(f"[#5392] Failed to re-resolve persona instructions: {e}")
 
     @web.rpc("chat_create_conversation_rpc", "create_conversation_rpc")
     def create_conversation_rpc(

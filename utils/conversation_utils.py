@@ -35,6 +35,34 @@ def resolve_persona_instructions(user_personalization: dict, persona: str) -> st
         return instructions_map.get(persona) or '' if persona else ''
     return user_personalization.get('default_instructions') or ''
 
+def reresolve_persona_instructions(session, conversation, persona) -> None:
+    """Re-derive conversation.meta['default_instructions'] for a new persona (#5392).
+
+    Looks up the conversation's user participant, re-fetches their personalization, and
+    resolves the instructions for `persona`. An empty result removes the key so the
+    conversation no longer carries the previous persona's instructions.
+    """
+    try:
+        owner = session.query(Participant).join(
+            ParticipantMapping, ParticipantMapping.participant_id == Participant.id
+        ).filter(
+            ParticipantMapping.conversation_id == conversation.id,
+            Participant.entity_name == ParticipantTypes.user.value,
+        ).first()
+        if not owner:
+            return
+        user_id = owner.entity_meta.get('id')
+        if not user_id:
+            return
+        social_user = rpc_tools.RpcMixin().rpc.timeout(2).social_get_user(user_id)
+        personalization = (social_user or {}).get('personalization') or {}
+        selected = resolve_persona_instructions(personalization, persona)
+        if selected:
+            conversation.meta['default_instructions'] = selected
+        else:
+            conversation.meta.pop('default_instructions', None)
+    except Exception as e:
+        log.warning(f"[#5392] Failed to re-resolve persona instructions: {e}")
 
 def _thinking_span_subquery(session: Session, conversation_ids: list[int]):
     """Per-group thinking wall-clock (secs) from message_trace_step: max(finished) - min(started).
