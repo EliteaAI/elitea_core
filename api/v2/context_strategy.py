@@ -34,7 +34,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             try:
                 validated = ContextStrategyUpdate.model_validate(data)
             except ValidationError as e:
-                return {"error": e.errors()}, 400
+                return {"error": e.errors(include_context=False, include_url=False)}, 400
 
             analytics, current_max_tokens, current_strategy_name = get_context_data(project_id, conversation_id)
 
