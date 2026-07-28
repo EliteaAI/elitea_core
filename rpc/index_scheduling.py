@@ -205,11 +205,26 @@ class RPC:
                                                 initiator=InitiatorType.schedule
                                             )
 
-                                            # Update last_run timestamp in toolkit meta
+                                            # Update last_run timestamp in toolkit meta.
+                                            # Re-read the row to avoid clobbering a concurrent deletion
+                                            # (delete wins: if the schedule was removed mid-tick, skip).
                                             current_time = datetime.now(UTC).isoformat()
-                                            toolkit.meta['indexes_meta'][index_meta_id]['schedules'][user_id]['last_run'] = current_time
-                                            flag_modified(toolkit, 'meta')
-                                            project_session.commit()
+                                            project_session.refresh(toolkit)
+                                            live_schedules = (
+                                                toolkit.meta
+                                                .get('indexes_meta', {})
+                                                .get(index_meta_id, {})
+                                                .get('schedules', {})
+                                            )
+                                            if user_id not in live_schedules:
+                                                log.info(
+                                                    f"Schedule for user {user_id} on {index_meta_id} "
+                                                    f"was deleted mid-tick, skipping last_run update"
+                                                )
+                                            else:
+                                                toolkit.meta['indexes_meta'][index_meta_id]['schedules'][user_id]['last_run'] = current_time
+                                                flag_modified(toolkit, 'meta')
+                                                project_session.commit()
 
                                             log.info(
                                                 f"Index trigger finished at {current_time} "
