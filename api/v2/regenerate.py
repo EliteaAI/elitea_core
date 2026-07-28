@@ -152,9 +152,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 session.delete(message_item)
 
             execution_generation = str(uuid4())
-            msg_group.meta = begin_execution_generation(
+            fresh_meta = begin_execution_generation(
                 retire_all_interrupts(msg_group.meta), execution_generation,
             )
+            # The meta writer preserves the stored list whenever a run reports none, so a
+            # regeneration that applies no skill would inherit the discarded answer's.
+            # Not in begin_execution_generation: that also runs on HITL resume, which keeps them.
+            fresh_meta.pop('invoked_skills', None)
+            msg_group.meta = fresh_meta
             # Clear the group's trace steps (rows are the accumulator; regenerate starts fresh).
             session.query(MessageTraceStep).filter(
                 MessageTraceStep.message_group_id == msg_group.id

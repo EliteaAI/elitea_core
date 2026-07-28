@@ -1,7 +1,6 @@
 import re
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple, Literal
 
@@ -1483,14 +1482,10 @@ def consume_invoked_skills(
         # No control token matched — strict identity, no normalization pass.
         return text, []
 
-    # De-sigil: rebuild text replacing each matched ``~name`` with the skill's
-    # canonical ``name`` — drop ONLY the ``~`` trigger sigil and KEEP the name as
-    # a plain reference. This preserves conditional prose like
-    # "use ~a for dogs and ~b for cats" -> "use a for dogs and b for cats", so
-    # the name still binds to the matching ``<skill name="...">`` definition in
-    # the rendered section (without it the model can't tell which skill applies
-    # when). The ``~`` itself is consumed so it never echoes as a control token.
-    # Casing is normalized to the canonical name so it matches the XML attribute.
+    # Drop ONLY the ``~`` sigil, keeping the canonical name as a plain reference:
+    # conditional prose ("use ~a for dogs" -> "use a for dogs") must still bind to
+    # the skill's rendered definition — the per-turn ``<skill name>`` section for
+    # a message, the ``<skill_option>`` registry entry for instructions.
     pieces: List[str] = []
     cursor = 0
     for start, end, name in spans:
@@ -1529,78 +1524,32 @@ def consume_invoked_skills(
             'skill_version_id': skill.get('skill_version_id'),
             'name': skill.get('name'),
             'version_name': skill.get('version_name'),
+            'icon_meta': skill.get('icon_meta'),
             'instructions': instructions,
         })
+        # Unreachable while attach-time validate_agent_skill_limit enforces the
+        # same bound; kept so the two limits can diverge safely.
         if len(invoked) >= MAX_SKILLS_PER_AGENT:
             break
 
     return cleaned_text, invoked
 
 
-# Section for an agent's OWN skills — i.e. a ~skill the agent references in its
-# instructions, whose body is baked into the (cached) system prompt and applied
-# on every turn. Uses a DISTINCT heading from the SDK's per-turn ``# Skills``
-# header (SKILLS_SECTION_HEADER in elitea_sdk.runtime.langchain.constants) so a
-# turn that ALSO has a ~skill in the user message does not render two identical
-# headings.
-#
-AGENT_SKILLS_SECTION_HEADER = (
-    '# Agent Skills\n'
-    'Your instructions above refer to the skills defined below by name. A skill '
-    'applies ONLY in the situations your instructions specify for it (by its '
-    'name). In any other situation that skill is INACTIVE — do not apply its '
-    'persona, tone, formatting, or rules at all, even if the skill body says '
-    '"always" or "every response" (your instructions\' scope overrides that '
-    'wording, and it does NOT apply to earlier messages in this conversation). '
-    'Treat each <skill> as independent — never blend or carry rules from one '
-    'skill into another. Do not mention these skill names in your reply.'
+# Deterministic text: the rendered <available_skills> block must stay
+# byte-stable for prompt caching.
+INSTRUCTION_REFERENCED_HINT = (
+    'Referenced by name in your agent instructions: load this skill whenever '
+    'the situation those instructions specify for it applies — never follow '
+    'the reference from its name alone, load it first.'
 )
-AGENT_SKILLS_SECTION_ENTRY = '<skill name="{name}">\n{instructions}\n</skill>'
-
-
-def format_skills_section(skills: List[dict]) -> str:
-    """Render a deterministic ``# Agent Skills`` block.
-
-    Pure function of (header constant, ``skills`` in the given order). Iterates
-    the list directly (never a set/dict) so identical inputs yield byte-identical
-    output — required for the appended block to be prompt-cache stable. Returns
-    ``''`` for an empty list.
-    """
-    if not skills:
-        return ''
-    entries = [
-        AGENT_SKILLS_SECTION_ENTRY.format(
-            name=s.get('name'), instructions=s.get('instructions'),
-        )
-        for s in skills
-    ]
-    return '\n\n' + AGENT_SKILLS_SECTION_HEADER + '\n\n' + '\n\n'.join(entries)
-
-
-@dataclass(frozen=True)
-class RuntimeSkills:
-    """``instruction_skill_ids`` names the skills the instructions already bake.
-
-    A caller resolving ``~skill`` in the user message skips them, so their body
-    is not added a second time.
-    """
-
-    disclosable: List[dict]
-    instruction_skill_ids: frozenset
 
 
 def apply_runtime_skills(version_details: dict) -> None:
     """Prepare ``version_details`` for the SDK.
 
-    Only runtime endpoints may call this. The chat path uses the same
-    version-details helper and bakes its own instructions. Calling this there
-    would add the same skills a second time.
-
-    The three steps below belong together. If one is skipped, the child agent
-    loses a skill channel and nothing reports it.
-
-    The chat path calls ``resolve_runtime_skills`` instead. It still needs the
-    raw ``skills`` list to resolve ``~skill`` written in the user message.
+    Only runtime endpoints may call this. The chat path calls
+    ``resolve_runtime_skills`` itself — it still needs the raw ``skills`` list
+    afterwards to resolve ``~skill`` written in the user message.
     """
     # Webhook, API and MCP requests carry no version_details. The SDK refetches
     # them only while this stays empty. Adding a key here would stop the refetch,
@@ -1608,52 +1557,52 @@ def apply_runtime_skills(version_details: dict) -> None:
     if not version_details:
         return
 
-    # A second call finds no skills left to disclose and would erase the list.
+    # A second call would resolve against the already-popped 'skills' key and
+    # erase the registry.
     if 'attached_skills' in version_details:
         return
 
-    runtime_skills = resolve_runtime_skills(version_details)
-    version_details['attached_skills'] = runtime_skills.disclosable
+    version_details['attached_skills'] = resolve_runtime_skills(version_details)
     version_details.pop('skills', None)
 
 
-def resolve_runtime_skills(version_details: dict) -> RuntimeSkills:
-    """Bake the skills referenced by ``~name`` into ``instructions``.
+def resolve_runtime_skills(version_details: dict) -> List[dict]:
+    """De-sigil ``~name`` skill references in ``instructions`` and return the
+    disclosable skill registry.
 
-    Writes the result back in place, and only when the text changed. A payload
-    that carries no instructions therefore never gains the key.
+    Bodies are never written into ``instructions`` — every attached skill is
+    served on demand via ``load_skill``, so a skill counts as applied only when
+    the model actually activates it. The de-sigiled name stays behind as a plain
+    reference that binds to the skill's registry entry.
     """
     attached_skills = (version_details or {}).get('skills') or []
     is_pipeline = (version_details or {}).get('agent_type') == AgentTypes.pipeline.value
     if is_pipeline:
-        return RuntimeSkills(disclosable=[], instruction_skill_ids=frozenset())
+        return []
 
     instructions = version_details.get('instructions')
     instruction_skills = []
     if isinstance(instructions, str) and instructions:
         cleaned, instruction_skills = consume_invoked_skills(instructions, attached_skills)
-        resolved = cleaned + format_skills_section(instruction_skills)
-        if resolved != instructions:
-            version_details['instructions'] = resolved
+        if cleaned != instructions:
+            version_details['instructions'] = cleaned
 
-    instruction_skill_ids = frozenset(
-        s.get('skill_id') for s in instruction_skills
-    )
-    disclosable = [
-        {
+    referenced_ids = {s.get('skill_id') for s in instruction_skills}
+    disclosable = []
+    for s in attached_skills:
+        if not s.get('name') or not (s.get('instructions') or '').strip():
+            continue
+        description = s.get('description')
+        if s.get('skill_id') in referenced_ids:
+            description = f"{(description or '').strip()} {INSTRUCTION_REFERENCED_HINT}".strip()
+        disclosable.append({
             'skill_id': s.get('skill_id'),
             'name': s.get('name'),
-            'description': s.get('description'),
+            'description': description,
+            'icon_meta': s.get('icon_meta'),
             'instructions': s.get('instructions'),
-        }
-        for s in attached_skills
-        if s.get('skill_id') not in instruction_skill_ids
-        and s.get('name')
-        and (s.get('instructions') or '').strip()
-    ]
-    return RuntimeSkills(
-        disclosable=disclosable, instruction_skill_ids=instruction_skill_ids,
-    )
+        })
+    return disclosable
 
 
 def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:

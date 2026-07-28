@@ -272,6 +272,18 @@ def generate_predict_payload(
         'invoked_skills': getattr(parsed, 'invoked_skills', None) or [],
     }
 
+    # Only the raw LLM chat shape stops here; every agent-backed shape reaches
+    # the branch below, which recomputes this.
+    payload['applied_skills'] = [
+        {
+            'skill_id': s.get('skill_id'),
+            'name': s.get('name'),
+            'icon_meta': s.get('icon_meta'),
+        }
+        for s in payload['invoked_skills']
+        if isinstance(s, dict) and s.get('name')
+    ]
+
     # Auto-approve sensitive actions for API requests when project secret is set.
     # Only honor the explicit server-side argument, never a client-provided model field.
     if eligible_for_autoapproval:
@@ -309,8 +321,7 @@ def generate_predict_payload(
         attached_skills = version_details.get('skills') or []
         is_pipeline = version_details.get('agent_type') == AgentTypes.pipeline.value
 
-        runtime_skills = resolve_runtime_skills(version_details)
-        instruction_skill_ids = runtime_skills.instruction_skill_ids
+        disclosable_skills = resolve_runtime_skills(version_details)
 
         # Message-referenced skills (per-turn): resolve + consume from the user's
         # message and send via the dynamic invoked_skills channel (injected AFTER
@@ -347,26 +358,29 @@ def generate_predict_payload(
                 rebuilt_blocks.append({'type': 'text', 'text': 'continue'})
             payload['user_input'] = rebuilt_blocks
 
-        # A skill referenced in BOTH places applies ONCE via the agent-skills
-        # (cached instructions) block and is EXCLUDED from the dynamic channel to
-        # avoid double injection.
-        payload['invoked_skills'] = [
-            s for s in message_skills if s.get('skill_id') not in instruction_skill_ids
+        payload['invoked_skills'] = message_skills
+
+        # Message-invoked only: an instruction-referenced skill counts as applied
+        # only when the model actually loads it (folded in by the indexer).
+        payload['applied_skills'] = [
+            {
+                'skill_id': s.get('skill_id'),
+                'name': s.get('name'),
+                'icon_meta': s.get('icon_meta'),
+            }
+            for s in payload['invoked_skills']
+            if s.get('name')
         ]
 
-        # Progressive disclosure: attached skills become loadable on demand via the
-        # SDK's load_skill tool. Instruction-baked ids are excluded (already always-on
-        # in the cached prompt — re-advertising them would double-inject); pipelines
-        # are excluded so deterministic nodes gain no autonomous tool.
+        # Pipelines are excluded so deterministic nodes gain no autonomous tool.
         if attached_skills and not is_pipeline:
-            disclosable_skills = runtime_skills.disclosable
             if disclosable_skills:
                 payload['attached_skills'] = disclosable_skills
             dropped = len(attached_skills) - len(disclosable_skills)
             if dropped:
                 log.debug(
                     '[Skills] Progressive disclosure dropped %d of %d attached skills '
-                    '(instruction-baked/blank-instructions/missing-name)',
+                    '(blank-instructions/missing-name)',
                     dropped, len(attached_skills),
                 )
 

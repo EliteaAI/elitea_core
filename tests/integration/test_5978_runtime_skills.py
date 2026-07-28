@@ -215,10 +215,10 @@ class TestPipelineInstructionsPreserved:
         assert version_details['attached_skills'] == []
 
 
-class TestChannelsAreDisjoint:
-    """A skill is either baked into the instructions or loadable, never both."""
+class TestReferencedSkillsStayLoadable:
+    """No body is ever written into instructions; every skill loads on demand."""
 
-    def test_referenced_skill_is_baked_and_not_disclosable(self, skill_utils_module):
+    def test_referenced_skill_is_desigiled_and_stays_loadable(self, skill_utils_module):
         version_details = {
             'instructions': 'Answer briefly. Follow ~shout in every reply.',
             'skills': [UPPERCASE, TERSE],
@@ -226,9 +226,21 @@ class TestChannelsAreDisjoint:
 
         skill_utils_module.apply_runtime_skills(version_details)
 
-        assert 'Write every letter in upper case.' in version_details['instructions']
-        assert '~' not in version_details['instructions']
-        assert [s['name'] for s in version_details['attached_skills']] == ['terse']
+        assert version_details['instructions'] == 'Answer briefly. Follow shout in every reply.'
+        assert [s['name'] for s in version_details['attached_skills']] == ['shout', 'terse']
+
+    def test_referenced_skill_description_carries_the_hint(self, skill_utils_module):
+        version_details = {
+            'instructions': 'Follow ~shout in every reply.',
+            'skills': [UPPERCASE, TERSE],
+        }
+
+        skill_utils_module.apply_runtime_skills(version_details)
+
+        by_name = {s['name']: s for s in version_details['attached_skills']}
+        hint = skill_utils_module.INSTRUCTION_REFERENCED_HINT
+        assert by_name['shout']['description'] == f"{UPPERCASE['description']} {hint}"
+        assert by_name['terse']['description'] == TERSE['description']
 
     def test_unreferenced_skills_stay_loadable(self, skill_utils_module):
         version_details = {'instructions': 'Answer briefly.', 'skills': [UPPERCASE, TERSE]}
@@ -253,7 +265,7 @@ class TestChannelsAreDisjoint:
 
         skill_utils_module.apply_runtime_skills(version_details)
 
-        assert '~' not in version_details['instructions']
+        assert version_details['instructions'] == 'Do shout now.'
         assert version_details['attached_skills'] == []
 
 
@@ -287,21 +299,22 @@ class TestRepeatedApplication:
 
         assert version_details['attached_skills'] == first
 
-    def test_second_call_does_not_bake_twice(self, skill_utils_module):
+    def test_second_call_leaves_instructions_untouched(self, skill_utils_module):
         version_details = {
             'instructions': 'Follow ~shout in every reply.',
             'skills': [UPPERCASE],
         }
 
         skill_utils_module.apply_runtime_skills(version_details)
-        baked = version_details['instructions']
+        desigiled = version_details['instructions']
         skill_utils_module.apply_runtime_skills(version_details)
 
-        assert version_details['instructions'] == baked
+        assert version_details['instructions'] == desigiled
 
 
 class TestDeterminism:
-    """The baked prompt is cached, so identical input must render identically."""
+    """The instructions and registry feed the cached prompt, so identical input
+    must render identically."""
 
     def test_identical_inputs_render_identically(self, skill_utils_module):
         def shape():
@@ -310,6 +323,6 @@ class TestDeterminism:
                 'skills': [UPPERCASE, TERSE],
             }
             skill_utils_module.apply_runtime_skills(version_details)
-            return version_details['instructions']
+            return version_details['instructions'], version_details['attached_skills']
 
         assert shape() == shape()

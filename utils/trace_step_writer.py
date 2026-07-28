@@ -32,7 +32,7 @@ _TOOL_METADATA_KEYS = (
     'agent_type', 'checkpoint_ns', 'display_name', 'hitl_deferred',
     'langgraph_node', 'original_name', 'toolkit_name', 'toolkit_type',
 )
-_TOOL_META_KEYS = ('name', 'display_name', 'model_name')
+_TOOL_META_KEYS = ('name', 'display_name', 'model_name', 'loaded_skill')
 
 
 def _parse_ts(value):
