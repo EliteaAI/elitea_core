@@ -252,7 +252,7 @@ class RPC:
                 log.error(f"Error updating conversation: {str(e)}")
                 return {'success': False, 'error': 'Failed to update conversation'}
 
-    @staticmethod
+    @web.rpc()
     def _reresolve_persona_instructions(session, conversation, persona) -> None:
         """Re-derive conversation.meta['default_instructions'] for a new persona (#5392).
 
