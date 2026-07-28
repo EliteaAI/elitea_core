@@ -11,6 +11,7 @@ class ContextStrategyUpdate(BaseModel):
     preserve_recent_messages: Optional[int] = Field(None, ge=1)
     preserve_system_messages: Optional[bool] = None
     enable_summarization: Optional[bool] = None
+    enable_context_editing: Optional[bool] = None
     summary_instructions: Optional[str] = None
     enabled: Optional[bool] = True
 
@@ -37,6 +38,7 @@ class ContextStrategy(BaseModel):
     name: str = "default"
     enabled: bool = True
     enable_summarization: bool = True
+    enable_context_editing: bool = False
     max_context_tokens: int = Field(64000, ge=1000)
     preserve_recent_messages: int = Field(5, ge=1, le=99)
     preserve_system_messages: bool = True

@@ -30,6 +30,7 @@ ChatHistoryMessage = ChatHistory
 class ContextStrategyModel(BaseModel):
     enabled: Optional[bool] = True
     enable_summarization: Optional[bool] = True
+    enable_context_editing: Optional[bool] = False
     max_context_tokens: Optional[int] = 64000
     preserve_recent_messages: Optional[int] = 5
     summary_instructions: Optional[str] = 'Generate a concise summary of the following conversation messages'
