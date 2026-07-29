@@ -1,5 +1,6 @@
 import calendar
 import datetime
+import re
 
 from flask import request
 from tools import api_tools, auth, config as c, rpc_tools
@@ -14,6 +15,59 @@ AMOUNT_FIELDS = ("spend", "monthly_limit", "effective_limit", "remaining", "curr
 
 # Used when the runtime plugin cannot be reached; matches its own default
 DEFAULT_WARNING_PCT = 80
+
+
+def _strip_model_prefixes(model: str):
+    """Model id as the configuration registry stores it.
+
+    LiteLLM reports the resolved name, which carries a provider prefix and, for a
+    shared model, the owning project id. Neither is part of the configured name.
+    """
+    without_provider = model.rsplit("/", 1)[-1]
+    #
+    return re.sub(r"^\d+_", "", without_provider)
+
+
+def _model_display_names(project_id: int):
+    """Map of configured model name -> display name, for the usage-by-model table.
+
+    Same source of truth as the analytics pages, so one model reads identically in both.
+    An empty map is a safe outcome: callers keep the raw model name.
+    """
+    try:
+        response = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_models(
+            project_id=project_id, section="llm", include_shared=True,
+        ) or {}
+    except Exception:  # pylint: disable=W0703
+        return {}
+    #
+    result = {}
+    #
+    for item in response.get("items") or []:
+        if isinstance(item, dict) and item.get("name"):
+            result[item["name"]] = item.get("display_name") or item["name"]
+    #
+    return result
+
+
+def _attach_display_names(models: list, display_names: dict):
+    """Add display_name to each usage row that resolves to a configured model.
+
+    Tries the reported name first so an exact registration always wins, then the
+    normalised form. Rows that resolve to nothing are left alone rather than given
+    the raw id, so the client can fall back to its own formatting.
+    """
+    if not display_names:
+        return models
+    #
+    for row in models:
+        raw = row.get("model") or ""
+        display = display_names.get(raw) or display_names.get(_strip_model_prefixes(raw))
+        #
+        if display:
+            row["display_name"] = display
+    #
+    return models
 
 
 def _period_reset(period: str):
@@ -154,7 +208,9 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
         "warning_pct": _warning_pct(scope, is_personal),
         "total_tokens": detail.get("total_tokens", 0),
         "api_requests": detail.get("api_requests", 0),
-        "models": detail.get("models") or [],
+        "models": _attach_display_names(
+            detail.get("models") or [], _model_display_names(project_id),
+        ),
         "daily": detail.get("daily") or [],
         "period": period,
         "period_start": period_start,
