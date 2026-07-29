@@ -41,5 +41,17 @@ DEFAULT_SKILL_CATEGORIES: list = [
 DEFAULT_FALLBACK_CATEGORY: str = 'Other'
 
 
+# Analytics: system user filtering (excluded from all analytics aggregations)
+SYSTEM_USER_EMAILS = ['system@centry.user']
+SYSTEM_USER_EMAIL_PATTERN = 'system_user_%@centry.user'
+
+# Analytics: default date range when no date params provided
+DEFAULT_DATE_RANGE_DAYS = 7
+
+# Analytics: hard cap on the queryable span so an unbounded daily-trend query
+# (one row per calendar day) can't be driven to pathological cardinality.
+MAX_DATE_RANGE_DAYS = 366
+
+
 class PredictionEvents(str, Enum):
     prediction_done = 'prediction_done'

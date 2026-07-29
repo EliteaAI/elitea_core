@@ -17,6 +17,7 @@ if _API_AVAILABLE:
     from datetime import datetime, timedelta, timezone
     from flask import request
     from sqlalchemy import func, case, cast, Date, desc, asc
+    from sqlalchemy.orm import aliased
 
     def _parse_dates(args):
         date_from = args.get("date_from")
@@ -36,6 +37,7 @@ if _API_AVAILABLE:
 
     _SORT_WHITELIST = frozenset([
         "events", "users", "avg_duration_ms", "errors", "entity_name",
+        "total_tokens", "llm_cost",
     ])
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -94,7 +96,7 @@ if _API_AVAILABLE:
                     "required": False,
                     "schema": {
                         "type": "string",
-                        "enum": ["events", "users", "avg_duration_ms", "errors", "entity_name"],
+                        "enum": ["events", "users", "avg_duration_ms", "errors", "entity_name", "total_tokens", "llm_cost"],
                         "default": "events",
                     },
                     "description": "Column to sort by.",
@@ -122,6 +124,8 @@ if _API_AVAILABLE:
                                         "users": 5,
                                         "avg_duration_ms": 1200.0,
                                         "errors": 4,
+                                        "total_tokens": 84500,
+                                        "llm_cost": 0.00845,
                                     },
                                     {
                                         "entity_name": "SQL Assistant",
@@ -130,6 +134,8 @@ if _API_AVAILABLE:
                                         "users": 3,
                                         "avg_duration_ms": 740.0,
                                         "errors": 1,
+                                        "total_tokens": 42000,
+                                        "llm_cost": 0.0042,
                                     },
                                 ],
                                 "chat_daily": [
@@ -201,6 +207,45 @@ if _API_AVAILABLE:
                             AuditEvent.entity_name.ilike(f"%{search}%")
                         )
 
+                    # Per-agent LLM cost/tokens can't be read off the application
+                    # events themselves: cost/token data lives on generation spans
+                    # that carry no entity_type/entity_id, only user + model attrs.
+                    # We correlate each llm event to the agent that produced it via
+                    # shared trace_id (same approach analytics_costs uses), building
+                    # a per-entity cost map we LEFT JOIN below so the DB can still
+                    # sort by llm_cost / total_tokens.
+                    app_traces = session.query(
+                        AuditEvent.trace_id.label("trace_id"),
+                        func.min(AuditEvent.entity_id).label("entity_id"),
+                    ).filter(
+                        AuditEvent.entity_type == "application",
+                        AuditEvent.entity_id.isnot(None),
+                        AuditEvent.trace_id.isnot(None),
+                        AuditEvent.trace_id != "",
+                    )
+                    if project_id:
+                        app_traces = app_traces.filter(
+                            AuditEvent.project_id == project_id
+                        )
+                    app_traces = app_traces.group_by(AuditEvent.trace_id).subquery()
+
+                    llm_ev = aliased(AuditEvent)
+                    cost_map = session.query(
+                        app_traces.c.entity_id.label("entity_id"),
+                        func.sum(llm_ev.llm_cost).label("llm_cost"),
+                        func.sum(
+                            func.coalesce(llm_ev.input_tokens, 0)
+                            + func.coalesce(llm_ev.output_tokens, 0)
+                        ).label("total_tokens"),
+                    ).select_from(llm_ev).join(
+                        app_traces, llm_ev.trace_id == app_traces.c.trace_id,
+                    ).filter(
+                        llm_ev.event_type == "llm",
+                    )
+                    if project_id:
+                        cost_map = cost_map.filter(llm_ev.project_id == project_id)
+                    cost_map = cost_map.group_by(app_traces.c.entity_id).subquery()
+
                     events_col = func.count().label("events")
                     users_col = func.count(
                         func.distinct(AuditEvent.user_id)
@@ -211,16 +256,29 @@ if _API_AVAILABLE:
                     errors_col = func.sum(case(
                         (AuditEvent.is_error.is_(True), 1), else_=0,
                     )).label("errors")
+                    # func.max over the joined cost-map columns: the LEFT JOIN pairs
+                    # each of an entity's application events with that entity's single
+                    # cost-map row, so max() reads the value without inflating it by
+                    # the application-event count (sum() would multiply it).
+                    total_tokens_col = func.coalesce(
+                        func.max(cost_map.c.total_tokens), 0
+                    ).label("total_tokens")
+                    llm_cost_col = func.coalesce(
+                        func.max(cost_map.c.llm_cost), 0
+                    ).label("llm_cost")
 
-                    query = base.with_entities(
-                        AuditEvent.entity_name,
+                    query = base.outerjoin(
+                        cost_map, AuditEvent.entity_id == cost_map.c.entity_id,
+                    ).with_entities(
+                        func.max(AuditEvent.entity_name).label("entity_name"),
                         AuditEvent.entity_id,
                         events_col,
                         users_col,
                         avg_dur_col,
                         errors_col,
+                        total_tokens_col,
+                        llm_cost_col,
                     ).group_by(
-                        AuditEvent.entity_name,
                         AuditEvent.entity_id,
                     )
 
@@ -230,12 +288,15 @@ if _API_AVAILABLE:
                     ).scalar() or 0
 
                     # Sort
+                    name_col = func.max(AuditEvent.entity_name).label("entity_name")
                     sort_map = {
                         "events": events_col,
                         "users": users_col,
                         "avg_duration_ms": avg_dur_col,
                         "errors": errors_col,
-                        "entity_name": AuditEvent.entity_name,
+                        "entity_name": name_col,
+                        "total_tokens": total_tokens_col,
+                        "llm_cost": llm_cost_col,
                     }
                     col = sort_map.get(sort_by, events_col)
                     order_fn = desc if sort_order == "desc" else asc
@@ -269,6 +330,8 @@ if _API_AVAILABLE:
                                 "users": r.users,
                                 "avg_duration_ms": round(r.avg_duration_ms, 1) if r.avg_duration_ms else 0,
                                 "errors": r.errors or 0,
+                                "total_tokens": r.total_tokens or 0,
+                                "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
                             }
                             for r in rows
                         ],

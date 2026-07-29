@@ -7,8 +7,10 @@ safely coexist when both plugins are loaded in the same process.
 """
 
 from datetime import datetime
+from decimal import Decimal
+from typing import Optional
 
-from sqlalchemy import Integer, String, DateTime, SmallInteger, Float, Boolean, func, Index
+from sqlalchemy import Integer, String, DateTime, SmallInteger, Float, Boolean, Numeric, func, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tools import db, config as c
@@ -22,6 +24,7 @@ class AuditEvent(db.Base):
         Index('ix_audit_events_project_id', 'project_id'),
         Index('ix_audit_events_trace_id', 'trace_id'),
         Index('ix_audit_events_entity', 'entity_type', 'entity_id'),
+        Index('ix_audit_events_model_name', 'model_name'),
         {'schema': c.POSTGRES_SCHEMA, 'extend_existing': True},
     )
 
@@ -56,6 +59,12 @@ class AuditEvent(db.Base):
     # Agent/tool details
     tool_name: Mapped[str] = mapped_column(String(256), nullable=True)
     model_name: Mapped[str] = mapped_column(String(256), nullable=True)
+
+    # Token usage and cost (ADR-0008). Numeric(18, 8) matches the tracing
+    # write-side model so a large upstream response_cost never overflows.
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
+    llm_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 8), nullable=True)
 
     # Trace linkage
     trace_id: Mapped[str] = mapped_column(String(32), nullable=True)

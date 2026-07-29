@@ -16,7 +16,12 @@ except ImportError:
 if _API_AVAILABLE:
     from datetime import datetime, timedelta, timezone
     from flask import request
-    from sqlalchemy import func, case, cast, Date, desc, asc
+    from sqlalchemy import func, case, cast, Date, desc, asc, or_
+
+    from ...utils.constants import (
+        SYSTEM_USER_EMAILS,
+        SYSTEM_USER_EMAIL_PATTERN,
+    )
 
     def _parse_dates(args):
         date_from = args.get("date_from")
@@ -37,6 +42,7 @@ if _API_AVAILABLE:
     _SORT_WHITELIST = frozenset([
         "total_events", "active_days", "llm_events", "tool_events",
         "agent_events", "chat_events", "errors", "user_email",
+        "total_tokens", "llm_cost",
     ])
 
     class PromptLibAPI(api_tools.APIModeHandler):
@@ -98,7 +104,7 @@ if _API_AVAILABLE:
                         "enum": [
                             "total_events", "active_days", "llm_events",
                             "tool_events", "agent_events", "chat_events",
-                            "errors", "user_email",
+                            "errors", "user_email", "total_tokens", "llm_cost",
                         ],
                         "default": "total_events",
                     },
@@ -130,6 +136,8 @@ if _API_AVAILABLE:
                                         "agent_events": 60,
                                         "chat_events": 45,
                                         "errors": 5,
+                                        "total_tokens": 84500,
+                                        "llm_cost": 0.00845,
                                     },
                                     {
                                         "user_id": 55,
@@ -141,6 +149,8 @@ if _API_AVAILABLE:
                                         "agent_events": 30,
                                         "chat_events": 25,
                                         "errors": 2,
+                                        "total_tokens": 52000,
+                                        "llm_cost": 0.0052,
                                     },
                                 ],
                             }
@@ -195,11 +205,15 @@ if _API_AVAILABLE:
                     base = session.query(AuditEvent).filter(
                         AuditEvent.project_id == project_id,
                         AuditEvent.user_id.isnot(None),
-                        # Exclude system users from analytics
-                        ~AuditEvent.user_email.in_([
-                            'system@centry.user'
-                        ]),
-                        ~AuditEvent.user_email.like('system_user_%@centry.user'),
+                        # Exclude system users from analytics (NULL-safe)
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
+                        ),
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
+                        ),
                     )
 
                     if dt_from:
@@ -231,6 +245,11 @@ if _API_AVAILABLE:
                     errors_col = func.sum(case(
                         (AuditEvent.is_error.is_(True), 1), else_=0,
                     )).label("errors")
+                    total_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.input_tokens, 0)
+                        + func.coalesce(AuditEvent.output_tokens, 0)
+                    ).label("total_tokens")
+                    llm_cost_col = func.sum(AuditEvent.llm_cost).label("llm_cost")
 
                     query = base.with_entities(
                         AuditEvent.user_id,
@@ -242,6 +261,8 @@ if _API_AVAILABLE:
                         agent_col,
                         chat_col,
                         errors_col,
+                        total_tokens_col,
+                        llm_cost_col,
                     ).group_by(
                         AuditEvent.user_id,
                         AuditEvent.user_email,
@@ -262,6 +283,8 @@ if _API_AVAILABLE:
                         "chat_events": chat_col,
                         "errors": errors_col,
                         "user_email": AuditEvent.user_email,
+                        "total_tokens": total_tokens_col,
+                        "llm_cost": llm_cost_col,
                     }
                     col = sort_map.get(sort_by, total_events_col)
                     order_fn = desc if sort_order == "desc" else asc
@@ -282,6 +305,8 @@ if _API_AVAILABLE:
                                 "agent_events": r.agent_events or 0,
                                 "chat_events": r.chat_events or 0,
                                 "errors": r.errors or 0,
+                                "total_tokens": r.total_tokens or 0,
+                                "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
                             }
                             for r in rows
                         ],
