@@ -170,6 +170,100 @@ class TestRedaction(unittest.TestCase):
         out = usage._redact(usage._redact(self._payload()))
         self.assertNotIn("spend", out)
 
+    def test_display_name_survives_redaction(self):
+        # A model's name is not a cost figure; hiding it would leave the table unreadable
+        payload = self._payload()
+        payload["models"][0]["display_name"] = "GPT-5"
+        #
+        out = usage._redact(payload)
+        self.assertEqual(out["models"][0]["display_name"], "GPT-5")
+
+
+class TestStripModelPrefixes(unittest.TestCase):
+    """LiteLLM reports a resolved name; the registry stores it without prefixes."""
+
+    def test_provider_prefix_removed(self):
+        self.assertEqual(
+            usage._strip_model_prefixes("bedrock/eu.anthropic.claude-sonnet-4-6"),
+            "eu.anthropic.claude-sonnet-4-6",
+        )
+
+    def test_multi_segment_provider_path_keeps_only_the_model(self):
+        self.assertEqual(
+            usage._strip_model_prefixes("bedrock/converse/eu.anthropic.claude-sonnet-4-5"),
+            "eu.anthropic.claude-sonnet-4-5",
+        )
+
+    def test_project_id_prefix_removed(self):
+        self.assertEqual(usage._strip_model_prefixes("1_gpt-5"), "gpt-5")
+
+    def test_both_prefixes_removed(self):
+        self.assertEqual(usage._strip_model_prefixes("azure/1_gpt-5"), "gpt-5")
+
+    def test_bare_name_unchanged(self):
+        self.assertEqual(usage._strip_model_prefixes("gpt-5.4-mini"), "gpt-5.4-mini")
+
+    def test_version_suffix_is_not_mistaken_for_a_prefix(self):
+        # The trailing ":0" and digits inside the name must survive
+        self.assertEqual(
+            usage._strip_model_prefixes("bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0"),
+            "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        )
+
+
+class TestAttachDisplayNames(unittest.TestCase):
+    """Rows resolve to configured names, matching what the analytics pages show."""
+
+    def _rows(self):
+        return [
+            {"model": "gpt-5", "spend": 1.0},
+            {"model": "bedrock/eu.anthropic.claude-sonnet-4-6", "spend": 2.0},
+            {"model": "never-registered", "spend": 3.0},
+        ]
+
+    def _names(self):
+        return {
+            "gpt-5": "GPT-5",
+            "eu.anthropic.claude-sonnet-4-6": "Anthropic Claude 4.6 Sonnet",
+        }
+
+    def test_exact_match_resolves(self):
+        out = usage._attach_display_names(self._rows(), self._names())
+        self.assertEqual(out[0]["display_name"], "GPT-5")
+
+    def test_prefixed_row_resolves_after_normalisation(self):
+        out = usage._attach_display_names(self._rows(), self._names())
+        self.assertEqual(out[1]["display_name"], "Anthropic Claude 4.6 Sonnet")
+
+    def test_unresolved_row_gets_no_display_name(self):
+        # The client formats the raw name itself, so a wrong guess here is worse than none
+        out = usage._attach_display_names(self._rows(), self._names())
+        self.assertNotIn("display_name", out[2])
+
+    def test_exact_match_wins_over_normalised(self):
+        # A model registered under its full prefixed name must not be resolved to another
+        rows = [{"model": "bedrock/gpt-5"}]
+        names = {"bedrock/gpt-5": "Prefixed registration", "gpt-5": "Bare registration"}
+        #
+        out = usage._attach_display_names(rows, names)
+        self.assertEqual(out[0]["display_name"], "Prefixed registration")
+
+    def test_empty_map_leaves_rows_untouched(self):
+        out = usage._attach_display_names(self._rows(), {})
+        for row in out:
+            self.assertNotIn("display_name", row)
+
+    def test_spend_and_counts_are_not_altered(self):
+        out = usage._attach_display_names(self._rows(), self._names())
+        self.assertEqual([row["spend"] for row in out], [1.0, 2.0, 3.0])
+
+    def test_missing_model_key_does_not_raise(self):
+        out = usage._attach_display_names([{"spend": 1.0}], self._names())
+        self.assertNotIn("display_name", out[0])
+
+    def test_empty_rows(self):
+        self.assertEqual(usage._attach_display_names([], self._names()), [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
