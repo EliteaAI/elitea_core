@@ -533,8 +533,8 @@ if _API_AVAILABLE:
                         "health": health,
                     }, 200
 
-            except Exception as e:
-                log.error(f"Analytics query failed: {e}")
+            except Exception:
+                log.error("Analytics query failed", exc_info=True)
                 return {"error": "Failed to query analytics"}, 500
 
 
@@ -576,8 +576,8 @@ if _API_AVAILABLE:
                         },
                     }, 200
 
-            except Exception as e:
-                log.error(f"Admin analytics query failed: {e}")
+            except Exception:
+                log.error("Admin analytics query failed", exc_info=True)
                 return {"error": "Failed to query analytics"}, 500
 
 

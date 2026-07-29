@@ -313,8 +313,8 @@ if _API_AVAILABLE:
                         ],
                     }, 200
 
-            except Exception as e:
-                log.error(f"Analytics user detail query failed: {e}")
+            except Exception:
+                log.error("Analytics user detail query failed", exc_info=True)
                 return {"error": "Failed to query user detail"}, 500
 
 
