@@ -170,6 +170,8 @@ def set_context_strategy(
             strategy_data['preserve_recent_messages'] = user_context_defaults['preserve_recent_messages']
         if 'enable_summarization' in user_context_defaults:
             strategy_data['enable_summarization'] = user_context_defaults['enable_summarization']
+        if 'enable_context_editing' in user_context_defaults:
+            strategy_data['enable_context_editing'] = user_context_defaults['enable_context_editing']
 
     if user_summarization_defaults:
         if 'enable_summarization' in user_summarization_defaults and user_summarization_defaults[
