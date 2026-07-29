@@ -55,7 +55,7 @@ class Method:
         
         # Only process terminal statuses that require notification
         state = index_data_status.get('state')
-        if state not in (IndexDataStatus.completed, IndexDataStatus.failed, IndexDataStatus.created):
+        if state not in (IndexDataStatus.completed, IndexDataStatus.failed, IndexDataStatus.created, IndexDataStatus.scheduled_reindex):
             return
         
         initiator = index_data_status.get('initiator')

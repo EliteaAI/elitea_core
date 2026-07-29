@@ -58,6 +58,7 @@ class IndexDataStatus(StrEnum):
     failed = 'failed'
     cancelled = 'cancelled'
     created = 'created'
+    scheduled_reindex = 'scheduled_reindex'
 
 
 class ToolEntityTypes(StrEnum):
