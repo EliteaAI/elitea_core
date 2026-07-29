@@ -1075,10 +1075,31 @@ class RPC:
             session.add(msg_group)
             session.add(msg)
 
+            # Determine once whether this turn targets a pipeline application.
+            # Pipelines consume the raw user input directly and must not receive
+            # the synthetic <runtime_context> block (see below) or attachment
+            # graph-state handling further down.
+            target_is_pipeline = False
+            if parsed.participant_id:
+                target_participant = session.query(Participant).filter(
+                    Participant.id == parsed.participant_id
+                ).first()
+                if (
+                    target_participant is not None
+                    and str(target_participant.entity_name) == ParticipantTypes.application.value
+                ):
+                    target_app_id = target_participant.entity_meta.get('id')
+                    if target_app_id:
+                        target_is_pipeline = session.query(ApplicationVersion).filter(
+                            ApplicationVersion.application_id == target_app_id,
+                            ApplicationVersion.agent_type == AgentTypes.pipeline.value,
+                        ).first() is not None
+
             # Inject context only when internal_mcp is enabled for this conversation.
             # Support assistant conversations always have 'internal_mcp' in internal_tools.
+            # Skip for pipelines: the injected metadata pollutes their input (see #5981).
             conversation_internal_tools = (conversation.meta or {}).get('internal_tools', [])
-            if 'internal_mcp' in conversation_internal_tools:
+            if 'internal_mcp' in conversation_internal_tools and not target_is_pipeline:
                 effective_runtime_context = dict(parsed.runtime_context) if parsed.runtime_context else {}
 
                 # Always set server-side truth values
@@ -1110,22 +1131,11 @@ class RPC:
                 session.add(response_msg)
                 session.flush()
 
-            is_pipeline = False
+            is_pipeline = target_is_pipeline
             pipeline_attachment_filepaths = []
 
             if parsed.attachments_info:
                 try:
-                    sent_to = msg_group.sent_to
-                    if (
-                        sent_to is not None
-                        and str(sent_to.entity_name) == ParticipantTypes.application.value
-                    ):
-                        app_id = sent_to.entity_meta.get('id')
-                        if app_id:
-                            is_pipeline = session.query(ApplicationVersion).filter(
-                                ApplicationVersion.application_id == app_id,
-                                ApplicationVersion.agent_type == AgentTypes.pipeline.value,
-                            ).first() is not None
                     msg_group = process_attachment_message_items(
                         session,
                         parsed.project_id,
