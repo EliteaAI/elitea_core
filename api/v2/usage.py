@@ -12,6 +12,9 @@ SCOPE_USER = "user"
 # Amount fields stripped for members who may not see platform cost figures
 AMOUNT_FIELDS = ("spend", "monthly_limit", "effective_limit", "remaining", "currency")
 
+# Used when the runtime plugin cannot be reached; matches its own default
+DEFAULT_WARNING_PCT = 80
+
 
 def _period_reset(period: str):
     """Start of the next monthly period, when the budget tag rolls over."""
@@ -51,13 +54,13 @@ def _is_personal_project(project_id: int, user_id: int):
     return personal_id is not None and int(personal_id) == int(project_id)
 
 
-def _can_see_amounts(project_id: int, user_id: int):
+def _can_see_amounts(project_id: int, user_id: int, is_personal: bool):
     """Members see percentages only; project admins and personal-project owners see cost.
 
     A personal project's spend is the owner's own, and it is where token-based
     integrations land, so amounts are always shown there.
     """
-    if _is_personal_project(project_id, user_id):
+    if is_personal:
         return True
     #
     try:
@@ -82,7 +85,21 @@ def _redact(payload: dict):
     return payload
 
 
-def _usage_state(project_id: int, user_id: int, scope: str):
+def _warning_pct(scope: str, is_personal: bool):
+    """Configured percent-of-limit at which this scope warns."""
+    threshold_scope = "user" if scope == SCOPE_USER else (
+        "personal_project" if is_personal else "project"
+    )
+    #
+    try:
+        return rpc_tools.RpcMixin().rpc.timeout(5).litellm_get_warning_threshold(
+            scope=threshold_scope,
+        )
+    except Exception:  # pylint: disable=W0703
+        return DEFAULT_WARNING_PCT
+
+
+def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
     """Budget state plus the per-model and per-day breakdown for one scope."""
     rpc = rpc_tools.RpcMixin().rpc
     #
@@ -134,6 +151,7 @@ def _usage_state(project_id: int, user_id: int, scope: str):
         "spend": spent,
         "remaining": None if limit is None else max(0.0, limit - spent),
         "percent_used": None if not limit else round(spent / limit * 100, 2),
+        "warning_pct": _warning_pct(scope, is_personal),
         "total_tokens": detail.get("total_tokens", 0),
         "api_requests": detail.get("api_requests", 0),
         "models": detail.get("models") or [],
@@ -166,9 +184,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if scope not in (SCOPE_PROJECT, SCOPE_USER):
             return {"error": "scope must be 'project' or 'user'"}, 400
         #
-        payload = _usage_state(project_id, user_id, scope)
+        is_personal = _is_personal_project(project_id, user_id)
         #
-        visible = _can_see_amounts(project_id, user_id)
+        payload = _usage_state(project_id, user_id, scope, is_personal)
+        #
+        visible = _can_see_amounts(project_id, user_id, is_personal)
         payload["can_see_amounts"] = visible
         #
         return (payload if visible else _redact(payload)), 200

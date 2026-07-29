@@ -61,9 +61,15 @@ def _member_budget_rows(project_id: int):
             "percent_used": None if not effective else round(spend / effective * 100, 2),
         })
     #
+    try:
+        warning_pct = rpc.timeout(5).litellm_get_warning_threshold(scope="user")
+    except Exception:  # pylint: disable=W0703
+        warning_pct = 80
+    #
     return {
         "rows": rows,
         "total": len(rows),
+        "warning_pct": warning_pct,
     }
 
 
