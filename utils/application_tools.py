@@ -485,7 +485,7 @@ def toolkits_listing(
     search_artifact: Optional[str] = None,
 ):
     from ..models.all import EliteATool
-    from ..models.pd.tool import ToolDetails
+    from ..models.pd.tool import ToolDetails, sanitization_pattern
     from ..utils.authors import get_authors_data
     from tools import rpc_tools
 
@@ -501,13 +501,23 @@ def toolkits_listing(
         if search_artifact:
             q = q.filter(EliteATool.name.ilike(f"%{search_artifact}%"))
         elif query:
-            q = q.filter(
+            # Search only by name + description EL-2653
+            search_filter = (
                 (EliteATool.name.ilike(f"%{query}%")) |
                 (EliteATool.description.ilike(f"%{query}%"))
-                # Search only by name + description EL-2653
-                # (EliteATool.type.ilike(f"%{query}%")) |
-                # (func.cast(EliteATool.settings, String).ilike(f"%{query}%"))
             )
+            # Toolkit names were historically displayed in their sanitized form
+            # (e.g. "Elitea Figma" shown as "EliteaFigma"), so users search either
+            # way; match the query against the sanitized name too. The shared
+            # sanitization_pattern is a plain character class, valid in both
+            # Python re and Postgres POSIX regex — keep it that way.
+            sanitized_query = sanitization_pattern.sub('', query).replace('.', '_')
+            if sanitized_query:
+                sanitized_name = func.replace(func.regexp_replace(
+                    EliteATool.name, sanitization_pattern.pattern, '', 'g'
+                ), '.', '_')
+                search_filter = search_filter | sanitized_name.ilike(f"%{sanitized_query}%")
+            q = q.filter(search_filter)
         if toolkit_type:
             q = q.filter(EliteATool.type.in_(toolkit_type))
 
