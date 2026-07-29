@@ -6,6 +6,23 @@ from tools import api_tools, auth, config as c, rpc_tools
 COMPUTED_SORT_FIELDS = ("spend", "percent_used", "effective_limit")
 
 
+def _owner_ids_for_search(rpc, search: str):
+    """Ids of users whose name or email matches, so a search can find them by identity.
+
+    A personal project is named project_user_N, which nobody searches for. The project
+    query matches ids rather than joining users, so the caller resolves them first.
+    """
+    if not search:
+        return None
+    #
+    try:
+        matched = rpc.timeout(15).auth_search_users(search=search) or []
+    except Exception:  # pylint: disable=W0703
+        return None
+    #
+    return [user["id"] for user in matched] or None
+
+
 def _limit_source(row: dict, effective):
     """Explain where the enforced limit came from, so an admin isn't surprised by it."""
     if row and not row.get("enabled", True):
@@ -43,6 +60,10 @@ class AdminAPI(api_tools.APIModeHandler):
         # for those and the page is re-sorted below.
         is_computed_sort = sort_by in COMPUTED_SORT_FIELDS
         #
+        # Owner ids are OR'd into the project search, so resolve them only for personal
+        # projects. Doing it always would let a team project match on its owner's email.
+        owner_ids = _owner_ids_for_search(rpc, search) if project_type == "personal" else None
+        #
         listing = rpc.timeout(15).project_list_paginated(
             limit=limit,
             offset=offset,
@@ -50,7 +71,7 @@ class AdminAPI(api_tools.APIModeHandler):
             sort_by="name" if is_computed_sort else sort_by,
             sort_order="asc" if is_computed_sort else sort_order,
             project_type=project_type,
-            owner_ids=None,
+            owner_ids=owner_ids,
         ) or {}
         #
         projects = listing.get("rows") or []
@@ -102,6 +123,9 @@ class AdminAPI(api_tools.APIModeHandler):
                 "project_id": project_id,
                 "name": project_name,
                 "display_name": owner_label if (is_personal and owner_label) else project_name,
+                # Falls back to email so the owner column is never blank; the two differ
+                # only where the identity provider supplies a real display name.
+                "owner_name": owner.get("name") or owner.get("email"),
                 "owner_email": owner.get("email"),
                 "is_personal": is_personal,
                 "monthly_limit": row.get("monthly_limit"),
