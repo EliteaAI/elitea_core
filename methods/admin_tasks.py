@@ -2712,6 +2712,101 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         return {"ok": True, "applied": len(applied)}
 
+    @web.method()
+    def migrate_empty_conversation_starters(self, *args, **kwargs):
+        """Admin task: remove empty/null entries from conversation_starters in all agent versions.
+
+        Iterates all projects and all application_versions, strips null/blank
+        string entries from the JSON array, and writes back the cleaned list.
+        Versions where conversation_starters is already clean are skipped.
+        Idempotent: safe to run multiple times.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - preview across all projects
+            "project_id=all"          - clean all projects
+            "project_id=3"            - clean project 3 only
+        """
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import ApplicationVersion  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error(
+                            "migrate_empty_conversation_starters: invalid project_id '%s'", value
+                        )
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info(
+            "Starting migrate_empty_conversation_starters (dry_run=%s, project_id_filter=%s)",
+            dry_run, project_id_filter
+        )
+        start_ts = time.time()
+        total_versions = 0
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_empty_conversation_starters: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project["id"]
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    versions = session.query(ApplicationVersion).filter(
+                        ApplicationVersion.conversation_starters.isnot(None)
+                    ).all()
+
+                    for version in versions:
+                        starters = version.conversation_starters
+                        if not isinstance(starters, list):
+                            continue
+                        cleaned = [s for s in starters if s is not None and str(s).strip()]
+                        if len(cleaned) == len(starters):
+                            continue
+                        log.info(
+                            "%sproject %s, version id=%s: %d -> %d starter(s)",
+                            prefix, project_id, version.id, len(starters), len(cleaned)
+                        )
+                        if not dry_run:
+                            version.conversation_starters = cleaned
+                        total_versions += 1
+
+                    if not dry_run:
+                        session.commit()
+
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "migrate_empty_conversation_starters: error in project %s", project_id
+                )
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_empty_conversation_starters — %s %s version(s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated",
+            total_versions, round(end_ts - start_ts, 2)
+        )
+        return {"migrated": total_versions, "dry_run": dry_run}
+
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
     project_id, conversation_arg, dry_run, prefix,
