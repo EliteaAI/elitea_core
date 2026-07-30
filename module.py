@@ -380,6 +380,10 @@ class Module(module.ModuleModel):
                 "migrate_skill_publish_columns", self.migrate_skill_publish_columns, group="R-2.0.5",
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_empty_conversation_starters", self.migrate_empty_conversation_starters,
+                group="R-2.0.5",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "migrate_budget_alert_columns", self.migrate_budget_alert_columns, group="R-2.0.5",
             )
             this.for_module("admin").module.register_admin_task(
@@ -836,6 +840,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "heal_llm_settings_family_conflicts", self.heal_llm_settings_family_conflicts
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_empty_conversation_starters", self.migrate_empty_conversation_starters
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
