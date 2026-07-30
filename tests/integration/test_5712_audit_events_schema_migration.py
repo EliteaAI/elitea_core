@@ -1,10 +1,12 @@
-"""Issue #5712 - auto-migrate the shared audit_events table at boot.
+"""Issue #5712 - migrate the shared audit_events table's schema.
 
 Tests utils/audit_events_schema.py, the compatibility guard that applies the
-ADR-0008 token/cost columns (and index) to an existing audit_events table
-without an operator having to run a migration by hand. Uses a fake
-connection/engine (no live Postgres) so the test exercises the DDL statement
-shape and idempotency directly.
+ADR-0008 token/cost columns (and index) to an existing audit_events table.
+Invoked via the migrate_audit_events_columns admin task (release group
+"R-2.0.5"), not at boot — audit_events is a shared, high-write table and the
+index build can't use CONCURRENTLY inside the advisory-locked transaction.
+Uses a fake connection/engine (no live Postgres) so the test exercises the
+DDL statement shape and idempotency directly.
 
 Run via:
     python tests/run_tests.py integration/test_5712_audit_events_schema_migration.py -v

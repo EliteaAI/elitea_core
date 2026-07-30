@@ -568,8 +568,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Adds ``input_tokens``, ``output_tokens``, ``llm_cost`` and the
         ``ix_audit_events_model_name`` index. Idempotent (``ADD COLUMN IF NOT
-        EXISTS``): safe to run multiple times. Normally applied automatically at
-        boot; use this if that failed (see the boot log for "audit_events schema").
+        EXISTS``): safe to run multiple times. Registered under release group
+        "R-2.0.5" — run this as part of that release's admin-task batch rather
+        than at boot, since the index build can't use CONCURRENTLY here and
+        audit_events is a shared, high-write table.
 
         Param format (optional):
             "dry_run"

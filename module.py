@@ -303,11 +303,6 @@ class Module(module.ModuleModel):
         from .utils.trace_step_schema import ensure_trace_step_schema
         ensure_trace_step_schema(db.engine)
 
-        # Same gap for the shared audit_events table: apply any ADR-0008 token/cost
-        # columns before the analytics endpoints can query them.
-        from .utils.audit_events_schema import ensure_audit_events_schema
-        ensure_audit_events_schema(db.engine)
-
         try:
             from tools import this
             this.for_module("admin").module.register_admin_task(
@@ -394,7 +389,7 @@ class Module(module.ModuleModel):
                 "reassign_skill_category", self.reassign_skill_category,
             )
             this.for_module("admin").module.register_admin_task(
-                "migrate_audit_events_columns", self.migrate_audit_events_columns,
+                "migrate_audit_events_columns", self.migrate_audit_events_columns, group="R-2.0.5",
             )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)

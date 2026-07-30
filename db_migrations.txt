@@ -198,11 +198,12 @@ Run admin task migrate_skill_publish_columns with param: project_id=all
 # (input_tokens/output_tokens/llm_cost + ix_audit_events_model_name index).
 # The analytics endpoints select these columns on every query, so an
 # unmigrated schema fails with UndefinedColumn and the UI shows "Failed to
-# query analytics". Normally applied automatically at boot (module.py
-# ready() calls ensure_audit_events_schema unconditionally — this table is a
-# single shared schema, not per-project, so there's no flag to disable it);
-# run manually if the boot log shows "audit_events schema" errors, or use
-# the admin task below for a dry-run/verification pass.
+# query analytics". audit_events is a shared, high-write table (not
+# per-project), so this is NOT applied at boot — the index build can't use
+# CONCURRENTLY inside the advisory-locked transaction boot uses, and would
+# block writes platform-wide. Instead it's registered as a release admin
+# task under group "R-2.0.5"; run it as part of that release's rollout, or
+# manually via the admin task below (supports dry-run/verification).
 # Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS input_tokens INTEGER;
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS output_tokens INTEGER;
