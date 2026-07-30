@@ -146,7 +146,7 @@ class SkillVersionConflictError(SkillError):
 
 
 class SkillVersionNotUpdatableError(SkillError):
-    """Raised for forbidden version mutations (rename 'base', delete only/base version)."""
+    """Raised for forbidden version mutations (update published/embedded, rename 'base', delete only/base version)."""
     http_status = 400
 
     def __init__(self, message: str, version_id: int = None):
@@ -870,6 +870,7 @@ def update_skill(
         if update_data.version:
             version = skill.get_default_version()
             if version:
+                _ensure_version_updatable(version)
                 _update_version_fields(s, version, update_data.version)
 
         return serialize(SkillDetailModel.model_validate(skill))
@@ -962,6 +963,8 @@ def update_skill_version(
 
         if not version:
             raise SkillVersionNotFoundError(skill_id, version_id=version_id)
+
+        _ensure_version_updatable(version)
 
         # Prevent renaming 'base' version
         if version.name == 'base' and update_data.name and update_data.name != 'base':
@@ -1625,6 +1628,14 @@ def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
     # Flush so newly-created tags receive their auto-increment ids before the
     # version is serialized (SkillVersionDetailModel.tags requires int ids).
     session.flush()
+
+
+def _ensure_version_updatable(version: SkillVersion) -> None:
+    if version.status in (PublishStatus.published, PublishStatus.embedded):
+        raise SkillVersionNotUpdatableError(
+            f'Version id {version.id} is {version.status} and can not be updated',
+            version_id=version.id,
+        )
 
 
 def _update_version_fields(session, version: SkillVersion, update_data: SkillVersionUpdateModel) -> None:
