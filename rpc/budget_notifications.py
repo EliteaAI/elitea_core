@@ -88,6 +88,11 @@ class RPC:
                 )
                 #
                 recipients = self.get_project_admin_ids(project_id)
+                if not recipients and project.get('owner_id') is not None:
+                    # Auto-created personal projects give the owner editor/viewer/monitor,
+                    # never admin (rpc/poc.py create_personal_project) — fall back to owner
+                    # or the alert is silently dropped for every such project.
+                    recipients = [int(project['owner_id'])]
             #
             if not recipients:
                 log.warning(
