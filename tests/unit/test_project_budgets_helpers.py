@@ -107,6 +107,28 @@ class TestOwnerIdsForSearch(unittest.TestCase):
         self.assertIsNone(budgets._owner_ids_for_search(rpc, "admin"))
 
 
+class TestSafeSortField(unittest.TestCase):
+    """Only real project columns can be ordered.
+
+    Limit, spend and used are derived after the query, so ordering by them would sort
+    just the fetched page. They are no longer offered, and a hand-crafted request for one
+    must not appear to work: the project listing silently defaults an unknown field to
+    name, which would look like a successful sort by the wrong column.
+    """
+
+    def test_supported_fields_pass_through(self):
+        self.assertEqual(budgets._safe_sort_field("name"), "name")
+        self.assertEqual(budgets._safe_sort_field("id"), "id")
+
+    def test_computed_columns_are_refused(self):
+        for field in ("spend", "percent_used", "effective_limit"):
+            self.assertEqual(budgets._safe_sort_field(field), "name", field)
+
+    def test_unknown_and_empty_values_fall_back(self):
+        for field in ("nonsense", "", None, "NAME"):
+            self.assertEqual(budgets._safe_sort_field(field), "name", field)
+
+
 class TestLimitSource(unittest.TestCase):
     """The source label explains why a limit applies, so an admin isn't surprised by it."""
 
