@@ -23,7 +23,7 @@ from functools import partial
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401,W0611
 from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
-from tools import db  # pylint: disable=E0401
+from tools import db, config as c  # pylint: disable=E0401
 
 from ..scripts.tool_icons import download_github_repo_zip, unzip_file
 from ..utils.toolkit_migration import (
@@ -2675,6 +2675,42 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 "results": results,
                 "errors": errors,
             })
+
+    @web.method("migrate_budget_alert_columns")
+    def migrate_budget_alert_columns(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: add the budget-alert tracking columns to user_budgets.
+
+        Budget notifications record the highest threshold already alerted for a period so a
+        warning fires once. project_budgets has those columns already; user_budgets needs
+        them for the per-member alerts.
+
+        Shared-schema table, so there is no per-project loop. Idempotent
+        (ADD COLUMN IF NOT EXISTS): safe to run more than once, no dry run needed.
+        """
+        from sqlalchemy import text  # pylint: disable=C0415
+
+        statements = [
+            f"ALTER TABLE {c.POSTGRES_SCHEMA}.user_budgets "
+            "ADD COLUMN IF NOT EXISTS last_alerted_pct INTEGER",
+            f"ALTER TABLE {c.POSTGRES_SCHEMA}.user_budgets "
+            "ADD COLUMN IF NOT EXISTS last_alerted_period VARCHAR(8)",
+        ]
+        #
+        applied = []
+        #
+        try:
+            with db.get_session(None) as session:
+                for statement in statements:
+                    session.execute(text(statement))
+                    applied.append(statement)
+                session.commit()
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("migrate_budget_alert_columns: failed")
+            return {"ok": False, "applied": len(applied), "error": str(exc)}
+        #
+        log.info("migrate_budget_alert_columns: applied %s statement(s)", len(applied))
+        #
+        return {"ok": True, "applied": len(applied)}
 
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914

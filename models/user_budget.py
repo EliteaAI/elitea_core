@@ -28,6 +28,11 @@ class UserBudget(db.Base):
     currency: Mapped[str] = mapped_column(String(8), nullable=False, default='USD')
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
+    # Highest threshold already alerted this period, so a warning fires once. Storing the
+    # percentage rather than a flag lets a raised threshold alert again later.
+    last_alerted_pct: Mapped[int] = mapped_column(Integer, nullable=True)
+    last_alerted_period: Mapped[str] = mapped_column(String(8), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

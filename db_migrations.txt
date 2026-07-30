@@ -199,3 +199,11 @@ ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS input_tokens INTEGER;
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS output_tokens INTEGER;
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS llm_cost NUMERIC(18, 8);
 CREATE INDEX IF NOT EXISTS ix_audit_events_model_name ON centry.audit_events (model_name);
+
+# Issue #6011: budget-alert tracking columns on centry.user_budgets
+# Budget notifications record the highest threshold already alerted for a period so a
+# warning fires once per scope per period. project_budgets already has these columns;
+# user_budgets needs them for the per-member alerts.
+# Shared-schema table, so no per-project loop. Idempotent (ADD COLUMN IF NOT EXISTS),
+# so no dry run is offered.
+Run admin task migrate_budget_alert_columns
