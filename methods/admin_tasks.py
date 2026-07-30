@@ -563,6 +563,33 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
+    def migrate_audit_events_columns(self, *args, **kwargs):
+        """Admin task: add the ADR-0008 token/cost columns to the shared audit_events table.
+
+        Adds ``input_tokens``, ``output_tokens``, ``llm_cost`` and the
+        ``ix_audit_events_model_name`` index. Idempotent (``ADD COLUMN IF NOT
+        EXISTS``): safe to run multiple times. Registered under release group
+        "R-2.0.5" — run this as part of that release's admin-task batch rather
+        than at boot, since the index build can't use CONCURRENTLY here and
+        audit_events is a shared, high-write table.
+
+        Param format (optional):
+            "dry_run"
+        """
+        from ..utils.audit_events_schema import ensure_audit_events_schema
+
+        param = kwargs.get("param", "") or ""
+        dry_run = any(seg.strip().lower() == "dry_run" for seg in param.split(";"))
+
+        try:
+            result = ensure_audit_events_schema(db.engine, dry_run=dry_run)
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_audit_events_columns: failed to apply schema")
+            return {"error": "failed to apply schema"}
+
+        return {"dry_run": dry_run, **result}
+
+    @web.method()
     def migrate_toolkit_settings_alita_title(self, *args, **kwargs):
         """Admin task: rename 'alita_title' to 'elitea_title' inside toolkit settings JSON.
 

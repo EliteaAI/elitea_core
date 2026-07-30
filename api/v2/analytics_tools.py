@@ -247,8 +247,8 @@ if _API_AVAILABLE:
                         ],
                     }, 200
 
-            except Exception as e:
-                log.error(f"Analytics tools query failed: {e}")
+            except Exception:
+                log.error("Analytics tools query failed", exc_info=True)
                 return {"error": "Failed to query analytics tools"}, 500
 
 

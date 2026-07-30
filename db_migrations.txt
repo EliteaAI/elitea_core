@@ -195,10 +195,22 @@ Run admin task migrate_list_collections_to_list_indexes with param: project_id=a
 Run admin task migrate_skill_publish_columns with param: project_id=all
 
 # ADR-0008: Add LLM token usage and cost tracking to audit_events
+# (input_tokens/output_tokens/llm_cost + ix_audit_events_model_name index).
+# The analytics endpoints select these columns on every query, so an
+# unmigrated schema fails with UndefinedColumn and the UI shows "Failed to
+# query analytics". audit_events is a shared, high-write table (not
+# per-project), so this is NOT applied at boot — the index build can't use
+# CONCURRENTLY inside the advisory-locked transaction boot uses, and would
+# block writes platform-wide. Instead it's registered as a release admin
+# task under group "R-2.0.5"; run it as part of that release's rollout, or
+# manually via the admin task below (supports dry-run/verification).
+# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS input_tokens INTEGER;
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS output_tokens INTEGER;
 ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS llm_cost NUMERIC(18, 8);
 CREATE INDEX IF NOT EXISTS ix_audit_events_model_name ON centry.audit_events (model_name);
+Run admin task migrate_audit_events_columns with param: dry_run
+Run admin task migrate_audit_events_columns
 
 # Issue #6011: budget-alert tracking columns on centry.user_budgets
 # Budget notifications record the highest threshold already alerted for a period so a

@@ -392,6 +392,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "reassign_skill_category", self.reassign_skill_category,
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_audit_events_columns", self.migrate_audit_events_columns, group="R-2.0.5",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
