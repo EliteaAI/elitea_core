@@ -567,7 +567,13 @@ class RPC:
         toolkits['rows'] = [
             {
                 'id': t['id'],
-                'name': t.get('toolkit_name') or t.get('settings', {}).get('elitea_title'),
+                # Mirror the FE getToolkitDisplayName ordering: readable titles
+                # before the sanitized toolkit_name identifier
+                'name': t.get('name')
+                        or t.get('settings', {}).get('elitea_title')
+                        or t.get('settings', {}).get('configuration_title')
+                        or t.get('toolkit_name'),
+                'type': t.get('type'),
             } for t in toolkits['rows']
         ]
         return toolkits

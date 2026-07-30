@@ -134,7 +134,7 @@ def get_or_create_one(
                 }
             case ParticipantTypes.toolkit:
                 meta = {
-                    'name': entity_details.get('toolkit_name'),
+                    'name': entity_details.get('name') or entity_details.get('toolkit_name'),
                 }
                 mcp_flag = entity_details.get('meta', {}).get('mcp', False)
                 if mcp_flag:
