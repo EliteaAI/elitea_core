@@ -105,7 +105,8 @@ class FakeConnection:
         if "FROM pg_indexes" in sql:
             return FakeResult(self.indexes)
         if "ALTER TABLE" in sql:
-            for name in ("input_tokens", "output_tokens", "llm_cost"):
+            for name in ("input_tokens", "output_tokens", "llm_cost",
+                         "token_source", "cost_source"):
                 if f'"{name}"' in sql:
                     self.columns.add(name)
         if "CREATE INDEX" in sql:
@@ -148,7 +149,10 @@ class TestEnsureAuditEventsSchema:
 
         result = audit_events_schema_module.ensure_audit_events_schema(engine)
 
-        assert sorted(result["added_columns"]) == ["input_tokens", "llm_cost", "output_tokens"]
+        assert sorted(result["added_columns"]) == [
+            "cost_source", "input_tokens", "llm_cost",
+            "output_tokens", "token_source",
+        ]
         assert result["added_indexes"] == ["ix_audit_events_model_name"]
 
         alter_statements = [sql for sql in connection.executed if "ALTER TABLE" in sql]
@@ -156,6 +160,8 @@ class TestEnsureAuditEventsSchema:
         assert '"input_tokens" INTEGER' in alter_statements[0]
         assert '"output_tokens" INTEGER' in alter_statements[0]
         assert '"llm_cost" NUMERIC(18, 8)' in alter_statements[0]
+        assert '"token_source" VARCHAR(16)' in alter_statements[0]
+        assert '"cost_source" VARCHAR(32)' in alter_statements[0]
         assert any("CREATE INDEX" in sql for sql in connection.executed)
 
         # Takes the advisory lock before touching the catalog.
@@ -164,7 +170,11 @@ class TestEnsureAuditEventsSchema:
     def test_is_idempotent_once_columns_present(self, audit_events_schema_module):
         """A second run against an already-migrated table issues no DDL."""
         connection = FakeConnection(
-            columns=["id", "timestamp", "model_name", "input_tokens", "output_tokens", "llm_cost"],
+            columns=[
+                "id", "timestamp", "model_name",
+                "input_tokens", "output_tokens", "llm_cost",
+                "token_source", "cost_source",
+            ],
             indexes=["ix_audit_events_model_name"],
         )
         engine = FakeEngine(connection)
@@ -182,7 +192,10 @@ class TestEnsureAuditEventsSchema:
 
         result = audit_events_schema_module.ensure_audit_events_schema(engine, dry_run=True)
 
-        assert sorted(result["added_columns"]) == ["input_tokens", "llm_cost", "output_tokens"]
+        assert sorted(result["added_columns"]) == [
+            "cost_source", "input_tokens", "llm_cost",
+            "output_tokens", "token_source",
+        ]
         assert result["added_indexes"] == ["ix_audit_events_model_name"]
         assert not any("ALTER TABLE" in sql for sql in connection.executed)
         assert not any("CREATE INDEX" in sql for sql in connection.executed)

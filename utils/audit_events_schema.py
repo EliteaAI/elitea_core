@@ -19,6 +19,11 @@ _REQUIRED_COLUMNS = {
     'input_tokens': 'INTEGER',
     'output_tokens': 'INTEGER',
     'llm_cost': 'NUMERIC(18, 8)',
+    # Provenance for the token/cost values written by the tracing plugin.
+    # token_source ∈ {'langfuse', 'audit', NULL}; cost_source ∈ {'observed',
+    # 'estimated:litellm-<version>', NULL}. See tracing/utils/PRICING.md.
+    'token_source': 'VARCHAR(16)',
+    'cost_source': 'VARCHAR(32)',
 }
 _REQUIRED_INDEXES = {
     'ix_audit_events_model_name': '(model_name)',
