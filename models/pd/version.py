@@ -16,6 +16,7 @@ from ...models.pd.llm import LLMSettingsModel, LLMSettingsWriteModel
 from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel
 from ...models.pd.tag import TagDetailModel
 from ...utils.pipeline_utils import validate_yaml_from_str
+from ...utils.constants import contains_embedded_image
 
 # todo: switch to rpc call
 from ...utils.authors import get_authors_data
@@ -64,6 +65,10 @@ def conversation_starters_validator(value):
         if not item:
             raise ValueError(
                 f'conversation_starters[{i}] cannot be empty or whitespace-only'
+            )
+        if contains_embedded_image(item):
+            raise ValueError(
+                f'conversation_starters[{i}] must not contain embedded images'
             )
         validated.append(item)
 
@@ -121,6 +126,13 @@ class ApplicationVersionBaseModel(BaseModel):
     @classmethod
     def ensure_instructions_not_null(cls, v):
         return v if v is not None else ''
+
+    @field_validator('instructions', 'welcome_message', mode='after')
+    @classmethod
+    def reject_embedded_images(cls, v, info: ValidationInfo):
+        if contains_embedded_image(v):
+            raise ValueError(f'{info.field_name} must not contain embedded images')
+        return v
 
 
 class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):
