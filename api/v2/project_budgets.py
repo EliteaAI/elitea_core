@@ -2,8 +2,20 @@ from flask import request
 from tools import api_tools, auth, config as c, rpc_tools
 
 
-# Columns derived after the DB query, so they cannot be sorted in SQL
-COMPUTED_SORT_FIELDS = ("spend", "percent_used", "effective_limit")
+# Only real project columns can be ordered. Limit, spend and used are derived after the
+# query — from stored budgets, config defaults and LiteLLM — so ordering by them would
+# only ever sort the page that was already fetched. Ranking by cost is done in the export.
+SORTABLE_FIELDS = ("name", "id")
+DEFAULT_SORT_FIELD = "name"
+
+
+def _safe_sort_field(sort_by):
+    """Fall back to the default for anything not orderable in SQL.
+
+    An unsupported field would otherwise reach the project listing's own silent default
+    and appear to work while ordering by something else entirely.
+    """
+    return sort_by if sort_by in SORTABLE_FIELDS else DEFAULT_SORT_FIELD
 
 
 def _owner_ids_for_search(rpc, search: str):
@@ -53,12 +65,9 @@ class AdminAPI(api_tools.APIModeHandler):
         offset = int(request.args.get("offset", 0))
         search = request.args.get("search") or None
         project_type = request.args.get("project_type") or None
-        sort_by = request.args.get("sort_by", "name")
         sort_order = request.args.get("sort_order", "asc")
         #
-        # Spend/limit are computed after the query, so the DB keeps a stable order
-        # for those and the page is re-sorted below.
-        is_computed_sort = sort_by in COMPUTED_SORT_FIELDS
+        sort_by = _safe_sort_field(request.args.get("sort_by", DEFAULT_SORT_FIELD))
         #
         # Owner ids are OR'd into the project search, so resolve them only for personal
         # projects. Doing it always would let a team project match on its owner's email.
@@ -68,8 +77,8 @@ class AdminAPI(api_tools.APIModeHandler):
             limit=limit,
             offset=offset,
             search=search,
-            sort_by="name" if is_computed_sort else sort_by,
-            sort_order="asc" if is_computed_sort else sort_order,
+            sort_by=sort_by,
+            sort_order=sort_order,
             project_type=project_type,
             owner_ids=owner_ids,
         ) or {}
@@ -138,19 +147,10 @@ class AdminAPI(api_tools.APIModeHandler):
                 "percent_used": None if not effective else round(spend / effective * 100, 2),
             })
         #
-        if is_computed_sort:
-            reverse = sort_order.lower() == "desc"
-            # Nulls (unlimited / no spend) sort last either way
-            rows.sort(
-                key=lambda row: (row.get(sort_by) is None, row.get(sort_by) or 0),
-                reverse=reverse,
-            )
-        #
         return {
             "rows": rows,
             "total": listing.get("total", len(rows)),
             "counts": listing.get("counts") or {},
-            "sorted_within_page": is_computed_sort,
         }, 200
 
 
