@@ -1,5 +1,7 @@
 from flask import request
-from tools import api_tools, auth, config as c, rpc_tools
+from tools import api_tools, auth, config as c, register_openapi, rpc_tools
+
+OPENAPI_TAG = "elitea_core/usage"
 
 
 # Only real project columns can be ordered. Limit, spend and used are derived after the
@@ -49,6 +51,80 @@ def _limit_source(row: dict, effective):
 class AdminAPI(api_tools.APIModeHandler):
     """Platform-admin listing of every project's budget and current-month spend."""
 
+    @register_openapi(
+        name="List Project Budgets (Admin)",
+        description=(
+            "Paginated list of projects with their effective budget and current-month "
+            "spend. Backs Admin -> Budgets.\n\n"
+            "Only name and id can be ordered. Limit, spend and usage are derived after the "
+            "query - from stored budgets, configured defaults and the LLM proxy - so "
+            "ordering by them would sort only the returned page; an unsupported sort_by "
+            "falls back to name. Export the data to rank projects by cost.\n\n"
+            "Personal projects can additionally be matched by their owner's name or email."
+        ),
+        tags=[OPENAPI_TAG],
+        parameters=[
+            {
+                "name": "limit",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "default": 20},
+                "description": "Page size.",
+                "example": 20,
+            },
+            {
+                "name": "offset",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "default": 0},
+                "description": "Rows to skip.",
+                "example": 0,
+            },
+            {
+                "name": "search",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": (
+                    "Matches project name or id; for personal projects, also the owner's "
+                    "name and email."
+                ),
+                "example": "analytics",
+            },
+            {
+                "name": "project_type",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "enum": ["team", "personal"]},
+                "description": "Restrict to shared team projects or to users' own projects.",
+                "example": "team",
+            },
+            {
+                "name": "sort_by",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "enum": list(SORTABLE_FIELDS), "default": DEFAULT_SORT_FIELD},
+                "description": "Anything else falls back to name.",
+                "example": DEFAULT_SORT_FIELD,
+            },
+            {
+                "name": "sort_order",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "enum": ["asc", "desc"], "default": "asc"},
+                "description": "Sort direction.",
+                "example": "asc",
+            },
+        ],
+        responses={
+            "200": {
+                "description": (
+                    "Rows for the requested page, the filtered total, and unfiltered "
+                    "per-type counts for tab labels."
+                ),
+            },
+        },
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.admin.project_budgets.view"],
