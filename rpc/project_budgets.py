@@ -50,8 +50,10 @@ class RPC:
             budget.monthly_limit = monthly_limit
             budget.enabled = enabled
             budget.currency = currency
-            # A new limit restarts the alert cycle for this period
+            # A new limit restarts the alert cycle: clearing the period too, so a stale
+            # period cannot suppress the first alert against the new limit
             budget.last_alerted_pct = None
+            budget.last_alerted_period = None
             #
             session.commit()
             result = budget.to_json()
@@ -107,6 +109,9 @@ class RPC:
             budget.monthly_limit = monthly_limit
             budget.enabled = enabled
             budget.currency = currency
+            # A new limit restarts the alert cycle, as for project budgets
+            budget.last_alerted_pct = None
+            budget.last_alerted_period = None
             #
             session.commit()
             result = budget.to_json()
@@ -122,6 +127,63 @@ class RPC:
             )
         #
         return result
+
+    @web.rpc("elitea_core_claim_budget_alert", "claim_budget_alert")
+    def claim_budget_alert(  # pylint: disable=R0913
+            self, project_id: int, period: str, pct: int, user_id: int = None, **kwargs
+    ):
+        """Reserve the right to send one budget alert, or return False if already sent.
+
+        Compare-and-set in a single call so two concurrent requests cannot both decide to
+        notify. The stored value is the threshold last alerted at, not a flag: raising a
+        threshold above what was already sent arms the alert again, while lowering it does
+        not re-notify for spend that was already covered.
+
+        A project inheriting a platform default has no stored row, so one is created purely
+        to hold this state. monthly_limit stays NULL, which already means "inherit the
+        default", so enforcement is unchanged.
+        """
+        try:
+            with db.with_project_schema_session(None) as session:
+                if user_id is None:
+                    budget = session.query(ProjectBudget).filter(
+                        ProjectBudget.project_id == project_id,
+                    ).first()
+                    #
+                    if budget is None:
+                        budget = ProjectBudget(project_id=project_id)
+                        session.add(budget)
+                else:
+                    budget = session.query(UserBudget).filter(
+                        UserBudget.project_id == project_id,
+                        UserBudget.user_id == user_id,
+                    ).first()
+                    #
+                    if budget is None:
+                        budget = UserBudget(project_id=project_id, user_id=user_id)
+                        session.add(budget)
+                #
+                # A new period starts a fresh cycle, so anything recorded earlier is stale
+                same_period = budget.last_alerted_period == period
+                already_sent = budget.last_alerted_pct if same_period else None
+                #
+                if already_sent is not None and already_sent >= pct:
+                    return False
+                #
+                budget.last_alerted_pct = pct
+                budget.last_alerted_period = period
+                #
+                session.commit()
+                #
+                return True
+        except Exception:  # pylint: disable=W0703
+            # Includes the columns not yet existing, when the release lands before the
+            # migration is run. Not claiming means not notifying, never a broken request.
+            log.exception(
+                "Failed to claim budget alert for project %s user %s", project_id, user_id,
+            )
+            #
+            return False
 
     @web.rpc("elitea_core_list_user_budgets", "list_user_budgets")
     def list_user_budgets(self, project_id: int = None, **kwargs):

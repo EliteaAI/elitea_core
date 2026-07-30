@@ -380,6 +380,9 @@ class Module(module.ModuleModel):
                 "migrate_skill_publish_columns", self.migrate_skill_publish_columns, group="R-2.0.5",
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_budget_alert_columns", self.migrate_budget_alert_columns, group="R-2.0.5",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "rename_skill_category", self.rename_skill_category,
             )
             this.for_module("admin").module.register_admin_task(

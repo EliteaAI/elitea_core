@@ -49,6 +49,10 @@ class NotificationEventTypes(StrEnum):
     skill_unpublished = 'skill_unpublished'
     bucket_expiration_warning = 'bucket_expiration_warning'
     personal_access_token_expiring = 'personal_access_token_expiring'
+    budget_threshold_reached = 'budget_threshold_reached'
+    budget_limit_reached = 'budget_limit_reached'
+    member_budget_threshold_reached = 'member_budget_threshold_reached'
+    member_budget_limit_reached = 'member_budget_limit_reached'
 
 
 class IndexDataStatus(StrEnum):
