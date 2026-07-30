@@ -17,7 +17,7 @@ from pydantic import (
 from ...utils.authors import get_authors_data
 from ...models.enums.all import PublishStatus
 from ...models.pd.collection_base import AuthorBaseModel, TagBaseModel
-from ...utils.constants import ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API
+from ...utils.constants import ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API, contains_embedded_image
 
 from .version import (
     ApplicationVersionBaseModel,
@@ -56,6 +56,12 @@ class ApplicationArgsForwardingModel(BaseModel):
         return values
 
 
+def reject_description_embedded_image(value: Optional[str]) -> Optional[str]:
+    if contains_embedded_image(value):
+        raise ValueError('description must not contain embedded images')
+    return value
+
+
 class ApplicationBaseModel(BaseModel):
     name: str = Field(min_length=1)
     description: Optional[str] = None
@@ -67,6 +73,11 @@ class ApplicationBaseModel(BaseModel):
     meta: Optional[dict] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator('description')
+    @classmethod
+    def check_description_no_embedded_image(cls, value: Optional[str]) -> Optional[str]:
+        return reject_description_embedded_image(value)
 
 
 class ApplicationDetailModel(ApplicationBaseModel):
@@ -353,6 +364,11 @@ class ApplicationUpdateModel(ApplicationArgsForwardingModel):
     description: Optional[str] = None
     version: Optional[ApplicationVersionFullUpdateModel] = None
     webhook_secret: Optional[SecretString] = None
+
+    @field_validator('description')
+    @classmethod
+    def check_description_no_embedded_image(cls, value: Optional[str]) -> Optional[str]:
+        return reject_description_embedded_image(value)
 
 
 class ApplicationCreateModel(ApplicationBaseModel, ApplicationArgsForwardingModel):

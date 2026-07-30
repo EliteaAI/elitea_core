@@ -1,6 +1,19 @@
+import re
 from enum import Enum
 
 PROMPT_LIB_MODE = 'prompt_lib'
+
+# Detects embedded images pasted into agent text fields (issue #6040): base64
+# image data URIs and <img> tags. Scoped to images only so instructions that
+# legitimately contain angle brackets, code, or XML/HTML examples are not flagged.
+_EMBEDDED_IMAGE_RE = re.compile(r'data:image/[^;]+;base64,|<img\b', re.IGNORECASE)
+
+
+def contains_embedded_image(value) -> bool:
+    """Return True if the string carries an embedded image payload."""
+    if not isinstance(value, str):
+        return False
+    return bool(_EMBEDDED_IMAGE_RE.search(value))
 
 ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API: int = 210
 
