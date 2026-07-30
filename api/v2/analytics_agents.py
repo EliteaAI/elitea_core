@@ -233,10 +233,13 @@ if _API_AVAILABLE:
                     cost_map = session.query(
                         app_traces.c.entity_id.label("entity_id"),
                         func.sum(llm_ev.llm_cost).label("llm_cost"),
+                        func.sum(func.coalesce(llm_ev.input_tokens, 0)).label("input_tokens"),
+                        func.sum(func.coalesce(llm_ev.output_tokens, 0)).label("output_tokens"),
                         func.sum(
                             func.coalesce(llm_ev.input_tokens, 0)
                             + func.coalesce(llm_ev.output_tokens, 0)
                         ).label("total_tokens"),
+                        func.count().label("llm_calls"),
                     ).select_from(llm_ev).join(
                         app_traces, llm_ev.trace_id == app_traces.c.trace_id,
                     ).filter(
@@ -260,12 +263,21 @@ if _API_AVAILABLE:
                     # each of an entity's application events with that entity's single
                     # cost-map row, so max() reads the value without inflating it by
                     # the application-event count (sum() would multiply it).
+                    input_tokens_col = func.coalesce(
+                        func.max(cost_map.c.input_tokens), 0
+                    ).label("input_tokens")
+                    output_tokens_col = func.coalesce(
+                        func.max(cost_map.c.output_tokens), 0
+                    ).label("output_tokens")
                     total_tokens_col = func.coalesce(
                         func.max(cost_map.c.total_tokens), 0
                     ).label("total_tokens")
                     llm_cost_col = func.coalesce(
                         func.max(cost_map.c.llm_cost), 0
                     ).label("llm_cost")
+                    llm_calls_col = func.coalesce(
+                        func.max(cost_map.c.llm_calls), 0
+                    ).label("llm_calls")
 
                     query = base.outerjoin(
                         cost_map, AuditEvent.entity_id == cost_map.c.entity_id,
@@ -276,8 +288,11 @@ if _API_AVAILABLE:
                         users_col,
                         avg_dur_col,
                         errors_col,
+                        input_tokens_col,
+                        output_tokens_col,
                         total_tokens_col,
                         llm_cost_col,
+                        llm_calls_col,
                     ).group_by(
                         AuditEvent.entity_id,
                     )
@@ -330,8 +345,14 @@ if _API_AVAILABLE:
                                 "users": r.users,
                                 "avg_duration_ms": round(r.avg_duration_ms, 1) if r.avg_duration_ms else 0,
                                 "errors": r.errors or 0,
+                                "input_tokens": r.input_tokens or 0,
+                                "output_tokens": r.output_tokens or 0,
                                 "total_tokens": r.total_tokens or 0,
                                 "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
+                                "avg_tokens_per_call": (
+                                    (r.total_tokens or 0) / r.llm_calls
+                                    if r.llm_calls else 0
+                                ),
                             }
                             for r in rows
                         ],

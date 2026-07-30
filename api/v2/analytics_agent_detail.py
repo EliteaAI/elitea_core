@@ -239,10 +239,9 @@ if _API_AVAILABLE:
                     # (same correlation used for tool calls above).
                     cost_row = session.query(
                         func.sum(AuditEvent.llm_cost).label("llm_cost"),
-                        func.sum(
-                            func.coalesce(AuditEvent.input_tokens, 0)
-                            + func.coalesce(AuditEvent.output_tokens, 0)
-                        ).label("total_tokens"),
+                        func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                        func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                        func.count().label("llm_calls"),
                     ).filter(
                         AuditEvent.trace_id.in_(
                             session.query(trace_subq.c.trace_id)
@@ -268,8 +267,18 @@ if _API_AVAILABLE:
                             "avg_duration_ms": round(kpi.avg_duration_ms, 1) if kpi.avg_duration_ms else 0,
                             "errors": kpi.errors or 0,
                             "error_rate": round((kpi.errors or 0) / kpi.total_events * 100, 2) if kpi.total_events > 0 else 0,
-                            "total_tokens": (cost_row.total_tokens if cost_row else 0) or 0,
+                            "input_tokens": (cost_row.input_tokens if cost_row else 0) or 0,
+                            "output_tokens": (cost_row.output_tokens if cost_row else 0) or 0,
+                            "total_tokens": (
+                                ((cost_row.input_tokens or 0) + (cost_row.output_tokens or 0))
+                                if cost_row else 0
+                            ),
                             "llm_cost": float(cost_row.llm_cost) if cost_row and cost_row.llm_cost else 0.0,
+                            "avg_cost_per_call": (
+                                float(cost_row.llm_cost) / cost_row.llm_calls
+                                if cost_row and cost_row.llm_cost and cost_row.llm_calls
+                                else 0.0
+                            ),
                         },
                         "users_total": users_total,
                         "users_truncated": users_total > len(user_rows),
