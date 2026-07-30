@@ -871,6 +871,7 @@ def update_skill(
                 version = skill.get_default_version()
             if version:
                 _ensure_version_updatable(version)
+                _ensure_version_renamable(s, skill_id, version, update_data.version.name)
 
         # Update skill metadata
         if update_data.name is not None:
@@ -975,22 +976,7 @@ def update_skill_version(
             raise SkillVersionNotFoundError(skill_id, version_id=version_id)
 
         _ensure_version_updatable(version)
-
-        # Prevent renaming 'base' version
-        if version.name == 'base' and update_data.name and update_data.name != 'base':
-            raise SkillVersionNotUpdatableError(
-                'Cannot rename the base version', version_id=version_id
-            )
-
-        # Pre-check rename uniqueness (commit moved to the helper boundary).
-        if update_data.name and update_data.name != version.name:
-            conflict = s.query(SkillVersion.id).filter(
-                SkillVersion.skill_id == skill_id,
-                SkillVersion.name == update_data.name,
-                SkillVersion.id != version_id,
-            ).first()
-            if conflict:
-                raise SkillVersionConflictError(skill_id, update_data.name)
+        _ensure_version_renamable(s, skill_id, version, update_data.name)
 
         _update_version_fields(s, version, update_data)
 
@@ -1646,6 +1632,22 @@ def _ensure_version_updatable(version: SkillVersion) -> None:
             f'Version id {version.id} is {version.status} and can not be updated',
             version_id=version.id,
         )
+
+
+def _ensure_version_renamable(session, skill_id: int, version: SkillVersion, new_name: Optional[str]) -> None:
+    if not new_name or new_name == version.name:
+        return
+    if version.name == 'base':
+        raise SkillVersionNotUpdatableError(
+            'Cannot rename the base version', version_id=version.id
+        )
+    conflict = session.query(SkillVersion.id).filter(
+        SkillVersion.skill_id == skill_id,
+        SkillVersion.name == new_name,
+        SkillVersion.id != version.id,
+    ).first()
+    if conflict:
+        raise SkillVersionConflictError(skill_id, new_name)
 
 
 def _update_version_fields(session, version: SkillVersion, update_data: SkillVersionUpdateModel) -> None:

@@ -38,7 +38,6 @@ from .skill_version import (
     SkillVersionCreateModel,
     SkillVersionListModel,
     SkillVersionDetailModel,
-    SkillVersionUpdateModel,
     SkillVersionNestedUpdateModel,
     SkillVersionExportModel,
     SkillVersionImportModel,
