@@ -39,6 +39,7 @@ from .skill_version import (
     SkillVersionListModel,
     SkillVersionDetailModel,
     SkillVersionUpdateModel,
+    SkillVersionNestedUpdateModel,
     SkillVersionExportModel,
     SkillVersionImportModel,
 )
@@ -314,7 +315,7 @@ class SkillDetailModel(BaseModel):
 class SkillUpdateModel(SkillArgsForwardingModel):
     name: Optional[SkillName] = Field(None, min_length=1, max_length=64)
     description: Optional[str] = Field(None, min_length=1, max_length=2304)
-    version: Optional[SkillVersionUpdateModel] = None
+    version: Optional[SkillVersionNestedUpdateModel] = None
     meta: Optional[dict] = None
 
 

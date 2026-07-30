@@ -858,6 +858,20 @@ def update_skill(
         if not skill:
             raise SkillNotFoundError(skill_id)
 
+        version = None
+        if update_data.version:
+            if update_data.version.id is not None:
+                version = next(
+                    (v for v in skill.versions if v.id == update_data.version.id),
+                    None,
+                )
+                if not version:
+                    raise SkillVersionNotFoundError(skill_id, version_id=update_data.version.id)
+            else:
+                version = skill.get_default_version()
+            if version:
+                _ensure_version_updatable(version)
+
         # Update skill metadata
         if update_data.name is not None:
             skill.name = update_data.name
@@ -866,12 +880,8 @@ def update_skill(
         if update_data.meta is not None:
             skill.meta = {**(skill.meta or {}), **update_data.meta}
 
-        # Update version if provided
-        if update_data.version:
-            version = skill.get_default_version()
-            if version:
-                _ensure_version_updatable(version)
-                _update_version_fields(s, version, update_data.version)
+        if version:
+            _update_version_fields(s, version, update_data.version)
 
         return serialize(SkillDetailModel.model_validate(skill))
 

@@ -71,6 +71,10 @@ class SkillVersionUpdateModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class SkillVersionNestedUpdateModel(SkillVersionUpdateModel):
+    id: Optional[int] = None
+
+
 class SkillVersionExportModel(BaseModel):
     name: str
     instructions: str

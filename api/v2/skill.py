@@ -112,7 +112,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Update a skill's metadata or a specific skill version",
-        description="Without a version_id path segment, updates the skill metadata (name, description, meta) and optionally its default version content. With a version_id segment, updates that specific version (resolved by numeric id).",
+        description="Without a version_id path segment, updates the skill metadata (name, description, meta) and optionally version content in the same transaction — the nested version.id selects the target version (default version when omitted). With a version_id segment, updates that specific version (resolved by numeric id). Published or embedded versions cannot be updated.",
         request_body=SkillUpdateModel,
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
