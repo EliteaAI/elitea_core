@@ -161,7 +161,7 @@ class TestEnsureAuditEventsSchema:
         assert '"output_tokens" INTEGER' in alter_statements[0]
         assert '"llm_cost" NUMERIC(18, 8)' in alter_statements[0]
         assert '"token_source" VARCHAR(16)' in alter_statements[0]
-        assert '"cost_source" VARCHAR(32)' in alter_statements[0]
+        assert '"cost_source" VARCHAR(64)' in alter_statements[0]
         assert any("CREATE INDEX" in sql for sql in connection.executed)
 
         # Takes the advisory lock before touching the catalog.

@@ -68,8 +68,11 @@ class AuditEvent(db.Base):
     # Provenance stamps written by tracing/utils/audit_processor.py.
     # token_source ∈ {'langfuse', 'audit'}; cost_source ∈ {'observed',
     # 'estimated:litellm-<version>'}. NULL when unknown / not applicable.
+    # cost_source(64) mirrors the schema-guard width — the tag itself is
+    # 33-ish today ('estimated:litellm-v1.83.14-stable') and needs room for
+    # future '-stable.patch.N' variants.
     token_source: Mapped[str] = mapped_column(String(16), nullable=True)
-    cost_source: Mapped[str] = mapped_column(String(32), nullable=True)
+    cost_source: Mapped[str] = mapped_column(String(64), nullable=True)
 
     # Trace linkage
     trace_id: Mapped[str] = mapped_column(String(32), nullable=True)

@@ -22,8 +22,11 @@ _REQUIRED_COLUMNS = {
     # Provenance for the token/cost values written by the tracing plugin.
     # token_source ∈ {'langfuse', 'audit', NULL}; cost_source ∈ {'observed',
     # 'estimated:litellm-<version>', NULL}. See tracing/utils/PRICING.md.
+    # cost_source is sized generously (64) so future LiteLLM tag variants
+    # like 'estimated:litellm-v1.100.0-stable.patch.2' (41+ chars) don't
+    # overflow silently — the write path swallows StringDataRightTruncation.
     'token_source': 'VARCHAR(16)',
-    'cost_source': 'VARCHAR(32)',
+    'cost_source': 'VARCHAR(64)',
 }
 _REQUIRED_INDEXES = {
     'ix_audit_events_model_name': '(model_name)',
