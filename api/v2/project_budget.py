@@ -1,7 +1,47 @@
 from flask import request
-from tools import api_tools, auth, config as c, rpc_tools
+from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 from ...utils.constants import PROMPT_LIB_MODE
+
+OPENAPI_TAG = "elitea_core/usage"
+
+PROJECT_ID_PARAM = {
+    "name": "project_id",
+    "in": "path",
+    "required": True,
+    "schema": {"type": "integer"},
+    "description": "Project whose budget to read or write.",
+    "example": 1,
+}
+
+BUDGET_WRITE_BODY = {
+    "required": True,
+    "content": {
+        "application/json": {
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "monthly_limit": {
+                        "type": "number",
+                        "nullable": True,
+                        "minimum": 0,
+                        "description": "Limit in USD. Null means no limit for this scope.",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "False marks the scope deliberately exempt, so it stays "
+                            "unlimited even where a platform default would otherwise apply."
+                        ),
+                    },
+                    "currency": {"type": "string", "default": "USD"},
+                },
+            },
+            "example": {"monthly_limit": 100, "enabled": True, "currency": "USD"},
+        },
+    },
+}
 
 
 def _budget_state(project_id: int):
@@ -62,6 +102,19 @@ def _parse_payload(raw: dict):
 class PromptLibAPI(api_tools.APIModeHandler):
     """Project-scoped read of a project's own budget and spend."""
 
+    @register_openapi(
+        name="Get Project Budget",
+        description=(
+            "The project's own budget and current-month spend. limit_source explains where "
+            "the enforced limit came from: explicit when set for this project, default when "
+            "inherited from a platform default, unlimited when nothing applies.\n\n"
+            "Available to project members in prompt_lib mode and to platform "
+            "administrators, regardless of membership, in administration mode."
+        ),
+        tags=[OPENAPI_TAG],
+        parameters=[PROJECT_ID_PARAM],
+        responses={"200": {"description": "Budget state and current-month spend."}},
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.project_context.view"],
@@ -78,6 +131,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
 class AdminAPI(api_tools.APIModeHandler):
     """Platform-admin read/write of any project's budget."""
 
+    # Documented on PromptLibAPI: both handlers share one path, so only one GET
+    # registration survives. Same convention as analytics.py. The PUT below has no
+    # project-scoped twin, so it is documented here.
     @auth.decorators.check_api(
         {
             "permissions": ["models.admin.project_budgets.view"],
@@ -90,6 +146,23 @@ class AdminAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, **kwargs):
         return _budget_state(project_id), 200
 
+    @register_openapi(
+        name="Set Project Budget (Admin)",
+        description=(
+            "Create or replace a project's monthly limit and push it to the LLM proxy, so "
+            "it takes effect on the next call rather than at the next period.\n\n"
+            "Returns the resulting budget state, which may differ from what was sent: a "
+            "null limit or enabled=false leaves the project unlimited, and clearing an "
+            "explicit limit can let a platform default apply instead."
+        ),
+        tags=[OPENAPI_TAG],
+        parameters=[PROJECT_ID_PARAM],
+        request_body=BUDGET_WRITE_BODY,
+        responses={
+            "200": {"description": "Budget state after the write."},
+            "400": {"description": "monthly_limit was negative or not a number."},
+        },
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.admin.project_budgets.edit"],

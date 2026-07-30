@@ -3,12 +3,28 @@ import datetime
 import re
 
 from flask import request
-from tools import api_tools, auth, config as c, rpc_tools
+from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 from ...utils.constants import PROMPT_LIB_MODE
 
+OPENAPI_TAG = "elitea_core/usage"
+
 SCOPE_PROJECT = "project"
 SCOPE_USER = "user"
+
+# Budgets are monthly, so there is no date range to document: the period is implied by
+# "now" and reported back in period_start / period_end.
+SCOPE_PARAM = {
+    "name": "scope",
+    "in": "query",
+    "required": False,
+    "schema": {"type": "string", "enum": [SCOPE_PROJECT, SCOPE_USER], "default": SCOPE_PROJECT},
+    "description": (
+        "Whose usage to report. 'project' covers the whole project; 'user' covers only "
+        "the calling member's own spend within it."
+    ),
+    "example": SCOPE_PROJECT,
+}
 
 # Amount fields stripped for members who may not see platform cost figures
 AMOUNT_FIELDS = ("spend", "monthly_limit", "effective_limit", "remaining", "currency")
@@ -223,6 +239,36 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
 class PromptLibAPI(api_tools.APIModeHandler):
     """A project member reads usage for the project or for themselves."""
 
+    @register_openapi(
+        name="Get Project Usage",
+        description=(
+            "Current-period spend against the applicable budget, with the per-day and "
+            "per-model breakdown behind Settings -> Usage. Only calls to platform-shared "
+            "models are counted; models configured with a project's own credentials are "
+            "billed by that provider and never appear here.\n\n"
+            "The period is the current month and is reported back in period_start, "
+            "period_end and resets_at, so no date range is accepted.\n\n"
+            "Members who may not see platform cost figures receive the same payload with "
+            "spend, limits and currency removed and can_see_amounts set to false; "
+            "percentages and token counts are still present."
+        ),
+        tags=[OPENAPI_TAG],
+        parameters=[
+            {
+                "name": "project_id",
+                "in": "path",
+                "required": True,
+                "schema": {"type": "integer"},
+                "description": "Project to report on.",
+                "example": 1,
+            },
+            SCOPE_PARAM,
+        ],
+        responses={
+            "200": {"description": "Usage and budget state for the requested scope."},
+            "400": {"description": "scope was neither 'project' nor 'user'."},
+        },
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.project_context.view"],

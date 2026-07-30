@@ -31,6 +31,9 @@ def _load_module():
         DEFAULT_MODE="default", ADMINISTRATION_MODE="administration",
     )
     tools_stub.rpc_tools = types.SimpleNamespace(RpcMixin=object)
+    # The API modules document themselves with this decorator; it only records
+    # metadata, so an identity function is enough here
+    tools_stub.register_openapi = lambda *a, **kw: (lambda func: func)
     #
     flask_stub = types.ModuleType("flask")
     flask_stub.request = types.SimpleNamespace(args={})

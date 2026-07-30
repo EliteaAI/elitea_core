@@ -1,7 +1,18 @@
-from tools import api_tools, auth, config as c, rpc_tools
+from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 from ...utils.constants import PROMPT_LIB_MODE
 from .project_budgets import _limit_source
+
+OPENAPI_TAG = "elitea_core/usage"
+
+PROJECT_ID_PARAM = {
+    "name": "project_id",
+    "in": "path",
+    "required": True,
+    "schema": {"type": "integer"},
+    "description": "Project whose members to report on.",
+    "example": 1,
+}
 
 
 def _member_budget_rows(project_id: int):
@@ -76,6 +87,25 @@ def _member_budget_rows(project_id: int):
 class PromptLibAPI(api_tools.APIModeHandler):
     """Project admins list their own project's per-member usage."""
 
+    @register_openapi(
+        name="List Project Member Budgets",
+        description=(
+            "Per-member spend and budget for every member of the project, for the current "
+            "month. Backs the Members section of Settings -> Usage.\n\n"
+            "A member's own limit applies in addition to the project limit: a call is "
+            "blocked when either is exceeded.\n\n"
+            "In prompt_lib mode this is restricted to admins of that project; ordinary "
+            "members receive 403, since they may see only their own usage. In "
+            "administration mode it is available to platform administrators regardless of "
+            "membership."
+        ),
+        tags=[OPENAPI_TAG],
+        parameters=[PROJECT_ID_PARAM],
+        responses={
+            "200": {"description": "One row per member, plus the configured warning threshold."},
+            "403": {"description": "Caller is not an admin of this project."},
+        },
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.project_context.view"],
@@ -103,6 +133,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 class AdminAPI(api_tools.APIModeHandler):
     """Platform-admin listing of per-user budgets and spend within one project."""
 
+    # Documented on PromptLibAPI: both handlers share one path, so only one registration
+    # survives. Same convention as analytics.py.
     @auth.decorators.check_api(
         {
             "permissions": ["models.admin.project_budgets.view"],

@@ -1,7 +1,29 @@
 from flask import request
-from tools import api_tools, auth, config as c, rpc_tools
+from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 from ...utils.constants import PROMPT_LIB_MODE
+from .project_budget import BUDGET_WRITE_BODY
+
+OPENAPI_TAG = "elitea_core/usage"
+
+MEMBER_PARAMS = [
+    {
+        "name": "project_id",
+        "in": "path",
+        "required": True,
+        "schema": {"type": "integer"},
+        "description": "Project the member belongs to.",
+        "example": 1,
+    },
+    {
+        "name": "user_id",
+        "in": "path",
+        "required": True,
+        "schema": {"type": "integer"},
+        "description": "Member whose budget to read or write.",
+        "example": 1,
+    },
+]
 
 
 def _user_budget_state(project_id: int, user_id: int):
@@ -56,6 +78,23 @@ def _parse_payload(raw: dict):
 class PromptLibAPI(api_tools.APIModeHandler):
     """A project member reads their own per-user budget and spend."""
 
+    @register_openapi(
+        name="Get Member Budget",
+        description=(
+            "One member's own budget and current-month spend within a project. This limit "
+            "applies in addition to the project limit, so a call is blocked when either is "
+            "exceeded.\n\n"
+            "In prompt_lib mode a member may read only their own row: requesting another "
+            "member's user_id returns 403 unless the caller is an admin of the project. In "
+            "administration mode platform administrators may read any row."
+        ),
+        tags=[OPENAPI_TAG],
+        parameters=MEMBER_PARAMS,
+        responses={
+            "200": {"description": "The member's budget state and current-month spend."},
+            "403": {"description": "Caller asked for another member's budget and is not a project admin."},
+        },
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.project_context.view"],
@@ -86,6 +125,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
 class AdminAPI(api_tools.APIModeHandler):
     """Platform-admin read/write of any user's budget within a project."""
 
+    # Documented on PromptLibAPI: both handlers share one path, so only one GET
+    # registration survives. Same convention as analytics.py. The PUT below has no
+    # project-scoped twin, so it is documented here.
     @auth.decorators.check_api(
         {
             "permissions": ["models.admin.project_budgets.view"],
@@ -98,6 +140,22 @@ class AdminAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, user_id: int, **kwargs):
         return _user_budget_state(project_id, user_id), 200
 
+    @register_openapi(
+        name="Set Member Budget (Admin)",
+        description=(
+            "Create or replace one member's limit within a project and push it to the LLM "
+            "proxy, so it applies on their next call.\n\n"
+            "Caps a single member's share without changing the project's own limit; the "
+            "stricter of the two decides whether a call is allowed."
+        ),
+        tags=[OPENAPI_TAG],
+        parameters=MEMBER_PARAMS,
+        request_body=BUDGET_WRITE_BODY,
+        responses={
+            "200": {"description": "The member's budget state after the write."},
+            "400": {"description": "monthly_limit was negative or not a number."},
+        },
+    )
     @auth.decorators.check_api(
         {
             "permissions": ["models.admin.project_budgets.edit"],
