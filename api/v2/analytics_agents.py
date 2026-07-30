@@ -16,8 +16,13 @@ except ImportError:
 if _API_AVAILABLE:
     from datetime import datetime, timedelta, timezone
     from flask import request
-    from sqlalchemy import func, case, cast, Date, desc, asc
+    from sqlalchemy import func, case, cast, Date, desc, asc, or_
     from sqlalchemy.orm import aliased
+
+    from ...utils.constants import (
+        SYSTEM_USER_EMAILS,
+        SYSTEM_USER_EMAIL_PATTERN,
+    )
 
     def _parse_dates(args):
         date_from = args.get("date_from")
@@ -191,9 +196,23 @@ if _API_AVAILABLE:
 
             try:
                 with db.with_project_schema_session(None) as session:
+                    # System-user filter mirrors analytics_costs.py so the two
+                    # views agree on which rows count as "real user activity".
+                    _system_user_predicates = [
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
+                        ),
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
+                        ),
+                    ]
+
                     base = session.query(AuditEvent).filter(
                         AuditEvent.entity_type == "application",
                         AuditEvent.entity_id.isnot(None),
+                        *_system_user_predicates,
                     )
                     # Filter by project_id if provided (agents may span projects)
                     if project_id:
@@ -222,14 +241,29 @@ if _API_AVAILABLE:
                         AuditEvent.entity_id.isnot(None),
                         AuditEvent.trace_id.isnot(None),
                         AuditEvent.trace_id != "",
+                        *_system_user_predicates,
                     )
                     if project_id:
                         app_traces = app_traces.filter(
                             AuditEvent.project_id == project_id
                         )
+                    if dt_from:
+                        app_traces = app_traces.filter(AuditEvent.timestamp >= dt_from)
+                    if dt_to:
+                        app_traces = app_traces.filter(AuditEvent.timestamp <= dt_to)
                     app_traces = app_traces.group_by(AuditEvent.trace_id).subquery()
 
                     llm_ev = aliased(AuditEvent)
+                    _llm_system_user_predicates = [
+                        or_(
+                            llm_ev.user_email.is_(None),
+                            ~llm_ev.user_email.in_(SYSTEM_USER_EMAILS),
+                        ),
+                        or_(
+                            llm_ev.user_email.is_(None),
+                            ~llm_ev.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
+                        ),
+                    ]
                     cost_map = session.query(
                         app_traces.c.entity_id.label("entity_id"),
                         func.sum(llm_ev.llm_cost).label("llm_cost"),
@@ -244,9 +278,14 @@ if _API_AVAILABLE:
                         app_traces, llm_ev.trace_id == app_traces.c.trace_id,
                     ).filter(
                         llm_ev.event_type == "llm",
+                        *_llm_system_user_predicates,
                     )
                     if project_id:
                         cost_map = cost_map.filter(llm_ev.project_id == project_id)
+                    if dt_from:
+                        cost_map = cost_map.filter(llm_ev.timestamp >= dt_from)
+                    if dt_to:
+                        cost_map = cost_map.filter(llm_ev.timestamp <= dt_to)
                     cost_map = cost_map.group_by(app_traces.c.entity_id).subquery()
 
                     events_col = func.count().label("events")

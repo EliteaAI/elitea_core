@@ -236,7 +236,9 @@ if _API_AVAILABLE:
 
                     # LLM cost/tokens for this agent. Generation spans carry no
                     # entity_id, so we sum llm events sharing the agent's trace_ids
-                    # (same correlation used for tool calls above).
+                    # (same correlation used for tool calls above). Timestamp
+                    # filter re-applied so long-lived traces don't leak LLM
+                    # events from outside the requested window.
                     cost_row = session.query(
                         func.sum(AuditEvent.llm_cost).label("llm_cost"),
                         func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
@@ -247,7 +249,12 @@ if _API_AVAILABLE:
                             session.query(trace_subq.c.trace_id)
                         ),
                         AuditEvent.event_type == "llm",
-                    ).first()
+                    )
+                    if dt_from:
+                        cost_row = cost_row.filter(AuditEvent.timestamp >= dt_from)
+                    if dt_to:
+                        cost_row = cost_row.filter(AuditEvent.timestamp <= dt_to)
+                    cost_row = cost_row.first()
 
                     # Daily usage
                     daily_rows = base.with_entities(
