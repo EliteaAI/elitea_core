@@ -34,11 +34,13 @@ _REQUIRED_INDEXES = {
 
 
 def _columns(connection, schema):
-    return set(connection.execute(text("""
-        SELECT column_name
+    """Return {column_name: character_maximum_length_or_None} for the audit table."""
+    rows = connection.execute(text("""
+        SELECT column_name, character_maximum_length
         FROM information_schema.columns
         WHERE table_schema = :schema AND table_name = :table_name
-    """), {'schema': schema, 'table_name': _TABLE_NAME}).scalars())
+    """), {'schema': schema, 'table_name': _TABLE_NAME}).all()
+    return {name: length for name, length in rows}
 
 
 def _indexes(connection, schema):
@@ -47,6 +49,16 @@ def _indexes(connection, schema):
         FROM pg_indexes
         WHERE schemaname = :schema AND tablename = :table_name
     """), {'schema': schema, 'table_name': _TABLE_NAME}).scalars())
+
+
+def _required_varchar_width(coltype):
+    """Extract the VARCHAR(N) width, or None if the column type is not VARCHAR."""
+    if not coltype.upper().startswith('VARCHAR('):
+        return None
+    try:
+        return int(coltype[8:-1])
+    except (ValueError, IndexError):
+        return None
 
 
 def ensure_audit_events_schema(engine, dry_run=False):
@@ -67,11 +79,17 @@ def ensure_audit_events_schema(engine, dry_run=False):
         with engine.connect() as connection:
             columns = _columns(connection, schema)
             if not columns:
-                return {"table_present": False, "added_columns": [], "added_indexes": []}
+                return {
+                    "table_present": False,
+                    "added_columns": [],
+                    "widened_columns": [],
+                    "added_indexes": [],
+                }
             indexes = _indexes(connection, schema)
             return {
                 "table_present": True,
                 "added_columns": [name for name in _REQUIRED_COLUMNS if name not in columns],
+                "widened_columns": _columns_needing_widen(columns),
                 "added_indexes": sorted(_REQUIRED_INDEXES.keys() - indexes),
             }
 
@@ -85,7 +103,12 @@ def ensure_audit_events_schema(engine, dry_run=False):
         columns = _columns(connection, schema)
         if not columns:
             log.info('audit_events schema: table not present yet, skipping (create_all will provision it)')
-            return {"table_present": False, "added_columns": [], "added_indexes": []}
+            return {
+                "table_present": False,
+                "added_columns": [],
+                "widened_columns": [],
+                "added_indexes": [],
+            }
 
         qualified_name = f'{quote(schema)}.{quote(_TABLE_NAME)}'
         added_columns = [name for name in _REQUIRED_COLUMNS if name not in columns]
@@ -98,6 +121,18 @@ def ensure_audit_events_schema(engine, dry_run=False):
                 f'ALTER TABLE {qualified_name} ' + ', '.join(statements)
             ))
 
+        # Widen existing VARCHAR columns that are narrower than required.
+        # ADD COLUMN IF NOT EXISTS above will not touch a column that already
+        # exists, so any env that ran an earlier version of this same PR (or
+        # any other codepath that installed the column at a smaller width)
+        # would silently keep the narrower type and truncate writes.
+        widened = _columns_needing_widen(columns)
+        for name, target_width in widened:
+            connection.execute(text(
+                f'ALTER TABLE {qualified_name} '
+                f'ALTER COLUMN {quote(name)} TYPE VARCHAR({target_width})'
+            ))
+
         indexes = _indexes(connection, schema)
         missing_indexes = sorted(_REQUIRED_INDEXES.keys() - indexes)
         for index_name in missing_indexes:
@@ -105,12 +140,30 @@ def ensure_audit_events_schema(engine, dry_run=False):
                 f'CREATE INDEX {quote(index_name)} ON {qualified_name} {_REQUIRED_INDEXES[index_name]}'
             ))
 
-        if statements or missing_indexes:
+        if statements or widened or missing_indexes:
             log.info(
-                'audit_events schema: added columns=%s indexes=%s',
-                added_columns, missing_indexes,
+                'audit_events schema: added columns=%s widened=%s indexes=%s',
+                added_columns, widened, missing_indexes,
             )
         else:
             log.info('audit_events schema is current')
 
-        return {"table_present": True, "added_columns": added_columns, "added_indexes": missing_indexes}
+        return {
+            "table_present": True,
+            "added_columns": added_columns,
+            "widened_columns": widened,
+            "added_indexes": missing_indexes,
+        }
+
+
+def _columns_needing_widen(existing_columns):
+    """Return [(name, target_width), ...] for VARCHAR columns narrower than required."""
+    widened = []
+    for name, coltype in _REQUIRED_COLUMNS.items():
+        target = _required_varchar_width(coltype)
+        if target is None:
+            continue
+        existing_width = existing_columns.get(name)
+        if existing_width is not None and existing_width < target:
+            widened.append((name, target))
+    return widened

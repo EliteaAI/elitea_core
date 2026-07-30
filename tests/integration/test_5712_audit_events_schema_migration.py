@@ -88,10 +88,22 @@ class FakeDialect:
 
 
 class FakeConnection:
-    """Records executed statements; simulates catalog state for one schema."""
+    """Records executed statements; simulates catalog state for one schema.
+
+    ``columns`` accepts a list (each entry becomes a column with
+    character_maximum_length=None) OR a dict {name: width_or_None}.
+    """
+
+    _VARCHAR_DEFAULTS = {
+        "token_source": 16,
+        "cost_source": 64,
+    }
 
     def __init__(self, columns, indexes):
-        self.columns = set(columns)
+        if isinstance(columns, dict):
+            self.columns = dict(columns)
+        else:
+            self.columns = {name: None for name in columns}
         self.indexes = set(indexes)
         self.executed = []
         self.dialect = FakeDialect()
@@ -101,14 +113,21 @@ class FakeConnection:
         self.executed.append(sql)
 
         if "FROM information_schema.columns" in sql:
-            return FakeResult(self.columns)
+            # _columns() now selects (column_name, character_maximum_length).
+            return FakeResult([(n, w) for n, w in self.columns.items()])
         if "FROM pg_indexes" in sql:
             return FakeResult(self.indexes)
-        if "ALTER TABLE" in sql:
+        if "ALTER TABLE" in sql and "ADD COLUMN" in sql:
             for name in ("input_tokens", "output_tokens", "llm_cost",
                          "token_source", "cost_source"):
                 if f'"{name}"' in sql:
-                    self.columns.add(name)
+                    self.columns[name] = self._VARCHAR_DEFAULTS.get(name)
+        elif "ALTER TABLE" in sql and "ALTER COLUMN" in sql:
+            # widen path
+            import re
+            m = re.search(r'ALTER COLUMN "([^"]+)" TYPE VARCHAR\((\d+)\)', sql)
+            if m:
+                self.columns[m.group(1)] = int(m.group(2))
         if "CREATE INDEX" in sql:
             self.indexes.add("ix_audit_events_model_name")
         return FakeResult([])
@@ -139,7 +158,12 @@ class TestEnsureAuditEventsSchema:
 
         result = audit_events_schema_module.ensure_audit_events_schema(engine)
 
-        assert result == {"table_present": False, "added_columns": [], "added_indexes": []}
+        assert result == {
+            "table_present": False,
+            "added_columns": [],
+            "widened_columns": [],
+            "added_indexes": [],
+        }
         assert not any("ALTER TABLE" in sql for sql in connection.executed)
 
     def test_adds_missing_columns_and_index(self, audit_events_schema_module):
@@ -153,15 +177,17 @@ class TestEnsureAuditEventsSchema:
             "cost_source", "input_tokens", "llm_cost",
             "output_tokens", "token_source",
         ]
+        assert result["widened_columns"] == []
         assert result["added_indexes"] == ["ix_audit_events_model_name"]
 
         alter_statements = [sql for sql in connection.executed if "ALTER TABLE" in sql]
-        assert len(alter_statements) == 1
-        assert '"input_tokens" INTEGER' in alter_statements[0]
-        assert '"output_tokens" INTEGER' in alter_statements[0]
-        assert '"llm_cost" NUMERIC(18, 8)' in alter_statements[0]
-        assert '"token_source" VARCHAR(16)' in alter_statements[0]
-        assert '"cost_source" VARCHAR(64)' in alter_statements[0]
+        add_stmts = [s for s in alter_statements if "ADD COLUMN" in s]
+        assert len(add_stmts) == 1
+        assert '"input_tokens" INTEGER' in add_stmts[0]
+        assert '"output_tokens" INTEGER' in add_stmts[0]
+        assert '"llm_cost" NUMERIC(18, 8)' in add_stmts[0]
+        assert '"token_source" VARCHAR(16)' in add_stmts[0]
+        assert '"cost_source" VARCHAR(64)' in add_stmts[0]
         assert any("CREATE INDEX" in sql for sql in connection.executed)
 
         # Takes the advisory lock before touching the catalog.
@@ -170,18 +196,23 @@ class TestEnsureAuditEventsSchema:
     def test_is_idempotent_once_columns_present(self, audit_events_schema_module):
         """A second run against an already-migrated table issues no DDL."""
         connection = FakeConnection(
-            columns=[
-                "id", "timestamp", "model_name",
-                "input_tokens", "output_tokens", "llm_cost",
-                "token_source", "cost_source",
-            ],
+            columns={
+                "id": None, "timestamp": None, "model_name": 256,
+                "input_tokens": None, "output_tokens": None, "llm_cost": None,
+                "token_source": 16, "cost_source": 64,
+            },
             indexes=["ix_audit_events_model_name"],
         )
         engine = FakeEngine(connection)
 
         result = audit_events_schema_module.ensure_audit_events_schema(engine)
 
-        assert result == {"table_present": True, "added_columns": [], "added_indexes": []}
+        assert result == {
+            "table_present": True,
+            "added_columns": [],
+            "widened_columns": [],
+            "added_indexes": [],
+        }
         assert not any("ALTER TABLE" in sql for sql in connection.executed)
         assert not any("CREATE INDEX" in sql for sql in connection.executed)
 
@@ -196,6 +227,7 @@ class TestEnsureAuditEventsSchema:
             "cost_source", "input_tokens", "llm_cost",
             "output_tokens", "token_source",
         ]
+        assert result["widened_columns"] == []
         assert result["added_indexes"] == ["ix_audit_events_model_name"]
         assert not any("ALTER TABLE" in sql for sql in connection.executed)
         assert not any("CREATE INDEX" in sql for sql in connection.executed)
@@ -204,3 +236,50 @@ class TestEnsureAuditEventsSchema:
         # Second dry run against the (untouched) fake reports the same gap again.
         second = audit_events_schema_module.ensure_audit_events_schema(engine, dry_run=True)
         assert second == result
+
+    def test_widens_narrower_varchar_columns(self, audit_events_schema_module):
+        """Env that ran an earlier version of this same PR has cost_source
+        already at VARCHAR(32); the guard must widen it to 64 rather than
+        silently leaving the narrower column in place."""
+        connection = FakeConnection(
+            columns={
+                "id": None, "timestamp": None, "model_name": 256,
+                "input_tokens": None, "output_tokens": None, "llm_cost": None,
+                "token_source": 16,
+                # This is the round-2 defect: an env booted 7f1248d before
+                # the 6a10af3 widen; cost_source is present but 32 chars.
+                "cost_source": 32,
+            },
+            indexes=["ix_audit_events_model_name"],
+        )
+        engine = FakeEngine(connection)
+
+        result = audit_events_schema_module.ensure_audit_events_schema(engine)
+
+        assert result["added_columns"] == []
+        assert result["widened_columns"] == [("cost_source", 64)]
+
+        alter_stmts = [sql for sql in connection.executed if "ALTER TABLE" in sql]
+        widen_stmts = [s for s in alter_stmts if "ALTER COLUMN" in s]
+        assert len(widen_stmts) == 1
+        assert '"cost_source" TYPE VARCHAR(64)' in widen_stmts[0]
+
+    def test_does_not_widen_when_at_or_above_target(self, audit_events_schema_module):
+        """Column already at the required width or wider is untouched."""
+        connection = FakeConnection(
+            columns={
+                "id": None, "timestamp": None, "model_name": 256,
+                "input_tokens": None, "output_tokens": None, "llm_cost": None,
+                "token_source": 16,
+                "cost_source": 128,  # wider than required — leave alone
+            },
+            indexes=["ix_audit_events_model_name"],
+        )
+        engine = FakeEngine(connection)
+
+        result = audit_events_schema_module.ensure_audit_events_schema(engine)
+
+        assert result["widened_columns"] == []
+        assert not any(
+            "ALTER COLUMN" in sql for sql in connection.executed
+        )
