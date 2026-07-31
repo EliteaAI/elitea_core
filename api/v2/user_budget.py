@@ -3,6 +3,7 @@ from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 from ...utils.constants import PROMPT_LIB_MODE
 from .project_budget import BUDGET_WRITE_BODY
+from .project_budgets import _limit_source
 
 OPENAPI_TAG = "elitea_core/usage"
 
@@ -27,7 +28,7 @@ MEMBER_PARAMS = [
 
 
 def _user_budget_state(project_id: int, user_id: int):
-    """Merge the stored per-user limit with LiteLLM's current-month spend."""
+    """Merge the member's effective limit with LiteLLM's current-month spend."""
     rpc = rpc_tools.RpcMixin().rpc
     #
     budget = rpc.timeout(5).elitea_core_get_user_budget(
@@ -41,13 +42,28 @@ def _user_budget_state(project_id: int, user_id: int):
     except Exception:  # pylint: disable=W0703
         spend = {}
     #
-    limit = budget.get("monthly_limit") if budget.get("enabled", True) else None
+    project_budget = rpc.timeout(5).elitea_core_get_project_budget(project_id=project_id) or {}
+    member_default = project_budget.get("member_default_limit")
+    #
+    # The enforced limit may come from the project's member default or a platform default,
+    # so it is resolved the same way enforcement does rather than read off the stored row
+    try:
+        limits = rpc.timeout(10).litellm_get_effective_user_limits(
+            project_id=project_id, user_ids=[user_id],
+        ) or {}
+        limit = limits.get(user_id, limits.get(str(user_id)))
+    except Exception:  # pylint: disable=W0703
+        stored = budget.get("monthly_limit") if budget.get("enabled", True) else None
+        limit = member_default if stored is None else stored
+    #
     spent = float(spend.get("spend", 0) or 0)
     #
     return {
         "project_id": project_id,
         "user_id": user_id,
         "monthly_limit": budget.get("monthly_limit"),
+        "effective_limit": limit,
+        "limit_source": _limit_source(budget, limit, member_default),
         "currency": budget.get("currency", "USD"),
         "enabled": budget.get("enabled", False),
         "spend": spent,
@@ -84,6 +100,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "One member's own budget and current-month spend within a project. This limit "
             "applies in addition to the project limit, so a call is blocked when either is "
             "exceeded.\n\n"
+            "limit_source explains where effective_limit came from: explicit when set for "
+            "this member, project_default when inherited from the project's member default, "
+            "default when inherited from a platform default, unlimited when nothing "
+            "applies.\n\n"
             "In prompt_lib mode a member may read only their own row: requesting another "
             "member's user_id returns 403 unless the caller is an admin of the project. In "
             "administration mode platform administrators may read any row."

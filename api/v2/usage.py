@@ -169,6 +169,15 @@ def _warning_pct(scope: str, is_personal: bool):
         return DEFAULT_WARNING_PCT
 
 
+def _member_default(rpc, project_id: int):
+    """The project's member default, for the path where the resolver is unreachable."""
+    try:
+        budget = rpc.timeout(5).elitea_core_get_project_budget(project_id=project_id) or {}
+        return budget.get("member_default_limit")
+    except Exception:  # pylint: disable=W0703
+        return None
+
+
 def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
     """Budget state plus the per-model and per-day breakdown for one scope."""
     rpc = rpc_tools.RpcMixin().rpc
@@ -183,7 +192,8 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
                 project_id=project_id, user_ids=[user_id],
             ) or {}).get(user_id)
         except Exception:  # pylint: disable=W0703
-            limit = budget.get("monthly_limit") if budget.get("enabled", True) else None
+            stored = budget.get("monthly_limit") if budget.get("enabled", True) else None
+            limit = stored if stored is not None else _member_default(rpc, project_id)
         #
         try:
             detail = rpc.timeout(30).litellm_get_user_usage_detail(
@@ -214,9 +224,10 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
         "scope": scope,
         "monthly_limit": budget.get("monthly_limit"),
         "effective_limit": limit,
-        "limit_source": "explicit" if budget.get("monthly_limit") is not None else (
-            "default" if limit is not None else "unlimited"
-        ),
+        # An exempt row's stored limit does not apply, so it must not read as explicit
+        "limit_source": "explicit" if (
+            budget.get("monthly_limit") is not None and budget.get("enabled", True)
+        ) else ("default" if limit is not None else "unlimited"),
         "currency": budget.get("currency", "USD"),
         "spend": spent,
         "remaining": None if limit is None else max(0.0, limit - spent),

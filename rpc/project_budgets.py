@@ -6,6 +6,10 @@ from ..models.project_budget import ProjectBudget
 from ..models.user_budget import UserBudget
 
 
+# Distinguishes "not sent" from an explicit null, so a caller unaware of a field cannot clear it
+_UNSET = object()
+
+
 class RPC:
     @web.rpc("elitea_core_get_project_budget_limit", "get_project_budget_limit")
     def get_project_budget_limit(self, project_id: int, **kwargs):
@@ -35,7 +39,8 @@ class RPC:
 
     @web.rpc("elitea_core_set_project_budget", "set_project_budget")
     def set_project_budget(  # pylint: disable=R0913
-            self, project_id: int, monthly_limit=None, enabled=True, currency='USD', **kwargs
+            self, project_id: int, monthly_limit=None, enabled=True, currency='USD',
+            member_default_limit=_UNSET, **kwargs
     ):
         """Upsert a project's monthly budget and push it to the LiteLLM tag budget."""
         with db.with_project_schema_session(None) as session:
@@ -50,6 +55,10 @@ class RPC:
             budget.monthly_limit = monthly_limit
             budget.enabled = enabled
             budget.currency = currency
+            # Omitted means "leave as is": a caller unaware of the field must not clear
+            # the default for every member of the project
+            if member_default_limit is not _UNSET:
+                budget.member_default_limit = member_default_limit
             # A new limit restarts the alert cycle: clearing the period too, so a stale
             # period cannot suppress the first alert against the new limit
             budget.last_alerted_pct = None

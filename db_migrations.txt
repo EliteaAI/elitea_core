@@ -219,3 +219,11 @@ Run admin task migrate_audit_events_columns
 # Shared-schema table, so no per-project loop. Idempotent (ADD COLUMN IF NOT EXISTS),
 # so no dry run is offered.
 Run admin task migrate_budget_alert_columns
+
+# Issue #6008: per-project member default limit on centry.project_budgets
+# Holds one limit that applies to every member of a project who has no limit of their own,
+# sitting between their explicit row and the platform-wide default. Without the column the
+# ORM fails with UndefinedColumn on every project-budget read.
+# Shared-schema table, so no per-project loop. Idempotent (ADD COLUMN IF NOT EXISTS),
+# so no dry run is offered.
+Run admin task migrate_project_member_default_limit

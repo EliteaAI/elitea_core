@@ -14,31 +14,61 @@ PROJECT_ID_PARAM = {
     "example": 1,
 }
 
+_BUDGET_WRITE_PROPERTIES = {
+    "monthly_limit": {
+        "type": "number",
+        "nullable": True,
+        "minimum": 0,
+        "description": "Limit in USD. Null means no limit for this scope.",
+    },
+    "enabled": {
+        "type": "boolean",
+        "default": True,
+        "description": (
+            "False marks the scope deliberately exempt, so it stays "
+            "unlimited even where a platform default would otherwise apply."
+        ),
+    },
+    "currency": {"type": "string", "default": "USD"},
+}
+
+# Shared with the member-budget endpoint, which has no project-scoped fields
 BUDGET_WRITE_BODY = {
+    "required": True,
+    "content": {
+        "application/json": {
+            "schema": {"type": "object", "properties": _BUDGET_WRITE_PROPERTIES},
+            "example": {"monthly_limit": 100, "enabled": True, "currency": "USD"},
+        },
+    },
+}
+
+PROJECT_BUDGET_WRITE_BODY = {
     "required": True,
     "content": {
         "application/json": {
             "schema": {
                 "type": "object",
                 "properties": {
-                    "monthly_limit": {
+                    **_BUDGET_WRITE_PROPERTIES,
+                    "member_default_limit": {
                         "type": "number",
                         "nullable": True,
                         "minimum": 0,
-                        "description": "Limit in USD. Null means no limit for this scope.",
-                    },
-                    "enabled": {
-                        "type": "boolean",
-                        "default": True,
                         "description": (
-                            "False marks the scope deliberately exempt, so it stays "
-                            "unlimited even where a platform default would otherwise apply."
+                            "Default in USD applied to every member of this project who has "
+                            "no limit of their own, ahead of any platform default. Null "
+                            "clears it; omit the field to leave it unchanged."
                         ),
                     },
-                    "currency": {"type": "string", "default": "USD"},
                 },
             },
-            "example": {"monthly_limit": 100, "enabled": True, "currency": "USD"},
+            "example": {
+                "monthly_limit": 100,
+                "enabled": True,
+                "currency": "USD",
+                "member_default_limit": 20,
+            },
         },
     },
 }
@@ -66,6 +96,7 @@ def _budget_state(project_id: int):
     return {
         "project_id": project_id,
         "monthly_limit": budget.get("monthly_limit"),
+        "member_default_limit": budget.get("member_default_limit"),
         "effective_limit": limit,
         "limit_source": "explicit" if budget.get("monthly_limit") is not None else (
             "default" if limit is not None else "unlimited"
@@ -83,20 +114,34 @@ def _budget_state(project_id: int):
     }
 
 
+def _parse_limit(raw: dict, field: str):
+    """Read one optional limit field, rejecting negatives."""
+    value = raw.get(field)
+    #
+    if value is None:
+        return None
+    #
+    value = float(value)
+    #
+    if value < 0:
+        raise ValueError(f"{field} must be >= 0")
+    #
+    return value
+
+
 def _parse_payload(raw: dict):
     """Validate a budget write payload."""
-    monthly_limit = raw.get("monthly_limit")
-    #
-    if monthly_limit is not None:
-        monthly_limit = float(monthly_limit)
-        if monthly_limit < 0:
-            raise ValueError("monthly_limit must be >= 0")
-    #
-    return {
-        "monthly_limit": monthly_limit,
+    payload = {
+        "monthly_limit": _parse_limit(raw, "monthly_limit"),
         "enabled": bool(raw.get("enabled", True)),
         "currency": raw.get("currency", "USD"),
     }
+    #
+    # Only forwarded when sent: an absent key must leave every member's default alone
+    if "member_default_limit" in raw:
+        payload["member_default_limit"] = _parse_limit(raw, "member_default_limit")
+    #
+    return payload
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -153,11 +198,13 @@ class AdminAPI(api_tools.APIModeHandler):
             "it takes effect on the next call rather than at the next period.\n\n"
             "Returns the resulting budget state, which may differ from what was sent: a "
             "null limit or enabled=false leaves the project unlimited, and clearing an "
-            "explicit limit can let a platform default apply instead."
+            "explicit limit can let a platform default apply instead.\n\n"
+            "member_default_limit is a separate value applied to members of this project "
+            "who have no limit of their own; it is honoured even when enabled=false."
         ),
         tags=[OPENAPI_TAG],
         parameters=[PROJECT_ID_PARAM],
-        request_body=BUDGET_WRITE_BODY,
+        request_body=PROJECT_BUDGET_WRITE_BODY,
         responses={
             "200": {"description": "Budget state after the write."},
             "400": {"description": "monthly_limit was negative or not a number."},

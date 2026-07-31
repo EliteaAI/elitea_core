@@ -2739,6 +2739,35 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         return {"ok": True, "applied": len(applied)}
 
+    @web.method("migrate_project_member_default_limit")
+    def migrate_project_member_default_limit(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: add the per-project member default limit column to project_budgets.
+
+        Holds one limit that applies to every member of the project who has no limit of
+        their own, between their row and the platform default.
+
+        Shared-schema table, so there is no per-project loop. Idempotent
+        (ADD COLUMN IF NOT EXISTS): safe to run more than once, no dry run needed.
+        """
+        from sqlalchemy import text  # pylint: disable=C0415
+
+        statement = (
+            f"ALTER TABLE {c.POSTGRES_SCHEMA}.project_budgets "
+            "ADD COLUMN IF NOT EXISTS member_default_limit DOUBLE PRECISION"
+        )
+        #
+        try:
+            with db.get_session(None) as session:
+                session.execute(text(statement))
+                session.commit()
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("migrate_project_member_default_limit: failed")
+            return {"ok": False, "applied": 0, "error": str(exc)}
+        #
+        log.info("migrate_project_member_default_limit: applied")
+        #
+        return {"ok": True, "applied": 1}
+
     @web.method()
     def migrate_empty_conversation_starters(self, *args, **kwargs):
         """Admin task: remove empty/null entries from conversation_starters in all agent versions.
