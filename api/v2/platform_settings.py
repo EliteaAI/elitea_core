@@ -22,14 +22,12 @@ def _is_analytics_enabled():
     return True
 
 
-def _is_cost_budgets_enabled():
-    """True when cost tracking is on, so the Usage tab has data to show."""
+def _cost_budgets_mode():
+    """Current cost-budgets mode, or None when the feature is not installed."""
     try:
-        mode = rpc_tools.RpcMixin().rpc.timeout(5).litellm_budgets_mode()
+        return rpc_tools.RpcMixin().rpc.timeout(5).litellm_budgets_mode()
     except Exception:  # pylint: disable=W0703
-        return False
-    #
-    return mode in ("observe", "enforce")
+        return None
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -41,12 +39,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
         Returns deployment-configured feature flags that control
         UI visibility and functionality availability.
         """
+        # Read once: both flags below describe the same mode
+        budgets_mode = _cost_budgets_mode()
+        #
         return {
             "mcp_exposure_enabled": is_mcp_exposure_enabled(),
             "mcp_in_menu_enabled": is_mcp_in_menu_enabled(),
             "mcp_category_name": get_mcp_category_name(),
             "analytics_enabled": _is_analytics_enabled(),
-            "cost_budgets_enabled": _is_cost_budgets_enabled(),
+            # Tracking is on, so the Usage tab has data to show
+            "cost_budgets_enabled": budgets_mode in ("observe", "enforce"),
+            # Limits actually block. Observe mode tracks without blocking, so a warning
+            # that requests are about to become unavailable would not be true there.
+            "cost_budgets_enforcing": budgets_mode == "enforce",
             "is_publish_blocked": getattr(this.module, 'is_publish_blocked', False),
             "publish_whitelist_project_ids": list(
                 getattr(this.module, 'publish_whitelist_project_ids', set())
