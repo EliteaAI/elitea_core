@@ -388,7 +388,7 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_project_member_default_limit", self.migrate_project_member_default_limit,
-                group="R-2.0.6",
+                group="R-2.0.5",
             )
             this.for_module("admin").module.register_admin_task(
                 "rename_skill_category", self.rename_skill_category,
