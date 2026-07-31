@@ -32,6 +32,7 @@ from .publish_utils import (
     ValidationChain,
     ValidationResult,
     generate_validation_token,
+    has_custom_icon,
     verify_validation_token,
 )
 from .constants import DEFAULT_FALLBACK_CATEGORY
@@ -151,8 +152,7 @@ class SkillDescriptionChecker(BaseChecker):
 
 class SkillIconChecker(BaseChecker):
     def check(self, data, result, *, context=None):
-        icon_meta = data.get('icon_meta')
-        if not icon_meta or not isinstance(icon_meta, dict):
+        if not has_custom_icon(data.get('icon_meta')):
             result.issue(
                 'critical', 'icon',
                 'No custom icon set',
@@ -597,6 +597,31 @@ def compute_skill_content_hash(instructions: str, name: str = '', description: s
         sort_keys=True, separators=(',', ':'),
     )
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def revalidate_skill_for_publish(
+    project_id: int,
+    skill_id: int,
+    version_id: int,
+    version_name: str,
+    category: Optional[str] = None,
+) -> dict:
+    """Deterministic-only re-check, in the same shape /publish_skill_validate
+    returns so callers can render it with one component.
+
+    A validation token pins only instructions/name/description, so everything
+    else the gate judges — icon, tags — can still be changed between validate
+    and publish. Re-running the deterministic half at publish time costs no AI
+    call and closes that window for the whole class, not one field at a time.
+    """
+    _, skill_data = build_skill_validation_input(
+        project_id, skill_id, version_id, version_name, category,
+    )
+    det = run_skill_deterministic_checks(
+        skill_data, version_name, category,
+        skill_id=skill_id, project_id=project_id,
+    )
+    return merge_skill_validation_results(det, {})
 
 
 def validate_skill_for_publish(
