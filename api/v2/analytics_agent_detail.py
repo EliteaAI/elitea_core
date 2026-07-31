@@ -236,19 +236,25 @@ if _API_AVAILABLE:
 
                     # LLM cost/tokens for this agent. Generation spans carry no
                     # entity_id, so we sum llm events sharing the agent's trace_ids
-                    # (same correlation used for tool calls above).
+                    # (same correlation used for tool calls above). Timestamp
+                    # filter re-applied so long-lived traces don't leak LLM
+                    # events from outside the requested window.
                     cost_row = session.query(
                         func.sum(AuditEvent.llm_cost).label("llm_cost"),
-                        func.sum(
-                            func.coalesce(AuditEvent.input_tokens, 0)
-                            + func.coalesce(AuditEvent.output_tokens, 0)
-                        ).label("total_tokens"),
+                        func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                        func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                        func.count().label("llm_calls"),
                     ).filter(
                         AuditEvent.trace_id.in_(
                             session.query(trace_subq.c.trace_id)
                         ),
                         AuditEvent.event_type == "llm",
-                    ).first()
+                    )
+                    if dt_from:
+                        cost_row = cost_row.filter(AuditEvent.timestamp >= dt_from)
+                    if dt_to:
+                        cost_row = cost_row.filter(AuditEvent.timestamp <= dt_to)
+                    cost_row = cost_row.first()
 
                     # Daily usage
                     daily_rows = base.with_entities(
@@ -268,8 +274,18 @@ if _API_AVAILABLE:
                             "avg_duration_ms": round(kpi.avg_duration_ms, 1) if kpi.avg_duration_ms else 0,
                             "errors": kpi.errors or 0,
                             "error_rate": round((kpi.errors or 0) / kpi.total_events * 100, 2) if kpi.total_events > 0 else 0,
-                            "total_tokens": (cost_row.total_tokens if cost_row else 0) or 0,
+                            "input_tokens": (cost_row.input_tokens if cost_row else 0) or 0,
+                            "output_tokens": (cost_row.output_tokens if cost_row else 0) or 0,
+                            "total_tokens": (
+                                ((cost_row.input_tokens or 0) + (cost_row.output_tokens or 0))
+                                if cost_row else 0
+                            ),
                             "llm_cost": float(cost_row.llm_cost) if cost_row and cost_row.llm_cost else 0.0,
+                            "avg_cost_per_call": (
+                                float(cost_row.llm_cost) / cost_row.llm_calls
+                                if cost_row and cost_row.llm_cost and cost_row.llm_calls
+                                else 0.0
+                            ),
                         },
                         "users_total": users_total,
                         "users_truncated": users_total > len(user_rows),

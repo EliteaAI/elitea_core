@@ -254,6 +254,7 @@ if _API_AVAILABLE:
                             func.coalesce(AuditEvent.input_tokens, 0)
                             + func.coalesce(AuditEvent.output_tokens, 0)
                         ).label("total_tokens"),
+                        func.count().label("calls"),
                     ).group_by(
                         app_trace_map.c.entity_id
                     ).order_by(func.sum(AuditEvent.llm_cost).desc()).limit(20).all()
@@ -264,6 +265,11 @@ if _API_AVAILABLE:
                             "entity_id": r.entity_id,
                             "total_cost": round(float(r.total_cost), 6) if r.total_cost else 0.0,
                             "total_tokens": r.total_tokens or 0,
+                            "calls": r.calls or 0,
+                            "avg_cost": (
+                                round(float(r.total_cost) / r.calls, 6)
+                                if r.total_cost and r.calls else 0.0
+                            ),
                         }
                         for r in agent_rows
                     ]

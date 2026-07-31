@@ -16,8 +16,13 @@ except ImportError:
 if _API_AVAILABLE:
     from datetime import datetime, timedelta, timezone
     from flask import request
-    from sqlalchemy import func, case, cast, Date, desc, asc
+    from sqlalchemy import func, case, cast, Date, desc, asc, or_
     from sqlalchemy.orm import aliased
+
+    from ...utils.constants import (
+        SYSTEM_USER_EMAILS,
+        SYSTEM_USER_EMAIL_PATTERN,
+    )
 
     def _parse_dates(args):
         date_from = args.get("date_from")
@@ -191,9 +196,23 @@ if _API_AVAILABLE:
 
             try:
                 with db.with_project_schema_session(None) as session:
+                    # System-user filter mirrors analytics_costs.py so the two
+                    # views agree on which rows count as "real user activity".
+                    _system_user_predicates = [
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
+                        ),
+                        or_(
+                            AuditEvent.user_email.is_(None),
+                            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
+                        ),
+                    ]
+
                     base = session.query(AuditEvent).filter(
                         AuditEvent.entity_type == "application",
                         AuditEvent.entity_id.isnot(None),
+                        *_system_user_predicates,
                     )
                     # Filter by project_id if provided (agents may span projects)
                     if project_id:
@@ -222,28 +241,51 @@ if _API_AVAILABLE:
                         AuditEvent.entity_id.isnot(None),
                         AuditEvent.trace_id.isnot(None),
                         AuditEvent.trace_id != "",
+                        *_system_user_predicates,
                     )
                     if project_id:
                         app_traces = app_traces.filter(
                             AuditEvent.project_id == project_id
                         )
+                    if dt_from:
+                        app_traces = app_traces.filter(AuditEvent.timestamp >= dt_from)
+                    if dt_to:
+                        app_traces = app_traces.filter(AuditEvent.timestamp <= dt_to)
                     app_traces = app_traces.group_by(AuditEvent.trace_id).subquery()
 
                     llm_ev = aliased(AuditEvent)
+                    _llm_system_user_predicates = [
+                        or_(
+                            llm_ev.user_email.is_(None),
+                            ~llm_ev.user_email.in_(SYSTEM_USER_EMAILS),
+                        ),
+                        or_(
+                            llm_ev.user_email.is_(None),
+                            ~llm_ev.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
+                        ),
+                    ]
                     cost_map = session.query(
                         app_traces.c.entity_id.label("entity_id"),
                         func.sum(llm_ev.llm_cost).label("llm_cost"),
+                        func.sum(func.coalesce(llm_ev.input_tokens, 0)).label("input_tokens"),
+                        func.sum(func.coalesce(llm_ev.output_tokens, 0)).label("output_tokens"),
                         func.sum(
                             func.coalesce(llm_ev.input_tokens, 0)
                             + func.coalesce(llm_ev.output_tokens, 0)
                         ).label("total_tokens"),
+                        func.count().label("llm_calls"),
                     ).select_from(llm_ev).join(
                         app_traces, llm_ev.trace_id == app_traces.c.trace_id,
                     ).filter(
                         llm_ev.event_type == "llm",
+                        *_llm_system_user_predicates,
                     )
                     if project_id:
                         cost_map = cost_map.filter(llm_ev.project_id == project_id)
+                    if dt_from:
+                        cost_map = cost_map.filter(llm_ev.timestamp >= dt_from)
+                    if dt_to:
+                        cost_map = cost_map.filter(llm_ev.timestamp <= dt_to)
                     cost_map = cost_map.group_by(app_traces.c.entity_id).subquery()
 
                     events_col = func.count().label("events")
@@ -260,12 +302,21 @@ if _API_AVAILABLE:
                     # each of an entity's application events with that entity's single
                     # cost-map row, so max() reads the value without inflating it by
                     # the application-event count (sum() would multiply it).
+                    input_tokens_col = func.coalesce(
+                        func.max(cost_map.c.input_tokens), 0
+                    ).label("input_tokens")
+                    output_tokens_col = func.coalesce(
+                        func.max(cost_map.c.output_tokens), 0
+                    ).label("output_tokens")
                     total_tokens_col = func.coalesce(
                         func.max(cost_map.c.total_tokens), 0
                     ).label("total_tokens")
                     llm_cost_col = func.coalesce(
                         func.max(cost_map.c.llm_cost), 0
                     ).label("llm_cost")
+                    llm_calls_col = func.coalesce(
+                        func.max(cost_map.c.llm_calls), 0
+                    ).label("llm_calls")
 
                     query = base.outerjoin(
                         cost_map, AuditEvent.entity_id == cost_map.c.entity_id,
@@ -276,8 +327,11 @@ if _API_AVAILABLE:
                         users_col,
                         avg_dur_col,
                         errors_col,
+                        input_tokens_col,
+                        output_tokens_col,
                         total_tokens_col,
                         llm_cost_col,
+                        llm_calls_col,
                     ).group_by(
                         AuditEvent.entity_id,
                     )
@@ -330,8 +384,14 @@ if _API_AVAILABLE:
                                 "users": r.users,
                                 "avg_duration_ms": round(r.avg_duration_ms, 1) if r.avg_duration_ms else 0,
                                 "errors": r.errors or 0,
+                                "input_tokens": r.input_tokens or 0,
+                                "output_tokens": r.output_tokens or 0,
                                 "total_tokens": r.total_tokens or 0,
                                 "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
+                                "avg_tokens_per_call": (
+                                    (r.total_tokens or 0) / r.llm_calls
+                                    if r.llm_calls else 0
+                                ),
                             }
                             for r in rows
                         ],

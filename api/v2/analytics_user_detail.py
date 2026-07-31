@@ -250,6 +250,17 @@ if _API_AVAILABLE:
                         AuditEvent.entity_id,
                     ).order_by(func.count().desc()).all()
 
+                    # LLM cost/tokens for this user. Correlation is user_id
+                    # directly (already in the base filter); no trace join needed.
+                    llm_kpi = base.with_entities(
+                        func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                        func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                        func.sum(AuditEvent.llm_cost).label("llm_cost"),
+                        func.count().label("llm_calls"),
+                    ).filter(
+                        AuditEvent.event_type == "llm",
+                    ).first()
+
                     # Daily activity by event type
                     daily_rows = base.with_entities(
                         cast(AuditEvent.timestamp, Date).label("day"),
@@ -279,6 +290,18 @@ if _API_AVAILABLE:
                             "agent_events": kpi.agent_events or 0,
                             "chat_events": kpi.chat_events or 0,
                             "errors": kpi.errors or 0,
+                            "input_tokens": (llm_kpi.input_tokens if llm_kpi else 0) or 0,
+                            "output_tokens": (llm_kpi.output_tokens if llm_kpi else 0) or 0,
+                            "total_tokens": (
+                                ((llm_kpi.input_tokens or 0) + (llm_kpi.output_tokens or 0))
+                                if llm_kpi else 0
+                            ),
+                            "llm_cost": float(llm_kpi.llm_cost) if llm_kpi and llm_kpi.llm_cost else 0.0,
+                            "avg_cost_per_call": (
+                                float(llm_kpi.llm_cost) / llm_kpi.llm_calls
+                                if llm_kpi and llm_kpi.llm_cost and llm_kpi.llm_calls
+                                else 0.0
+                            ),
                         },
                         "models": [
                             {
