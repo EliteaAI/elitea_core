@@ -9,6 +9,7 @@ from ...utils.skill_category_utils import validate_skill_category
 from ...utils.skill_publish_utils import (
     admin_publish_skill,
     is_skill_publish_blocked_for_project,
+    revalidate_skill_for_publish,
     user_publish_skill,
     validate_skill_for_publish,
     verify_skill_token_for_publish,
@@ -26,7 +27,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Publishes a skill version to the public project, making it "
                     "available to the broader community. Requires the version to "
                     "pass pre-publish validation; run /publish_skill_validate first "
-                    "to receive a validation_token that skips re-validation.",
+                    "to receive a validation_token that skips the AI half of it. "
+                    "The deterministic checks re-run here either way, so a version "
+                    "edited after validation is rejected.",
         request_body=SkillPublishRequest,
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
@@ -78,6 +81,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     )
                     if not is_valid:
                         return {"error": "validation_token_invalid", "msg": err_msg}, 400
+                    recheck = revalidate_skill_for_publish(
+                        project_id, skill_id, version_id, parsed.version_name,
+                        category=parsed.category,
+                    )
+                    if recheck["critical_issues"]:
+                        return {
+                            "error": "validation_failed",
+                            "msg": "Skill no longer meets the publishing requirements. "
+                                   "Run /publish_skill_validate again.",
+                            "validation_result": recheck,
+                        }, 400
                 else:
                     result = validate_skill_for_publish(
                         project_id, skill_id, version_id, parsed.version_name,

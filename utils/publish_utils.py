@@ -2807,12 +2807,19 @@ class DescriptionChecker(BaseChecker):
             )
 
 
+def has_custom_icon(icon_meta) -> bool:
+    """Resetting an entity to the default icon leaves an icon_meta dict with
+    blank name/url behind, so presence of the dict alone means nothing."""
+    if not isinstance(icon_meta, dict):
+        return False
+    return bool(str(icon_meta.get('url') or '').strip())
+
+
 class IconChecker(BaseChecker):
     """Checks for a custom icon via version meta.icon_meta."""
 
     def check(self, data, result, *, context=None):
-        icon_meta = data.get('icon_meta')
-        if not icon_meta or not isinstance(icon_meta, dict):
+        if not has_custom_icon(data.get('icon_meta')):
             result.issue(
                 'warnings', 'icon',
                 'No custom icon set',

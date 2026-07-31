@@ -157,10 +157,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if not version:
                 return {'ok': False, 'msg': f'There is no such version id {skill_version_id}'}, 404
 
+            icon_meta = update_input.as_entity_meta()
             if version.meta:
-                version.meta['icon_meta'] = update_input.dict()
+                version.meta['icon_meta'] = icon_meta
             else:
-                version.meta = {'icon_meta': update_input.dict()}
+                version.meta = {'icon_meta': icon_meta}
             session.commit()
 
         return {'updated': True}, 200
