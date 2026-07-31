@@ -23,6 +23,9 @@ class ProjectBudget(db.Base):
     currency: Mapped[str] = mapped_column(String(8), nullable=False, default='USD')
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
+    # Applies to any member with no limit of their own, between their row and the platform default
+    member_default_limit: Mapped[float] = mapped_column(Float, nullable=True)
+
     # Tracks the highest alert threshold already sent this period, so the 80% notification fires once
     last_alerted_pct: Mapped[int] = mapped_column(Integer, nullable=True)
     last_alerted_period: Mapped[str] = mapped_column(String(8), nullable=True)
@@ -38,6 +41,7 @@ class ProjectBudget(db.Base):
         return {
             'project_id': self.project_id,
             'monthly_limit': self.monthly_limit,
+            'member_default_limit': self.member_default_limit,
             'currency': self.currency,
             'enabled': self.enabled,
         }

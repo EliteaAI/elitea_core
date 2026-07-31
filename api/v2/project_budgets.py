@@ -37,15 +37,25 @@ def _owner_ids_for_search(rpc, search: str):
     return [user["id"] for user in matched] or None
 
 
-def _limit_source(row: dict, effective):
-    """Explain where the enforced limit came from, so an admin isn't surprised by it."""
-    if row and not row.get("enabled", True):
-        return "unlimited"
+def _limit_source(row: dict, effective, project_default=None):
+    """Explain where the enforced limit came from, so an admin isn't surprised by it.
+
+    project_default is the project's member default, passed only for member rows: it
+    separates "capped by this project" from "capped platform-wide". A member marked exempt
+    is still subject to it, so the label follows the resolved limit rather than the flag.
+    """
+    exempt = bool(row) and not row.get("enabled", True)
     #
-    if row and row.get("monthly_limit") is not None:
+    if row and not exempt and row.get("monthly_limit") is not None:
         return "explicit"
     #
-    return "default" if effective is not None else "unlimited"
+    if effective is None:
+        return "unlimited"
+    #
+    if project_default is not None and effective == project_default:
+        return "project_default"
+    #
+    return "default"
 
 
 class AdminAPI(api_tools.APIModeHandler):
@@ -214,6 +224,8 @@ class AdminAPI(api_tools.APIModeHandler):
                 "owner_email": owner.get("email"),
                 "is_personal": is_personal,
                 "monthly_limit": row.get("monthly_limit"),
+                # Carried so the edit dialog can prefill it without a second read
+                "member_default_limit": row.get("member_default_limit"),
                 "effective_limit": effective,
                 "limit_source": _limit_source(row, effective),
                 "currency": row.get("currency", "USD"),

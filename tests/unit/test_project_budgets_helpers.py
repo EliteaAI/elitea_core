@@ -166,5 +166,48 @@ class TestLimitSource(unittest.TestCase):
         )
 
 
+class TestLimitSourceProjectDefault(unittest.TestCase):
+    """Member rows also pass the project's member default, so the two tiers are told apart.
+
+    Without it an admin looking at a member capped by their own project would read
+    "Default" and go looking for a platform-wide setting that isn't the cause.
+    """
+
+    def test_effective_matching_the_project_default_is_attributed_to_it(self):
+        self.assertEqual(budgets._limit_source({}, 20.0, 20.0), "project_default")
+        self.assertEqual(budgets._limit_source(None, 20.0, 20.0), "project_default")
+
+    def test_platform_default_still_reads_as_default(self):
+        # The project has its own default, but this member is capped lower/higher by the platform
+        self.assertEqual(budgets._limit_source({}, 50.0, 20.0), "default")
+
+    def test_no_project_default_behaves_exactly_as_before(self):
+        self.assertEqual(budgets._limit_source({}, 25.0, None), "default")
+        self.assertEqual(budgets._limit_source({}, None, None), "unlimited")
+
+    def test_explicit_member_row_still_wins(self):
+        self.assertEqual(
+            budgets._limit_source({"enabled": True, "monthly_limit": 5.0}, 5.0, 20.0), "explicit",
+        )
+
+    def test_member_marked_unlimited_is_still_labelled_by_the_project_default(self):
+        # The resolver now caps this member at 20.0, so calling it "unlimited" would
+        # contradict the number shown beside it
+        self.assertEqual(
+            budgets._limit_source({"enabled": False, "monthly_limit": 5.0}, 20.0, 20.0),
+            "project_default",
+        )
+
+    def test_exempt_member_with_no_project_default_is_unlimited(self):
+        self.assertEqual(
+            budgets._limit_source({"enabled": False, "monthly_limit": 5.0}, None, None),
+            "unlimited",
+        )
+
+    def test_zero_project_default_is_a_real_limit(self):
+        # Zero blocks all shared-model usage; it must not read as "no project default"
+        self.assertEqual(budgets._limit_source({}, 0.0, 0.0), "project_default")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -32,6 +32,10 @@ def _member_budget_rows(project_id: int):
     stored = rpc.timeout(10).elitea_core_list_user_budgets(project_id=project_id) or []
     by_user = {row["user_id"]: row for row in stored}
     #
+    # The value every member with no limit of their own inherits, shown as its own source
+    project_budget = rpc.timeout(5).elitea_core_get_project_budget(project_id=project_id) or {}
+    member_default = project_budget.get("member_default_limit")
+    #
     # One LiteLLM call for all members rather than one per row. Safe to batch because
     # different users' tags cover disjoint requests, unlike a project tag and its users'.
     try:
@@ -64,7 +68,7 @@ def _member_budget_rows(project_id: int):
             "roles": user_roles.get(user_id) or user_roles.get(str(user_id)) or [],
             "monthly_limit": row.get("monthly_limit"),
             "effective_limit": effective,
-            "limit_source": _limit_source(row, effective),
+            "limit_source": _limit_source(row, effective, member_default),
             "currency": row.get("currency", "USD"),
             "enabled": row.get("enabled", False),
             "spend": spend,
@@ -81,6 +85,7 @@ def _member_budget_rows(project_id: int):
         "rows": rows,
         "total": len(rows),
         "warning_pct": warning_pct,
+        "member_default_limit": member_default,
     }
 
 
