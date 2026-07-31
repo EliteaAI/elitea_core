@@ -27,6 +27,22 @@ MEMBER_PARAMS = [
 ]
 
 
+def _is_personal_project(project_id: int, user_id: int):
+    """True when this project is that user's own personal project.
+
+    A personal project has one member, so its project budget already is that member's
+    budget and no member-scoped limit applies there.
+    """
+    try:
+        personal_id = rpc_tools.RpcMixin().rpc.timeout(5).projects_get_personal_project_id(
+            user_id=user_id,
+        )
+    except Exception:  # pylint: disable=W0703
+        return False
+    #
+    return personal_id is not None and int(personal_id) == int(project_id)
+
+
 def _user_budget_state(project_id: int, user_id: int):
     """Merge the member's effective limit with LiteLLM's current-month spend."""
     rpc = rpc_tools.RpcMixin().rpc
@@ -45,6 +61,10 @@ def _user_budget_state(project_id: int, user_id: int):
     project_budget = rpc.timeout(5).elitea_core_get_project_budget(project_id=project_id) or {}
     member_default = project_budget.get("member_default_limit")
     #
+    # A personal project's one member is capped by the project budget alone, so no
+    # member-scoped limit is reported here either
+    personal = _is_personal_project(project_id, user_id)
+    #
     # The enforced limit may come from the project's member default or a platform default,
     # so it is resolved the same way enforcement does rather than read off the stored row
     try:
@@ -54,7 +74,7 @@ def _user_budget_state(project_id: int, user_id: int):
         limit = limits.get(user_id, limits.get(str(user_id)))
     except Exception:  # pylint: disable=W0703
         stored = budget.get("monthly_limit") if budget.get("enabled", True) else None
-        limit = member_default if stored is None else stored
+        limit = None if personal else (member_default if stored is None else stored)
     #
     spent = float(spend.get("spend", 0) or 0)
     #
@@ -63,7 +83,11 @@ def _user_budget_state(project_id: int, user_id: int):
         "user_id": user_id,
         "monthly_limit": budget.get("monthly_limit"),
         "effective_limit": limit,
-        "limit_source": _limit_source(budget, limit, member_default),
+        # A stored row on a personal project is not enforced, so it must not read as
+        # "explicit" against an effective limit of None
+        "limit_source": "unlimited" if personal else _limit_source(
+            budget, limit, member_default,
+        ),
         "currency": budget.get("currency", "USD"),
         "enabled": budget.get("enabled", False),
         "spend": spent,
@@ -166,14 +190,21 @@ class AdminAPI(api_tools.APIModeHandler):
             "Create or replace one member's limit within a project and push it to the LLM "
             "proxy, so it applies on their next call.\n\n"
             "Caps a single member's share without changing the project's own limit; the "
-            "stricter of the two decides whether a call is allowed."
+            "stricter of the two decides whether a call is allowed.\n\n"
+            "Rejected for a personal project: its one member is already capped by the "
+            "project's own budget, so a member limit there would never be enforced."
         ),
         tags=[OPENAPI_TAG],
         parameters=MEMBER_PARAMS,
         request_body=BUDGET_WRITE_BODY,
         responses={
             "200": {"description": "The member's budget state after the write."},
-            "400": {"description": "monthly_limit was negative or not a number."},
+            "400": {
+                "description": (
+                    "monthly_limit was negative or not a number, or the project is a "
+                    "personal project, where member budgets do not apply."
+                ),
+            },
         },
     )
     @auth.decorators.check_api(
@@ -186,6 +217,16 @@ class AdminAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def put(self, project_id: int, user_id: int, **kwargs):
+        # Refused rather than stored and ignored: enforcement skips member limits on a
+        # personal project, so accepting one would show a limit that never applies
+        if _is_personal_project(project_id, user_id):
+            return {
+                "error": (
+                    "Member budgets do not apply to a personal project. Set the "
+                    "project's own budget instead."
+                ),
+            }, 400
+        #
         try:
             payload = _parse_payload(dict(request.json or {}))
         except (TypeError, ValueError) as error:
