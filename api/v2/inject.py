@@ -1,25 +1,29 @@
 from flask import request
+from sqlalchemy import desc
 from tools import api_tools, auth, db, config as c, register_openapi
 from tools import serialize
 from pylon.core.tools import log
 
 from ...models.conversation import Conversation
 from ...models.message_group import ConversationMessageGroup
+from ...models.message_items.base import MessageItem
 from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
-from ...models.pd.participant import ParticipantEntityUser
 from ...models.enums.all import ParticipantTypes
-from ...utils.participant_utils import get_or_create_one
 from ...utils.sio_utils import get_chat_room, SioEvents
 from ...utils.constants import PROMPT_LIB_MODE
 
 import uuid as _uuid
 
+# Injected text shares the turn's context window with tool results, and
+# summarization cannot relieve pressure from inside the tool loop.
+MAX_INJECTION_CHARS = 4000
+
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Inject Mid-Turn Message",
-        description="Inject a user message into a conversation while an agent turn is still running (Phase 0 POC).",
+        description="Inject a user message into a conversation while an agent turn is still running.",
         tags=["elitea_core/chat"],
         available_to_users=True,
     )
@@ -38,9 +42,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_input = (raw.get("user_input") or "").strip()
         if not user_input:
             return {"error": "user_input is required"}, 400
+        if len(user_input) > MAX_INJECTION_CHARS:
+            return {
+                "error": f"Injected message too long ({len(user_input)} chars, "
+                         f"max {MAX_INJECTION_CHARS}). Send it as a new message instead."
+            }, 400
 
         injection_id = raw.get("injection_id") or str(_uuid.uuid4())
-        current_user = auth.current_user()
 
         with db.get_session(project_id) as session:
             conversation = session.query(Conversation).filter(
@@ -49,35 +57,47 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if conversation is None:
                 return {"error": f"No conversation found with uuid {conversation_uuid}"}, 404
 
-            # Effective thread_id must match what the running turn registered
-            # (ensure_thread_id falls back to the conversation uuid when unset).
+            # A turn is in flight iff its assistant group is still streaming. That
+            # group's reply_to_id points at the user request group we append to.
+            streaming_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.conversation_id == conversation.id,
+                ConversationMessageGroup.is_streaming.is_(True),
+                ConversationMessageGroup.reply_to_id.isnot(None),
+            ).order_by(desc(ConversationMessageGroup.created_at)).first()
+            if streaming_group is None:
+                return {"error": "No agent turn is currently running in this conversation"}, 409
+
+            request_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.id == streaming_group.reply_to_id
+            ).first()
+            if request_group is None:
+                return {"error": "Running turn has no user request group to append to"}, 409
+            if request_group.author_participant.entity_name != ParticipantTypes.user:
+                return {"error": "Running turn was not initiated by a user message"}, 409
+
             thread_id = raw.get("thread_id") or str(conversation.uuid)
 
-            author_participant, _ = get_or_create_one(
-                session=session,
-                entity_name=ParticipantTypes.user,
-                entity_meta=ParticipantEntityUser(id=current_user['id']),
-            )
+            # Append to the user's own request group: role is resolved per group,
+            # so this replays as a multi-part user turn with no author ambiguity.
+            max_index = session.query(MessageItem.order_index).filter(
+                MessageItem.message_group_id == request_group.id
+            ).order_by(desc(MessageItem.order_index)).limit(1).scalar()
+            next_index = (max_index or 0) + 1
 
-            msg_group = ConversationMessageGroup(
-                uuid=str(_uuid.uuid4()),
-                conversation=conversation,
-                author_participant=author_participant,
-                meta={'injection_id': injection_id},
-            )
             msg = TextMessageItem(
-                message_group=msg_group,
+                message_group=request_group,
                 item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
                 content=user_input,
-                order_index=0,
+                order_index=next_index,
+                meta={'injection_id': injection_id},
             )
-            session.add(msg_group)
             session.add(msg)
             session.commit()
-            session.refresh(msg_group)
+            session.refresh(request_group)
 
-            group_payload = serialize(MessageGroupDetail.model_validate(msg_group))
-            group_uuid = str(msg_group.uuid)
+            group_payload = serialize(MessageGroupDetail.model_validate(request_group))
+            item_uuid = str(msg.uuid)
+            group_uuid = str(request_group.uuid)
 
         # Notify the running agent turn (indexer) to fold this input in.
         try:
@@ -90,7 +110,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except Exception as e:
             log.error(f"Failed to emit inject event for thread {thread_id}: {e}")
 
-        # Reflect the injected user message to all connected clients.
+        # Reflect the injected chunk to all connected clients.
         try:
             self.module.context.sio.emit(
                 event=SioEvents.chat_predict.value,
@@ -104,6 +124,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             'injection_id': injection_id,
             'thread_id': thread_id,
             'message_group_uuid': group_uuid,
+            'message_item_uuid': item_uuid,
+            'order_index': next_index,
             'message_group': group_payload,
         }, 201
 
