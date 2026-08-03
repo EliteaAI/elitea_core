@@ -15,10 +15,10 @@ class ContinuePredictPayload(BaseModel):
         ..., description="UUID of the paused response message to resume (from the HITL interrupt).")
     hitl_resume: bool = Field(
         True, description="Whether this request resumes a HITL interrupt.")
-    hitl_action: Optional[Literal["approve", "reject", "edit", "block_with_comment"]] = Field(
+    hitl_action: Optional[Literal["approve", "reject", "edit", "block_with_comment", "answer"]] = Field(
         None, description="HITL decision. Required when hitl_resume is true.")
-    hitl_value: Optional[str] = Field(
-        None, description="Edited text for 'edit', or the user's note for 'block_with_comment'.")
+    hitl_value: Optional[str | Dict[str, Any]] = Field(
+        None, description="Edited text for 'edit', the user's note for 'block_with_comment', or the answers object for a clarifying-question 'answer'.")
     hitl_decisions: Optional[List[Dict[str, Any]]] = Field(
         None, description="Per-child HITL decisions for a parallel sub-agent resume.")
     user_input: Optional[str] = Field(
