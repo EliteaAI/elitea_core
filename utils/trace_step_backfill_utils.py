@@ -31,9 +31,12 @@ from .trace_step_writer import sync_trace_steps
 MAX_TOOL_OUTPUT_CHARS = 200000
 TRUNCATION_SUFFIX = '…[truncated]'
 
+DEFAULT_BATCH_SIZE = 400
+MAX_BATCH_SIZE = 5000
+
 
 def parse_backfill_params(raw_param: str) -> dict:
-    """Parse "project_ids=<all|N|lo-hi>;cutoff_days=<180|all>;dry_run=<true|false>"; raises ValueError on bad input."""
+    """Parse "project_ids=<all|N|lo-hi>;cutoff_days=<180|all>;dry_run=<true|false>;batch_size=<int>"; raises ValueError on bad input."""
     tokens = [t.strip() for t in raw_param.split(';') if t.strip()]
     params = {}
     for token in tokens:
@@ -63,10 +66,24 @@ def parse_backfill_params(raw_param: str) -> dict:
     else:
         raise ValueError(f"Invalid dry_run value: {dry_run_raw!r} (expected true/false)")
 
+    batch_size_raw = params.get('batch_size', str(DEFAULT_BATCH_SIZE)).strip()
+    try:
+        batch_size = int(batch_size_raw)
+    except ValueError:
+        raise ValueError(f"Invalid batch_size: {batch_size_raw!r} (expected int)")  # pylint: disable=W0707
+    if batch_size < 1:
+        raise ValueError(f"Invalid batch_size: {batch_size} (must be >= 1)")
+    if batch_size > MAX_BATCH_SIZE:
+        log.warning(
+            "parse_backfill_params: batch_size %s exceeds max %s, clamping", batch_size, MAX_BATCH_SIZE,
+        )
+        batch_size = MAX_BATCH_SIZE
+
     return {
         'project_id_spec': project_id_spec,
         'cutoff_days': cutoff_days,
         'dry_run': dry_run,
+        'batch_size': batch_size,
     }
 
 
@@ -76,6 +93,7 @@ def parse_backfill_params(raw_param: str) -> dict:
 _CANDIDATE_SQL = """
 SELECT
     g.id,
+    g.created_at,
     (SELECT jsonb_object_agg(
         key,
         CASE WHEN length(value->>'tool_output') > :cap
@@ -100,8 +118,15 @@ FROM {table} g
 WHERE g.is_streaming = false AND (g.meta ? 'tool_calls' OR g.meta ? 'thinking_steps')
 {cutoff_clause}
 AND NOT EXISTS (SELECT 1 FROM {trace_table} t WHERE t.message_group_id = g.id)
-ORDER BY g.created_at DESC
+{cursor_clause}
+ORDER BY g.created_at DESC, g.id DESC
+LIMIT :batch_size
 """  # nosec B608 - project_id is platform-resolved (resolve_target_project_ids), not user input
+
+# Keyset cursor on (created_at, id) — created_at DESC, id DESC matches _CANDIDATE_SQL's ORDER BY.
+# Cursor params are omitted entirely (not passed as NULL) on the first batch: `(x, y) < (NULL, NULL)`
+# is never true in SQL and would silently return zero rows.
+_CURSOR_CLAUSE = "AND (g.created_at, g.id) < (:last_created_at, :last_id)"
 
 _STREAMING_SKIP_COUNT_SQL = """
 SELECT count(*) FROM {table}
@@ -129,8 +154,16 @@ WHERE id = :group_id
 """  # nosec B608
 
 
-def backfill_project(session, project_id: int, cutoff_days, dry_run: bool, yield_to_hub) -> dict:
-    """Backfill one project's message groups. Returns the reconciliation counters dict."""
+def backfill_project(
+    session, project_id: int, cutoff_days, dry_run: bool, yield_to_hub, batch_size: int = DEFAULT_BATCH_SIZE,
+) -> dict:
+    """Backfill one project's message groups, in keyset-paginated batches. Returns the counters dict.
+
+    Batching bounds how many candidate rows (each carrying that group's tool_calls/thinking_steps
+    JSON) are ever in memory at once; expunge_all() between batches then drops the ORM identity-map
+    entries sync_trace_steps() accumulated for the batch just processed. Both guard against the OOM
+    in issue #6089, where a single unbounded fetchall() loaded every candidate row for a project.
+    """
     group_table = f"p_{project_id}.chat_message_group"
     trace_step_table = f"p_{project_id}.chat_message_trace_step"
 
@@ -151,6 +184,7 @@ def backfill_project(session, project_id: int, cutoff_days, dry_run: bool, yield
         'truncated_results': 0,
         'meta_stripped': 0,
         'errors': 0,
+        'batches': 0,
     }
 
     counters['skipped_streaming'] = session.execute(
@@ -163,46 +197,71 @@ def backfill_project(session, project_id: int, cutoff_days, dry_run: bool, yield
         cutoff_params,
     ).scalar() or 0
 
-    candidates = session.execute(
-        text(_CANDIDATE_SQL.format(table=group_table, trace_table=trace_step_table, cutoff_clause=cutoff_clause)),
-        {'cap': MAX_TOOL_OUTPUT_CHARS, 'suffix': TRUNCATION_SUFFIX, **cutoff_params},
-    ).fetchall()
+    cursor = None
+    while True:
+        cursor_clause = _CURSOR_CLAUSE if cursor else ""
+        cursor_params = {'last_created_at': cursor[0], 'last_id': cursor[1]} if cursor else {}
 
-    for row in candidates:
-        yield_to_hub()
+        rows = session.execute(
+            text(_CANDIDATE_SQL.format(
+                table=group_table, trace_table=trace_step_table,
+                cutoff_clause=cutoff_clause, cursor_clause=cursor_clause,
+            )),
+            {
+                'cap': MAX_TOOL_OUTPUT_CHARS, 'suffix': TRUNCATION_SUFFIX,
+                'batch_size': batch_size, **cutoff_params, **cursor_params,
+            },
+        ).fetchall()
 
-        tool_calls = row.tool_calls or {}
-        thinking_steps = row.thinking_steps or []
-        if not tool_calls and not thinking_steps:
-            counters['skipped_no_keys'] += 1
-            continue
+        if not rows:
+            break
 
-        counters['scanned'] += 1
-        if row.any_truncated:
-            counters['truncated_results'] += 1
+        for row in rows:
+            yield_to_hub()
 
-        if dry_run:
-            counters['migrated'] += 1
-            continue
+            tool_calls = row.tool_calls or {}
+            thinking_steps = row.thinking_steps or []
+            if not tool_calls and not thinking_steps:
+                counters['skipped_no_keys'] += 1
+                continue
 
-        try:
-            sync_trace_steps(session, row.id, tool_calls, thinking_steps)
-            session.execute(
-                text(_STRIP_AND_MARK_SQL.format(table=group_table)),
-                {
-                    'group_id': row.id,
-                    'migrated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                },
-            )
-            session.commit()
-            counters['migrated'] += 1
-            counters['meta_stripped'] += 1
-        except Exception:  # pylint: disable=W0703
-            session.rollback()
-            counters['errors'] += 1
-            log.exception(
-                "backfill_legacy_trace_steps: error migrating project %s group %s",
-                project_id, row.id,
-            )
+            counters['scanned'] += 1
+            if row.any_truncated:
+                counters['truncated_results'] += 1
+
+            if dry_run:
+                counters['migrated'] += 1
+                continue
+
+            try:
+                sync_trace_steps(session, row.id, tool_calls, thinking_steps)
+                session.execute(
+                    text(_STRIP_AND_MARK_SQL.format(table=group_table)),
+                    {
+                        'group_id': row.id,
+                        'migrated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    },
+                )
+                session.commit()
+                counters['migrated'] += 1
+                counters['meta_stripped'] += 1
+            except Exception:  # pylint: disable=W0703
+                session.rollback()
+                counters['errors'] += 1
+                log.exception(
+                    "backfill_legacy_trace_steps: error migrating project %s group %s",
+                    project_id, row.id,
+                )
+
+        cursor = (rows[-1].created_at, rows[-1].id)
+        counters['batches'] += 1
+        session.expunge_all()
+        log.info(
+            "backfill_legacy_trace_steps: project %s batch %s (rows=%s) — %s",
+            project_id, counters['batches'], len(rows), counters,
+        )
+
+        if len(rows) < batch_size:
+            break
 
     return counters
