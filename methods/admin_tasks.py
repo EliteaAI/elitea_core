@@ -1485,7 +1485,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def backfill_legacy_trace_steps(self, *args, **kwargs):
         """Backfill legacy meta.tool_calls/thinking_steps into message_trace_step.
 
-        Param: "project_ids=<all|N|lo-hi>;cutoff_days=<180|all>;dry_run=<true|false>" (dry_run defaults true).
+        Param: "project_ids=<all|N|lo-hi>;cutoff_days=<180|all>;dry_run=<true|false>;batch_size=<int>"
+        (dry_run defaults true, batch_size defaults 400).
         """
         raw_param = kwargs.get("param", "") or ""
         try:
@@ -1498,8 +1499,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         prefix = "[DRY RUN] " if parsed['dry_run'] else ""
         log.info(
-            "%sStarting backfill_legacy_trace_steps (project_ids=%s, cutoff_days=%s, dry_run=%s)",
-            prefix, parsed['project_id_spec'], parsed['cutoff_days'], parsed['dry_run'],
+            "%sStarting backfill_legacy_trace_steps (project_ids=%s, cutoff_days=%s, dry_run=%s, batch_size=%s)",
+            prefix, parsed['project_id_spec'], parsed['cutoff_days'], parsed['dry_run'], parsed['batch_size'],
         )
         start_ts = time.time()
 
@@ -1517,6 +1518,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 with db.with_project_schema_session(project_id) as session:
                     counters = backfill_project(
                         session, project_id, parsed['cutoff_days'], parsed['dry_run'], yield_to_hub,
+                        batch_size=parsed['batch_size'],
                     )
             except Exception:  # pylint: disable=W0703
                 log.exception("backfill_legacy_trace_steps: error in project %s", project_id)
