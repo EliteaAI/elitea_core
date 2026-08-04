@@ -124,6 +124,27 @@
       "default": "MCP",
       "requires_restart": false
     },
+    "is_midturn_injection_blocked": {
+      "type": "boolean",
+      "title": "Block Mid-turn Input",
+      "description": "When enabled, sending input into a running agent turn is blocked platform-wide except for whitelisted projects.",
+      "path": "midturn_injection_guardrail.is_blocked",
+      "section": "guardrails",
+      "default": false,
+      "requires_restart": false
+    },
+    "midturn_injection_whitelist_project_ids": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "title": "Mid-turn Input Allowed Projects",
+      "description": "Projects where mid-turn input remains allowed when blocked globally. If empty, mid-turn input is blocked for all projects.",
+      "path": "midturn_injection_guardrail.whitelist_project_ids",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false,
+      "enum_source": "projects",
+      "visible_when": { "field": "is_midturn_injection_blocked", "value": true }
+    },
     "is_publish_blocked": {
       "type": "boolean",
       "title": "Block Agent Publishing",

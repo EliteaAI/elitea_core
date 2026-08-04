@@ -132,3 +132,42 @@ def test_thinking_delta_replaces_same_run_without_changing_order():
     )
 
     assert merged == [{'tool_run_id': 'llm-1', 'text': 'complete'}]
+
+
+def test_injection_marker_survives_the_accumulator_round_trip():
+    """A mid-turn injection pin must not degrade into a plain thinking step.
+
+    Every partial save rebuilds rows from entries reconstructed off the table, so if the
+    marker (or its text) is dropped on either leg the pin silently loses its identity —
+    and the text is only in attrs, since the list path never selects the text column.
+    """
+    entry = {
+        'tool_run_id': 'injection_abc',
+        'type': 'midturn_injection',
+        'text': 'analyze formats only',
+        'timestamp_start': '2026-08-04T10:00:00+00:00',
+        'generation_info': {'midturn_injection_id': 'abc'},
+        'message': {'response_metadata': {'midturn_injection_id': 'abc'}},
+    }
+
+    row = thinking_step_to_row(1, entry)
+    assert row.attrs['midturn_injection_id'] == 'abc'
+    assert row.attrs['midturn_injection_text'] == 'analyze formats only'
+    assert row.has_visible_content is True
+
+    # Reconstruct as the accumulator does, then re-derive the row.
+    rebuilt_entry = trace_step_writer._row_to_thinking_step(row)
+    assert rebuilt_entry['generation_info'] == {'midturn_injection_id': 'abc'}
+
+    rebuilt_row = thinking_step_to_row(1, {**rebuilt_entry, 'text': row.text})
+    assert rebuilt_row.attrs['midturn_injection_id'] == 'abc'
+    assert _row_key(rebuilt_row) == _row_key(row)
+
+
+def test_ordinary_thinking_step_gets_no_injection_marker():
+    row = thinking_step_to_row(1, {
+        'tool_run_id': 'llm-1',
+        'text': 'reasoning',
+        'message': {'response_metadata': {}},
+    })
+    assert 'midturn_injection_id' not in (row.attrs or {})

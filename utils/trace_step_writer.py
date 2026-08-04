@@ -224,6 +224,17 @@ def thinking_step_to_row(msg_group_id: int, entry: dict) -> MessageTraceStep:
         attrs['response_metadata'] = display_response_metadata
     text = entry.get('text')
     thinking = entry.get('thinking')
+    # Mid-turn injection marker: the id is what tells the UI to draw this step as a
+    # user interjection rather than model reasoning. Kept in attrs so no new column
+    # is needed and the step round-trips through _row_to_thinking_step unchanged.
+    injection_id = (entry.get('generation_info') or {}).get('midturn_injection_id')
+    if injection_id:
+        attrs['midturn_injection_id'] = _bounded_string(injection_id)
+        # The list path never selects `text` (heavy, detail-only), but this pin has to
+        # show the user's own words at rest. Injected text is endpoint-capped and then
+        # bounded again here, so it cannot grow the sidecar unexpectedly.
+        if isinstance(text, str) and text.strip():
+            attrs['midturn_injection_text'] = _bounded_string(text)
     has_visible_content = bool(
         (isinstance(text, str) and text.strip())
         or (isinstance(thinking, str) and thinking.strip())
@@ -282,7 +293,15 @@ def _row_to_thinking_step(row: MessageTraceStep) -> dict:
     attrs = row.attrs if isinstance(row.attrs, dict) else {}
     resp_meta = dict(attrs.get('response_metadata') or {})
     resp_meta['model_name'] = row.model_name  # promoted column is source of truth
+    # Round-trip the injection marker: the accumulator rebuilds rows from these
+    # entries on every partial save, so dropping it here would silently downgrade
+    # an injection pin into an ordinary thinking step.
+    generation_info = (
+        {'midturn_injection_id': attrs['midturn_injection_id']}
+        if attrs.get('midturn_injection_id') else None
+    )
     return {
+        **({'generation_info': generation_info} if generation_info else {}),
         'tool_run_id': row.run_id,
         'parent_agent_name': row.parent_agent_name,
         'parent_agent_call_id': row.parent_agent_call_id,

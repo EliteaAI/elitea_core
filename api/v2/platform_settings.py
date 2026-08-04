@@ -9,6 +9,10 @@ from tools import api_tools, auth, config as c, rpc_tools, this
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.mcp_config import get_mcp_category_name, is_mcp_exposure_enabled, is_mcp_in_menu_enabled
+from ...utils.midturn_injection_utils import (
+    get_midturn_injection_blocked,
+    get_midturn_injection_whitelist,
+)
 from ...utils.skill_publish_utils import get_skill_publish_blocked, get_skill_publish_whitelist
 
 
@@ -58,6 +62,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ),
             "is_skill_publish_blocked": get_skill_publish_blocked(),
             "skill_publish_whitelist_project_ids": list(get_skill_publish_whitelist()),
+            "is_midturn_injection_blocked": get_midturn_injection_blocked(),
+            "midturn_injection_whitelist_project_ids": list(
+                get_midturn_injection_whitelist()
+            ),
         }, 200
 
 
