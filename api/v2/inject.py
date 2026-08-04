@@ -10,6 +10,7 @@ from ...models.message_items.base import MessageItem
 from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
 from ...models.enums.all import ParticipantTypes
+from ...utils.midturn_injection_utils import is_midturn_injection_blocked_for_project
 from ...utils.sio_utils import get_chat_room, SioEvents
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -38,6 +39,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def post(self, project_id: int, conversation_uuid: str):
+        if is_midturn_injection_blocked_for_project(project_id):
+            return {"error": "Mid-turn input is not enabled for this project"}, 403
+
         raw = dict(request.json or {})
         user_input = (raw.get("user_input") or "").strip()
         if not user_input:
