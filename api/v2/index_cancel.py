@@ -28,18 +28,45 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return validation_error
         #
         log.debug(f"Attempting to cancel index {index_name} in toolkit {toolkit_id} (task {task_id})")
+        cancelled = False
         with get_session_for_schema(connection_string, toolkit_name_id) as session:
             meta = get_toolkit_index_meta(session, index_name)
+            if meta is None:
+                # Row already gone (e.g. deleted from another tab) — nothing to stop,
+                # but "could not be stopped" would be the wrong story for the caller.
+                log.debug(f"No index_meta to cancel for index_name={index_name}")
+                return {"ok": True, "cancelled": False, "reason": "not_found"}, 200
+            row_task_id = meta.cmetadata.get("task_id")
             log.debug(f"Expected task_id to cancel: {task_id}")
-            log.debug(f"Actual task_id to cancel: {meta.cmetadata.get('task_id') if meta else 'No meta to get task_id'}")
-            if meta and meta.cmetadata.get("task_id") == task_id:
+            log.debug(f"Actual task_id to cancel: {row_task_id}")
+            # A null row id is still cancellable (the id can be lost while a run is
+            # live); a mismatch means the row belongs to a different run that this
+            # possibly-stale request must not touch.
+            if row_task_id in (None, task_id):
+                # Kill only ids corroborated server-side — by the row, or by the
+                # registry, which still names the task after a lost update wiped the
+                # row's id. A bare client-held id must not be able to stop tasks.
+                corroborated = bool(task_id) and row_task_id == task_id
+                if not corroborated and task_id:
+                    # Registry keys come from event payloads, these ids from Flask path
+                    # converters — normalize so an int/str drift can't silently degrade
+                    # corroboration to never-kill.
+                    wanted = (str(project_id), str(toolkit_id), str(index_name))
+                    with self.module.active_index_tasks_lock:
+                        entries = self.module.active_index_tasks.get(str(task_id)) or {}
+                        corroborated = any(
+                            (str(p), str(t), str(n)) == wanted for (p, t, n) in entries
+                        )
                 # Try to stop the task (best-effort)
-                if task_id and self.module.task_node is not None:
+                if corroborated and self.module.task_node is not None:
                     try:
                         log.debug(f"Attempting to stop indexer's task {task_id}")
                         self.module.task_node.stop_task(task_id)
                     except Exception as e:
                         log.warning(f"Failed to stop task {task_id}: {e}. Proceeding with cleanup.")
+                elif task_id:
+                    log.warning(f"Skipping task stop for index {index_name}: task {task_id} not "
+                                f"corroborated by row or registry (task may already be dead)")
                 log.debug(f"Attempting to update index meta to 'cancelled' state for index {index_name}")
                 try:
                     cancelled = cancel_toolkit_index_meta(
@@ -58,7 +85,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         "ok": False,
                         "error": str(e)
                     }, 400
-        return None, 204
+        return {"ok": True, "cancelled": bool(cancelled)}, 200
 
 
 class API(api_tools.APIBase):
