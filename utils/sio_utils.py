@@ -69,6 +69,8 @@ class SioEvents(StrEnum):
     tts_error = 'tts_error'
     tts_word_timings = 'tts_word_timings'
 
+    next_input_suggestion_ready = 'next_input_suggestion_ready'
+
 
 class SioValidationError(Exception):
     def __init__(self, sio, sid: str | None, event: str, error, stream_id: str, message_id: str | None = None):
