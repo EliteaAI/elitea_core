@@ -4,7 +4,7 @@ from datetime import datetime, UTC
 from flask import request
 from pydantic import ValidationError
 from pylon.core.tools import log
-from sqlalchemy import cast, create_engine, inspect, Numeric, nullslast
+from sqlalchemy import cast, inspect, Numeric, nullslast
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -17,6 +17,7 @@ from ...utils.application_tools import (
     get_session_for_schema,
     is_index_stale,
     clean_up_schedule_in_toolkit,
+    _get_pgvector_engine,
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import get_toolkit_config
@@ -36,7 +37,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if validation_error:
             return validation_error
         #
-        engine = create_engine(connection_string)
+        engine = _get_pgvector_engine(connection_string)
         inspector = inspect(engine)
         table_exists = inspector.has_table("langchain_pg_embedding", schema=toolkit_name_id)
         if not table_exists:

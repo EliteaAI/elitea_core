@@ -421,11 +421,9 @@ def _get_pgvector_engine(conn_str: str):
     with _PGVECTOR_ENGINE_CACHE_LOCK:
         engine = _PGVECTOR_ENGINE_CACHE.get(conn_str)
         if engine is None:
-            # Never disposed, so cap idle retention per cached engine.
+            # Cached for the process lifetime, so recycle before the pooler reaps.
             engine = create_engine(
                 conn_str,
-                pool_size=1,
-                max_overflow=4,
                 pool_recycle=3600,
                 pool_pre_ping=True,
             )
@@ -1269,7 +1267,8 @@ def ensure_pgvector_schema_and_tables(connection_string: str, schema: str, vecto
     from sqlalchemy.schema import CreateSchema
     from pgvector.sqlalchemy import Vector
 
-    engine = create_engine(connection_string)
+    # Models below qualify the schema explicitly, so the untranslated engine is correct.
+    engine = _get_pgvector_engine(connection_string)
     with engine.begin() as conn:
         conn.execute(CreateSchema(schema, if_not_exists=True))
 
@@ -1316,37 +1315,8 @@ def ensure_pgvector_schema_and_tables(connection_string: str, schema: str, vecto
     Base.metadata.create_all(engine)
 
 
-_SCHEMA_ENGINE_CACHE = {}
-_SCHEMA_ENGINE_CACHE_LOCK = threading.Lock()
 _ENSURED_SCHEMAS = set()
 _ENSURED_SCHEMAS_LOCK = threading.Lock()
-
-
-def _get_schema_engine(connection_string: str, schema: str):
-    """Process-lifetime engine per (DSN, schema); never disposed, like _get_pgvector_engine."""
-    key = (connection_string, schema)
-    engine = _SCHEMA_ENGINE_CACHE.get(key)
-    if engine is not None:
-        return engine
-    with _SCHEMA_ENGINE_CACHE_LOCK:
-        engine = _SCHEMA_ENGINE_CACHE.get(key)
-        if engine is None:
-            # A session-level SET search_path leaks to other clients through PgBouncer
-            # transaction pooling, so the schema is applied at SQL compile time instead.
-            # Raw text() SQL is not translated and must qualify the schema explicitly.
-            # schema_translate_map is baked into the engine, so it belongs in the cache key.
-            # Cached engines are never disposed, so keep idle retention to one
-            # connection per schema instead of SQLAlchemy's default five.
-            engine = create_engine(
-                connection_string,
-                pool_size=1,
-                max_overflow=4,
-                pool_recycle=3600,
-                pool_pre_ping=True,
-                execution_options={"schema_translate_map": {None: schema}},
-            )
-            _SCHEMA_ENGINE_CACHE[key] = engine
-    return engine
 
 
 def get_session_for_schema(connection_string: str, schema: str):
@@ -1358,7 +1328,14 @@ def get_session_for_schema(connection_string: str, schema: str):
             if key not in _ENSURED_SCHEMAS:
                 ensure_pgvector_schema_and_tables(connection_string, schema)
                 _ENSURED_SCHEMAS.add(key)
-    return Session(_get_schema_engine(connection_string, schema))
+    # A session-level SET search_path leaks to other clients through PgBouncer
+    # transaction pooling, so the schema is applied at SQL compile time instead.
+    # Raw text() SQL is not translated and must qualify the schema explicitly.
+    # This view shares the cached engine's pool, so schemas do not multiply pools.
+    engine = _get_pgvector_engine(connection_string).execution_options(
+        schema_translate_map={None: schema}
+    )
+    return Session(engine)
 
 
 def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
