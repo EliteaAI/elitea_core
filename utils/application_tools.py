@@ -1312,10 +1312,14 @@ def ensure_pgvector_schema_and_tables(connection_string: str, schema: str, vecto
 def get_session_for_schema(connection_string: str, schema: str):
     ensure_pgvector_schema_and_tables(connection_string, schema)
 
-    engine = create_engine(connection_string)
-    session = Session(engine)
-    session.execute(text(f'SET search_path TO "{schema}"'))
-    return session
+    # A session-level SET search_path leaks to other clients through PgBouncer
+    # transaction pooling, so the schema is applied at SQL compile time instead.
+    # Raw text() SQL is not translated and must qualify the schema explicitly.
+    engine = create_engine(
+        connection_string,
+        execution_options={"schema_translate_map": {None: schema}},
+    )
+    return Session(engine)
 
 
 def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
