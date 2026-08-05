@@ -580,6 +580,8 @@ class Module(module.ModuleModel):
         self.event_node.subscribe("voice_asr_error", self.voice_asr_error)
         self.event_node.subscribe("voice_asr_speech_started", self.voice_asr_speech_started)
         self.event_node.subscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
+        # Next-input suggestion (indexer → pylon_main → browser)
+        self.event_node.subscribe("next_input_suggestion_ready", self.next_input_suggestion_ready)
         # self.event_node.subscribe("log_data", self.log_data)
         # configurations
         self.event_node.subscribe("application_toolkit_configurations_collected", self.toolkit_configurations_collected)
@@ -757,6 +759,21 @@ class Module(module.ModuleModel):
         if sid:
             self.context.sio.emit(SioEvents.asr_vad_flush, {}, to=sid)
 
+    def next_input_suggestion_ready(self, event: str, payload: dict, *args):
+        sid = payload.get("sid")
+        suggestion = payload.get("suggestion")
+        if not sid or not suggestion:
+            return
+        self.context.sio.emit(
+            SioEvents.next_input_suggestion_ready,
+            {
+                "stream_id": payload.get("stream_id"),
+                "message_id": payload.get("message_id"),
+                "suggestion": suggestion,
+            },
+            to=sid,
+        )
+
     def deinit(self):
         log.info('De-initializing')
         self.thread._stop()
@@ -781,6 +798,7 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("voice_tts_audio_chunk", self.voice_tts_audio_chunk)
         self.event_node.unsubscribe("voice_tts_done", self.voice_tts_done)
         self.event_node.unsubscribe("voice_tts_error", self.voice_tts_error)
+        self.event_node.unsubscribe("next_input_suggestion_ready", self.next_input_suggestion_ready)
         self.event_node.unsubscribe("voice_asr_transcript_delta", self.voice_asr_transcript_delta)
         self.event_node.unsubscribe("voice_asr_transcript_done", self.voice_asr_transcript_done)
         self.event_node.unsubscribe("voice_asr_error", self.voice_asr_error)

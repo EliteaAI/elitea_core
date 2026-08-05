@@ -229,6 +229,47 @@
       "default": [],
       "requires_restart": false
     },
+    "is_next_input_suggestion_enabled": {
+      "type": "boolean",
+      "title": "Enable Next-Input Suggestions",
+      "description": "When enabled, the platform suggests a next user input after a predict turn, using a low-tier model. Only active for whitelisted projects.",
+      "path": "next_input_suggestion_guardrail.is_enabled",
+      "section": "guardrails",
+      "default": false,
+      "requires_restart": false
+    },
+    "next_input_suggestion_disallowed_project_ids": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "title": "Next-Input Suggestion Disallowed Projects",
+      "description": "Projects where next-input suggestions stay off even though the feature is enabled above. Leave empty to enable for every project.",
+      "path": "next_input_suggestion_guardrail.disallowed_project_ids",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false,
+      "enum_source": "projects",
+      "visible_when": { "field": "is_next_input_suggestion_enabled", "value": true }
+    },
+    "next_input_suggestion_min_response_chars": {
+      "type": "integer",
+      "title": "Minimum Response Length (chars)",
+      "description": "AI responses shorter than this are never used to generate a suggestion (avoids a second LLM call for trivial replies).",
+      "path": "next_input_suggestion_guardrail.min_response_chars",
+      "section": "guardrails",
+      "default": 150,
+      "requires_restart": false,
+      "visible_when": { "field": "is_next_input_suggestion_enabled", "value": true }
+    },
+    "next_input_suggestion_timeout_seconds": {
+      "type": "integer",
+      "title": "Generation Timeout (seconds)",
+      "description": "Max time allowed for suggestion generation. Exceeding it silently skips the suggestion.",
+      "path": "next_input_suggestion_guardrail.timeout_seconds",
+      "section": "guardrails",
+      "default": 15,
+      "requires_restart": false,
+      "visible_when": { "field": "is_next_input_suggestion_enabled", "value": true }
+    },
     "ai_project_id": {
       "type": "integer",
       "title": "Public Project ID",

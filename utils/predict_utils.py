@@ -7,6 +7,11 @@ from tools import auth, rpc_tools, VaultClient, serialize, context
 from typing import Optional, Union
 
 from .llm_settings import get_default_max_tokens
+from .next_input_suggestion_utils import (
+    get_next_input_suggestion_min_response_chars,
+    get_next_input_suggestion_timeout_seconds,
+    is_next_input_suggestion_enabled_for_project,
+)
 from .skill_utils import consume_invoked_skills, resolve_runtime_skills
 from ..models.elitea_tools import EliteATool
 from ..models.enums.all import AgentTypes
@@ -270,6 +275,14 @@ def generate_predict_payload(
         'supports_vision': supports_vision,
         'return_chat_history': return_chat_history,
         'invoked_skills': getattr(parsed, 'invoked_skills', None) or [],
+        # Non-interactive predicts (scheduled/webhook/blocking REST) pass sid=None,
+        # so bool(sid) alone gates this off for them without a separate flag.
+        'next_input_suggestion': {
+            'enabled': bool(sid) and is_next_input_suggestion_enabled_for_project(parsed.project_id),
+            'min_response_chars': get_next_input_suggestion_min_response_chars(),
+            'timeout_seconds': get_next_input_suggestion_timeout_seconds(),
+            'sid': sid,
+        },
     }
 
     # Only the raw LLM chat shape stops here; every agent-backed shape reaches
