@@ -13,11 +13,13 @@ from ...models.pd.application import (
     ApplicationDetailModel,
     ApplicationVersionDetailModel,
     MultipleApplicationListModel,
+    MultiplePublishedApplicationListModel,
 )
 
 from ...models.all import ApplicationVersion
 from ...utils.create_utils import create_application
 from ...utils.application_utils import list_applications_api
+from ...utils.utils import get_public_project_id
 from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
@@ -101,8 +103,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 without_tags=request.args.get('without_tags', False),
                 session=session
             )
+        list_model = (
+            MultiplePublishedApplicationListModel
+            if project_id == get_public_project_id()
+            else MultipleApplicationListModel
+        )
         try:
-            parsed = MultipleApplicationListModel(applications=some_result['applications'])
+            parsed = list_model(applications=some_result['applications'])
             return {
                 'total': some_result['total'],
                 'rows': [
