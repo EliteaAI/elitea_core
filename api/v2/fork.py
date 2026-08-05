@@ -20,7 +20,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         fork_data = copy.copy(request.json)
         author_id = auth.current_user().get("id")
 
-        entities = (fork_data.get('applications') or []) + (fork_data.get('skills') or [])
+        applications = fork_data.get('applications') or []
+        entities = applications + (fork_data.get('skills') or [])
 
         # Set fork parent metadata on each version (this makes is_forked = true)
         for entity in entities:
@@ -35,8 +36,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     })
                     version['meta'] = meta
 
-        # Call import_wizard exactly like the import_wizard endpoint does
-        result, errors = self.module.import_wizard(entities, project_id, author_id)
+        # Re-forking one agent must not multiply its skills, so only a skill the user
+        # picked is copied fresh. main_entity is client-derived and may not override.
+        main_entity = fork_data.get('main_entity')
+        is_agent_fork = bool(applications)
+        skills_are_picked = not is_agent_fork and main_entity in (None, 'skills')
+        result, errors = self.module.import_wizard(
+            entities, project_id, author_id, force_new_skills=skills_are_picked,
+        )
 
         has_results = any(result[key] for key in result if result[key])
         has_errors = any(errors[key] for key in errors if errors[key])

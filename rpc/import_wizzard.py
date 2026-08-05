@@ -307,7 +307,10 @@ def _attach_imported_skills(project_id, agents_with_skills, skill_id_mapper,
 
 class RPC:
     @web.rpc('applications_import_wizard', 'import_wizard')
-    def import_wizard(self, import_data: dict, project_id: int, author_id: int):
+    def import_wizard(
+        self, import_data: dict, project_id: int, author_id: int,
+        force_new_skills: bool = False,
+    ):
         rpc_call = rpc_tools.RpcMixin().rpc.call
 
         result, errors = {}, {}
@@ -378,9 +381,14 @@ class RPC:
             rpc_func = ENTITY_IMPORT_MAPPER.get(entity)
             if rpc_func:
                 r = e = None
+                skill_fork_kwargs = (
+                    {'force_new': True}
+                    if entity == 'skills' and force_new_skills
+                    else {}
+                )
                 try:
                     r, e = getattr(rpc_call, rpc_func)(
-                        model_data, project_id, author_id
+                        model_data, project_id, author_id, **skill_fork_kwargs
                     )
                 except Exception as ex:
                     log.error(ex)
