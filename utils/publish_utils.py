@@ -1728,6 +1728,7 @@ def _resolve_or_fork_skill_twin(
                 SkillVersion.meta[_TWIN_PARENT_VERSION_ID].astext == str(skill_info['skill_version_id']),
                 SkillVersion.meta[_TWIN_CONTENT_SHA].astext == content_sha,
             )
+            .order_by(SkillVersion.skill_id)
             .first()
         )
     if twin:
