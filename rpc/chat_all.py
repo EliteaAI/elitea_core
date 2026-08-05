@@ -176,7 +176,7 @@ def generate_toolkit_payload(
     # Inject internal ImageGen tool if toggle is enabled and no manual ImageGen exists
     try:
         imagegen_tool = inject_internal_imagegen_tool(
-            conversation_meta=conversation.meta or {},
+            internal_tools=internal_tools or [],
             user_id=user_id,
             project_id=conversation_project_id,
             existing_tools=tools,

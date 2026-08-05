@@ -161,7 +161,7 @@ def is_imagegen_toolkit(toolkit_payload: dict) -> bool:
 
 
 def inject_internal_imagegen_tool(
-    conversation_meta: dict,
+    internal_tools: list[str],
     user_id: int,
     project_id: int,
     existing_tools: list[dict],
@@ -169,36 +169,35 @@ def inject_internal_imagegen_tool(
 ) -> Optional[dict]:
     """
     Conditionally create auto-injected ImageGen toolkit payload.
-    
-    This function checks if the image_generation toggle is enabled in conversation
-    settings and if so, injects an ImageGen toolkit with project defaults.
-    
+
+    This function checks if the image_generation toggle is enabled (from
+    conversation and/or agent version meta) and if so, injects an ImageGen
+    toolkit with project defaults.
+
     Generated images are stored in the same bucket as chat attachments,
     under ``{conversation_uuid}/`` folder for isolation.
-    
+
     The injection is skipped if:
-    - Toggle is not enabled in conversation.meta.internal_tools
+    - Toggle is not enabled in internal_tools
     - A manual ImageGen toolkit already exists in the conversation
     - The ImageGen provider is not available/healthy
-    
+
     Args:
-        conversation_meta: Conversation meta dict containing internal_tools
+        internal_tools: List of enabled internal tools (from conversation + agent version meta)
         user_id: User ID for provider lookup (project expansion)
         project_id: Project ID for configuration lookup
         existing_tools: Already collected manual toolkit payloads
         conversation_uuid: Conversation UUID for folder-based image isolation
-        
+
     Returns:
         ImageGen toolkit payload dict, or None if should not inject
-        
+
     Raises:
         ImageGenConfigurationError: If toggle is ON but no default model is configured
     """
-    internal_tools = conversation_meta.get('internal_tools', [])
-    
     # 1. Check if image_generation toggle is enabled
     if IMAGEGEN_INTERNAL_TOOL_KEY not in internal_tools:
-        log.debug("Image generation internal tool not enabled in conversation")
+        log.debug("Image generation internal tool not enabled")
         return None
     
     # 2. Check if manual ImageGen toolkit already exists
