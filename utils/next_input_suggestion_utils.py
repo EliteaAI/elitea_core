@@ -19,28 +19,24 @@
 
 from tools import this
 
-
-def _next_input_suggestion_config() -> dict:
-    """Live config (read each call so admin changes need no reload)."""
-    return this.descriptor.config.get('next_input_suggestion_guardrail', {}) or {}
+DEFAULT_MIN_RESPONSE_CHARS = 150
+DEFAULT_TIMEOUT_SECONDS = 15
 
 
-def get_next_input_suggestion_min_response_chars() -> int:
-    return int(_next_input_suggestion_config().get('min_response_chars', 150))
+def next_input_suggestion_config(project_id: int) -> dict:
+    """Live config (read each call so admin changes need no reload).
 
-
-def get_next_input_suggestion_timeout_seconds() -> int:
-    return int(_next_input_suggestion_config().get('timeout_seconds', 15))
-
-
-def is_next_input_suggestion_enabled_for_project(project_id: int) -> bool:
-    """Toggle-off means off for everyone; toggle-on means on for everyone except
-    projects explicitly listed in the disallow-list."""
-    cfg = _next_input_suggestion_config()
-    if not cfg.get('is_enabled', False):
-        return False
+    Toggle-off means off for everyone; toggle-on means on for everyone except
+    projects explicitly listed in the disallow-list.
+    """
+    cfg = this.descriptor.config.get('next_input_suggestion_guardrail', {}) or {}
     disallowed = {
         int(x) for x in cfg.get('disallowed_project_ids', []) or []
         if isinstance(x, (int, float)) or (isinstance(x, str) and x.isdigit())
     }
-    return project_id not in disallowed
+    enabled = bool(cfg.get('is_enabled', False)) and project_id not in disallowed
+    return {
+        'enabled': enabled,
+        'min_response_chars': int(cfg.get('min_response_chars', DEFAULT_MIN_RESPONSE_CHARS)),
+        'timeout_seconds': int(cfg.get('timeout_seconds', DEFAULT_TIMEOUT_SECONDS)),
+    }
