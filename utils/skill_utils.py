@@ -598,7 +598,9 @@ def attach_public_skill_to_agents(
         owned_ids = {row[0] for row in owned_rows}
 
         # (1) Resolve-or-fork ONCE: reuse an existing local copy of exactly this
-        # public (skill, version); else fork it in.
+        # public (skill, version); else fork it in. Copies of one public version pile
+        # up and each can carry the lineage on several version rows, and their owners
+        # may edit them apart, so the pick is ordered rather than left to Postgres.
         local = (
             s.query(SkillVersion.skill_id, SkillVersion.id)
             .filter(
@@ -606,6 +608,7 @@ def attach_public_skill_to_agents(
                 SkillVersion.meta['parent_entity_id'].astext == str(public_skill_id),
                 SkillVersion.meta['parent_version_id'].astext == str(public_version_id),
             )
+            .order_by(SkillVersion.skill_id, SkillVersion.id)
             .first()
         )
         if local:
@@ -1056,7 +1059,11 @@ def _source_lineage(versions: list) -> Optional[tuple]:
 
 def _find_forked_skill(session, project_id: int, source: tuple) -> Optional[Skill]:
     """Find a skill in this project already forked from the same source skill,
-    matched on the (parent_project_id, parent_entity_id) lineage its versions carry."""
+    matched on the (parent_project_id, parent_entity_id) lineage its versions carry.
+
+    Ordered because a project can hold several forks of one source: what an
+    unordered query returns drifts as Postgres rewrites rows.
+    """
     src_project, src_entity = source
     return (
         session.query(Skill)
@@ -1066,6 +1073,7 @@ def _find_forked_skill(session, project_id: int, source: tuple) -> Optional[Skil
             SkillVersion.meta['parent_project_id'].astext == str(src_project),
             SkillVersion.meta['parent_entity_id'].astext == str(src_entity),
         )
+        .order_by(Skill.id)
         .first()
     )
 
@@ -1077,12 +1085,19 @@ def import_skill(
     versions: list,
     author_id: int,
     *,
+    force_new: bool = False,
     session=None,
 ) -> SkillImportResultModel:
+    """Create a skill in ``project_id``, reusing an existing fork of the same source
+    when there is one.
+
+    ``force_new`` suppresses that reuse: a fork the user asked for must yield an
+    independent entity the way agents do, while resolve-or-fork callers depend on it.
+    """
     if not versions:
         raise ValueError(f"Skill '{name}' has no versions to import")
 
-    source = _source_lineage(versions)
+    source = None if force_new else _source_lineage(versions)
     if source:
         with _skill_session(session, project_id) as s:
             existing = _find_forked_skill(s, project_id, source)

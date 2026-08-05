@@ -45,7 +45,9 @@ class RPC:
         )
 
     @web.rpc("applications_import_skill", "applications_import_skill")
-    def applications_import_skill(self, model_data: dict, project_id: int, author_id: int):
+    def applications_import_skill(
+        self, model_data: dict, project_id: int, author_id: int, force_new: bool = False,
+    ):
         # ensure an imported skill has a 'base' version (additive). See ensure_base_version.
         versions = ensure_base_version(model_data.get('versions') or [])
         try:
@@ -55,6 +57,7 @@ class RPC:
                 description=model_data.get('description') or model_data['name'],
                 versions=versions,
                 author_id=author_id,
+                force_new=force_new,
             )
         except Exception as ex:
             log.error(f"[IMPORT] Failed to import skill '{model_data.get('name')}': {ex}")
