@@ -30,6 +30,11 @@ from .version import (
 )
 
 
+def version_icon_meta(version) -> dict:
+    icon_meta = (version.meta or {}).get('icon_meta')
+    return icon_meta if isinstance(icon_meta, dict) else {}
+
+
 class ApplicationArgsForwardingModel(BaseModel):
     project_id: int = Field(..., exclude=True)
     user_id: int = Field(..., exclude=True)
@@ -294,21 +299,13 @@ class ApplicationListModel(BaseModel):
         if not versions:
             return self
 
-        published_version = None
-
-        for version in versions:
-            # Prefer published version over base for Agent Studio icons
-            if version.status == PublishStatus.published:
-                published_version = version
-                break
-
-        # Priority: published > oldest version (fallback)
-        selected_version = published_version or min(versions, key=lambda version: version.created_at)
-
-        meta = selected_version.meta or {}
-
-        if 'icon_meta' in meta:
-            self.icon_meta = meta['icon_meta']
+        default_version_id = (self.meta or {}).get('default_version_id')
+        selected_version = (
+            next((v for v in versions if v.id == default_version_id), None)
+            or next((v for v in versions if v.status == PublishStatus.published), None)
+            or min(versions, key=lambda version: version.created_at)
+        )
+        self.icon_meta = version_icon_meta(selected_version)
 
         return self
 
@@ -439,6 +436,15 @@ class PublishedApplicationListModel(ApplicationListModel):
     trending_likes: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='after')
+    def set_icon_meta_from_published_version(self) -> 'PublishedApplicationListModel':
+        published_version = next(
+            (v for v in self.versions if v.status == PublishStatus.published), None
+        )
+        if published_version:
+            self.icon_meta = version_icon_meta(published_version)
+        return self
 
     @field_validator('is_liked')
     @classmethod

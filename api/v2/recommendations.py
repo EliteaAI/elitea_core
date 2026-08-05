@@ -25,8 +25,9 @@ from tools import api_tools, config as c, db, auth
 from pylon.core.tools import log
 
 from ...models.all import Application
-from ...models.pd.application import ApplicationListModel
+from ...models.pd.application import ApplicationListModel, PublishedApplicationListModel
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.utils import get_public_project_id
 
 
 def _query_audit_recommendations(project_id, user_id=None, limit=5, days=30):
@@ -165,7 +166,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if not applications:
                 return None
 
-            app_map = {app.id: ApplicationListModel.from_orm(app) for app in applications}
+            list_model = (
+                PublishedApplicationListModel
+                if project_id == get_public_project_id()
+                else ApplicationListModel
+            )
+            app_map = {app.id: list_model.from_orm(app) for app in applications}
             rec_map = {rec['application_id']: rec['usage_count'] for rec in recommendations}
 
             result = []
@@ -211,9 +217,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     'message': 'No applications available in this project'
                 }, 200
 
+            list_model = (
+                PublishedApplicationListModel
+                if project_id == get_public_project_id()
+                else ApplicationListModel
+            )
             result = []
             for app in applications:
-                app = ApplicationListModel.from_orm(app)
+                app = list_model.from_orm(app)
                 result.append({
                     'id': app.id,
                     'name': app.name,
