@@ -169,8 +169,8 @@ class SioContinuePredictModel(BaseModel):
     # User input for continue flow - if provided, uses this instead of 'continue'
     user_input: Optional[str] = Field(default=None, description="User input to use instead of 'continue'")
     hitl_resume: bool = Field(default=False, description="Whether this continue request resumes a HITL interrupt")
-    hitl_action: Optional[str] = Field(default=None, description="HITL action: approve, reject, edit, or block_with_comment")
-    hitl_value: Optional[str] = Field(default=None, description="Edited text for HITL edit resumes, or the user's note for block_with_comment")
+    hitl_action: Optional[str] = Field(default=None, description="HITL action: approve, reject, edit, block_with_comment, or answer")
+    hitl_value: Optional[str | Dict[str, Any]] = Field(default=None, description="Edited text for HITL edit resumes, the user's note for block_with_comment, or the answers object for a clarifying-question 'answer'")
     # Parallel sub-agent fan-out (#4993): one decision per paused child, each
     # keyed by the parent Application tool_call_id. {tool_call_id, action, value}.
     hitl_decisions: Optional[List[Dict[str, Any]]] = Field(
