@@ -393,12 +393,14 @@ class ToolForkDetails(ToolExportDetails):
     owner_id: Optional[int] = None
 
 
-class ToolCreateModel(ToolBase):
+class ToolCopyModel(ToolBase):
     name: str = Field(..., min_length=1)
     id: Optional[int] = None
     project_id: int = Field(..., exclude=True)
     user_id: int = Field(..., exclude=True)
 
+
+class ToolCreateModel(ToolCopyModel):
     @model_validator(mode='before')
     @classmethod
     def validate_settings(cls, values):
