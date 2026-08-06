@@ -8,6 +8,7 @@ from .tool import (
     ToolValidatedDetails,
     ToolBase,
     ToolCreateModel,
+    ToolCopyModel,
     ToolApplicationExportDetails
 )
 from ..enums.all import AgentTypes
@@ -184,6 +185,13 @@ class ApplicationVersionCreateModel(ApplicationVersionBaseModel, ApplicationVers
         if 'step_limit' not in self.meta:
             self.meta['step_limit'] = DEFAULT_STEP_LIMIT
         return self
+
+
+class ApplicationVersionCloneModel(ApplicationVersionCreateModel):
+    # FIXME: publishing should drop toolkits before cloning. They are stripped from the
+    # published copy anyway, so carrying them through the clone only re-validates rows
+    # that are re-linked, never rewritten.
+    tools: Optional[List[ToolCopyModel]] = None
 
 
 class ApplicationVersionForkCreateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):

@@ -20,7 +20,7 @@ from ..utils.attachment_utils import extract_as_bytes_from_base64_content
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
 from ..models.pd.search import MultipleApplicationSearchModel
 from ..models.pd.tool import ToolDetails, ToolImportModel, ToolValidatedDetails
-from ..models.pd.version import ApplicationVersionDetailModel, ApplicationVersionCreateModel
+from ..models.pd.version import ApplicationVersionDetailModel, ApplicationVersionCloneModel
 from ..utils.application_tools import (
     toolkits_listing,
     expand_toolkit_settings,
@@ -1763,7 +1763,7 @@ class RPC:
                 version_details['author_id'] = author_id
                 version_details['user_id'] = author_id
                 version_details['status'] = PublishStatus.draft
-                new_version_pd = ApplicationVersionCreateModel.model_validate(version_details)
+                new_version_pd = ApplicationVersionCloneModel.model_validate(version_details)
                 application = session.query(Application).get(application_id)
                 if not application:
                     return {
