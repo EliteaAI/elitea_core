@@ -13,6 +13,10 @@ create model rejects — and the boundary, that the create/save path still
 rejects it. Merging ``ApplicationVersionCloneModel`` back into its parent, or
 pointing its ``tools`` field at ``ToolCreateModel``, breaks these.
 
+``test_clone_model_accepts_a_well_formed_version`` is the one case that cannot
+fail on settings content, since the clone never runs the validator. It covers
+the rest of the model rejecting a well-formed version.
+
 Run via:
     python tests/run_tests.py integration/test_6125_clone_skips_toolkit_validation.py -v
 """
@@ -221,11 +225,18 @@ def test_clone_model_never_calls_the_toolkit_validator(pd_models):
     assert pd_models.validator_spy.calls == []
 
 
-@pytest.mark.parametrize('model_name', [
-    'ApplicationVersionCreateModel', 'ApplicationVersionCloneModel',
-])
-def test_valid_toolkit_is_accepted_by_both_models(pd_models, model_name):
-    version = getattr(pd_models, model_name).model_validate(_payload(VALID_SETTINGS))
+def test_create_model_accepts_valid_toolkit(pd_models):
+    version = pd_models.ApplicationVersionCreateModel.model_validate(
+        _payload(VALID_SETTINGS),
+    )
+
+    assert version.tools[0].settings == VALID_SETTINGS
+
+
+def test_clone_model_accepts_a_well_formed_version(pd_models):
+    version = pd_models.ApplicationVersionCloneModel.model_validate(
+        _payload(VALID_SETTINGS),
+    )
 
     assert version.tools[0].settings == VALID_SETTINGS
 
