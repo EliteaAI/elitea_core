@@ -1532,22 +1532,32 @@ def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Op
     #
     if expected_task_id is not None:
         row_task_id = meta.cmetadata.get("task_id")
-        if row_task_id not in (None, expected_task_id):
-            log.debug(f"Skipping cancel for index_name={index_name}: "
-                      f"task_id mismatch (row={row_task_id}, expected={expected_task_id})")
-            return False
-        # Row has no task_id (agent path): a reused index_name may be a NEWER run
-        # (reindex race). Disambiguate by created_on with tolerance (float round-trip
-        # drift must not cause a false skip); missing created_on -> still cancel.
-        if row_task_id is None and expected_created_on is not None:
+        # created_on is refreshed at every run start, so a match proves the row belongs
+        # to the stopping run whatever task_id it carries. Both sides are the same float
+        # over JSON — the tolerance only absorbs serialization drift; anything larger
+        # would let a Stop for run A claim a run B started moments later.
+        created_on_matches = None
+        if expected_created_on is not None:
             row_created_on = meta.cmetadata.get("created_on")
             try:
-                if row_created_on is not None and abs(float(row_created_on) - float(expected_created_on)) > 1.0:
-                    log.debug(f"Skipping cancel for index_name={index_name}: created_on mismatch "
-                              f"(row={row_created_on}, expected={expected_created_on}) - likely a newer run")
-                    return False
+                if row_created_on is not None:
+                    created_on_matches = abs(float(row_created_on) - float(expected_created_on)) <= 0.05
             except (TypeError, ValueError):
                 pass
+        if row_task_id not in (None, expected_task_id):
+            # A mismatched task_id can be a stale leftover adopted from a zombie
+            # in_progress row (crashed run) — created_on match overrides it.
+            if created_on_matches is not True:
+                log.debug(f"Skipping cancel for index_name={index_name}: "
+                          f"task_id mismatch (row={row_task_id}, expected={expected_task_id})")
+                return False
+        elif row_task_id is None and created_on_matches is False:
+            # Null task_id (agent path): a reused index_name may be a NEWER run, so only
+            # a confirmed mismatch skips. Warning, not debug — this fires spuriously if
+            # any writer other than the SDK ever lands last on a null-id row.
+            log.warning(f"Skipping cancel for index_name={index_name}: created_on mismatch "
+                        f"(row={meta.cmetadata.get('created_on')}, expected={expected_created_on}) - likely a newer run")
+            return False
     #
     meta.cmetadata["state"] = IndexDataStatus.cancelled.value
     meta.cmetadata["task_id"] = None
