@@ -1,24 +1,7 @@
-"""Issue #6125 — publishing must not re-validate the toolkits it only re-links.
-
-``clone_version`` snapshots an already-persisted version. It used to feed that
-snapshot through ``ApplicationVersionCreateModel``, whose ``ToolCreateModel``
-re-runs the creation-time toolkit validators, so an agent whose toolkit had
-drifted out of spec (schema change, removed credential, renamed tool) failed
-publish with an opaque "Can't clone version". Nothing was protected: the clone
-only re-links existing toolkit rows, and the published copy has its toolkits
-stripped.
-
-This suite pins the asymmetry — the clone model accepts a tool payload the
-create model rejects — and the boundary, that the create/save path still
-rejects it. Merging ``ApplicationVersionCloneModel`` back into its parent, or
-pointing its ``tools`` field at ``ToolCreateModel``, breaks these.
-
-``test_clone_model_accepts_a_well_formed_version`` is the one case that cannot
-fail on settings content, since the clone never runs the validator. It covers
-the rest of the model rejecting a well-formed version.
-
-Run via:
-    python tests/run_tests.py integration/test_6125_clone_skips_toolkit_validation.py -v
+"""Publishing clones an already-persisted version. Re-running the creation-time
+toolkit validators over that clone blocks publish on a stale toolkit config the
+published copy never carries — folding ``ApplicationVersionCloneModel`` into its
+parent, or pointing its ``tools`` at ``ToolCreateModel``, restores the failure.
 """
 
 import importlib.util
@@ -62,14 +45,7 @@ def _load(dotted_name, relative_path):
     return module
 
 
-class _ValidatorSpy:
-    """Stands in for ``this.module.toolkit_settings_validator``.
-
-    Rejects settings missing ``repository`` the way the real validator rejects a
-    required field, and records every call so a test can assert the clone path
-    never reaches it.
-    """
-
+class _ToolkitSettingsValidatorSpy:
     def __init__(self):
         self.calls = []
 
@@ -87,11 +63,6 @@ class _ValidatorSpy:
 
 @pytest.fixture(scope='module')
 def pd_models():
-    """Load models.pd.tool + models.pd.version against stubbed runtime deps.
-
-    Everything below the import line is stubbed; the toolkit validator entry
-    point is the only behaviour under test.
-    """
     saved = {}
 
     def install(name, module):
@@ -103,7 +74,7 @@ def pd_models():
     log = types.SimpleNamespace(
         info=noop, error=noop, warning=noop, debug=noop, exception=noop,
     )
-    spy = _ValidatorSpy()
+    spy = _ToolkitSettingsValidatorSpy()
 
     for pkg in (
         'plugins', 'plugins.elitea_core', 'plugins.elitea_core.models',
