@@ -24,8 +24,7 @@ pgvector_engine_cache:
   pool_size: 5              # persistent connections per cached engine
   max_overflow: 10          # extra connections per engine allowed beyond pool_size
   max_cached_engines: 32    # hard cap on distinct engines held at once (LRU-evicted beyond this)
-  max_idle_seconds: 3600    # idle time before an engine is reaped and disposed
-  reap_interval_seconds: 300  # minimum time between reap passes
+  max_idle_seconds: 3600    # idle time before the reaper tick disposes an engine
 
 # Publish validation config references (defaults in code):
 # publishing_guardrail.publish_validation_rules - custom AI evaluation rules (default: built-in, via admin UI)

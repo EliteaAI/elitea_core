@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from collections import OrderedDict
 from copy import deepcopy
 from typing import Optional, List
 from uuid import uuid4
@@ -400,77 +401,77 @@ def _extract_pgvector_schema(toolkit_detail):
 
 # Process-wide cache of pgvector SQLAlchemy engines keyed by connection string,
 # reused across requests instead of rebuilding a pool per call.
-_PGVECTOR_ENGINE_CACHE = {}
-_PGVECTOR_ENGINE_LAST_USED = {}
+# Values are [engine, last_used]; insertion order is LRU order (oldest first).
+_PGVECTOR_ENGINE_CACHE = OrderedDict()
 _PGVECTOR_ENGINE_CACHE_LOCK = threading.Lock()
-_PGVECTOR_ENGINE_LAST_REAP = [0.0]
 
 
-def _pgvector_cache_cfg(key: str, default):
+def _pgvector_cache_cfg(key: str, default, minimum: int = 1):
     # Read per call: this.descriptor.config is not guaranteed populated at module import.
-    return (this.descriptor.config.get('pgvector_engine_cache') or {}).get(key, default)
+    # Clamped because these are runtime-editable and a 0 would disable the cache entirely.
+    try:
+        return max(minimum, int((this.descriptor.config.get('pgvector_engine_cache') or {})[key]))
+    except (KeyError, TypeError, ValueError):
+        return default
 
 
 def _get_pgvector_engine(conn_str: str):
-    # Reused across requests; reclaimed by _reap_idle_pgvector_engines, not held forever.
-    now = time.monotonic()
-    engine = _PGVECTOR_ENGINE_CACHE.get(conn_str)
-    if engine is not None:
-        _PGVECTOR_ENGINE_LAST_USED[conn_str] = now
-        _reap_idle_pgvector_engines(now)
-        return engine
+    # Reused across requests; reclaimed by reap_idle_pgvector_engines, not held forever.
     with _PGVECTOR_ENGINE_CACHE_LOCK:
-        engine = _PGVECTOR_ENGINE_CACHE.get(conn_str)
-        if engine is None:
-            engine = create_engine(
-                conn_str,
-                pool_recycle=3600,
-                pool_pre_ping=True,
-                pool_size=_pgvector_cache_cfg('pool_size', 5),
-                max_overflow=_pgvector_cache_cfg('max_overflow', 10),
-            )
-            _PGVECTOR_ENGINE_CACHE[conn_str] = engine
-        _PGVECTOR_ENGINE_LAST_USED[conn_str] = now
-    _reap_idle_pgvector_engines(now)
+        entry = _PGVECTOR_ENGINE_CACHE.get(conn_str)
+        if entry is not None:
+            entry[1] = time.monotonic()
+            _PGVECTOR_ENGINE_CACHE.move_to_end(conn_str)
+            return entry[0]
+        engine = create_engine(
+            conn_str,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+            pool_size=_pgvector_cache_cfg('pool_size', 5),
+            max_overflow=_pgvector_cache_cfg('max_overflow', 10, minimum=0),
+        )
+        _PGVECTOR_ENGINE_CACHE[conn_str] = [engine, time.monotonic()]
+        overflowed = _evict_pgvector_overflow()
+    for evicted in overflowed:
+        _dispose_pgvector_engine(evicted)
     return engine
 
 
-def _reap_idle_pgvector_engines(now: float) -> None:
-    interval = _pgvector_cache_cfg('reap_interval_seconds', 300)
-    if now - _PGVECTOR_ENGINE_LAST_REAP[0] < interval:
-        return
-    with _PGVECTOR_ENGINE_CACHE_LOCK:
-        if now - _PGVECTOR_ENGINE_LAST_REAP[0] < interval:
-            return
-        _PGVECTOR_ENGINE_LAST_REAP[0] = now
-        evicted = _collect_pgvector_evictions(now)
-    # dispose() outside the lock: only checked-in connections close, live sessions elsewhere
-    # are unaffected, and closing sockets shouldn't happen while holding the cache lock.
-    for engine in evicted:
-        try:
-            engine.dispose()
-        except Exception:
-            log.exception('pgvector engine cache: dispose failed during reap')
-
-
-def _collect_pgvector_evictions(now: float) -> list:
-    # Called with _PGVECTOR_ENGINE_CACHE_LOCK held.
-    max_idle = _pgvector_cache_cfg('max_idle_seconds', 3600)
-    stale = [cs for cs, ts in _PGVECTOR_ENGINE_LAST_USED.items() if now - ts >= max_idle]
-    for cs in stale:
-        _PGVECTOR_ENGINE_LAST_USED.pop(cs, None)
-    evicted = [_PGVECTOR_ENGINE_CACHE.pop(cs) for cs in stale if cs in _PGVECTOR_ENGINE_CACHE]
-
+def _evict_pgvector_overflow() -> list:
+    # Called with the lock held. Enforced on insert, not on the reap tick, so a burst of
+    # distinct connection strings between ticks cannot exceed the cap.
     max_cached = _pgvector_cache_cfg('max_cached_engines', 32)
-    overflow = len(_PGVECTOR_ENGINE_CACHE) - max_cached
-    if overflow > 0:
-        # LRU backstop for a burst of distinct connstrs inside one idle window.
-        by_last_used = sorted(_PGVECTOR_ENGINE_LAST_USED.items(), key=lambda item: item[1])
-        for cs, _ts in by_last_used[:overflow]:
-            _PGVECTOR_ENGINE_LAST_USED.pop(cs, None)
-            evicted.append(_PGVECTOR_ENGINE_CACHE.pop(cs))
-
+    evicted = []
+    while len(_PGVECTOR_ENGINE_CACHE) > max_cached:
+        evicted.append(_PGVECTOR_ENGINE_CACHE.popitem(last=False)[1][0])
     return evicted
+
+
+def reap_idle_pgvector_engines() -> int:
+    # Driven by a scheduler tick: a quiet process must release its pools too, and nothing
+    # arrives on the request path to trigger reclamation while it is idle.
+    now = time.monotonic()
+    max_idle = _pgvector_cache_cfg('max_idle_seconds', 3600)
+    with _PGVECTOR_ENGINE_CACHE_LOCK:
+        stale = [
+            cs for cs, entry in _PGVECTOR_ENGINE_CACHE.items() if now - entry[1] >= max_idle
+        ]
+        # pop with a default: tolerate an entry vanishing mid-pass rather than
+        # aborting the pass and abandoning the engines already collected.
+        popped = [_PGVECTOR_ENGINE_CACHE.pop(cs, None) for cs in stale]
+        evicted = [entry[0] for entry in popped if entry is not None]
+    for engine in evicted:
+        _dispose_pgvector_engine(engine)
+    return len(evicted)
+
+
+def _dispose_pgvector_engine(engine) -> None:
+    # Always called outside the cache lock: dispose() closes only checked-in connections, so
+    # live sessions elsewhere survive, but socket teardown must not block cache readers.
+    try:
+        engine.dispose()
+    except Exception:
+        log.exception('pgvector engine cache: dispose failed')
 
 
 def batch_count_toolkit_indexes(toolkit_conn_map: dict) -> dict:
