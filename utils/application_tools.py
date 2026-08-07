@@ -398,37 +398,79 @@ def _extract_pgvector_schema(toolkit_detail):
         return None
 
 
-# Process-wide cache of pgvector SQLAlchemy engines keyed by connection string.
-# Rebuilding a fresh engine per listing request was the hot path: for every
-# `toolkits_listing` call, `create_engine(conn_str)` + `engine.connect()` ran
-# once per distinct project connstr (in practice the same connstr for the
-# whole project). The engine's own connection pool was thrown away after each
-# call. This dict lets us reuse a single pooled engine across requests.
+# Process-wide cache of pgvector SQLAlchemy engines keyed by connection string,
+# reused across requests instead of rebuilding a pool per call.
 _PGVECTOR_ENGINE_CACHE = {}
+_PGVECTOR_ENGINE_LAST_USED = {}
 _PGVECTOR_ENGINE_CACHE_LOCK = threading.Lock()
+_PGVECTOR_ENGINE_LAST_REAP = [0.0]
+
+
+def _pgvector_cache_cfg(key: str, default):
+    # Read per call: this.descriptor.config is not guaranteed populated at module import.
+    return (this.descriptor.config.get('pgvector_engine_cache') or {}).get(key, default)
 
 
 def _get_pgvector_engine(conn_str: str):
-    """Return a cached SQLAlchemy engine for `conn_str`, creating it on first use.
-
-    Engines are safe to share across threads; connection pooling is delegated to
-    SQLAlchemy. We intentionally never call `engine.dispose()` here — the engine
-    lives for the process lifetime.
-    """
+    # Reused across requests; reclaimed by _reap_idle_pgvector_engines, not held forever.
+    now = time.monotonic()
     engine = _PGVECTOR_ENGINE_CACHE.get(conn_str)
     if engine is not None:
+        _PGVECTOR_ENGINE_LAST_USED[conn_str] = now
+        _reap_idle_pgvector_engines(now)
         return engine
     with _PGVECTOR_ENGINE_CACHE_LOCK:
         engine = _PGVECTOR_ENGINE_CACHE.get(conn_str)
         if engine is None:
-            # Cached for the process lifetime, so recycle before the pooler reaps.
             engine = create_engine(
                 conn_str,
                 pool_recycle=3600,
                 pool_pre_ping=True,
+                pool_size=_pgvector_cache_cfg('pool_size', 5),
+                max_overflow=_pgvector_cache_cfg('max_overflow', 10),
             )
             _PGVECTOR_ENGINE_CACHE[conn_str] = engine
+        _PGVECTOR_ENGINE_LAST_USED[conn_str] = now
+    _reap_idle_pgvector_engines(now)
     return engine
+
+
+def _reap_idle_pgvector_engines(now: float) -> None:
+    interval = _pgvector_cache_cfg('reap_interval_seconds', 300)
+    if now - _PGVECTOR_ENGINE_LAST_REAP[0] < interval:
+        return
+    with _PGVECTOR_ENGINE_CACHE_LOCK:
+        if now - _PGVECTOR_ENGINE_LAST_REAP[0] < interval:
+            return
+        _PGVECTOR_ENGINE_LAST_REAP[0] = now
+        evicted = _collect_pgvector_evictions(now)
+    # dispose() outside the lock: only checked-in connections close, live sessions elsewhere
+    # are unaffected, and closing sockets shouldn't happen while holding the cache lock.
+    for engine in evicted:
+        try:
+            engine.dispose()
+        except Exception:
+            log.exception('pgvector engine cache: dispose failed during reap')
+
+
+def _collect_pgvector_evictions(now: float) -> list:
+    # Called with _PGVECTOR_ENGINE_CACHE_LOCK held.
+    max_idle = _pgvector_cache_cfg('max_idle_seconds', 3600)
+    stale = [cs for cs, ts in _PGVECTOR_ENGINE_LAST_USED.items() if now - ts >= max_idle]
+    for cs in stale:
+        _PGVECTOR_ENGINE_LAST_USED.pop(cs, None)
+    evicted = [_PGVECTOR_ENGINE_CACHE.pop(cs) for cs in stale if cs in _PGVECTOR_ENGINE_CACHE]
+
+    max_cached = _pgvector_cache_cfg('max_cached_engines', 32)
+    overflow = len(_PGVECTOR_ENGINE_CACHE) - max_cached
+    if overflow > 0:
+        # LRU backstop for a burst of distinct connstrs inside one idle window.
+        by_last_used = sorted(_PGVECTOR_ENGINE_LAST_USED.items(), key=lambda item: item[1])
+        for cs, _ts in by_last_used[:overflow]:
+            _PGVECTOR_ENGINE_LAST_USED.pop(cs, None)
+            evicted.append(_PGVECTOR_ENGINE_CACHE.pop(cs))
+
+    return evicted
 
 
 def batch_count_toolkit_indexes(toolkit_conn_map: dict) -> dict:
