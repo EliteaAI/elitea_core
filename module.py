@@ -462,6 +462,13 @@ class Module(module.ModuleModel):
                 'active': True
             })
             self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                'rpc_func': 'elitea_core_reap_pgvector_engines',
+                'rpc_kwargs': {},
+                'name': 'pgvector_engine_reap',
+                'cron': '*/5 * * * *',
+                'active': True
+            })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
                 'rpc_func': 'elitea_core_check_pat_expiration',
                 'rpc_kwargs': {},
                 'name': 'pat_expiration_check',
