@@ -996,6 +996,10 @@ def _application_to_md(app: dict, toolkits: list, applications: list = None, ver
     if conversation_starters and isinstance(conversation_starters, list) and len(conversation_starters) > 0:
         frontmatter['conversation_starters'] = conversation_starters
 
+    notes = version.get('notes')
+    if notes:
+        frontmatter['notes'] = notes
+
     # Build version_map for nested agent version lookups
     version_map = _build_version_map(applications) if applications else {}
 
