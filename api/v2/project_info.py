@@ -17,29 +17,31 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, project_id: int, **kwargs):
         rpc = rpc_tools.RpcMixin().rpc.timeout(5)
+        fields = request.args.get('fields', '')
+        requested = set(f.strip() for f in fields.split(',')) if fields else None
 
-        # Get teammates count
-        try:
-            user_ids = rpc.admin_get_users_ids_in_project(
-                project_id, filter_system_user=True
+        result = {}
+
+        if not requested or 'teammates_count' in requested:
+            try:
+                user_ids = rpc.admin_get_users_ids_in_project(
+                    project_id, filter_system_user=True
+                )
+                result['teammates_count'] = len(user_ids) if user_ids else 0
+            except Exception:
+                result['teammates_count'] = 0
+
+        if not requested or 'icon_meta' in requested:
+            config = rpc.configurations_get_first_filtered_project(
+                project_id=project_id,
+                filter_fields={"type": "project_icon", "elitea_title": f"project_icon_{project_id}"},
             )
-            teammates_count = len(user_ids) if user_ids else 0
-        except Exception:
-            teammates_count = 0
+            icon_meta = None
+            if config and config.get("data"):
+                icon_meta = config["data"].get("icon_meta")
+            result['icon_meta'] = icon_meta
 
-        # Get project icon_meta from configurations
-        config = rpc.configurations_get_first_filtered_project(
-            project_id=project_id,
-            filter_fields={"type": "project_icon", "elitea_title": f"project_icon_{project_id}"},
-        )
-        icon_meta = None
-        if config and config.get("data"):
-            icon_meta = config["data"].get("icon_meta")
-
-        return {
-            "teammates_count": teammates_count,
-            "icon_meta": icon_meta,
-        }, 200
+        return result, 200
 
     @auth.decorators.check_api(
         {
