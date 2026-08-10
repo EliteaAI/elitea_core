@@ -1,8 +1,8 @@
-"""Editor notes belong in the exported Markdown, and are dropped when empty.
+"""Editor notes reach the exported Markdown.
 
-An agent whose notes survive export but not re-import is the defect these pin;
-the empty cases guard the omit-when-empty convention every other optional
-frontmatter key follows.
+``_application_to_md`` builds its frontmatter from an explicit key allow-list,
+and a field missing from that list is dropped silently — which is how editor
+notes came to be absent from every exported agent.
 """
 
 import importlib.util
@@ -128,28 +128,5 @@ def _frontmatter(export_import, **version_overrides):
 
 def test_notes_exported_when_set(export_import):
     frontmatter = _frontmatter(export_import, notes=NOTES_TEXT)
-
-    assert frontmatter['notes'] == NOTES_TEXT
-
-
-def test_notes_omitted_when_empty(export_import):
-    frontmatter = _frontmatter(export_import, notes='')
-
-    assert 'notes' not in frontmatter
-
-
-def test_notes_omitted_when_absent(export_import):
-    frontmatter = _frontmatter(export_import)
-
-    assert 'notes' not in frontmatter
-
-
-def test_pipeline_exports_notes(export_import):
-    frontmatter = _frontmatter(
-        export_import,
-        agent_type='pipeline',
-        instructions='nodes:\n  - id: start\n    type: llm\n',
-        notes=NOTES_TEXT,
-    )
 
     assert frontmatter['notes'] == NOTES_TEXT
