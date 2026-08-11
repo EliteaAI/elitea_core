@@ -115,10 +115,17 @@ GENERIC_VERSION_BLOCKLIST = frozenset({
     "v1", "v2", "v3", "1", "2", "test", "draft",
 })
 
+# Word boundaries keep acronyms that merely contain a marker (JTBD, TODOS.app)
+# from being read as draft stubs.
 PLACEHOLDER_RE = re.compile(
-    r'TODO|TBD|Lorem|FIXME|\[REPLACE\]|placeholder|insert here',
+    r'\bTODO\b|\bTBD\b|\bFIXME\b|\bLorem\b|\[REPLACE\]|\binsert here\b',
     re.IGNORECASE,
 )
+
+# "placeholder" is also an ordinary English noun (e.g. instructions describing
+# placeholder sections of a generated document), so on its own it is only
+# grounds for a warning, never a publish block.
+PLACEHOLDER_WORD_RE = re.compile(r'\bplaceholders?\b', re.IGNORECASE)
 
 SECRET_RE = re.compile(
     r'sk-[a-zA-Z0-9]{20,}'
@@ -2740,6 +2747,12 @@ class NameChecker(BaseChecker):
                 'Name contains placeholder text',
                 'Replace placeholder with actual name', context,
             )
+        elif PLACEHOLDER_WORD_RE.search(name):
+            result.issue(
+                'warnings', 'name',
+                'Name may contain placeholder text',
+                'Verify the name is final', context,
+            )
         # Sub-agent name uniqueness: check if this name appears more than once
         # (list includes parent name + all sub-agent names; mutable ref shared
         #  across iterations — once reported, duplicates are removed so the
@@ -2805,6 +2818,12 @@ class DescriptionChecker(BaseChecker):
                 'Description contains placeholder text',
                 'Replace placeholder text with actual description',
                 context,
+            )
+        elif PLACEHOLDER_WORD_RE.search(desc):
+            result.issue(
+                'warnings', 'description',
+                'Description may contain placeholder text',
+                'Verify the description is final', context,
             )
 
 
@@ -2910,6 +2929,12 @@ class InstructionsChecker(BaseChecker):
                 'Replace placeholder text with actual instructions',
                 context,
             )
+        elif PLACEHOLDER_WORD_RE.search(instructions):
+            result.issue(
+                'warnings', 'instructions',
+                'Instructions may contain placeholder text',
+                'Verify the instructions are final', context,
+            )
 
 
 class SkillContentChecker(BaseChecker):
@@ -2945,6 +2970,12 @@ class SkillContentChecker(BaseChecker):
                 'Skill content contains placeholder text',
                 'Replace placeholder text with actual instructions',
                 context,
+            )
+        elif PLACEHOLDER_WORD_RE.search(content):
+            result.issue(
+                'warnings', 'skills',
+                'Skill content may contain placeholder text',
+                'Verify the skill content is final', context,
             )
         if SECRET_RE.search(content):
             result.issue(
@@ -3363,13 +3394,15 @@ def merge_validation_results(
     else:
         status = 'PASS'
 
-    if not summary:
-        if status == 'FAIL':
-            summary = (
-                f"Agent has {len(critical)} critical issue(s) "
-                f"that must be fixed before publishing."
-            )
-        elif status == 'WARN':
+    # The AI writes its summary without seeing the deterministic findings, so
+    # on FAIL the merged verdict wins over a possibly-positive AI wording.
+    if status == 'FAIL':
+        summary = (
+            f"Agent has {len(critical)} critical issue(s) "
+            f"that must be fixed before publishing."
+        )
+    elif not summary:
+        if status == 'WARN':
             summary = (
                 f"Agent meets requirements but has "
                 f"{len(warnings)} warning(s) for improvement."
