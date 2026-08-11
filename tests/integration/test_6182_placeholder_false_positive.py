@@ -7,10 +7,10 @@ text" because the instructions legitimately describe placeholder sections of a
 generated document. On top of that the merged report carried the AI's
 "well-structured and publishable" summary next to status FAIL, because the
 summary was taken from the AI verbatim without reconciling it with the merged
-verdict. This suite pins the boundary-aware regex and demoted word check for
-agents, the complete removal of deterministic placeholder findings for skills
-(the AI's default rules take over draft detection), and the FAIL-summary
-reconciliation.
+verdict. This suite pins the skills-side fix: complete removal of deterministic
+placeholder findings (the AI's default rules take over draft detection) and the
+FAIL-summary reconciliation. The agent flow is intentionally untouched by this
+hotfix; its twin false positive is tracked separately.
 
 Run via:
     python tests/run_tests.py integration/test_6182_placeholder_false_positive.py -v
@@ -158,37 +158,6 @@ def spu(pu):
     return _load('utils.skill_publish_utils', 'utils/skill_publish_utils.py')
 
 
-class TestPlaceholderRegex:
-    @pytest.mark.parametrize('text', [
-        'JTBD evolution table with 5 JTBDs per persona',
-        'Uncovered JTBD clusters flagged above 15%',
-        'the jtbdanalysis module',
-        'STODOR statue restoration guide',
-        'read the loremaster notes',
-    ], ids=['jtbd', 'jtbd-lower-context', 'jtbd-joined', 'todo-inside-word', 'lorem-inside-word'])
-    def test_markers_inside_words_do_not_match(self, pu, text):
-        assert pu.PLACEHOLDER_RE.search(text) is None
-
-    @pytest.mark.parametrize('text', [
-        'TODO: write the real instructions here',
-        'Pricing section is TBD',
-        'FIXME before shipping',
-        'Lorem ipsum dolor sit amet',
-        '[REPLACE] with your content',
-        'insert here your steps',
-        'todo: finish later',
-    ], ids=['todo', 'tbd', 'fixme', 'lorem', 'replace', 'insert-here', 'todo-lower'])
-    def test_real_stub_markers_still_match(self, pu, text):
-        assert pu.PLACEHOLDER_RE.search(text) is not None
-
-    def test_bare_placeholder_word_moved_to_word_regex(self, pu):
-        assert pu.PLACEHOLDER_RE.search('placeholder custdev blocks') is None
-        assert pu.PLACEHOLDER_WORD_RE.search('placeholder custdev blocks') is not None
-        assert pu.PLACEHOLDER_WORD_RE.search('stays placeholder until data arrives') is not None
-        assert pu.PLACEHOLDER_WORD_RE.search('two placeholders remain') is not None
-        assert pu.PLACEHOLDER_WORD_RE.search('the placeholderish look') is None
-
-
 class TestSkillCheckersHaveNoPlaceholderRule:
     """Draft detection is a semantic judgment, so for skills it lives entirely
     in the AI review: the deterministic checkers emit no placeholder findings
@@ -273,19 +242,4 @@ class TestSummaryReconciliation:
             self.POSITIVE_AI,
         )
         assert merged['status'] == 'WARN'
-        assert merged['summary'] == self.POSITIVE_AI['summary']
-
-    def test_agent_fail_overrides_positive_ai_summary(self, pu):
-        merged = pu.merge_validation_results(self.DET_CRITICAL, self.POSITIVE_AI)
-        assert merged['status'] == 'FAIL'
-        assert merged['summary'] == (
-            'Agent has 1 critical issue(s) that must be fixed before publishing.'
-        )
-
-    def test_agent_pass_keeps_ai_summary(self, pu):
-        merged = pu.merge_validation_results(
-            {'critical_issues': [], 'warnings': [], 'recommendations': []},
-            self.POSITIVE_AI,
-        )
-        assert merged['status'] == 'PASS'
         assert merged['summary'] == self.POSITIVE_AI['summary']
