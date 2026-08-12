@@ -1674,12 +1674,17 @@ class RPC:
                         'content': _prefill_content,
                     })
                     _word_count = len(_tc_stripped.split())
+                    _original_q = original_user_input or ''
+                    _original_q_clause = (
+                        f' The original request was: "{_original_q}".' if _original_q else ''
+                    )
                     payload['user_input'] = (
-                        f'Your previous response above was cut off due to token limits and is incomplete. '
-                        f'It already contains approximately {_word_count} words. '
-                        f'Please complete it now: output only the missing ending that finishes the response, '
-                        f'respecting all constraints from my original request (length, format, scope). '
-                        f'Do not repeat anything already written.'
+                        f'Your previous response above was cut off due to token limits and is incomplete.'
+                        f'{_original_q_clause}'
+                        f' It already contains approximately {_word_count} words.'
+                        f' Please complete it: output only the missing ending that finishes the response,'
+                        f' strictly respecting all constraints from the original request (length, format, scope).'
+                        f' Do not repeat anything already written.'
                     )
                     payload['truncated_content'] = truncated_content
                     if isinstance(payload.get('llm'), dict):
@@ -1692,22 +1697,6 @@ class RPC:
                         llm_settings_vd['reasoning_effort'] = 'low'
                 payload['message_id'] = str(response_msg.uuid)
                 payload[EXECUTION_GENERATION_KEY] = execution_generation
-
-                if is_token_limit_continuation and response_msg.meta is not None:
-                    # Store anchors so message_stream.py can detect both seam
-                    # overlap (model repeated last N chars) and full regeneration
-                    # (model reproduced the whole existing text from the beginning).
-                    _tc = truncated_content.rstrip('\n\r')
-                    _SEAM_TAIL = 500
-                    _HEAD_ANCHOR = 100
-                    response_msg.meta['continuation_seam_tail'] = (
-                        _tc[-_SEAM_TAIL:] if len(_tc) > _SEAM_TAIL else _tc
-                    )
-                    response_msg.meta['continuation_head_anchor'] = _tc[:_HEAD_ANCHOR]
-                    response_msg.meta['continuation_full_length'] = len(_tc)
-                    flag_modified(response_msg, 'meta')
-                    session.add(response_msg)
-                    session.commit()
 
                 context_management_enabled = get_context_manager_feature_flag(parsed.project_id)
                 if context_management_enabled and response_msg.meta is not None:

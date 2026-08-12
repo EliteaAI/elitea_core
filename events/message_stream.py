@@ -25,70 +25,6 @@ from ..utils.attachments import (
 from ..utils.sio_utils import SioEvents
 
 
-def _existing_text_for_group(msg_group: ConversationMessageGroup) -> str:
-    """Concatenate existing text_message content for overlap detection."""
-    parts = []
-    for item in (msg_group.message_items or []):
-        if getattr(item, 'item_type', None) == 'text_message' and item.content:
-            parts.append(str(item.content))
-    return ''.join(parts)
-
-
-def _trim_exact_seam(
-    seam_tail: str,
-    incoming_text: str,
-    head_anchor: str = '',
-    full_length: int = 0,
-) -> str:
-    """Strip repeated content from incoming_text using stored seam anchors.
-
-    seam_tail = last N chars of the already-stored truncated content.
-    head_anchor = first M chars of the already-stored truncated content.
-    full_length = total length of the already-stored truncated content.
-
-    Cases handled in order:
-    1. Full regeneration: incoming starts with head_anchor (model reproduced
-       the entire existing text from the beginning).  Skip past full_length
-       chars and return only what follows.
-    2. Seam-tail prefix: incoming starts with seam_tail (model reproduced
-       from the mid-point onward).  Strip that prefix.
-    3. Partial seam overlap: model repeated a suffix of seam_tail at the
-       join point.  Strip that suffix.
-    4. Clean: incoming is a pure continuation — return as-is.
-    """
-    if not seam_tail or not incoming_text:
-        return incoming_text
-    stripped = incoming_text.lstrip('\n\r')
-
-    # Case 1: full regeneration detected via head anchor
-    if head_anchor and full_length and stripped.startswith(head_anchor):
-        remainder = stripped[full_length:]
-        return remainder.lstrip('\n\r') if remainder else ''
-
-    # Case 2: incoming starts exactly with the seam tail
-    if stripped.startswith(seam_tail):
-        return stripped[len(seam_tail):]
-
-    # Case 3: partial overlap at the seam
-    for overlap in range(min(len(seam_tail), len(stripped)), 0, -1):
-        if seam_tail[-overlap:] == stripped[:overlap]:
-            return stripped[overlap:]
-
-    return incoming_text
-
-
-def _trim_prefix_overlap(existing_text: str, incoming_text: str) -> str:
-    """Trim repeated prefix if incoming starts with existing suffix (seam dedup)."""
-    if not existing_text or not incoming_text:
-        return incoming_text
-
-    tail_window = existing_text[-1200:]
-    max_overlap = min(len(tail_window), len(incoming_text))
-    for overlap in range(max_overlap, 31, -1):
-        if tail_window[-overlap:] == incoming_text[:overlap]:
-            return incoming_text[overlap:]
-    return incoming_text
-
 
 class Event:
     @web.event('chat_message_stream_end')
@@ -137,23 +73,24 @@ class Event:
                         MessageItem.message_group_id == msg_group.id
                     ).count()
                     text_content = str(content)
+                    # On continuation turns, trim any overlap at the seam.
+                    # The model sees the last 600 chars of the truncated response as
+                    # its own assistant prefill and occasionally bleeds the last few
+                    # words into the start of its continuation output. Strip any
+                    # suffix of the existing stored text that appears at the start
+                    # of the incoming continuation (up to 150 chars of overlap).
                     if payload.get('response_metadata', {}).get('should_continue'):
-                        meta = msg_group.meta or {}
-                        seam_tail = meta.get('continuation_seam_tail')
-                        head_anchor = meta.get('continuation_head_anchor', '')
-                        full_length = meta.get('continuation_full_length', 0)
-                        if seam_tail:
-                            text_content = _trim_exact_seam(
-                                seam_tail, text_content,
-                                head_anchor=head_anchor,
-                                full_length=full_length,
-                            )
-                        else:
-                            text_content = _trim_prefix_overlap(
-                                _existing_text_for_group(msg_group),
-                                text_content,
-                            )
-
+                        existing_parts = []
+                        for item in (msg_group.message_items or []):
+                            if getattr(item, 'item_type', None) == 'text_message' and item.content:
+                                existing_parts.append(str(item.content))
+                        existing_tail = ''.join(existing_parts)[-150:]
+                        if existing_tail:
+                            stripped = text_content.lstrip('\n\r')
+                            for overlap in range(min(len(existing_tail), len(stripped)), 0, -1):
+                                if existing_tail[-overlap:] == stripped[:overlap]:
+                                    text_content = stripped[overlap:]
+                                    break
                     _ARTIFACT_BLOCKS = frozenset(('{}', '{ }'))
                     if not text_content.strip() or text_content.strip() in _ARTIFACT_BLOCKS:
                         log.debug(
