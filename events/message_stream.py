@@ -25,6 +25,7 @@ from ..utils.attachments import (
 from ..utils.sio_utils import SioEvents
 
 
+
 class Event:
     @web.event('chat_message_stream_end')
     def chat_message_stream_end(self, context, event, payload):
@@ -71,12 +72,39 @@ class Event:
                     existing_count = session.query(MessageItem).filter(
                         MessageItem.message_group_id == msg_group.id
                     ).count()
-                    msg: TextMessageItem = TextMessageItem(
-                        content=str(content),
-                        message_group=msg_group,
-                        order_index=existing_count,
-                    )
-                    session.add(msg)
+                    text_content = str(content)
+                    # On continuation turns, trim any overlap at the seam.
+                    # The model sees the last 600 chars of the truncated response as
+                    # its own assistant prefill and occasionally bleeds the last few
+                    # words into the start of its continuation output. Strip any
+                    # suffix of the existing stored text that appears at the start
+                    # of the incoming continuation (up to 150 chars of overlap).
+                    if payload.get('response_metadata', {}).get('should_continue'):
+                        existing_parts = []
+                        for item in (msg_group.message_items or []):
+                            if getattr(item, 'item_type', None) == 'text_message' and item.content:
+                                existing_parts.append(str(item.content))
+                        existing_tail = ''.join(existing_parts)[-150:]
+                        if existing_tail:
+                            stripped = text_content.lstrip('\n\r')
+                            for overlap in range(min(len(existing_tail), len(stripped)), 0, -1):
+                                if existing_tail[-overlap:] == stripped[:overlap]:
+                                    text_content = stripped[overlap:]
+                                    break
+                    _ARTIFACT_BLOCKS = frozenset(('{}', '{ }'))
+                    if not text_content.strip() or text_content.strip() in _ARTIFACT_BLOCKS:
+                        log.debug(
+                            'chat_message_stream_end: skipping empty/duplicated '
+                            'continue text for message %s',
+                            payload['message_id'],
+                        )
+                    else:
+                        msg: TextMessageItem = TextMessageItem(
+                            content=text_content,
+                            message_group=msg_group,
+                            order_index=existing_count,
+                        )
+                        session.add(msg)
 
                 # Extract image thumbnails mapping (used by both files_modified and user-upload blocks)
                 image_thumbnails = payload.get('response_metadata', {}).get('image_thumbnails', {})

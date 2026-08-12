@@ -91,6 +91,11 @@ class ApplicationChatRequest(MergeUpdateBase):
         description="Context settings for the LLM"
     )
     is_regenerate: Optional[bool] = False
+    truncated_content: Optional[str] = Field(
+        default='',
+        description="Partial response content from a token-limit truncated run; "
+                    "used by the indexer to continue from where the LLM left off.",
+    )
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
