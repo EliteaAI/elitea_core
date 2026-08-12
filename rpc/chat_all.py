@@ -841,8 +841,12 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             result = deep_update(result, toolkit_payload)
             return result
 
-    # TODO: detect when continue flow with user input, use the request's user_input instead of message content
-    result['user_input'] = generate_user_input(msg_group)
+    # Continue flow can provide explicit user_input (e.g., a custom continue note).
+    # Fall back to the original message-group content when absent.
+    if getattr(predict_payload, 'should_continue', False) and predict_payload.user_input is not None:
+        result['user_input'] = predict_payload.user_input
+    else:
+        result['user_input'] = generate_user_input(msg_group)
 
     # Add steps limit parameter if any
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
@@ -1403,7 +1407,8 @@ class RPC:
 
             # Find the existing response message that was paused
             response_msg: ConversationMessageGroup = session.query(ConversationMessageGroup).options(
-                joinedload(ConversationMessageGroup.author_participant)
+                joinedload(ConversationMessageGroup.author_participant),
+                selectinload(ConversationMessageGroup.message_items),
             ).filter(
                 ConversationMessageGroup.uuid == parsed.message_id
             ).with_for_update(of=ConversationMessageGroup).populate_existing().first()
@@ -1551,6 +1556,75 @@ class RPC:
                     message_id=parsed.message_id,
                 )
 
+            # Pass any already-generated partial content so the indexer can use it
+            # as context when the LangGraph run has no paused checkpoint to resume
+            # from (token-limit truncation case: finish_reason == 'length').
+            # Strip trailing empty-block artifacts (e.g. '{}') that some reasoning
+            # models emit as the last content block when they hit the token limit.
+            _EMPTY_BLOCK_ARTIFACTS = ('{}', '{ }')
+            sorted_items = sorted(
+                (response_msg.message_items or []),
+                key=lambda msg_item: (msg_item.order_index or 0),
+            )
+
+            def _is_clean_text_item(item) -> bool:
+                if item.item_type != 'text_message':
+                    return False
+                if not isinstance(item.content, str):
+                    return False
+                stripped = item.content.strip()
+                if not stripped:
+                    return False
+                if stripped in _EMPTY_BLOCK_ARTIFACTS:
+                    return False
+                # Filter out injected system/context blocks that leaked into a
+                # previous response (e.g. from a broken continuation run).
+                if stripped.startswith('[ATTACHMENTS]'):
+                    return False
+                if stripped.startswith('<runtime_context>'):
+                    return False
+                return True
+
+            truncated_content = ''.join(
+                item.content
+                for item in sorted_items
+                if _is_clean_text_item(item)
+            )
+
+            # Token-limit detection: only apply continuation logic when:
+            # 1. There IS partial content to continue from.
+            # 2. There is NO active HITL/MCP interrupt — those must resume
+            #    from a live checkpoint, not start a fresh run.
+            is_token_limit_continuation = (
+                bool(truncated_content)
+                and not parsed.hitl_resume
+                and not pending_interrupts(response_msg.meta)
+            )
+
+            # For token-limit continuations: purge dirty items from the DB so
+            # they don't appear in the UI. "Dirty" means non-text items, empty
+            # artifact blocks, or system messages that leaked in from a prior
+            # broken continuation run (e.g. [ATTACHMENTS] / <runtime_context>).
+            # Also trim trailing newlines from the last clean item so there is
+            # no blank gap between the truncated text and the appended continuation.
+            if is_token_limit_continuation:
+                dirty_items = [item for item in sorted_items if not _is_clean_text_item(item)]
+                for dirty_item in dirty_items:
+                    session.delete(dirty_item)
+                if dirty_items:
+                    session.commit()
+                    # Rebuild sorted_items without the deleted ones
+                    sorted_items = [item for item in sorted_items if item not in dirty_items]
+
+                last_text_item = next(
+                    (item for item in reversed(sorted_items) if _is_clean_text_item(item)),
+                    None,
+                )
+                if last_text_item and last_text_item.content != last_text_item.content.rstrip('\n\r'):
+                    last_text_item.content = last_text_item.content.rstrip('\n\r')
+                    session.add(last_text_item)
+                    session.flush()
+
             try:
                 # Use thread_id from payload or fall back to existing message meta
                 if not payload.get('thread_id') and response_msg.meta:
@@ -1569,8 +1643,71 @@ class RPC:
                 payload['chat_history'] = generate_chat_history(
                     message_groups=chat_history_groups, summaries=summaries
                 )
+                if is_token_limit_continuation:
+                    # Assistant-prefill continuation. The sequence sent to the LLM:
+                    #   [... history ...]
+                    #   [user:      original question]
+                    #   [assistant: tail of truncated text (last 600 chars)]  ← prefill
+                    #   [user:      explicit instruction to complete the incomplete response]
+                    #
+                    # Only the tail is used as the assistant prefill, not the full truncated
+                    # content. The original question in chat_history already provides all
+                    # structural context (e.g. "write a market report covering sections A, B, C").
+                    # The tail (600 chars) gives the model a precise cutoff anchor so it can
+                    # complete the current sentence seamlessly.
+                    #
+                    # Using the full truncated content causes reasoning models to spend most
+                    # of their output budget on thinking — they reason about the entire
+                    # document's coherence when they see their own incomplete long-form output,
+                    # leaving almost no tokens for actual text.
+                    _tc_stripped = truncated_content.rstrip('\n\r')
+                    _tail_chars = 600
+                    _prefill_content = _tc_stripped[-_tail_chars:] if len(_tc_stripped) > _tail_chars else _tc_stripped
+                    original_user_input = payload.get('user_input', '')
+                    if original_user_input:
+                        payload['chat_history'].append({
+                            'role': 'user',
+                            'content': original_user_input,
+                        })
+                    payload['chat_history'].append({
+                        'role': 'assistant',
+                        'content': _prefill_content,
+                    })
+                    _word_count = len(_tc_stripped.split())
+                    payload['user_input'] = (
+                        f'Your previous response above was cut off due to token limits and is incomplete. '
+                        f'It already contains approximately {_word_count} words. '
+                        f'Please complete it now: output only the missing ending that finishes the response, '
+                        f'respecting all constraints from my original request (length, format, scope). '
+                        f'Do not repeat anything already written.'
+                    )
+                    payload['truncated_content'] = truncated_content
+                    if isinstance(payload.get('llm'), dict):
+                        llm_kwargs = payload['llm'].get('kwargs', {})
+                        if 'reasoning_effort' in llm_kwargs:
+                            llm_kwargs['reasoning_effort'] = 'low'
+                    app_vd = (payload.get('application') or {}).get('version_details') or {}
+                    llm_settings_vd = app_vd.get('llm_settings') or {}
+                    if 'reasoning_effort' in llm_settings_vd:
+                        llm_settings_vd['reasoning_effort'] = 'low'
                 payload['message_id'] = str(response_msg.uuid)
                 payload[EXECUTION_GENERATION_KEY] = execution_generation
+
+                if is_token_limit_continuation and response_msg.meta is not None:
+                    # Store anchors so message_stream.py can detect both seam
+                    # overlap (model repeated last N chars) and full regeneration
+                    # (model reproduced the whole existing text from the beginning).
+                    _tc = truncated_content.rstrip('\n\r')
+                    _SEAM_TAIL = 500
+                    _HEAD_ANCHOR = 100
+                    response_msg.meta['continuation_seam_tail'] = (
+                        _tc[-_SEAM_TAIL:] if len(_tc) > _SEAM_TAIL else _tc
+                    )
+                    response_msg.meta['continuation_head_anchor'] = _tc[:_HEAD_ANCHOR]
+                    response_msg.meta['continuation_full_length'] = len(_tc)
+                    flag_modified(response_msg, 'meta')
+                    session.add(response_msg)
+                    session.commit()
 
                 context_management_enabled = get_context_manager_feature_flag(parsed.project_id)
                 if context_management_enabled and response_msg.meta is not None:

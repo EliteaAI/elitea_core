@@ -259,6 +259,7 @@ def generate_predict_payload(
         'ignored_mcp_servers': parsed.ignored_mcp_servers or [],
         'user_declined_mcp_servers': getattr(parsed, 'user_declined_mcp_servers', None) or [],
         'should_continue': parsed.should_continue,
+        'truncated_content': getattr(parsed, 'truncated_content', '') or '',
         'hitl_resume': bool(getattr(parsed, 'hitl_resume', False)),
         'hitl_action': getattr(parsed, 'hitl_action', None),
         'hitl_value': getattr(parsed, 'hitl_value', None),
