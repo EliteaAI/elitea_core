@@ -33,7 +33,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         """
         user_id = auth.current_user().get('id')
 
-        result = self.context.rpc_manager.call.chat_stop_task(
+        result = self.module.context.rpc_manager.call.chat_stop_task(
             project_id=project_id,
             message_group_uuid=message_group_uuid,
             user_id=user_id,
