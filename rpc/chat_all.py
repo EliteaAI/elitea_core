@@ -40,7 +40,8 @@ from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, decisions_for_child,
     interrupt_identity, pending_interrupts,
-    retire_child_interrupts, retire_interrupts, validate_child_decisions,
+    retire_all_interrupts, retire_child_interrupts, retire_interrupts,
+    validate_child_decisions,
 )
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
@@ -52,6 +53,8 @@ from ..utils.internal_tools import (
 from ..utils.utils import get_public_project_id
 from ..utils.predict_utils import get_project_context, prepend_project_context
 
+
+TIMEOUT_CANCEL_TEXT = "No response, cancelled by timeout"
 
 CHAT_PREDICT_MAPPER = {
     ParticipantTypes.dummy: 'applications_predict_sio_llm',
@@ -1297,6 +1300,10 @@ class RPC:
                         session.commit()
                         raise
 
+                    self.finalize_timed_out_response(
+                        session, response_msg, result, await_task_timeout
+                    )
+
                     if return_message_ids:
                         session.refresh(msg_group)
                         session.refresh(response_msg)
@@ -1589,6 +1596,9 @@ class RPC:
                     await_task_timeout=await_task_timeout,
                     user_id=current_user['id']
                 )
+                self.finalize_timed_out_response(
+                    session, response_msg, result, await_task_timeout
+                )
                 return result
             except Exception as e:
                 # Reset streaming flag on any unexpected error
@@ -1603,6 +1613,45 @@ class RPC:
                     stream_id=str(parsed.conversation_uuid),
                     message_id=parsed.message_id,
                 )
+
+    @web.method()
+    def finalize_timed_out_response(self, session, response_msg, result, await_task_timeout):
+        """Close out a response message group whose task was cancelled on blocking timeout.
+
+        Mirrors the stop button (api/v2/task.py) minus the salvage/delete branches: the
+        worker is gone, so the row must not stay is_streaming forever.
+        """
+        # A timeout is the only case returning a bare task_id: a completed run has
+        # 'result', maintenance mode has 'error'.
+        if await_task_timeout <= 0 or not isinstance(result, dict):
+            return
+        if 'result' in result or not result.get('task_id'):
+            return
+        if not this.descriptor.config.get("cancel_on_timeout", True):
+            return
+
+        # Refuse a later HITL resume on a run whose worker was killed
+        self.mark_chat_run_stopped(str(response_msg.uuid))
+
+        response_msg.is_streaming = False
+        if response_msg.meta:
+            response_msg.meta = retire_all_interrupts(response_msg.meta)
+            flag_modified(response_msg, 'meta')
+        if not response_msg.message_items:
+            session.add(TextMessageItem(
+                message_group=response_msg,
+                item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
+                content=TIMEOUT_CANCEL_TEXT,
+                order_index=0,
+            ))
+        session.commit()
+
+        session.refresh(response_msg)
+        self.context.sio.emit(
+            event=SioEvents.chat_message_sync,
+            data=serialize(MessageGroupDetail.model_validate(response_msg)),
+            room=get_chat_room(response_msg.conversation.uuid),
+        )
 
     @web.method()
     def _continue_child_resume(self, sid, parsed, current_user):

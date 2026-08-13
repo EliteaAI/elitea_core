@@ -42,6 +42,15 @@ class Event:
                         'for message %s', payload['message_id'],
                     )
                     return
+                # A killed worker still emits stream_end; its bare "Error: " would land
+                # under the terminal text the stopper already wrote.
+                is_stopped = getattr(self, 'is_chat_run_stopped', None)
+                if is_stopped and is_stopped(payload['message_id']):
+                    log.info(
+                        'chat_message_stream_end: ignoring late end for stopped message %s',
+                        payload['message_id'],
+                    )
+                    return
                 content = safe_decode_bytes_in_dict(payload['content'])
 
                 # Try to parse string content as JSON (may be stringified list from SDK)
