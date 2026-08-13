@@ -56,6 +56,20 @@ from ..utils.tracing_utils import add_trace_context_to_meta
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 
 
+def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
+    """Stop a task the blocking caller gave up on, so it doesn't hold a worker slot forever."""
+    if not this.descriptor.config.get("cancel_on_timeout", True):
+        log.warning(
+            "%s: task %s abandoned after %ss (cancel_on_timeout off)", label, task_id, timeout
+        )
+        return
+    log.warning("%s: cancelling task %s abandoned after %ss", label, task_id, timeout)
+    try:
+        module.stop_task(task_id)
+    except Exception:  # pylint: disable=W0703
+        log.exception("%s: stop_task failed for %s", label, task_id)
+
+
 class RPC:
     @web.rpc(
         "applications_get_default_publish_validation_rules",
@@ -328,6 +342,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result":  result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "predict_sio")
 
         return {"task_id": task_id}
 
@@ -528,6 +543,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result": result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "predict_sio_llm")
 
         return {"task_id": task_id}
 
@@ -1393,6 +1409,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result": result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "test_toolkit_tool_sio")
 
         return {"task_id": task_id}
 
@@ -1595,6 +1612,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result": result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "test_mcp_connection_sio")
 
         return {"task_id": task_id}
 
@@ -1735,6 +1753,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result": result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "mcp_sync_tools_sio")
 
         return {"task_id": task_id}
 

@@ -287,6 +287,15 @@
       "section": "runtime",
       "default": "centry.user"
     },
+    "cancel_on_timeout": {
+      "type": "boolean",
+      "title": "Cancel Task On Timeout",
+      "description": "Stop the worker task when a blocking predict exceeds await_task_timeout, and close the chat response with a cancellation marker. Disable to leave abandoned tasks running until the pod restarts.",
+      "path": "cancel_on_timeout",
+      "section": "runtime",
+      "default": true,
+      "requires_restart": false
+    },
     "pipeline_scheduling_enabled": {
       "type": "boolean",
       "title": "Pipeline Scheduling Enabled",
