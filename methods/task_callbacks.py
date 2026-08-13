@@ -23,6 +23,11 @@ import requests  # pylint: disable=E0401
 from pylon.core.tools import web, log  # pylint: disable=E0401,E0611,W0611
 
 from ..utils.application_tools import cancel_toolkit_index_meta, resolve_toolkit_index_connection
+from ..utils.sio_utils import SioEvents
+
+
+# Fallback only; the aborting worker normally supplies this text itself (#6245).
+FORK_PROBE_USER_MESSAGE = "Temporary server error, please try again"
 
 
 class Method:
@@ -95,6 +100,53 @@ class Method:
             log.exception("Error in callback sender (task_id=%s)", task_id)
 
     @web.method()
+    def _report_fork_probe_failure(self, task_id, meta, result):
+        """End the chat stream for a worker that aborted on the fork-DNS probe (#6245)."""
+        # The child exits without touching Redis, so its agent_exception/full_message
+        # never arrive; only the result file does. Synthesize both here.
+        stream_id = result.get("stream_id")
+        message_id = result.get("message_id") or meta.get("message_id")
+        sio_event = meta.get("sio_event") or SioEvents.application_predict.value
+        content = result.get("human_readable") or FORK_PROBE_USER_MESSAGE
+        #
+        log.warning(
+            "Agent task %s aborted on the fork DNS probe; reporting to the UI "
+            "(message_id=%s)", task_id, message_id,
+        )
+        #
+        response_metadata = {
+            "project_id": meta.get("project_id"),
+            "chat_project_id": meta.get("chat_project_id"),
+            "is_error": True,
+            "error": result.get("error") or "fork_dns_probe_failed",
+        }
+        base_payload = {
+            "stream_id": stream_id,
+            "message_id": message_id,
+            "question_id": meta.get("question_id"),
+            "sio_event": sio_event,
+            "content": content,
+            "response_metadata": response_metadata,
+            "execution_generation": result.get("execution_generation"),
+        }
+        #
+        # Live UI: clears the spinner and shows the error box in the running chat.
+        try:
+            self.stream_response(sio_event, {**base_payload, "type": "agent_exception"})
+        except Exception:  # pylint: disable=W0703
+            log.exception("Fork-probe agent_exception emit failed (task_id=%s)", task_id)
+        #
+        # Persistence: same event the child's full_message would have triggered, so the
+        # row stops streaming and the error survives a reload.
+        if sio_event == SioEvents.chat_predict.value and response_metadata["chat_project_id"]:
+            try:
+                self.context.event_manager.fire_event(
+                    "chat_message_stream_end", {**base_payload, "type": "full_message"},
+                )
+            except Exception:  # pylint: disable=W0703
+                log.exception("Fork-probe stream_end fire failed (task_id=%s)", task_id)
+
+    @web.method()
     def reconcile_stopped_index_metas(self, task_id):
         """Cancel any in_progress index_meta rows a stopped task left orphaned.
 
@@ -163,12 +215,13 @@ class Method:
 
     @web.method()
     def _maybe_handle_parallel_dispatch(self, task_id):
-        """Route a stopped task into parked-parent launch or child reconcile.
+        """Route a stopped task into parked-parent launch, child reconcile, or fork-probe report.
 
         Reads meta first (cheap) to branch:
           * child  — meta carries reconcile_epoch → advance the reconcile gate.
-          * parent — task_name is an agent runner AND its result is parked →
-                     launch one durable child per spec.
+          * parent — task_name is an agent runner; its result is either parked
+                     (launch one durable child per spec) or a fork-DNS-probe abort
+                     (report the failure to the UI, #6245).
         Anything else (ordinary agent run, index task, unknown) is ignored. The
         result is only deserialized when the cheap meta check already matched, so
         the common no-op path stays O(meta lookup).
@@ -198,6 +251,11 @@ class Method:
             result = self.task_node.get_task_result(task_id)  # pylint: disable=E1101
         except Exception:  # pylint: disable=W0703
             return
-        if not isinstance(result, dict) or not result.get("parallel_parked"):
+        if not isinstance(result, dict):
+            return
+        if result.get("fork_dns_probe_failed"):
+            self._report_fork_probe_failure(task_id, meta, result)
+            return
+        if not result.get("parallel_parked"):
             return
         self.parallel_dispatch_launch_children(task_id, meta, result)
