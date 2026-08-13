@@ -10,7 +10,7 @@ from tools import db, auth, serialize, this, VaultClient, rpc_tools, config as c
 import redis
 from pydantic import ValidationError
 from pydantic.utils import deep_update
-from sqlalchemy import asc, desc, String
+from sqlalchemy import asc, desc, String, func
 
 from ..utils.chat_constants import SUMMARIZATION_LOCKING_TTL
 from ..utils.conversation_utils import get_conversation_locked_key
@@ -18,6 +18,7 @@ from ..models.all import ApplicationVersion
 from ..models.conversation import Conversation
 from ..models.enums.all import AgentTypes, ParticipantTypes, ChatHistoryTemplates, PublishStatus
 from ..models.message_group import ConversationMessageGroup
+from ..models.message_trace_step import MessageTraceStep
 from ..models.message_items.text import TextMessageItem
 from ..models.participants import ParticipantMapping, Participant
 from ..models.pd.message import MessageGroupDetail
@@ -2061,3 +2062,137 @@ class RPC:
     @web.rpc("chat_get_message_group_model")
     def get_conversation_message_group_model(self):
         return ConversationMessageGroup
+
+    @web.rpc("chat_stop_task", "chat_stop_task")
+    def chat_stop_task(
+            self,
+            project_id: int,
+            message_group_uuid: str,
+            user_id: int,
+    ) -> dict:
+        """
+        Stop a running chat task for a message group.
+
+        This is the single source of truth for stopping chat tasks.
+        Called by:
+        - elitea_core DELETE /api/v2/task endpoint (EliteaUI)
+        - support_assistant support_stop Socket.IO event (Support Widget)
+
+        Performs all 5 steps:
+        1. Stop task via Arbiter (stop_task RPC)
+        2. Mark chat run as stopped in Redis (prevents late event processing)
+        3. Set is_streaming = False in database
+        4. Retire all HITL interrupts
+        5. Emit chat_message_sync or chat_message_delete event
+
+        Args:
+            project_id: The project ID where the conversation exists
+            message_group_uuid: The UUID of the message group to stop
+            user_id: The user ID requesting the stop (for ownership verification)
+
+        Returns:
+            dict with 'success' or 'error' key
+        """
+        with db.get_session(project_id) as session:
+            msg_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_group_uuid
+            ).with_for_update(of=ConversationMessageGroup).first()
+
+            if not msg_group:
+                return {"error": "Message group not found", "code": "NOT_FOUND"}
+
+            # Verify ownership: user must be conversation author or message author
+            if user_id != msg_group.conversation.author_id:
+                author = msg_group.author_participant
+                if author.entity_name != ParticipantTypes.user or \
+                        user_id != author.entity_meta.get('id'):
+                    return {
+                        "error": "Message can be stopped only by message or conversation author",
+                        "code": "FORBIDDEN"
+                    }
+
+            task_id = msg_group.task_id
+            if not task_id:
+                return {"error": "No active task for this message", "code": "NO_TASK"}
+
+            # Step 1: Stop task via Arbiter
+            self.stop_task(task_id)
+
+            # Step 2: Mark chat run as stopped in Redis
+            self.mark_chat_run_stopped(message_group_uuid)
+
+            # Step 3: Set is_streaming = False in database
+            msg_group.is_streaming = False
+
+            # Step 4: Retire all HITL interrupts
+            if msg_group.meta:
+                msg_group.meta = retire_all_interrupts(msg_group.meta)
+                flag_modified(msg_group, 'meta')
+
+            msg_group_deleted = False
+            room = get_chat_room(msg_group.conversation.uuid)
+
+            # Handle empty message case: salvage thinking text or delete
+            if not msg_group.message_items:
+                # Salvage the latest non-empty thinking text as the reply
+                latest_text = (
+                    session.query(MessageTraceStep.text)
+                    .filter(
+                        MessageTraceStep.message_group_id == msg_group.id,
+                        MessageTraceStep.kind == 'thinking_step',
+                        MessageTraceStep.text.isnot(None),
+                        func.trim(MessageTraceStep.text) != '',
+                    )
+                    .order_by(MessageTraceStep.finished_at.desc(), MessageTraceStep.id.desc())
+                    .limit(1)
+                    .scalar()
+                )
+
+                if latest_text:
+                    msg: TextMessageItem = TextMessageItem(
+                        content=str(latest_text),
+                        message_group=msg_group,
+                        order_index=0,
+                    )
+                    session.add(msg)
+                else:
+                    # No content at all - delete both message groups
+                    reply_to_record = session.query(ConversationMessageGroup).filter(
+                        ConversationMessageGroup.id == msg_group.reply_to_id
+                    ).first()
+                    session.delete(reply_to_record)
+                    session.delete(msg_group)
+                    msg_group_deleted = True
+
+                    # Step 5a: Emit delete events
+                    self.context.sio.emit(
+                        event=SioEvents.chat_message_delete,
+                        data={
+                            'message_group_id': msg_group.id,
+                            'message_group_uid': str(msg_group.uuid),
+                        },
+                        room=room,
+                    )
+                    self.context.sio.emit(
+                        event=SioEvents.chat_message_delete,
+                        data={
+                            'message_group_id': reply_to_record.id,
+                            'message_group_uid': str(reply_to_record.uuid),
+                        },
+                        room=room,
+                    )
+
+            session.commit()
+
+            # Step 5b: Emit sync event for non-deleted message
+            if not msg_group_deleted:
+                session.refresh(msg_group)
+                msg_group_detail = MessageGroupDetail.model_validate(msg_group)
+
+                self.context.sio.emit(
+                    event=SioEvents.chat_message_sync,
+                    data=serialize(msg_group_detail),
+                    room=room,
+                )
+
+            return {"success": True}
