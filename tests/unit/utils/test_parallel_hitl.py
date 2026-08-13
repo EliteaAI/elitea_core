@@ -307,7 +307,6 @@ def test_all_hitl_jsonb_mutations_lock_the_message_row_and_stop_clears_cards():
     plugin_root = pathlib.Path(__file__).resolve().parents[3]
     event_source = (plugin_root / 'events' / 'message_stream.py').read_text()
     continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
-    stop_source = (plugin_root / 'api' / 'v2' / 'task.py').read_text()
     regenerate_source = (plugin_root / 'api' / 'v2' / 'regenerate.py').read_text()
     chat_models_source = (plugin_root / 'models' / 'pd' / 'chat.py').read_text()
     predict_source = (plugin_root / 'utils' / 'predict_utils.py').read_text()
@@ -321,13 +320,17 @@ def test_all_hitl_jsonb_mutations_lock_the_message_row_and_stop_clears_cards():
         continue_source.index('def continue_predict_sio'):
         continue_source.index('def _continue_child_resume')
     ]
+    # Stop logic is now in chat_stop_task RPC (chat_all.py), called by api/v2/task.py
+    stop_rpc = continue_source[
+        continue_source.index('def chat_stop_task('):
+    ]
     assert '.with_for_update(of=ConversationMessageGroup)' in root_resume
     assert 'retire_interrupts(' in root_resume
     assert '.with_for_update(of=ConversationMessageGroup).first()' in pause_handler
     assert '.with_for_update(of=ConversationMessageGroup).first()' in child_resume
     assert 'This sub-orchestrator approval expired' in continue_source
-    assert '.with_for_update(of=ConversationMessageGroup).first()' in stop_source
-    assert 'retire_all_interrupts(msg_group.meta)' in stop_source
+    assert '.with_for_update(of=ConversationMessageGroup).first()' in stop_rpc
+    assert 'retire_all_interrupts(msg_group.meta)' in stop_rpc
     assert 'retire_all_interrupts(msg_group.meta)' in event_source
     assert 'retire_all_interrupts(msg_group.meta)' in regenerate_source
     assert 'begin_execution_generation(' in regenerate_source
