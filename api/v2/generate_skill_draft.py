@@ -52,8 +52,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         ),
         request_body=GenerateSkillDraftRequest,
         tags=["elitea_core/skills"],
-        mcp_tool=False,
-        available_to_users=False,
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.skills.create"],

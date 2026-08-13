@@ -214,6 +214,14 @@ class Module(module.ModuleModel):
                     "description": "Sync tools from remote MCP servers and proxy OAuth token exchange for MCP integrations.",
                 },
                 {
+                    "name": "elitea_core/project_context",
+                    "description": "Manage project context content and AI-assisted project context draft generation.",
+                },
+                {
+                    "name": "elitea_core/skills",
+                    "description": "Create, update, version, list, and generate skills from natural-language requirements.",
+                },
+                {
                     "name": "elitea_core/runtime",
                     "description": "Runtime and infrastructure utility endpoints.",
                 },
