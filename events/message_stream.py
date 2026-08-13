@@ -15,6 +15,9 @@ from ..utils.parallel_hitl import (
     is_current_execution, merge_interrupts, requires_plural_persistence,
     retire_all_interrupts,
 )
+from ..utils.toolkit_authorization import (
+    merge_authorization_request, retire_all_authorization_requests,
+)
 from ..utils.attachments import (
     process_single_attachment_file,
     is_multimodal_content,
@@ -185,6 +188,7 @@ class Event:
                 # child's card. A re-pause re-persists via chat_message_stream_pause.
                 if msg_group.meta:
                     msg_group.meta = retire_all_interrupts(msg_group.meta)
+                    msg_group.meta = retire_all_authorization_requests(msg_group.meta)
                 flag_modified(msg_group, 'is_streaming')
                 flag_modified(msg_group, 'meta')
                 session.add(msg_group)
@@ -446,7 +450,31 @@ class Event:
                 # is unaffected.
                 hitl_interrupt = response_metadata.get('hitl_interrupt')
                 hitl_interrupts = response_metadata.get('hitl_interrupts')
-                if hitl_interrupt or hitl_interrupts:
+                auth_request = (
+                    response_metadata
+                    if payload.get('type') == 'mcp_authorization_required'
+                    and response_metadata.get('guardrail_type') == 'mcp_auth'
+                    else None
+                )
+                if auth_request:
+                    if msg_group.meta is None:
+                        msg_group.meta = {}
+                    msg_group.meta = merge_authorization_request(
+                        msg_group.meta, auth_request,
+                    )
+                    root_thread_id = response_metadata.get('root_thread_id')
+                    if root_thread_id and not msg_group.meta.get('thread_id'):
+                        msg_group.meta['thread_id'] = root_thread_id
+                    flag_modified(msg_group, 'meta')
+                    # An SDK-nested Application also has a child_thread_id but
+                    # resumes through the root checkpoint.  Only a worker-owned
+                    # durable fan-out child remains active while its parent is
+                    # parked for reconciliation.
+                    msg_group.is_streaming = (
+                        response_metadata.get('resume_strategy')
+                        == 'aggregate_child'
+                    )
+                elif hitl_interrupt or hitl_interrupts:
                     if msg_group.meta is None:
                         msg_group.meta = {}
                     merged = merge_interrupts(msg_group.meta, response_metadata)
