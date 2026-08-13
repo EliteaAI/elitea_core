@@ -77,19 +77,19 @@ class TestSummarizeIndexingReport:
     def test_unchanged_items_are_not_reported_as_skipped(self, indexing_report):
         """An incremental reindex must not describe untouched documents as skipped —
         the chip beside this counts them as indexed."""
-        report = make_report(indexed=5, skipped=196, unchanged=195, total=201)
+        report = make_report(indexed=5, skipped=1, unchanged=195, total=201)
 
         summary = indexing_report.summarize_indexing_report(report)
 
         assert summary == '5 pages indexed, 1 skipped, 195 unchanged'
 
     def test_unchanged_alone_needs_no_skipped_clause(self, indexing_report):
-        report = make_report(indexed=5, skipped=195, unchanged=195, total=200)
+        report = make_report(indexed=5, skipped=0, unchanged=195, total=200)
 
         assert indexing_report.summarize_indexing_report(report) == '5 pages indexed, 195 unchanged'
 
     def test_nothing_changed_reads_as_up_to_date(self, indexing_report):
-        report = make_report(indexed=0, unchanged=196, skipped=196, total=196)
+        report = make_report(indexed=0, unchanged=196, skipped=0, total=196)
 
         summary = indexing_report.summarize_indexing_report(report)
 
@@ -131,7 +131,7 @@ class TestBuildIndexNotificationMessage:
         assert message.startswith('Index [docs]() is successfully reindexed by schedule.')
 
     def test_scheduled_run_that_changed_nothing(self, indexing_report):
-        report = make_report(indexed=0, unchanged=196, skipped=196, total=196)
+        report = make_report(indexed=0, unchanged=196, skipped=0, total=196)
 
         message = indexing_report.build_index_notification_message(
             {'index_name': 'docs', 'reindex': True, 'report': report}, initiator='schedule'

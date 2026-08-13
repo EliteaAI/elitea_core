@@ -72,10 +72,6 @@ def summarize_indexing_report(report):
     parts = [f'{indexed} {_noun(indexed, labels, DEFAULT_ITEM_LABELS)} indexed']
     for key, wording in (('skipped', 'skipped'), ('not_indexed', 'not indexed'), ('failed', 'failed')):
         count = totals.get(key) or 0
-        # Unchanged items sit inside `skipped` for totals parity, but nothing about
-        # them was left out of the index.
-        if key == 'skipped':
-            count -= unchanged
         if count > 0:
             parts.append(f'{count} {wording}')
     if unchanged:
