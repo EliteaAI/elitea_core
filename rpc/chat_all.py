@@ -1490,7 +1490,14 @@ class RPC:
                 ]
                 if decisions:
                     try:
-                        validate_child_decisions(pending, decisions)
+                        # Track-1/in-process aggregates share one root worker
+                        # checkpoint. Resume only the selected leaf; the SDK
+                        # preserves and re-emits unresolved sibling interrupts.
+                        # True parked worker children keep the exact-all rule in
+                        # ``_continue_child_resume`` below.
+                        validate_child_decisions(
+                            pending, decisions, require_all=False,
+                        )
                     except ValueError as exc:
                         raise SioValidationError(
                             sio=self.context.sio, sid=sid,

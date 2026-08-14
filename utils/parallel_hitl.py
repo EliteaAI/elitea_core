@@ -238,20 +238,28 @@ def decisions_for_child(decisions, child_thread_id, tool_call_id=None):
     return by_tool or decisions
 
 
-def validate_child_decisions(pending, decisions):
-    """Require an exact, unique decision for every pending durable-child card."""
+def validate_child_decisions(pending, decisions, require_all=True):
+    """Validate unique decisions against pending interrupt identities.
+
+    A parked worker child is resumed once and therefore still requires a
+    complete decision set.  An in-process root aggregate can be resumed with a
+    subset: the SDK checkpoints the completed leaf and returns the remaining
+    interrupts with their stable identities.
+    """
     pending = [dict(item) for item in (pending or []) if isinstance(item, dict)]
     decisions = [dict(item) for item in (decisions or []) if isinstance(item, dict)]
     expected = [interrupt_identity(item) for item in pending]
     received = [interrupt_identity(item) for item in decisions]
     if not expected or any(not identity for identity in expected):
         raise ValueError('Pending interrupt is missing a stable identity')
-    if any(not identity for identity in received):
+    if not received or any(not identity for identity in received):
         raise ValueError('Every decision must include an interrupt identity')
     if len(received) != len(set(received)):
         raise ValueError('Duplicate interrupt decisions are not allowed')
-    if set(received) != set(expected):
+    if require_all and set(received) != set(expected):
         raise ValueError('Decisions must exactly match all pending interrupts')
+    if not require_all and not set(received).issubset(set(expected)):
+        raise ValueError('Decision does not match a pending interrupt')
 
     pending_by_identity = {
         interrupt_identity(item): item for item in pending

@@ -347,6 +347,32 @@ def test_child_decisions_require_exact_unique_identities_and_valid_actions():
         raise AssertionError(f'expected invalid decisions to fail: {decisions}')
 
 
+def test_root_decisions_allow_one_pending_interrupt_at_a_time():
+    pending = [
+        {'interrupt_id': 'i-1', 'available_actions': ['approve', 'reject']},
+        {'interrupt_id': 'i-2', 'available_actions': ['approve', 'reject']},
+    ]
+
+    validate_child_decisions(
+        pending,
+        [{'interrupt_id': 'i-1', 'action': 'approve'}],
+        require_all=False,
+    )
+
+    for decisions in (
+        [],
+        [{'interrupt_id': 'unknown', 'action': 'approve'}],
+        [{'interrupt_id': 'i-1', 'action': 'edit'}],
+    ):
+        try:
+            validate_child_decisions(
+                pending, decisions, require_all=False,
+            )
+        except ValueError:
+            continue
+        raise AssertionError(f'expected invalid partial decisions to fail: {decisions}')
+
+
 def test_regenerate_clears_stopped_flag_but_continue_does_not():
     plugin_root = pathlib.Path(__file__).resolve().parents[3]
     regenerate_source = (plugin_root / 'api' / 'v2' / 'regenerate.py').read_text()
