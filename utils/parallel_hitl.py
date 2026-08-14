@@ -71,13 +71,23 @@ def normalize_interrupts(response_metadata):
         if not isinstance(item, dict):
             continue
         current = deepcopy(item)
-        child_thread_id = (
-            current.get('child_thread_id')
-            or lineage.get('child_thread_id')
-        )
+        # The task metadata identifies the durable worker child whose launch
+        # payload is stashed in Redis. A nested in-process Application may also
+        # put its leaf checkpoint id in ``child_thread_id``; that value is useful
+        # for LangGraph routing, but it must not replace the durable worker id or
+        # Core will look up a Redis key that can never exist on resume.
+        durable_child_thread_id = lineage.get('child_thread_id')
+        nested_child_thread_id = current.get('child_thread_id')
+        child_thread_id = durable_child_thread_id or nested_child_thread_id
+        if (
+            durable_child_thread_id
+            and nested_child_thread_id
+            and nested_child_thread_id != durable_child_thread_id
+        ):
+            current.setdefault('thread_id', nested_child_thread_id)
         tool_call_id = current.get('tool_call_id') or lineage.get('tool_call_id')
         if child_thread_id:
-            current.setdefault('child_thread_id', child_thread_id)
+            current['child_thread_id'] = child_thread_id
         if tool_call_id:
             current.setdefault('tool_call_id', tool_call_id)
         for key in ('parent_agent_call_id', 'sibling_ordinal'):

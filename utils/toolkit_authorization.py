@@ -21,6 +21,16 @@ def pending_authorization_requests(meta):
 def merge_authorization_request(meta, response_metadata):
     updated = dict(meta or {})
     incoming = dict(response_metadata or {})
+    lineage = incoming.get('metadata') or {}
+    durable_child_thread_id = lineage.get('child_thread_id')
+    nested_child_thread_id = incoming.get('child_thread_id')
+    if durable_child_thread_id:
+        if (
+            nested_child_thread_id
+            and nested_child_thread_id != durable_child_thread_id
+        ):
+            incoming.setdefault('thread_id', nested_child_thread_id)
+        incoming['child_thread_id'] = durable_child_thread_id
     request_id = authorization_identity(incoming)
     if not request_id:
         return updated

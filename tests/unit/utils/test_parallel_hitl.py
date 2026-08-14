@@ -122,6 +122,36 @@ def test_two_interrupts_in_one_durable_child_preserve_both():
     assert requires_plural_persistence(normalized, response) is True
 
 
+def test_nested_leaf_threads_keep_durable_child_as_resume_route():
+    response = {
+        'hitl_interrupts': [
+            {
+                'interrupt_id': 'leaf-1',
+                'child_thread_id': 'leaf-thread-1',
+                'thread_id': 'leaf-thread-1',
+                'tool_call_id': 'leaf-tool-1',
+            },
+            {
+                'interrupt_id': 'leaf-2',
+                'child_thread_id': 'leaf-thread-2',
+                'thread_id': 'leaf-thread-2',
+                'tool_call_id': 'leaf-tool-2',
+            },
+        ],
+        'metadata': {'child_thread_id': 'durable-child'},
+    }
+
+    normalized = normalize_interrupts(response)
+
+    assert [item['child_thread_id'] for item in normalized] == [
+        'durable-child', 'durable-child',
+    ]
+    assert [item['thread_id'] for item in normalized] == [
+        'leaf-thread-1', 'leaf-thread-2',
+    ]
+    assert all(item['resume_strategy'] == 'aggregate_child' for item in normalized)
+
+
 def test_interrupt_lineage_prefixes_outer_root_and_drops_replayed_self_hop():
     response = {
         'hitl_interrupt': {

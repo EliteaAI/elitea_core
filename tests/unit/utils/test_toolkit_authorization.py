@@ -48,3 +48,15 @@ def test_child_thread_without_worker_route_defaults_to_root_resume():
     meta = merge_authorization_request({}, request)
 
     assert pending_authorization_requests(meta)[0]['resume_strategy'] == 'root'
+
+
+def test_worker_route_overrides_nested_authorization_leaf_thread():
+    request = _request('auth-nested', 'leaf-thread')
+    request['metadata'] = {'child_thread_id': 'durable-child'}
+
+    meta = merge_authorization_request({}, request)
+
+    persisted = pending_authorization_requests(meta)[0]
+    assert persisted['child_thread_id'] == 'durable-child'
+    assert persisted['thread_id'] == 'leaf-thread'
+    assert persisted['resume_strategy'] == 'aggregate_child'
