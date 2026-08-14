@@ -503,7 +503,8 @@ class Event:
                     # while its routed child interrupts are open. Root/single pauses keep legacy
                     # is_streaming=False behavior.
                     msg_group.is_streaming = any(
-                        item.get('child_thread_id') for item in merged
+                        item.get('resume_strategy') == 'aggregate_child'
+                        for item in merged
                     )
                 else:
                     # MCP-auth pauses have no HITL interrupt object, but the durable-child

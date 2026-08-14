@@ -31,6 +31,12 @@ def merge_authorization_request(meta, response_metadata):
         ):
             incoming.setdefault('thread_id', nested_child_thread_id)
         incoming['child_thread_id'] = durable_child_thread_id
+        incoming['resume_strategy'] = 'aggregate_child'
+    else:
+        # SDK Application nesting also uses child_thread_id. Without a worker
+        # lineage overlay there is no Redis launch stash and the authorization
+        # must resume the root execution that owns the nested caller.
+        incoming['resume_strategy'] = 'root'
     request_id = authorization_identity(incoming)
     if not request_id:
         return updated
@@ -40,13 +46,6 @@ def merge_authorization_request(meta, response_metadata):
     incoming['interrupt_id'] = request_id
     incoming['authorization_request_id'] = request_id
     incoming.setdefault('available_actions', ['authorize', 'skip'])
-    incoming.setdefault(
-        'resume_strategy',
-        # child_thread_id alone is not a durable-worker signal: in-process SDK
-        # Application nesting uses one too.  The worker stamps aggregate_child
-        # only when it owns a parked fan-out child task.
-        'root',
-    )
     by_id = {
         authorization_identity(item): item
         for item in pending_authorization_requests(updated)

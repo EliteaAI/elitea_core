@@ -103,8 +103,13 @@ def normalize_interrupts(response_metadata):
                 if outer_last.get('name') == inner_first.get('name'):
                     inner_path = inner_path[1:]
             current['parent_agent_path'] = deepcopy(outer_path) + deepcopy(inner_path)
-        current.setdefault(
-            'resume_strategy', 'aggregate_child' if child_thread_id else 'single',
+        # Only the worker task lineage identifies a parked Core fan-out child
+        # backed by ``parallel_child_launch:*``. SDK Applications also attach
+        # child_thread_id while bubbling an in-process LangGraph interrupt, but
+        # those pauses must continue the root worker so the decision reaches
+        # the actual nested caller. Never trust an SDK-supplied strategy here.
+        current['resume_strategy'] = (
+            'aggregate_child' if durable_child_thread_id else 'single'
         )
         normalized.append(current)
     return normalized

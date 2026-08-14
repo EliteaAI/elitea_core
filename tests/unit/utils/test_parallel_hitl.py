@@ -152,6 +152,34 @@ def test_nested_leaf_threads_keep_durable_child_as_resume_route():
     assert all(item['resume_strategy'] == 'aggregate_child' for item in normalized)
 
 
+def test_nested_in_process_leaf_threads_resume_the_root_worker():
+    response = {
+        'thread_id': 'root-worker-thread',
+        'hitl_interrupts': [
+            {
+                'interrupt_id': 'leaf-1',
+                'child_thread_id': 'sdk-leaf-thread-1',
+                'thread_id': 'sdk-leaf-thread-1',
+                'resume_strategy': 'aggregate_child',
+            },
+            {
+                'interrupt_id': 'leaf-2',
+                'child_thread_id': 'sdk-leaf-thread-2',
+                'thread_id': 'sdk-leaf-thread-2',
+                'resume_strategy': 'aggregate_child',
+            },
+        ],
+    }
+
+    normalized = normalize_interrupts(response)
+
+    assert [item['child_thread_id'] for item in normalized] == [
+        'sdk-leaf-thread-1', 'sdk-leaf-thread-2',
+    ]
+    assert all(item['resume_strategy'] == 'single' for item in normalized)
+    assert requires_plural_persistence(normalized, response) is True
+
+
 def test_interrupt_lineage_prefixes_outer_root_and_drops_replayed_self_hop():
     response = {
         'hitl_interrupt': {

@@ -25,7 +25,7 @@ def test_authorization_requests_merge_and_retire_one_without_losing_siblings():
 
     pending = pending_authorization_requests(meta)
     assert [authorization_identity(item) for item in pending] == ['auth-1', 'auth-2']
-    assert pending[0]['resume_strategy'] == 'aggregate_child'
+    assert pending[0]['resume_strategy'] == 'root'
 
     retired = retire_authorization_requests(meta, ['auth-1'])
     assert [authorization_identity(item) for item in pending_authorization_requests(retired)] == ['auth-2']
