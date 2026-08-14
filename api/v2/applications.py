@@ -4,9 +4,10 @@ import json
 
 from flask import request
 from pydantic import ValidationError
+from queue import Empty
 
 from sqlalchemy.orm import selectinload
-from tools import api_tools, config as c, db, auth, serialize, register_openapi
+from tools import api_tools, config as c, db, auth, serialize, register_openapi, rpc_tools
 
 from ...models.pd.application import (
     ApplicationCreateModel,
@@ -23,6 +24,50 @@ from ...utils.utils import get_public_project_id
 from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
+
+
+def get_enabled_agent_internal_tools(personalization) -> list:
+    """
+    Extract enabled agent internal tool names from user personalization settings.
+    Maps field names like 'default_agent_image_generation_enabled' to tool names like 'image_generation'.
+    
+    Args:
+        personalization: dict or PersonalizationModel object
+    
+    Returns:
+        list of enabled internal tool names
+    """
+    if not personalization:
+        return []
+    
+    # Convert Pydantic model to dict if needed
+    if hasattr(personalization, 'model_dump'):
+        personalization_dict = personalization.model_dump(exclude_none=True)
+    elif hasattr(personalization, 'dict'):
+        personalization_dict = personalization.dict(exclude_none=True)
+    else:
+        personalization_dict = personalization
+    
+    # Map personalization field names to internal tool names
+    field_to_tool_map = {
+        'default_agent_internal_mcp_enabled': 'internal_mcp',
+        'default_agent_skill_builder_enabled': 'skill_builder',
+        'default_agent_project_context_builder_enabled': 'project_context_builder',
+        'default_agent_image_generation_enabled': 'image_generation',
+        'default_agent_data_analysis_enabled': 'data_analysis',
+        'default_agent_planner_enabled': 'planner',
+        'default_agent_pyodide_enabled': 'pyodide',
+        'default_agent_swarm_enabled': 'swarm',
+        'default_agent_lazy_tools_mode_enabled': 'lazy_tools_mode',
+    }
+    
+    enabled_tools = []
+    for field_name, tool_name in field_to_tool_map.items():
+        if personalization_dict.get(field_name):
+            enabled_tools.append(tool_name)
+    
+    return enabled_tools
+
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -173,6 +218,25 @@ class PromptLibAPI(api_tools.APIModeHandler):
         raw['user_id'] = author_id
         for version in raw.get("versions", []):
             version["author_id"] = author_id
+         
+        # Apply default internal tools from user personalization if not explicitly set
+        try:
+            user_personalization = rpc_tools.RpcMixin().rpc.timeout(2).social_get_user(author_id)
+            if user_personalization and 'personalization' in user_personalization:
+                default_internal_tools = get_enabled_agent_internal_tools(
+                    user_personalization['personalization']
+                )
+                # Apply to all versions that don't already have internal_tools set in meta
+                for version in raw.get("versions", []):
+                    meta = version.get('meta') or {}
+                    if 'internal_tools' not in meta and default_internal_tools:
+                        meta['internal_tools'] = default_internal_tools
+                        version['meta'] = meta
+        except Empty:
+            log.debug(f"social_get_user RPC not available, skipping default internal tools")
+        except Exception as e:
+            log.warning(f"Failed to fetch user personalization for default internal tools: {e}")
+         
         try:
             application_data = ApplicationCreateModel.model_validate(raw)
         except ValidationError as e:

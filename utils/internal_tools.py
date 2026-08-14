@@ -55,6 +55,10 @@ MCP_SKILL_BUILDER_ENDPOINT_CONFIGS = [
 MCP_PROJECT_CONTEXT_BUILDER_ENDPOINT_CONFIGS = [
     {"suffix": "elitea_core/project_context", "name": "Elitea Project Context"},
 ]
+MCP_CURRENT_PROJECT_SUFFIXES = {
+    "elitea_core/project_context",
+    "elitea_core/skills",
+}
 MCP_BUILDER_TOOL_KEYS = {
     MCP_INTERNAL_TOOL_KEY,
     MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY,
@@ -575,6 +579,7 @@ def dedupe_internal_mcp_tools(tools: list[dict]) -> None:
 
 def inject_mcp_toolkits(
     user_id: int,
+    current_project_id: int | None = None,
     internal_tools: list[str] = None,
     existing_tools: list[dict] = None,
 ) -> list[dict]:
@@ -591,6 +596,7 @@ def inject_mcp_toolkits(
 
     Args:
         user_id: User ID for auth and project lookup
+        current_project_id: Active project ID from current runtime context
         internal_tools: List of enabled internal tools from conversation/agent meta
         existing_tools: Toolkits already in the payload, used to dedupe against manual toolkits
 
@@ -640,7 +646,10 @@ def inject_mcp_toolkits(
         if ep['suffix'] in covered_suffixes:
             log.debug(f"[MCP Injection] Skipping '{ep['name']}' — already added as a manual toolkit")
             continue
-        url = f"{base_url}/app/{user_project.id}/mcp/{ep['suffix']}"
+        target_project_id = user_project.id
+        if ep['suffix'] in MCP_CURRENT_PROJECT_SUFFIXES and current_project_id is not None:
+            target_project_id = current_project_id
+        url = f"{base_url}/app/{target_project_id}/mcp/{ep['suffix']}"
         tool = {
             'type': 'mcp',
             'name': f'{ep["name"]}',

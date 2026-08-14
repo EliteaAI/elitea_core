@@ -272,6 +272,7 @@ def generate_toolkit_payload(
     try:
         mcp_tools = inject_mcp_toolkits(
             user_id=user_id,
+            current_project_id=conversation_project_id,
             internal_tools=internal_tools or [],
             existing_tools=tools,
         )
