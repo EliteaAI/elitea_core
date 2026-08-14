@@ -47,6 +47,11 @@ _module(
 )
 _module('models.enums.all', AgentTypes=_AgentTypes)
 _module('models.elitea_tools', EliteATool=object)
+_module(
+    'jinja2',
+    Environment=object,
+    DebugUndefined=object,
+)
 
 chat = importlib.import_module('models.pd.chat')
 ApplicationChatRequest = chat.ApplicationChatRequest
@@ -56,7 +61,14 @@ _package('utils', UTILS_ROOT)
 _module('flask')
 _module('pylon')
 _package('pylon.core', PLUGIN_ROOT)
-_module('pylon.core.tools', log=SimpleNamespace(debug=lambda *_args, **_kwargs: None, warning=lambda *_args, **_kwargs: None))
+_module(
+    'pylon.core.tools',
+    log=SimpleNamespace(
+        debug=lambda *_args, **_kwargs: None,
+        info=lambda *_args, **_kwargs: None,
+        warning=lambda *_args, **_kwargs: None,
+    ),
+)
 _module(
     'tools',
     VaultClient=object,

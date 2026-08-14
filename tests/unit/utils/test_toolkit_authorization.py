@@ -1,8 +1,26 @@
-from utils.toolkit_authorization import (
-    authorization_identity,
-    merge_authorization_request,
-    pending_authorization_requests,
-    retire_authorization_requests,
+import importlib.util
+import pathlib
+
+
+MODULE_PATH = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / 'utils'
+    / 'toolkit_authorization.py'
+)
+SPEC = importlib.util.spec_from_file_location(
+    'toolkit_authorization_under_test',
+    MODULE_PATH,
+)
+toolkit_authorization = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(toolkit_authorization)
+
+authorization_identity = toolkit_authorization.authorization_identity
+merge_authorization_request = toolkit_authorization.merge_authorization_request
+pending_authorization_requests = (
+    toolkit_authorization.pending_authorization_requests
+)
+retire_authorization_requests = (
+    toolkit_authorization.retire_authorization_requests
 )
 
 
