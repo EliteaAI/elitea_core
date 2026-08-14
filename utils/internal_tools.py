@@ -829,15 +829,55 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
         return ''
     if not set(internal_tools or []).intersection(MCP_BUILDER_TOOL_KEYS):
         return ''
+    enabled_tools = set(internal_tools or [])
     app_host = c.APP_HOST.rstrip('/')
+    skill_scope_instruction = (
+        " Disambiguate 'skill' from the full conversation context: treat it as an ELITEA platform "
+        "Skill entity only when the user request is clearly about ELITEA entities/workflows "
+        "(e.g., create/update/list/publish/import/export/link/version/category in ELITEA via "
+        "elitea_core/skills). If the user means a general human capability, handle it as a regular "
+        "concept and do not invoke ELITEA skills MCP tools unless explicitly requested."
+        if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools
+        else ""
+    )
+    few_shot_blocks = []
+    if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+        few_shot_blocks.append(
+            "Skills versioning rule:\n"
+            "- Never rename an existing skill version.\n"
+            "- If content should change in an existing version: update that version.\n"
+            "- If a distinct revision is needed: create a new version.\n"
+            "- Treat 'base' as immutable for renaming.\n\n"
+            "Skills few-shot disambiguation examples:\n"
+            "- User: \"How can I improve my communication skills?\" -> Treat as general human capability. "
+            "Do NOT use ELITEA Skills MCP tools.\n"
+            "- User: \"Create a skill named incident-triage\" -> Use elitea_core/skills MCP tools.\n"
+            "- User: \"List skills in this project and open the base version\" -> Use elitea_core/skills MCP tools."
+        )
+    if MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+        few_shot_blocks.append(
+            "Project Context few-shot disambiguation examples:\n"
+            "- User: \"What context window does this model have?\" -> General LLM question. "
+            "Do NOT use project-context MCP tools.\n"
+            "- User: \"Update this project's background with release constraints\" -> "
+            "Use elitea_core/project_context MCP tools.\n"
+            "- User: \"Show current project context and enable it\" -> Use elitea_core/project_context MCP tools."
+        )
+    if few_shot_blocks:
+        few_shot_joined = "\n\n".join(few_shot_blocks)
+        few_shot_instruction = f"\n\n{few_shot_joined}"
+    else:
+        few_shot_instruction = ""
     return (
         f"\n\nYou have access to Elitea MCP tools and may have project context available. "
+        f"{skill_scope_instruction}"
+        f"{few_shot_instruction}"
         f"Only use MCP tools and only reference project context when the user explicitly requests it. "
         f"Do not proactively offer, suggest, or perform any MCP tool actions, and do not mention project details unless asked.\n"
         f"When you use an Elitea MCP tool to create an entity, include a link to it in your response:\n"
         f"- Agent: {app_host}/app/agents/all/<application_id>?viewMode=owner&name=<agent_name>\n"
         f"- Pipeline: {app_host}/app/pipelines/all/<application_id>?viewMode=owner&name=<pipeline_name>\n"
-        f"- Skill: {app_host}/app/skills/all/<skill_id>?viewMode=owner&name=<skill_name>\n"
+        f"- ELITEA Skill: {app_host}/app/skills/all/<skill_id>?viewMode=owner&name=<skill_name>\n"
         f"- Project Context: {app_host}/app/settings/project-context\n"
         f"- Tool: {app_host}/app/toolkits/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
         f"- MCP: {app_host}/app/mcps/all/<tool_id>?viewMode=owner&name=<tool_name>\n"

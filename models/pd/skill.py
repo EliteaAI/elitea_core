@@ -261,6 +261,8 @@ class SkillDetailModel(BaseModel):
     created_at: datetime
     versions: List[SkillVersionListModel]
     version_details: Optional[SkillVersionDetailModel] = None
+    default_version_id: Optional[int] = None
+    version_id: Optional[int] = None
     meta: Optional[dict] = None
     is_pinned: bool = False
     likes_count: int = 0
@@ -308,6 +310,24 @@ class SkillDetailModel(BaseModel):
         )
         if selected and (selected.meta or {}).get('icon_meta'):
             self.icon_meta = selected.meta['icon_meta']
+        return self
+
+    @model_validator(mode='after')
+    def set_version_ids(self):
+        if not self.versions:
+            return self
+        default_id = (self.meta or {}).get('default_version_id')
+        if default_id is None:
+            selected_default = (
+                next((v for v in self.versions if v.name == 'base'), None)
+                or min(self.versions, key=lambda version: version.created_at)
+            )
+            default_id = selected_default.id if selected_default else None
+        self.default_version_id = default_id
+        if self.version_details:
+            self.version_id = self.version_details.id
+        elif default_id is not None:
+            self.version_id = default_id
         return self
 
 

@@ -791,6 +791,9 @@ def get_skill_details(
         else:
             version = skill.get_default_version()
 
+        if version is None and skill.versions:
+            version = min(skill.versions, key=lambda version_item: version_item.created_at)
+
         if version:
             result.version_details = SkillVersionDetailModel.model_validate(version)
 
@@ -817,6 +820,7 @@ def create_skill(
     session.flush()
 
     # Create initial version
+    first_created_version_id = None
     for version_data in skill_data.versions:
         version = SkillVersion(
             skill_id=skill.id,
@@ -826,11 +830,19 @@ def create_skill(
             meta=version_data.meta or {},
         )
         session.add(version)
+        session.flush()
+        if first_created_version_id is None:
+            first_created_version_id = version.id
 
         # Handle tags
         if version_data.tags:
             _apply_tags_to_version(session, version, version_data.tags)
 
+    if first_created_version_id is not None:
+        skill.meta = {
+            **(skill.meta or {}),
+            'default_version_id': first_created_version_id,
+        }
     session.flush()
     return skill
 
@@ -839,7 +851,8 @@ def build_skill_detail(skill: Skill) -> SkillDetailModel:
     """Build a SkillDetailModel with version_details from a refreshed skill."""
     result = SkillDetailModel.model_validate(skill)
     if skill.versions:
-        result.version_details = SkillVersionDetailModel.model_validate(skill.versions[0])
+        selected = skill.get_default_version() or min(skill.versions, key=lambda version_item: version_item.created_at)
+        result.version_details = SkillVersionDetailModel.model_validate(selected)
     return result
 
 

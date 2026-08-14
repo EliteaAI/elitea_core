@@ -74,7 +74,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create a new skill with a mandatory initial 'base' version",
-        description="Creates a new skill with an initial version. The request must include skill metadata (name, description) and exactly one version definition.",
+        description=(
+            "Creates a new skill with an initial version. The request must include skill metadata "
+            "(name, description) and exactly one version definition. Response includes both "
+            "default_version_id and version_id for immediate follow-up operations."
+        ),
         request_body=SkillCreateModel,
         tags=["elitea_core/skills"],
         mcp_tool=True,
