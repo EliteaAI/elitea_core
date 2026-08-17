@@ -34,8 +34,10 @@ class SharedConversationUnlockAPI(api_tools.APIModeHandler):
         )
         if ok is None:
             return {"error": "This link is no longer available."}, 404
+        if ok == 'locked':
+            return {"error": "Too many failed attempts. Try again in 15 minutes."}, 429
         if not ok:
-            return {"error": "Incorrect password."}, 403
+            return {"error": "Incorrect password."}, 401
 
         signed_value = _get_signer().sign(token.encode()).decode()
         response = make_response({"ok": True})

@@ -1,7 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from pylon.core.tools import log, web
 from werkzeug.security import check_password_hash, generate_password_hash
+
+_MAX_FAILED_ATTEMPTS = 10
+_LOCKOUT_DURATION = timedelta(minutes=15)
 
 from tools import db
 
@@ -302,6 +305,14 @@ class RPC:
             share.is_revoked = True
             session.commit()
 
+        # Remove from global index so the public slot is freed
+        try:
+            with db.get_session(None) as pub_session:
+                pub_session.query(ConversationShareTokenIndex).filter_by(token=token).delete()
+                pub_session.commit()
+        except Exception:
+            log.exception("revoke_share_token: failed to remove index entry for token %s...", token[:8])
+
         self.context.event_manager.fire_event('conversation_share_revoked', {
             'project_id': project_id,
             'token': token,
@@ -334,7 +345,14 @@ class RPC:
                 return None
             if share.is_revoked:
                 return {'status': 'revoked'}
-            if share.expires_at and share.expires_at < datetime.utcnow():
+            if share.expires_at and share.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
+                # Lazily evict the expired token from the global index
+                try:
+                    with db.get_session(None) as pub_session:
+                        pub_session.query(ConversationShareTokenIndex).filter_by(token=token).delete()
+                        pub_session.commit()
+                except Exception:
+                    log.exception("get_shared_conversation: failed to remove expired index entry for token %s...", token[:8])
                 return {'status': 'expired'}
             if share.password_hash and not unlocked:
                 return {'status': 'password_required'}
@@ -367,6 +385,10 @@ class RPC:
 
     @web.rpc("chat_verify_share_token_password", "verify_share_token_password")
     def verify_share_token_password(self, token: str, password: str) -> bool | None:
+        """Return True on success, False on wrong password (may set lockout), None if token invalid.
+
+        Returns 'locked' (string) when the token is currently locked out.
+        """
         try:
             with db.get_session(None) as pub_session:
                 index = pub_session.get(ConversationShareTokenIndex, token)
@@ -386,4 +408,27 @@ class RPC:
                 return None
             if share.password_hash is None:
                 return True
-            return check_password_hash(share.password_hash, password)
+
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+            # Check lockout
+            if share.locked_until and share.locked_until > now:
+                return 'locked'
+
+            if check_password_hash(share.password_hash, password):
+                # Reset counter on success
+                share.failed_attempts = 0
+                share.locked_until = None
+                session.commit()
+                return True
+
+            # Wrong password — increment counter, lock if threshold reached
+            share.failed_attempts = (share.failed_attempts or 0) + 1
+            if share.failed_attempts >= _MAX_FAILED_ATTEMPTS:
+                share.locked_until = now + _LOCKOUT_DURATION
+                log.warning(
+                    "verify_share_token_password: token %s... locked after %s failed attempts",
+                    token[:8], share.failed_attempts,
+                )
+            session.commit()
+            return False

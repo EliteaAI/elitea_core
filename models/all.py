@@ -231,6 +231,8 @@ class ConversationShareToken(db.Base):
     password_hash: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     is_revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # 'all' | 'messages' | 'attachments' | 'partial'
     scope: Mapped[str] = mapped_column(String(32), nullable=False, default='all')
     # JSON list of ConversationMessageGroup.id values when scope='partial'; None otherwise

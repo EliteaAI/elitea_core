@@ -3,7 +3,7 @@
 Endpoints (all require ELITEA login):
   POST   /elitea_core/shared_chat_links/prompt_lib/<project_id>/<conversation_id>  — create token
   GET    /elitea_core/shared_chat_links/prompt_lib/<project_id>/<conversation_id>  — list tokens
-  DELETE /elitea_core/shared_link/prompt_lib/<project_id>/<token>             — revoke token
+  DELETE /elitea_core/shared_chat_link/prompt_lib/<project_id>/<token>        — revoke token
 """
 from pydantic import ValidationError
 from flask import request

@@ -1,5 +1,5 @@
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional
 
@@ -33,7 +33,8 @@ EXPIRY_DELTA = {
 
 def compute_expiry(expiry: ShareLinkExpiry) -> Optional[datetime]:
     delta = EXPIRY_DELTA[expiry]
-    return datetime.utcnow() + delta if delta else None
+    # Store as naive UTC (consistent with DB server_default=func.now() which is also naive UTC)
+    return datetime.now(timezone.utc).replace(tzinfo=None) + delta if delta else None
 
 
 def generate_token() -> str:

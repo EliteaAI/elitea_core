@@ -6,7 +6,7 @@ The token must be valid (not expired/revoked). The requested attachment must bel
 a message group that is visible under the token's scope (respects message_group_ids
 for partial-scope tokens). The file is streamed from MinioClient storage.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 import urllib.parse
 
 from flask import Response, request
@@ -83,7 +83,7 @@ class SharedConversationAttachmentAPI(api_tools.APIModeHandler):
             )
             if share is None or share.is_revoked:
                 return {"error": "This link is no longer available."}, 404
-            if share.expires_at and share.expires_at < datetime.utcnow():
+            if share.expires_at and share.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
                 return {"error": "This link has expired."}, 410
 
             # Password gate — must be unlocked before accessing attachments
@@ -126,17 +126,6 @@ class SharedConversationAttachmentAPI(api_tools.APIModeHandler):
             stored_name = attachment.name
             attachment_type = attachment.attachment_type or 'document'
 
-        # Stream the file from Minio
-        try:
-            mc = MinioClient.from_project_id(project_id)
-            file_data = mc.download_file(bucket, stored_name)
-        except Exception:
-            log.exception(
-                "Failed to download shared attachment %s/%s for token %s...",
-                bucket, stored_name, token[:8],
-            )
-            return {"error": "Failed to retrieve attachment."}, 500
-
         # Determine content type — SVG and other active-content types are forced
         # to attachment + octet-stream to prevent stored-XSS execution.
         ext = stored_name.rsplit('.', 1)[-1].lower() if '.' in stored_name else ''
@@ -156,11 +145,22 @@ class SharedConversationAttachmentAPI(api_tools.APIModeHandler):
 
         display_name = filename.split('/')[-1] if '/' in filename else filename
         safe_name = urllib.parse.quote(display_name)
+        disposition = 'attachment' if force_download else 'inline'
+
+        # Download from storage
+        try:
+            mc = MinioClient.from_project_id(project_id)
+            file_data = mc.download_file(bucket, stored_name)
+        except Exception:
+            log.exception(
+                "Failed to download shared attachment %s/%s for token %s...",
+                bucket, stored_name, token[:8],
+            )
+            return {"error": "Failed to retrieve attachment."}, 500
 
         if not isinstance(file_data, (bytes, bytearray)):
             file_data = bytes(file_data)
 
-        disposition = 'attachment' if force_download else 'inline'
         response = Response(
             file_data,
             content_type=content_type,
@@ -170,6 +170,7 @@ class SharedConversationAttachmentAPI(api_tools.APIModeHandler):
             f"{disposition}; filename*=UTF-8''{safe_name}"
         )
         response.headers['Content-Length'] = len(file_data)
+        response.headers['X-Content-Type-Options'] = 'nosniff'
         return response
 
 

@@ -23,6 +23,8 @@ _PROJECT_STATEMENTS = (
         password_hash    VARCHAR(256),
         is_revoked       BOOLEAN NOT NULL DEFAULT FALSE,
         access_count     INTEGER NOT NULL DEFAULT 0,
+        failed_attempts  INTEGER NOT NULL DEFAULT 0,
+        locked_until     TIMESTAMP,
         scope            VARCHAR(32) NOT NULL DEFAULT 'all',
         message_group_ids JSON
     )
@@ -31,6 +33,11 @@ _PROJECT_STATEMENTS = (
     "ON p_{pid}.chat_conversation_share_tokens (token)",
     "CREATE INDEX IF NOT EXISTS ix_p_{pid}_chat_conv_share_tokens_conv "
     "ON p_{pid}.chat_conversation_share_tokens (conversation_id)",
+    # Add rate-limit columns to tables created before this migration
+    "ALTER TABLE p_{pid}.chat_conversation_share_tokens "
+    "ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE p_{pid}.chat_conversation_share_tokens "
+    "ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP",
 )
 
 # DDL applied to the public schema (once, not per-project)
@@ -43,6 +50,24 @@ _PUBLIC_STATEMENTS = (
     )
     """,
 )
+
+
+def _project_ids_missing_rate_limit_columns():
+    """Return project IDs whose share token table exists but lacks the rate-limit columns."""
+    query = text(
+        "SELECT t.table_schema FROM information_schema.tables t "
+        "WHERE t.table_name = 'chat_conversation_share_tokens' "
+        "AND t.table_schema ~ '^p_[0-9]+$' "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM information_schema.columns c "
+        "  WHERE c.table_schema = t.table_schema "
+        "  AND c.table_name = 'chat_conversation_share_tokens' "
+        "  AND c.column_name = 'failed_attempts'"
+        ")"
+    )
+    with db.get_session(None) as session:
+        rows = session.execute(query).fetchall()
+    return [int(row[0][2:]) for row in rows]
 
 
 def _project_ids_missing_share_token_table():
@@ -100,4 +125,22 @@ def apply_share_token_schema():
         except Exception:
             log.exception("share token schema: failed to migrate project %s", pid)
             failed.append({"project_id": pid})
+
+    # Add rate-limit columns to tables that predate them
+    _RATE_LIMIT_ALTERS = (
+        "ALTER TABLE p_{pid}.chat_conversation_share_tokens "
+        "ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE p_{pid}.chat_conversation_share_tokens "
+        "ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP",
+    )
+    for pid in _project_ids_missing_rate_limit_columns():
+        try:
+            with db.with_project_schema_session(pid) as session:
+                for stmt in _RATE_LIMIT_ALTERS:
+                    session.execute(text(stmt.format(pid=pid)))
+                session.commit()
+            log.info("share token schema: added rate-limit columns to project %s", pid)
+        except Exception:
+            log.exception("share token schema: failed to add rate-limit columns to project %s", pid)
+
     return migrated, failed
