@@ -2972,6 +2972,111 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "dry_run": dry_run,
         }
 
+    @web.method("migrate_entity_folders")
+    def migrate_entity_folders(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: create entity_folders table and add folder_id columns to entity tables.
+
+        Issue #5194: Entity folders for organizing agents, pipelines, skills, toolkits, configurations.
+        Creates the entity_folders table in per-project schemas and adds folder_id FK columns to:
+          - applications (agents/pipelines)
+          - skills
+          - elitea_tools (toolkits)
+          - configuration
+
+        Idempotent (CREATE TABLE IF NOT EXISTS, ADD COLUMN IF NOT EXISTS): safe to run
+        multiple times.
+
+        Param format (optional):
+            "project_id=<all|N>"
+
+        Examples:
+            "project_id=all"  - migrate all projects (default)
+            "project_id=3"    - migrate project 3 only
+        """
+        from sqlalchemy import text  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        project_id_filter = None
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_entity_folders: invalid project_id '%s'", value)
+                        return {"ok": False, "error": f"invalid project_id: '{value}'"}
+
+        log.info("Starting migrate_entity_folders (project_id_filter=%s)", project_id_filter)
+
+        if project_id_filter:
+            project_ids = [project_id_filter]
+        else:
+            project_ids = resolve_target_project_ids(("all", None))
+
+        results = {
+            "projects_processed": 0,
+            "projects_skipped": 0,
+            "errors": [],
+        }
+
+        for project_id in project_ids:
+            schema = f"p_{project_id}"
+            statements = [
+                # Create entity_folders table
+                f"""
+                CREATE TABLE IF NOT EXISTS {schema}.entity_folders (
+                    id SERIAL PRIMARY KEY,
+                    uuid UUID UNIQUE DEFAULT gen_random_uuid(),
+                    name VARCHAR(128) NOT NULL,
+                    owner_id INTEGER NOT NULL,
+                    entity_type VARCHAR(32) NOT NULL,
+                    sub_type VARCHAR(32),
+                    meta JSONB NOT NULL DEFAULT '{{}}',
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP
+                )
+                """,
+                # Add folder_id to applications
+                f"ALTER TABLE {schema}.applications ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL",
+                f"CREATE INDEX IF NOT EXISTS ix_applications_folder_id ON {schema}.applications(folder_id)",
+                # Add folder_id to skills
+                f"ALTER TABLE {schema}.skills ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL",
+                f"CREATE INDEX IF NOT EXISTS ix_skills_folder_id ON {schema}.skills(folder_id)",
+                # Add folder_id to elitea_tools (toolkits)
+                f"ALTER TABLE {schema}.elitea_tools ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL",
+                f"CREATE INDEX IF NOT EXISTS ix_elitea_tools_folder_id ON {schema}.elitea_tools(folder_id)",
+                # Add folder_id to configuration
+                f"ALTER TABLE {schema}.configuration ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL",
+                f"CREATE INDEX IF NOT EXISTS ix_configuration_folder_id ON {schema}.configuration(folder_id)",
+            ]
+
+            try:
+                with db.get_session(project_id) as session:
+                    for statement in statements:
+                        session.execute(text(statement))
+                    session.commit()
+                results["projects_processed"] += 1
+                log.info("migrate_entity_folders: project %s migrated", project_id)
+            except Exception as exc:  # pylint: disable=W0703
+                log.exception("migrate_entity_folders: project %s failed", project_id)
+                results["errors"].append({"project_id": project_id, "error": str(exc)})
+                results["projects_skipped"] += 1
+
+        log.info(
+            "migrate_entity_folders: completed. processed=%s, skipped=%s, errors=%s",
+            results["projects_processed"],
+            results["projects_skipped"],
+            len(results["errors"]),
+        )
+
+        return {
+            "ok": len(results["errors"]) == 0,
+            **results,
+        }
+
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
     project_id, conversation_arg, dry_run, prefix,

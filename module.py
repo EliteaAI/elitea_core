@@ -410,6 +410,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_share_token_columns", self.migrate_share_token_columns, group="R-2.0.6",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_entity_folders", self.migrate_entity_folders, group="R-2.0.6",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 

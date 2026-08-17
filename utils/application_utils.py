@@ -1203,6 +1203,8 @@ def list_applications_api(
         agents_type: str = 'all',
         without_tags: bool = False,
         category: str | None = None,
+        folder_id: int | None = None,
+        unfoldered_only: bool = False,
         session=None,
 ) -> dict:
     # OPTIMIZATION: Only include likes subqueries for Agent Studio (public library)
@@ -1298,6 +1300,12 @@ def list_applications_api(
             filters.append(pipeline_only_query)
         else:
             pass
+
+    # Folder filtering
+    if folder_id is not None:
+        filters.append(Application.folder_id == folder_id)
+    elif unfoldered_only:
+        filters.append(Application.folder_id.is_(None))
 
     trend_period = None
     if trend_start_period:

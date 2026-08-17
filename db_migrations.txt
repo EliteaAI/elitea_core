@@ -235,3 +235,10 @@ Run admin task migrate_project_member_default_limit
 # Nullable — existing rows default to NULL (treated as unrestricted, equivalent to scope='all').
 # Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
 Run admin task migrate_share_token_columns
+
+# Issue #5194: Entity folders for organizing agents, pipelines, skills, toolkits, configurations
+# Creates entity_folders table in social plugin and adds folder_id FK to applications, skills,
+# elitea_tools, and configuration tables.
+# Folders allow users to organize their entities into groups.
+# Idempotent (CREATE TABLE IF NOT EXISTS, ADD COLUMN IF NOT EXISTS).
+Run admin task migrate_entity_folders with param: project_id=all

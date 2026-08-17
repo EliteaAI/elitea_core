@@ -117,6 +117,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Filter by agent type: 'pipeline' for pipelines, 'classic' for classic agents. Omit for all."},
             {"name": "my_liked", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
              "description": "If true, return only agents/pipelines liked by the current user."},
+            {"name": "folder_id", "in": "query", "required": False, "schema": {"type": "integer"},
+             "description": "Filter by folder ID. Returns only applications in the specified folder."},
+            {"name": "unfoldered_only", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
+             "description": "If true, return only applications that are not in any folder."},
         ],
         available_to_users=True,
     )
@@ -147,6 +151,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 statuses=request.args.get('statuses'),
                 agents_type=request.args.get('agents_type'),
                 without_tags=request.args.get('without_tags', False),
+                folder_id=request.args.get('folder_id', type=int),
+                unfoldered_only=request.args.get('unfoldered_only', 'false').lower() == 'true',
                 session=session
             )
         list_model = (

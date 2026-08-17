@@ -30,3 +30,27 @@ class ConversationFolder(db.Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())
+
+
+class ApplicationFolder(db.Base):
+    """Folder for organizing agents and pipelines."""
+    __tablename__ = 'application_folders'
+    __table_args__ = (
+        {'schema': c.POSTGRES_TENANT_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    uuid: Mapped[str] = mapped_column(UUID(as_uuid=True), unique=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_id: Mapped[int] = mapped_column(Integer, nullable=False)  # User ID who owns the folder
+    agent_type: Mapped[str] = mapped_column(String(32), nullable=False)  # 'openai' for agents, 'pipeline' for pipelines
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # For is_pinned, future extensibility
+
+    applications: Mapped[List['Application']] = relationship(
+        'Application',
+        back_populates='folder',
+        lazy='dynamic',
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())

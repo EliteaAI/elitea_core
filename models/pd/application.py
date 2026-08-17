@@ -164,6 +164,7 @@ class ApplicationListModel(BaseModel):
     has_interrupt: bool = False
     has_swarm: bool = False
     is_pinned: bool = False
+    folder_id: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 
