@@ -41,6 +41,7 @@ from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, decisions_for_child,
     interrupt_identity, pending_interrupts,
+    partition_root_hitl_decisions,
     retire_all_interrupts, retire_child_interrupts, retire_interrupts,
     validate_child_decisions,
 )
@@ -1484,6 +1485,7 @@ class RPC:
             # ``_continue_child_resume`` above.
             if parsed.hitl_resume:
                 pending = pending_interrupts(response_msg.meta)
+                pending_auth = pending_authorization_requests(response_msg.meta)
                 decisions = [
                     dict(item) for item in (parsed.hitl_decisions or [])
                     if isinstance(item, dict)
@@ -1495,8 +1497,10 @@ class RPC:
                         # preserves and re-emits unresolved sibling interrupts.
                         # True parked worker children keep the exact-all rule in
                         # ``_continue_child_resume`` below.
-                        validate_child_decisions(
-                            pending, decisions, require_all=False,
+                        resolved_ids, resolved_auth_ids = (
+                            partition_root_hitl_decisions(
+                                pending, pending_auth, decisions,
+                            )
                         )
                     except ValueError as exc:
                         raise SioValidationError(
@@ -1506,7 +1510,6 @@ class RPC:
                             stream_id=str(parsed.conversation_uuid),
                             message_id=parsed.message_id,
                         ) from exc
-                    resolved_ids = [interrupt_identity(item) for item in decisions]
                 else:
                     if len(pending) != 1:
                         raise SioValidationError(
@@ -1536,8 +1539,12 @@ class RPC:
                             message_id=parsed.message_id,
                         )
                     resolved_ids = [interrupt_identity(pending[0])]
+                    resolved_auth_ids = []
                 response_msg.meta = retire_interrupts(
                     response_msg.meta, resolved_ids,
+                )
+                response_msg.meta = retire_authorization_requests(
+                    response_msg.meta, resolved_auth_ids,
                 )
                 flag_modified(response_msg, 'meta')
 

@@ -16,11 +16,35 @@ is_current_execution = _MODULE.is_current_execution
 merge_interrupts = _MODULE.merge_interrupts
 normalize_interrupts = _MODULE.normalize_interrupts
 pending_interrupts = _MODULE.pending_interrupts
+partition_root_hitl_decisions = _MODULE.partition_root_hitl_decisions
 requires_plural_persistence = _MODULE.requires_plural_persistence
 retire_child_interrupts = _MODULE.retire_child_interrupts
 retire_interrupts = _MODULE.retire_interrupts
 retire_all_interrupts = _MODULE.retire_all_interrupts
 validate_child_decisions = _MODULE.validate_child_decisions
+
+
+def test_mixed_root_resume_partitions_sensitive_and_authorization_decisions():
+    sensitive = {
+        'interrupt_id': 'hitl-delete',
+        'available_actions': ['approve', 'reject'],
+    }
+    authorization = {
+        'interrupt_id': 'hitl-auth',
+        'available_actions': ['authorize', 'skip'],
+    }
+
+    sensitive_ids, authorization_ids = partition_root_hitl_decisions(
+        [sensitive],
+        [authorization],
+        [
+            {'interrupt_id': 'hitl-auth', 'action': 'skip'},
+            {'interrupt_id': 'hitl-delete', 'action': 'reject'},
+        ],
+    )
+
+    assert sensitive_ids == ['hitl-delete']
+    assert authorization_ids == ['hitl-auth']
 
 
 def test_pause_merge_preserves_sibling_children_and_adds_identity():

@@ -273,6 +273,43 @@ def validate_child_decisions(pending, decisions, require_all=True):
             )
 
 
+def partition_root_hitl_decisions(
+    pending_hitl, pending_authorizations, decisions,
+):
+    """Validate and partition one mixed root-checkpoint resume.
+
+    Nested MCP authorization and sensitive-tool pauses can be surfaced in the
+    same root aggregate even though Core persists them in separate metadata
+    collections. The root LangGraph checkpoint accepts one decision list, so
+    validate that list against the union and return the identities to retire
+    from each collection.
+    """
+    pending_hitl = [
+        dict(item) for item in (pending_hitl or []) if isinstance(item, dict)
+    ]
+    pending_authorizations = [
+        dict(item) for item in (pending_authorizations or [])
+        if isinstance(item, dict)
+    ]
+    decisions = [
+        dict(item) for item in (decisions or []) if isinstance(item, dict)
+    ]
+    validate_child_decisions(
+        pending_hitl + pending_authorizations,
+        decisions,
+        require_all=False,
+    )
+    hitl_ids = {interrupt_identity(item) for item in pending_hitl}
+    authorization_ids = {
+        interrupt_identity(item) for item in pending_authorizations
+    }
+    received_ids = [interrupt_identity(item) for item in decisions]
+    return (
+        [identity for identity in received_ids if identity in hitl_ids],
+        [identity for identity in received_ids if identity in authorization_ids],
+    )
+
+
 def retire_child_interrupts(meta, child_thread_id, interrupt_ids=None):
     """Retire one resumed child's cards after its replacement task is accepted.
 
