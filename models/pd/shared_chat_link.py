@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ShareLinkExpiry(str, Enum):
@@ -44,7 +44,13 @@ class SharedLinkCreate(BaseModel):
     expiry: ShareLinkExpiry = ShareLinkExpiry.seven_days
     password: Optional[str] = Field(None, min_length=4, max_length=64)
     scope: ShareScope = ShareScope.all
-    message_group_ids: Optional[list[int]] = None  # required when scope='partial'
+    message_group_ids: Optional[list[int]] = None
+
+    @model_validator(mode='after')
+    def _partial_requires_groups(self) -> 'SharedLinkCreate':
+        if self.scope == ShareScope.partial and not self.message_group_ids:
+            raise ValueError("message_group_ids must be a non-empty list when scope is 'partial'")
+        return self
 
 
 class SharedLinkResponse(BaseModel):

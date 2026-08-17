@@ -65,10 +65,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
     })
     @api_tools.endpoint_metrics
     def get(self, project_id: int, conversation_id: int, **kwargs):
+        user_id = auth.current_user().get("id")
         rpc = rpc_tools.RpcMixin().rpc
         result = rpc.timeout(5).chat_list_share_tokens(
             project_id=project_id,
             conversation_id=conversation_id,
+            user_id=user_id,
         )
         return result, 200
 

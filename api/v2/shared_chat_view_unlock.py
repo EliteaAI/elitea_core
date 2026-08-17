@@ -2,13 +2,19 @@
 
   POST /elitea_core/shared_chat_view_unlock/prompt_lib/<token>/unlock  — verify password, set session cookie
 """
-from flask import make_response, request
+from flask import current_app, make_response, request
+from itsdangerous import TimestampSigner
 
 from tools import api_tools, rpc_tools, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
 
 _UNLOCK_COOKIE_PREFIX = 'share_unlocked_'
+_COOKIE_MAX_AGE = 3600
+
+
+def _get_signer() -> TimestampSigner:
+    return TimestampSigner(current_app.config['SECRET_KEY'], salt='share_unlock')
 
 
 class SharedConversationUnlockAPI(api_tools.APIModeHandler):
@@ -31,11 +37,12 @@ class SharedConversationUnlockAPI(api_tools.APIModeHandler):
         if not ok:
             return {"error": "Incorrect password."}, 403
 
+        signed_value = _get_signer().sign(token.encode()).decode()
         response = make_response({"ok": True})
         response.set_cookie(
             _UNLOCK_COOKIE_PREFIX + token,
-            "true",
-            max_age=3600,
+            signed_value,
+            max_age=_COOKIE_MAX_AGE,
             httponly=True,
             samesite="Lax",
         )

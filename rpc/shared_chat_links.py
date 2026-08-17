@@ -130,8 +130,12 @@ def _serialize_conversation(
         .filter(ConversationMessageGroup.is_streaming == False)  # noqa: E712
         .order_by(ConversationMessageGroup.created_at.asc())
     )
-    if scope == ShareScope.partial and message_group_ids:
-        query = query.filter(ConversationMessageGroup.id.in_(message_group_ids))
+    if scope == ShareScope.partial:
+        # Fail-closed: no allow-list means no groups are accessible.
+        allowed = message_group_ids or []
+        if not allowed:
+            return []
+        query = query.filter(ConversationMessageGroup.id.in_(allowed))
     groups = query.all()
 
     messages = []
@@ -161,14 +165,9 @@ def _serialize_conversation(
 
         group_meta = group.meta or {}
         is_error = bool(group_meta.get('is_error', False))
+        # Only expose the curated error message stored in meta, never raw message
+        # content which may contain internal tracebacks.
         error_text = group_meta.get('error') or None
-        if is_error and not error_text:
-            # fall back to first text item content, like the frontend does
-            first_text = next(
-                (i for i in items if i.type == 'text_message' and i.content),
-                None,
-            )
-            error_text = first_text.content if first_text else None
 
         messages.append(SharedMessageGroup(
             id=group.id,
@@ -216,6 +215,13 @@ class RPC:
             conv = session.get(Conversation, conversation_id)
             if conv is None:
                 return None
+            # Only the conversation author may create share tokens.
+            if conv.author_id != created_by:
+                log.warning(
+                    "create_share_token: user %s not owner of conversation %s",
+                    created_by, conversation_id,
+                )
+                return None
             conversation_name = conv.name
 
             # Only persist message_group_ids for partial scope
@@ -260,14 +266,18 @@ class RPC:
         return result
 
     @web.rpc("chat_list_share_tokens", "list_share_tokens")
-    def list_share_tokens(self, project_id: int, conversation_id: int) -> list:
+    def list_share_tokens(self, project_id: int, conversation_id: int, user_id: int) -> list:
         with db.get_session(project_id) as session:
             conv = session.get(Conversation, conversation_id)
             if conv is None:
                 return []
             tokens = (
                 session.query(ConversationShareToken)
-                .filter_by(conversation_id=conversation_id, is_revoked=False)
+                .filter_by(
+                    conversation_id=conversation_id,
+                    created_by=user_id,
+                    is_revoked=False,
+                )
                 .order_by(ConversationShareToken.created_at.desc())
                 .all()
             )
@@ -282,6 +292,12 @@ class RPC:
                 .first()
             )
             if share is None:
+                return False
+            if share.created_by != user_id:
+                log.warning(
+                    "revoke_share_token: user %s not owner of token %s...",
+                    user_id, token[:8],
+                )
                 return False
             share.is_revoked = True
             session.commit()
@@ -344,8 +360,6 @@ class RPC:
                 scope=share.scope,
                 messages=messages,
             ).model_dump(mode='json')
-            # messages already serialized as list of dicts above
-            data['messages'] = messages
 
             session.commit()
 

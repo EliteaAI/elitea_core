@@ -4,7 +4,8 @@
 """
 from datetime import datetime
 
-from flask import request
+from flask import current_app, request
+from itsdangerous import BadSignature, TimestampSigner
 from pylon.core.tools import log
 
 from tools import api_tools, rpc_tools, register_openapi
@@ -12,11 +13,24 @@ from tools import api_tools, rpc_tools, register_openapi
 from ...utils.constants import PROMPT_LIB_MODE
 
 _UNLOCK_COOKIE_PREFIX = 'share_unlocked_'
+# Cookies are valid for 1 hour after being set by the unlock endpoint.
+_COOKIE_MAX_AGE = 3600
+
+
+def _get_signer() -> TimestampSigner:
+    return TimestampSigner(current_app.config['SECRET_KEY'], salt='share_unlock')
 
 
 def _is_session_unlocked(token: str) -> bool:
     cookie_name = _UNLOCK_COOKIE_PREFIX + token
-    return request.cookies.get(cookie_name) == 'true'
+    value = request.cookies.get(cookie_name)
+    if not value:
+        return False
+    try:
+        payload = _get_signer().unsign(value, max_age=_COOKIE_MAX_AGE).decode()
+        return payload == token
+    except BadSignature:
+        return False
 
 
 class SharedConversationViewAPI(api_tools.APIModeHandler):
