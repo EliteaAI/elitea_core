@@ -12,16 +12,79 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 decisions_for_child = _MODULE.decisions_for_child
 begin_execution_generation = _MODULE.begin_execution_generation
+claim_supervisor_decision_phase = _MODULE.claim_supervisor_decision_phase
 is_current_execution = _MODULE.is_current_execution
 merge_interrupts = _MODULE.merge_interrupts
+merge_supervisor_roster = _MODULE.merge_supervisor_roster
 normalize_interrupts = _MODULE.normalize_interrupts
 pending_interrupts = _MODULE.pending_interrupts
+pending_supervisor_decisions = _MODULE.pending_supervisor_decisions
+persist_supervisor_decision = _MODULE.persist_supervisor_decision
 partition_root_hitl_decisions = _MODULE.partition_root_hitl_decisions
 requires_plural_persistence = _MODULE.requires_plural_persistence
 retire_child_interrupts = _MODULE.retire_child_interrupts
 retire_interrupts = _MODULE.retire_interrupts
 retire_all_interrupts = _MODULE.retire_all_interrupts
 validate_child_decisions = _MODULE.validate_child_decisions
+
+
+def test_supervised_pause_preserves_live_resume_strategy_without_worker_child_lineage():
+    response = {
+        'resume_strategy': 'supervised_child',
+        'root_thread_id': 'root-1',
+        'hitl_interrupt': {
+            'interrupt_id': 'i-live',
+            'tool_call_id': 'call-live',
+        },
+    }
+
+    normalized = normalize_interrupts(response)
+
+    assert normalized[0]['resume_strategy'] == 'supervised_child'
+
+
+def test_supervisor_decision_and_roster_are_bounded_durable_message_state():
+    meta = persist_supervisor_decision({}, {
+        'decision_id': 'd-1',
+        'interrupt_id': 'i-1',
+        'action': 'approve',
+    })
+    meta = merge_supervisor_roster(meta, {
+        'root_thread_id': 'root-1',
+        'tool_call_id': 'call-a',
+        'state': 'paused',
+    })
+
+    assert pending_supervisor_decisions(meta) == [{
+        'decision_id': 'd-1',
+        'interrupt_id': 'i-1',
+        'action': 'approve',
+        'phase': 'queued',
+    }]
+    assert meta['parallel_hitl_roster']['children']['call-a']['state'] == 'paused'
+
+    retired = retire_all_interrupts(meta)
+    assert 'parallel_hitl_decisions' not in retired
+    assert 'parallel_hitl_roster' not in retired
+
+
+def test_supervisor_fallback_has_one_phase_owner():
+    meta = persist_supervisor_decision({}, {
+        'decision_id': 'd-fallback',
+        'interrupt_id': 'i-fallback',
+        'pending_interrupt': {'interrupt_id': 'i-fallback'},
+    }, phase='fallback_pending')
+
+    claimed_meta, claimed = claim_supervisor_decision_phase(
+        meta, 'd-fallback', {'fallback_pending'}, 'fallback_starting',
+    )
+    losing_meta, claimed_again = claim_supervisor_decision_phase(
+        claimed_meta, 'd-fallback', {'fallback_pending'}, 'recovering',
+    )
+
+    assert claimed is True
+    assert claimed_again is False
+    assert pending_supervisor_decisions(losing_meta)[0]['phase'] == 'fallback_starting'
 
 
 def test_mixed_root_resume_partitions_sensitive_and_authorization_decisions():
@@ -446,3 +509,49 @@ def test_all_hitl_jsonb_mutations_lock_the_message_row_and_stop_clears_cards():
     assert chat_models_source.count('execution_generation: Optional[str]') >= 2
     assert "'execution_generation': getattr(parsed, 'execution_generation', None)" in predict_source
     assert '.with_for_update(of=ConversationMessageGroup)' in regenerate_source
+
+
+def test_supervised_fallback_cannot_launch_a_competing_root_worker():
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
+    continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
+    callback_source = (plugin_root / 'methods' / 'task_callbacks.py').read_text()
+
+    offer = continue_source[
+        continue_source.index('def _offer_supervised_decision'):
+        continue_source.index('@web.rpc("chat_continue_predict_sio"')
+    ]
+    claim = continue_source[
+        continue_source.index('def _claim_stopped_supervisor_fallback'):
+        continue_source.index('def _offer_supervised_decision')
+    ]
+    recovery = callback_source[
+        callback_source.index('def _maybe_recover_supervised_hitl'):
+        callback_source.index('def _report_fork_probe_failure')
+    ]
+
+    assert "task_status != 'stopped'" in claim
+    assert "{'fallback_pending'}" in claim
+    assert 'return None' in offer
+    assert 'ConversationMessageGroup.task_id == task_id' in recovery
+    assert 'self.chat_continue_predict_sio(' in recovery
+    assert 'self.continue_predict_sio(' not in recovery
+    assert '_internal_token=INTERNAL_CONTINUE_TOKEN' in recovery
+
+
+def test_repeated_resolved_supervised_decision_cannot_replay_the_root():
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
+    continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
+
+    resolved_guard = continue_source[
+        continue_source.index('def _resolved_resume_result'):
+        continue_source.index('def _claim_stopped_supervisor_fallback')
+    ]
+    offer = continue_source[
+        continue_source.index('def _offer_supervised_decision'):
+        continue_source.index('@web.rpc("chat_continue_predict_sio"')
+    ]
+
+    assert "meta.get('resolved_hitl_interrupt_ids')" in resolved_guard
+    assert "meta.get('resolved_authorization_request_ids')" in resolved_guard
+    assert "'already_resolved': True" in resolved_guard
+    assert 'return self._resolved_resume_result(response_msg, parsed)' in offer

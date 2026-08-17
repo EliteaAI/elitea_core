@@ -21,9 +21,17 @@
 import requests  # pylint: disable=E0401
 
 from pylon.core.tools import web, log  # pylint: disable=E0401,E0611,W0611
+from sqlalchemy.orm.attributes import flag_modified
+from tools import db
 
+from ..models.message_group import ConversationMessageGroup
 from ..utils.application_tools import cancel_toolkit_index_meta, resolve_toolkit_index_connection
+from ..utils.parallel_hitl import (
+    INTERNAL_CONTINUE_TOKEN, merge_interrupts, pending_supervisor_decisions,
+    update_supervisor_decision_phase,
+)
 from ..utils.sio_utils import SioEvents
+from ..utils.toolkit_authorization import merge_authorization_request
 
 
 # Fallback only; the aborting worker normally supplies this text itself (#6245).
@@ -50,6 +58,10 @@ class Method:
             self._maybe_handle_parallel_dispatch(task_id)
         except Exception:  # pylint: disable=W0702,W0703
             log.exception("Parallel dispatch handling failed (task_id=%s)", task_id)
+        try:
+            self._maybe_recover_supervised_hitl(task_id)
+        except Exception:  # pylint: disable=W0702,W0703
+            log.exception("Parallel HITL recovery failed (task_id=%s)", task_id)
         #
         # Reconcile any index_data run that was hard-killed by this Stop: an inline
         # index_data run in the agent worker never writes its terminal state when the
@@ -98,6 +110,112 @@ class Method:
             log.info("Callback POST result: %s", requests_result)
         except:  # pylint: disable=W0702
             log.exception("Error in callback sender (task_id=%s)", task_id)
+
+    @web.method()
+    def _maybe_recover_supervised_hitl(self, task_id):
+        """Replay durable live decisions if their owning root worker died."""
+        try:
+            task_meta = self.task_node.get_task_meta(task_id)  # pylint: disable=E1101
+        except Exception:  # pylint: disable=W0703
+            return
+        if not isinstance(task_meta, dict):
+            return
+        project_id = task_meta.get('chat_project_id')
+        message_id = task_meta.get('message_id')
+        if not project_id or not message_id or self.is_chat_run_stopped(message_id):
+            return
+
+        with db.get_session(project_id) as session:
+            response_msg = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_id,
+                ConversationMessageGroup.task_id == task_id,
+            ).with_for_update(of=ConversationMessageGroup).first()
+            if response_msg is None:
+                return
+            decisions = [
+                item for item in pending_supervisor_decisions(response_msg.meta)
+                if item.get('phase') in {
+                    'queued', 'offered', 'committed', 'resuming',
+                    'fallback_pending',
+                }
+                and isinstance(item.get('pending_interrupt'), dict)
+            ]
+            if not decisions:
+                return
+
+            meta = dict(response_msg.meta or {})
+            for decision in decisions:
+                pending = dict(decision['pending_interrupt'])
+                interrupt_id = decision.get('interrupt_id')
+                pending['resume_strategy'] = 'root'
+                meta['resolved_hitl_interrupt_ids'] = [
+                    value for value in meta.get('resolved_hitl_interrupt_ids', [])
+                    if value != interrupt_id
+                ]
+                meta['resolved_authorization_request_ids'] = [
+                    value for value in meta.get(
+                        'resolved_authorization_request_ids', []
+                    ) if value != interrupt_id
+                ]
+                if pending.get('guardrail_type') == 'mcp_auth':
+                    meta = merge_authorization_request(meta, pending)
+                else:
+                    merged = merge_interrupts(meta, {
+                        'resume_strategy': 'root',
+                        'hitl_interrupt': pending,
+                    })
+                    if merged:
+                        meta['hitl_interrupt'] = merged[0]
+                        meta['hitl_interrupts'] = merged
+                meta = update_supervisor_decision_phase(
+                    meta, decision['decision_id'], 'recovering',
+                )
+            response_msg.meta = meta
+            response_msg.is_streaming = False
+            flag_modified(response_msg, 'meta')
+            session.commit()
+
+            conversation_uuid = str(response_msg.conversation.uuid)
+            author_id = response_msg.conversation.author_id
+            root_thread_id = (
+                decisions[0].get('root_thread_id')
+                or meta.get('thread_id')
+                or conversation_uuid
+            )
+
+        resume_decisions = [
+            {
+                'interrupt_id': item.get('interrupt_id'),
+                'tool_call_id': item.get('tool_call_id'),
+                'action': item.get('action'),
+                'value': item.get('value', ''),
+                'guardrail_type': item.get('guardrail_type'),
+            }
+            for item in decisions
+        ]
+        log.warning(
+            '[PARALLEL] recovering %d supervised HITL decision(s) after task %s',
+            len(resume_decisions), task_id,
+        )
+        # ``continue_predict_sio`` is registered on the plugin module under
+        # its RPC name (``chat_continue_predict_sio``).  Method mixins cannot
+        # call the undecorated Python function name through ``self``.
+        self.chat_continue_predict_sio(
+            None,
+            {
+                'project_id': project_id,
+                'conversation_uuid': conversation_uuid,
+                'message_id': str(message_id),
+                'thread_id': root_thread_id,
+                'hitl_resume': True,
+                'hitl_action': resume_decisions[0].get('action') or 'approve',
+                'hitl_decisions': resume_decisions,
+                'should_continue': True,
+            },
+            -1,
+            _internal_token=INTERNAL_CONTINUE_TOKEN,
+            _internal_user_id=author_id,
+        )
 
     @web.method()
     def _report_fork_probe_failure(self, task_id, meta, result):

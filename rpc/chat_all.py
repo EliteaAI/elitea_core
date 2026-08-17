@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import time
 from typing import Optional
 from uuid import uuid4
 
@@ -39,8 +40,10 @@ from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
-    EXECUTION_GENERATION_KEY, begin_execution_generation, decisions_for_child,
-    interrupt_identity, pending_interrupts,
+    EXECUTION_GENERATION_KEY, begin_execution_generation,
+    claim_supervisor_decision_phase, decisions_for_child,
+    INTERNAL_CONTINUE_TOKEN, decision_ack_key, interrupt_identity, pending_interrupts,
+    persist_supervisor_decision, update_supervisor_decision_phase,
     partition_root_hitl_decisions,
     retire_all_interrupts, retire_child_interrupts, retire_interrupts,
     validate_child_decisions,
@@ -1327,9 +1330,278 @@ class RPC:
                         }
                     return result
 
+    @web.method()
+    def _wait_parallel_hitl_ack(self, message_id, decision_id, phase, timeout=0.75):
+        """Bounded wait for the active worker's offer/commit acknowledgement."""
+        key = decision_ack_key(message_id, decision_id, phase)
+        deadline = time.monotonic() + timeout
+        client = self.get_redis_client()
+        while time.monotonic() < deadline:
+            value = client.get(key)
+            if value is not None:
+                client.delete(key)
+                if isinstance(value, bytes):
+                    value = value.decode('utf-8', errors='replace')
+                return value == '1'
+            time.sleep(0.025)
+        return None
+
+    @web.method()
+    def _supervised_decision(self, parsed, pending_hitl, pending_auth, generation):
+        """Return one exact live decision when the selected card is supervised."""
+        decisions = [
+            dict(item) for item in (
+                parsed.mcp_auth_decisions
+                if parsed.mcp_auth_resume else parsed.hitl_decisions
+            ) or []
+            if isinstance(item, dict)
+        ]
+        if decisions:
+            candidate = decisions[0]
+        elif parsed.mcp_auth_resume:
+            request_id = parsed.authorization_request_id
+            if not request_id and len(pending_auth) == 1:
+                request_id = authorization_identity(pending_auth[0])
+            candidate = {
+                'interrupt_id': request_id,
+                'action': parsed.mcp_auth_action,
+            }
+        elif parsed.hitl_resume and len(pending_hitl) == 1:
+            candidate = {
+                'interrupt_id': interrupt_identity(pending_hitl[0]),
+                'action': parsed.hitl_action,
+                'value': parsed.hitl_value,
+            }
+        else:
+            return None
+
+        interrupt_id = str(candidate.get('interrupt_id') or '')
+        all_pending = pending_hitl + pending_auth
+        selected = next(
+            (
+                item for item in all_pending
+                if interrupt_identity(item) == interrupt_id
+                and item.get('resume_strategy') == 'supervised_child'
+            ),
+            None,
+        )
+        if selected is None:
+            return None
+        return {
+            **candidate,
+            'decision_id': str(uuid4()),
+            'interrupt_id': interrupt_id,
+            'tool_call_id': selected.get('tool_call_id'),
+            'guardrail_type': selected.get('guardrail_type'),
+            'root_thread_id': selected.get('root_thread_id'),
+            'execution_generation': generation,
+            'pending_interrupt': dict(selected),
+        }
+
+    @staticmethod
+    def _explicit_resume_interrupt_ids(parsed):
+        """Return stable ids explicitly selected by one continuation request."""
+        decisions = (
+            parsed.mcp_auth_decisions
+            if parsed.mcp_auth_resume
+            else parsed.hitl_decisions
+        ) or []
+        identities = [
+            str(item.get('interrupt_id') or '')
+            for item in decisions if isinstance(item, dict)
+        ]
+        if parsed.mcp_auth_resume and parsed.authorization_request_id:
+            identities.append(str(parsed.authorization_request_id))
+        return {identity for identity in identities if identity}
+
+    @web.method()
+    def _resolved_resume_result(self, response_msg, parsed):
+        """A repeated exact decision is an idempotent no-op, never a root replay.
+
+        A supervised child can finish between a browser's local click handling
+        and a delayed/retried socket emission.  Once Core has tombstoned that
+        interrupt, falling through to the ordinary root continuation would
+        reconstruct the orchestrator with the original user prompt.  Besides
+        duplicating work, that loses the real nested caller which already
+        consumed the structured guard result.
+        """
+        requested = self._explicit_resume_interrupt_ids(parsed)
+        if not requested:
+            return None
+        meta = response_msg.meta or {}
+        resolved = {
+            str(value) for value in (
+                list(meta.get('resolved_hitl_interrupt_ids') or [])
+                + list(meta.get('resolved_authorization_request_ids') or [])
+            ) if value
+        }
+        if not requested.issubset(resolved):
+            return None
+        log.info(
+            '[PARALLEL] ignoring repeated resolved HITL decision(s) count=%d '
+            'message_id=%s',
+            len(requested), response_msg.uuid,
+        )
+        return {
+            'queued': False,
+            'live_resume': False,
+            'already_resolved': True,
+        }
+
+    @web.method()
+    def _claim_stopped_supervisor_fallback(
+        self, session, response_msg, decision,
+    ):
+        """Claim root recovery when the live owner is already terminal."""
+        task_id = response_msg.task_id
+        try:
+            task_status = self.task_node.get_task_status(task_id)
+        except Exception:  # pylint: disable=W0703
+            return False
+        if task_status != 'stopped':
+            return False
+        response_msg = session.query(ConversationMessageGroup).where(
+            ConversationMessageGroup.uuid == response_msg.uuid
+        ).with_for_update(of=ConversationMessageGroup).execution_options(
+            populate_existing=True,
+        ).first()
+        if response_msg is None:
+            return False
+        response_msg.meta, claimed = claim_supervisor_decision_phase(
+            response_msg.meta,
+            decision['decision_id'],
+            {'fallback_pending'},
+            'fallback_starting',
+        )
+        if claimed:
+            flag_modified(response_msg, 'meta')
+            session.commit()
+        return claimed
+
+    @web.method()
+    def _offer_supervised_decision(self, session, response_msg, parsed):
+        """Offer an exact decision to the live one-process supervisor.
+
+        Returns a response only after both offer and commit are acknowledged.
+        Otherwise the caller continues through the normal durable root resume.
+        """
+        pending_hitl = pending_interrupts(response_msg.meta)
+        pending_auth = pending_authorization_requests(response_msg.meta)
+        generation = (response_msg.meta or {}).get(EXECUTION_GENERATION_KEY)
+        decision = self._supervised_decision(
+            parsed, pending_hitl, pending_auth, generation,
+        )
+        if decision is None:
+            return self._resolved_resume_result(response_msg, parsed)
+        root_thread_id = decision.get('root_thread_id') or (
+            (response_msg.meta or {}).get('thread_id')
+        )
+        if not root_thread_id:
+            return None
+
+        response_msg.meta = persist_supervisor_decision(
+            response_msg.meta, decision, phase='queued',
+        )
+        flag_modified(response_msg, 'meta')
+        session.add(response_msg)
+        session.commit()
+
+        event_base = {
+            'root_thread_id': root_thread_id,
+            'thread_id': root_thread_id,
+            'decision': decision,
+        }
+        this.module.event_node.emit('predict_events', {
+            'type': 'parallel_hitl_decision_offer', **event_base,
+        })
+        if self._wait_parallel_hitl_ack(
+            str(response_msg.uuid), decision['decision_id'], 'offered',
+        ) is not True:
+            session.refresh(response_msg)
+            response_msg.meta = update_supervisor_decision_phase(
+                response_msg.meta, decision['decision_id'], 'fallback_pending',
+            )
+            flag_modified(response_msg, 'meta')
+            session.commit()
+            # The aggregate fallback may have checkpointed and stopped before
+            # the user clicked.  In that case no future terminal callback exists
+            # to consume ``fallback_pending``.  Claim the already-stopped task
+            # under the message-row lock and let this request continue through
+            # the ordinary durable root-resume path.  If the task is still
+            # running, its terminal callback owns recovery instead, avoiding a
+            # competing executor while live siblings settle.
+            if self._claim_stopped_supervisor_fallback(
+                session, response_msg, decision,
+            ):
+                return None
+            return {
+                'queued': True,
+                'live_resume': False,
+                'decision_id': decision['decision_id'],
+                'interrupt_id': decision['interrupt_id'],
+            }
+
+        this.module.event_node.emit('predict_events', {
+            'type': 'parallel_hitl_decision_commit', **event_base,
+        })
+        commit_ack = self._wait_parallel_hitl_ack(
+            str(response_msg.uuid), decision['decision_id'], 'committed',
+        )
+        if commit_ack is False:
+            session.refresh(response_msg)
+            response_msg.meta = update_supervisor_decision_phase(
+                response_msg.meta, decision['decision_id'], 'fallback_pending',
+            )
+            flag_modified(response_msg, 'meta')
+            session.commit()
+            if self._claim_stopped_supervisor_fallback(
+                session, response_msg, decision,
+            ):
+                return None
+            return {
+                'queued': True,
+                'live_resume': False,
+                'decision_id': decision['decision_id'],
+                'interrupt_id': decision['interrupt_id'],
+            }
+        if commit_ack is None:
+            # The offer already transferred ownership to this worker. Never
+            # start a competing root continuation merely because the commit
+            # acknowledgement was lost; the durable queued decision remains
+            # available to crash/aggregate recovery.
+            return {
+                'queued': True,
+                'live_resume': False,
+                'decision_id': decision['decision_id'],
+                'interrupt_id': decision['interrupt_id'],
+            }
+        session.refresh(response_msg)
+        if parsed.mcp_auth_resume:
+            response_msg.meta = retire_authorization_requests(
+                response_msg.meta, [decision['interrupt_id']],
+            )
+        else:
+            response_msg.meta = retire_interrupts(
+                response_msg.meta, [decision['interrupt_id']],
+            )
+        response_msg.meta = update_supervisor_decision_phase(
+            response_msg.meta, decision['decision_id'], 'committed',
+        )
+        response_msg.is_streaming = True
+        flag_modified(response_msg, 'meta')
+        session.add(response_msg)
+        session.commit()
+        return {
+            'queued': True,
+            'live_resume': True,
+            'decision_id': decision['decision_id'],
+            'interrupt_id': decision['interrupt_id'],
+        }
+
     @web.rpc("chat_continue_predict_sio", "chat_continue_predict_sio")
     def continue_predict_sio(
-        self, sid: str | None, data: dict, await_task_timeout: int = -1
+        self, sid: str | None, data: dict, await_task_timeout: int = -1,
+        _internal_token=None, _internal_user_id=None,
     ) -> Optional[str | dict]:
         """
         Continue execution of a paused chat prediction (e.g., after MCP OAuth interruption).
@@ -1339,8 +1611,17 @@ class RPC:
         - Has different validation requirements (message_id required, user_input not needed)
         - Shares minimal logic with the normal predict flow
         """
-        log.debug("Continue predict: message_id=%s conversation_uuid=%s sid=%s user_input=%s",
-                  data.get("message_id"), data.get("conversation_uuid"), sid, data.get("user_input"))
+        log.debug(
+            "Continue predict: message_id=%s conversation_uuid=%s sid=%s "
+            "hitl_resume=%s mcp_auth_resume=%s authorization_request_id=%s "
+            "hitl_decisions=%d mcp_auth_decisions=%d user_input=%s",
+            data.get("message_id"), data.get("conversation_uuid"), sid,
+            bool(data.get("hitl_resume")), bool(data.get("mcp_auth_resume")),
+            data.get("authorization_request_id"),
+            len(data.get("hitl_decisions") or []),
+            len(data.get("mcp_auth_decisions") or []),
+            data.get("user_input"),
+        )
         try:
             parsed = SioContinuePredictModel.model_validate(data)
         except ValidationError as e:
@@ -1353,7 +1634,9 @@ class RPC:
                 message_id=data.get("message_id"),
             )
 
-        if sid:
+        if _internal_token is INTERNAL_CONTINUE_TOKEN and _internal_user_id:
+            current_user = {'id': _internal_user_id}
+        elif sid:
             current_user = auth.current_user(auth_data=auth.sio_users[sid])
         else:
             current_user = auth.current_user()
@@ -1477,6 +1760,19 @@ class RPC:
                         stream_id=str(parsed.conversation_uuid),
                         message_id=parsed.message_id,
                     )
+
+            # Independent in-process fan-out (#6264): first offer the exact
+            # invocation-scoped decision to the active root worker. The worker
+            # resumes only that child while siblings continue. If no live
+            # supervisor accepts the offer, fall through unchanged to the
+            # existing durable root-checkpoint continuation below.
+            if parsed.hitl_resume or parsed.mcp_auth_resume:
+                live_result = self._offer_supervised_decision(
+                    session, response_msg, parsed,
+                )
+                if live_result is not None:
+                    return live_result
+                session.refresh(response_msg)
 
             # Retire the exact Track-1/root cards accepted by this resume before
             # the resumed worker can emit its next pause.  Previously the live UI

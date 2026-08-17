@@ -18,6 +18,109 @@ from copy import deepcopy
 RESOLVED_INTERRUPT_IDS_KEY = 'resolved_hitl_interrupt_ids'
 EXECUTION_GENERATION_KEY = 'execution_generation'
 MAX_RESOLVED_INTERRUPT_IDS = 256
+SUPERVISOR_DECISIONS_KEY = 'parallel_hitl_decisions'
+SUPERVISOR_ROSTER_KEY = 'parallel_hitl_roster'
+MAX_SUPERVISOR_DECISIONS = 256
+INTERNAL_CONTINUE_TOKEN = object()
+
+
+def decision_ack_key(message_id, decision_id, phase):
+    return f'parallel_hitl_ack:{message_id}:{decision_id}:{phase}'
+
+
+def pending_supervisor_decisions(meta):
+    values = (meta or {}).get(SUPERVISOR_DECISIONS_KEY) or []
+    return [dict(item) for item in values if isinstance(item, dict)]
+
+
+def persist_supervisor_decision(meta, decision, phase='queued'):
+    """Durably upsert one invocation-scoped decision before pub/sub delivery."""
+    updated = dict(meta or {})
+    current = pending_supervisor_decisions(updated)
+    decision_id = str((decision or {}).get('decision_id') or '')
+    if not decision_id:
+        return updated
+    incoming = {**dict(decision), 'phase': phase}
+    by_id = {
+        str(item.get('decision_id')): item
+        for item in current if item.get('decision_id')
+    }
+    existing = by_id.get(decision_id) or {}
+    by_id[decision_id] = {**existing, **incoming}
+    updated[SUPERVISOR_DECISIONS_KEY] = list(by_id.values())[
+        -MAX_SUPERVISOR_DECISIONS:
+    ]
+    return updated
+
+
+def update_supervisor_decision_phase(meta, decision_id, phase):
+    updated = dict(meta or {})
+    decisions = pending_supervisor_decisions(updated)
+    for item in decisions:
+        if str(item.get('decision_id')) == str(decision_id):
+            item['phase'] = phase
+    if decisions:
+        updated[SUPERVISOR_DECISIONS_KEY] = decisions
+    return updated
+
+
+def claim_supervisor_decision_phase(meta, decision_id, expected_phases, phase):
+    """Atomically-shaped pure update used under the message-row lock.
+
+    The caller owns the database lock.  Returning ``claimed=False`` lets a
+    competing terminal callback or socket request observe that another path
+    already took responsibility for the durable fallback.
+    """
+    updated = dict(meta or {})
+    decisions = pending_supervisor_decisions(updated)
+    expected = set(expected_phases or [])
+    claimed = False
+    for item in decisions:
+        if (
+            str(item.get('decision_id')) == str(decision_id)
+            and item.get('phase') in expected
+        ):
+            item['phase'] = phase
+            claimed = True
+            break
+    if decisions:
+        updated[SUPERVISOR_DECISIONS_KEY] = decisions
+    return updated, claimed
+
+
+def complete_supervisor_decisions(meta, tool_call_id):
+    """Mark live decisions settled when their resumed child becomes terminal."""
+    updated = dict(meta or {})
+    decisions = pending_supervisor_decisions(updated)
+    for item in decisions:
+        if str(item.get('tool_call_id') or '') == str(tool_call_id or ''):
+            item['phase'] = 'completed'
+    if decisions:
+        updated[SUPERVISOR_DECISIONS_KEY] = decisions
+    return updated
+
+
+def merge_supervisor_roster(meta, state):
+    """Persist bounded branch-local supervisor status for crash/reload recovery."""
+    updated = dict(meta or {})
+    roster = dict(updated.get(SUPERVISOR_ROSTER_KEY) or {})
+    root_thread_id = str((state or {}).get('root_thread_id') or '')
+    tool_call_id = str((state or {}).get('tool_call_id') or '')
+    if root_thread_id:
+        roster['root_thread_id'] = root_thread_id
+    if tool_call_id:
+        children = dict(roster.get('children') or {})
+        children[tool_call_id] = {
+            **dict(children.get(tool_call_id) or {}),
+            **{
+                key: value for key, value in dict(state or {}).items()
+                if key not in {'chat_project_id'}
+            },
+        }
+        roster['children'] = children
+    if roster:
+        updated[SUPERVISOR_ROSTER_KEY] = roster
+    return updated
 
 
 def pending_interrupts(meta):
@@ -108,9 +211,15 @@ def normalize_interrupts(response_metadata):
         # child_thread_id while bubbling an in-process LangGraph interrupt, but
         # those pauses must continue the root worker so the decision reaches
         # the actual nested caller. Never trust an SDK-supplied strategy here.
-        current['resume_strategy'] = (
-            'aggregate_child' if durable_child_thread_id else 'single'
-        )
+        if (
+            not durable_child_thread_id
+            and response_metadata.get('resume_strategy') == 'supervised_child'
+        ):
+            current['resume_strategy'] = 'supervised_child'
+        else:
+            current['resume_strategy'] = (
+                'aggregate_child' if durable_child_thread_id else 'single'
+            )
         normalized.append(current)
     return normalized
 
@@ -178,6 +287,8 @@ def retire_all_interrupts(meta):
     updated = remember_resolved_interrupts(meta, pending_interrupts(meta))
     updated.pop('hitl_interrupts', None)
     updated.pop('hitl_interrupt', None)
+    updated.pop(SUPERVISOR_DECISIONS_KEY, None)
+    updated.pop(SUPERVISOR_ROSTER_KEY, None)
     return updated
 
 
