@@ -33,11 +33,6 @@ _PROJECT_STATEMENTS = (
     "ON p_{pid}.chat_conversation_share_tokens (token)",
     "CREATE INDEX IF NOT EXISTS ix_p_{pid}_chat_conv_share_tokens_conv "
     "ON p_{pid}.chat_conversation_share_tokens (conversation_id)",
-    # Add rate-limit columns to tables created before this migration
-    "ALTER TABLE p_{pid}.chat_conversation_share_tokens "
-    "ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE p_{pid}.chat_conversation_share_tokens "
-    "ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP",
 )
 
 # DDL applied to the public schema (once, not per-project)

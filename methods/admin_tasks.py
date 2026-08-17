@@ -2867,13 +2867,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method("migrate_share_token_columns")
     def migrate_share_token_columns(self, *args, **kwargs):  # pylint: disable=W0613
-        """Admin task: add message_group_ids column to chat_conversation_share_tokens.
+        """Admin task: add share-token columns to chat_conversation_share_tokens.
 
-        Required for the partial-scope share link feature (issue #1431). The column
-        stores a JSON list of ConversationMessageGroup IDs to include when scope='partial'.
+        Adds the following columns where missing (idempotent, ADD COLUMN IF NOT EXISTS):
+          - message_group_ids  JSON      — partial-scope group allow-list (issue #1431)
+          - failed_attempts    INTEGER   — rate-limit counter (issue #1431)
+          - locked_until       TIMESTAMP — rate-limit lockout expiry (issue #1431)
 
-        Iterates all per-project schemas and adds the column where the table exists.
-        Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+        Iterates all per-project schemas. Safe to run multiple times.
         Registered under release group R-2.0.6.
 
         Param format (optional):
@@ -2881,10 +2882,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Examples:
             ""         - run migration across all projects
-            "dry_run"  - preview which projects need the column (no DB writes)
+            "dry_run"  - preview which projects need the columns (no DB writes)
         """
         from sqlalchemy import text  # pylint: disable=C0415
         from tools import db  # pylint: disable=C0415
+
+        # Each entry: (column_name, DDL fragment for ALTER TABLE ADD COLUMN)
+        COLUMNS = [
+            ("message_group_ids", "ADD COLUMN IF NOT EXISTS message_group_ids JSON"),
+            ("failed_attempts",   "ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0"),
+            ("locked_until",      "ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP"),
+        ]
 
         param = kwargs.get("param", "") or ""
         dry_run = any(seg.strip().lower() == "dry_run" for seg in param.split(";"))
@@ -2904,39 +2912,46 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         for project_id in project_ids:
             schema = f"p_{project_id}"
-            check_sql = text(
-                "SELECT EXISTS ("
-                "  SELECT 1 FROM information_schema.columns"
-                f"  WHERE table_schema = 'p_{project_id}'"
-                "  AND table_name = 'chat_conversation_share_tokens'"
-                "  AND column_name = 'message_group_ids'"
-                ")"
-            )
             try:
                 with db.get_session(project_id) as session:
-                    already_exists = session.execute(check_sql).scalar()
-                    if already_exists:
+                    # Determine which columns are missing for this project
+                    missing = []
+                    for col_name, col_ddl in COLUMNS:
+                        exists = session.execute(text(
+                            "SELECT EXISTS ("
+                            "  SELECT 1 FROM information_schema.columns"
+                            f"  WHERE table_schema = '{schema}'"
+                            "  AND table_name = 'chat_conversation_share_tokens'"
+                            f"  AND column_name = '{col_name}'"
+                            ")"
+                        )).scalar()
+                        if not exists:
+                            missing.append((col_name, col_ddl))
+
+                    if not missing:
                         log.info(
-                            "%smigrate_share_token_columns: project %s — column already exists, skip",
+                            "%smigrate_share_token_columns: project %s — all columns present, skip",
                             prefix, project_id,
                         )
                         skipped += 1
                         continue
 
+                    col_list = ", ".join(c for c, _ in missing)
                     log.info(
-                        "%smigrate_share_token_columns: project %s — %s",
+                        "%smigrate_share_token_columns: project %s — %s: %s",
                         prefix, project_id,
-                        "would add column" if dry_run else "adding column",
+                        "would add" if dry_run else "adding",
+                        col_list,
                     )
 
                     if dry_run:
                         would_apply += 1
                         continue
 
-                    session.execute(text(
-                        f"ALTER TABLE {schema}.chat_conversation_share_tokens "
-                        "ADD COLUMN IF NOT EXISTS message_group_ids JSON"
-                    ))
+                    for _, col_ddl in missing:
+                        session.execute(text(
+                            f"ALTER TABLE {schema}.chat_conversation_share_tokens {col_ddl}"
+                        ))
                     session.commit()
                     applied += 1
 
