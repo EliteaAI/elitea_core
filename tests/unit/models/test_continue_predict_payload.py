@@ -69,6 +69,44 @@ class TestContinuePredictPayload:
             {"conversation_uuid": UUID_STR, "message_id": MSG_ID, "hitl_resume": False})
         assert m.hitl_action is None
 
+    def test_toolkit_authorization_selects_its_own_resume_protocol(self, payload_model):
+        m = payload_model.model_validate({
+            "conversation_uuid": UUID_STR,
+            "message_id": MSG_ID,
+            "mcp_auth_resume": True,
+            "mcp_auth_action": "authorize",
+            "authorization_request_id": "mcp_auth_123",
+        })
+        assert m.hitl_resume is False
+        assert m.mcp_auth_action == "authorize"
+        assert m.authorization_request_id == "mcp_auth_123"
+
+    def test_toolkit_authorization_requires_valid_action(self, payload_model):
+        with pytest.raises(ValidationError):
+            payload_model.model_validate({
+                "conversation_uuid": UUID_STR,
+                "message_id": MSG_ID,
+                "mcp_auth_resume": True,
+            })
+        with pytest.raises(ValidationError):
+            payload_model.model_validate({
+                "conversation_uuid": UUID_STR,
+                "message_id": MSG_ID,
+                "mcp_auth_resume": True,
+                "mcp_auth_action": "approve",
+            })
+
+    def test_resume_protocols_are_mutually_exclusive(self, payload_model):
+        with pytest.raises(ValidationError):
+            payload_model.model_validate({
+                "conversation_uuid": UUID_STR,
+                "message_id": MSG_ID,
+                "hitl_resume": True,
+                "hitl_action": "approve",
+                "mcp_auth_resume": True,
+                "mcp_auth_action": "authorize",
+            })
+
     def test_message_id_required(self, payload_model):
         with pytest.raises(ValidationError):
             payload_model.model_validate(

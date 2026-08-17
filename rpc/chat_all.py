@@ -41,8 +41,13 @@ from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, decisions_for_child,
     interrupt_identity, pending_interrupts,
+    partition_root_hitl_decisions,
     retire_all_interrupts, retire_child_interrupts, retire_interrupts,
     validate_child_decisions,
+)
+from ..utils.toolkit_authorization import (
+    authorization_identity, pending_authorization_requests,
+    retire_all_authorization_requests, retire_authorization_requests,
 )
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
@@ -704,6 +709,9 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
         'hitl_action': getattr(predict_payload, 'hitl_action', None),
         'hitl_value': getattr(predict_payload, 'hitl_value', None),
         'hitl_decisions': getattr(predict_payload, 'hitl_decisions', None),
+        'mcp_auth_resume': bool(getattr(predict_payload, 'mcp_auth_resume', False)),
+        'mcp_auth_action': getattr(predict_payload, 'mcp_auth_action', None),
+        'mcp_auth_decisions': getattr(predict_payload, 'mcp_auth_decisions', None),
         'thread_id': predict_payload.thread_id,
     }
 
@@ -1386,6 +1394,13 @@ class RPC:
                     for item in pending_interrupts(
                         persisted.meta if persisted else None
                     )
+                ) or any(
+                    item.get('resume_strategy') == 'aggregate_child'
+                    and (item.get('child_thread_id') or item.get('thread_id'))
+                    == parsed.thread_id
+                    for item in pending_authorization_requests(
+                        persisted.meta if persisted else None
+                    )
                 )
             if expired_child:
                 raise SioValidationError(
@@ -1471,13 +1486,23 @@ class RPC:
             # ``_continue_child_resume`` above.
             if parsed.hitl_resume:
                 pending = pending_interrupts(response_msg.meta)
+                pending_auth = pending_authorization_requests(response_msg.meta)
                 decisions = [
                     dict(item) for item in (parsed.hitl_decisions or [])
                     if isinstance(item, dict)
                 ]
                 if decisions:
                     try:
-                        validate_child_decisions(pending, decisions)
+                        # Track-1/in-process aggregates share one root worker
+                        # checkpoint. Resume only the selected leaf; the SDK
+                        # preserves and re-emits unresolved sibling interrupts.
+                        # True parked worker children keep the exact-all rule in
+                        # ``_continue_child_resume`` below.
+                        resolved_ids, resolved_auth_ids = (
+                            partition_root_hitl_decisions(
+                                pending, pending_auth, decisions,
+                            )
+                        )
                     except ValueError as exc:
                         raise SioValidationError(
                             sio=self.context.sio, sid=sid,
@@ -1486,7 +1511,6 @@ class RPC:
                             stream_id=str(parsed.conversation_uuid),
                             message_id=parsed.message_id,
                         ) from exc
-                    resolved_ids = [interrupt_identity(item) for item in decisions]
                 else:
                     if len(pending) != 1:
                         raise SioValidationError(
@@ -1516,8 +1540,42 @@ class RPC:
                             message_id=parsed.message_id,
                         )
                     resolved_ids = [interrupt_identity(pending[0])]
+                    resolved_auth_ids = []
                 response_msg.meta = retire_interrupts(
                     response_msg.meta, resolved_ids,
+                )
+                response_msg.meta = retire_authorization_requests(
+                    response_msg.meta, resolved_auth_ids,
+                )
+                flag_modified(response_msg, 'meta')
+
+            if parsed.mcp_auth_resume:
+                pending_auth = pending_authorization_requests(response_msg.meta)
+                requested_id = parsed.authorization_request_id
+                if not requested_id and len(pending_auth) == 1:
+                    requested_id = authorization_identity(pending_auth[0])
+                selected = [
+                    item for item in pending_auth
+                    if authorization_identity(item) == str(requested_id or '')
+                ]
+                if len(selected) != 1:
+                    raise SioValidationError(
+                        sio=self.context.sio, sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error='The toolkit authorization request is missing or already resolved',
+                        stream_id=str(parsed.conversation_uuid),
+                        message_id=parsed.message_id,
+                    )
+                if parsed.mcp_auth_action not in {'authorize', 'skip'}:
+                    raise SioValidationError(
+                        sio=self.context.sio, sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error='Toolkit authorization action must be authorize or skip',
+                        stream_id=str(parsed.conversation_uuid),
+                        message_id=parsed.message_id,
+                    )
+                response_msg.meta = retire_authorization_requests(
+                    response_msg.meta, [requested_id],
                 )
                 flag_modified(response_msg, 'meta')
 
@@ -1607,7 +1665,9 @@ class RPC:
             is_token_limit_continuation = (
                 bool(truncated_content)
                 and not parsed.hitl_resume
+                and not parsed.mcp_auth_resume
                 and not pending_interrupts(response_msg.meta)
+                and not pending_authorization_requests(response_msg.meta)
             )
 
             # For token-limit continuations: purge dirty items from the DB so
@@ -1764,6 +1824,7 @@ class RPC:
         response_msg.is_streaming = False
         if response_msg.meta:
             response_msg.meta = retire_all_interrupts(response_msg.meta)
+            response_msg.meta = retire_all_authorization_requests(response_msg.meta)
             flag_modified(response_msg, 'meta')
         if not response_msg.message_items:
             session.add(TextMessageItem(
@@ -1850,17 +1911,32 @@ class RPC:
 
         # Forward the COMPLETE aggregate decision list. Scalar action/value remain only as the
         # single-interrupt compatibility path.
-        action = getattr(parsed, 'hitl_action', None)
+        is_mcp_auth = bool(getattr(parsed, 'mcp_auth_resume', False))
+        action = (
+            getattr(parsed, 'mcp_auth_action', None)
+            if is_mcp_auth else getattr(parsed, 'hitl_action', None)
+        )
         value = getattr(parsed, 'hitl_value', None)
         child_decisions = decisions_for_child(
-            getattr(parsed, 'hitl_decisions', None),
+            (
+                getattr(parsed, 'mcp_auth_decisions', None)
+                if is_mcp_auth else getattr(parsed, 'hitl_decisions', None)
+            ),
             thread_id,
             child_meta.get('tool_call_id'),
         )
         pending_for_child = [
-            item for item in pending_interrupts(persisted_meta)
+            item for item in (
+                pending_authorization_requests(persisted_meta)
+                if is_mcp_auth else pending_interrupts(persisted_meta)
+            )
             if (item.get('child_thread_id') or item.get('thread_id')) == thread_id
         ]
+        if is_mcp_auth and getattr(parsed, 'authorization_request_id', None):
+            pending_for_child = [
+                item for item in pending_for_child
+                if authorization_identity(item) == parsed.authorization_request_id
+            ]
         if not pending_for_child:
             raise SioValidationError(
                 sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
@@ -1891,8 +1967,21 @@ class RPC:
             action = first_decision.get('action', action)
             value = first_decision.get('value', value)
 
+        if is_mcp_auth and action not in {'authorize', 'skip'}:
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid,
+                event=SioEvents.chat_predict.value,
+                error='Toolkit authorization action must be authorize or skip',
+                stream_id=str(parsed.conversation_uuid),
+                message_id=parsed.message_id,
+            )
+
         resume_interrupt_ids = [
-            interrupt_identity(item) for item in pending_for_child
+            (
+                authorization_identity(item)
+                if is_mcp_auth else interrupt_identity(item)
+            )
+            for item in pending_for_child
         ]
         if not self.parallel_dispatch_claim_child_resume(
             thread_id, resume_interrupt_ids,
@@ -1903,11 +1992,17 @@ class RPC:
                 stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
             )
 
-        child_payload['hitl_resume'] = True
-        child_payload['hitl_action'] = action or 'approve'
-        child_payload['hitl_value'] = value or ''
-        if child_decisions:
-            child_payload['hitl_decisions'] = child_decisions
+        if is_mcp_auth:
+            child_payload['mcp_auth_resume'] = True
+            child_payload['mcp_auth_action'] = action or 'skip'
+            if child_decisions:
+                child_payload['mcp_auth_decisions'] = child_decisions
+        else:
+            child_payload['hitl_resume'] = True
+            child_payload['hitl_action'] = action or 'approve'
+            child_payload['hitl_value'] = value or ''
+            if child_decisions:
+                child_payload['hitl_decisions'] = child_decisions
         child_payload['should_continue'] = False
         execution_generation = persisted_meta.get(EXECUTION_GENERATION_KEY)
         if execution_generation:
@@ -1945,7 +2040,9 @@ class RPC:
             child_meta.get('parent_thread_id'), child_meta.get('reconcile_epoch'),
             {thread_id: task_id},
         )
-        resolved_ids = [item.get('interrupt_id') for item in child_decisions]
+        resolved_ids = [
+            item.get('interrupt_id') for item in (child_decisions or [])
+        ]
         with db.get_session(parsed.project_id) as session:
             response_msg = session.query(ConversationMessageGroup).where(
                 ConversationMessageGroup.uuid == parsed.message_id
@@ -1953,9 +2050,14 @@ class RPC:
             if response_msg:
                 response_msg.task_id = task_id
                 response_msg.is_streaming = True
-                response_msg.meta = retire_child_interrupts(
-                    response_msg.meta, thread_id, resolved_ids,
-                )
+                if is_mcp_auth:
+                    response_msg.meta = retire_authorization_requests(
+                        response_msg.meta, resume_interrupt_ids,
+                    )
+                else:
+                    response_msg.meta = retire_child_interrupts(
+                        response_msg.meta, thread_id, resolved_ids,
+                    )
                 flag_modified(response_msg, 'meta')
                 session.add(response_msg)
                 session.commit()
@@ -2128,6 +2230,7 @@ class RPC:
             # Step 4: Retire all HITL interrupts
             if msg_group.meta:
                 msg_group.meta = retire_all_interrupts(msg_group.meta)
+                msg_group.meta = retire_all_authorization_requests(msg_group.meta)
                 flag_modified(msg_group, 'meta')
 
             msg_group_deleted = False

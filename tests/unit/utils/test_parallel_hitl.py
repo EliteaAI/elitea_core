@@ -16,11 +16,35 @@ is_current_execution = _MODULE.is_current_execution
 merge_interrupts = _MODULE.merge_interrupts
 normalize_interrupts = _MODULE.normalize_interrupts
 pending_interrupts = _MODULE.pending_interrupts
+partition_root_hitl_decisions = _MODULE.partition_root_hitl_decisions
 requires_plural_persistence = _MODULE.requires_plural_persistence
 retire_child_interrupts = _MODULE.retire_child_interrupts
 retire_interrupts = _MODULE.retire_interrupts
 retire_all_interrupts = _MODULE.retire_all_interrupts
 validate_child_decisions = _MODULE.validate_child_decisions
+
+
+def test_mixed_root_resume_partitions_sensitive_and_authorization_decisions():
+    sensitive = {
+        'interrupt_id': 'hitl-delete',
+        'available_actions': ['approve', 'reject'],
+    }
+    authorization = {
+        'interrupt_id': 'hitl-auth',
+        'available_actions': ['authorize', 'skip'],
+    }
+
+    sensitive_ids, authorization_ids = partition_root_hitl_decisions(
+        [sensitive],
+        [authorization],
+        [
+            {'interrupt_id': 'hitl-auth', 'action': 'skip'},
+            {'interrupt_id': 'hitl-delete', 'action': 'reject'},
+        ],
+    )
+
+    assert sensitive_ids == ['hitl-delete']
+    assert authorization_ids == ['hitl-auth']
 
 
 def test_pause_merge_preserves_sibling_children_and_adds_identity():
@@ -119,6 +143,64 @@ def test_two_interrupts_in_one_durable_child_preserve_both():
     normalized = normalize_interrupts(response)
     assert [item['tool_call_id'] for item in normalized] == ['leaf-1', 'leaf-2']
     assert all(item['child_thread_id'] == 'durable-child' for item in normalized)
+    assert requires_plural_persistence(normalized, response) is True
+
+
+def test_nested_leaf_threads_keep_durable_child_as_resume_route():
+    response = {
+        'hitl_interrupts': [
+            {
+                'interrupt_id': 'leaf-1',
+                'child_thread_id': 'leaf-thread-1',
+                'thread_id': 'leaf-thread-1',
+                'tool_call_id': 'leaf-tool-1',
+            },
+            {
+                'interrupt_id': 'leaf-2',
+                'child_thread_id': 'leaf-thread-2',
+                'thread_id': 'leaf-thread-2',
+                'tool_call_id': 'leaf-tool-2',
+            },
+        ],
+        'metadata': {'child_thread_id': 'durable-child'},
+    }
+
+    normalized = normalize_interrupts(response)
+
+    assert [item['child_thread_id'] for item in normalized] == [
+        'durable-child', 'durable-child',
+    ]
+    assert [item['thread_id'] for item in normalized] == [
+        'leaf-thread-1', 'leaf-thread-2',
+    ]
+    assert all(item['resume_strategy'] == 'aggregate_child' for item in normalized)
+
+
+def test_nested_in_process_leaf_threads_resume_the_root_worker():
+    response = {
+        'thread_id': 'root-worker-thread',
+        'hitl_interrupts': [
+            {
+                'interrupt_id': 'leaf-1',
+                'child_thread_id': 'sdk-leaf-thread-1',
+                'thread_id': 'sdk-leaf-thread-1',
+                'resume_strategy': 'aggregate_child',
+            },
+            {
+                'interrupt_id': 'leaf-2',
+                'child_thread_id': 'sdk-leaf-thread-2',
+                'thread_id': 'sdk-leaf-thread-2',
+                'resume_strategy': 'aggregate_child',
+            },
+        ],
+    }
+
+    normalized = normalize_interrupts(response)
+
+    assert [item['child_thread_id'] for item in normalized] == [
+        'sdk-leaf-thread-1', 'sdk-leaf-thread-2',
+    ]
+    assert all(item['resume_strategy'] == 'single' for item in normalized)
     assert requires_plural_persistence(normalized, response) is True
 
 
@@ -287,6 +369,32 @@ def test_child_decisions_require_exact_unique_identities_and_valid_actions():
         except ValueError:
             continue
         raise AssertionError(f'expected invalid decisions to fail: {decisions}')
+
+
+def test_root_decisions_allow_one_pending_interrupt_at_a_time():
+    pending = [
+        {'interrupt_id': 'i-1', 'available_actions': ['approve', 'reject']},
+        {'interrupt_id': 'i-2', 'available_actions': ['approve', 'reject']},
+    ]
+
+    validate_child_decisions(
+        pending,
+        [{'interrupt_id': 'i-1', 'action': 'approve'}],
+        require_all=False,
+    )
+
+    for decisions in (
+        [],
+        [{'interrupt_id': 'unknown', 'action': 'approve'}],
+        [{'interrupt_id': 'i-1', 'action': 'edit'}],
+    ):
+        try:
+            validate_child_decisions(
+                pending, decisions, require_all=False,
+            )
+        except ValueError:
+            continue
+        raise AssertionError(f'expected invalid partial decisions to fail: {decisions}')
 
 
 def test_regenerate_clears_stopped_flag_but_continue_does_not():

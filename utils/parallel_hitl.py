@@ -71,13 +71,23 @@ def normalize_interrupts(response_metadata):
         if not isinstance(item, dict):
             continue
         current = deepcopy(item)
-        child_thread_id = (
-            current.get('child_thread_id')
-            or lineage.get('child_thread_id')
-        )
+        # The task metadata identifies the durable worker child whose launch
+        # payload is stashed in Redis. A nested in-process Application may also
+        # put its leaf checkpoint id in ``child_thread_id``; that value is useful
+        # for LangGraph routing, but it must not replace the durable worker id or
+        # Core will look up a Redis key that can never exist on resume.
+        durable_child_thread_id = lineage.get('child_thread_id')
+        nested_child_thread_id = current.get('child_thread_id')
+        child_thread_id = durable_child_thread_id or nested_child_thread_id
+        if (
+            durable_child_thread_id
+            and nested_child_thread_id
+            and nested_child_thread_id != durable_child_thread_id
+        ):
+            current.setdefault('thread_id', nested_child_thread_id)
         tool_call_id = current.get('tool_call_id') or lineage.get('tool_call_id')
         if child_thread_id:
-            current.setdefault('child_thread_id', child_thread_id)
+            current['child_thread_id'] = child_thread_id
         if tool_call_id:
             current.setdefault('tool_call_id', tool_call_id)
         for key in ('parent_agent_call_id', 'sibling_ordinal'):
@@ -93,8 +103,13 @@ def normalize_interrupts(response_metadata):
                 if outer_last.get('name') == inner_first.get('name'):
                     inner_path = inner_path[1:]
             current['parent_agent_path'] = deepcopy(outer_path) + deepcopy(inner_path)
-        current.setdefault(
-            'resume_strategy', 'aggregate_child' if child_thread_id else 'single',
+        # Only the worker task lineage identifies a parked Core fan-out child
+        # backed by ``parallel_child_launch:*``. SDK Applications also attach
+        # child_thread_id while bubbling an in-process LangGraph interrupt, but
+        # those pauses must continue the root worker so the decision reaches
+        # the actual nested caller. Never trust an SDK-supplied strategy here.
+        current['resume_strategy'] = (
+            'aggregate_child' if durable_child_thread_id else 'single'
         )
         normalized.append(current)
     return normalized
@@ -223,20 +238,28 @@ def decisions_for_child(decisions, child_thread_id, tool_call_id=None):
     return by_tool or decisions
 
 
-def validate_child_decisions(pending, decisions):
-    """Require an exact, unique decision for every pending durable-child card."""
+def validate_child_decisions(pending, decisions, require_all=True):
+    """Validate unique decisions against pending interrupt identities.
+
+    A parked worker child is resumed once and therefore still requires a
+    complete decision set.  An in-process root aggregate can be resumed with a
+    subset: the SDK checkpoints the completed leaf and returns the remaining
+    interrupts with their stable identities.
+    """
     pending = [dict(item) for item in (pending or []) if isinstance(item, dict)]
     decisions = [dict(item) for item in (decisions or []) if isinstance(item, dict)]
     expected = [interrupt_identity(item) for item in pending]
     received = [interrupt_identity(item) for item in decisions]
     if not expected or any(not identity for identity in expected):
         raise ValueError('Pending interrupt is missing a stable identity')
-    if any(not identity for identity in received):
+    if not received or any(not identity for identity in received):
         raise ValueError('Every decision must include an interrupt identity')
     if len(received) != len(set(received)):
         raise ValueError('Duplicate interrupt decisions are not allowed')
-    if set(received) != set(expected):
+    if require_all and set(received) != set(expected):
         raise ValueError('Decisions must exactly match all pending interrupts')
+    if not require_all and not set(received).issubset(set(expected)):
+        raise ValueError('Decision does not match a pending interrupt')
 
     pending_by_identity = {
         interrupt_identity(item): item for item in pending
@@ -248,6 +271,43 @@ def validate_child_decisions(pending, decisions):
             raise ValueError(
                 f"Action '{action}' is not available for interrupt '{identity}'"
             )
+
+
+def partition_root_hitl_decisions(
+    pending_hitl, pending_authorizations, decisions,
+):
+    """Validate and partition one mixed root-checkpoint resume.
+
+    Nested MCP authorization and sensitive-tool pauses can be surfaced in the
+    same root aggregate even though Core persists them in separate metadata
+    collections. The root LangGraph checkpoint accepts one decision list, so
+    validate that list against the union and return the identities to retire
+    from each collection.
+    """
+    pending_hitl = [
+        dict(item) for item in (pending_hitl or []) if isinstance(item, dict)
+    ]
+    pending_authorizations = [
+        dict(item) for item in (pending_authorizations or [])
+        if isinstance(item, dict)
+    ]
+    decisions = [
+        dict(item) for item in (decisions or []) if isinstance(item, dict)
+    ]
+    validate_child_decisions(
+        pending_hitl + pending_authorizations,
+        decisions,
+        require_all=False,
+    )
+    hitl_ids = {interrupt_identity(item) for item in pending_hitl}
+    authorization_ids = {
+        interrupt_identity(item) for item in pending_authorizations
+    }
+    received_ids = [interrupt_identity(item) for item in decisions]
+    return (
+        [identity for identity in received_ids if identity in hitl_ids],
+        [identity for identity in received_ids if identity in authorization_ids],
+    )
 
 
 def retire_child_interrupts(meta, child_thread_id, interrupt_ids=None):
