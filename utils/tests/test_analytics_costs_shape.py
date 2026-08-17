@@ -40,6 +40,12 @@ def test_model_fields_present():
         assert key in src, f"Missing model field: {key}"
 
 
+def test_breakdown_fields_present():
+    src = _get_source()
+    for key in ("date", "user_id", "user_email", "entity_id", "entity_name", "total_tokens", "input_tokens", "output_tokens"):
+        assert key in src, f"Missing breakdown field: {key}"
+
+
 def test_cost_column_references():
     src = _get_source()
     assert "AuditEvent.llm_cost" in src, "Missing llm_cost column reference"
