@@ -118,6 +118,7 @@ class SkillListModel(BaseModel):
     is_forked: bool = False
     is_pinned: bool = False
     has_published_version: bool = False
+    folder_id: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -268,6 +269,7 @@ class SkillDetailModel(BaseModel):
     likes_count: int = 0
     is_liked: bool = False
     icon_meta: Optional[dict] = {}
+    folder_id: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 

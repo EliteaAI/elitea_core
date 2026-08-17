@@ -2974,29 +2974,31 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method("migrate_entity_folders")
     def migrate_entity_folders(self, *args, **kwargs):  # pylint: disable=W0613
-        """Admin task: create entity_folders table and add folder_id columns to entity tables.
+        """Admin task: create entity_folders table for organizing entities.
 
-        Issue #5194: Entity folders for organizing agents, pipelines, skills, toolkits, configurations.
-        Creates the entity_folders table in per-project schemas and adds folder_id FK columns to:
-          - applications (agents/pipelines)
-          - skills
-          - elitea_tools (toolkits)
-          - configuration
+        Issue #5194: Folder organization for applications, skills, toolkits, and configurations.
+        Creates entity_folders table in social plugin and adds folder_id FK to entity tables.
 
-        Idempotent (CREATE TABLE IF NOT EXISTS, ADD COLUMN IF NOT EXISTS): safe to run
-        multiple times.
+        This migration:
+        1. Creates entity_folders table in all tenant schemas
+        2. Adds folder_id column to applications, skills, elitea_tools, configuration tables
+        3. Creates indexes and foreign key constraints
+
+        Idempotent: safe to run multiple times.
 
         Param format (optional):
-            "project_id=<all|N>"
+            "project_id=<all|N>;dry_run"
 
         Examples:
-            "project_id=all"  - migrate all projects (default)
-            "project_id=3"    - migrate project 3 only
+            "project_id=all"        - migrate all projects (default)
+            "project_id=3"          - migrate project 3 only
+            "project_id=all;dry_run" - preview changes without applying
         """
         from sqlalchemy import text  # pylint: disable=C0415
 
         param = kwargs.get("param", "") or ""
         project_id_filter = None
+        dry_run = False
 
         for seg in [s.strip() for s in param.split(";")]:
             seg_lower = seg.lower()
@@ -3008,8 +3010,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     except ValueError:
                         log.error("migrate_entity_folders: invalid project_id '%s'", value)
                         return {"ok": False, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
 
-        log.info("Starting migrate_entity_folders (project_id_filter=%s)", project_id_filter)
+        prefix = "[DRY_RUN] " if dry_run else ""
+        log.info("%sStarting migrate_entity_folders (project_id_filter=%s)", prefix, project_id_filter)
 
         if project_id_filter:
             project_ids = [project_id_filter]
@@ -3020,53 +3025,149 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "projects_processed": 0,
             "projects_skipped": 0,
             "errors": [],
+            "dry_run": dry_run,
         }
 
         for project_id in project_ids:
             schema = f"p_{project_id}"
-            statements = [
-                # Create entity_folders table
-                f"""
-                CREATE TABLE IF NOT EXISTS {schema}.entity_folders (
-                    id SERIAL PRIMARY KEY,
-                    uuid UUID UNIQUE DEFAULT gen_random_uuid(),
-                    name VARCHAR(128) NOT NULL,
-                    owner_id INTEGER NOT NULL,
-                    entity_type VARCHAR(32) NOT NULL,
-                    sub_type VARCHAR(32),
-                    meta JSONB NOT NULL DEFAULT '{{}}',
-                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMP
-                )
-                """,
-                # Add folder_id to applications
-                f"ALTER TABLE {schema}.applications ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL",
-                f"CREATE INDEX IF NOT EXISTS ix_applications_folder_id ON {schema}.applications(folder_id)",
-                # Add folder_id to skills
-                f"ALTER TABLE {schema}.skills ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL",
-                f"CREATE INDEX IF NOT EXISTS ix_skills_folder_id ON {schema}.skills(folder_id)",
-                # Add folder_id to elitea_tools (toolkits)
-                f"ALTER TABLE {schema}.elitea_tools ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL",
-                f"CREATE INDEX IF NOT EXISTS ix_elitea_tools_folder_id ON {schema}.elitea_tools(folder_id)",
-                # Add folder_id to configuration
-                f"ALTER TABLE {schema}.configuration ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL",
-                f"CREATE INDEX IF NOT EXISTS ix_configuration_folder_id ON {schema}.configuration(folder_id)",
-            ]
-
             try:
                 with db.get_session(project_id) as session:
-                    for statement in statements:
-                        session.execute(text(statement))
-                    session.commit()
-                results["projects_processed"] += 1
-                log.info("migrate_entity_folders: project %s migrated", project_id)
+                    # Step 1: Create entity_folders table
+                    create_table_sql = f"""
+                    CREATE TABLE IF NOT EXISTS {schema}.entity_folders (
+                        id SERIAL PRIMARY KEY,
+                        uuid UUID UNIQUE DEFAULT gen_random_uuid(),
+                        name VARCHAR(128) NOT NULL,
+                        owner_id INTEGER NOT NULL,
+                        entity_type VARCHAR(32) NOT NULL,
+                        sub_type VARCHAR(32),
+                        meta JSONB NOT NULL DEFAULT '{{}}',
+                        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMP
+                    )
+                    """
+                    if not dry_run:
+                        session.execute(text(create_table_sql))
+
+                    # Create indexes
+                    index_statements = [
+                        f"CREATE INDEX IF NOT EXISTS ix_entity_folders_owner_type ON {schema}.entity_folders(owner_id, entity_type)",
+                        f"CREATE INDEX IF NOT EXISTS ix_entity_folders_entity_sub ON {schema}.entity_folders(entity_type, sub_type)",
+                    ]
+                    if not dry_run:
+                        for stmt in index_statements:
+                            session.execute(text(stmt))
+
+                    # Step 2: Add folder_id to applications table
+                    apps_folder_sql = f"""
+                    ALTER TABLE {schema}.applications ADD COLUMN IF NOT EXISTS folder_id INTEGER;
+                    """
+                    apps_fk_sql = f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conname = 'applications_folder_id_fkey'
+                            AND conrelid = '{schema}.applications'::regclass
+                        ) THEN
+                            ALTER TABLE {schema}.applications
+                            ADD CONSTRAINT applications_folder_id_fkey
+                            FOREIGN KEY (folder_id) REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL;
+                        END IF;
+                    END $$
+                    """
+                    apps_index_sql = f"CREATE INDEX IF NOT EXISTS ix_applications_folder_id ON {schema}.applications(folder_id)"
+                    if not dry_run:
+                        session.execute(text(apps_folder_sql))
+                        session.execute(text(apps_fk_sql))
+                        session.execute(text(apps_index_sql))
+
+                    # Step 3: Add folder_id to skills table
+                    skills_folder_sql = f"""
+                    ALTER TABLE {schema}.skills ADD COLUMN IF NOT EXISTS folder_id INTEGER;
+                    """
+                    skills_fk_sql = f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conname = 'skills_folder_id_fkey'
+                            AND conrelid = '{schema}.skills'::regclass
+                        ) THEN
+                            ALTER TABLE {schema}.skills
+                            ADD CONSTRAINT skills_folder_id_fkey
+                            FOREIGN KEY (folder_id) REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL;
+                        END IF;
+                    END $$
+                    """
+                    skills_index_sql = f"CREATE INDEX IF NOT EXISTS ix_skills_folder_id ON {schema}.skills(folder_id)"
+                    if not dry_run:
+                        session.execute(text(skills_folder_sql))
+                        session.execute(text(skills_fk_sql))
+                        session.execute(text(skills_index_sql))
+
+                    # Step 4: Add folder_id to elitea_tools table
+                    tools_folder_sql = f"""
+                    ALTER TABLE {schema}.elitea_tools ADD COLUMN IF NOT EXISTS folder_id INTEGER;
+                    """
+                    tools_fk_sql = f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conname = 'elitea_tools_folder_id_fkey'
+                            AND conrelid = '{schema}.elitea_tools'::regclass
+                        ) THEN
+                            ALTER TABLE {schema}.elitea_tools
+                            ADD CONSTRAINT elitea_tools_folder_id_fkey
+                            FOREIGN KEY (folder_id) REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL;
+                        END IF;
+                    END $$
+                    """
+                    tools_index_sql = f"CREATE INDEX IF NOT EXISTS ix_elitea_tools_folder_id ON {schema}.elitea_tools(folder_id)"
+                    if not dry_run:
+                        session.execute(text(tools_folder_sql))
+                        session.execute(text(tools_fk_sql))
+                        session.execute(text(tools_index_sql))
+
+                    # Step 5: Add folder_id to configuration table
+                    config_folder_sql = f"""
+                    ALTER TABLE {schema}.configuration ADD COLUMN IF NOT EXISTS folder_id INTEGER;
+                    """
+                    config_fk_sql = f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conname = 'configuration_folder_id_fkey'
+                            AND conrelid = '{schema}.configuration'::regclass
+                        ) THEN
+                            ALTER TABLE {schema}.configuration
+                            ADD CONSTRAINT configuration_folder_id_fkey
+                            FOREIGN KEY (folder_id) REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL;
+                        END IF;
+                    END $$
+                    """
+                    config_index_sql = f"CREATE INDEX IF NOT EXISTS ix_configuration_folder_id ON {schema}.configuration(folder_id)"
+                    if not dry_run:
+                        session.execute(text(config_folder_sql))
+                        session.execute(text(config_fk_sql))
+                        session.execute(text(config_index_sql))
+
+                    if not dry_run:
+                        session.commit()
+
+                    results["projects_processed"] += 1
+                    log.info("%smigrate_entity_folders: project %s completed", prefix, project_id)
+
             except Exception as exc:  # pylint: disable=W0703
-                log.exception("migrate_entity_folders: project %s failed", project_id)
+                log.exception("%smigrate_entity_folders: project %s failed", prefix, project_id)
                 results["errors"].append({"project_id": project_id, "error": str(exc)})
                 results["projects_skipped"] += 1
 
         log.info(
-            "migrate_entity_folders: completed. processed=%s, skipped=%s, errors=%s",
+            "%smigrate_entity_folders: completed. processed=%s, skipped=%s, errors=%s",
+            prefix,
             results["projects_processed"],
             results["projects_skipped"],
             len(results["errors"]),

@@ -60,3 +60,7 @@ class EliteATool(db_tools.AbstractBaseMixin, db.Base):
     shared_owner_id: Mapped[int] = mapped_column(Integer, nullable=True)
     shared_id: Mapped[int] = mapped_column(Integer, nullable=True)
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    folder_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey(f"{c.POSTGRES_TENANT_SCHEMA}.entity_folders.id", ondelete="SET NULL"), nullable=True, index=True
+    )

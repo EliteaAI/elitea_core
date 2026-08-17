@@ -12,7 +12,6 @@ from .enums.all import AgentTypes, PublishStatus, ToolEntityTypes, SkillEntityTy
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.skill import Skill, EntitySkillMapping
 from .mixins import AbstractLikesMixin
-from .folder import ApplicationFolder
 
 
 class Tag(db_tools.AbstractBaseMixin, db.Base):
@@ -51,12 +50,7 @@ class Application(db_tools.AbstractBaseMixin, db.Base, AbstractLikesMixin):
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
 
     folder_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey(f"{c.POSTGRES_TENANT_SCHEMA}.application_folders.id"), nullable=True, index=True
-    )
-    folder: Mapped['ApplicationFolder'] = relationship(
-        'ApplicationFolder',
-        back_populates='applications',
-        lazy=True,
+        Integer, ForeignKey(f"{c.POSTGRES_TENANT_SCHEMA}.entity_folders.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
     def get_default_version(self) -> Optional['ApplicationVersion']:

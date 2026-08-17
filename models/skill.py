@@ -61,6 +61,10 @@ class Skill(db_tools.AbstractBaseMixin, db.Base, AbstractLikesMixin):
     shared_owner_id: Mapped[int] = mapped_column(Integer, nullable=True)
     shared_id: Mapped[int] = mapped_column(Integer, nullable=True)
 
+    folder_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey(f"{c.POSTGRES_TENANT_SCHEMA}.entity_folders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     versions: Mapped[List['SkillVersion']] = relationship(
         back_populates='skill',
         lazy=True,

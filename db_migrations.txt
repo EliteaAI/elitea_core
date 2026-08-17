@@ -236,9 +236,38 @@ Run admin task migrate_project_member_default_limit
 # Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
 Run admin task migrate_share_token_columns
 
-# Issue #5194: Entity folders for organizing agents, pipelines, skills, toolkits, configurations
-# Creates entity_folders table in social plugin and adds folder_id FK to applications, skills,
-# elitea_tools, and configuration tables.
-# Folders allow users to organize their entities into groups.
-# Idempotent (CREATE TABLE IF NOT EXISTS, ADD COLUMN IF NOT EXISTS).
+# Issue #5194: Generic entity folders in social plugin
+# Creates entity_folders table for organizing applications, skills, toolkits, and configurations.
+Run admin task migrate_entity_folders with param: project_id=all;dry_run
 Run admin task migrate_entity_folders with param: project_id=all
+
+# Or manual SQL (entity_folders table + folder_id on all entity tables):
+CREATE TABLE IF NOT EXISTS {pid}.entity_folders (
+    id SERIAL PRIMARY KEY,
+    uuid UUID UNIQUE DEFAULT gen_random_uuid(),
+    name VARCHAR(128) NOT NULL,
+    owner_id INTEGER NOT NULL,
+    entity_type VARCHAR(32) NOT NULL,
+    sub_type VARCHAR(32),
+    meta JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_entity_folders_owner_type ON {pid}.entity_folders(owner_id, entity_type);
+CREATE INDEX IF NOT EXISTS ix_entity_folders_entity_sub ON {pid}.entity_folders(entity_type, sub_type);
+
+# Add folder_id to applications (update FK if migrating from old schema)
+ALTER TABLE {pid}.applications ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {pid}.entity_folders(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS ix_applications_folder_id ON {pid}.applications(folder_id);
+
+# Add folder_id to skills
+ALTER TABLE {pid}.skills ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {pid}.entity_folders(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS ix_skills_folder_id ON {pid}.skills(folder_id);
+
+# Add folder_id to elitea_tools (toolkits/MCP)
+ALTER TABLE {pid}.elitea_tools ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {pid}.entity_folders(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS ix_elitea_tools_folder_id ON {pid}.elitea_tools(folder_id);
+
+# Add folder_id to configuration (credentials)
+ALTER TABLE {pid}.configuration ADD COLUMN IF NOT EXISTS folder_id INTEGER REFERENCES {pid}.entity_folders(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS ix_configuration_folder_id ON {pid}.configuration(folder_id);
