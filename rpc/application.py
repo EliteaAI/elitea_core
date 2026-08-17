@@ -54,6 +54,7 @@ from ..utils.internal_tools import (
 )
 from ..utils.tracing_utils import add_trace_context_to_meta
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
+from ..utils.vectorstore import get_pgvector_connection_string
 
 
 class RPC:
@@ -264,6 +265,18 @@ class RPC:
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
+        # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
+        # so the indexer worker doesn't have to resolve DNS/vault itself inside a
+        # forked worker process, which is exposed to a getaddrinfo hang (#6245).
+        # Scoped strictly to this project_id — never shared across projects.
+        try:
+            payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
+        except Exception as e:
+            log.warning(
+                "Failed to prefetch pgvector_connstr for project_id=%s: %s",
+                parsed.project_id, e
+            )
+
         try:
             task_id = self.task_node.start_task(
                 "indexer_agent",
@@ -457,6 +470,18 @@ class RPC:
         # TODO probably better move to toolkits expand, check OpenAPI
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
+
+        # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
+        # so the indexer worker doesn't have to resolve DNS/vault itself inside a
+        # forked worker process, which is exposed to a getaddrinfo hang (#6245).
+        # Scoped strictly to this project_id — never shared across projects.
+        try:
+            payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
+        except Exception as e:
+            log.warning(
+                "Failed to prefetch pgvector_connstr for project_id=%s: %s",
+                parsed.project_id, e
+            )
 
         try:
             task_id = self.task_node.start_task(
