@@ -1,0 +1,52 @@
+"""Public (unauthenticated) API for unlocking password-protected shared conversations.
+
+  POST /elitea_core/shared_chat_view_unlock/prompt_lib/<token>/unlock  — verify password, set session cookie
+"""
+from flask import make_response, request
+
+from tools import api_tools, rpc_tools, register_openapi
+
+from ...utils.constants import PROMPT_LIB_MODE
+
+_UNLOCK_COOKIE_PREFIX = 'share_unlocked_'
+
+
+class SharedConversationUnlockAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Unlock Password-Protected Shared Conversation",
+        description="Verify the password for a password-protected shared conversation link. Sets a session cookie on success.",
+        tags=["elitea_core/chat"],
+        available_to_users=True,
+    )
+    @api_tools.endpoint_metrics
+    def post(self, token: str, **kwargs):
+        rpc = rpc_tools.RpcMixin().rpc
+        password = (request.json or {}).get("password", "")
+        ok = rpc.timeout(5).chat_verify_share_token_password(
+            token=token,
+            password=password,
+        )
+        if ok is None:
+            return {"error": "This link is no longer available."}, 404
+        if not ok:
+            return {"error": "Incorrect password."}, 403
+
+        response = make_response({"ok": True})
+        response.set_cookie(
+            _UNLOCK_COOKIE_PREFIX + token,
+            "true",
+            max_age=3600,
+            httponly=True,
+            samesite="Lax",
+        )
+        return response
+
+
+class API(api_tools.APIBase):
+    url_params = api_tools.with_modes([
+        '<string:token>/unlock',
+    ])
+
+    mode_handlers = {
+        PROMPT_LIB_MODE: SharedConversationUnlockAPI,
+    }

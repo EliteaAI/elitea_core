@@ -126,7 +126,7 @@ def get_or_create_one(
             case ParticipantTypes.llm:
                 meta = {'name': entity_meta['model_name']}
             case ParticipantTypes.dummy:
-                meta = {'name': "EliteA"}
+                meta = {'name': "Elitea"}
             case ParticipantTypes.user:
                 meta = {
                     'user_name': entity_details.get('user_name'),

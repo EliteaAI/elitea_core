@@ -399,6 +399,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_audit_events_columns", self.migrate_audit_events_columns, group="R-2.0.5",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_share_token_columns", self.migrate_share_token_columns, group="R-2.0.6",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -648,6 +651,20 @@ class Module(module.ModuleModel):
         log.info(f"Making webhook API url public: {self.webhook_api_url_re}")
         auth.add_public_rule({"uri": self.webhook_api_url_re})
 
+        # Shared conversation view/unlock public URL registration (unauthenticated access)
+        # URL pattern: /api/v2/{module_name}/shared_chat_view/prompt_lib/<token>
+        self.shared_view_url_re = f"/api/v2/{this.module_name}/shared_chat_view/.*"
+        log.info(f"Making shared chat view API url public: {self.shared_view_url_re}")
+        auth.add_public_rule({"uri": self.shared_view_url_re})
+        # URL pattern: /api/v2/{module_name}/shared_chat_view_unlock/prompt_lib/<token>/unlock
+        self.shared_view_unlock_url_re = f"/api/v2/{this.module_name}/shared_chat_view_unlock/.*"
+        log.info(f"Making shared chat view unlock API url public: {self.shared_view_unlock_url_re}")
+        auth.add_public_rule({"uri": self.shared_view_unlock_url_re})
+        # URL pattern: /api/v2/{module_name}/shared_chat_attachment/prompt_lib/<token>/<group_id>/<filename>
+        self.shared_attachment_url_re = f"/api/v2/{this.module_name}/shared_chat_attachment/.*"
+        log.info(f"Making shared chat attachment API url public: {self.shared_attachment_url_re}")
+        auth.add_public_rule({"uri": self.shared_attachment_url_re})
+
         # Provider Hub initialization
         self.provider_hub_init()
 
@@ -660,6 +677,7 @@ class Module(module.ModuleModel):
 
         from .models import all, folder, message_group, message_trace_step, participants, project_budget, user_budget
         from .models.message_items import base, text, canvas, context
+        from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
 
         self.thread = Thread(
             target=self.listen_in_memory_event
