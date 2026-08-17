@@ -140,6 +140,12 @@ if _API_AVAILABLE:
         def get(self, project_id: int, **kwargs):
             from tools import db, rpc_tools
             from ...models.audit_event import AuditEvent
+            try:
+                from plugins.costs.models.model_price import ModelPrice
+                _model_price_available = True
+            except ImportError:
+                ModelPrice = None
+                _model_price_available = False
 
             dt_from, dt_to = _parse_dates(request.args)
 
@@ -164,16 +170,38 @@ if _API_AVAILABLE:
                         base = base.filter(AuditEvent.timestamp <= dt_to)
 
                     # Overall KPIs
-                    kpi = base.with_entities(
-                        func.sum(AuditEvent.llm_cost).label("total_cost"),
-                        func.sum(AuditEvent.input_tokens).label("total_input_tokens"),
-                        func.sum(AuditEvent.output_tokens).label("total_output_tokens"),
-                        func.sum(
-                            func.coalesce(AuditEvent.input_tokens, 0)
-                            + func.coalesce(AuditEvent.output_tokens, 0)
-                        ).label("total_tokens"),
-                        func.count().label("total_calls"),
-                    ).first()
+                    if _model_price_available:
+                        kpi = base.outerjoin(
+                            ModelPrice, AuditEvent.model_name == ModelPrice.model_name
+                        ).with_entities(
+                            func.sum(AuditEvent.llm_cost).label("total_cost"),
+                            func.sum(AuditEvent.input_tokens).label("total_input_tokens"),
+                            func.sum(AuditEvent.output_tokens).label("total_output_tokens"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                + func.coalesce(AuditEvent.output_tokens, 0)
+                            ).label("total_tokens"),
+                            func.count().label("total_calls"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                * func.coalesce(ModelPrice.input_cost_per_token, 0)
+                            ).label("total_input_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.output_tokens, 0)
+                                * func.coalesce(ModelPrice.output_cost_per_token, 0)
+                            ).label("total_output_cost"),
+                        ).first()
+                    else:
+                        kpi = base.with_entities(
+                            func.sum(AuditEvent.llm_cost).label("total_cost"),
+                            func.sum(AuditEvent.input_tokens).label("total_input_tokens"),
+                            func.sum(AuditEvent.output_tokens).label("total_output_tokens"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                + func.coalesce(AuditEvent.output_tokens, 0)
+                            ).label("total_tokens"),
+                            func.count().label("total_calls"),
+                        ).first()
 
                     total_cost = float(kpi.total_cost) if kpi and kpi.total_cost else 0.0
                     total_calls = kpi.total_calls or 0
@@ -184,6 +212,8 @@ if _API_AVAILABLE:
                         "total_output_tokens": kpi.total_output_tokens or 0,
                         "total_tokens": kpi.total_tokens or 0,
                         "avg_cost_per_call": round(total_cost / total_calls, 8) if total_calls > 0 else 0.0,
+                        "total_input_cost": round(float(kpi.total_input_cost), 6) if _model_price_available and kpi.total_input_cost else 0.0,
+                        "total_output_cost": round(float(kpi.total_output_cost), 6) if _model_price_available and kpi.total_output_cost else 0.0,
                     }
 
                     # Get model display names
@@ -200,18 +230,42 @@ if _API_AVAILABLE:
                         log.warning(f"Failed to get model configurations for cost breakdown: {e}")
 
                     # Cost by model
-                    model_rows = base.with_entities(
-                        AuditEvent.model_name,
-                        func.count().label("calls"),
-                        func.sum(AuditEvent.input_tokens).label("input_tokens"),
-                        func.sum(AuditEvent.output_tokens).label("output_tokens"),
-                        func.sum(AuditEvent.llm_cost).label("total_cost"),
-                    ).filter(
-                        AuditEvent.model_name.isnot(None),
-                        AuditEvent.model_name != "",
-                    ).group_by(AuditEvent.model_name).order_by(
-                        func.sum(AuditEvent.llm_cost).desc()
-                    ).limit(30).all()
+                    if _model_price_available:
+                        model_rows = base.outerjoin(
+                            ModelPrice, AuditEvent.model_name == ModelPrice.model_name
+                        ).with_entities(
+                            AuditEvent.model_name,
+                            func.count().label("calls"),
+                            func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                            func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(AuditEvent.llm_cost).label("total_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                * func.coalesce(ModelPrice.input_cost_per_token, 0)
+                            ).label("input_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.output_tokens, 0)
+                                * func.coalesce(ModelPrice.output_cost_per_token, 0)
+                            ).label("output_cost"),
+                        ).filter(
+                            AuditEvent.model_name.isnot(None),
+                            AuditEvent.model_name != "",
+                        ).group_by(AuditEvent.model_name).order_by(
+                            func.sum(AuditEvent.llm_cost).desc()
+                        ).limit(30).all()
+                    else:
+                        model_rows = base.with_entities(
+                            AuditEvent.model_name,
+                            func.count().label("calls"),
+                            func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                            func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(AuditEvent.llm_cost).label("total_cost"),
+                        ).filter(
+                            AuditEvent.model_name.isnot(None),
+                            AuditEvent.model_name != "",
+                        ).group_by(AuditEvent.model_name).order_by(
+                            func.sum(AuditEvent.llm_cost).desc()
+                        ).limit(30).all()
 
                     by_model = [
                         {
@@ -221,6 +275,8 @@ if _API_AVAILABLE:
                             "input_tokens": r.input_tokens or 0,
                             "output_tokens": r.output_tokens or 0,
                             "total_cost": round(float(r.total_cost), 6) if r.total_cost else 0.0,
+                            "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
+                            "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
                         }
                         for r in model_rows
                     ]
@@ -243,10 +299,15 @@ if _API_AVAILABLE:
                         AuditEvent.trace_id != "",
                     ).group_by(AuditEvent.trace_id).subquery()
 
-                    agent_rows = base.join(
+                    agent_base = base.join(
                         app_trace_map,
                         AuditEvent.trace_id == app_trace_map.c.trace_id,
-                    ).with_entities(
+                    )
+                    if _model_price_available:
+                        agent_base = agent_base.outerjoin(
+                            ModelPrice, AuditEvent.model_name == ModelPrice.model_name
+                        )
+                    agent_rows = agent_base.with_entities(
                         app_trace_map.c.entity_id.label("entity_id"),
                         func.min(app_trace_map.c.entity_name).label("entity_name"),
                         func.sum(AuditEvent.llm_cost).label("total_cost"),
@@ -257,6 +318,19 @@ if _API_AVAILABLE:
                             + func.coalesce(AuditEvent.output_tokens, 0)
                         ).label("total_tokens"),
                         func.count().label("calls"),
+                        *(
+                            [
+                                func.sum(
+                                    func.coalesce(AuditEvent.input_tokens, 0)
+                                    * func.coalesce(ModelPrice.input_cost_per_token, 0)
+                                ).label("input_cost"),
+                                func.sum(
+                                    func.coalesce(AuditEvent.output_tokens, 0)
+                                    * func.coalesce(ModelPrice.output_cost_per_token, 0)
+                                ).label("output_cost"),
+                            ]
+                            if _model_price_available else []
+                        ),
                     ).group_by(
                         app_trace_map.c.entity_id
                     ).order_by(func.sum(AuditEvent.llm_cost).desc()).limit(20).all()
@@ -266,6 +340,8 @@ if _API_AVAILABLE:
                             "entity_name": r.entity_name or f"Agent #{r.entity_id}",
                             "entity_id": r.entity_id,
                             "total_cost": round(float(r.total_cost), 6) if r.total_cost else 0.0,
+                            "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
+                            "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
                             "input_tokens": r.input_tokens or 0,
                             "output_tokens": r.output_tokens or 0,
                             "total_tokens": r.total_tokens or 0,
@@ -279,27 +355,56 @@ if _API_AVAILABLE:
                     ]
 
                     # Cost by user
-                    user_rows = base.with_entities(
-                        AuditEvent.user_id,
-                        AuditEvent.user_email,
-                        func.sum(AuditEvent.llm_cost).label("total_cost"),
-                        func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
-                        func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
-                        func.sum(
-                            func.coalesce(AuditEvent.input_tokens, 0)
-                            + func.coalesce(AuditEvent.output_tokens, 0)
-                        ).label("total_tokens"),
-                    ).filter(
-                        AuditEvent.user_id.isnot(None),
-                    ).group_by(
-                        AuditEvent.user_id, AuditEvent.user_email
-                    ).order_by(func.sum(AuditEvent.llm_cost).desc()).limit(20).all()
+                    if _model_price_available:
+                        user_rows = base.outerjoin(
+                            ModelPrice, AuditEvent.model_name == ModelPrice.model_name
+                        ).with_entities(
+                            AuditEvent.user_id,
+                            AuditEvent.user_email,
+                            func.sum(AuditEvent.llm_cost).label("total_cost"),
+                            func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                            func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                + func.coalesce(AuditEvent.output_tokens, 0)
+                            ).label("total_tokens"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                * func.coalesce(ModelPrice.input_cost_per_token, 0)
+                            ).label("input_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.output_tokens, 0)
+                                * func.coalesce(ModelPrice.output_cost_per_token, 0)
+                            ).label("output_cost"),
+                        ).filter(
+                            AuditEvent.user_id.isnot(None),
+                        ).group_by(
+                            AuditEvent.user_id, AuditEvent.user_email
+                        ).order_by(func.sum(AuditEvent.llm_cost).desc()).limit(20).all()
+                    else:
+                        user_rows = base.with_entities(
+                            AuditEvent.user_id,
+                            AuditEvent.user_email,
+                            func.sum(AuditEvent.llm_cost).label("total_cost"),
+                            func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                            func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                + func.coalesce(AuditEvent.output_tokens, 0)
+                            ).label("total_tokens"),
+                        ).filter(
+                            AuditEvent.user_id.isnot(None),
+                        ).group_by(
+                            AuditEvent.user_id, AuditEvent.user_email
+                        ).order_by(func.sum(AuditEvent.llm_cost).desc()).limit(20).all()
 
                     by_user = [
                         {
                             "user_id": r.user_id,
                             "user_email": r.user_email,
                             "total_cost": round(float(r.total_cost), 6) if r.total_cost else 0.0,
+                            "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
+                            "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
                             "input_tokens": r.input_tokens or 0,
                             "output_tokens": r.output_tokens or 0,
                             "total_tokens": r.total_tokens or 0,
@@ -308,21 +413,45 @@ if _API_AVAILABLE:
                     ]
 
                     # Daily cost trend
-                    daily_rows = base.with_entities(
-                        cast(AuditEvent.timestamp, Date).label("day"),
-                        func.sum(AuditEvent.llm_cost).label("total_cost"),
-                        func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
-                        func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
-                        func.sum(
-                            func.coalesce(AuditEvent.input_tokens, 0)
-                            + func.coalesce(AuditEvent.output_tokens, 0)
-                        ).label("total_tokens"),
-                    ).group_by("day").order_by("day").all()
+                    if _model_price_available:
+                        daily_rows = base.outerjoin(
+                            ModelPrice, AuditEvent.model_name == ModelPrice.model_name
+                        ).with_entities(
+                            cast(AuditEvent.timestamp, Date).label("day"),
+                            func.sum(AuditEvent.llm_cost).label("total_cost"),
+                            func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                            func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                + func.coalesce(AuditEvent.output_tokens, 0)
+                            ).label("total_tokens"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                * func.coalesce(ModelPrice.input_cost_per_token, 0)
+                            ).label("input_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.output_tokens, 0)
+                                * func.coalesce(ModelPrice.output_cost_per_token, 0)
+                            ).label("output_cost"),
+                        ).group_by("day").order_by("day").all()
+                    else:
+                        daily_rows = base.with_entities(
+                            cast(AuditEvent.timestamp, Date).label("day"),
+                            func.sum(AuditEvent.llm_cost).label("total_cost"),
+                            func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                            func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                + func.coalesce(AuditEvent.output_tokens, 0)
+                            ).label("total_tokens"),
+                        ).group_by("day").order_by("day").all()
 
                     daily = [
                         {
                             "date": r.day.isoformat() if r.day else None,
                             "total_cost": round(float(r.total_cost), 6) if r.total_cost else 0.0,
+                            "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
+                            "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
                             "input_tokens": r.input_tokens or 0,
                             "output_tokens": r.output_tokens or 0,
                             "total_tokens": r.total_tokens or 0,

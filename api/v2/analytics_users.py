@@ -182,6 +182,12 @@ if _API_AVAILABLE:
             """
             from tools import db
             from ...models.audit_event import AuditEvent
+            try:
+                from plugins.costs.models.model_price import ModelPrice
+                _model_price_available = True
+            except ImportError:
+                ModelPrice = None
+                _model_price_available = False
 
             dt_from, dt_to = _parse_dates(request.args)
 
@@ -249,9 +255,31 @@ if _API_AVAILABLE:
                         func.coalesce(AuditEvent.input_tokens, 0)
                         + func.coalesce(AuditEvent.output_tokens, 0)
                     ).label("total_tokens")
+                    input_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.input_tokens, 0)
+                    ).label("input_tokens")
+                    output_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.output_tokens, 0)
+                    ).label("output_tokens")
                     llm_cost_col = func.sum(AuditEvent.llm_cost).label("llm_cost")
 
-                    query = base.with_entities(
+                    extra_cost_cols = []
+                    if _model_price_available:
+                        input_cost_col = func.sum(
+                            func.coalesce(AuditEvent.input_tokens, 0)
+                            * func.coalesce(ModelPrice.input_cost_per_token, 0)
+                        ).label("input_cost")
+                        output_cost_col = func.sum(
+                            func.coalesce(AuditEvent.output_tokens, 0)
+                            * func.coalesce(ModelPrice.output_cost_per_token, 0)
+                        ).label("output_cost")
+                        extra_cost_cols = [input_cost_col, output_cost_col]
+
+                    user_base = base.outerjoin(
+                        ModelPrice, AuditEvent.model_name == ModelPrice.model_name
+                    ) if _model_price_available else base
+
+                    query = user_base.with_entities(
                         AuditEvent.user_id,
                         AuditEvent.user_email,
                         total_events_col,
@@ -262,7 +290,10 @@ if _API_AVAILABLE:
                         chat_col,
                         errors_col,
                         total_tokens_col,
+                        input_tokens_col,
+                        output_tokens_col,
                         llm_cost_col,
+                        *extra_cost_cols,
                     ).group_by(
                         AuditEvent.user_id,
                         AuditEvent.user_email,
@@ -306,7 +337,11 @@ if _API_AVAILABLE:
                                 "chat_events": r.chat_events or 0,
                                 "errors": r.errors or 0,
                                 "total_tokens": r.total_tokens or 0,
+                                "input_tokens": r.input_tokens or 0,
+                                "output_tokens": r.output_tokens or 0,
                                 "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
+                                "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
+                                "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
                             }
                             for r in rows
                         ],
