@@ -42,7 +42,7 @@ def generate_token() -> str:
 
 class SharedLinkCreate(BaseModel):
     expiry: ShareLinkExpiry = ShareLinkExpiry.seven_days
-    password: Optional[str] = Field(None, min_length=4, max_length=64)
+    password: Optional[str] = Field(None, min_length=8, max_length=64)
     scope: ShareScope = ShareScope.all
     message_group_ids: Optional[list[int]] = None
 
