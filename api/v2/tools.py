@@ -90,6 +90,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Create Toolkit",
         description="Create a new toolkit in the project.",
+        request_body=ToolCreateModel,
         mcp_description="""
         USE to create a new toolkit instance in the project for attaching to agent versions.
 
@@ -113,7 +114,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def post(self, project_id: int, **kwargs):
-        data = dict(request.json)
+        payload = request.get_json(silent=True)
+        if payload is None:
+            payload = request.get_json(force=True, silent=True)
+        data = dict(payload or {})
         data['user_id'] = data['author_id'] = auth.current_user()['id']
         data['project_id'] = project_id
 
