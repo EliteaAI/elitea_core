@@ -439,24 +439,6 @@ class Module(module.ModuleModel):
 
         Thread(target=_run, daemon=True).start()
 
-    def _ensure_share_token_schema(self):
-        """Startup safety net: create share-token tables in any project schema (and
-        the public schema) that predates them. Runs off-thread; guarded by catalog
-        checks so steady-state boots issue no DDL."""
-        def _run():
-            try:
-                from .utils.share_token_schema import apply_share_token_schema
-                migrated, failed = apply_share_token_schema()
-                if migrated or failed:
-                    log.info(
-                        "share token schema: auto-migration done (migrated=%s failed=%s)",
-                        len(migrated), len(failed),
-                    )
-            except Exception:  # pylint: disable=W0703
-                log.exception("share token schema: auto-migration failed")
-
-        Thread(target=_run, daemon=True).start()
-
         try:
             scheduler_cfg = self.descriptor.config.get('scheduler', {}) or {}
             idx_cfg = scheduler_cfg.get('index_scheduling', {}) or {}
@@ -535,6 +517,24 @@ class Module(module.ModuleModel):
             )
         except Exception as e:
             log.warning('Failed to register provider RPC method: %s', e)
+
+    def _ensure_share_token_schema(self):
+        """Startup safety net: create share-token tables in any project schema (and
+        the public schema) that predates them. Runs off-thread; guarded by catalog
+        checks so steady-state boots issue no DDL."""
+        def _run():
+            try:
+                from .utils.share_token_schema import apply_share_token_schema
+                migrated, failed = apply_share_token_schema()
+                if migrated or failed:
+                    log.info(
+                        "share token schema: auto-migration done (migrated=%s failed=%s)",
+                        len(migrated), len(failed),
+                    )
+            except Exception:  # pylint: disable=W0703
+                log.exception("share token schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
 
     def init(self):
         self.bp = self.descriptor.init_all(url_prefix="/app")
