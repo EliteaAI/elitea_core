@@ -273,8 +273,6 @@ def list_skills_api(
     author_id: int | None = None,
     q: str | None = None,
     statuses: str | list | None = None,
-    folder_id: int | None = None,
-    unfoldered_only: bool = False,
     limit: int = 10,
     offset: int = 0,
     sort_by: str = 'created_at',
@@ -290,8 +288,6 @@ def list_skills_api(
         author_id: Filter by author ID
         q: Search query for name/description
         statuses: Version statuses to filter by (comma-separated string or list)
-        folder_id: Filter by folder ID
-        unfoldered_only: If True, return only skills not in any folder
         limit: Maximum results
         offset: Results to skip
         sort_by: Sort field
@@ -302,12 +298,6 @@ def list_skills_api(
         Dictionary with 'total' and 'skills' keys
     """
     filters = []
-
-    # Folder filter
-    if folder_id is not None:
-        filters.append(Skill.folder_id == folder_id)
-    elif unfoldered_only:
-        filters.append(Skill.folder_id.is_(None))
 
     # Author filter
     if author_id:

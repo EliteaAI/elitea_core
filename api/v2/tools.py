@@ -40,10 +40,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Filter by author user ID."},
             {"name": "search_artifact", "in": "query", "required": False, "schema": {"type": "string"},
              "description": "Filter toolkits that reference a specific artifact."},
-            {"name": "folder_id", "in": "query", "required": False, "schema": {"type": "integer"},
-             "description": "Filter by folder ID."},
-            {"name": "unfoldered_only", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
-             "description": "Return only toolkits not in any folder."},
         ],
         available_to_users=True,
     )
@@ -68,8 +64,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         filter_application = request.args.get('application', 'false').lower() == 'true'
         author_id = request.args.get('author_id', type=int)
         search_artifact = request.args.get('search_artifact')
-        folder_id = request.args.get('folder_id', type=int)
-        unfoldered_only = request.args.get('unfoldered_only', 'false').lower() == 'true'
 
         try:
             result = toolkits_listing(
@@ -84,8 +78,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 filter_application=filter_application,
                 author_id=author_id,
                 search_artifact=search_artifact,
-                folder_id=folder_id,
-                unfoldered_only=unfoldered_only,
             )
             return result, 200
         except Exception as e:

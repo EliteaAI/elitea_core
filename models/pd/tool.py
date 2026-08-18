@@ -82,7 +82,6 @@ class ToolDetails(ToolBase):
     variables: Optional[List] = []
     is_pinned: bool = False
     indexes_count: Optional[int] = None
-    folder_id: Optional[int] = None
 
     def check_is_pinned(self, project_id: int) -> 'ToolDetails':
         try:

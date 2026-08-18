@@ -49,10 +49,6 @@ class Application(db_tools.AbstractBaseMixin, db.Base, AbstractLikesMixin):
     webhook_secret: Mapped[str] = mapped_column(String, nullable=True)
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
 
-    folder_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey(f"{c.POSTGRES_TENANT_SCHEMA}.entity_folders.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-
     def get_default_version(self) -> Optional['ApplicationVersion']:
         """Get the default version of the application.
         

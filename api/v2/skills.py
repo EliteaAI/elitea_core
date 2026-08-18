@@ -22,15 +22,13 @@ from pylon.core.tools import log
 
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
-        name="List skills in a project — paginated, filterable by tags, author, folder, and free text",
-        description="Returns a paginated list of skills in the project. Supports filtering by tags, author, folder, and free-text search over name and description.",
+        name="List skills in a project — paginated, filterable by tags, author, and free text",
+        description="Returns a paginated list of skills in the project. Supports filtering by tags, author, and free-text search over name and description.",
         parameters=[
             {"name": "query", "in": "query", "schema": {"type": "string"}, "description": "Free-text search over name/description"},
             {"name": "tags", "in": "query", "schema": {"type": "string"}, "description": "Comma-separated tag IDs"},
             {"name": "author_id", "in": "query", "schema": {"type": "integer"}, "description": "Filter by author ID"},
             {"name": "statuses", "in": "query", "schema": {"type": "string"}, "description": "Comma-separated version statuses (e.g. published, draft)"},
-            {"name": "folder_id", "in": "query", "schema": {"type": "integer"}, "description": "Filter by folder ID"},
-            {"name": "unfoldered_only", "in": "query", "schema": {"type": "boolean", "default": False}, "description": "Return only skills not in any folder"},
             {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 10}},
             {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}},
             {"name": "sort_by", "in": "query", "schema": {"type": "string", "default": "created_at"}},
@@ -58,8 +56,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 author_id=request.args.get('author_id', type=int),
                 q=request.args.get('query'),
                 statuses=request.args.get('statuses'),
-                folder_id=request.args.get('folder_id', type=int),
-                unfoldered_only=request.args.get('unfoldered_only', default='false').lower() == 'true',
                 limit=request.args.get("limit", default=10, type=int),
                 offset=request.args.get("offset", default=0, type=int),
                 sort_by=request.args.get("sort_by", default="created_at"),
