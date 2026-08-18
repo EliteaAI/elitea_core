@@ -5,7 +5,7 @@ from typing import List, Optional
 from tools import db_tools, db, config as c
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Integer, String, DateTime, func, ForeignKey, JSON, Table, Column, UniqueConstraint
+from sqlalchemy import Boolean, Integer, String, DateTime, func, ForeignKey, JSON, Table, Column, UniqueConstraint
 from sqlalchemy.ext.mutable import MutableDict
 
 from .enums.all import AgentTypes, PublishStatus, ToolEntityTypes, SkillEntityTypes
@@ -205,6 +205,55 @@ ApplicationVersionTagAssociation = Table(
 
 # Merged from chat.models.all
 CONVERSATION_TABLE_NAME = 'chat_conversations'
+
+CONVERSATION_SHARE_TOKEN_TABLE_NAME = 'chat_conversation_share_tokens'
+CONVERSATION_SHARE_TOKEN_INDEX_TABLE_NAME = 'chat_conversation_share_token_index'
+
+
+class ConversationShareToken(db.Base):
+    """Per-project-schema table holding shareable external link tokens."""
+    __tablename__ = CONVERSATION_SHARE_TOKEN_TABLE_NAME
+    __table_args__ = ({'schema': c.POSTGRES_TENANT_SCHEMA},)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{c.POSTGRES_TENANT_SCHEMA}.{CONVERSATION_TABLE_NAME}.id',
+            ondelete='CASCADE',
+        ),
+        nullable=False,
+        index=True,
+    )
+    created_by: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    password_hash: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    is_revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # 'all' | 'messages' | 'attachments' | 'partial'
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, default='all')
+    # JSON list of ConversationMessageGroup.id values when scope='partial'; None otherwise
+    message_group_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+    conversation: Mapped['Conversation'] = relationship(
+        'Conversation',
+        back_populates='share_tokens',
+        lazy=True,
+    )
+
+
+class ConversationShareTokenIndex(db.Base):
+    """Global (public schema) index mapping token → (project_id, conversation_id)
+    so public endpoints can look up a token without scanning every project schema."""
+    __tablename__ = CONVERSATION_SHARE_TOKEN_INDEX_TABLE_NAME
+    __table_args__ = ({'schema': 'public'},)
+
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    conversation_id: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class SelectedConversations(db.Base):

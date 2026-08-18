@@ -57,3 +57,10 @@ class Conversation(db.Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())
+
+    share_tokens: Mapped[List['ConversationShareToken']] = relationship(
+        'ConversationShareToken',
+        back_populates='conversation',
+        lazy='dynamic',
+        cascade='all, delete-orphan',
+    )
