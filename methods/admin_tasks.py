@@ -2976,7 +2976,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def migrate_entity_folders(self, *args, **kwargs):  # pylint: disable=W0613
         """Admin task: create entity_folders table for organizing entities.
 
-        Issue #5194: Folder organization for applications, skills, toolkits, and configurations.
+        Issue #5194: Folder organization for agents, pipelines, skills, toolkits, mcp, and configurations.
         Creates entity_folders table in social plugin and adds folder_id FK to entity tables.
 
         This migration:
@@ -3033,6 +3033,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             try:
                 with db.get_session(project_id) as session:
                     # Step 1: Create entity_folders table
+                    # entity_type supports: agent, pipeline, skill, toolkit, mcp, configuration
                     create_table_sql = f"""
                     CREATE TABLE IF NOT EXISTS {schema}.entity_folders (
                         id SERIAL PRIMARY KEY,
@@ -3040,7 +3041,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         name VARCHAR(128) NOT NULL,
                         owner_id INTEGER NOT NULL,
                         entity_type VARCHAR(32) NOT NULL,
-                        sub_type VARCHAR(32),
                         meta JSONB NOT NULL DEFAULT '{{}}',
                         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMP
@@ -3052,7 +3052,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     # Create indexes
                     index_statements = [
                         f"CREATE INDEX IF NOT EXISTS ix_entity_folders_owner_type ON {schema}.entity_folders(owner_id, entity_type)",
-                        f"CREATE INDEX IF NOT EXISTS ix_entity_folders_entity_sub ON {schema}.entity_folders(entity_type, sub_type)",
                     ]
                     if not dry_run:
                         for stmt in index_statements:
