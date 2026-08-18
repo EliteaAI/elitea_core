@@ -1108,6 +1108,9 @@ class Module(module.ModuleModel):
         auth.add_public_rule({"uri": re.escape("/robots.txt")})
         auth.add_public_rule({"uri": re.escape("/favicon.ico")})
         auth.add_public_rule({"uri": re.escape("/app/access_denied")})
+        auth.add_public_rule({"uri": "/app/shared/chat/[^/]+/?"})
+        auth.add_public_rule({"uri": r"/app/assets/[^/]+\.(js|css|png|svg|woff2?)(\?.*)?"})
+        auth.add_public_rule({"uri": r"/app/favicon\.svg"})
         #
         # Set auth denied URL to styled access denied page
         #
