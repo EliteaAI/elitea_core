@@ -893,15 +893,20 @@ class Module(module.ModuleModel):
 
     def next_input_suggestion_ready(self, event: str, payload: dict, *args):
         sid = payload.get("sid")
-        suggestion = payload.get("suggestion")
-        if not sid or not suggestion:
+        suggestions = payload.get("suggestions") or payload.get("suggestion")
+        if not sid or not suggestions:
+            return
+        # Ensure suggestions is a list (backward compatibility with old format)
+        if isinstance(suggestions, str):
+            suggestions = [suggestions]
+        if not isinstance(suggestions, list) or not suggestions:
             return
         self.context.sio.emit(
             SioEvents.next_input_suggestion_ready,
             {
                 "stream_id": payload.get("stream_id"),
                 "message_id": payload.get("message_id"),
-                "suggestion": suggestion,
+                "suggestions": suggestions[:3],  # Cap at 3
             },
             to=sid,
         )
