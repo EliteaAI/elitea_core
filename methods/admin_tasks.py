@@ -2974,15 +2974,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method("migrate_entity_folders")
     def migrate_entity_folders(self, *args, **kwargs):  # pylint: disable=W0613
-        """Admin task: create entity_folders table for organizing entities.
+        """Admin task: create entity_folders and social_folder_items tables.
 
         Issue #5194: Folder organization for agents, pipelines, skills, toolkits, mcp, and configurations.
-        Creates entity_folders table in social plugin and adds folder_id FK to entity tables.
+        Creates entity_folders table for folder metadata and social_folder_items join table
+        for folder membership (instead of folder_id FK columns on entity tables).
 
         This migration:
-        1. Creates entity_folders table in all tenant schemas
-        2. Adds folder_id column to applications, skills, elitea_tools, configuration tables
-        3. Creates indexes and foreign key constraints
+        1. Creates entity_folders table in all tenant schemas (folder metadata)
+        2. Creates social_folder_items join table (folder membership)
+        3. Creates indexes for efficient sorting and lookup
 
         Idempotent: safe to run multiple times.
 
@@ -3034,7 +3035,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 with db.get_session(project_id) as session:
                     # Step 1: Create entity_folders table
                     # entity_type supports: agent, pipeline, skill, toolkit, mcp, configuration
-                    create_table_sql = f"""
+                    create_folders_sql = f"""
                     CREATE TABLE IF NOT EXISTS {schema}.entity_folders (
                         id SERIAL PRIMARY KEY,
                         uuid UUID UNIQUE DEFAULT gen_random_uuid(),
@@ -3047,111 +3048,39 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     )
                     """
                     if not dry_run:
-                        session.execute(text(create_table_sql))
+                        session.execute(text(create_folders_sql))
 
-                    # Create indexes
+                    # Step 2: Create social_folder_items join table
+                    create_items_sql = f"""
+                    CREATE TABLE IF NOT EXISTS {schema}.social_folder_items (
+                        id SERIAL PRIMARY KEY,
+                        folder_id INTEGER NOT NULL,
+                        entity VARCHAR(32) NOT NULL,
+                        entity_id INTEGER NOT NULL,
+                        project_id INTEGER NOT NULL,
+                        owner_id INTEGER NOT NULL,
+                        sort_name VARCHAR(256) NOT NULL DEFAULT '',
+                        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        CONSTRAINT _folder_item_entity_uc UNIQUE (folder_id, entity, entity_id)
+                    )
+                    """
+                    if not dry_run:
+                        session.execute(text(create_items_sql))
+
+                    # Step 3: Create indexes
                     index_statements = [
                         f"CREATE INDEX IF NOT EXISTS ix_entity_folders_owner_type ON {schema}.entity_folders(owner_id, entity_type)",
+                        f"CREATE INDEX IF NOT EXISTS ix_folder_items_folder_sort ON {schema}.social_folder_items(folder_id, sort_name)",
+                        f"CREATE INDEX IF NOT EXISTS ix_folder_items_folder_entity ON {schema}.social_folder_items(folder_id, entity, entity_id)",
+                        f"CREATE INDEX IF NOT EXISTS ix_folder_items_owner ON {schema}.social_folder_items(owner_id, entity)",
+                        f"CREATE INDEX IF NOT EXISTS ix_folder_items_folder_id ON {schema}.social_folder_items(folder_id)",
+                        f"CREATE INDEX IF NOT EXISTS ix_folder_items_entity ON {schema}.social_folder_items(entity)",
+                        f"CREATE INDEX IF NOT EXISTS ix_folder_items_entity_id ON {schema}.social_folder_items(entity_id)",
+                        f"CREATE INDEX IF NOT EXISTS ix_folder_items_project_id ON {schema}.social_folder_items(project_id)",
                     ]
                     if not dry_run:
                         for stmt in index_statements:
                             session.execute(text(stmt))
-
-                    # Step 2: Add folder_id to applications table
-                    apps_folder_sql = f"""
-                    ALTER TABLE {schema}.applications ADD COLUMN IF NOT EXISTS folder_id INTEGER;
-                    """
-                    apps_fk_sql = f"""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint
-                            WHERE conname = 'applications_folder_id_fkey'
-                            AND conrelid = '{schema}.applications'::regclass
-                        ) THEN
-                            ALTER TABLE {schema}.applications
-                            ADD CONSTRAINT applications_folder_id_fkey
-                            FOREIGN KEY (folder_id) REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL;
-                        END IF;
-                    END $$
-                    """
-                    apps_index_sql = f"CREATE INDEX IF NOT EXISTS ix_applications_folder_id ON {schema}.applications(folder_id)"
-                    if not dry_run:
-                        session.execute(text(apps_folder_sql))
-                        session.execute(text(apps_fk_sql))
-                        session.execute(text(apps_index_sql))
-
-                    # Step 3: Add folder_id to skills table
-                    skills_folder_sql = f"""
-                    ALTER TABLE {schema}.skills ADD COLUMN IF NOT EXISTS folder_id INTEGER;
-                    """
-                    skills_fk_sql = f"""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint
-                            WHERE conname = 'skills_folder_id_fkey'
-                            AND conrelid = '{schema}.skills'::regclass
-                        ) THEN
-                            ALTER TABLE {schema}.skills
-                            ADD CONSTRAINT skills_folder_id_fkey
-                            FOREIGN KEY (folder_id) REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL;
-                        END IF;
-                    END $$
-                    """
-                    skills_index_sql = f"CREATE INDEX IF NOT EXISTS ix_skills_folder_id ON {schema}.skills(folder_id)"
-                    if not dry_run:
-                        session.execute(text(skills_folder_sql))
-                        session.execute(text(skills_fk_sql))
-                        session.execute(text(skills_index_sql))
-
-                    # Step 4: Add folder_id to elitea_tools table
-                    tools_folder_sql = f"""
-                    ALTER TABLE {schema}.elitea_tools ADD COLUMN IF NOT EXISTS folder_id INTEGER;
-                    """
-                    tools_fk_sql = f"""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint
-                            WHERE conname = 'elitea_tools_folder_id_fkey'
-                            AND conrelid = '{schema}.elitea_tools'::regclass
-                        ) THEN
-                            ALTER TABLE {schema}.elitea_tools
-                            ADD CONSTRAINT elitea_tools_folder_id_fkey
-                            FOREIGN KEY (folder_id) REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL;
-                        END IF;
-                    END $$
-                    """
-                    tools_index_sql = f"CREATE INDEX IF NOT EXISTS ix_elitea_tools_folder_id ON {schema}.elitea_tools(folder_id)"
-                    if not dry_run:
-                        session.execute(text(tools_folder_sql))
-                        session.execute(text(tools_fk_sql))
-                        session.execute(text(tools_index_sql))
-
-                    # Step 5: Add folder_id to configuration table
-                    config_folder_sql = f"""
-                    ALTER TABLE {schema}.configuration ADD COLUMN IF NOT EXISTS folder_id INTEGER;
-                    """
-                    config_fk_sql = f"""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint
-                            WHERE conname = 'configuration_folder_id_fkey'
-                            AND conrelid = '{schema}.configuration'::regclass
-                        ) THEN
-                            ALTER TABLE {schema}.configuration
-                            ADD CONSTRAINT configuration_folder_id_fkey
-                            FOREIGN KEY (folder_id) REFERENCES {schema}.entity_folders(id) ON DELETE SET NULL;
-                        END IF;
-                    END $$
-                    """
-                    config_index_sql = f"CREATE INDEX IF NOT EXISTS ix_configuration_folder_id ON {schema}.configuration(folder_id)"
-                    if not dry_run:
-                        session.execute(text(config_folder_sql))
-                        session.execute(text(config_fk_sql))
-                        session.execute(text(config_index_sql))
 
                     if not dry_run:
                         session.commit()
