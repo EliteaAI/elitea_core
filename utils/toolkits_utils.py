@@ -6,28 +6,6 @@ from ..utils.application_tools import find_suggested_toolkit_name_field
 from ..utils.toolkit_security import filter_blocked_toolkits, filter_tools_in_schema, get_toolkit_security_config
 
 
-def format_tool_call_as_user_input(tool_name: str, tool_params: dict) -> str:
-    """
-    Format a toolkit tool call as a human-readable string.
-    
-    Args:
-        tool_name: Name of the tool being called
-        tool_params: Dictionary of parameters passed to the tool
-        
-    Returns:
-        Human-readable string representation of the tool call
-    """
-    if tool_params:
-        # Format params nicely
-        params_str = ", ".join(
-            f"{k}={repr(v) if isinstance(v, str) else v}"
-            for k, v in tool_params.items()
-        )
-        return f"Calling tool '{tool_name}' with parameters: {params_str}"
-    else:
-        return f"Calling tool '{tool_name}' with no parameters"
-
-
 def get_mcp_schemas(project_id: int, user_id: int) -> dict:
     """
     Get tool schemas from mcp_sse module if available.

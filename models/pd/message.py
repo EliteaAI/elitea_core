@@ -9,7 +9,7 @@ from .participant import ParticipantDetails
 from .text import TextMessageItemDetail
 from .attachment import AttachmentMessageItemDetail, AttachmentMessageItemPredict
 from .predict import ToolkitToolCallPayload
-from ...utils.toolkits_utils import format_tool_call_as_user_input
+from ...utils.tool_call_format import format_tool_call_as_user_input
 
 
 class MessageGroupBase(BaseModel):
