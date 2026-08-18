@@ -1398,8 +1398,8 @@ class RPC:
             'pending_interrupt': dict(selected),
         }
 
-    @staticmethod
-    def _explicit_resume_interrupt_ids(parsed):
+    @web.method()
+    def _explicit_resume_interrupt_ids(self, parsed):
         """Return stable ids explicitly selected by one continuation request."""
         decisions = (
             parsed.mcp_auth_decisions

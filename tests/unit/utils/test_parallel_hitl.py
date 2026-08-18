@@ -555,3 +555,17 @@ def test_repeated_resolved_supervised_decision_cannot_replay_the_root():
     assert "meta.get('resolved_authorization_request_ids')" in resolved_guard
     assert "'already_resolved': True" in resolved_guard
     assert 'return self._resolved_resume_result(response_msg, parsed)' in offer
+
+
+def test_resolved_resume_identity_helper_is_registered_on_pylon_module():
+    """Root MCP resumes reach this helper after the supervised fast path misses."""
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
+    continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
+
+    helper = continue_source[
+        continue_source.index('def _explicit_resume_interrupt_ids') - 40:
+        continue_source.index('def _resolved_resume_result')
+    ]
+
+    assert '@web.method()' in helper
+    assert 'def _explicit_resume_interrupt_ids(self, parsed)' in helper
