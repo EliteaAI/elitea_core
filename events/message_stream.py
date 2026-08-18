@@ -12,11 +12,14 @@ from ..models.pd.message import MessageGroupDetail
 from ..utils.sio_utils import get_chat_room
 from ..utils.message_stream import update_message_group_meta, safe_decode_bytes_in_dict
 from ..utils.parallel_hitl import (
-    is_current_execution, merge_interrupts, requires_plural_persistence,
-    retire_all_interrupts,
+    complete_supervisor_decisions, is_current_execution, merge_interrupts,
+    merge_supervisor_roster,
+    requires_plural_persistence, retire_all_interrupts, retire_interrupts,
+    update_supervisor_decision_phase,
 )
 from ..utils.toolkit_authorization import (
     merge_authorization_request, retire_all_authorization_requests,
+    retire_authorization_requests,
 )
 from ..utils.attachments import (
     process_single_attachment_file,
@@ -30,6 +33,60 @@ from ..utils.sio_utils import SioEvents
 
 
 class Event:
+    @web.event('chat_parallel_hitl_state')
+    def chat_parallel_hitl_state(self, context, event, payload):
+        del context, event
+        metadata = payload.get('response_metadata') or {}
+        project_id = metadata.get('chat_project_id')
+        message_id = payload.get('message_id')
+        if not project_id or not message_id:
+            return
+        with db.get_session(project_id) as session:
+            msg_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_id
+            ).with_for_update(of=ConversationMessageGroup).first()
+            if not msg_group or not is_current_execution(msg_group.meta, payload):
+                return
+            msg_group.meta = merge_supervisor_roster(msg_group.meta, metadata)
+            if metadata.get('state') in {'completed', 'paused'}:
+                msg_group.meta = complete_supervisor_decisions(
+                    msg_group.meta, metadata.get('tool_call_id'),
+                )
+            if metadata.get('state') == 'resuming' and metadata.get('interrupt_id'):
+                interrupt_id = metadata['interrupt_id']
+                msg_group.meta = retire_interrupts(
+                    msg_group.meta, [interrupt_id],
+                )
+                msg_group.meta = retire_authorization_requests(
+                    msg_group.meta, [interrupt_id],
+                )
+            flag_modified(msg_group, 'meta')
+            session.commit()
+
+    @web.event('chat_parallel_hitl_decision_ack')
+    def chat_parallel_hitl_decision_ack(self, context, event, payload):
+        del context, event
+        metadata = payload.get('response_metadata') or {}
+        project_id = metadata.get('chat_project_id')
+        message_id = payload.get('message_id')
+        decision_id = metadata.get('decision_id')
+        if not project_id or not message_id or not decision_id:
+            return
+        phase = metadata.get('phase')
+        accepted = metadata.get('accepted')
+        stored_phase = phase if accepted else f'{phase}_rejected'
+        with db.get_session(project_id) as session:
+            msg_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_id
+            ).with_for_update(of=ConversationMessageGroup).first()
+            if not msg_group or not is_current_execution(msg_group.meta, payload):
+                return
+            msg_group.meta = update_supervisor_decision_phase(
+                msg_group.meta, decision_id, stored_phase,
+            )
+            flag_modified(msg_group, 'meta')
+            session.commit()
+
     @web.event('chat_message_stream_end')
     def chat_message_stream_end(self, context, event, payload):
         # log.debug(f'chat_message_stream_end {event=}')
@@ -472,7 +529,7 @@ class Event:
                     # parked for reconciliation.
                     msg_group.is_streaming = (
                         response_metadata.get('resume_strategy')
-                        == 'aggregate_child'
+                        in {'aggregate_child', 'supervised_child'}
                     )
                 elif hitl_interrupt or hitl_interrupts:
                     if msg_group.meta is None:
@@ -503,7 +560,9 @@ class Event:
                     # while its routed child interrupts are open. Root/single pauses keep legacy
                     # is_streaming=False behavior.
                     msg_group.is_streaming = any(
-                        item.get('resume_strategy') == 'aggregate_child'
+                        item.get('resume_strategy') in {
+                            'aggregate_child', 'supervised_child',
+                        }
                         for item in merged
                     )
                 else:

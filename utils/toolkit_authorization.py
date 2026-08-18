@@ -32,6 +32,8 @@ def merge_authorization_request(meta, response_metadata):
             incoming.setdefault('thread_id', nested_child_thread_id)
         incoming['child_thread_id'] = durable_child_thread_id
         incoming['resume_strategy'] = 'aggregate_child'
+    elif incoming.get('resume_strategy') == 'supervised_child':
+        incoming['resume_strategy'] = 'supervised_child'
     else:
         # SDK Application nesting also uses child_thread_id. Without a worker
         # lineage overlay there is no Redis launch stash and the authorization

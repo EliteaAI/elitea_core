@@ -78,3 +78,12 @@ def test_worker_route_overrides_nested_authorization_leaf_thread():
     assert persisted['child_thread_id'] == 'durable-child'
     assert persisted['thread_id'] == 'leaf-thread'
     assert persisted['resume_strategy'] == 'aggregate_child'
+
+
+def test_supervised_authorization_keeps_root_live_resume_strategy():
+    request = _request('auth-live', 'sdk-child-thread')
+    request['resume_strategy'] = 'supervised_child'
+
+    meta = merge_authorization_request({}, request)
+
+    assert pending_authorization_requests(meta)[0]['resume_strategy'] == 'supervised_child'
