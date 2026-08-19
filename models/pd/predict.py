@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator, Validat
 from tools import db, VaultClient
 
 from ...models.participants import Participant
-from ...utils.toolkits_utils import format_tool_call_as_user_input
+from ...utils.tool_call_format import format_tool_call_as_user_input
 from .attachment import AttachmentMessageItemPredict
 from .participant_settings import EntitySettingsLlm
 
