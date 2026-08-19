@@ -48,8 +48,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         ),
         request_body=GenerateProjectContextDraftRequest,
         tags=["elitea_core/project_context"],
-        mcp_tool=False,
-        available_to_users=False,
+        mcp_tool=True,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.project_context.generate"],

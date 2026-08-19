@@ -54,6 +54,21 @@ from ..utils.internal_tools import (
 )
 from ..utils.tracing_utils import add_trace_context_to_meta
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
+from ..utils.vectorstore import get_pgvector_connection_string
+
+
+def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
+    """Stop a task the blocking caller gave up on, so it doesn't hold a worker slot forever."""
+    if not this.descriptor.config.get("cancel_on_timeout", True):
+        log.warning(
+            "%s: task %s abandoned after %ss (cancel_on_timeout off)", label, task_id, timeout
+        )
+        return
+    log.warning("%s: cancelling task %s abandoned after %ss", label, task_id, timeout)
+    try:
+        module.stop_task(task_id)
+    except Exception:  # pylint: disable=W0703
+        log.exception("%s: stop_task failed for %s", label, task_id)
 
 
 class RPC:
@@ -264,6 +279,18 @@ class RPC:
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
+        # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
+        # so the indexer worker doesn't have to resolve DNS/vault itself inside a
+        # forked worker process, which is exposed to a getaddrinfo hang (#6245).
+        # Scoped strictly to this project_id — never shared across projects.
+        try:
+            payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
+        except Exception as e:
+            log.warning(
+                "Failed to prefetch pgvector_connstr for project_id=%s: %s",
+                parsed.project_id, e
+            )
+
         try:
             task_id = self.task_node.start_task(
                 "indexer_agent",
@@ -328,6 +355,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result":  result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "predict_sio")
 
         return {"task_id": task_id}
 
@@ -458,6 +486,18 @@ class RPC:
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
 
+        # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
+        # so the indexer worker doesn't have to resolve DNS/vault itself inside a
+        # forked worker process, which is exposed to a getaddrinfo hang (#6245).
+        # Scoped strictly to this project_id — never shared across projects.
+        try:
+            payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
+        except Exception as e:
+            log.warning(
+                "Failed to prefetch pgvector_connstr for project_id=%s: %s",
+                parsed.project_id, e
+            )
+
         try:
             task_id = self.task_node.start_task(
                 "indexer_predict_agent",
@@ -528,6 +568,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result": result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "predict_sio_llm")
 
         return {"task_id": task_id}
 
@@ -1393,6 +1434,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result": result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "test_toolkit_tool_sio")
 
         return {"task_id": task_id}
 
@@ -1595,6 +1637,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result": result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "test_mcp_connection_sio")
 
         return {"task_id": task_id}
 
@@ -1735,6 +1778,7 @@ class RPC:
             result = self.task_node.join_task(task_id, timeout=int(await_task_timeout))
             if result is not ...:
                 return {"result": result}
+            _cancel_abandoned_task(self, task_id, int(await_task_timeout), "mcp_sync_tools_sio")
 
         return {"task_id": task_id}
 

@@ -12,6 +12,9 @@ add_admin_roles:
 
 max_published_versions_per_agent: 3
 
+# Stop the worker when a blocking predict exceeds await_task_timeout
+cancel_on_timeout: true
+
 scheduler:
   pipeline_scheduling:
     enabled: true

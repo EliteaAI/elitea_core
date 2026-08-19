@@ -36,6 +36,8 @@ ATTACHMENT_DEFAULT_SELECTED_TOOLS = [
 
 # MCP Internal Tool Constants
 MCP_INTERNAL_TOOL_KEY = 'internal_mcp'
+MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY = 'skill_builder'
+MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY = 'project_context_builder'
 MCP_PROJECT_ID_MARKER = '{project_id}'
 
 MCP_ENDPOINT_CONFIGS = [
@@ -47,6 +49,21 @@ MCP_ENDPOINT_CONFIGS = [
     {"suffix": "configurations", "name": "Configurations"},
     {"suffix": "artifacts", "name": "Artifacts"},
 ]
+MCP_SKILL_BUILDER_ENDPOINT_CONFIGS = [
+    {"suffix": "elitea_core/skills", "name": "Elitea Skills"},
+]
+MCP_PROJECT_CONTEXT_BUILDER_ENDPOINT_CONFIGS = [
+    {"suffix": "elitea_core/project_context", "name": "Elitea Project Context"},
+]
+MCP_CURRENT_PROJECT_SUFFIXES = {
+    "elitea_core/project_context",
+    "elitea_core/skills",
+}
+MCP_BUILDER_TOOL_KEYS = {
+    MCP_INTERNAL_TOOL_KEY,
+    MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY,
+    MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY,
+}
 
 
 class ImageGenConfigurationError(Exception):
@@ -562,6 +579,7 @@ def dedupe_internal_mcp_tools(tools: list[dict]) -> None:
 
 def inject_mcp_toolkits(
     user_id: int,
+    current_project_id: int | None = None,
     internal_tools: list[str] = None,
     existing_tools: list[dict] = None,
 ) -> list[dict]:
@@ -578,19 +596,37 @@ def inject_mcp_toolkits(
 
     Args:
         user_id: User ID for auth and project lookup
+        current_project_id: Active project ID from current runtime context
         internal_tools: List of enabled internal tools from conversation/agent meta
         existing_tools: Toolkits already in the payload, used to dedupe against manual toolkits
 
     Returns:
         List of MCP toolkit payloads with id=None, or empty list if not enabled
     """
-    log.info(f"[MCP Injection] Checking internal_tools={internal_tools}, looking for key={MCP_INTERNAL_TOOL_KEY}")
+    enabled_tools = set(internal_tools or [])
+    log.info(
+        f"[MCP Injection] Checking internal_tools={internal_tools}, "
+        f"looking for keys={sorted(MCP_BUILDER_TOOL_KEYS)}"
+    )
     if not is_mcp_exposure_enabled():
         log.debug("MCP exposure is disabled, skipping MCP injection")
         return []
-    if MCP_INTERNAL_TOOL_KEY not in (internal_tools or []):
+    if not enabled_tools.intersection(MCP_BUILDER_TOOL_KEYS):
         log.debug("MCP internal tool not enabled, skipping auto-injection")
         return []
+
+    endpoint_configs = list(MCP_ENDPOINT_CONFIGS) if MCP_INTERNAL_TOOL_KEY in enabled_tools else []
+    if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+        endpoint_configs.extend(MCP_SKILL_BUILDER_ENDPOINT_CONFIGS)
+    if MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+        endpoint_configs.extend(MCP_PROJECT_CONTEXT_BUILDER_ENDPOINT_CONFIGS)
+
+    # Keep insertion stable while avoiding duplicate endpoint registrations.
+    seen_suffixes = set()
+    endpoint_configs = [
+        ep for ep in endpoint_configs
+        if not (ep['suffix'] in seen_suffixes or seen_suffixes.add(ep['suffix']))
+    ]
 
     user_project = rpc_tools.RpcMixin().rpc.timeout(5).admin_get_user_private_project(user_id)
     if not user_project:
@@ -606,11 +642,14 @@ def inject_mcp_toolkits(
     covered_suffixes = _collect_covered_internal_mcp_suffixes(existing_tools)
 
     tools = []
-    for ep in MCP_ENDPOINT_CONFIGS:
+    for ep in endpoint_configs:
         if ep['suffix'] in covered_suffixes:
             log.debug(f"[MCP Injection] Skipping '{ep['name']}' — already added as a manual toolkit")
             continue
-        url = f"{base_url}/app/{user_project.id}/mcp/{ep['suffix']}"
+        target_project_id = user_project.id
+        if ep['suffix'] in MCP_CURRENT_PROJECT_SUFFIXES and current_project_id is not None:
+            target_project_id = current_project_id
+        url = f"{base_url}/app/{target_project_id}/mcp/{ep['suffix']}"
         tool = {
             'type': 'mcp',
             'name': f'{ep["name"]}',
@@ -782,24 +821,65 @@ def require_internal_mcp_pat(toolkit_config: dict, user_id: int) -> None:
 def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
     """
     Return a system-prompt addon that instructs the model to return entity links
-    after creating agents or pipelines via Elitea MCP Tools.
+    after creating entities via Elitea MCP Tools.
 
     Returns empty string when MCP internal tool is not active.
     """
     if not is_mcp_exposure_enabled():
         return ''
-    if MCP_INTERNAL_TOOL_KEY not in (internal_tools or []):
+    if not set(internal_tools or []).intersection(MCP_BUILDER_TOOL_KEYS):
         return ''
+    enabled_tools = set(internal_tools or [])
     app_host = c.APP_HOST.rstrip('/')
+    skill_scope_instruction = (
+        " Disambiguate 'skill' from the full conversation context: treat it as an ELITEA platform "
+        "Skill entity only when the user request is clearly about ELITEA entities/workflows "
+        "(e.g., create/update/list/publish/import/export/link/version/category in ELITEA via "
+        "elitea_core/skills). If the user means a general human capability, handle it as a regular "
+        "concept and do not invoke ELITEA skills MCP tools unless explicitly requested."
+        if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools
+        else ""
+    )
+    few_shot_blocks = []
+    if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+        few_shot_blocks.append(
+            "Skills versioning rule:\n"
+            "- Never rename an existing skill version.\n"
+            "- If content should change in an existing version: update that version.\n"
+            "- If a distinct revision is needed: create a new version.\n"
+            "- Treat 'base' as immutable for renaming.\n\n"
+            "Skills few-shot disambiguation examples:\n"
+            "- User: \"How can I improve my communication skills?\" -> Treat as general human capability. "
+            "Do NOT use ELITEA Skills MCP tools.\n"
+            "- User: \"Create a skill named incident-triage\" -> Use elitea_core/skills MCP tools.\n"
+            "- User: \"List skills in this project and open the base version\" -> Use elitea_core/skills MCP tools."
+        )
+    if MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+        few_shot_blocks.append(
+            "Project Context few-shot disambiguation examples:\n"
+            "- User: \"What context window does this model have?\" -> General LLM question. "
+            "Do NOT use project-context MCP tools.\n"
+            "- User: \"Update this project's background with release constraints\" -> "
+            "Use elitea_core/project_context MCP tools.\n"
+            "- User: \"Show current project context and enable it\" -> Use elitea_core/project_context MCP tools."
+        )
+    if few_shot_blocks:
+        few_shot_joined = "\n\n".join(few_shot_blocks)
+        few_shot_instruction = f"\n\n{few_shot_joined}"
+    else:
+        few_shot_instruction = ""
     return (
         f"\n\nYou have access to Elitea MCP tools and may have project context available. "
+        f"{skill_scope_instruction}"
+        f"{few_shot_instruction}"
         f"Only use MCP tools and only reference project context when the user explicitly requests it. "
         f"Do not proactively offer, suggest, or perform any MCP tool actions, and do not mention project details unless asked.\n"
         f"When you use an Elitea MCP tool to create an entity, include a link to it in your response:\n"
         f"- Agent: {app_host}/app/agents/all/<application_id>?viewMode=owner&name=<agent_name>\n"
         f"- Pipeline: {app_host}/app/pipelines/all/<application_id>?viewMode=owner&name=<pipeline_name>\n"
+        f"- ELITEA Skill: {app_host}/app/skills/all/<skill_id>?viewMode=owner&name=<skill_name>\n"
+        f"- Project Context: {app_host}/app/settings/project-context\n"
         f"- Tool: {app_host}/app/toolkits/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
         f"- MCP: {app_host}/app/mcps/all/<tool_id>?viewMode=owner&name=<tool_name>\n"
-        f"Where <application_id> is returned by the creation tool and <..._name> is the name provided in the request."
+        f"Where IDs are returned by the creation tools and names are the names provided in the request."
     )
-

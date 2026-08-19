@@ -26,7 +26,11 @@ from ...utils.constants import PROMPT_LIB_MODE
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Retrieve full metadata and version configuration of a specific skill",
-        description="Returns the full details of the specified skill. If a version_id path segment is provided, that version's details are included (404 if the version id does not exist); otherwise the default ('base') version is included.",
+        description=(
+            "Returns the full details of the specified skill. If a version_id path segment is provided, "
+            "that version's details are included (404 if the version id does not exist); otherwise the "
+            "default version is included. Response includes top-level default_version_id and version_id."
+        ),
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},

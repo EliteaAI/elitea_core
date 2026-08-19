@@ -135,6 +135,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             agent_internal_tools = (version_details.get('meta') or {}).get('internal_tools', [])
             mcp_tools = inject_mcp_toolkits(
                 user_id=user_id,
+                current_project_id=project_id,
                 internal_tools=agent_internal_tools,
                 existing_tools=version_details.get('tools'),
             )

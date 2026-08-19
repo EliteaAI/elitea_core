@@ -12,8 +12,14 @@ from ..models.pd.message import MessageGroupDetail
 from ..utils.sio_utils import get_chat_room
 from ..utils.message_stream import update_message_group_meta, safe_decode_bytes_in_dict
 from ..utils.parallel_hitl import (
-    is_current_execution, merge_interrupts, requires_plural_persistence,
-    retire_all_interrupts,
+    complete_supervisor_decisions, is_current_execution, merge_interrupts,
+    merge_supervisor_roster,
+    requires_plural_persistence, retire_all_interrupts, retire_interrupts,
+    update_supervisor_decision_phase,
+)
+from ..utils.toolkit_authorization import (
+    merge_authorization_request, retire_all_authorization_requests,
+    retire_authorization_requests,
 )
 from ..utils.attachments import (
     process_single_attachment_file,
@@ -25,7 +31,62 @@ from ..utils.attachments import (
 from ..utils.sio_utils import SioEvents
 
 
+
 class Event:
+    @web.event('chat_parallel_hitl_state')
+    def chat_parallel_hitl_state(self, context, event, payload):
+        del context, event
+        metadata = payload.get('response_metadata') or {}
+        project_id = metadata.get('chat_project_id')
+        message_id = payload.get('message_id')
+        if not project_id or not message_id:
+            return
+        with db.get_session(project_id) as session:
+            msg_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_id
+            ).with_for_update(of=ConversationMessageGroup).first()
+            if not msg_group or not is_current_execution(msg_group.meta, payload):
+                return
+            msg_group.meta = merge_supervisor_roster(msg_group.meta, metadata)
+            if metadata.get('state') in {'completed', 'paused'}:
+                msg_group.meta = complete_supervisor_decisions(
+                    msg_group.meta, metadata.get('tool_call_id'),
+                )
+            if metadata.get('state') == 'resuming' and metadata.get('interrupt_id'):
+                interrupt_id = metadata['interrupt_id']
+                msg_group.meta = retire_interrupts(
+                    msg_group.meta, [interrupt_id],
+                )
+                msg_group.meta = retire_authorization_requests(
+                    msg_group.meta, [interrupt_id],
+                )
+            flag_modified(msg_group, 'meta')
+            session.commit()
+
+    @web.event('chat_parallel_hitl_decision_ack')
+    def chat_parallel_hitl_decision_ack(self, context, event, payload):
+        del context, event
+        metadata = payload.get('response_metadata') or {}
+        project_id = metadata.get('chat_project_id')
+        message_id = payload.get('message_id')
+        decision_id = metadata.get('decision_id')
+        if not project_id or not message_id or not decision_id:
+            return
+        phase = metadata.get('phase')
+        accepted = metadata.get('accepted')
+        stored_phase = phase if accepted else f'{phase}_rejected'
+        with db.get_session(project_id) as session:
+            msg_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_id
+            ).with_for_update(of=ConversationMessageGroup).first()
+            if not msg_group or not is_current_execution(msg_group.meta, payload):
+                return
+            msg_group.meta = update_supervisor_decision_phase(
+                msg_group.meta, decision_id, stored_phase,
+            )
+            flag_modified(msg_group, 'meta')
+            session.commit()
+
     @web.event('chat_message_stream_end')
     def chat_message_stream_end(self, context, event, payload):
         # log.debug(f'chat_message_stream_end {event=}')
@@ -40,6 +101,15 @@ class Event:
                     log.info(
                         'chat_message_stream_end: ignoring superseded execution '
                         'for message %s', payload['message_id'],
+                    )
+                    return
+                # A killed worker still emits stream_end; its bare "Error: " would land
+                # under the terminal text the stopper already wrote.
+                is_stopped = getattr(self, 'is_chat_run_stopped', None)
+                if is_stopped and is_stopped(payload['message_id']):
+                    log.info(
+                        'chat_message_stream_end: ignoring late end for stopped message %s',
+                        payload['message_id'],
                     )
                     return
                 content = safe_decode_bytes_in_dict(payload['content'])
@@ -71,12 +141,39 @@ class Event:
                     existing_count = session.query(MessageItem).filter(
                         MessageItem.message_group_id == msg_group.id
                     ).count()
-                    msg: TextMessageItem = TextMessageItem(
-                        content=str(content),
-                        message_group=msg_group,
-                        order_index=existing_count,
-                    )
-                    session.add(msg)
+                    text_content = str(content)
+                    # On continuation turns, trim any overlap at the seam.
+                    # The model sees the last 600 chars of the truncated response as
+                    # its own assistant prefill and occasionally bleeds the last few
+                    # words into the start of its continuation output. Strip any
+                    # suffix of the existing stored text that appears at the start
+                    # of the incoming continuation (up to 150 chars of overlap).
+                    if payload.get('response_metadata', {}).get('should_continue'):
+                        existing_parts = []
+                        for item in (msg_group.message_items or []):
+                            if getattr(item, 'item_type', None) == 'text_message' and item.content:
+                                existing_parts.append(str(item.content))
+                        existing_tail = ''.join(existing_parts)[-150:]
+                        if existing_tail:
+                            stripped = text_content.lstrip('\n\r')
+                            for overlap in range(min(len(existing_tail), len(stripped)), 0, -1):
+                                if existing_tail[-overlap:] == stripped[:overlap]:
+                                    text_content = stripped[overlap:]
+                                    break
+                    _ARTIFACT_BLOCKS = frozenset(('{}', '{ }'))
+                    if not text_content.strip() or text_content.strip() in _ARTIFACT_BLOCKS:
+                        log.debug(
+                            'chat_message_stream_end: skipping empty/duplicated '
+                            'continue text for message %s',
+                            payload['message_id'],
+                        )
+                    else:
+                        msg: TextMessageItem = TextMessageItem(
+                            content=text_content,
+                            message_group=msg_group,
+                            order_index=existing_count,
+                        )
+                        session.add(msg)
 
                 # Extract image thumbnails mapping (used by both files_modified and user-upload blocks)
                 image_thumbnails = payload.get('response_metadata', {}).get('image_thumbnails', {})
@@ -148,6 +245,7 @@ class Event:
                 # child's card. A re-pause re-persists via chat_message_stream_pause.
                 if msg_group.meta:
                     msg_group.meta = retire_all_interrupts(msg_group.meta)
+                    msg_group.meta = retire_all_authorization_requests(msg_group.meta)
                 flag_modified(msg_group, 'is_streaming')
                 flag_modified(msg_group, 'meta')
                 session.add(msg_group)
@@ -409,7 +507,31 @@ class Event:
                 # is unaffected.
                 hitl_interrupt = response_metadata.get('hitl_interrupt')
                 hitl_interrupts = response_metadata.get('hitl_interrupts')
-                if hitl_interrupt or hitl_interrupts:
+                auth_request = (
+                    response_metadata
+                    if payload.get('type') == 'mcp_authorization_required'
+                    and response_metadata.get('guardrail_type') == 'mcp_auth'
+                    else None
+                )
+                if auth_request:
+                    if msg_group.meta is None:
+                        msg_group.meta = {}
+                    msg_group.meta = merge_authorization_request(
+                        msg_group.meta, auth_request,
+                    )
+                    root_thread_id = response_metadata.get('root_thread_id')
+                    if root_thread_id and not msg_group.meta.get('thread_id'):
+                        msg_group.meta['thread_id'] = root_thread_id
+                    flag_modified(msg_group, 'meta')
+                    # An SDK-nested Application also has a child_thread_id but
+                    # resumes through the root checkpoint.  Only a worker-owned
+                    # durable fan-out child remains active while its parent is
+                    # parked for reconciliation.
+                    msg_group.is_streaming = (
+                        response_metadata.get('resume_strategy')
+                        in {'aggregate_child', 'supervised_child'}
+                    )
+                elif hitl_interrupt or hitl_interrupts:
                     if msg_group.meta is None:
                         msg_group.meta = {}
                     merged = merge_interrupts(msg_group.meta, response_metadata)
@@ -438,7 +560,10 @@ class Event:
                     # while its routed child interrupts are open. Root/single pauses keep legacy
                     # is_streaming=False behavior.
                     msg_group.is_streaming = any(
-                        item.get('child_thread_id') for item in merged
+                        item.get('resume_strategy') in {
+                            'aggregate_child', 'supervised_child',
+                        }
+                        for item in merged
                     )
                 else:
                     # MCP-auth pauses have no HITL interrupt object, but the durable-child

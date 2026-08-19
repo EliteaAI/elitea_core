@@ -1,20 +1,6 @@
-from sqlalchemy import func
-from sqlalchemy.orm.attributes import flag_modified
+from tools import api_tools, auth, config as c, register_openapi
 
-from tools import serialize
-from tools import api_tools, auth, db, config as c, register_openapi
-
-from ...models.enums.all import ParticipantTypes
-from ...models.pd.message import MessageGroupDetail
-from ...models.message_items.text import TextMessageItem
-from ...models.message_group import ConversationMessageGroup
-from ...models.message_trace_step import MessageTraceStep
-
-from ...utils.sio_utils import get_chat_room
-from ...utils.sio_utils import SioEvents
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.parallel_hitl import retire_all_interrupts
-
 
 from pylon.core.tools import log
 
@@ -35,96 +21,34 @@ class PromptLibAPI(api_tools.APIModeHandler):
     })
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, message_group_uuid: str, **kwargs):
-        with db.get_session(project_id) as session:
-            msg_group = session.query(ConversationMessageGroup).filter(
-                ConversationMessageGroup.uuid == message_group_uuid
-            ).with_for_update(of=ConversationMessageGroup).first()
+        """
+        Stop a running chat task for a message group.
 
-            user_id = auth.current_user().get('id')
-            if user_id != msg_group.conversation.author_id:
-                author = msg_group.author_participant
-                if author.entity_name != ParticipantTypes.user or \
-                        user_id != author.entity_meta.get('id'):
-                    return {
-                        "error": "Message can be stopped only by "
-                                 "message or conversation author"
-                    }, 400
+        Delegates to chat_stop_task RPC which handles all stop logic:
+        1. Stop task via Arbiter
+        2. Mark chat run as stopped in Redis
+        3. Set is_streaming = False in database
+        4. Retire all HITL interrupts
+        5. Emit chat_message_sync or chat_message_delete event
+        """
+        user_id = auth.current_user().get('id')
 
-            self.module.stop_task(msg_group.task_id)
+        result = self.module.context.rpc_manager.call.chat_stop_task(
+            project_id=project_id,
+            message_group_uuid=message_group_uuid,
+            user_id=user_id,
+        )
 
-            # Freeze this run: refuse any later HITL resume / continue on it so a
-            # stale approval card cannot re-invoke the parent and re-fan-out the
-            # parallel children (#4993 Track 2). Keyed by the response message
-            # uuid — the same id the continue resume carries.
-            self.module.mark_chat_run_stopped(message_group_uuid)
+        if result.get('error'):
+            code = result.get('code', 'ERROR')
+            status_map = {
+                'NOT_FOUND': 404,
+                'FORBIDDEN': 403,
+                'NO_TASK': 400,
+            }
+            return {"error": result['error']}, status_map.get(code, 500)
 
-            msg_group.is_streaming = False
-            if msg_group.meta:
-                msg_group.meta = retire_all_interrupts(msg_group.meta)
-                flag_modified(msg_group, 'meta')
-            msg_group_deleted = False
-
-            room = get_chat_room(msg_group.conversation.uuid)
-
-            if not msg_group.message_items:
-                # Salvage the latest non-empty thinking text as the reply (steps live in the table now).
-                latest_text = (
-                    session.query(MessageTraceStep.text)
-                    .filter(
-                        MessageTraceStep.message_group_id == msg_group.id,
-                        MessageTraceStep.kind == 'thinking_step',
-                        MessageTraceStep.text.isnot(None),
-                        func.trim(MessageTraceStep.text) != '',
-                    )
-                    .order_by(MessageTraceStep.finished_at.desc(), MessageTraceStep.id.desc())
-                    .limit(1)
-                    .scalar()
-                )
-
-                if latest_text:
-                    msg: TextMessageItem = TextMessageItem(
-                        content=str(latest_text),
-                        message_group=msg_group,
-                        order_index=0,
-                    )
-                    session.add(msg)
-                else:
-                    reply_to_record = session.query(ConversationMessageGroup).filter(
-                        ConversationMessageGroup.id == msg_group.reply_to_id
-                    ).first()
-                    session.delete(reply_to_record)
-                    session.delete(msg_group)
-                    msg_group_deleted = True
-                    self.module.context.sio.emit(
-                        event=SioEvents.chat_message_delete,
-                        data={
-                            'message_group_id': msg_group.id,
-                            'message_group_uid': str(msg_group.uuid),
-                        },
-                        room=room,
-                    )
-                    self.module.context.sio.emit(
-                        event=SioEvents.chat_message_delete,
-                        data={
-                            'message_group_id': reply_to_record.id,
-                            'message_group_uid': str(reply_to_record.uuid),
-                        },
-                        room=room,
-                    )
-
-            session.commit()
-
-            if not msg_group_deleted:
-                session.refresh(msg_group)
-                msg_group = MessageGroupDetail.model_validate(msg_group)
-
-                self.module.context.sio.emit(
-                     event=SioEvents.chat_message_sync,
-                     data=serialize(msg_group),
-                     room=room,
-                )
-
-            return None, 204
+        return None, 204
 
 
 class API(api_tools.APIBase):

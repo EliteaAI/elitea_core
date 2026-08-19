@@ -118,7 +118,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def patch(self, project_id: int, tool_id: int):
-        update_relation_data = dict(request.json)
+        relation_payload = request.get_json(silent=True)
+        if relation_payload is None:
+            relation_payload = request.get_json(force=True, silent=True)
+        update_relation_data = dict(relation_payload or {})
 
         try:
             result = toolkit_change_relation(
@@ -143,6 +146,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Update Toolkit",
         description="Update an existing toolkit's configuration.",
+        request_body=ToolAPIUpdateModel,
         mcp_description="""
         USE to modify an existing toolkit instance — update its name, settings, or configuration references.
 
@@ -167,7 +171,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def put(self, project_id: int, tool_id: int):
-        payload = dict(request.json)
+        json_payload = request.get_json(silent=True)
+        if json_payload is None:
+            json_payload = request.get_json(force=True, silent=True)
+        payload = dict(json_payload or {})
         payload['project_id'] = project_id
         payload['user_id'] = auth.current_user()['id']
 

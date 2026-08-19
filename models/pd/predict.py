@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator, Validat
 from tools import db, VaultClient
 
 from ...models.participants import Participant
-from ...utils.toolkits_utils import format_tool_call_as_user_input
+from ...utils.tool_call_format import format_tool_call_as_user_input
 from .attachment import AttachmentMessageItemPredict
 from .participant_settings import EntitySettingsLlm
 
@@ -177,6 +177,10 @@ class SioContinuePredictModel(BaseModel):
         default=None,
         description="Per-child HITL decisions for a parallel sub-agent resume",
     )
+    mcp_auth_resume: bool = Field(default=False, description="Resume a durable toolkit authorization interrupt")
+    mcp_auth_action: Optional[str] = Field(default=None, description="Toolkit authorization action: authorize or skip")
+    mcp_auth_decisions: Optional[List[Dict[str, Any]]] = Field(default=None, description="Per-request toolkit authorization decisions")
+    authorization_request_id: Optional[str] = Field(default=None, description="Exact durable authorization request being resolved")
     # Fields needed for compatibility with generate_payload
     interaction_uuid: str | uuid.UUID | None = None
     llm_settings: Optional[EntitySettingsLlm] = None

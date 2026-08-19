@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import time
 from typing import Optional
 from uuid import uuid4
 
@@ -10,7 +11,7 @@ from tools import db, auth, serialize, this, VaultClient, rpc_tools, config as c
 import redis
 from pydantic import ValidationError
 from pydantic.utils import deep_update
-from sqlalchemy import asc, desc, String
+from sqlalchemy import asc, desc, String, func
 
 from ..utils.chat_constants import SUMMARIZATION_LOCKING_TTL
 from ..utils.conversation_utils import get_conversation_locked_key
@@ -18,6 +19,7 @@ from ..models.all import ApplicationVersion
 from ..models.conversation import Conversation
 from ..models.enums.all import AgentTypes, ParticipantTypes, ChatHistoryTemplates, PublishStatus
 from ..models.message_group import ConversationMessageGroup
+from ..models.message_trace_step import MessageTraceStep
 from ..models.message_items.text import TextMessageItem
 from ..models.participants import ParticipantMapping, Participant
 from ..models.pd.message import MessageGroupDetail
@@ -38,9 +40,17 @@ from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
-    EXECUTION_GENERATION_KEY, begin_execution_generation, decisions_for_child,
-    interrupt_identity, pending_interrupts,
-    retire_child_interrupts, retire_interrupts, validate_child_decisions,
+    EXECUTION_GENERATION_KEY, begin_execution_generation,
+    claim_supervisor_decision_phase, decisions_for_child,
+    INTERNAL_CONTINUE_TOKEN, decision_ack_key, interrupt_identity, pending_interrupts,
+    persist_supervisor_decision, update_supervisor_decision_phase,
+    partition_root_hitl_decisions,
+    retire_all_interrupts, retire_child_interrupts, retire_interrupts,
+    validate_child_decisions,
+)
+from ..utils.toolkit_authorization import (
+    authorization_identity, pending_authorization_requests,
+    retire_all_authorization_requests, retire_authorization_requests,
 )
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
@@ -52,6 +62,8 @@ from ..utils.internal_tools import (
 from ..utils.utils import get_public_project_id
 from ..utils.predict_utils import get_project_context, prepend_project_context
 
+
+TIMEOUT_CANCEL_TEXT = "No response, cancelled by timeout"
 
 CHAT_PREDICT_MAPPER = {
     ParticipantTypes.dummy: 'applications_predict_sio_llm',
@@ -268,6 +280,7 @@ def generate_toolkit_payload(
     try:
         mcp_tools = inject_mcp_toolkits(
             user_id=user_id,
+            current_project_id=conversation_project_id,
             internal_tools=internal_tools or [],
             existing_tools=tools,
         )
@@ -699,6 +712,9 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
         'hitl_action': getattr(predict_payload, 'hitl_action', None),
         'hitl_value': getattr(predict_payload, 'hitl_value', None),
         'hitl_decisions': getattr(predict_payload, 'hitl_decisions', None),
+        'mcp_auth_resume': bool(getattr(predict_payload, 'mcp_auth_resume', False)),
+        'mcp_auth_action': getattr(predict_payload, 'mcp_auth_action', None),
+        'mcp_auth_decisions': getattr(predict_payload, 'mcp_auth_decisions', None),
         'thread_id': predict_payload.thread_id,
     }
 
@@ -841,8 +857,12 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             result = deep_update(result, toolkit_payload)
             return result
 
-    # TODO: detect when continue flow with user input, use the request's user_input instead of message content
-    result['user_input'] = generate_user_input(msg_group)
+    # Continue flow can provide explicit user_input (e.g., a custom continue note).
+    # Fall back to the original message-group content when absent.
+    if getattr(predict_payload, 'should_continue', False) and predict_payload.user_input is not None:
+        result['user_input'] = predict_payload.user_input
+    else:
+        result['user_input'] = generate_user_input(msg_group)
 
     # Add steps limit parameter if any
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
@@ -1297,6 +1317,10 @@ class RPC:
                         session.commit()
                         raise
 
+                    self.finalize_timed_out_response(
+                        session, response_msg, result, await_task_timeout
+                    )
+
                     if return_message_ids:
                         session.refresh(msg_group)
                         session.refresh(response_msg)
@@ -1306,9 +1330,278 @@ class RPC:
                         }
                     return result
 
+    @web.method()
+    def _wait_parallel_hitl_ack(self, message_id, decision_id, phase, timeout=0.75):
+        """Bounded wait for the active worker's offer/commit acknowledgement."""
+        key = decision_ack_key(message_id, decision_id, phase)
+        deadline = time.monotonic() + timeout
+        client = self.get_redis_client()
+        while time.monotonic() < deadline:
+            value = client.get(key)
+            if value is not None:
+                client.delete(key)
+                if isinstance(value, bytes):
+                    value = value.decode('utf-8', errors='replace')
+                return value == '1'
+            time.sleep(0.025)
+        return None
+
+    @web.method()
+    def _supervised_decision(self, parsed, pending_hitl, pending_auth, generation):
+        """Return one exact live decision when the selected card is supervised."""
+        decisions = [
+            dict(item) for item in (
+                parsed.mcp_auth_decisions
+                if parsed.mcp_auth_resume else parsed.hitl_decisions
+            ) or []
+            if isinstance(item, dict)
+        ]
+        if decisions:
+            candidate = decisions[0]
+        elif parsed.mcp_auth_resume:
+            request_id = parsed.authorization_request_id
+            if not request_id and len(pending_auth) == 1:
+                request_id = authorization_identity(pending_auth[0])
+            candidate = {
+                'interrupt_id': request_id,
+                'action': parsed.mcp_auth_action,
+            }
+        elif parsed.hitl_resume and len(pending_hitl) == 1:
+            candidate = {
+                'interrupt_id': interrupt_identity(pending_hitl[0]),
+                'action': parsed.hitl_action,
+                'value': parsed.hitl_value,
+            }
+        else:
+            return None
+
+        interrupt_id = str(candidate.get('interrupt_id') or '')
+        all_pending = pending_hitl + pending_auth
+        selected = next(
+            (
+                item for item in all_pending
+                if interrupt_identity(item) == interrupt_id
+                and item.get('resume_strategy') == 'supervised_child'
+            ),
+            None,
+        )
+        if selected is None:
+            return None
+        return {
+            **candidate,
+            'decision_id': str(uuid4()),
+            'interrupt_id': interrupt_id,
+            'tool_call_id': selected.get('tool_call_id'),
+            'guardrail_type': selected.get('guardrail_type'),
+            'root_thread_id': selected.get('root_thread_id'),
+            'execution_generation': generation,
+            'pending_interrupt': dict(selected),
+        }
+
+    @web.method()
+    def _explicit_resume_interrupt_ids(self, parsed):
+        """Return stable ids explicitly selected by one continuation request."""
+        decisions = (
+            parsed.mcp_auth_decisions
+            if parsed.mcp_auth_resume
+            else parsed.hitl_decisions
+        ) or []
+        identities = [
+            str(item.get('interrupt_id') or '')
+            for item in decisions if isinstance(item, dict)
+        ]
+        if parsed.mcp_auth_resume and parsed.authorization_request_id:
+            identities.append(str(parsed.authorization_request_id))
+        return {identity for identity in identities if identity}
+
+    @web.method()
+    def _resolved_resume_result(self, response_msg, parsed):
+        """A repeated exact decision is an idempotent no-op, never a root replay.
+
+        A supervised child can finish between a browser's local click handling
+        and a delayed/retried socket emission.  Once Core has tombstoned that
+        interrupt, falling through to the ordinary root continuation would
+        reconstruct the orchestrator with the original user prompt.  Besides
+        duplicating work, that loses the real nested caller which already
+        consumed the structured guard result.
+        """
+        requested = self._explicit_resume_interrupt_ids(parsed)
+        if not requested:
+            return None
+        meta = response_msg.meta or {}
+        resolved = {
+            str(value) for value in (
+                list(meta.get('resolved_hitl_interrupt_ids') or [])
+                + list(meta.get('resolved_authorization_request_ids') or [])
+            ) if value
+        }
+        if not requested.issubset(resolved):
+            return None
+        log.info(
+            '[PARALLEL] ignoring repeated resolved HITL decision(s) count=%d '
+            'message_id=%s',
+            len(requested), response_msg.uuid,
+        )
+        return {
+            'queued': False,
+            'live_resume': False,
+            'already_resolved': True,
+        }
+
+    @web.method()
+    def _claim_stopped_supervisor_fallback(
+        self, session, response_msg, decision,
+    ):
+        """Claim root recovery when the live owner is already terminal."""
+        task_id = response_msg.task_id
+        try:
+            task_status = self.task_node.get_task_status(task_id)
+        except Exception:  # pylint: disable=W0703
+            return False
+        if task_status != 'stopped':
+            return False
+        response_msg = session.query(ConversationMessageGroup).where(
+            ConversationMessageGroup.uuid == response_msg.uuid
+        ).with_for_update(of=ConversationMessageGroup).execution_options(
+            populate_existing=True,
+        ).first()
+        if response_msg is None:
+            return False
+        response_msg.meta, claimed = claim_supervisor_decision_phase(
+            response_msg.meta,
+            decision['decision_id'],
+            {'fallback_pending'},
+            'fallback_starting',
+        )
+        if claimed:
+            flag_modified(response_msg, 'meta')
+            session.commit()
+        return claimed
+
+    @web.method()
+    def _offer_supervised_decision(self, session, response_msg, parsed):
+        """Offer an exact decision to the live one-process supervisor.
+
+        Returns a response only after both offer and commit are acknowledged.
+        Otherwise the caller continues through the normal durable root resume.
+        """
+        pending_hitl = pending_interrupts(response_msg.meta)
+        pending_auth = pending_authorization_requests(response_msg.meta)
+        generation = (response_msg.meta or {}).get(EXECUTION_GENERATION_KEY)
+        decision = self._supervised_decision(
+            parsed, pending_hitl, pending_auth, generation,
+        )
+        if decision is None:
+            return self._resolved_resume_result(response_msg, parsed)
+        root_thread_id = decision.get('root_thread_id') or (
+            (response_msg.meta or {}).get('thread_id')
+        )
+        if not root_thread_id:
+            return None
+
+        response_msg.meta = persist_supervisor_decision(
+            response_msg.meta, decision, phase='queued',
+        )
+        flag_modified(response_msg, 'meta')
+        session.add(response_msg)
+        session.commit()
+
+        event_base = {
+            'root_thread_id': root_thread_id,
+            'thread_id': root_thread_id,
+            'decision': decision,
+        }
+        this.module.event_node.emit('predict_events', {
+            'type': 'parallel_hitl_decision_offer', **event_base,
+        })
+        if self._wait_parallel_hitl_ack(
+            str(response_msg.uuid), decision['decision_id'], 'offered',
+        ) is not True:
+            session.refresh(response_msg)
+            response_msg.meta = update_supervisor_decision_phase(
+                response_msg.meta, decision['decision_id'], 'fallback_pending',
+            )
+            flag_modified(response_msg, 'meta')
+            session.commit()
+            # The aggregate fallback may have checkpointed and stopped before
+            # the user clicked.  In that case no future terminal callback exists
+            # to consume ``fallback_pending``.  Claim the already-stopped task
+            # under the message-row lock and let this request continue through
+            # the ordinary durable root-resume path.  If the task is still
+            # running, its terminal callback owns recovery instead, avoiding a
+            # competing executor while live siblings settle.
+            if self._claim_stopped_supervisor_fallback(
+                session, response_msg, decision,
+            ):
+                return None
+            return {
+                'queued': True,
+                'live_resume': False,
+                'decision_id': decision['decision_id'],
+                'interrupt_id': decision['interrupt_id'],
+            }
+
+        this.module.event_node.emit('predict_events', {
+            'type': 'parallel_hitl_decision_commit', **event_base,
+        })
+        commit_ack = self._wait_parallel_hitl_ack(
+            str(response_msg.uuid), decision['decision_id'], 'committed',
+        )
+        if commit_ack is False:
+            session.refresh(response_msg)
+            response_msg.meta = update_supervisor_decision_phase(
+                response_msg.meta, decision['decision_id'], 'fallback_pending',
+            )
+            flag_modified(response_msg, 'meta')
+            session.commit()
+            if self._claim_stopped_supervisor_fallback(
+                session, response_msg, decision,
+            ):
+                return None
+            return {
+                'queued': True,
+                'live_resume': False,
+                'decision_id': decision['decision_id'],
+                'interrupt_id': decision['interrupt_id'],
+            }
+        if commit_ack is None:
+            # The offer already transferred ownership to this worker. Never
+            # start a competing root continuation merely because the commit
+            # acknowledgement was lost; the durable queued decision remains
+            # available to crash/aggregate recovery.
+            return {
+                'queued': True,
+                'live_resume': False,
+                'decision_id': decision['decision_id'],
+                'interrupt_id': decision['interrupt_id'],
+            }
+        session.refresh(response_msg)
+        if parsed.mcp_auth_resume:
+            response_msg.meta = retire_authorization_requests(
+                response_msg.meta, [decision['interrupt_id']],
+            )
+        else:
+            response_msg.meta = retire_interrupts(
+                response_msg.meta, [decision['interrupt_id']],
+            )
+        response_msg.meta = update_supervisor_decision_phase(
+            response_msg.meta, decision['decision_id'], 'committed',
+        )
+        response_msg.is_streaming = True
+        flag_modified(response_msg, 'meta')
+        session.add(response_msg)
+        session.commit()
+        return {
+            'queued': True,
+            'live_resume': True,
+            'decision_id': decision['decision_id'],
+            'interrupt_id': decision['interrupt_id'],
+        }
+
     @web.rpc("chat_continue_predict_sio", "chat_continue_predict_sio")
     def continue_predict_sio(
-        self, sid: str | None, data: dict, await_task_timeout: int = -1
+        self, sid: str | None, data: dict, await_task_timeout: int = -1,
+        _internal_token=None, _internal_user_id=None,
     ) -> Optional[str | dict]:
         """
         Continue execution of a paused chat prediction (e.g., after MCP OAuth interruption).
@@ -1318,8 +1611,17 @@ class RPC:
         - Has different validation requirements (message_id required, user_input not needed)
         - Shares minimal logic with the normal predict flow
         """
-        log.debug("Continue predict: message_id=%s conversation_uuid=%s sid=%s user_input=%s",
-                  data.get("message_id"), data.get("conversation_uuid"), sid, data.get("user_input"))
+        log.debug(
+            "Continue predict: message_id=%s conversation_uuid=%s sid=%s "
+            "hitl_resume=%s mcp_auth_resume=%s authorization_request_id=%s "
+            "hitl_decisions=%d mcp_auth_decisions=%d user_input=%s",
+            data.get("message_id"), data.get("conversation_uuid"), sid,
+            bool(data.get("hitl_resume")), bool(data.get("mcp_auth_resume")),
+            data.get("authorization_request_id"),
+            len(data.get("hitl_decisions") or []),
+            len(data.get("mcp_auth_decisions") or []),
+            data.get("user_input"),
+        )
         try:
             parsed = SioContinuePredictModel.model_validate(data)
         except ValidationError as e:
@@ -1332,7 +1634,9 @@ class RPC:
                 message_id=data.get("message_id"),
             )
 
-        if sid:
+        if _internal_token is INTERNAL_CONTINUE_TOKEN and _internal_user_id:
+            current_user = {'id': _internal_user_id}
+        elif sid:
             current_user = auth.current_user(auth_data=auth.sio_users[sid])
         else:
             current_user = auth.current_user()
@@ -1373,6 +1677,13 @@ class RPC:
                     for item in pending_interrupts(
                         persisted.meta if persisted else None
                     )
+                ) or any(
+                    item.get('resume_strategy') == 'aggregate_child'
+                    and (item.get('child_thread_id') or item.get('thread_id'))
+                    == parsed.thread_id
+                    for item in pending_authorization_requests(
+                        persisted.meta if persisted else None
+                    )
                 )
             if expired_child:
                 raise SioValidationError(
@@ -1403,7 +1714,8 @@ class RPC:
 
             # Find the existing response message that was paused
             response_msg: ConversationMessageGroup = session.query(ConversationMessageGroup).options(
-                joinedload(ConversationMessageGroup.author_participant)
+                joinedload(ConversationMessageGroup.author_participant),
+                selectinload(ConversationMessageGroup.message_items),
             ).filter(
                 ConversationMessageGroup.uuid == parsed.message_id
             ).with_for_update(of=ConversationMessageGroup).populate_existing().first()
@@ -1449,6 +1761,19 @@ class RPC:
                         message_id=parsed.message_id,
                     )
 
+            # Independent in-process fan-out (#6264): first offer the exact
+            # invocation-scoped decision to the active root worker. The worker
+            # resumes only that child while siblings continue. If no live
+            # supervisor accepts the offer, fall through unchanged to the
+            # existing durable root-checkpoint continuation below.
+            if parsed.hitl_resume or parsed.mcp_auth_resume:
+                live_result = self._offer_supervised_decision(
+                    session, response_msg, parsed,
+                )
+                if live_result is not None:
+                    return live_result
+                session.refresh(response_msg)
+
             # Retire the exact Track-1/root cards accepted by this resume before
             # the resumed worker can emit its next pause.  Previously the live UI
             # advanced, but the old cards remained in JSONB and all reappeared on
@@ -1457,13 +1782,23 @@ class RPC:
             # ``_continue_child_resume`` above.
             if parsed.hitl_resume:
                 pending = pending_interrupts(response_msg.meta)
+                pending_auth = pending_authorization_requests(response_msg.meta)
                 decisions = [
                     dict(item) for item in (parsed.hitl_decisions or [])
                     if isinstance(item, dict)
                 ]
                 if decisions:
                     try:
-                        validate_child_decisions(pending, decisions)
+                        # Track-1/in-process aggregates share one root worker
+                        # checkpoint. Resume only the selected leaf; the SDK
+                        # preserves and re-emits unresolved sibling interrupts.
+                        # True parked worker children keep the exact-all rule in
+                        # ``_continue_child_resume`` below.
+                        resolved_ids, resolved_auth_ids = (
+                            partition_root_hitl_decisions(
+                                pending, pending_auth, decisions,
+                            )
+                        )
                     except ValueError as exc:
                         raise SioValidationError(
                             sio=self.context.sio, sid=sid,
@@ -1472,7 +1807,6 @@ class RPC:
                             stream_id=str(parsed.conversation_uuid),
                             message_id=parsed.message_id,
                         ) from exc
-                    resolved_ids = [interrupt_identity(item) for item in decisions]
                 else:
                     if len(pending) != 1:
                         raise SioValidationError(
@@ -1502,8 +1836,42 @@ class RPC:
                             message_id=parsed.message_id,
                         )
                     resolved_ids = [interrupt_identity(pending[0])]
+                    resolved_auth_ids = []
                 response_msg.meta = retire_interrupts(
                     response_msg.meta, resolved_ids,
+                )
+                response_msg.meta = retire_authorization_requests(
+                    response_msg.meta, resolved_auth_ids,
+                )
+                flag_modified(response_msg, 'meta')
+
+            if parsed.mcp_auth_resume:
+                pending_auth = pending_authorization_requests(response_msg.meta)
+                requested_id = parsed.authorization_request_id
+                if not requested_id and len(pending_auth) == 1:
+                    requested_id = authorization_identity(pending_auth[0])
+                selected = [
+                    item for item in pending_auth
+                    if authorization_identity(item) == str(requested_id or '')
+                ]
+                if len(selected) != 1:
+                    raise SioValidationError(
+                        sio=self.context.sio, sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error='The toolkit authorization request is missing or already resolved',
+                        stream_id=str(parsed.conversation_uuid),
+                        message_id=parsed.message_id,
+                    )
+                if parsed.mcp_auth_action not in {'authorize', 'skip'}:
+                    raise SioValidationError(
+                        sio=self.context.sio, sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error='Toolkit authorization action must be authorize or skip',
+                        stream_id=str(parsed.conversation_uuid),
+                        message_id=parsed.message_id,
+                    )
+                response_msg.meta = retire_authorization_requests(
+                    response_msg.meta, [requested_id],
                 )
                 flag_modified(response_msg, 'meta')
 
@@ -1551,6 +1919,77 @@ class RPC:
                     message_id=parsed.message_id,
                 )
 
+            # Pass any already-generated partial content so the indexer can use it
+            # as context when the LangGraph run has no paused checkpoint to resume
+            # from (token-limit truncation case: finish_reason == 'length').
+            # Strip trailing empty-block artifacts (e.g. '{}') that some reasoning
+            # models emit as the last content block when they hit the token limit.
+            _EMPTY_BLOCK_ARTIFACTS = ('{}', '{ }')
+            sorted_items = sorted(
+                (response_msg.message_items or []),
+                key=lambda msg_item: (msg_item.order_index or 0),
+            )
+
+            def _is_clean_text_item(item) -> bool:
+                if item.item_type != 'text_message':
+                    return False
+                if not isinstance(item.content, str):
+                    return False
+                stripped = item.content.strip()
+                if not stripped:
+                    return False
+                if stripped in _EMPTY_BLOCK_ARTIFACTS:
+                    return False
+                # Filter out injected system/context blocks that leaked into a
+                # previous response (e.g. from a broken continuation run).
+                if stripped.startswith('[ATTACHMENTS]'):
+                    return False
+                if stripped.startswith('<runtime_context>'):
+                    return False
+                return True
+
+            truncated_content = ''.join(
+                item.content
+                for item in sorted_items
+                if _is_clean_text_item(item)
+            )
+
+            # Token-limit detection: only apply continuation logic when:
+            # 1. There IS partial content to continue from.
+            # 2. There is NO active HITL/MCP interrupt — those must resume
+            #    from a live checkpoint, not start a fresh run.
+            is_token_limit_continuation = (
+                bool(truncated_content)
+                and not parsed.hitl_resume
+                and not parsed.mcp_auth_resume
+                and not pending_interrupts(response_msg.meta)
+                and not pending_authorization_requests(response_msg.meta)
+            )
+
+            # For token-limit continuations: purge dirty items from the DB so
+            # they don't appear in the UI. "Dirty" means non-text items, empty
+            # artifact blocks, or system messages that leaked in from a prior
+            # broken continuation run (e.g. [ATTACHMENTS] / <runtime_context>).
+            # Also trim trailing newlines from the last clean item so there is
+            # no blank gap between the truncated text and the appended continuation.
+            if is_token_limit_continuation:
+                dirty_items = [item for item in sorted_items if not _is_clean_text_item(item)]
+                for dirty_item in dirty_items:
+                    session.delete(dirty_item)
+                if dirty_items:
+                    session.commit()
+                    # Rebuild sorted_items without the deleted ones
+                    sorted_items = [item for item in sorted_items if item not in dirty_items]
+
+                last_text_item = next(
+                    (item for item in reversed(sorted_items) if _is_clean_text_item(item)),
+                    None,
+                )
+                if last_text_item and last_text_item.content != last_text_item.content.rstrip('\n\r'):
+                    last_text_item.content = last_text_item.content.rstrip('\n\r')
+                    session.add(last_text_item)
+                    session.flush()
+
             try:
                 # Use thread_id from payload or fall back to existing message meta
                 if not payload.get('thread_id') and response_msg.meta:
@@ -1569,6 +2008,58 @@ class RPC:
                 payload['chat_history'] = generate_chat_history(
                     message_groups=chat_history_groups, summaries=summaries
                 )
+                if is_token_limit_continuation:
+                    # Assistant-prefill continuation. The sequence sent to the LLM:
+                    #   [... history ...]
+                    #   [user:      original question]
+                    #   [assistant: tail of truncated text (last 600 chars)]  ← prefill
+                    #   [user:      explicit instruction to complete the incomplete response]
+                    #
+                    # Only the tail is used as the assistant prefill, not the full truncated
+                    # content. The original question in chat_history already provides all
+                    # structural context (e.g. "write a market report covering sections A, B, C").
+                    # The tail (600 chars) gives the model a precise cutoff anchor so it can
+                    # complete the current sentence seamlessly.
+                    #
+                    # Using the full truncated content causes reasoning models to spend most
+                    # of their output budget on thinking — they reason about the entire
+                    # document's coherence when they see their own incomplete long-form output,
+                    # leaving almost no tokens for actual text.
+                    _tc_stripped = truncated_content.rstrip('\n\r')
+                    _tail_chars = 600
+                    _prefill_content = _tc_stripped[-_tail_chars:] if len(_tc_stripped) > _tail_chars else _tc_stripped
+                    original_user_input = payload.get('user_input', '')
+                    if original_user_input:
+                        payload['chat_history'].append({
+                            'role': 'user',
+                            'content': original_user_input,
+                        })
+                    payload['chat_history'].append({
+                        'role': 'assistant',
+                        'content': _prefill_content,
+                    })
+                    _word_count = len(_tc_stripped.split())
+                    _original_q = original_user_input or ''
+                    _original_q_clause = (
+                        f' The original request was: "{_original_q}".' if _original_q else ''
+                    )
+                    payload['user_input'] = (
+                        f'Your previous response above was cut off due to token limits and is incomplete.'
+                        f'{_original_q_clause}'
+                        f' It already contains approximately {_word_count} words.'
+                        f' Please complete it: output only the missing ending that finishes the response,'
+                        f' strictly respecting all constraints from the original request (length, format, scope).'
+                        f' Do not repeat anything already written.'
+                    )
+                    payload['truncated_content'] = truncated_content
+                    if isinstance(payload.get('llm'), dict):
+                        llm_kwargs = payload['llm'].get('kwargs', {})
+                        if 'reasoning_effort' in llm_kwargs:
+                            llm_kwargs['reasoning_effort'] = 'low'
+                    app_vd = (payload.get('application') or {}).get('version_details') or {}
+                    llm_settings_vd = app_vd.get('llm_settings') or {}
+                    if 'reasoning_effort' in llm_settings_vd:
+                        llm_settings_vd['reasoning_effort'] = 'low'
                 payload['message_id'] = str(response_msg.uuid)
                 payload[EXECUTION_GENERATION_KEY] = execution_generation
 
@@ -1589,6 +2080,9 @@ class RPC:
                     await_task_timeout=await_task_timeout,
                     user_id=current_user['id']
                 )
+                self.finalize_timed_out_response(
+                    session, response_msg, result, await_task_timeout
+                )
                 return result
             except Exception as e:
                 # Reset streaming flag on any unexpected error
@@ -1603,6 +2097,46 @@ class RPC:
                     stream_id=str(parsed.conversation_uuid),
                     message_id=parsed.message_id,
                 )
+
+    @web.method()
+    def finalize_timed_out_response(self, session, response_msg, result, await_task_timeout):
+        """Close out a response message group whose task was cancelled on blocking timeout.
+
+        Mirrors the stop button (api/v2/task.py) minus the salvage/delete branches: the
+        worker is gone, so the row must not stay is_streaming forever.
+        """
+        # A timeout is the only case returning a bare task_id: a completed run has
+        # 'result', maintenance mode has 'error'.
+        if await_task_timeout <= 0 or not isinstance(result, dict):
+            return
+        if 'result' in result or not result.get('task_id'):
+            return
+        if not this.descriptor.config.get("cancel_on_timeout", True):
+            return
+
+        # Refuse a later HITL resume on a run whose worker was killed
+        self.mark_chat_run_stopped(str(response_msg.uuid))
+
+        response_msg.is_streaming = False
+        if response_msg.meta:
+            response_msg.meta = retire_all_interrupts(response_msg.meta)
+            response_msg.meta = retire_all_authorization_requests(response_msg.meta)
+            flag_modified(response_msg, 'meta')
+        if not response_msg.message_items:
+            session.add(TextMessageItem(
+                message_group=response_msg,
+                item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
+                content=TIMEOUT_CANCEL_TEXT,
+                order_index=0,
+            ))
+        session.commit()
+
+        session.refresh(response_msg)
+        self.context.sio.emit(
+            event=SioEvents.chat_message_sync,
+            data=serialize(MessageGroupDetail.model_validate(response_msg)),
+            room=get_chat_room(response_msg.conversation.uuid),
+        )
 
     @web.method()
     def _continue_child_resume(self, sid, parsed, current_user):
@@ -1673,17 +2207,32 @@ class RPC:
 
         # Forward the COMPLETE aggregate decision list. Scalar action/value remain only as the
         # single-interrupt compatibility path.
-        action = getattr(parsed, 'hitl_action', None)
+        is_mcp_auth = bool(getattr(parsed, 'mcp_auth_resume', False))
+        action = (
+            getattr(parsed, 'mcp_auth_action', None)
+            if is_mcp_auth else getattr(parsed, 'hitl_action', None)
+        )
         value = getattr(parsed, 'hitl_value', None)
         child_decisions = decisions_for_child(
-            getattr(parsed, 'hitl_decisions', None),
+            (
+                getattr(parsed, 'mcp_auth_decisions', None)
+                if is_mcp_auth else getattr(parsed, 'hitl_decisions', None)
+            ),
             thread_id,
             child_meta.get('tool_call_id'),
         )
         pending_for_child = [
-            item for item in pending_interrupts(persisted_meta)
+            item for item in (
+                pending_authorization_requests(persisted_meta)
+                if is_mcp_auth else pending_interrupts(persisted_meta)
+            )
             if (item.get('child_thread_id') or item.get('thread_id')) == thread_id
         ]
+        if is_mcp_auth and getattr(parsed, 'authorization_request_id', None):
+            pending_for_child = [
+                item for item in pending_for_child
+                if authorization_identity(item) == parsed.authorization_request_id
+            ]
         if not pending_for_child:
             raise SioValidationError(
                 sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value,
@@ -1714,8 +2263,21 @@ class RPC:
             action = first_decision.get('action', action)
             value = first_decision.get('value', value)
 
+        if is_mcp_auth and action not in {'authorize', 'skip'}:
+            raise SioValidationError(
+                sio=self.context.sio, sid=sid,
+                event=SioEvents.chat_predict.value,
+                error='Toolkit authorization action must be authorize or skip',
+                stream_id=str(parsed.conversation_uuid),
+                message_id=parsed.message_id,
+            )
+
         resume_interrupt_ids = [
-            interrupt_identity(item) for item in pending_for_child
+            (
+                authorization_identity(item)
+                if is_mcp_auth else interrupt_identity(item)
+            )
+            for item in pending_for_child
         ]
         if not self.parallel_dispatch_claim_child_resume(
             thread_id, resume_interrupt_ids,
@@ -1726,11 +2288,17 @@ class RPC:
                 stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
             )
 
-        child_payload['hitl_resume'] = True
-        child_payload['hitl_action'] = action or 'approve'
-        child_payload['hitl_value'] = value or ''
-        if child_decisions:
-            child_payload['hitl_decisions'] = child_decisions
+        if is_mcp_auth:
+            child_payload['mcp_auth_resume'] = True
+            child_payload['mcp_auth_action'] = action or 'skip'
+            if child_decisions:
+                child_payload['mcp_auth_decisions'] = child_decisions
+        else:
+            child_payload['hitl_resume'] = True
+            child_payload['hitl_action'] = action or 'approve'
+            child_payload['hitl_value'] = value or ''
+            if child_decisions:
+                child_payload['hitl_decisions'] = child_decisions
         child_payload['should_continue'] = False
         execution_generation = persisted_meta.get(EXECUTION_GENERATION_KEY)
         if execution_generation:
@@ -1768,7 +2336,9 @@ class RPC:
             child_meta.get('parent_thread_id'), child_meta.get('reconcile_epoch'),
             {thread_id: task_id},
         )
-        resolved_ids = [item.get('interrupt_id') for item in child_decisions]
+        resolved_ids = [
+            item.get('interrupt_id') for item in (child_decisions or [])
+        ]
         with db.get_session(parsed.project_id) as session:
             response_msg = session.query(ConversationMessageGroup).where(
                 ConversationMessageGroup.uuid == parsed.message_id
@@ -1776,9 +2346,14 @@ class RPC:
             if response_msg:
                 response_msg.task_id = task_id
                 response_msg.is_streaming = True
-                response_msg.meta = retire_child_interrupts(
-                    response_msg.meta, thread_id, resolved_ids,
-                )
+                if is_mcp_auth:
+                    response_msg.meta = retire_authorization_requests(
+                        response_msg.meta, resume_interrupt_ids,
+                    )
+                else:
+                    response_msg.meta = retire_child_interrupts(
+                        response_msg.meta, thread_id, resolved_ids,
+                    )
                 flag_modified(response_msg, 'meta')
                 session.add(response_msg)
                 session.commit()
@@ -1886,3 +2461,138 @@ class RPC:
     @web.rpc("chat_get_message_group_model")
     def get_conversation_message_group_model(self):
         return ConversationMessageGroup
+
+    @web.rpc("chat_stop_task", "chat_stop_task")
+    def chat_stop_task(
+            self,
+            project_id: int,
+            message_group_uuid: str,
+            user_id: int,
+    ) -> dict:
+        """
+        Stop a running chat task for a message group.
+
+        This is the single source of truth for stopping chat tasks.
+        Called by:
+        - elitea_core DELETE /api/v2/task endpoint (EliteaUI)
+        - support_assistant support_stop Socket.IO event (Support Widget)
+
+        Performs all 5 steps:
+        1. Stop task via Arbiter (stop_task RPC)
+        2. Mark chat run as stopped in Redis (prevents late event processing)
+        3. Set is_streaming = False in database
+        4. Retire all HITL interrupts
+        5. Emit chat_message_sync or chat_message_delete event
+
+        Args:
+            project_id: The project ID where the conversation exists
+            message_group_uuid: The UUID of the message group to stop
+            user_id: The user ID requesting the stop (for ownership verification)
+
+        Returns:
+            dict with 'success' or 'error' key
+        """
+        with db.get_session(project_id) as session:
+            msg_group = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_group_uuid
+            ).with_for_update(of=ConversationMessageGroup).first()
+
+            if not msg_group:
+                return {"error": "Message group not found", "code": "NOT_FOUND"}
+
+            # Verify ownership: user must be conversation author or message author
+            if user_id != msg_group.conversation.author_id:
+                author = msg_group.author_participant
+                if author.entity_name != ParticipantTypes.user or \
+                        user_id != author.entity_meta.get('id'):
+                    return {
+                        "error": "Message can be stopped only by message or conversation author",
+                        "code": "FORBIDDEN"
+                    }
+
+            task_id = msg_group.task_id
+            if not task_id:
+                return {"error": "No active task for this message", "code": "NO_TASK"}
+
+            # Step 1: Stop task via Arbiter
+            self.stop_task(task_id)
+
+            # Step 2: Mark chat run as stopped in Redis
+            self.mark_chat_run_stopped(message_group_uuid)
+
+            # Step 3: Set is_streaming = False in database
+            msg_group.is_streaming = False
+
+            # Step 4: Retire all HITL interrupts
+            if msg_group.meta:
+                msg_group.meta = retire_all_interrupts(msg_group.meta)
+                msg_group.meta = retire_all_authorization_requests(msg_group.meta)
+                flag_modified(msg_group, 'meta')
+
+            msg_group_deleted = False
+            room = get_chat_room(msg_group.conversation.uuid)
+
+            # Handle empty message case: salvage thinking text or delete
+            if not msg_group.message_items:
+                # Salvage the latest non-empty thinking text as the reply
+                latest_text = (
+                    session.query(MessageTraceStep.text)
+                    .filter(
+                        MessageTraceStep.message_group_id == msg_group.id,
+                        MessageTraceStep.kind == 'thinking_step',
+                        MessageTraceStep.text.isnot(None),
+                        func.trim(MessageTraceStep.text) != '',
+                    )
+                    .order_by(MessageTraceStep.finished_at.desc(), MessageTraceStep.id.desc())
+                    .limit(1)
+                    .scalar()
+                )
+
+                if latest_text:
+                    msg: TextMessageItem = TextMessageItem(
+                        content=str(latest_text),
+                        message_group=msg_group,
+                        order_index=0,
+                    )
+                    session.add(msg)
+                else:
+                    # No content at all - delete both message groups
+                    reply_to_record = session.query(ConversationMessageGroup).filter(
+                        ConversationMessageGroup.id == msg_group.reply_to_id
+                    ).first()
+                    session.delete(reply_to_record)
+                    session.delete(msg_group)
+                    msg_group_deleted = True
+
+                    # Step 5a: Emit delete events
+                    self.context.sio.emit(
+                        event=SioEvents.chat_message_delete,
+                        data={
+                            'message_group_id': msg_group.id,
+                            'message_group_uid': str(msg_group.uuid),
+                        },
+                        room=room,
+                    )
+                    self.context.sio.emit(
+                        event=SioEvents.chat_message_delete,
+                        data={
+                            'message_group_id': reply_to_record.id,
+                            'message_group_uid': str(reply_to_record.uuid),
+                        },
+                        room=room,
+                    )
+
+            session.commit()
+
+            # Step 5b: Emit sync event for non-deleted message
+            if not msg_group_deleted:
+                session.refresh(msg_group)
+                msg_group_detail = MessageGroupDetail.model_validate(msg_group)
+
+                self.context.sio.emit(
+                    event=SioEvents.chat_message_sync,
+                    data=serialize(msg_group_detail),
+                    room=room,
+                )
+
+            return {"success": True}

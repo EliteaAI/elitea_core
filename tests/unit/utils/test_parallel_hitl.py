@@ -12,15 +12,102 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 decisions_for_child = _MODULE.decisions_for_child
 begin_execution_generation = _MODULE.begin_execution_generation
+claim_supervisor_decision_phase = _MODULE.claim_supervisor_decision_phase
 is_current_execution = _MODULE.is_current_execution
 merge_interrupts = _MODULE.merge_interrupts
+merge_supervisor_roster = _MODULE.merge_supervisor_roster
 normalize_interrupts = _MODULE.normalize_interrupts
 pending_interrupts = _MODULE.pending_interrupts
+pending_supervisor_decisions = _MODULE.pending_supervisor_decisions
+persist_supervisor_decision = _MODULE.persist_supervisor_decision
+partition_root_hitl_decisions = _MODULE.partition_root_hitl_decisions
 requires_plural_persistence = _MODULE.requires_plural_persistence
 retire_child_interrupts = _MODULE.retire_child_interrupts
 retire_interrupts = _MODULE.retire_interrupts
 retire_all_interrupts = _MODULE.retire_all_interrupts
 validate_child_decisions = _MODULE.validate_child_decisions
+
+
+def test_supervised_pause_preserves_live_resume_strategy_without_worker_child_lineage():
+    response = {
+        'resume_strategy': 'supervised_child',
+        'root_thread_id': 'root-1',
+        'hitl_interrupt': {
+            'interrupt_id': 'i-live',
+            'tool_call_id': 'call-live',
+        },
+    }
+
+    normalized = normalize_interrupts(response)
+
+    assert normalized[0]['resume_strategy'] == 'supervised_child'
+
+
+def test_supervisor_decision_and_roster_are_bounded_durable_message_state():
+    meta = persist_supervisor_decision({}, {
+        'decision_id': 'd-1',
+        'interrupt_id': 'i-1',
+        'action': 'approve',
+    })
+    meta = merge_supervisor_roster(meta, {
+        'root_thread_id': 'root-1',
+        'tool_call_id': 'call-a',
+        'state': 'paused',
+    })
+
+    assert pending_supervisor_decisions(meta) == [{
+        'decision_id': 'd-1',
+        'interrupt_id': 'i-1',
+        'action': 'approve',
+        'phase': 'queued',
+    }]
+    assert meta['parallel_hitl_roster']['children']['call-a']['state'] == 'paused'
+
+    retired = retire_all_interrupts(meta)
+    assert 'parallel_hitl_decisions' not in retired
+    assert 'parallel_hitl_roster' not in retired
+
+
+def test_supervisor_fallback_has_one_phase_owner():
+    meta = persist_supervisor_decision({}, {
+        'decision_id': 'd-fallback',
+        'interrupt_id': 'i-fallback',
+        'pending_interrupt': {'interrupt_id': 'i-fallback'},
+    }, phase='fallback_pending')
+
+    claimed_meta, claimed = claim_supervisor_decision_phase(
+        meta, 'd-fallback', {'fallback_pending'}, 'fallback_starting',
+    )
+    losing_meta, claimed_again = claim_supervisor_decision_phase(
+        claimed_meta, 'd-fallback', {'fallback_pending'}, 'recovering',
+    )
+
+    assert claimed is True
+    assert claimed_again is False
+    assert pending_supervisor_decisions(losing_meta)[0]['phase'] == 'fallback_starting'
+
+
+def test_mixed_root_resume_partitions_sensitive_and_authorization_decisions():
+    sensitive = {
+        'interrupt_id': 'hitl-delete',
+        'available_actions': ['approve', 'reject'],
+    }
+    authorization = {
+        'interrupt_id': 'hitl-auth',
+        'available_actions': ['authorize', 'skip'],
+    }
+
+    sensitive_ids, authorization_ids = partition_root_hitl_decisions(
+        [sensitive],
+        [authorization],
+        [
+            {'interrupt_id': 'hitl-auth', 'action': 'skip'},
+            {'interrupt_id': 'hitl-delete', 'action': 'reject'},
+        ],
+    )
+
+    assert sensitive_ids == ['hitl-delete']
+    assert authorization_ids == ['hitl-auth']
 
 
 def test_pause_merge_preserves_sibling_children_and_adds_identity():
@@ -119,6 +206,64 @@ def test_two_interrupts_in_one_durable_child_preserve_both():
     normalized = normalize_interrupts(response)
     assert [item['tool_call_id'] for item in normalized] == ['leaf-1', 'leaf-2']
     assert all(item['child_thread_id'] == 'durable-child' for item in normalized)
+    assert requires_plural_persistence(normalized, response) is True
+
+
+def test_nested_leaf_threads_keep_durable_child_as_resume_route():
+    response = {
+        'hitl_interrupts': [
+            {
+                'interrupt_id': 'leaf-1',
+                'child_thread_id': 'leaf-thread-1',
+                'thread_id': 'leaf-thread-1',
+                'tool_call_id': 'leaf-tool-1',
+            },
+            {
+                'interrupt_id': 'leaf-2',
+                'child_thread_id': 'leaf-thread-2',
+                'thread_id': 'leaf-thread-2',
+                'tool_call_id': 'leaf-tool-2',
+            },
+        ],
+        'metadata': {'child_thread_id': 'durable-child'},
+    }
+
+    normalized = normalize_interrupts(response)
+
+    assert [item['child_thread_id'] for item in normalized] == [
+        'durable-child', 'durable-child',
+    ]
+    assert [item['thread_id'] for item in normalized] == [
+        'leaf-thread-1', 'leaf-thread-2',
+    ]
+    assert all(item['resume_strategy'] == 'aggregate_child' for item in normalized)
+
+
+def test_nested_in_process_leaf_threads_resume_the_root_worker():
+    response = {
+        'thread_id': 'root-worker-thread',
+        'hitl_interrupts': [
+            {
+                'interrupt_id': 'leaf-1',
+                'child_thread_id': 'sdk-leaf-thread-1',
+                'thread_id': 'sdk-leaf-thread-1',
+                'resume_strategy': 'aggregate_child',
+            },
+            {
+                'interrupt_id': 'leaf-2',
+                'child_thread_id': 'sdk-leaf-thread-2',
+                'thread_id': 'sdk-leaf-thread-2',
+                'resume_strategy': 'aggregate_child',
+            },
+        ],
+    }
+
+    normalized = normalize_interrupts(response)
+
+    assert [item['child_thread_id'] for item in normalized] == [
+        'sdk-leaf-thread-1', 'sdk-leaf-thread-2',
+    ]
+    assert all(item['resume_strategy'] == 'single' for item in normalized)
     assert requires_plural_persistence(normalized, response) is True
 
 
@@ -289,6 +434,32 @@ def test_child_decisions_require_exact_unique_identities_and_valid_actions():
         raise AssertionError(f'expected invalid decisions to fail: {decisions}')
 
 
+def test_root_decisions_allow_one_pending_interrupt_at_a_time():
+    pending = [
+        {'interrupt_id': 'i-1', 'available_actions': ['approve', 'reject']},
+        {'interrupt_id': 'i-2', 'available_actions': ['approve', 'reject']},
+    ]
+
+    validate_child_decisions(
+        pending,
+        [{'interrupt_id': 'i-1', 'action': 'approve'}],
+        require_all=False,
+    )
+
+    for decisions in (
+        [],
+        [{'interrupt_id': 'unknown', 'action': 'approve'}],
+        [{'interrupt_id': 'i-1', 'action': 'edit'}],
+    ):
+        try:
+            validate_child_decisions(
+                pending, decisions, require_all=False,
+            )
+        except ValueError:
+            continue
+        raise AssertionError(f'expected invalid partial decisions to fail: {decisions}')
+
+
 def test_regenerate_clears_stopped_flag_but_continue_does_not():
     plugin_root = pathlib.Path(__file__).resolve().parents[3]
     regenerate_source = (plugin_root / 'api' / 'v2' / 'regenerate.py').read_text()
@@ -307,7 +478,6 @@ def test_all_hitl_jsonb_mutations_lock_the_message_row_and_stop_clears_cards():
     plugin_root = pathlib.Path(__file__).resolve().parents[3]
     event_source = (plugin_root / 'events' / 'message_stream.py').read_text()
     continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
-    stop_source = (plugin_root / 'api' / 'v2' / 'task.py').read_text()
     regenerate_source = (plugin_root / 'api' / 'v2' / 'regenerate.py').read_text()
     chat_models_source = (plugin_root / 'models' / 'pd' / 'chat.py').read_text()
     predict_source = (plugin_root / 'utils' / 'predict_utils.py').read_text()
@@ -321,13 +491,17 @@ def test_all_hitl_jsonb_mutations_lock_the_message_row_and_stop_clears_cards():
         continue_source.index('def continue_predict_sio'):
         continue_source.index('def _continue_child_resume')
     ]
+    # Stop logic is now in chat_stop_task RPC (chat_all.py), called by api/v2/task.py
+    stop_rpc = continue_source[
+        continue_source.index('def chat_stop_task('):
+    ]
     assert '.with_for_update(of=ConversationMessageGroup)' in root_resume
     assert 'retire_interrupts(' in root_resume
     assert '.with_for_update(of=ConversationMessageGroup).first()' in pause_handler
     assert '.with_for_update(of=ConversationMessageGroup).first()' in child_resume
     assert 'This sub-orchestrator approval expired' in continue_source
-    assert '.with_for_update(of=ConversationMessageGroup).first()' in stop_source
-    assert 'retire_all_interrupts(msg_group.meta)' in stop_source
+    assert '.with_for_update(of=ConversationMessageGroup).first()' in stop_rpc
+    assert 'retire_all_interrupts(msg_group.meta)' in stop_rpc
     assert 'retire_all_interrupts(msg_group.meta)' in event_source
     assert 'retire_all_interrupts(msg_group.meta)' in regenerate_source
     assert 'begin_execution_generation(' in regenerate_source
@@ -335,3 +509,63 @@ def test_all_hitl_jsonb_mutations_lock_the_message_row_and_stop_clears_cards():
     assert chat_models_source.count('execution_generation: Optional[str]') >= 2
     assert "'execution_generation': getattr(parsed, 'execution_generation', None)" in predict_source
     assert '.with_for_update(of=ConversationMessageGroup)' in regenerate_source
+
+
+def test_supervised_fallback_cannot_launch_a_competing_root_worker():
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
+    continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
+    callback_source = (plugin_root / 'methods' / 'task_callbacks.py').read_text()
+
+    offer = continue_source[
+        continue_source.index('def _offer_supervised_decision'):
+        continue_source.index('@web.rpc("chat_continue_predict_sio"')
+    ]
+    claim = continue_source[
+        continue_source.index('def _claim_stopped_supervisor_fallback'):
+        continue_source.index('def _offer_supervised_decision')
+    ]
+    recovery = callback_source[
+        callback_source.index('def _maybe_recover_supervised_hitl'):
+        callback_source.index('def _report_fork_probe_failure')
+    ]
+
+    assert "task_status != 'stopped'" in claim
+    assert "{'fallback_pending'}" in claim
+    assert 'return None' in offer
+    assert 'ConversationMessageGroup.task_id == task_id' in recovery
+    assert 'self.chat_continue_predict_sio(' in recovery
+    assert 'self.continue_predict_sio(' not in recovery
+    assert '_internal_token=INTERNAL_CONTINUE_TOKEN' in recovery
+
+
+def test_repeated_resolved_supervised_decision_cannot_replay_the_root():
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
+    continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
+
+    resolved_guard = continue_source[
+        continue_source.index('def _resolved_resume_result'):
+        continue_source.index('def _claim_stopped_supervisor_fallback')
+    ]
+    offer = continue_source[
+        continue_source.index('def _offer_supervised_decision'):
+        continue_source.index('@web.rpc("chat_continue_predict_sio"')
+    ]
+
+    assert "meta.get('resolved_hitl_interrupt_ids')" in resolved_guard
+    assert "meta.get('resolved_authorization_request_ids')" in resolved_guard
+    assert "'already_resolved': True" in resolved_guard
+    assert 'return self._resolved_resume_result(response_msg, parsed)' in offer
+
+
+def test_resolved_resume_identity_helper_is_registered_on_pylon_module():
+    """Root MCP resumes reach this helper after the supervised fast path misses."""
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
+    continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
+
+    helper = continue_source[
+        continue_source.index('def _explicit_resume_interrupt_ids') - 40:
+        continue_source.index('def _resolved_resume_result')
+    ]
+
+    assert '@web.method()' in helper
+    assert 'def _explicit_resume_interrupt_ids(self, parsed)' in helper

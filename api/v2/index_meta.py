@@ -63,8 +63,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 task_disconnected_timeout = int(secrets.get('task_disconnected_timeout_sec', 7200))
                 
                 for id, cmetadata in meta:
-                    for key in ['index_configuration', 'history']:
-                        if cmetadata and key in cmetadata:
+                    for key in ['index_configuration', 'history', 'report']:
+                        # 'report' is cleared to null when a reindex starts.
+                        if cmetadata and cmetadata.get(key):
                             try:
                                 cmetadata[key] = json.loads(cmetadata[key])
                             except (TypeError, json.JSONDecodeError):

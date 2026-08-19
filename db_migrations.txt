@@ -250,3 +250,11 @@ ALTER TABLE centry.eval_platform_dimension
 # reports the duplicate rows to resolve, and the real run refuses while any remain.
 Run admin task migrate_eval_binding_constraints with param: project_id=all;dry_run
 Run admin task migrate_eval_binding_constraints with param: project_id=all
+
+# 2.0.5 -> 2.0.6
+
+# Issue #1431: add message_group_ids column to chat_conversation_share_tokens
+# Stores a JSON list of ConversationMessageGroup IDs selected when scope='partial'.
+# Nullable — existing rows default to NULL (treated as unrestricted, equivalent to scope='all').
+# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+Run admin task migrate_share_token_columns

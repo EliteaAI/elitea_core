@@ -25,6 +25,7 @@ from ..models.pd.index import IndexDataRemovedEvent
 from ..sio.all import get_event_room, SioEvents
 from ..utils.application_tools import handle_index_data_failure, ensure_index_data_has_task_id, \
     clean_up_schedule_in_toolkit
+from ..utils.parallel_hitl import decision_ack_key
 
 
 class Method:
@@ -55,6 +56,28 @@ class Method:
         # this single event.
         if payload.get('type') == "agent_hitl_interrupt":
             self.context.event_manager.fire_event('chat_message_stream_pause', payload)
+
+        if payload.get('type') == "parallel_hitl_state":
+            self.context.event_manager.fire_event('chat_parallel_hitl_state', payload)
+
+        if payload.get('type') == "parallel_hitl_decision_ack":
+            response_metadata = payload.get('response_metadata') or {}
+            decision_id = response_metadata.get('decision_id')
+            phase = response_metadata.get('phase')
+            if payload.get('message_id') and decision_id and phase:
+                try:
+                    self.get_redis_client().setex(
+                        decision_ack_key(
+                            payload['message_id'], decision_id, phase,
+                        ),
+                        30,
+                        '1' if response_metadata.get('accepted') else '0',
+                    )
+                except Exception:
+                    log.exception('Failed to persist parallel HITL acknowledgement')
+            self.context.event_manager.fire_event(
+                'chat_parallel_hitl_decision_ack', payload,
+            )
 
         # Handle swarm agent response - emit as separate child message for non-parent agents
         if payload.get('type') == "agent_swarm_agent_response":
@@ -95,7 +118,9 @@ class Method:
             )
 
         room = get_event_room(sio_event, stream_id)
-        force_emit = payload.get('type') == "mcp_authorization_required"
+        force_emit = payload.get('type') in {
+            "mcp_authorization_required", "parallel_hitl_decision_ack",
+        }
         # Skip the emit if no client has joined this room — avoids serializing and
         # pushing the payload for non-interactive flows (scheduled pipelines,
         # webhooks, blocking REST calls) where the room always has zero subscribers.

@@ -48,6 +48,10 @@ class ApplicationChatRequest(MergeUpdateBase):
     # Parallel sub-agent fan-out (#4993): per-child HITL decisions keyed by the
     # parent Application tool_call_id. {tool_call_id, action, value}.
     hitl_decisions: Optional[List[Dict[str, Any]]] = None
+    mcp_auth_resume: Optional[bool] = False
+    mcp_auth_action: Optional[str] = None
+    mcp_auth_decisions: Optional[List[Dict[str, Any]]] = None
+    authorization_request_id: Optional[str] = None
     execution_generation: Optional[str] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
@@ -91,6 +95,11 @@ class ApplicationChatRequest(MergeUpdateBase):
         description="Context settings for the LLM"
     )
     is_regenerate: Optional[bool] = False
+    truncated_content: Optional[str] = Field(
+        default='',
+        description="Partial response content from a token-limit truncated run; "
+                    "used by the indexer to continue from where the LLM left off.",
+    )
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
@@ -113,6 +122,10 @@ class LLMChatRequest(MergeUpdateBase):
     # Parallel sub-agent fan-out (#4993): per-child HITL decisions keyed by the
     # parent Application tool_call_id. {tool_call_id, action, value}.
     hitl_decisions: Optional[List[Dict[str, Any]]] = None
+    mcp_auth_resume: Optional[bool] = False
+    mcp_auth_action: Optional[str] = None
+    mcp_auth_decisions: Optional[List[Dict[str, Any]]] = None
+    authorization_request_id: Optional[str] = None
     execution_generation: Optional[str] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None

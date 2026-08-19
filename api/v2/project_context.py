@@ -1,12 +1,19 @@
 from flask import request
 from pydantic import ValidationError
-from tools import api_tools, auth, config as c, rpc_tools
+from tools import api_tools, auth, config as c, rpc_tools, register_openapi
 
 from ...models.pd.project_context import ProjectContextDetail, ProjectContextUpdate
 from ...utils.constants import PROMPT_LIB_MODE
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
+    @register_openapi(
+        name="Get project context",
+        description="Returns the project's context content and enabled state.",
+        tags=["elitea_core/project_context"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.project_context.view"],
         "recommended_roles": {
@@ -21,6 +28,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
         )
         return ProjectContextDetail.from_config(config).model_dump(mode='json'), 200
 
+    @register_openapi(
+        name="Create or update project context",
+        description="Creates project context if missing, or updates existing project context content and enabled state.",
+        request_body=ProjectContextUpdate,
+        tags=["elitea_core/project_context"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.project_context.edit"],
         "recommended_roles": {
@@ -57,6 +72,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return ProjectContextDetail.from_config(result).model_dump(mode='json'), 200
 
+    @register_openapi(
+        name="Delete project context",
+        description="Deletes the project's context configuration.",
+        tags=["elitea_core/project_context"],
+        mcp_tool=True,
+        available_to_users=True,
+    )
     @auth.decorators.check_api({
         "permissions": ["models.project_context.edit"],
         "recommended_roles": {
