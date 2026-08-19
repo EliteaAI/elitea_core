@@ -7,13 +7,14 @@ from typing import List, Optional, Tuple, Literal
 from sqlalchemy import func, or_, asc, desc
 from sqlalchemy.orm import selectinload
 
-from tools import db, auth, serialize, rpc_tools, this
+from tools import db, auth, serialize, rpc_tools, this, context
 
 from .utils import set_columns_as_attrs, get_public_project_id
 from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag, ApplicationVersion, Application
 from ..models.enums.all import SkillEntityTypes, PublishStatus, AgentTypes
+from ..models.enums.events import ApplicationEvents
 from ..models.pd.skill import (
     SkillCreateModel,
     SkillDetailModel,
@@ -926,12 +927,19 @@ def delete_skill(
         if published_version:
             raise SkillPublishedError(skill_id)
 
+        skill_name = skill.name
+
         s.query(EntitySkillMapping).filter(
             EntitySkillMapping.skill_id == skill_id
         ).delete(synchronize_session=False)
 
         s.delete(skill)
-        return None
+
+    context.event_manager.fire_event(
+        ApplicationEvents.skill_deleted.value,
+        {'id': skill_id, 'name': skill_name, 'project_id': project_id}
+    )
+    return None
 
 
 def create_skill_version(
