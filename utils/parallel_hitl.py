@@ -18,6 +18,109 @@ from copy import deepcopy
 RESOLVED_INTERRUPT_IDS_KEY = 'resolved_hitl_interrupt_ids'
 EXECUTION_GENERATION_KEY = 'execution_generation'
 MAX_RESOLVED_INTERRUPT_IDS = 256
+SUPERVISOR_DECISIONS_KEY = 'parallel_hitl_decisions'
+SUPERVISOR_ROSTER_KEY = 'parallel_hitl_roster'
+MAX_SUPERVISOR_DECISIONS = 256
+INTERNAL_CONTINUE_TOKEN = object()
+
+
+def decision_ack_key(message_id, decision_id, phase):
+    return f'parallel_hitl_ack:{message_id}:{decision_id}:{phase}'
+
+
+def pending_supervisor_decisions(meta):
+    values = (meta or {}).get(SUPERVISOR_DECISIONS_KEY) or []
+    return [dict(item) for item in values if isinstance(item, dict)]
+
+
+def persist_supervisor_decision(meta, decision, phase='queued'):
+    """Durably upsert one invocation-scoped decision before pub/sub delivery."""
+    updated = dict(meta or {})
+    current = pending_supervisor_decisions(updated)
+    decision_id = str((decision or {}).get('decision_id') or '')
+    if not decision_id:
+        return updated
+    incoming = {**dict(decision), 'phase': phase}
+    by_id = {
+        str(item.get('decision_id')): item
+        for item in current if item.get('decision_id')
+    }
+    existing = by_id.get(decision_id) or {}
+    by_id[decision_id] = {**existing, **incoming}
+    updated[SUPERVISOR_DECISIONS_KEY] = list(by_id.values())[
+        -MAX_SUPERVISOR_DECISIONS:
+    ]
+    return updated
+
+
+def update_supervisor_decision_phase(meta, decision_id, phase):
+    updated = dict(meta or {})
+    decisions = pending_supervisor_decisions(updated)
+    for item in decisions:
+        if str(item.get('decision_id')) == str(decision_id):
+            item['phase'] = phase
+    if decisions:
+        updated[SUPERVISOR_DECISIONS_KEY] = decisions
+    return updated
+
+
+def claim_supervisor_decision_phase(meta, decision_id, expected_phases, phase):
+    """Atomically-shaped pure update used under the message-row lock.
+
+    The caller owns the database lock.  Returning ``claimed=False`` lets a
+    competing terminal callback or socket request observe that another path
+    already took responsibility for the durable fallback.
+    """
+    updated = dict(meta or {})
+    decisions = pending_supervisor_decisions(updated)
+    expected = set(expected_phases or [])
+    claimed = False
+    for item in decisions:
+        if (
+            str(item.get('decision_id')) == str(decision_id)
+            and item.get('phase') in expected
+        ):
+            item['phase'] = phase
+            claimed = True
+            break
+    if decisions:
+        updated[SUPERVISOR_DECISIONS_KEY] = decisions
+    return updated, claimed
+
+
+def complete_supervisor_decisions(meta, tool_call_id):
+    """Mark live decisions settled when their resumed child becomes terminal."""
+    updated = dict(meta or {})
+    decisions = pending_supervisor_decisions(updated)
+    for item in decisions:
+        if str(item.get('tool_call_id') or '') == str(tool_call_id or ''):
+            item['phase'] = 'completed'
+    if decisions:
+        updated[SUPERVISOR_DECISIONS_KEY] = decisions
+    return updated
+
+
+def merge_supervisor_roster(meta, state):
+    """Persist bounded branch-local supervisor status for crash/reload recovery."""
+    updated = dict(meta or {})
+    roster = dict(updated.get(SUPERVISOR_ROSTER_KEY) or {})
+    root_thread_id = str((state or {}).get('root_thread_id') or '')
+    tool_call_id = str((state or {}).get('tool_call_id') or '')
+    if root_thread_id:
+        roster['root_thread_id'] = root_thread_id
+    if tool_call_id:
+        children = dict(roster.get('children') or {})
+        children[tool_call_id] = {
+            **dict(children.get(tool_call_id) or {}),
+            **{
+                key: value for key, value in dict(state or {}).items()
+                if key not in {'chat_project_id'}
+            },
+        }
+        roster['children'] = children
+    if roster:
+        updated[SUPERVISOR_ROSTER_KEY] = roster
+    return updated
 
 
 def pending_interrupts(meta):
@@ -71,13 +174,23 @@ def normalize_interrupts(response_metadata):
         if not isinstance(item, dict):
             continue
         current = deepcopy(item)
-        child_thread_id = (
-            current.get('child_thread_id')
-            or lineage.get('child_thread_id')
-        )
+        # The task metadata identifies the durable worker child whose launch
+        # payload is stashed in Redis. A nested in-process Application may also
+        # put its leaf checkpoint id in ``child_thread_id``; that value is useful
+        # for LangGraph routing, but it must not replace the durable worker id or
+        # Core will look up a Redis key that can never exist on resume.
+        durable_child_thread_id = lineage.get('child_thread_id')
+        nested_child_thread_id = current.get('child_thread_id')
+        child_thread_id = durable_child_thread_id or nested_child_thread_id
+        if (
+            durable_child_thread_id
+            and nested_child_thread_id
+            and nested_child_thread_id != durable_child_thread_id
+        ):
+            current.setdefault('thread_id', nested_child_thread_id)
         tool_call_id = current.get('tool_call_id') or lineage.get('tool_call_id')
         if child_thread_id:
-            current.setdefault('child_thread_id', child_thread_id)
+            current['child_thread_id'] = child_thread_id
         if tool_call_id:
             current.setdefault('tool_call_id', tool_call_id)
         for key in ('parent_agent_call_id', 'sibling_ordinal'):
@@ -93,9 +206,20 @@ def normalize_interrupts(response_metadata):
                 if outer_last.get('name') == inner_first.get('name'):
                     inner_path = inner_path[1:]
             current['parent_agent_path'] = deepcopy(outer_path) + deepcopy(inner_path)
-        current.setdefault(
-            'resume_strategy', 'aggregate_child' if child_thread_id else 'single',
-        )
+        # Only the worker task lineage identifies a parked Core fan-out child
+        # backed by ``parallel_child_launch:*``. SDK Applications also attach
+        # child_thread_id while bubbling an in-process LangGraph interrupt, but
+        # those pauses must continue the root worker so the decision reaches
+        # the actual nested caller. Never trust an SDK-supplied strategy here.
+        if (
+            not durable_child_thread_id
+            and response_metadata.get('resume_strategy') == 'supervised_child'
+        ):
+            current['resume_strategy'] = 'supervised_child'
+        else:
+            current['resume_strategy'] = (
+                'aggregate_child' if durable_child_thread_id else 'single'
+            )
         normalized.append(current)
     return normalized
 
@@ -163,6 +287,8 @@ def retire_all_interrupts(meta):
     updated = remember_resolved_interrupts(meta, pending_interrupts(meta))
     updated.pop('hitl_interrupts', None)
     updated.pop('hitl_interrupt', None)
+    updated.pop(SUPERVISOR_DECISIONS_KEY, None)
+    updated.pop(SUPERVISOR_ROSTER_KEY, None)
     return updated
 
 
@@ -223,20 +349,28 @@ def decisions_for_child(decisions, child_thread_id, tool_call_id=None):
     return by_tool or decisions
 
 
-def validate_child_decisions(pending, decisions):
-    """Require an exact, unique decision for every pending durable-child card."""
+def validate_child_decisions(pending, decisions, require_all=True):
+    """Validate unique decisions against pending interrupt identities.
+
+    A parked worker child is resumed once and therefore still requires a
+    complete decision set.  An in-process root aggregate can be resumed with a
+    subset: the SDK checkpoints the completed leaf and returns the remaining
+    interrupts with their stable identities.
+    """
     pending = [dict(item) for item in (pending or []) if isinstance(item, dict)]
     decisions = [dict(item) for item in (decisions or []) if isinstance(item, dict)]
     expected = [interrupt_identity(item) for item in pending]
     received = [interrupt_identity(item) for item in decisions]
     if not expected or any(not identity for identity in expected):
         raise ValueError('Pending interrupt is missing a stable identity')
-    if any(not identity for identity in received):
+    if not received or any(not identity for identity in received):
         raise ValueError('Every decision must include an interrupt identity')
     if len(received) != len(set(received)):
         raise ValueError('Duplicate interrupt decisions are not allowed')
-    if set(received) != set(expected):
+    if require_all and set(received) != set(expected):
         raise ValueError('Decisions must exactly match all pending interrupts')
+    if not require_all and not set(received).issubset(set(expected)):
+        raise ValueError('Decision does not match a pending interrupt')
 
     pending_by_identity = {
         interrupt_identity(item): item for item in pending
@@ -248,6 +382,43 @@ def validate_child_decisions(pending, decisions):
             raise ValueError(
                 f"Action '{action}' is not available for interrupt '{identity}'"
             )
+
+
+def partition_root_hitl_decisions(
+    pending_hitl, pending_authorizations, decisions,
+):
+    """Validate and partition one mixed root-checkpoint resume.
+
+    Nested MCP authorization and sensitive-tool pauses can be surfaced in the
+    same root aggregate even though Core persists them in separate metadata
+    collections. The root LangGraph checkpoint accepts one decision list, so
+    validate that list against the union and return the identities to retire
+    from each collection.
+    """
+    pending_hitl = [
+        dict(item) for item in (pending_hitl or []) if isinstance(item, dict)
+    ]
+    pending_authorizations = [
+        dict(item) for item in (pending_authorizations or [])
+        if isinstance(item, dict)
+    ]
+    decisions = [
+        dict(item) for item in (decisions or []) if isinstance(item, dict)
+    ]
+    validate_child_decisions(
+        pending_hitl + pending_authorizations,
+        decisions,
+        require_all=False,
+    )
+    hitl_ids = {interrupt_identity(item) for item in pending_hitl}
+    authorization_ids = {
+        interrupt_identity(item) for item in pending_authorizations
+    }
+    received_ids = [interrupt_identity(item) for item in decisions]
+    return (
+        [identity for identity in received_ids if identity in hitl_ids],
+        [identity for identity in received_ids if identity in authorization_ids],
+    )
 
 
 def retire_child_interrupts(meta, child_thread_id, interrupt_ids=None):

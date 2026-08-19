@@ -17,7 +17,7 @@ from ...utils.exceptions import PoolSaturationError
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Continue / Resume Conversation",
-        description="Resume a HITL-paused conversation with an approve/reject/edit/block decision.",
+        description="Resume a HITL or Toolkit-authorization paused conversation.",
         mcp_description="""
         USE to resume a conversation that is paused at a human-in-the-loop (HITL) node, so a run can
         advance past the interrupt. Sending a plain message to a paused conversation just re-fires the
@@ -32,6 +32,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - edit — continue with `hitl_value` as the edited text.
         - block_with_comment — block and continue with `hitl_value` as the note.
 
+        For an on-demand Toolkit authorization pause, send `mcp_auth_resume: true`,
+        `mcp_auth_action: authorize|skip`, and the exact `authorization_request_id`
+        returned by the pause. Do not set `hitl_resume` for this protocol.
+
         `await_task_timeout`: 30 (default) waits up to 30 s and returns the post-resume message_groups;
         -1 returns immediately (poll with get_message); 0..300 is a custom timeout.
 
@@ -39,6 +43,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         1. Approve: { 'conversation_uuid': '550e...', 'message_id': 'a1b2...', 'hitl_action': 'approve' }
         2. Edit:    { 'conversation_uuid': '550e...', 'message_id': 'a1b2...', 'hitl_action': 'edit', 'hitl_value': 'use v2 endpoint' }
         3. Reject:  { 'conversation_uuid': '550e...', 'message_id': 'a1b2...', 'hitl_action': 'reject' }
+        4. Authorize Toolkit: { 'conversation_uuid': '550e...', 'message_id': 'a1b2...',
+           'mcp_auth_resume': true, 'mcp_auth_action': 'authorize',
+           'authorization_request_id': 'mcp_auth_...' }
         """,
         request_body=ContinuePredictPayload,
         mcp_tool=True,
@@ -67,11 +74,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "project_id": project_id,
             "conversation_uuid": str(parsed.conversation_uuid),
             "message_id": parsed.message_id,
-            "should_continue": True,
+            "should_continue": not parsed.mcp_auth_resume,
             "hitl_resume": parsed.hitl_resume,
             "hitl_action": parsed.hitl_action,
             "hitl_value": parsed.hitl_value,
             "hitl_decisions": parsed.hitl_decisions,
+            "mcp_auth_resume": parsed.mcp_auth_resume,
+            "mcp_auth_action": parsed.mcp_auth_action,
+            "mcp_auth_decisions": parsed.mcp_auth_decisions,
+            "authorization_request_id": parsed.authorization_request_id,
             "user_input": parsed.user_input,
             "thread_id": parsed.thread_id,
         }
