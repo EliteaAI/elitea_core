@@ -28,6 +28,7 @@ The DB/dispatch wrapper (:func:`execute_run`) keeps every ORM/SDK import lazy in
 function so this module loads by source with no ``tools``/SDK present — the pure core is
 unit-tested here; the wrapper's live behavior is exercised end-to-end (E2E-09 / E2E-11).
 """
+import time
 from typing import Any, Callable, List, Optional
 
 from .evaluation_scoring import (
@@ -46,10 +47,34 @@ ENGINE_CODE = 'code'
 STATUS_OK = 'ok'
 STATUS_ERROR = 'error'
 STATUS_PENDING_HUMAN = 'pending_human'
+
+# Why a run stopped short of its last case. Both keep the partial scorecard, but the user needs to
+# know which one happened: one is something they asked for, the other is the platform giving up.
+STOP_CANCEL_REQUESTED = 'cancel_requested'
+STOP_TIME_BUDGET = 'time_budget_exceeded'
+
+#: Wall-clock ceiling on a whole run, checked at case boundaries. Distinct from the reaper's
+#: ``RUN_STALE_AFTER_SECONDS``, which bounds the *quiet gap between two cases* — a run that keeps
+#: finishing cases is never stale, so without this cap a large enough dataset (or a pathologically
+#: slow agent) can hold a pool slot and heartbeat indefinitely. 6h is far longer than any sane
+#: dataset needs and short enough that a stuck run frees its slot within a working day.
+RUN_TIME_BUDGET_SECONDS = 6 * 60 * 60
 STATUS_SKIPPED = 'skipped'          # a code validation's own script returned 'na' (not scope-driven)
 
 TRIGGER_OFFLINE_BATCH = 'offline_batch'
 TRIGGER_ON_DEMAND = 'on_demand'
+
+
+# Plain exceptions (not EvalLibraryError subclasses) so this module keeps loading without ``tools``.
+# Both are raised only by the DB wrapper below, which runs on a daemon thread where the launcher
+# logs them — they never need an ``http_status``.
+
+class EvalRunAlreadyStartedError(Exception):
+    """Another worker already moved this run out of ``created``; this one must not execute it."""
+
+
+class EvalRunJudgeUnconfiguredError(Exception):
+    """The suite has AI-engine bindings but no judge model resolved (E4 — fail closed)."""
 
 
 def effective_engine(binding: dict) -> str:
@@ -198,6 +223,15 @@ def all_bindings_structure_only(bindings: List[dict]) -> bool:
     :func:`is_structure_only_binding`) — an empty suite is not a structure-only run, it's just an
     empty suite, so callers should keep requiring a dataset for that case."""
     return bool(bindings) and all(is_structure_only_binding(b) for b in bindings)
+
+
+def snapshot_needs_judge(snapshot: dict) -> bool:
+    """True when at least one binding in the snapshot runs on the AI engine, i.e. the run cannot
+    proceed without a resolved judge model (E4)."""
+    return any(
+        effective_engine(b) == ENGINE_AI
+        for b in ((snapshot or {}).get('bindings') or [])
+    )
 
 
 def resolve_version_id(bindings: List[dict], override: Optional[int] = None) -> Optional[int]:
@@ -468,6 +502,32 @@ def assemble_case_results(
     return results
 
 
+def run_one_case(
+    case: dict,
+    snapshot: dict,
+    *,
+    agent_runner: Optional[Callable[[dict], dict]] = None,
+    ai_scorer: Optional[Callable[[dict, List[dict]], List[dict]]] = None,
+    code_scorer: Optional[Callable[[dict, dict], dict]] = None,
+) -> tuple:
+    """Resolve one case's output (H4) then score it → ``(resolved_case, result_rows)``.
+
+    Everything a single case needs, touching no shared state, so :func:`orchestrate_run` can call
+    it either in-line or on a worker thread without the two paths diverging.
+    """
+    if agent_runner is not None and case.get('output') is None:
+        outcome = agent_runner(case)
+        if outcome.get('status') == 'ok':
+            case = {**case, 'output': outcome.get('output'), 'structure': outcome.get('structure')}
+        else:
+            case = {**case, 'structure': outcome.get('structure'),
+                    '_agent_error':
+                    outcome.get('error') or f"agent execution {outcome.get('status')}"}
+    return case, assemble_case_results(
+        case, snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
+    )
+
+
 def orchestrate_run(
     snapshot: dict,
     *,
@@ -475,6 +535,9 @@ def orchestrate_run(
     code_scorer: Optional[Callable[[dict, dict], dict]] = None,
     agent_runner: Optional[Callable[[dict], dict]] = None,
     on_case_done: Optional[Callable[[int, int], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    case_concurrency: int = 1,
+    time_budget_seconds: Optional[int] = RUN_TIME_BUDGET_SECONDS,
 ) -> dict:
     """Run every case in the snapshot → ``{results, headline_score, progress}``.
 
@@ -492,31 +555,128 @@ def orchestrate_run(
     ``on_case_done(done, total)`` fires after each case so the caller can publish intermediate
     progress; without it the loop is synchronous end-to-end and a poller would only ever observe
     ``0/N`` then ``N/N``.
+
+    ``should_cancel()`` is polled *before each case is started*: a case's agent call and judge
+    dispatches are blocking and already carry their own timeouts, so the run stops at a case
+    boundary rather than interrupting work in flight. The cases already scored are kept and
+    returned with ``cancelled=True`` — a partial scorecard is more useful than discarding the work,
+    and the headline is aggregated over what actually scored.
+
+    ``case_concurrency`` bounds how many cases run at once. **It defaults to 1, i.e. exactly the
+    sequential loop**, and that default is deliberate rather than conservative-by-omission: a case
+    is a burst of judge predicts plus one code dispatch per code binding, and both degrade to
+    *error verdicts* rather than backpressure when saturated (§19.5). Raising it therefore trades
+    wall-clock time for a real risk of scoring a run wrongly — judge rate-limit rejections and a
+    full indexer light-pool both surface as error rows that are indistinguishable from a genuinely
+    failed validation. Raise it only for a deployment whose judge model and code pool have the
+    headroom.
+
+    Cases are always submitted in index order and every submitted case is awaited, so the scored
+    set is a prefix no matter the concurrency: ``cases`` comes back index-aligned with the frozen
+    snapshot (which the caller writes back, and the drill-down indexes into), and ``results`` stays
+    in case-then-binding order so persisted row order does not depend on completion timing.
+
+    ``time_budget_seconds`` caps the whole run's wall clock, enforced at the same case boundaries
+    as the cancel check (``None`` disables it). It closes the gap the reaper cannot: the reaper
+    measures the *quiet interval between two cases*, so a run that keeps finishing cases keeps
+    heartbeating and never looks stale no matter how long it has been going. Both stops produce the
+    same partial scorecard, but ``stop_reason`` distinguishes them — one is what the user asked for,
+    the other is the platform giving up, and a scorecard that cannot tell you which is misleading.
     """
     cases = snapshot.get('cases') or []
     total = len(cases)
-    resolved_cases: List[dict] = []
-    all_results: List[dict] = []
-    for case in cases:
-        if agent_runner is not None and case.get('output') is None:
-            outcome = agent_runner(case)
-            if outcome.get('status') == 'ok':
-                case = {**case, 'output': outcome.get('output'), 'structure': outcome.get('structure')}
-            else:
-                case = {**case, 'structure': outcome.get('structure'),
-                        '_agent_error':
-                        outcome.get('error') or f"agent execution {outcome.get('status')}"}
-        resolved_cases.append(case)
-        all_results.extend(assemble_case_results(
-            case, snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
-        ))
-        if on_case_done is not None:
-            # Progress reporting must never take the run down with it.
-            try:
-                on_case_done(len(resolved_cases), total)
-            except Exception:  # noqa: BLE001
-                from pylon.core.tools import log  # local: this module loads without pylon present
-                log.exception('Eval run progress callback failed')
+    workers = max(1, int(case_concurrency or 1))
+    resolved: dict = {}
+    results_by_index: dict = {}
+    stop_reason: Optional[str] = None
+    deadline = (
+        time.monotonic() + max(1, int(time_budget_seconds))
+        if time_budget_seconds else None
+    )
+
+    def _report(done: int) -> None:
+        """Progress reporting must never take the run down with it."""
+        if on_case_done is None:
+            return
+        try:
+            on_case_done(done, total)
+        except Exception:  # noqa: BLE001
+            from pylon.core.tools import log  # local: this module loads without pylon present
+            log.exception('Eval run progress callback failed')
+
+    def _should_stop() -> bool:
+        """Should the run stop before starting another case, and why?
+
+        The budget is checked first so an over-budget run does not spend a DB round trip asking
+        about a cancel it is about to stop for anyway. Called from the submitting thread only, so
+        the ``stop_reason`` write needs no lock.
+        """
+        nonlocal stop_reason
+        if stop_reason is not None:
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            stop_reason = STOP_TIME_BUDGET
+        elif should_cancel is not None and should_cancel():
+            stop_reason = STOP_CANCEL_REQUESTED
+        return stop_reason is not None
+
+    if workers == 1:
+        # Kept as a real in-line loop, not a one-worker pool: this is the default path, and running
+        # it on the calling thread means the common case never inherits thread-affinity surprises
+        # from the agent / judge / code dispatch stack.
+        for index, case in enumerate(cases):
+            if _should_stop():
+                break
+            resolved[index], results_by_index[index] = run_one_case(
+                cases[index], snapshot, agent_runner=agent_runner,
+                ai_scorer=ai_scorer, code_scorer=code_scorer)
+            _report(len(resolved))
+    else:
+        import threading
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+        counter_lock = threading.Lock()
+        done_count = 0
+
+        def _count_done() -> int:
+            nonlocal done_count
+            with counter_lock:
+                done_count += 1
+                return done_count
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='eval_case') as pool:
+            pending: dict = {}
+            next_index = 0
+            while True:
+                while stop_reason is None and len(pending) < workers and next_index < total:
+                    if _should_stop():
+                        break
+                    pending[pool.submit(
+                        run_one_case, cases[next_index], snapshot, agent_runner=agent_runner,
+                        ai_scorer=ai_scorer, code_scorer=code_scorer)] = next_index
+                    next_index += 1
+                if not pending:
+                    break
+                # Await whatever finishes first and immediately top the pool back up, so a slow
+                # case cannot idle the other slots. Every submitted case is awaited even after a
+                # cancel — its agent call is already paid for, so discarding it would throw away
+                # work the user is billed for and leave `cases` misaligned.
+                completed, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                for future in completed:
+                    index = pending.pop(future)
+                    # A raise here propagates once the `with` drains the rest, marking the run
+                    # errored exactly as the sequential path would.
+                    resolved[index], results_by_index[index] = future.result()
+                    _report(_count_done())
+
+    scored_case_count = len(resolved)
+    # The caller writes `cases` back onto the frozen snapshot, so any case never reached has to be
+    # carried through verbatim — dropping it would rewrite history and shrink the run's case set to
+    # whatever happened to be scored before the stop.
+    resolved_cases: List[dict] = [resolved.get(i, cases[i]) for i in range(total)]
+    all_results: List[dict] = [
+        row for i in range(total) for row in results_by_index.get(i, [])
+    ]
 
     weight_map = snapshot_weight_map(snapshot)
     scored_items = [
@@ -530,7 +690,13 @@ def orchestrate_run(
     return {
         'results': all_results,
         'headline_score': headline,
-        'progress': {'done': total, 'total': total},
+        # True for either kind of early stop — both leave a partial scorecard, which is the only
+        # thing the terminal status has to express. `stop_reason` carries the distinction.
+        'cancelled': stop_reason is not None,
+        'stop_reason': stop_reason,
+        # On an early stop the count is the cases actually scored, so the progress bar keeps telling
+        # the truth about how far the run got instead of jumping to N/N.
+        'progress': {'done': scored_case_count, 'total': total},
         # Resolved cases (agent output filled in where the runner produced one) — the caller
         # writes this back onto the persisted snapshot so the drill-down shows the real output
         # instead of the pre-execution `None` (§3 lifecycle: "captures the output").
@@ -636,7 +802,8 @@ def execute_run(
     *,
     task_node,
     judge_llm_settings: Optional[dict] = None,
-    session=None,
+    case_concurrency: int = 1,
+    time_budget_seconds: Optional[int] = RUN_TIME_BUDGET_SECONDS,
     judge=None,
     executor=None,
 ) -> dict:
@@ -653,51 +820,126 @@ def execute_run(
         protects interactive traffic; pool saturation degrades to an error verdict, §19.5).
       * ``judge_llm_settings`` — resolved by the caller (suite override §18.7, else project
         default); falls back to the snapshot's frozen ``suite.judge_model``.
-      * ``judge`` / ``executor`` — optional overrides for tests. Live path (E2E-09/E2E-11)."""
+      * ``judge`` / ``executor`` — optional overrides for tests. Live path (E2E-09/E2E-11).
+
+    **Sessions are per checkpoint, never held across the run.** A run lasts as long as its dataset
+    takes — minutes to hours of blocking agent and judge calls — so a single session spanning it
+    would pin one pooled connection (times ``task_limit``, times the gunicorn worker count) for
+    that whole time while doing nothing, and an idle connection long enough for a server or pooler
+    timeout to reap leaves the terminal write to fail against a dead handle. Each phase below
+    therefore opens its own short session and closes it: claim, one per progress heartbeat, one per
+    cancel poll, and one for the terminal write. Nothing ORM-mapped is carried between phases —
+    only the plain snapshot dict and ``owner_id`` — so there are no detached instances."""
     from ..models.evaluation import EvalRun, EvalResult, EvalRunStatus
     from .code_validation import make_task_node_executor
-    from .evaluation_library_utils import _session
+    from tools import db  # pylint: disable=E0401
     from datetime import datetime
 
-    with _session(session, project_id) as s:
+    # --- claim -----------------------------------------------------------------------------
+    with db.get_session(project_id) as s:
         run = s.query(EvalRun).filter(EvalRun.id == run_id).first()
         if not run:
             raise ValueError(f'Eval run {run_id} not found')
         snapshot = run.snapshot or {}
-        run.status = EvalRunStatus.running
-        run.started_at = datetime.utcnow()
+        owner_id = run.owner_id
+
+        # Claim the run with a conditional UPDATE: two concurrent launches would both pass a plain
+        # read of `status`, both execute, and both write EvalResult rows — duplicated results and a
+        # raced headline. Whoever loses the claim exits without touching anything.
+        claimed = (
+            s.query(EvalRun)
+            .filter(EvalRun.id == run_id, EvalRun.status == EvalRunStatus.created)
+            .update(
+                {EvalRun.status: EvalRunStatus.running, EvalRun.started_at: datetime.utcnow()},
+                synchronize_session=False,
+            )
+        )
         s.commit()
+    if not claimed:
+        raise EvalRunAlreadyStartedError(run_id)
 
-        def _publish_progress(done: int, total: int) -> None:
-            """Publish intermediate progress to pollers.
+    def _publish_progress(done: int, total: int) -> None:
+        """Publish intermediate progress to pollers, and heartbeat for the reaper.
 
-            The status endpoint reads through a *different* session, so a flush would be invisible —
-            only a commit makes the count visible. Safe mid-loop: results accumulate in a plain list
-            and nothing is added to the session until the loop finishes, so no partial EvalResult
-            rows can leak.
-            """
+        The status endpoint reads through a different session, so only a commit makes the count
+        visible. The row is loaded and assigned rather than bulk-updated so ``updated_at``'s
+        ``onupdate`` fires unambiguously — that timestamp is what
+        :mod:`evaluation_run_reaper` measures staleness from, so a missed bump would eventually
+        get a healthy run failed out from under itself.
+        """
+        with db.get_session(project_id) as s:
             row = s.query(EvalRun).filter(EvalRun.id == run_id).first()
             if row is not None:
                 row.progress = {'done': done, 'total': total}
                 s.commit()
 
+    def _cancel_requested() -> bool:
+        """Has someone asked this run to stop? (§14.2 cancel)
+
+        A fresh session per poll, so the flag — written by a request handler in another
+        transaction — is always read outside any transaction this run holds open.
+        """
+        with db.get_session(project_id) as s:
+            meta = s.query(EvalRun.meta).filter(EvalRun.id == run_id).scalar() or {}
+        return bool(meta.get('cancel_requested'))
+
+    def _mark_errored(message: str) -> None:
+        """Record an orchestration-level failure on its own connection.
+
+        The failure may itself be a dead or poisoned connection, so this must not reuse whatever
+        session was in play — otherwise the run is left in ``running`` and only the reaper closes
+        it out, half an hour later.
+        """
         try:
-            if executor is None:
-                executor = make_task_node_executor(task_node)
-            settings = judge_llm_settings or (snapshot.get('suite') or {}).get('judge_model') or {}
-            ai_scorer = _make_ai_scorer(project_id, settings, judge=judge)
-            code_scorer = _make_code_scorer(snapshot, executor)
+            with db.get_session(project_id) as s:
+                row = s.query(EvalRun).filter(EvalRun.id == run_id).first()
+                if row is not None:
+                    row.status = EvalRunStatus.errored
+                    row.error = message
+                    row.finished_at = datetime.utcnow()
+                    s.commit()
+        except Exception:  # noqa: BLE001 - never mask the original failure
+            from pylon.core.tools import log  # local: this module loads without pylon present
+            log.exception('Could not mark eval run %s (project %s) errored', run_id, project_id)
 
-            # Live agent execution (H4) only for offline-batch: on-demand cases already carry the
-            # stored conversation's output. ``owner_id`` is the acting user for detail resolution.
-            agent_runner = None
-            if snapshot.get('trigger_type') == TRIGGER_OFFLINE_BATCH:
-                agent_runner = _make_agent_runner(project_id, snapshot, user_id=run.owner_id)
+    # --- execute (no session held) ---------------------------------------------------------
+    try:
+        if executor is None:
+            executor = make_task_node_executor(task_node)
+        settings = judge_llm_settings or (snapshot.get('suite') or {}).get('judge_model') or {}
+        # E4 fail-closed: with no judge resolved, every AI dimension would come back as a
+        # `predict_error` row and the run would still publish a partial headline that looks
+        # legitimate. Refuse the run instead.
+        if not settings and snapshot_needs_judge(snapshot):
+            raise EvalRunJudgeUnconfiguredError(
+                'Suite has AI-scored validations but no judge model is configured '
+                '(set one on the suite or as the project default).'
+            )
+        ai_scorer = _make_ai_scorer(project_id, settings, judge=judge)
+        code_scorer = _make_code_scorer(snapshot, executor)
 
-            outcome = orchestrate_run(snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
-                                      agent_runner=agent_runner,
-                                      on_case_done=_publish_progress)
+        # Live agent execution (H4) only for offline-batch: on-demand cases already carry the
+        # stored conversation's output. ``owner_id`` is the acting user for detail resolution.
+        agent_runner = None
+        if snapshot.get('trigger_type') == TRIGGER_OFFLINE_BATCH:
+            agent_runner = _make_agent_runner(project_id, snapshot, user_id=owner_id)
 
+        outcome = orchestrate_run(snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
+                                  agent_runner=agent_runner,
+                                  on_case_done=_publish_progress,
+                                  should_cancel=_cancel_requested,
+                                  case_concurrency=case_concurrency,
+                                  time_budget_seconds=time_budget_seconds)
+    except Exception as exc:  # noqa: BLE001 - orchestration-level failure marks the run errored
+        _mark_errored(str(exc))
+        raise
+
+    # --- terminal write --------------------------------------------------------------------
+    try:
+        with db.get_session(project_id) as s:
+            run = s.query(EvalRun).filter(EvalRun.id == run_id).first()
+            if run is None:
+                raise ValueError(f'Eval run {run_id} disappeared while executing')
             for row in outcome['results']:
                 s.add(EvalResult(run_id=run.id, **row))
             run.headline_score = outcome['headline_score']
@@ -705,21 +947,24 @@ def execute_run(
             # Reassign (not mutate in place) so SQLAlchemy detects the JSONB column changed —
             # the drill-down reads `snapshot.cases[i].output`, which is only known post-execution.
             run.snapshot = {**snapshot, 'cases': outcome['cases']}
-            run.status = EvalRunStatus.finished
+            # A run stopped early keeps the cases it did score (partial scorecard) but must not be
+            # read as a completed evaluation of the whole dataset.
+            run.status = (
+                EvalRunStatus.cancelled if outcome.get('cancelled') else EvalRunStatus.finished
+            )
+            if outcome.get('stop_reason') == STOP_TIME_BUDGET:
+                # Nobody asked for this stop, so without a reason on the row the run reads as a
+                # user cancellation and the missing cases look like someone's choice.
+                hours = (time_budget_seconds or 0) / 3600
+                run.error = (
+                    f'Run stopped after its {hours:g}h time limit with '
+                    f"{outcome['progress']['done']} of {outcome['progress']['total']} cases scored. "
+                    'The scores below cover only those cases. Split the dataset into smaller runs.'
+                )
             run.finished_at = datetime.utcnow()
-            s.flush()
-        except Exception as exc:  # noqa: BLE001 - orchestration-level failure marks the run errored
-            # Commit the terminal state before re-raising: the caller's session context rolls back
-            # on exception, which would discard it and leave the run stuck at `created` forever.
-            # Roll back first so a failed DB transaction can't block the marker write.
-            s.rollback()
-            run = s.query(EvalRun).filter(EvalRun.id == run_id).first()
-            if run is not None:
-                run.status = EvalRunStatus.errored
-                run.error = str(exc)
-                run.finished_at = datetime.utcnow()
-                s.commit()
-            raise
-
-        return {'run_id': run.id, 'status': run.status,
-                'headline_score': run.headline_score, 'progress': run.progress}
+            s.commit()
+            return {'run_id': run.id, 'status': run.status,
+                    'headline_score': run.headline_score, 'progress': run.progress}
+    except Exception as exc:  # noqa: BLE001 - results are lost, but the row must not stay `running`
+        _mark_errored(f'Run completed but its results could not be saved: {exc}')
+        raise

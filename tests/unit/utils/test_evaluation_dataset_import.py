@@ -4,6 +4,7 @@ Pure stdlib functions loaded directly from their path. These lock the row shape
 (input/variables/expected_output/source_ref), the reserved-column convention, and the
 per-row error report (invalid rows skipped, never abort the import).
 """
+import json
 import pathlib
 import sys
 
@@ -120,3 +121,30 @@ def test_parse_import_dispatch_json(imp):
 def test_parse_import_unknown_format(imp):
     rows, errors = imp.parse_import('xml', '<x/>')
     assert rows == [] and 'unsupported format' in errors[0]['error']
+
+
+# --- size caps ----------------------------------------------------------------
+# Import is one synchronous request that inserts a row per case, and every later run invokes the
+# agent once per case, so an unbounded file amplifies both request time and run cost.
+
+def test_csv_row_cap_reports_the_overflow(imp):
+    content = 'input\n' + ''.join(f'q{i}\n' for i in range(imp.MAX_CASES + 5))
+    rows, errors = imp.parse_csv(content)
+    assert len(rows) == imp.MAX_CASES
+    assert len(errors) == 1 and 'limited to' in errors[0]['error']
+
+
+def test_json_row_cap_reports_the_overflow(imp):
+    content = json.dumps([{'input': f'q{i}'} for i in range(imp.MAX_CASES + 5)])
+    rows, errors = imp.parse_json(content)
+    assert len(rows) == imp.MAX_CASES
+    assert len(errors) == 1 and 'limited to' in errors[0]['error']
+
+
+def test_oversized_cell_is_a_row_error_not_a_stored_case(imp):
+    huge = 'x' * (imp.MAX_CELL_CHARS + 1)
+    rows, errors = imp.parse_json(json.dumps([{'input': huge}]))
+    assert rows == [] and 'character limit' in errors[0]['error']
+
+    rows, errors = imp.parse_json(json.dumps([{'input': 'q', 'expected_output': huge}]))
+    assert rows == [] and 'expected_output' in errors[0]['error']

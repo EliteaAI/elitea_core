@@ -18,6 +18,7 @@ Deno/Pyodide sandbox that lives on ``pylon_indexer`` (§19.7) — this module is
   * ``make_task_node_executor`` / ``run_code_validation`` — dispatch the assembled script to
     the indexer's ``indexer_code_validation`` task (§19.7) and fold the result into a verdict.
 """
+import math
 from typing import Any, Optional
 
 from .evaluation_code_screen import screen_validation_code
@@ -83,6 +84,10 @@ def _coerce_to_contract(value: Any, return_contract: str):
         # bool is a subclass of int; a bool is not a valid number result.
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None, None, 'result is not a number'
+        # NaN/inf (a divide-by-zero in the script) would clamp to a perfect 100 downstream,
+        # because min(100.0, float('nan')) is 100.0 — reject it as an error verdict instead.
+        if not math.isfinite(value):
+            return None, None, 'result is not a finite number'
         return round(float(value), 2), None, None
 
     # bool contract (default): accept a real bool, or a number treated as truthy/falsy.

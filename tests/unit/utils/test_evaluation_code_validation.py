@@ -134,6 +134,14 @@ def test_coerce_number_contract_rejects_string(cv):
     assert native is None and err
 
 
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), float('-inf')])
+def test_coerce_number_contract_rejects_non_finite(cv, value):
+    # a divide-by-zero in the script must not become a top score: the downstream clamp turns
+    # NaN into 100.0, because min(100.0, float('nan')) is 100.0 in Python.
+    native, passed, err = cv._coerce_to_contract(value, 'number')
+    assert native is None and err and 'finite' in err
+
+
 # ---------------------------------------------------------------------------
 # map_execution_result — exec dict → verdict
 # ---------------------------------------------------------------------------

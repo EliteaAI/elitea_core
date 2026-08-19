@@ -60,7 +60,10 @@ class EvalDimensionBaseModel(BaseModel):
     scale_min: float = 0.0
     scale_max: float = 100.0
     polarity: str = EvalPolarity.higher_better
-    default_weight: float = 1.0
+    # A negative weight would invert the criterion inside the weighted mean (§20.6): a good score
+    # would pull the headline down, and a large enough negative weight can push the denominator
+    # to zero or negative and produce a headline outside 0..100 entirely.
+    default_weight: float = Field(1.0, ge=0)
     default_target: Optional[float] = None
     default_target_operator: Optional[str] = None
     meta: dict = Field(default_factory=dict)
@@ -222,7 +225,10 @@ class EvalBindingBaseModel(BaseModel):
     evidence_scope: dict = Field(
         default_factory=lambda: {'structure': False, 'input': True, 'output': True}
     )
-    weight: float = 1.0
+    # ge=0 for the same reason as EvalDimensionBaseModel.default_weight: a negative weight
+    # inverts the criterion in the weighted mean and can move the headline out of 0..100.
+    # 0 stays legal — it is the documented "informational only" weight (§20.6).
+    weight: float = Field(1.0, ge=0)
     target: Optional[float] = None
     target_operator: Optional[str] = None
     order_index: int = 0
@@ -271,7 +277,7 @@ class EvalBindingUpdateModel(EvalBindingBaseModel):
     # binding knobs only; the bound source (dimension/code/platform) is immutable post-create.
     engine: Optional[str] = None
     evidence_scope: Optional[dict] = None
-    weight: Optional[float] = None
+    weight: Optional[float] = Field(None, ge=0)
     order_index: Optional[int] = None
 
     @field_validator('engine')
@@ -499,7 +505,9 @@ class EvalDatasetImportModel(BaseModel):
     """Bulk case import (§17.2 CSV/JSON). ``content`` is the raw file text; rows are parsed
     and validated per-row by the import util, which returns an accepted-count + error report."""
     format: str = Field(..., description="csv | json")
-    content: str = Field(..., min_length=1)
+    # Capped at the API boundary so a huge body is rejected before it is parsed and held in memory
+    # twice (raw text + parsed rows); the parser applies its own per-row and per-cell caps.
+    content: str = Field(..., min_length=1, max_length=20_000_000)
 
     @field_validator('format')
     @classmethod

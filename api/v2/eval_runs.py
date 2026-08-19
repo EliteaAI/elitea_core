@@ -21,6 +21,7 @@ from ...utils.evaluation_run_utils import (
     create_batch_run,
     create_on_demand_run,
     launch_run,
+    mark_run_unstarted,
 )
 from ...utils.evaluation_run_orchestration import TRIGGER_ON_DEMAND
 from ...utils.evaluation_library_utils import EvalLibraryError
@@ -107,8 +108,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
             or snapshot_judge
             or get_validation_llm_settings(project_id, run.application_version_id)
         )
-        launch_run(project_id, run.id, task_node=self.module.task_node,
-                   judge_llm_settings=judge_settings)
+        # A rejected submission means no pool slot (or maintenance mode) — the run is not queued
+        # anywhere, so resolve the row here rather than answering 202 for work that will never
+        # start and leaving it in `created` forever.
+        task_id = launch_run(project_id, run.id, eval_task_node=self.module.eval_task_node,
+                             judge_llm_settings=judge_settings)
+        if task_id is None:
+            reason = ('Could not start: too many evaluation runs are already in progress. '
+                      'Wait for one to finish and start this run again.')
+            run = mark_run_unstarted(project_id, run.id, reason)
+            return {"error": reason,
+                    "run": EvalRunSummaryModel.model_validate(run).model_dump(mode='json')}, 503
         return EvalRunSummaryModel.model_validate(run).model_dump(mode='json'), 202
 
 

@@ -52,6 +52,12 @@ class EvalBindingSourceError(EvalLibraryError):
     http_status = 400
 
 
+class EvalBindingDuplicateError(EvalLibraryError):
+    """The item is already bound to this suite. Scoring the same criterion twice would silently
+    double its weight in the headline, so the second attach is refused."""
+    http_status = 409
+
+
 class EvalBindingEngineError(EvalLibraryError):
     """The binding asks for an engine the bound dimension's definition does not permit."""
     http_status = 400
@@ -199,6 +205,23 @@ def _validate_dimension_engine(s, dimension_id: Optional[int], engine: str) -> N
         raise EvalBindingEngineError(engine, allowed)
 
 
+def _require_not_already_bound(s, suite_id: int, data: EvalBindingCreateModel) -> None:
+    """Pre-check the ``(suite_id, <source>)`` unique constraints so a re-attach returns a 409
+    instead of surfacing an IntegrityError from the flush."""
+    column, value = (
+        (EvalBinding.dimension_id, data.dimension_id) if data.dimension_id is not None
+        else (EvalBinding.code_validation_id, data.code_validation_id) if data.code_validation_id is not None
+        else (EvalBinding.platform_key, data.platform_key)
+    )
+    existing = (
+        s.query(EvalBinding.id)
+        .filter(EvalBinding.suite_id == suite_id, column == value)
+        .first()
+    )
+    if existing:
+        raise EvalBindingDuplicateError('this validation is already bound to the suite')
+
+
 def list_bindings(project_id: int, suite_id: int, session=None) -> List[EvalBinding]:
     with _session(session, project_id) as s:
         _require_suite(s, suite_id)
@@ -231,6 +254,7 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
         if data.code_validation_id is not None or data.platform_key is not None:
             engine = EvalEngine.code
         _validate_dimension_engine(s, data.dimension_id, engine)
+        _require_not_already_bound(s, suite_id, data)
         binding = EvalBinding(
             suite_id=suite_id,
             application_version_id=data.application_version_id,

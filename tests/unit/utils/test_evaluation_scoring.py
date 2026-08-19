@@ -78,6 +78,28 @@ def test_degenerate_ordinal_raises(scoring):
         scoring.normalize_score(1, 'ordinal', 1, 1)
 
 
+def test_ordinal_honors_zero_based_min(scoring):
+    # a 0..4 scale: 2 is the midpoint, NOT (2-1)/(4-1) = 33.33
+    assert scoring.normalize_score(2, 'ordinal', 0, 4) == 50.0
+
+
+def test_ordinal_honors_offset_min(scoring):
+    # a 2..6 scale: 2 is the floor, 6 the ceiling
+    assert scoring.normalize_score(2, 'ordinal', 2, 6) == 0.0
+    assert scoring.normalize_score(4, 'ordinal', 2, 6) == 50.0
+
+
+def test_ordinal_min_defaults_to_one(scoring):
+    assert scoring.normalize_score(4, 'ordinal', None, 5) == 75.0
+
+
+@pytest.mark.parametrize('native', [float('nan'), float('inf'), float('-inf')])
+def test_non_finite_native_raises(scoring, native):
+    # the clamp would turn NaN into a perfect 100 — min(100.0, float('nan')) is 100.0 in Python
+    with pytest.raises(ValueError):
+        scoring.normalize_score(native, 'continuous', 0, 100)
+
+
 # --- case_weighted_score ------------------------------------------------------
 
 def test_worked_example_case_score(scoring):
@@ -166,6 +188,50 @@ def test_fold_then_aggregate_matches_manual(scoring):
     headline = scoring.aggregate_run_score(items, weight_map)
     # aggregate_run_score rounds to 2 decimals, matching what the Results view shows
     assert headline == pytest.approx(round((80 * 2 + 60) / 3 / 2 + 100 / 2, 2))
+
+
+# --- the canonical §20.6 fixture, end to end ----------------------------------
+# The documented worked example, driven from NATIVE scores through the real
+# normalize -> fold -> aggregate path rather than from pre-normalized numbers. This is the
+# standing regression test for server/client parity on the headline: any change to a scale
+# formula, the polarity flip, the clamp or the rounding moves this number off 86.5.
+
+CANONICAL_CASE_ID = 42
+
+# (dimension_id, native, scale_type, scale_min, scale_max, polarity, weight, expected_normalized)
+CANONICAL_ITEMS = [
+    (1, 78, 'continuous', 0, 100, 'higher_better', 2, 78.0),   # relevance
+    (2, 4, 'ordinal', 1, 5, 'higher_better', 1, 75.0),         # tone, 4 of 5
+    (3, True, 'binary', None, None, 'higher_better', 1, 100.0),  # format ok
+    (4, 12, 'continuous', 0, 100, 'lower_better', 1, 88.0),    # toxicity, inverse metric
+    (5, True, 'binary', None, None, 'higher_better', 1, 100.0),  # no PII
+]
+
+
+def test_canonical_worked_example_headline_is_86_5(scoring):
+    machine_items = []
+    weight_map = {}
+    for dim_id, native, scale_type, lo, hi, polarity, weight, expected in CANONICAL_ITEMS:
+        normalized = scoring.normalize_score(native, scale_type, lo, hi, polarity)
+        assert normalized == expected, f'dimension {dim_id} normalized to {normalized}'
+        machine_items.append((CANONICAL_CASE_ID, dim_id, None, None, normalized))
+        weight_map[scoring.binding_item_key(dim_id)] = weight
+
+    items = scoring.fold_latest_normalized(machine_items, [])
+    assert scoring.aggregate_run_score(items, weight_map) == 86.5
+
+
+def test_canonical_example_via_snapshot_weight_map(scoring):
+    # the weights the runner actually uses come off the frozen snapshot bindings — same 86.5
+    snapshot = {'bindings': [
+        {'dimension_id': dim_id, 'weight': weight}
+        for dim_id, _, _, _, _, _, weight, _ in CANONICAL_ITEMS
+    ]}
+    items = [
+        (CANONICAL_CASE_ID, scoring.binding_item_key(dim_id), expected)
+        for dim_id, _, _, _, _, _, _, expected in CANONICAL_ITEMS
+    ]
+    assert scoring.aggregate_run_score(items, scoring.snapshot_weight_map(snapshot)) == 86.5
 
 
 def test_fold_none_scores_survive_to_aggregate_as_provisional(scoring):

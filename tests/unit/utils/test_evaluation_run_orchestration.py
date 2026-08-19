@@ -484,6 +484,313 @@ def test_orchestrate_survives_failing_progress_callback(orch):
 
 
 # ---------------------------------------------------------------------------
+# orchestrate_run — cooperative cancel (§14.2 durability)
+# A 50-case run is hours of agent + judge work, so a run started by mistake needs a way out that
+# neither abandons a row reading "in progress" forever nor throws away the work already paid for.
+# ---------------------------------------------------------------------------
+
+def _three_case_snapshot(orch):
+    return _snapshot(
+        orch,
+        dimensions=[{'id': 1, 'scale_type': 'binary'}],
+        bindings=[{'engine': 'ai', 'dimension_id': 1}],
+        cases=[{'id': 1, 'output': 'a'}, {'id': 2, 'output': 'b'}, {'id': 3, 'output': 'c'}],
+    )
+
+
+def _ok_ai_scorer(evidence, dims):
+    return [_ai_result(d['id'], 1) for d in dims]
+
+
+def test_cancel_between_cases_keeps_what_already_scored(orch):
+    """Partial results are kept: the agent calls and judge tokens are already spent."""
+    calls = []
+
+    def should_cancel():
+        calls.append(1)
+        return len(calls) > 2  # allow cases 1 and 2, stop before case 3
+
+    out = orch.orchestrate_run(
+        _three_case_snapshot(orch), ai_scorer=_ok_ai_scorer, should_cancel=should_cancel)
+
+    assert out['cancelled'] is True
+    assert {r['dataset_case_id'] for r in out['results']} == {1, 2}
+    assert out['headline_score'] == 100.0  # aggregated over what scored, not over N/A cases
+
+
+def test_cancel_reports_the_cases_actually_scored_not_the_total(orch):
+    out = orch.orchestrate_run(
+        _three_case_snapshot(orch), ai_scorer=_ok_ai_scorer, should_cancel=lambda: True)
+    assert out['progress'] == {'done': 0, 'total': 3}
+    assert out['results'] == []
+
+
+def test_cancel_does_not_shrink_the_frozen_case_set(orch):
+    """``cases`` is written back onto the immutable snapshot, so the unscored tail must survive —
+    otherwise cancelling would rewrite the run's history down to whatever got scored."""
+    out = orch.orchestrate_run(
+        _three_case_snapshot(orch), ai_scorer=_ok_ai_scorer, should_cancel=lambda: True)
+    assert [c['id'] for c in out['cases']] == [1, 2, 3]
+
+
+def test_no_cancel_callback_runs_everything(orch):
+    out = orch.orchestrate_run(_three_case_snapshot(orch), ai_scorer=_ok_ai_scorer)
+    assert out['cancelled'] is False
+    assert out['progress'] == {'done': 3, 'total': 3}
+
+
+def test_cancel_is_checked_before_the_agent_runs_not_after(orch):
+    """The point of cancelling is to stop paying for agent executions."""
+    ran = []
+
+    def agent_runner(case):
+        ran.append(case['id'])
+        return {'status': 'ok', 'output': 'x'}
+
+    snap = _snapshot(
+        orch,
+        dimensions=[{'id': 1, 'scale_type': 'binary'}],
+        bindings=[{'engine': 'ai', 'dimension_id': 1}],
+        cases=[{'id': 1, 'output': None}, {'id': 2, 'output': None}],
+    )
+    orch.orchestrate_run(snap, ai_scorer=_ok_ai_scorer, agent_runner=agent_runner,
+                         should_cancel=lambda: True)
+    assert ran == []
+
+
+# ---------------------------------------------------------------------------
+# orchestrate_run — run-level wall-clock cap
+#
+# The reaper measures the quiet gap between two cases, so a run that keeps finishing cases keeps
+# heartbeating and never looks stale however long it runs. This cap is the only thing that bounds
+# total run time, and it must stay distinguishable from a user-requested cancel.
+# ---------------------------------------------------------------------------
+
+class _FakeClock:
+    """A monotonic clock whose first reading sets the deadline and whose next is far past it, so the
+    boundary can be asserted exactly without a real sleep."""
+
+    def __init__(self):
+        self._readings = 0
+
+    def monotonic(self):
+        self._readings += 1
+        return 0.0 if self._readings == 1 else 10_000.0
+
+
+def test_a_generous_budget_does_not_interfere(orch):
+    out = orch.orchestrate_run(
+        _three_case_snapshot(orch), ai_scorer=_ok_ai_scorer, time_budget_seconds=3600)
+    assert out['stop_reason'] is None
+    assert out['progress'] == {'done': 3, 'total': 3}
+
+
+def test_expired_time_budget_stops_before_any_case(orch):
+    """A budget already spent must not start a single agent call."""
+    ran = []
+
+    def agent_runner(case):
+        ran.append(case['id'])
+        return {'status': 'ok', 'output': 'x'}
+
+    snap = _snapshot(
+        orch,
+        dimensions=[{'id': 1, 'scale_type': 'binary'}],
+        bindings=[{'engine': 'ai', 'dimension_id': 1}],
+        cases=[{'id': 1, 'output': None}, {'id': 2, 'output': None}],
+    )
+    real_time = orch.time
+    orch.time = _FakeClock()
+    try:
+        out = orch.orchestrate_run(snap, ai_scorer=_ok_ai_scorer, agent_runner=agent_runner,
+                                   time_budget_seconds=5)
+    finally:
+        orch.time = real_time
+
+    assert ran == []
+    assert out['stop_reason'] == orch.STOP_TIME_BUDGET
+    assert out['cancelled'] is True
+    assert out['progress'] == {'done': 0, 'total': 2}
+    # the frozen case set must survive a timeout exactly as it survives a cancel
+    assert [c['id'] for c in out['cases']] == [1, 2]
+
+
+def test_time_budget_is_distinguishable_from_a_user_cancel(orch):
+    """Both leave a partial scorecard; only the reason says whether the user chose it."""
+    out = orch.orchestrate_run(
+        _three_case_snapshot(orch), ai_scorer=_ok_ai_scorer, should_cancel=lambda: True)
+    assert out['stop_reason'] == orch.STOP_CANCEL_REQUESTED
+
+
+def test_time_budget_can_be_disabled(orch):
+    out = orch.orchestrate_run(
+        _three_case_snapshot(orch), ai_scorer=_ok_ai_scorer, time_budget_seconds=None)
+    assert out['stop_reason'] is None
+    assert out['progress'] == {'done': 3, 'total': 3}
+
+
+def test_time_budget_default_is_hours_not_seconds(orch):
+    """A default short enough to cut a legitimate dataset short would be worse than none."""
+    import inspect
+    default = inspect.signature(orch.orchestrate_run).parameters['time_budget_seconds'].default
+    assert default == orch.RUN_TIME_BUDGET_SECONDS
+    assert default >= 60 * 60
+
+
+# ---------------------------------------------------------------------------
+# orchestrate_run — bounded per-case concurrency
+#
+# Raising concurrency must not change *what* a run scores, only how fast. The persisted snapshot is
+# indexed positionally by the drill-down and results are inserted in list order, so a run whose
+# outcome depended on completion timing would silently mismatch case to verdict.
+# ---------------------------------------------------------------------------
+
+def _six_case_snapshot(orch):
+    return _snapshot(
+        orch,
+        dimensions=[{'id': 1, 'scale_type': 'binary'}],
+        bindings=[{'engine': 'ai', 'dimension_id': 1}],
+        cases=[{'id': i, 'output': f'o{i}'} for i in range(1, 7)],
+    )
+
+
+def test_concurrency_default_is_one(orch):
+    """The default must be the sequential loop: a case is a burst of judge predicts, and
+    saturation degrades to error verdicts rather than backpressure."""
+    import inspect
+    sig = inspect.signature(orch.orchestrate_run)
+    assert sig.parameters['case_concurrency'].default == 1
+
+
+def test_concurrent_run_scores_every_case_exactly_once(orch):
+    out = orch.orchestrate_run(
+        _six_case_snapshot(orch), ai_scorer=_ok_ai_scorer, case_concurrency=3)
+
+    assert out['cancelled'] is False
+    assert out['progress'] == {'done': 6, 'total': 6}
+    assert [r['dataset_case_id'] for r in out['results']] == [1, 2, 3, 4, 5, 6]
+
+
+def test_concurrent_results_stay_in_case_order_despite_completion_order(orch):
+    """Results are persisted in list order, so a fast late case must not jump the queue."""
+    import time
+
+    def slow_first_agent(case):
+        # case 1 finishes last; every other case returns immediately
+        if case['id'] == 1:
+            time.sleep(0.05)
+        return {'status': 'ok', 'output': f"out-{case['id']}"}
+
+    snap = _snapshot(
+        orch,
+        dimensions=[{'id': 1, 'scale_type': 'binary'}],
+        bindings=[{'engine': 'ai', 'dimension_id': 1}],
+        cases=[{'id': i, 'output': None} for i in range(1, 5)],
+    )
+    out = orch.orchestrate_run(snap, ai_scorer=_ok_ai_scorer, agent_runner=slow_first_agent,
+                               case_concurrency=4)
+
+    assert [r['dataset_case_id'] for r in out['results']] == [1, 2, 3, 4]
+    # `cases` is written back onto the frozen snapshot and indexed positionally by the drill-down,
+    # so a shuffled list would show case 1's verdict against case 4's output.
+    assert [c['id'] for c in out['cases']] == [1, 2, 3, 4]
+    assert [c['output'] for c in out['cases']] == ['out-1', 'out-2', 'out-3', 'out-4']
+
+
+def test_concurrency_is_bounded(orch):
+    """The bound is the point: unbounded fan-out is what floods the judge model."""
+    import threading
+
+    in_flight = 0
+    peak = 0
+    lock = threading.Lock()
+    gate = threading.Event()
+
+    def agent_runner(case):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        # hold every worker until the pool is provably full, so the peak is not just a scheduling
+        # artefact of cases completing faster than they are submitted
+        gate.wait(0.5)
+        with lock:
+            in_flight -= 1
+        return {'status': 'ok', 'output': 'x'}
+
+    snap = _snapshot(
+        orch,
+        dimensions=[{'id': 1, 'scale_type': 'binary'}],
+        bindings=[{'engine': 'ai', 'dimension_id': 1}],
+        cases=[{'id': i, 'output': None} for i in range(1, 9)],
+    )
+    out = orch.orchestrate_run(snap, ai_scorer=_ok_ai_scorer, agent_runner=agent_runner,
+                               case_concurrency=2)
+
+    assert peak <= 2
+    assert out['progress'] == {'done': 8, 'total': 8}
+
+
+def test_concurrent_cancel_keeps_a_prefix_and_the_frozen_tail(orch):
+    """Cases are submitted in index order and all submitted are awaited, so the scored set is a
+    prefix — the untouched tail still has to come back verbatim."""
+    calls = []
+    lock = __import__('threading').Lock()
+
+    def should_cancel():
+        with lock:
+            calls.append(1)
+            return len(calls) > 2
+
+    out = orch.orchestrate_run(
+        _six_case_snapshot(orch), ai_scorer=_ok_ai_scorer,
+        should_cancel=should_cancel, case_concurrency=2)
+
+    assert out['cancelled'] is True
+    scored = [r['dataset_case_id'] for r in out['results']]
+    assert scored == list(range(1, len(scored) + 1))     # a prefix, not a sparse set
+    assert scored and len(scored) < 6
+    assert [c['id'] for c in out['cases']] == [1, 2, 3, 4, 5, 6]
+    assert out['progress'] == {'done': len(scored), 'total': 6}
+
+
+def test_concurrent_progress_counts_each_case_once(orch):
+    """The counter is shared across worker threads, so it must be locked, and it must never report
+    past the total — the UI renders done/total as a percentage."""
+    import threading
+
+    seen = []
+    lock = threading.Lock()
+
+    def on_case_done(done, total):
+        with lock:
+            seen.append((done, total))
+
+    orch.orchestrate_run(_six_case_snapshot(orch), ai_scorer=_ok_ai_scorer,
+                         on_case_done=on_case_done, case_concurrency=3)
+
+    assert sorted(d for d, _ in seen) == [1, 2, 3, 4, 5, 6]
+    assert all(t == 6 for _, t in seen)
+
+
+def test_concurrent_agent_failure_still_errors_the_run(orch):
+    """A raising agent_runner takes the run down exactly as it does sequentially — the caller
+    relies on that to mark the row errored rather than publishing a half-scored headline."""
+    def exploding_agent(case):
+        raise RuntimeError('agent exploded')
+
+    snap = _snapshot(
+        orch,
+        dimensions=[{'id': 1, 'scale_type': 'binary'}],
+        bindings=[{'engine': 'ai', 'dimension_id': 1}],
+        cases=[{'id': i, 'output': None} for i in range(1, 5)],
+    )
+    with pytest.raises(RuntimeError, match='agent exploded'):
+        orch.orchestrate_run(snap, ai_scorer=_ok_ai_scorer, agent_runner=exploding_agent,
+                             case_concurrency=2)
+
+
+# ---------------------------------------------------------------------------
 # orchestrate_run — live agent execution fill (EVAL-H4, §14.2)
 # ---------------------------------------------------------------------------
 
@@ -689,3 +996,24 @@ def test_structure_only_case_shape(orch):
     assert case['structure'] is None
     assert case['variables'] == {}
     assert case['order_index'] == 0
+
+
+# ---------------------------------------------------------------------------
+# snapshot_needs_judge — E4 fail-closed precondition
+# ---------------------------------------------------------------------------
+
+def test_snapshot_needs_judge_true_for_an_ai_dimension_binding(orch):
+    assert orch.snapshot_needs_judge({'bindings': [{'engine': 'ai', 'dimension_id': 1}]}) is True
+
+
+def test_snapshot_needs_judge_false_for_human_and_code_only(orch):
+    snapshot = {'bindings': [
+        {'engine': 'human', 'dimension_id': 1},
+        {'engine': 'ai', 'code_validation_id': 9},  # stored engine ignored: code always runs on code
+    ]}
+    assert orch.snapshot_needs_judge(snapshot) is False
+
+
+def test_snapshot_needs_judge_false_for_empty_snapshot(orch):
+    assert orch.snapshot_needs_judge({}) is False
+    assert orch.snapshot_needs_judge(None) is False

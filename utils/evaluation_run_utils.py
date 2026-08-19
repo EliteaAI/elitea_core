@@ -3,8 +3,9 @@
 Thin persistence + launch surface over the H5 pure core (:mod:`evaluation_run_orchestration`).
 Two entry points create a ``created`` :class:`EvalRun` with a frozen snapshot — one from a stored
 dataset (offline-batch, E2E-09), one from a stored conversation (on-demand, E2E-11) — plus list /
-get readers and :func:`launch_run`, which hands the run to H5's :func:`execute_run` on a daemon
-thread (the API returns ``202`` immediately; the client polls status/progress).
+get readers and :func:`launch_run`, which submits the run to the local ``eval_runs`` task pool
+where :func:`execute_run_task` drives H5's :func:`execute_run` (the API returns ``202``
+immediately; the client polls status/progress).
 
 No orchestration logic lives here (that is H5): this module only turns ORM rows into the pure dicts
 :func:`build_run_snapshot` consumes, resolves the D3 version pin, and persists the result. Errors
@@ -13,7 +14,6 @@ subclass ``EvalLibraryError`` so the v2 boundary returns ``exc.http_status`` uni
 ORM models are imported lazily inside functions (H1/H2 precedent); this wrapper is exercised live,
 not in the unit suite — its pure inputs are unit-tested in :mod:`evaluation_run_orchestration`.
 """
-import threading
 from typing import List, Optional
 
 from pylon.core.tools import log
@@ -28,6 +28,7 @@ from .evaluation_run_orchestration import (
     resolve_version_id,
     all_bindings_structure_only,
     structure_only_case,
+    RUN_TIME_BUDGET_SECONDS,
     TRIGGER_OFFLINE_BATCH,
     TRIGGER_ON_DEMAND,
 )
@@ -36,6 +37,15 @@ from .evaluation_run_orchestration import (
 class EvalRunConfigError(EvalLibraryError):
     """Run cannot be assembled: no dataset, no resolvable version pin, ambiguous pin, etc."""
     http_status = 400
+
+
+class EvalRunNotCancellableError(EvalLibraryError):
+    """The run already reached a terminal state, so there is nothing to stop."""
+    http_status = 409
+
+    def __init__(self, status: str):
+        super().__init__(f'Run is already {status} and cannot be cancelled')
+        self.status = status
 
 
 # ----------------------------------------------------------------------------
@@ -301,23 +311,133 @@ def get_run(project_id: int, run_id: int, session=None):
         return run
 
 
+def request_cancel(project_id: int, run_id: int, session=None):
+    """Ask a run to stop (§14.2 cancel). Returns the updated run.
+
+    A ``created`` run is stopped outright: it has no executing thread yet, and ``execute_run``
+    claims only from ``created``, so flipping the status here also prevents a queued launch from
+    ever starting. A ``running`` run is stopped *cooperatively* — the flag is committed and the
+    orchestration loop picks it up at the next case boundary, because the agent call and judge
+    dispatches in flight are blocking and carry their own timeouts. The status therefore stays
+    ``running`` until the worker itself writes the terminal row, so a poller sees the truth rather
+    than a run marked cancelled while it is demonstrably still working.
+    """
+    from ..models.evaluation import EvalRun, EvalRunStatus
+    from datetime import datetime
+
+    with _session(session, project_id) as s:
+        run = s.query(EvalRun).filter(EvalRun.id == run_id).first()
+        if not run:
+            raise EvalRunNotFoundError(run_id)
+        if run.status not in (EvalRunStatus.created, EvalRunStatus.running):
+            raise EvalRunNotCancellableError(run.status)
+
+        run.meta = {**(run.meta or {}), 'cancel_requested': True,
+                    'cancel_requested_at': datetime.utcnow().isoformat()}
+        if run.status == EvalRunStatus.created:
+            run.status = EvalRunStatus.cancelled
+            run.finished_at = datetime.utcnow()
+        s.commit()
+        s.refresh(run)
+        return run
+
+
 # ----------------------------------------------------------------------------
-# launch — background execution (202)
+# launch — background execution on the eval task pool (202)
 # ----------------------------------------------------------------------------
 
-def launch_run(project_id: int, run_id: int, *, task_node, judge_llm_settings: Optional[dict] = None):
-    """Spawn a daemon thread that runs H5's :func:`execute_run` to completion with its own DB
-    session. The POST handler returns ``202`` right after this call; the client polls status /
-    progress. The thread owns its session (``execute_run`` opens one when ``session=None``), so it
-    never shares the request's session across the thread boundary. H5 already fail-closes per item;
-    an orchestration-level failure marks the run ``errored`` inside ``execute_run``, and we swallow
-    the re-raise here so the daemon thread exits cleanly."""
-    def _worker():
-        try:
-            execute_run(project_id, run_id, task_node=task_node, judge_llm_settings=judge_llm_settings)
-        except Exception:  # noqa: BLE001 - run already marked errored in execute_run; thread must not crash the process
-            log.exception('Eval run %s (project %s) failed', run_id, project_id)
+#: Task registered on ``module.eval_task_node`` in ``module.init()``.
+EVAL_RUN_TASK_NAME = 'elitea_core_eval_run'
 
-    thread = threading.Thread(target=_worker, name=f'eval-run-{run_id}', daemon=True)
-    thread.start()
-    return thread
+EVAL_RUN_POOL = 'eval_runs'
+
+
+def execute_run_task(module, project_id: int, run_id: int,
+                     judge_llm_settings: Optional[dict] = None) -> dict:
+    """Task body: run H5's :func:`execute_run` to completion.
+
+    Bound to the module with ``functools.partial`` at registration so the task's own arguments stay
+    plain JSON — arbiter ships them through the event node, so a live session or ORM row could not
+    be passed even if we wanted to.
+
+    ``execute_run`` opens its own DB session (``session=None``) rather than inheriting the
+    request's, and dispatches sandboxed code validations through ``module.task_node``, the
+    indexer-pool dispatcher. That node is a stateless client handle on the module instance, not
+    something bound to the Flask request, so using it from a pool worker is safe.
+
+    H5 fail-closes per item and marks the run ``errored`` on an orchestration-level failure, so the
+    re-raise is swallowed: letting it escape would only have arbiter log a task crash for a run
+    whose outcome is already recorded in the row the client is polling.
+    """
+    try:
+        # Read off the descriptor rather than shipped in the task kwargs: it is a deployment
+        # capacity setting (judge rate limit + code pool headroom), not a property of the run, so
+        # the value in force must be the one the executing pylon is configured for.
+        concurrency = module.descriptor.config.get('eval_case_concurrency', 1)
+        budget = module.descriptor.config.get(
+            'eval_run_time_budget_seconds', RUN_TIME_BUDGET_SECONDS)
+        execute_run(project_id, run_id, task_node=module.task_node,
+                    judge_llm_settings=judge_llm_settings,
+                    case_concurrency=concurrency,
+                    time_budget_seconds=budget)
+        return {'ok': True, 'run_id': run_id}
+    except Exception as exc:  # noqa: BLE001 - outcome already persisted by execute_run
+        log.exception('Eval run %s (project %s) failed', run_id, project_id)
+        return {'ok': False, 'run_id': run_id, 'error': str(exc)}
+
+
+def launch_run(project_id: int, run_id: int, *, eval_task_node,
+               judge_llm_settings: Optional[dict] = None) -> Optional[str]:
+    """Submit the run to the eval pool. Returns the task id, or ``None`` if it was not accepted.
+
+    Replaces a bare ``threading.Thread``: the pool's ``task_limit`` bounds how many runs execute
+    concurrently, and the node is drained on graceful shutdown instead of being killed mid-case.
+
+    ``None`` means **rejected, not queued.** ``start_task`` broadcasts a start query and returns
+    ``None`` when no node answers with a free slot, so a saturated pool drops the request rather
+    than holding it — the caller must therefore resolve the run itself instead of leaving a row in
+    ``created`` that nothing will ever pick up. Maintenance mode is folded into the same signal by
+    the gate installed in ``module.init()``.
+    """
+    from .exceptions import MaintenanceInProgressError
+
+    try:
+        task_id = eval_task_node.start_task(
+            EVAL_RUN_TASK_NAME,
+            kwargs={
+                'project_id': project_id,
+                'run_id': run_id,
+                'judge_llm_settings': judge_llm_settings,
+            },
+            pool=EVAL_RUN_POOL,
+            meta={'task': EVAL_RUN_TASK_NAME, 'project_id': project_id, 'run_id': run_id},
+        )
+    except MaintenanceInProgressError:
+        log.info('Eval run %s (project %s) not started: maintenance mode', run_id, project_id)
+        return None
+    if task_id is None:
+        log.warning('Eval run %s (project %s) not accepted: eval pool has no free slot',
+                    run_id, project_id)
+    return task_id
+
+
+def mark_run_unstarted(project_id: int, run_id: int, reason: str, session=None):
+    """Resolve a run that was created but never accepted by the pool.
+
+    Without this the row sits in ``created`` forever: the reaper only considers ``running`` rows
+    (staleness is measured from the per-case progress heartbeat, which a run that never started
+    does not have), so nothing else would ever close it out.
+    """
+    from ..models.evaluation import EvalRun, EvalRunStatus
+    from datetime import datetime
+
+    with _session(session, project_id) as s:
+        run = s.query(EvalRun).filter(EvalRun.id == run_id).first()
+        if not run:
+            raise EvalRunNotFoundError(run_id)
+        run.status = EvalRunStatus.errored
+        run.error = reason
+        run.finished_at = datetime.utcnow()
+        s.commit()
+        s.refresh(run)
+        return run

@@ -27,6 +27,12 @@ Errors = List[dict]
 
 _RESERVED = {'input', 'expected_output', 'source_ref'}
 
+# Import is a single synchronous request that inserts one row per case and then every run over the
+# dataset invokes the agent once per case, so an unbounded file is both a request-time and a
+# run-cost amplifier. Over-cap rows are reported as errors rather than silently truncated.
+MAX_CASES = 5000
+MAX_CELL_CHARS = 100_000
+
 
 def _clean_expected(value) -> Optional[str]:
     if value is None:
@@ -45,11 +51,20 @@ def _normalize_row(raw: dict, row_no: int) -> Tuple[Optional[dict], Optional[dic
     if not isinstance(variables, dict):
         return None, {'row': row_no, 'error': '"variables" must be an object'}
 
+    input_text = str(input_val)
+    expected_text = _clean_expected(raw.get('expected_output'))
+    for field, text in (('input', input_text), ('expected_output', expected_text)):
+        if text is not None and len(text) > MAX_CELL_CHARS:
+            return None, {
+                'row': row_no,
+                'error': f'"{field}" exceeds the {MAX_CELL_CHARS} character limit',
+            }
+
     source_ref = raw.get('source_ref')
     return {
-        'input': str(input_val),
+        'input': input_text,
         'variables': variables,
-        'expected_output': _clean_expected(raw.get('expected_output')),
+        'expected_output': expected_text,
         'source_ref': str(source_ref) if source_ref not in (None, '') else None,
     }, None
 
@@ -66,6 +81,9 @@ def parse_csv(content: str) -> Tuple[Rows, Errors]:
         return rows, [{'row': 0, 'error': 'CSV header must contain an "input" column'}]
 
     for i, record in enumerate(reader, start=1):
+        if i > MAX_CASES:
+            errors.append({'row': i, 'error': f'import is limited to {MAX_CASES} cases'})
+            break
         variables = {
             k: v for k, v in record.items()
             if k is not None and k not in _RESERVED and v not in (None, '')
@@ -99,6 +117,9 @@ def parse_json(content: str) -> Tuple[Rows, Errors]:
     rows: Rows = []
     errors: Errors = []
     for i, record in enumerate(payload, start=1):
+        if i > MAX_CASES:
+            errors.append({'row': i, 'error': f'import is limited to {MAX_CASES} cases'})
+            break
         if not isinstance(record, dict):
             errors.append({'row': i, 'error': 'each case must be an object'})
             continue

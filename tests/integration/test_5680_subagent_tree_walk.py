@@ -64,6 +64,7 @@ def pu():
             'SkillVersion': type('SkillVersion', (), {}),
         },
         'plugins.elitea_core.utils.create_utils': {'create_application': None, 'create_version': None},
+        'plugins.elitea_core.utils.llm_judge': {'run_llm_judge': None},
         'plugins.elitea_core.utils.utils': {'get_public_project_id': None},
         'plugins.elitea_core.utils.category_utils': {
             'apply_category_to_tag_dicts': None, 'is_valid_category': None},

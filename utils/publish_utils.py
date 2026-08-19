@@ -16,7 +16,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
-from uuid import NAMESPACE_OID, uuid4, uuid5
+from uuid import NAMESPACE_OID, uuid5
 
 from pydantic import BaseModel, Field, ValidationError
 from pylon.core.tools import log
@@ -37,6 +37,7 @@ from ..models.pd.version import ApplicationVersionForkCreateModel
 from ..models.pd.publish import PublishAIResult
 from ..models.skill import EntitySkillMapping, Skill, SkillVersion
 from .create_utils import create_application, create_version
+from .llm_judge import run_llm_judge
 from .utils import get_public_project_id
 from .category_utils import apply_category_to_tag_dicts, is_valid_category
 from .application_utils import build_skill_mappings_list
@@ -3244,6 +3245,13 @@ def run_ai_validation(
     """Simple-agent LLM quality check.
 
     Raises AIValidationError on any failure — never returns None.
+
+    Re-expressed on the schema-agnostic ``run_llm_judge`` primitive (EVAL-H1): the judge
+    invocation / temp pinning / task-timeout handling now live in ``utils/llm_judge.py`` and are
+    shared with the agent-evaluation AI engine. The parse/field-validation path below is
+    unchanged — it still re-validates the raw predict_sio envelope through ``PublishAIResult`` and
+    routes error/unparseable results through ``_check_predict_error`` exactly as before, so publish
+    behavior is preserved.
     """
     config = this.descriptor.config
     timeout = int(
@@ -3261,58 +3269,26 @@ def run_ai_validation(
             "Configure a default model for the project.",
         )
 
-    resolved_llm = dict(llm_settings)
-    resolved_llm.pop('reasoning_effort', None)
-    resolved_llm.pop('max_tokens', None)  # Use default instead of version's potentially small limit
-    resolved_llm['temperature'] = 0.1  # deterministic output for reliable JSON
+    outcome = run_llm_judge(
+        project_id,
+        llm_settings,
+        prompt,
+        validation_input_json,
+        timeout,
+        stream_key=f'publish_validate_{version_id}',
+    )
 
-    version_details = {
-        'agent_type': 'openai',
-        'instructions': prompt,
-        'llm_settings': resolved_llm,
-        'tools': [],
-        'meta': {'internal_tools': [], 'step_limit': 5},
-    }
-
-    uid = uuid4().hex[:12]
-    data = {
-        'project_id': project_id,
-        'user_input': validation_input_json,
-        'llm_settings': resolved_llm,
-        'version_details': version_details,
-        'chat_history': [],
-        'tools': [],
-        'internal_tools': [],
-        'stream_id': f'publish_validate_{version_id}_{uid}',
-        'message_id': f'publish_validate_{version_id}_{uid}',
-    }
-
-    try:
-        result = this.module.predict_sio(
-            sid=None,
-            data=data,
-            await_task_timeout=timeout,
-            is_system_user=True,
-            return_chat_history=True,
-        )
-    except Exception as exc:
+    if outcome['status'] == 'predict_exception':
         raise AIValidationError(
-            f"AI validation failed: {exc}",
-        ) from exc
-
-    # Handle task timeout — predict_sio returns {"task_id": ...}
-    # when join_task doesn't complete within the timeout
-    if isinstance(result, dict) and 'task_id' in result and 'result' not in result:
-        task_id = result['task_id']
-        try:
-            this.module.stop_task(task_id)
-        except Exception:
-            pass
+            f"AI validation failed: {outcome['error']}",
+        )
+    if outcome['status'] == 'timeout':
         raise AIValidationError(
             f"AI validation timed out after {timeout}s. "
             f"Try again or increase publish_validation_timeout.",
         )
 
+    result = outcome['raw']
     try:
         parsed = PublishAIResult.model_validate(result)
     except ValidationError as ex:

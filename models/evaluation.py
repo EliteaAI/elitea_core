@@ -83,6 +83,10 @@ class EvalRunStatus:
     running = 'running'
     finished = 'finished'
     errored = 'errored'
+    # Stopped on request. Distinct from `errored` so an intentional stop is not read as a
+    # failure of the agent or the rubric: a 50-case run can take hours, and without this the
+    # only way out was to abandon a row that reads as "in progress" forever.
+    cancelled = 'cancelled'
 
 
 class EvalResultStatus:
@@ -202,7 +206,15 @@ class EvalBinding(db_tools.AbstractBaseMixin, db.Base):
     concrete ApplicationVersion (H6 versioning seam). Binding values override definition
     defaults (§16.2). Exactly one of dimension_id / code_validation_id / platform_key is set."""
     __tablename__ = 'eval_binding'
-    __table_args__ = ({'schema': c.POSTGRES_TENANT_SCHEMA},)
+    # A library item may only be bound once per suite: a duplicate binding scores the same
+    # criterion twice, silently doubling its weight in the headline. Postgres treats NULLs as
+    # distinct, so each constraint only bites on the column that is actually set.
+    __table_args__ = (
+        UniqueConstraint('suite_id', 'dimension_id', name='_eval_binding_suite_dimension_uc'),
+        UniqueConstraint('suite_id', 'code_validation_id', name='_eval_binding_suite_code_uc'),
+        UniqueConstraint('suite_id', 'platform_key', name='_eval_binding_suite_platform_uc'),
+        {'schema': c.POSTGRES_TENANT_SCHEMA},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     suite_id: Mapped[int] = mapped_column(

@@ -108,6 +108,7 @@ def pu():
             'SkillVersion': col_model('SkillVersion'),
         },
         'plugins.elitea_core.utils.create_utils': {'create_application': noop, 'create_version': noop},
+        'plugins.elitea_core.utils.llm_judge': {'run_llm_judge': noop},
         'plugins.elitea_core.utils.utils': {'get_public_project_id': lambda: 1},
         'plugins.elitea_core.utils.category_utils': {
             'apply_category_to_tag_dicts': lambda tags, cat: tags,

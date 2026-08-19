@@ -563,6 +563,70 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
+    def migrate_eval_binding_constraints(self, *args, **kwargs):
+        """Admin task: add the eval_binding uniqueness constraints to each project schema.
+
+        ``EvalBinding`` declares three ``UniqueConstraint``s, but eval tables are created by
+        ``create_all``, which never alters an existing table — so any schema provisioned before those
+        constraints existed has no DB-level guard against binding the same library item twice into
+        one suite, and a duplicate silently doubles that criterion's weight in the headline.
+
+        Idempotent (each ``ADD CONSTRAINT`` is guarded on ``pg_constraint``): safe to run multiple
+        times. **Run with dry_run first** — ``ADD CONSTRAINT`` fails on a table that already violates
+        it, and the dry run is what reports the offending rows.
+
+        Param format (optional):
+            "project_id=<all|N>[;dry_run]"
+        """
+        from ..utils.eval_binding_schema import (
+            apply_eval_binding_constraints, find_duplicate_bindings,
+        )
+
+        param = kwargs.get("param", "") or ""
+        project_id_filter = None
+        dry_run = False
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.warning(
+                            "migrate_eval_binding_constraints: invalid project_id '%s', scanning all",
+                            value)
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        try:
+            if project_id_filter is not None:
+                project_ids = [project_id_filter]
+            else:
+                project_ids = [
+                    p["id"] for p in (
+                        self.context.rpc_manager.call.project_list(
+                            filter_={"create_success": True}) or []
+                    )
+                ]
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_eval_binding_constraints: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        duplicates = find_duplicate_bindings(project_ids)
+        if dry_run:
+            return {"dry_run": True, "projects": len(project_ids), "duplicates": duplicates}
+        if duplicates:
+            # Applying now would fail per project anyway; refusing up front keeps the operator from
+            # having to read the exception to learn which rows to fix.
+            log.error("migrate_eval_binding_constraints: duplicate bindings must be resolved first: %s",
+                      duplicates)
+            return {"migrated": 0, "error": "duplicate bindings exist", "duplicates": duplicates}
+
+        migrated, failed = apply_eval_binding_constraints(project_ids)
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
+
+    @web.method()
     def migrate_audit_events_columns(self, *args, **kwargs):
         """Admin task: add the ADR-0008 token/cost columns to the shared audit_events table.
 

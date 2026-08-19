@@ -10,6 +10,7 @@ Pure functions (no DB, no ORM): the human-score write (B6) and, later, the run r
 results re-aggregation (B5) all call these so the numbers stay reproducible.
 """
 
+import math
 from typing import Iterable, List, Optional, Tuple
 
 # scale vocabulary mirrors models.evaluation.EvalScaleType / EvalPolarity, kept as literals
@@ -31,20 +32,27 @@ def normalize_score(
     input (unscored). Raises ``ValueError`` on a degenerate scale (min == max, ordinal N<=1).
 
     binary:      truthy -> 100, falsy -> 0
-    ordinal(N):  (v - 1) / (N - 1) * 100      with N = scale_max
+    ordinal:     (v - min) / (max - min) * 100  with the author-chosen [min, max] (min defaults to 1)
     continuous:  (v - min) / (max - min) * 100, clamped to [0, 100]
     polarity:    lower_better flips the result (100 - x) LAST.
+
+    A non-finite ``native`` (NaN/inf — e.g. a divide-by-zero in a number-contract validation
+    script) raises: the clamp below would turn NaN into a perfect 100, because
+    ``min(100.0, float('nan'))`` is ``100.0`` in Python.
     """
     if native is None:
         return None
+    if not math.isfinite(native):
+        raise ValueError('native score must be a finite number')
 
     if scale_type == _BINARY:
         norm = 100.0 if native else 0.0
     elif scale_type == _ORDINAL:
-        points = scale_max
-        if points is None or points <= 1:
-            raise ValueError('ordinal scale requires scale_max (points) > 1')
-        norm = (native - 1.0) / (points - 1.0) * 100.0
+        lo = 1.0 if scale_min is None else float(scale_min)
+        hi = scale_max
+        if hi is None or hi <= lo:
+            raise ValueError('ordinal scale requires scale_max > scale_min')
+        norm = (native - lo) / (hi - lo) * 100.0
     else:  # continuous (and code-numeric, which uses the same path with declared [min,max])
         lo = 0.0 if scale_min is None else scale_min
         hi = 100.0 if scale_max is None else scale_max
