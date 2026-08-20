@@ -615,6 +615,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         duplicates = find_duplicate_bindings(project_ids)
         if dry_run:
+            # The admin task runner discards the return value, so a dry run that only returned its
+            # findings would report nothing at all — and reporting them is its entire purpose.
+            if duplicates:
+                log.warning("migrate_eval_binding_constraints: dry run scanned %s project(s); "
+                            "resolve these duplicates before the real run: %s",
+                            len(project_ids), duplicates)
+            else:
+                log.info("migrate_eval_binding_constraints: dry run scanned %s project(s), "
+                         "no duplicate bindings found — safe to apply", len(project_ids))
             return {"dry_run": True, "projects": len(project_ids), "duplicates": duplicates}
         # Skip only the projects that actually carry duplicates — `ADD CONSTRAINT` would fail on
         # those, but the clean projects in the same batch still want guarding. Reporting them up
@@ -628,6 +637,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         result = {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
         if duplicates:
             result.update({"skipped": len(duplicates), "duplicates": duplicates})
+        log.info("migrate_eval_binding_constraints: %s", result)
         return result
 
     @web.method()
