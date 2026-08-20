@@ -1017,3 +1017,55 @@ def test_snapshot_needs_judge_false_for_human_and_code_only(orch):
 def test_snapshot_needs_judge_false_for_empty_snapshot(orch):
     assert orch.snapshot_needs_judge({}) is False
     assert orch.snapshot_needs_judge(None) is False
+
+
+# ---------------------------------------------------------------------------
+# cap_envelope — bounded evidence/verdict JSONB (review #336)
+# ---------------------------------------------------------------------------
+
+def test_cap_envelope_leaves_a_normal_envelope_untouched(orch):
+    envelope = {'input': 'hi', 'output': 'there', 'nested': {'items': ['a', 'b']}}
+    assert orch.cap_envelope(envelope) == envelope
+
+
+def test_cap_envelope_clips_an_oversized_string_and_marks_it(orch):
+    capped = orch.cap_envelope({'output': 'x' * (orch.MAX_ENVELOPE_TEXT + 50)})
+
+    assert capped['truncated'] is True
+    assert capped['output'].endswith('[truncated]')
+    assert len(capped['output']) < orch.MAX_ENVELOPE_TEXT + 50
+
+
+def test_cap_envelope_reaches_strings_nested_in_lists(orch):
+    capped = orch.cap_envelope({'steps': [{'text': 'y' * (orch.MAX_ENVELOPE_TEXT + 1)}]})
+
+    assert capped['truncated'] is True
+    assert capped['steps'][0]['text'].endswith('[truncated]')
+
+
+def test_cap_envelope_collapses_an_envelope_that_is_still_too_large(orch):
+    # Many individually-legal strings can still add up past the byte budget.
+    wide = {f'k{i}': 'z' * 1000 for i in range(500)}
+
+    capped = orch.cap_envelope(wide)
+
+    assert capped['truncated'] is True
+    assert 'exceeded' in capped['reason']
+    assert capped['keys'][:1] == ['k0']
+
+
+def test_cap_envelope_survives_a_non_serializable_value(orch):
+    capped = orch.cap_envelope({'obj': object()}, max_bytes=10)
+
+    assert capped['truncated'] is True
+
+
+def test_result_row_caps_both_envelopes(orch):
+    row = orch._result_row(
+        1, engine='ai', status='ok',
+        evidence={'output': 'o' * (orch.MAX_ENVELOPE_TEXT + 10)},
+        verdict={'rationale': 'r' * (orch.MAX_ENVELOPE_TEXT + 10)},
+    )
+
+    assert row['evidence']['truncated'] is True
+    assert row['verdict']['truncated'] is True

@@ -376,10 +376,18 @@ def execute_run_task(module, project_id: int, run_id: int,
         concurrency = module.descriptor.config.get('eval_case_concurrency', 1)
         budget = module.descriptor.config.get(
             'eval_run_time_budget_seconds', RUN_TIME_BUDGET_SECONDS)
+        # Progress push. This is the layer that has `module`, so it owns the transport and
+        # `execute_run` stays pylon-free. The frame goes over the event node (Redis pub/sub)
+        # rather than `module.context.sio` directly: the socket server lives only in pylon_main
+        # and the watching browser may be attached to a different replica than this worker.
+        def _publish(payload: dict) -> None:
+            module.event_node.emit('elitea_core_eval_run_progress', payload)
+
         execute_run(project_id, run_id, task_node=module.task_node,
                     judge_llm_settings=judge_llm_settings,
                     case_concurrency=concurrency,
-                    time_budget_seconds=budget)
+                    time_budget_seconds=budget,
+                    progress_publisher=_publish)
         return {'ok': True, 'run_id': run_id}
     except Exception as exc:  # noqa: BLE001 - outcome already persisted by execute_run
         log.exception('Eval run %s (project %s) failed', run_id, project_id)

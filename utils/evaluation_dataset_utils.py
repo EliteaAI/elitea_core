@@ -66,6 +66,38 @@ def get_dataset(project_id: int, dataset_id: int, session=None) -> Optional[Eval
         return s.query(EvalDataset).filter(EvalDataset.id == dataset_id).first()
 
 
+DEFAULT_CASE_LIMIT = 200
+MAX_CASE_LIMIT = 1000
+
+
+def list_cases(
+    project_id: int,
+    dataset_id: int,
+    session=None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> dict:
+    """One page of a dataset's cases, ordered by ``order_index``, plus the full ``total``.
+
+    Paginated because a dataset holds up to ``MAX_CASES`` (5000) rows, each with unbounded
+    ``input``/``expected_output`` text — the relationship-backed read returned all of them.
+    """
+    with _session(session, project_id) as s:
+        _require_dataset(s, dataset_id)
+        page_size = min(limit or DEFAULT_CASE_LIMIT, MAX_CASE_LIMIT)
+        ordered = (
+            s.query(EvalDatasetCase)
+            .filter(EvalDatasetCase.dataset_id == dataset_id)
+            .order_by(EvalDatasetCase.order_index.asc(), EvalDatasetCase.id.asc())
+        )
+        return {
+            'total': ordered.count(),
+            'limit': page_size,
+            'offset': max(offset, 0),
+            'cases': ordered.offset(max(offset, 0)).limit(page_size).all(),
+        }
+
+
 def create_dataset(project_id: int, data: EvalDatasetCreateModel, owner_id: int, session=None) -> EvalDataset:
     with _session(session, project_id) as s:
         dataset = EvalDataset(
@@ -191,9 +223,22 @@ def _append_rows(s, dataset_id: int, rows: List[dict], source_type: str) -> List
         s.add(case)
         created.append(case)
     s.flush()
-    for case in created:
-        s.refresh(case)
-    return created
+    if not created:
+        return created
+    # `created_at` is a server_default, so flush leaves it unloaded and the API's serialization
+    # would fault it in one row at a time. Load the whole appended block back in a single
+    # statement instead of `refresh`-ing up to MAX_CASES rows sequentially.
+    return (
+        s.query(EvalDatasetCase)
+        .filter(
+            EvalDatasetCase.dataset_id == dataset_id,
+            EvalDatasetCase.order_index >= start,
+            EvalDatasetCase.order_index < start + len(created),
+        )
+        .order_by(EvalDatasetCase.order_index.asc())
+        .populate_existing()
+        .all()
+    )
 
 
 def import_cases(project_id: int, dataset_id: int, fmt: str, content: str, session=None) -> dict:

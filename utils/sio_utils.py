@@ -71,6 +71,15 @@ class SioEvents(StrEnum):
 
     next_input_suggestion_ready = 'next_input_suggestion_ready'
 
+    eval_run_progress = 'eval_run_progress'
+    eval_run_enter_room = 'eval_run_enter_room'
+    eval_run_leave_room = 'eval_run_leave_room'
+    # Emitted back to the joining sid so the client can tell a working push transport from a
+    # merely connected one. Without it a server that never joins the room — old build, or a
+    # project-membership rejection — looks identical to a live feed and the client's polling
+    # fallback stays switched off.
+    eval_run_room_joined = 'eval_run_room_joined'
+
 
 class SioValidationError(Exception):
     def __init__(self, sio, sid: str | None, event: str, error, stream_id: str, message_id: str | None = None):
@@ -115,6 +124,13 @@ def get_chat_room(room_uuid: str, **kwargs):
     return get_event_room(
         event_name=SioEvents.chat_predict.value,
         room_id=str(room_uuid)
+    )
+
+
+def get_eval_run_room(run_id: int | str, **kwargs):
+    return get_event_room(
+        event_name=SioEvents.eval_run_progress.value,
+        room_id=str(run_id)
     )
 
 

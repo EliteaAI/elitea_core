@@ -245,6 +245,23 @@ def _active_project_ids() -> List[int]:
     return [int(project['id']) for project in projects]
 
 
+def _holds_any(project_id: int, uuids: List[str]) -> bool:
+    """Whether this project carries a projected row for any of ``uuids``.
+
+    A read-only probe so the resync only opens a write transaction on the projects it will
+    actually change — most projects attach none of the catalog, and a resync that commits in
+    every schema is what pushes the request past its timeout.
+    """
+    wanted = set(uuids)
+    with db.get_session(project_id) as session:
+        rows = (
+            session.query(EvalDimension)
+            .filter(EvalDimension.tier == EvalTier.platform)
+            .all()
+        )
+        return any(str(row.uuid) in wanted for row in rows)
+
+
 def _resync(entries: List[EvalPlatformDimension]) -> dict:
     """Push ``entries`` into every project that already holds a copy. Never inserts.
 
@@ -252,8 +269,13 @@ def _resync(entries: List[EvalPlatformDimension]) -> dict:
     the platform from picking up the edit.
     """
     synced, failures = [], []
+    uuids = [str(entry.uuid) for entry in entries]
+    if not uuids:
+        return {'synced': [], 'synced_projects': 0, 'failures': []}
     for project_id in _active_project_ids():
         try:
+            if not _holds_any(project_id, uuids):
+                continue
             result = project_to(project_id, entries, insert_missing=False)
         except Exception as exc:  # pylint: disable=broad-except
             log.exception('Failed to sync platform eval dimensions into project %s', project_id)

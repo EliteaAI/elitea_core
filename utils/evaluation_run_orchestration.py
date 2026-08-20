@@ -28,6 +28,7 @@ The DB/dispatch wrapper (:func:`execute_run`) keeps every ORM/SDK import lazy in
 function so this module loads by source with no ``tools``/SDK present — the pure core is
 unit-tested here; the wrapper's live behavior is exercised end-to-end (E2E-09 / E2E-11).
 """
+import json
 import time
 from typing import Any, Callable, List, Optional
 
@@ -298,13 +299,63 @@ def select_evidence(case: dict, scope: dict) -> dict:
 # Verdict → EvalResult-shaped dict
 # ---------------------------------------------------------------------------
 
+MAX_ENVELOPE_TEXT = 20_000
+MAX_ENVELOPE_BYTES = 256_000
+
+_TRUNCATED_MARK = '… [truncated]'
+
+
+def cap_envelope(value, max_text: int = MAX_ENVELOPE_TEXT, max_bytes: int = MAX_ENVELOPE_BYTES):
+    """Bound an ``evidence``/``verdict`` envelope before it is persisted as JSONB.
+
+    Live agent output and judge rationales flow in unbounded while the import path caps cell
+    text, and this platform has already been bitten by oversized JSONB starving the gevent hub.
+    Every truncation is marked so a reader can tell a short value from a clipped one:
+    strings gain a ``… [truncated]`` suffix, and an envelope still over ``max_bytes`` after that
+    collapses to ``{'truncated': True, ...}`` rather than being written whole.
+    """
+    truncated = False
+
+    def _walk(node):
+        nonlocal truncated
+        if isinstance(node, str):
+            if len(node) > max_text:
+                truncated = True
+                return node[:max_text] + _TRUNCATED_MARK
+            return node
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        if isinstance(node, (list, tuple)):
+            return [_walk(v) for v in node]
+        return node
+
+    capped = _walk(value)
+    if truncated and isinstance(capped, dict):
+        capped['truncated'] = True
+
+    try:
+        size = len(json.dumps(capped, default=str))
+    except (TypeError, ValueError):
+        return {'truncated': True, 'error': 'envelope is not serializable'}
+    if size <= max_bytes:
+        return capped
+    return {
+        'truncated': True,
+        'reason': f'envelope exceeded {max_bytes} bytes ({size})',
+        'keys': sorted(capped.keys()) if isinstance(capped, dict) else None,
+    }
+
+
 def _result_row(
     case_id, *, engine, status, evidence,
     dimension_id=None, code_validation_id=None, platform_key=None,
     native_score=None, normalized_score=None, verdict=None,
 ) -> dict:
     """One EvalResult-shaped dict (persistence layer splats it onto a row). Keys mirror the
-    model columns so the aggregate + B5 read see a uniform shape regardless of engine."""
+    model columns so the aggregate + B5 read see a uniform shape regardless of engine.
+
+    The two JSONB envelopes are capped here because this is the single point every engine's
+    result passes through."""
     return {
         'dataset_case_id': case_id,
         'dimension_id': dimension_id,
@@ -314,8 +365,8 @@ def _result_row(
         'status': status,
         'native_score': native_score,
         'normalized_score': normalized_score,
-        'verdict': verdict or {},
-        'evidence': evidence,
+        'verdict': cap_envelope(verdict or {}),
+        'evidence': cap_envelope(evidence),
     }
 
 
@@ -806,6 +857,7 @@ def execute_run(
     time_budget_seconds: Optional[int] = RUN_TIME_BUDGET_SECONDS,
     judge=None,
     executor=None,
+    progress_publisher: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Execute a persisted ``created`` run to completion and persist its results + headline.
 
@@ -858,6 +910,26 @@ def execute_run(
     if not claimed:
         raise EvalRunAlreadyStartedError(run_id)
 
+    def _push(payload: dict) -> None:
+        """Hand one progress frame to the injected transport, never letting it break the run.
+
+        The publisher is supplied by the pylon-aware caller (``execute_run_task``) precisely so
+        this module keeps loading without pylon. It is a best-effort side channel on top of the
+        committed ``progress`` column — a broken socket or event bus must not abort an
+        evaluation that is otherwise fine, so failures are logged and swallowed (same posture as
+        ``on_case_done`` in :func:`orchestrate_run`).
+        """
+        if progress_publisher is None:
+            return
+        try:
+            progress_publisher(payload)
+        except Exception:  # noqa: BLE001 - a side channel must never fail the run
+            try:
+                from pylon.core.tools import log  # local: this module loads without pylon present
+                log.warning('Eval run %s: progress publish failed', run_id)
+            except Exception:  # noqa: BLE001 - not even the logging may re-raise here
+                pass
+
     def _publish_progress(done: int, total: int) -> None:
         """Publish intermediate progress to pollers, and heartbeat for the reaper.
 
@@ -872,6 +944,9 @@ def execute_run(
             if row is not None:
                 row.progress = {'done': done, 'total': total}
                 s.commit()
+        # Push after the commit, so a client that reacts by re-reading the row sees the same count.
+        _push({'run_id': run_id, 'project_id': project_id, 'status': EvalRunStatus.running,
+               'progress': {'done': done, 'total': total}})
 
     def _cancel_requested() -> bool:
         """Has someone asked this run to stop? (§14.2 cancel)
@@ -901,6 +976,10 @@ def execute_run(
         except Exception:  # noqa: BLE001 - never mask the original failure
             from pylon.core.tools import log  # local: this module loads without pylon present
             log.exception('Could not mark eval run %s (project %s) errored', run_id, project_id)
+        # Terminal frame regardless: a client watching this run must not be left on `running`
+        # by a failure, whether or not the row itself could be written.
+        _push({'run_id': run_id, 'project_id': project_id, 'status': EvalRunStatus.errored,
+               'error': message})
 
     # --- execute (no session held) ---------------------------------------------------------
     try:
@@ -963,8 +1042,11 @@ def execute_run(
                 )
             run.finished_at = datetime.utcnow()
             s.commit()
-            return {'run_id': run.id, 'status': run.status,
-                    'headline_score': run.headline_score, 'progress': run.progress}
+            result = {'run_id': run.id, 'status': run.status,
+                      'headline_score': run.headline_score, 'progress': run.progress}
+            terminal_error = run.error
+        _push({**result, 'project_id': project_id, 'error': terminal_error})
+        return result
     except Exception as exc:  # noqa: BLE001 - results are lost, but the row must not stay `running`
         _mark_errored(f'Run completed but its results could not be saved: {exc}')
         raise

@@ -30,10 +30,13 @@ BLOCKED_IMPORTS = frozenset({
 })
 
 # Builtins that execute arbitrary code, do I/O, or break out of the sandbox namespace.
+# The reflection trio (getattr/setattr/delattr) is here because it reaches every dunder in
+# BLOCKED_ATTRS through a *string*, which no attribute-access rule can see.
 BLOCKED_BUILTINS = frozenset({
     'exec', 'eval', 'compile', 'execfile', '__import__', 'open',
     'input', 'breakpoint', 'globals', 'locals', 'vars', 'memoryview',
     'help', 'exit', 'quit',
+    'getattr', 'setattr', 'delattr',
 })
 
 # Dunder attribute traversal used to reach the object graph / builtins from a literal.
@@ -72,14 +75,29 @@ def screen_validation_code(code: str) -> List[str]:
             root = (node.module or '').split('.')[0]
             if root in BLOCKED_IMPORTS:
                 violations.append(f"import from '{node.module}' is not allowed (line {node.lineno})")
-        # exec(...) / eval(...) / open(...) / __import__(...)
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in BLOCKED_BUILTINS:
+        # exec(...) / eval(...) / open(...) / __import__(...), and the same names reached as
+        # an attribute (`m.eval(...)`). A call dispatched through a subscript is rejected
+        # outright: `tbl['eval']()` cannot be resolved statically and a scoring snippet has
+        # no legitimate reason to dispatch that way.
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in BLOCKED_BUILTINS:
                 violations.append(f"call to '{node.func.id}()' is not allowed (line {node.lineno})")
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in BLOCKED_BUILTINS:
+                violations.append(f"call to '{node.func.attr}()' is not allowed (line {node.lineno})")
+            elif isinstance(node.func, ast.Subscript):
+                violations.append(f'calling a subscripted value is not allowed (line {node.lineno})')
         # x.__globals__ / ().__class__ ...
         elif isinstance(node, ast.Attribute):
             if node.attr in BLOCKED_ATTRS:
                 violations.append(f"access to '{node.attr}' is not allowed (line {node.lineno})")
+        # Any dunder named as a *string* — `d['__builtins__']`, `getattr(o, '__globals__')`,
+        # `__import__` looked up in a dict. Attribute rules are blind to these, which is what
+        # made the object-graph walk reachable at all. Screened by shape rather than against
+        # BLOCKED_ATTRS: a scoring snippet has no business naming any dunder.
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            name = node.value
+            if len(name) > 4 and name.startswith('__') and name.endswith('__'):
+                violations.append(f"reference to '{name}' is not allowed (line {node.lineno})")
         # getattr(o, '__globals__') style dynamic escapes referenced as bare names
         elif isinstance(node, ast.Name) and node.id in BLOCKED_BUILTINS:
             # 'input' is also the harness-injected evidence variable (§19.4) — a bare

@@ -43,9 +43,10 @@ class _FakeQuery:
 
 
 class _FakeSession:
-    def __init__(self, store):
+    def __init__(self, store, on_commit=None):
         self._store = store
         self._pending = []
+        self._on_commit = on_commit
 
     def query(self, _model):
         return _FakeQuery(self._store)
@@ -56,6 +57,8 @@ class _FakeSession:
     def commit(self):
         self._store.extend(self._pending)
         self._pending = []
+        if self._on_commit is not None:
+            self._on_commit()
 
     def expunge(self, _row):
         pass
@@ -67,12 +70,16 @@ class _FakeDb:
     def __init__(self):
         self.schemas = {}
         self.broken = set()
+        self.committed = []
 
     @contextlib.contextmanager
     def get_session(self, project_id):
         if project_id in self.broken:
             raise RuntimeError(f'schema p_{project_id} is broken')
-        yield _FakeSession(self.schemas.setdefault(project_id, []))
+        yield _FakeSession(
+            self.schemas.setdefault(project_id, []),
+            on_commit=lambda: self.committed.append(project_id),
+        )
 
     @contextlib.contextmanager
     def with_project_schema_session(self, _project_id):
@@ -174,6 +181,7 @@ def _entry(name='Toxicity', **overrides):
 def clean_db():
     FAKE_DB.schemas.clear()
     FAKE_DB.broken.clear()
+    FAKE_DB.committed.clear()
     yield
 
 
@@ -305,6 +313,30 @@ def test_resync_updates_only_projects_holding_the_row(clean_db, monkeypatch):
     assert FAKE_DB.schemas[2][0].description == 'new rubric'
     # Projects that never attached it stay empty rather than gaining a copy.
     assert FAKE_DB.schemas[1] == [] and FAKE_DB.schemas[3] == []
+
+
+def test_resync_does_not_open_a_write_transaction_on_projects_without_the_row(clean_db, monkeypatch):
+    """Review #33: the single-dimension Sync ran a commit in *every* active schema, which is
+    what pushed it past the request timeout. Only holders may be written to."""
+    entry = _entry()
+    monkeypatch.setattr(platform_dimensions, '_active_project_ids', lambda: [1, 2, 3])
+    monkeypatch.setattr(platform_dimensions, 'get_registry', lambda _uuid: entry)
+    platform_dimensions.project_to(2, [entry])
+    FAKE_DB.committed.clear()
+
+    platform_dimensions.resync_dimension(str(entry.uuid))
+
+    assert FAKE_DB.committed == [2]
+
+
+def test_resync_of_an_empty_registry_touches_nothing(clean_db, monkeypatch):
+    monkeypatch.setattr(platform_dimensions, '_active_project_ids', lambda: [1, 2, 3])
+    monkeypatch.setattr(platform_dimensions, 'list_registry', lambda: [])
+
+    result = platform_dimensions.resync_all()
+
+    assert result['synced_projects'] == 0
+    assert FAKE_DB.committed == []
 
 
 def test_resync_survives_one_broken_schema(clean_db, monkeypatch):

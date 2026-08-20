@@ -482,7 +482,11 @@ class EvalDatasetSummaryModel(BaseModel):
 
 
 class EvalDatasetDetailModel(BaseModel):
-    """Detail shape (§17.4): embeds the ordered case set."""
+    """Detail shape (§17.4): embeds the ordered case set.
+
+    ``cases`` is a bounded window, not necessarily the whole set — ``case_count`` is the real
+    total and ``cases_truncated`` says whether the window stops short of it. The full set is
+    paged through the cases collection endpoint."""
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -494,6 +498,8 @@ class EvalDatasetDetailModel(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     cases: List[EvalDatasetCaseDetailModel] = Field(default_factory=list)
+    case_count: int = 0
+    cases_truncated: bool = False
 
     @field_validator('uuid', mode='before')
     @classmethod
@@ -621,8 +627,14 @@ class EvalRunResultsModel(BaseModel):
     """Results read envelope (screen #7). Bundles the run detail (incl. the frozen snapshot with
     binding weights), every result row, the latest human annotation per (case, dimension), and the
     server-side ``headline_score`` re-derived from those same normalized items — so a client
-    recompute over the returned per-item scores + snapshot weights matches it (EVAL-E2E-09)."""
+    recompute over the returned per-item scores + snapshot weights matches it (EVAL-E2E-09).
+
+    ``results`` is one page of rows and ``total`` is the run's full count; ``headline_score`` always
+    spans the whole run, so paging never moves the reported score."""
     run: EvalRunDetailModel
     results: List[EvalResultDetailModel] = Field(default_factory=list)
     human_scores: List[EvalHumanScoreDetailModel] = Field(default_factory=list)
     headline_score: Optional[float] = None
+    total: int = 0
+    limit: Optional[int] = None
+    offset: int = 0

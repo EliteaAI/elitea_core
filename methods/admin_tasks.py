@@ -616,15 +616,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         duplicates = find_duplicate_bindings(project_ids)
         if dry_run:
             return {"dry_run": True, "projects": len(project_ids), "duplicates": duplicates}
+        # Skip only the projects that actually carry duplicates — `ADD CONSTRAINT` would fail on
+        # those, but the clean projects in the same batch still want guarding. Reporting them up
+        # front saves the operator reading an exception to learn which rows to fix.
         if duplicates:
-            # Applying now would fail per project anyway; refusing up front keeps the operator from
-            # having to read the exception to learn which rows to fix.
             log.error("migrate_eval_binding_constraints: duplicate bindings must be resolved first: %s",
                       duplicates)
-            return {"migrated": 0, "error": "duplicate bindings exist", "duplicates": duplicates}
+        eligible = [pid for pid in project_ids if pid not in duplicates]
 
-        migrated, failed = apply_eval_binding_constraints(project_ids)
-        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
+        migrated, failed = apply_eval_binding_constraints(eligible)
+        result = {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
+        if duplicates:
+            result.update({"skipped": len(duplicates), "duplicates": duplicates})
+        return result
 
     @web.method()
     def migrate_audit_events_columns(self, *args, **kwargs):

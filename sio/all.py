@@ -35,12 +35,13 @@ from ..models.pd.sio import (
     EditCanvasPayload,
     CanvasLeavePayload,
     TestToolkitEnterRoomPayload,
+    EvalRunRoomPayload,
 )
 from ..utils.continue_message import continue_message
 from ..utils.participant_utils import get_entity_details, get_or_create_one
 from ..utils.canvas_utils import get_canvas_key, get_canvas_authors_key, get_shadow_key
 from ..utils.chat_constants import CANVAS_CONTENT_TTL, CANVAS_SHADOW_KEY_OFFSET_TTL
-from ..utils.sio_utils import get_chat_room, get_canvas_room, get_event_room
+from ..utils.sio_utils import get_chat_room, get_canvas_room, get_event_room, get_eval_run_room
 from ..utils.sio_utils import SioEvents, SioValidationError
 from pydantic import ValidationError
 
@@ -94,6 +95,53 @@ class SIO:
         )
         self.context.sio.enter_room(sid, room)
         log.info(f"Socket {sid} joined room {room} for test_toolkit reconnection")
+
+    @web.sio(SioEvents.eval_run_enter_room)
+    def eval_run_enter_room(self, sid: str, data: dict) -> None:
+        """
+        Join the progress room of one evaluation run, so the run's worker can push
+        progress instead of the client polling for it. Also used to re-join after a
+        page reload while a run is still in flight.
+        """
+        try:
+            parsed = EvalRunRoomPayload.model_validate(data)
+        except ValidationError as e:
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=SioEvents.eval_run_enter_room.value,
+                error=e.errors(include_url=False, include_context=False),
+                stream_id=str(data.get('run_id')) if isinstance(data, dict) else '',
+            )
+        # Rooms are keyed by run id alone, so project membership is the only
+        # authorization boundary on the pushed progress.
+        if not auth.is_sio_user_in_project(sid, parsed.project_id):
+            log.warning("Sid %s is not in project %s", sid, parsed.project_id)
+            return
+        room = get_eval_run_room(parsed.run_id)
+        self.context.sio.enter_room(sid, room)
+        # Confirm the join so the client can distinguish a live push feed from a connected but
+        # deaf socket. Every early return above deliberately leaves this unsent.
+        self.context.sio.emit(
+            event=SioEvents.eval_run_room_joined.value,
+            data={'run_id': parsed.run_id},
+            to=sid,
+        )
+        log.info(f"Socket {sid} joined room {room} for eval run progress")
+
+    @web.sio(SioEvents.eval_run_leave_room)
+    def eval_run_leave_room(self, sid: str, data: dict) -> None:
+        try:
+            parsed = EvalRunRoomPayload.model_validate(data)
+        except ValidationError as e:
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=SioEvents.eval_run_leave_room.value,
+                error=e.errors(include_url=False, include_context=False),
+                stream_id=str(data.get('run_id')) if isinstance(data, dict) else '',
+            )
+        self.context.sio.leave_room(sid, get_eval_run_room(parsed.run_id))
 
     @web.sio(SioEvents.chat_leave_rooms)
     def leave_rooms(self, sid: str, data: dict | list) -> None:

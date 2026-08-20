@@ -43,6 +43,10 @@ TEXT_ITEM_TYPES = ('text_message', 'text')
 
 _DEFAULT_SEP = '\n\n'
 
+# Read cap for `extract_conversation_turns`. Two groups make at most one case pair, so this is
+# the import path's MAX_CASES (5000) doubled.
+MAX_GROUPS = 10_000
+
 
 def classify_role(entity_name: Optional[str]) -> str:
     """Map a group's author ``entity_name`` to ``'user'`` or ``'agent'`` (§8.3). Anything that is
@@ -114,6 +118,7 @@ def extract_conversation_turns(
 
     Kept import-local so the pure contract above stays ORM-free and unit-testable.
     """
+    from sqlalchemy.orm import selectinload
     from tools import db
     from ..models.conversation import Conversation
     from ..models.message_group import ConversationMessageGroup
@@ -124,8 +129,17 @@ def extract_conversation_turns(
         groups = (
             session.query(ConversationMessageGroup)
             .filter(ConversationMessageGroup.conversation_id == conversation_id)
+            # Both relations are touched for every group below, and this runs synchronously
+            # inside a pylon_main request — lazily they cost 2N round-trips per promote.
+            .options(
+                selectinload(ConversationMessageGroup.author_participant),
+                selectinload(ConversationMessageGroup.message_items),
+            )
             .order_by(ConversationMessageGroup.created_at.asc(),
                       ConversationMessageGroup.id.asc())
+            # A conversation has no size bound of its own; the cap mirrors the import path's
+            # (`evaluation_dataset_import.MAX_CASES`) since each pair becomes one case anyway.
+            .limit(MAX_GROUPS)
             .all()
         )
         turns: List[Tuple[str, str]] = []

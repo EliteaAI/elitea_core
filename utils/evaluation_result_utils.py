@@ -26,14 +26,26 @@ from .evaluation_scoring import (
 )
 
 
-def get_run_results(project_id: int, run_id: int, session=None) -> dict:
+DEFAULT_RESULT_LIMIT = 500
+MAX_RESULT_LIMIT = 2000
+
+
+def get_run_results(
+    project_id: int,
+    run_id: int,
+    session=None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> dict:
     """Read a run's results + a server re-derived weighted headline (§20.6).
 
-    Returns a dict ``{run, results, human_scores, headline_score}`` where ``results`` is every
-    :class:`EvalResult` row (all statuses, newest-alignment order), ``human_scores`` is the latest
+    Returns a dict ``{run, results, human_scores, headline_score, total, limit, offset}`` where
+    ``results`` is one page of :class:`EvalResult` rows (all statuses, newest-alignment order,
+    capped at :data:`MAX_RESULT_LIMIT`), ``human_scores`` is the latest
     annotation per (case, dimension), and ``headline_score`` is aggregated from the same normalized
     items — machine ``ok`` results overlaid by latest human overrides — via the shared path so it
-    matches the runner's finish-time value and any client recompute. Raises
+    matches the runner's finish-time value and any client recompute. The headline always spans the
+    whole run, never just the requested page. Raises
     :class:`EvalRunNotFoundError` when the run is absent.
     """
     from ..models.evaluation import (
@@ -48,12 +60,18 @@ def get_run_results(project_id: int, run_id: int, session=None) -> dict:
         if not run:
             raise EvalRunNotFoundError(run_id)
 
-        results = (
+        # A run has one result per case × validation, each carrying an unbounded evidence/verdict
+        # envelope, so the rows are paginated. The headline below is deliberately *not* — it is
+        # folded from a columns-only read of every scored row, or a page boundary would silently
+        # change the reported score.
+        page_size = min(limit or DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT)
+        ordered = (
             s.query(EvalResult)
             .filter(EvalResult.run_id == run_id)
             .order_by(EvalResult.dataset_case_id.asc(), EvalResult.id.asc())
-            .all()
         )
+        total = ordered.count()
+        results = ordered.offset(max(offset, 0)).limit(page_size).all()
         human = (
             s.query(EvalHumanScore)
             .filter(
@@ -64,12 +82,23 @@ def get_run_results(project_id: int, run_id: int, session=None) -> dict:
             .all()
         )
 
-        # Re-derive the headline from the exact normalized items being returned (read-only). Only
-        # `ok` machine results contribute; errored/pending rows are shown but excluded from the fold.
+        # Re-derive the headline (read-only) over every `ok` row, not just the returned page.
+        # Only the five aggregation columns are read, so this stays cheap even for a large run;
+        # errored/pending rows are returned to the UI but excluded from the fold.
+        scored_rows = (
+            s.query(
+                EvalResult.dataset_case_id, EvalResult.dimension_id,
+                EvalResult.code_validation_id, EvalResult.platform_key,
+                EvalResult.normalized_score,
+            )
+            .filter(
+                EvalResult.run_id == run_id,
+                EvalResult.status == EvalResultStatus.ok,
+            )
+            .all()
+        )
         scored_items = fold_latest_normalized(
-            ((r.dataset_case_id, r.dimension_id, r.code_validation_id, r.platform_key,
-              r.normalized_score)
-             for r in results if r.status == EvalResultStatus.ok),
+            scored_rows,
             ((h.dataset_case_id, h.dimension_id, h.normalized_score) for h in human),
         )
         headline = aggregate_run_score(scored_items, snapshot_weight_map(run.snapshot))
@@ -79,4 +108,7 @@ def get_run_results(project_id: int, run_id: int, session=None) -> dict:
             'results': results,
             'human_scores': human,
             'headline_score': headline,
+            'total': total,
+            'limit': page_size,
+            'offset': max(offset, 0),
         }

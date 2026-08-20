@@ -36,3 +36,8 @@ class CanvasLeavePayload(BaseModel):
 class TestToolkitEnterRoomPayload(BaseModel):
     stream_id: UUID | str
     event_name: Optional[str] = "test_toolkit_tool"
+
+
+class EvalRunRoomPayload(BaseModel):
+    project_id: int
+    run_id: int

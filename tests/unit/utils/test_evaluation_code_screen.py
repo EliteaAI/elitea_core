@@ -75,3 +75,51 @@ def test_blocked_dunder_attr(screen, attr):
 def test_allowed_builtins_pass(screen):
     # ordinary safe builtins are not blocked
     assert screen('result = len([1, 2, 3]) > abs(-1)') == []
+
+
+# ---------------------------------------------------------------------------
+# Reflection escapes (review on elitea_core#336)
+#
+# The screen used to inspect only bare-`Name` calls and dunder *attribute names*, which left
+# the whole object graph reachable: `getattr` was not blocked, a dunder written as a string
+# was never examined, and a subscript was not walked at all. The PoC below passed cleanly.
+# ---------------------------------------------------------------------------
+
+REVIEW_POC = """
+g = getattr((lambda: 0), '__globals__')
+imp = g['__builtins__']['__import__']
+os_mod = imp('os')
+result = True
+"""
+
+
+def test_review_poc_is_rejected(screen):
+    assert screen(REVIEW_POC)
+
+
+@pytest.mark.parametrize('name', ['getattr', 'setattr', 'delattr'])
+def test_reflection_builtins_are_blocked(screen, name):
+    # These reach every BLOCKED_ATTRS dunder through a string, which no attribute rule sees.
+    assert any(name in v and 'not allowed' in v for v in screen(f'x = {name}(o, "a")'))
+
+
+@pytest.mark.parametrize('literal', ['__globals__', '__builtins__', '__import__', '__class__'])
+def test_dunder_as_a_string_is_blocked(screen, literal):
+    assert any(literal in v for v in screen(f'x = d[{literal!r}]\nresult = True'))
+
+
+def test_blocked_builtin_reached_as_an_attribute(screen):
+    assert any('eval' in v and 'not allowed' in v for v in screen('result = m.eval("1")'))
+
+
+def test_call_through_a_subscript_is_blocked(screen):
+    assert any('subscripted' in v for v in screen('result = tbl["f"]()'))
+
+
+def test_plain_subscripting_still_passes(screen):
+    # Only *calling* a subscript is refused; reading case data by key is the normal case.
+    assert screen('result = row["score"] > 0.5') == []
+
+
+def test_ordinary_strings_are_not_mistaken_for_dunders(screen):
+    assert screen('result = text == "__" or text == "a__b__c"') == []
