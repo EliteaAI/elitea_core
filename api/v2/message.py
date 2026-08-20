@@ -5,7 +5,7 @@ from pylon.core.tools import log
 
 from ...models.enums.all import ParticipantTypes
 from ...models.message_group import ConversationMessageGroup
-from ...models.pd.message import MessageGroupDetail
+from ...models.pd.message import MessageGroupDetail, MessageGroupMetaPatch
 from ...utils.conversation_utils import _message_group_columns, fetch_guarded_message_groups
 from ...utils.context_analytics import update_context_analytics_after_message_delete
 from ...utils.sio_utils import get_chat_room
@@ -62,6 +62,41 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     "error": f"Can not get details for {message_group_uid=}",
                 }, 400
             return result, 200
+
+    @register_openapi(
+        name="Update Message Meta",
+        description="Patch the meta of a message group — only the `created_entities` field may be updated.",
+        tags=["elitea_core/chat"],
+        available_to_users=True,
+    )
+    @auth.decorators.check_api({
+        "permissions": ["models.chat.messages.details"],
+        "recommended_roles": {
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
+        }
+    })
+    @api_tools.endpoint_metrics
+    def patch(self, project_id: int, message_group_uid: str, **kwargs):
+        from pydantic import ValidationError
+        raw = request.get_json(silent=True) or {}
+        if not raw:
+            return {"error": "No data provided"}, 400
+        try:
+            validated = MessageGroupMetaPatch.model_validate(raw)
+        except ValidationError as e:
+            return e.errors(include_url=False), 400
+        with db.get_session(project_id) as session:
+            message_group: ConversationMessageGroup = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_group_uid,
+            ).first()
+            if message_group is None:
+                return {"error": "Message group was not found"}, 400
+            current_meta = dict(message_group.meta or {})
+            current_meta["created_entities"] = [e.model_dump() for e in validated.created_entities]
+            message_group.meta = current_meta
+            session.commit()
+        return None, 204
 
     @register_openapi(
         name="Delete Message",

@@ -307,7 +307,8 @@ class McpService:
         log.info("Tool result: %s", result)
         #
         if "error" in result and result["error"] is not None:
-            response_content = result["error"]
+            err = result["error"]
+            response_content = err if isinstance(err, str) else json.dumps(err)
         #
         call_tool_result = _jrpc_server_response(request.id, types.CallToolResult(
             content=[types.TextContent(type="text", text=response_content)]
