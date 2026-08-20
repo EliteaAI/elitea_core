@@ -149,6 +149,12 @@ if _API_AVAILABLE:
             """
             from tools import db
             from ...models.audit_event import AuditEvent
+            try:
+                from plugins.costs.models.model_price import ModelPrice
+                _model_price_available = True
+            except ImportError:
+                ModelPrice = None
+                _model_price_available = False
 
             user_id = request.args.get("user_id")
             if not user_id:
@@ -252,12 +258,42 @@ if _API_AVAILABLE:
 
                     # LLM cost/tokens for this user. Correlation is user_id
                     # directly (already in the base filter); no trace join needed.
-                    llm_kpi = base.with_entities(
+                    llm_kpi_query = base.with_entities(
                         func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                         func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                        func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                        func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                         func.sum(AuditEvent.llm_cost).label("llm_cost"),
                         func.count().label("llm_calls"),
-                    ).filter(
+                    )
+                    if _model_price_available:
+                        llm_kpi_query = base.outerjoin(
+                            ModelPrice, AuditEvent.model_name == ModelPrice.model_name
+                        ).with_entities(
+                            func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
+                            func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
+                            func.sum(AuditEvent.llm_cost).label("llm_cost"),
+                            func.count().label("llm_calls"),
+                            func.sum(
+                                func.coalesce(AuditEvent.input_tokens, 0)
+                                * func.coalesce(ModelPrice.input_cost_per_token, 0)
+                            ).label("input_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.output_tokens, 0)
+                                * func.coalesce(ModelPrice.output_cost_per_token, 0)
+                            ).label("output_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
+                            ).label("cache_read_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
+                            ).label("cache_creation_cost"),
+                        )
+                    llm_kpi = llm_kpi_query.filter(
                         AuditEvent.event_type == "llm",
                     ).first()
 
@@ -296,7 +332,13 @@ if _API_AVAILABLE:
                                 ((llm_kpi.input_tokens or 0) + (llm_kpi.output_tokens or 0))
                                 if llm_kpi else 0
                             ),
+                            "cache_read_tokens": (llm_kpi.cache_read_tokens if llm_kpi else 0) or 0,
+                            "cache_creation_tokens": (llm_kpi.cache_creation_tokens if llm_kpi else 0) or 0,
                             "llm_cost": float(llm_kpi.llm_cost) if llm_kpi and llm_kpi.llm_cost else 0.0,
+                            "input_cost": round(float(llm_kpi.input_cost), 6) if _model_price_available and llm_kpi and llm_kpi.input_cost else 0.0,
+                            "output_cost": round(float(llm_kpi.output_cost), 6) if _model_price_available and llm_kpi and llm_kpi.output_cost else 0.0,
+                            "cache_read_cost": round(float(llm_kpi.cache_read_cost), 6) if _model_price_available and llm_kpi and llm_kpi.cache_read_cost else 0.0,
+                            "cache_creation_cost": round(float(llm_kpi.cache_creation_cost), 6) if _model_price_available and llm_kpi and llm_kpi.cache_creation_cost else 0.0,
                             "avg_cost_per_call": (
                                 float(llm_kpi.llm_cost) / llm_kpi.llm_calls
                                 if llm_kpi and llm_kpi.llm_cost and llm_kpi.llm_calls
