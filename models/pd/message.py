@@ -104,3 +104,15 @@ class MessagePostPayload(BaseModel):
                 if not llm_settings:
                     raise ValueError('llm_settings must be provided for LLM prediction')
         return v
+
+
+class CreatedEntityItem(BaseModel):
+    entity_type: str
+    entity_id: int
+    version_id: Optional[int] = None
+    entity_name: str
+    is_mcp: bool = False
+
+
+class MessageGroupMetaPatch(BaseModel):
+    created_entities: List[CreatedEntityItem]
