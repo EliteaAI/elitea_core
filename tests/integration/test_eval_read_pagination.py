@@ -44,16 +44,16 @@ class _Model:
     def model_validate(cls, obj):
         return cls(dict(obj) if isinstance(obj, dict) else dict(obj.__dict__))
 
-    def model_dump(self, mode=None):  # noqa: ARG002
-        return dict(self._payload)
+    def model_dump(self, mode=None, exclude=None):  # noqa: ARG002
+        return {k: v for k, v in self._payload.items() if k not in (exclude or set())}
 
 
 class _ResultsEnvelope:
     def __init__(self, **kwargs):
         self._payload = kwargs
 
-    def model_dump(self, mode=None):  # noqa: ARG002
-        out = dict(self._payload)
+    def model_dump(self, mode=None, exclude=None):  # noqa: ARG002
+        out = {k: v for k, v in self._payload.items() if k not in (exclude or set())}
         out['run'] = out['run'].model_dump()
         out['results'] = [r.model_dump() for r in out['results']]
         out['human_scores'] = [h.model_dump() for h in out['human_scores']]

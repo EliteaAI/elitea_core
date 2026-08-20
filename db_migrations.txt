@@ -228,6 +228,14 @@ Run admin task migrate_budget_alert_columns
 # so no dry run is offered.
 Run admin task migrate_project_member_default_limit
 
+# 2.0.5 -> 2.0.6
+
+# Issue #1431: add message_group_ids column to chat_conversation_share_tokens
+# Stores a JSON list of ConversationMessageGroup IDs selected when scope='partial'.
+# Nullable — existing rows default to NULL (treated as unrestricted, equivalent to scope='all').
+# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+Run admin task migrate_share_token_columns
+
 # Platform-wide eval dimension registry (§16.1): allowed_engines on
 # centry.eval_platform_dimension
 # Platform dimensions are scored by AI or Human, exactly like project-tier ones, so the
@@ -235,6 +243,8 @@ Run admin task migrate_project_member_default_limit
 # Only needed where the table was created by a pre-release build without this column;
 # fresh environments get it from create_tables. Shared-schema table, so no per-project loop.
 # Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+Run admin task migrate_eval_platform_dimension_columns
+# Manual fallback if the admin task is unavailable:
 ALTER TABLE centry.eval_platform_dimension
     ADD COLUMN IF NOT EXISTS allowed_engines JSONB NOT NULL DEFAULT '["ai"]'::jsonb;
 
@@ -250,11 +260,3 @@ ALTER TABLE centry.eval_platform_dimension
 # reports the duplicate rows to resolve, and the real run refuses while any remain.
 Run admin task migrate_eval_binding_constraints with param: project_id=all;dry_run
 Run admin task migrate_eval_binding_constraints with param: project_id=all
-
-# 2.0.5 -> 2.0.6
-
-# Issue #1431: add message_group_ids column to chat_conversation_share_tokens
-# Stores a JSON list of ConversationMessageGroup IDs selected when scope='partial'.
-# Nullable — existing rows default to NULL (treated as unrestricted, equivalent to scope='all').
-# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
-Run admin task migrate_share_token_columns

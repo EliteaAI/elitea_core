@@ -615,6 +615,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         duplicates = find_duplicate_bindings(project_ids)
         if dry_run:
+            # The admin task runner discards the return value, so a dry run that only returned its
+            # findings would report nothing at all — and reporting them is its entire purpose.
+            if duplicates:
+                log.warning("migrate_eval_binding_constraints: dry run scanned %s project(s); "
+                            "resolve these duplicates before the real run: %s",
+                            len(project_ids), duplicates)
+            else:
+                log.info("migrate_eval_binding_constraints: dry run scanned %s project(s), "
+                         "no duplicate bindings found — safe to apply", len(project_ids))
             return {"dry_run": True, "projects": len(project_ids), "duplicates": duplicates}
         # Skip only the projects that actually carry duplicates — `ADD CONSTRAINT` would fail on
         # those, but the clean projects in the same batch still want guarding. Reporting them up
@@ -628,7 +637,44 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         result = {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
         if duplicates:
             result.update({"skipped": len(duplicates), "duplicates": duplicates})
+        log.info("migrate_eval_binding_constraints: %s", result)
         return result
+
+    @web.method("migrate_eval_platform_dimension_columns")
+    def migrate_eval_platform_dimension_columns(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: add allowed_engines to the platform dimension registry.
+
+        Platform dimensions are scored by AI or Human exactly like project-tier ones, so the
+        engine set belongs to the registry and is projected into every p_N.eval_dimension row.
+        Only environments whose registry table was created by a pre-release build lack the
+        column; fresh ones get it from create_tables. Without it every registry read fails
+        with UndefinedColumn.
+
+        Shared-schema table, so there is no per-project loop. Idempotent
+        (ADD COLUMN IF NOT EXISTS): safe to run more than once, no dry run needed.
+        """
+        from sqlalchemy import text  # pylint: disable=C0415
+
+        statements = [
+            f"ALTER TABLE {c.POSTGRES_SCHEMA}.eval_platform_dimension "
+            "ADD COLUMN IF NOT EXISTS allowed_engines JSONB NOT NULL DEFAULT '[\"ai\"]'::jsonb",
+        ]
+        #
+        applied = []
+        #
+        try:
+            with db.get_session(None) as session:
+                for statement in statements:
+                    session.execute(text(statement))
+                    applied.append(statement)
+                session.commit()
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("migrate_eval_platform_dimension_columns: failed")
+            return {"ok": False, "applied": len(applied), "error": str(exc)}
+        #
+        log.info("migrate_eval_platform_dimension_columns: applied %s statement(s)", len(applied))
+        #
+        return {"ok": True, "applied": len(applied)}
 
     @web.method()
     def migrate_audit_events_columns(self, *args, **kwargs):
