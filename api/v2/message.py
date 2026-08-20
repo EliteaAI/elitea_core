@@ -63,6 +63,30 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 }, 400
             return result, 200
 
+    @auth.decorators.check_api({
+        "permissions": ["models.chat.messages.details"],
+        "recommended_roles": {
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
+        }
+    })
+    @api_tools.endpoint_metrics
+    def patch(self, project_id: int, message_group_uid: str, **kwargs):
+        payload = request.get_json(silent=True) or {}
+        if not payload:
+            return {"error": "No data provided"}, 400
+        with db.get_session(project_id) as session:
+            message_group: ConversationMessageGroup = session.query(ConversationMessageGroup).filter(
+                ConversationMessageGroup.uuid == message_group_uid,
+            ).first()
+            if message_group is None:
+                return {"error": "Message group was not found"}, 400
+            current_meta = dict(message_group.meta or {})
+            current_meta.update(payload)
+            message_group.meta = current_meta
+            session.commit()
+        return None, 204
+
     @register_openapi(
         name="Delete Message",
         description="Delete a single message by UUID.",
