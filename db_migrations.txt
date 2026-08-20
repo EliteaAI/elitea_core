@@ -228,6 +228,29 @@ Run admin task migrate_budget_alert_columns
 # so no dry run is offered.
 Run admin task migrate_project_member_default_limit
 
+# Platform-wide eval dimension registry (§16.1): allowed_engines on
+# centry.eval_platform_dimension
+# Platform dimensions are scored by AI or Human, exactly like project-tier ones, so the
+# engine set is part of the registry and is projected into every p_N.eval_dimension row.
+# Only needed where the table was created by a pre-release build without this column;
+# fresh environments get it from create_tables. Shared-schema table, so no per-project loop.
+# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+ALTER TABLE centry.eval_platform_dimension
+    ADD COLUMN IF NOT EXISTS allowed_engines JSONB NOT NULL DEFAULT '["ai"]'::jsonb;
+
+# Agent evaluation: eval_binding uniqueness guards on every p_N schema
+# EvalBinding declares three UniqueConstraints (suite_id + dimension_id / code_validation_id /
+# platform_key), but eval tables are provisioned by create_all, which creates tables and never
+# alters existing ones. Every schema whose eval_binding predates the constraints therefore has no
+# DB-level guard and relies on an app-level pre-check that has a read-then-insert race. A duplicate
+# binding scores the same criterion twice and silently doubles its weight in the run headline, so
+# this is a correctness fix. Per-project loop. Idempotent (each ADD CONSTRAINT is guarded on
+# pg_constraint, keeping the constraint name identical to the model's, so no schema drift).
+# ADD CONSTRAINT fails on a table that already violates it — always dry-run first; the dry run
+# reports the duplicate rows to resolve, and the real run refuses while any remain.
+Run admin task migrate_eval_binding_constraints with param: project_id=all;dry_run
+Run admin task migrate_eval_binding_constraints with param: project_id=all
+
 # 2.0.5 -> 2.0.6
 
 # Issue #1431: add message_group_ids column to chat_conversation_share_tokens

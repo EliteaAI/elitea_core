@@ -1,3 +1,4 @@
+import functools
 import os
 import re
 
@@ -12,6 +13,7 @@ from pylon.core.tools import module, log
 from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
 
+from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.sio_utils import SioEvents
 from .scripts.tool_icons import download_github_repo_zip, unzip_file
 from .utils.prompt_eliminate_utils import prompt_2_agent_migration
@@ -61,6 +63,47 @@ class Module(module.ModuleModel):
             #
             query_wait=5,
             watcher_max_wait=3,
+        )
+        #
+        # Eval runs execute *locally* in pylon_main (they orchestrate agent predicts and judge
+        # dispatches, both of which go out through `task_node` above), so this node serves its own
+        # pool rather than dispatching to the indexer.
+        #
+        # Why a node at all instead of the bare daemon thread this replaces: `task_limit` bounds how
+        # many runs execute at once, so a handful of users starting 50-case runs can no longer spawn
+        # unbounded threads all hammering the judge model; and registering the node in the bootstrap
+        # TASK_TARGETS makes graceful shutdown drain in-flight runs instead of killing them.
+        #
+        # It does NOT make a run survive the process dying — arbiter keeps task state in memory, so
+        # a hard restart still orphans a `running` row. That is what the eval_run_reap cron is for.
+        #
+        # The limit is per node, and gunicorn runs several pylon_main workers each with their own
+        # node, so the effective ceiling is limit x workers. It is a guard against a single user
+        # flooding the pool, not a global quota.
+        self.eval_task_node = arbiter.TaskNode(
+            self.event_node,
+            #
+            pool="eval_runs",
+            ident_prefix="eval_run_",
+            multiprocessing_context="threading",
+            #
+            task_limit=self.descriptor.config.get("eval_run_task_limit", 4),
+            #
+            result_transport="memory",
+            # A run's terminal state is written to the `eval_run` row by the task itself, so the
+            # in-memory result is never read and does not need to be retained for long.
+            task_retention_period=600,
+            housekeeping_interval=60,
+            thread_scan_interval=0.1,
+            #
+            kill_on_stop=False,
+            stop_node_task_wait=3,
+            #
+            start_attempts=1,
+            start_max_wait=3,
+            query_wait=3,
+            watcher_max_wait=3,
+            result_max_wait=3,
         )
         # Task callback state (used by task_status_changed in methods/task_callbacks.py).
         # Must be initialized here in __init__ — the callback is registered in init() via
@@ -410,6 +453,10 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_share_token_columns", self.migrate_share_token_columns, group="R-2.0.6",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_eval_binding_constraints", self.migrate_eval_binding_constraints,
+                group="R-2.0.5",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -478,6 +525,13 @@ class Module(module.ModuleModel):
                 'rpc_kwargs': {},
                 'name': 'pgvector_engine_reap',
                 'cron': '*/5 * * * *',
+                'active': True
+            })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                'rpc_func': 'elitea_core_reap_orphaned_eval_runs',
+                'rpc_kwargs': {},
+                'name': 'eval_run_reap',
+                'cron': '*/10 * * * *',
                 'active': True
             })
             self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
@@ -602,11 +656,32 @@ class Module(module.ModuleModel):
             return _original_start_task(*args, **kwargs)
 
         self.task_node.start_task = _maintenance_gated_start_task
+
+        # Eval run pool. Registered after the gate above so a run submitted during maintenance is
+        # rejected before it starts: its own code-validation dispatches go through the gated
+        # `task_node` and would fail closed, producing a scorecard of errors rather than an
+        # evaluation. `launch_run` translates the rejection into a 503.
+        self.eval_task_node.start()
+        self.eval_task_node.register_task(
+            functools.partial(execute_run_task, self), EVAL_RUN_TASK_NAME)
+
+        _original_eval_start_task = self.eval_task_node.start_task
+
+        def _maintenance_gated_eval_start_task(*args, **kwargs):
+            from .utils.maintenance_gate import is_maintenance_active
+            from .utils.exceptions import MaintenanceInProgressError
+            if is_maintenance_active():
+                raise MaintenanceInProgressError(task_name=EVAL_RUN_TASK_NAME)
+            return _original_eval_start_task(*args, **kwargs)
+
+        self.eval_task_node.start_task = _maintenance_gated_eval_start_task
         # Events
         self.event_node.subscribe("application_stream_response", self.stream_response)
         self.event_node.subscribe("application_full_response", self.conversation_message_proxy)
         self.event_node.subscribe("application_partial_response", self.conversation_partial_message_proxy)
         self.event_node.subscribe("application_child_message", self.child_message_proxy)
+        # Eval run progress (eval worker → every pylon_main replica → browser)
+        self.event_node.subscribe("elitea_core_eval_run_progress", self.eval_run_progress_event)
         # Voice TTS events (indexer → pylon_main → browser)
         self.event_node.subscribe("voice_tts_audio_chunk", self.voice_tts_audio_chunk)
         self.event_node.subscribe("voice_tts_done", self.voice_tts_done)
@@ -703,6 +778,7 @@ class Module(module.ModuleModel):
         self._init_skill_publishing_guardrail()
 
         from .models import all, folder, message_group, message_trace_step, participants, project_budget, user_budget
+        from .models import evaluation, eval_platform_dimension
         from .models.message_items import base, text, canvas, context
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
 
@@ -842,6 +918,7 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("application_full_response", self.conversation_message_proxy)
         self.event_node.unsubscribe("application_partial_response", self.conversation_partial_message_proxy)
         self.event_node.unsubscribe("application_child_message", self.child_message_proxy)
+        self.event_node.unsubscribe("elitea_core_eval_run_progress", self.eval_run_progress_event)
         self.event_node.unsubscribe("application_toolkit_configurations_collected", self.toolkit_configurations_collected)
         self.event_node.unsubscribe("application_toolkits_collected", self.toolkits_collected)
         self.event_node.unsubscribe("application_file_loaders_collected", self.index_types_collected)
@@ -858,6 +935,7 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
 
         # TaskNode
+        self.eval_task_node.stop()
         self.task_node.stop()
         try:
             from tools import this

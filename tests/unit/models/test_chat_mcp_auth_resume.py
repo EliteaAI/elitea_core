@@ -67,6 +67,8 @@ _module(
         debug=lambda *_args, **_kwargs: None,
         info=lambda *_args, **_kwargs: None,
         warning=lambda *_args, **_kwargs: None,
+        error=lambda *_args, **_kwargs: None,
+        exception=lambda *_args, **_kwargs: None,
     ),
 )
 _module(
