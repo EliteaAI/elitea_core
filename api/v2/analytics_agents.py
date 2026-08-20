@@ -275,6 +275,8 @@ if _API_AVAILABLE:
                         func.sum(llm_ev.llm_cost).label("llm_cost"),
                         func.sum(func.coalesce(llm_ev.input_tokens, 0)).label("input_tokens"),
                         func.sum(func.coalesce(llm_ev.output_tokens, 0)).label("output_tokens"),
+                        func.sum(func.coalesce(llm_ev.cache_read_tokens, 0)).label("cache_read_tokens"),
+                        func.sum(func.coalesce(llm_ev.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                         func.sum(
                             func.coalesce(llm_ev.input_tokens, 0)
                             + func.coalesce(llm_ev.output_tokens, 0)
@@ -288,6 +290,8 @@ if _API_AVAILABLE:
                             func.sum(llm_ev.llm_cost).label("llm_cost"),
                             func.sum(func.coalesce(llm_ev.input_tokens, 0)).label("input_tokens"),
                             func.sum(func.coalesce(llm_ev.output_tokens, 0)).label("output_tokens"),
+                            func.sum(func.coalesce(llm_ev.cache_read_tokens, 0)).label("cache_read_tokens"),
+                            func.sum(func.coalesce(llm_ev.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                             func.sum(
                                 func.coalesce(llm_ev.input_tokens, 0)
                                 + func.coalesce(llm_ev.output_tokens, 0)
@@ -301,6 +305,14 @@ if _API_AVAILABLE:
                                 func.coalesce(llm_ev.output_tokens, 0)
                                 * func.coalesce(mp_alias.output_cost_per_token, 0)
                             ).label("output_cost"),
+                            func.sum(
+                                func.coalesce(llm_ev.cache_read_tokens, 0)
+                                * func.coalesce(mp_alias.cache_read_input_token_cost, 0)
+                            ).label("cache_read_cost"),
+                            func.sum(
+                                func.coalesce(llm_ev.cache_creation_tokens, 0)
+                                * func.coalesce(mp_alias.cache_creation_input_token_cost, 0)
+                            ).label("cache_creation_cost"),
                         ).select_from(llm_ev).join(
                             app_traces, llm_ev.trace_id == app_traces.c.trace_id,
                         ).outerjoin(
@@ -342,6 +354,12 @@ if _API_AVAILABLE:
                     output_tokens_col = func.coalesce(
                         func.max(cost_map.c.output_tokens), 0
                     ).label("output_tokens")
+                    cache_read_tokens_col = func.coalesce(
+                        func.max(cost_map.c.cache_read_tokens), 0
+                    ).label("cache_read_tokens")
+                    cache_creation_tokens_col = func.coalesce(
+                        func.max(cost_map.c.cache_creation_tokens), 0
+                    ).label("cache_creation_tokens")
                     total_tokens_col = func.coalesce(
                         func.max(cost_map.c.total_tokens), 0
                     ).label("total_tokens")
@@ -360,7 +378,16 @@ if _API_AVAILABLE:
                         output_cost_col = func.coalesce(
                             func.max(cost_map.c.output_cost), 0
                         ).label("output_cost")
-                        extra_cost_cols = [input_cost_col, output_cost_col]
+                        cache_read_cost_col = func.coalesce(
+                            func.max(cost_map.c.cache_read_cost), 0
+                        ).label("cache_read_cost")
+                        cache_creation_cost_col = func.coalesce(
+                            func.max(cost_map.c.cache_creation_cost), 0
+                        ).label("cache_creation_cost")
+                        extra_cost_cols = [
+                            input_cost_col, output_cost_col,
+                            cache_read_cost_col, cache_creation_cost_col,
+                        ]
 
                     query = base.outerjoin(
                         cost_map, AuditEvent.entity_id == cost_map.c.entity_id,
@@ -373,6 +400,8 @@ if _API_AVAILABLE:
                         errors_col,
                         input_tokens_col,
                         output_tokens_col,
+                        cache_read_tokens_col,
+                        cache_creation_tokens_col,
                         total_tokens_col,
                         llm_cost_col,
                         llm_calls_col,
@@ -431,10 +460,14 @@ if _API_AVAILABLE:
                                 "errors": r.errors or 0,
                                 "input_tokens": r.input_tokens or 0,
                                 "output_tokens": r.output_tokens or 0,
+                                "cache_read_tokens": r.cache_read_tokens or 0,
+                                "cache_creation_tokens": r.cache_creation_tokens or 0,
                                 "total_tokens": r.total_tokens or 0,
                                 "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
                                 "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
                                 "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
+                                "cache_read_cost": round(float(r.cache_read_cost), 6) if _model_price_available and r.cache_read_cost else 0.0,
+                                "cache_creation_cost": round(float(r.cache_creation_cost), 6) if _model_price_available and r.cache_creation_cost else 0.0,
                                 "avg_tokens_per_call": (
                                     (r.total_tokens or 0) / r.llm_calls
                                     if r.llm_calls else 0

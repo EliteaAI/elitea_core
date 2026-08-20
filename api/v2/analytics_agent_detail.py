@@ -249,6 +249,8 @@ if _API_AVAILABLE:
                         func.sum(AuditEvent.llm_cost).label("llm_cost"),
                         func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                         func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                        func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                        func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                         func.count().label("llm_calls"),
                     )
                     if _model_price_available:
@@ -256,6 +258,8 @@ if _API_AVAILABLE:
                             func.sum(AuditEvent.llm_cost).label("llm_cost"),
                             func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                             func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                             func.count().label("llm_calls"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
@@ -265,6 +269,14 @@ if _API_AVAILABLE:
                                 func.coalesce(AuditEvent.output_tokens, 0)
                                 * func.coalesce(ModelPrice.output_cost_per_token, 0)
                             ).label("output_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
+                            ).label("cache_read_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
+                            ).label("cache_creation_cost"),
                         ).outerjoin(
                             ModelPrice, AuditEvent.model_name == ModelPrice.model_name
                         )
@@ -304,9 +316,13 @@ if _API_AVAILABLE:
                                 ((cost_row.input_tokens or 0) + (cost_row.output_tokens or 0))
                                 if cost_row else 0
                             ),
+                            "cache_read_tokens": (cost_row.cache_read_tokens if cost_row else 0) or 0,
+                            "cache_creation_tokens": (cost_row.cache_creation_tokens if cost_row else 0) or 0,
                             "llm_cost": float(cost_row.llm_cost) if cost_row and cost_row.llm_cost else 0.0,
                             "input_cost": round(float(cost_row.input_cost), 6) if _model_price_available and cost_row and cost_row.input_cost else 0.0,
                             "output_cost": round(float(cost_row.output_cost), 6) if _model_price_available and cost_row and cost_row.output_cost else 0.0,
+                            "cache_read_cost": round(float(cost_row.cache_read_cost), 6) if _model_price_available and cost_row and cost_row.cache_read_cost else 0.0,
+                            "cache_creation_cost": round(float(cost_row.cache_creation_cost), 6) if _model_price_available and cost_row and cost_row.cache_creation_cost else 0.0,
                             "avg_cost_per_call": (
                                 float(cost_row.llm_cost) / cost_row.llm_calls
                                 if cost_row and cost_row.llm_cost and cost_row.llm_calls

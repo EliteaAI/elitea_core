@@ -177,9 +177,13 @@ if _API_AVAILABLE:
                             func.sum(AuditEvent.llm_cost).label("total_cost"),
                             func.sum(AuditEvent.input_tokens).label("total_input_tokens"),
                             func.sum(AuditEvent.output_tokens).label("total_output_tokens"),
+                            func.sum(AuditEvent.cache_read_tokens).label("total_cache_read_tokens"),
+                            func.sum(AuditEvent.cache_creation_tokens).label("total_cache_creation_tokens"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
                                 + func.coalesce(AuditEvent.output_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_creation_tokens, 0)
                             ).label("total_tokens"),
                             func.count().label("total_calls"),
                             func.sum(
@@ -190,15 +194,27 @@ if _API_AVAILABLE:
                                 func.coalesce(AuditEvent.output_tokens, 0)
                                 * func.coalesce(ModelPrice.output_cost_per_token, 0)
                             ).label("total_output_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
+                            ).label("total_cache_read_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
+                            ).label("total_cache_creation_cost"),
                         ).first()
                     else:
                         kpi = base.with_entities(
                             func.sum(AuditEvent.llm_cost).label("total_cost"),
                             func.sum(AuditEvent.input_tokens).label("total_input_tokens"),
                             func.sum(AuditEvent.output_tokens).label("total_output_tokens"),
+                            func.sum(AuditEvent.cache_read_tokens).label("total_cache_read_tokens"),
+                            func.sum(AuditEvent.cache_creation_tokens).label("total_cache_creation_tokens"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
                                 + func.coalesce(AuditEvent.output_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_creation_tokens, 0)
                             ).label("total_tokens"),
                             func.count().label("total_calls"),
                         ).first()
@@ -210,10 +226,14 @@ if _API_AVAILABLE:
                         "total_cost": round(total_cost, 6),
                         "total_input_tokens": kpi.total_input_tokens or 0,
                         "total_output_tokens": kpi.total_output_tokens or 0,
+                        "total_cache_read_tokens": kpi.total_cache_read_tokens or 0,
+                        "total_cache_creation_tokens": kpi.total_cache_creation_tokens or 0,
                         "total_tokens": kpi.total_tokens or 0,
                         "avg_cost_per_call": round(total_cost / total_calls, 8) if total_calls > 0 else 0.0,
                         "total_input_cost": round(float(kpi.total_input_cost), 6) if _model_price_available and kpi.total_input_cost else 0.0,
                         "total_output_cost": round(float(kpi.total_output_cost), 6) if _model_price_available and kpi.total_output_cost else 0.0,
+                        "total_cache_read_cost": round(float(kpi.total_cache_read_cost), 6) if _model_price_available and kpi.total_cache_read_cost else 0.0,
+                        "total_cache_creation_cost": round(float(kpi.total_cache_creation_cost), 6) if _model_price_available and kpi.total_cache_creation_cost else 0.0,
                     }
 
                     # Get model display names
@@ -238,6 +258,8 @@ if _API_AVAILABLE:
                             func.count().label("calls"),
                             func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                             func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                             func.sum(AuditEvent.llm_cost).label("total_cost"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
@@ -247,6 +269,14 @@ if _API_AVAILABLE:
                                 func.coalesce(AuditEvent.output_tokens, 0)
                                 * func.coalesce(ModelPrice.output_cost_per_token, 0)
                             ).label("output_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
+                            ).label("cache_read_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
+                            ).label("cache_creation_cost"),
                         ).filter(
                             AuditEvent.model_name.isnot(None),
                             AuditEvent.model_name != "",
@@ -259,6 +289,8 @@ if _API_AVAILABLE:
                             func.count().label("calls"),
                             func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                             func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                             func.sum(AuditEvent.llm_cost).label("total_cost"),
                         ).filter(
                             AuditEvent.model_name.isnot(None),
@@ -274,9 +306,15 @@ if _API_AVAILABLE:
                             "calls": r.calls,
                             "input_tokens": r.input_tokens or 0,
                             "output_tokens": r.output_tokens or 0,
+                            "cache_read_tokens": r.cache_read_tokens or 0,
+                            "cache_creation_tokens": r.cache_creation_tokens or 0,
+                            "total_tokens": (r.input_tokens or 0) + (r.output_tokens or 0)
+                                + (r.cache_read_tokens or 0) + (r.cache_creation_tokens or 0),
                             "total_cost": round(float(r.total_cost), 6) if r.total_cost else 0.0,
                             "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
                             "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
+                            "cache_read_cost": round(float(r.cache_read_cost), 6) if _model_price_available and r.cache_read_cost else 0.0,
+                            "cache_creation_cost": round(float(r.cache_creation_cost), 6) if _model_price_available and r.cache_creation_cost else 0.0,
                         }
                         for r in model_rows
                     ]
@@ -313,9 +351,13 @@ if _API_AVAILABLE:
                         func.sum(AuditEvent.llm_cost).label("total_cost"),
                         func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                         func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                        func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                        func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                         func.sum(
                             func.coalesce(AuditEvent.input_tokens, 0)
                             + func.coalesce(AuditEvent.output_tokens, 0)
+                            + func.coalesce(AuditEvent.cache_read_tokens, 0)
+                            + func.coalesce(AuditEvent.cache_creation_tokens, 0)
                         ).label("total_tokens"),
                         func.count().label("calls"),
                         *(
@@ -328,6 +370,14 @@ if _API_AVAILABLE:
                                     func.coalesce(AuditEvent.output_tokens, 0)
                                     * func.coalesce(ModelPrice.output_cost_per_token, 0)
                                 ).label("output_cost"),
+                                func.sum(
+                                    func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                    * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
+                                ).label("cache_read_cost"),
+                                func.sum(
+                                    func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                                    * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
+                                ).label("cache_creation_cost"),
                             ]
                             if _model_price_available else []
                         ),
@@ -342,8 +392,12 @@ if _API_AVAILABLE:
                             "total_cost": round(float(r.total_cost), 6) if r.total_cost else 0.0,
                             "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
                             "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
+                            "cache_read_cost": round(float(r.cache_read_cost), 6) if _model_price_available and r.cache_read_cost else 0.0,
+                            "cache_creation_cost": round(float(r.cache_creation_cost), 6) if _model_price_available and r.cache_creation_cost else 0.0,
                             "input_tokens": r.input_tokens or 0,
                             "output_tokens": r.output_tokens or 0,
+                            "cache_read_tokens": r.cache_read_tokens or 0,
+                            "cache_creation_tokens": r.cache_creation_tokens or 0,
                             "total_tokens": r.total_tokens or 0,
                             "calls": r.calls or 0,
                             "avg_cost": (
@@ -364,9 +418,13 @@ if _API_AVAILABLE:
                             func.sum(AuditEvent.llm_cost).label("total_cost"),
                             func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                             func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
                                 + func.coalesce(AuditEvent.output_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_creation_tokens, 0)
                             ).label("total_tokens"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
@@ -376,6 +434,14 @@ if _API_AVAILABLE:
                                 func.coalesce(AuditEvent.output_tokens, 0)
                                 * func.coalesce(ModelPrice.output_cost_per_token, 0)
                             ).label("output_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
+                            ).label("cache_read_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
+                            ).label("cache_creation_cost"),
                         ).filter(
                             AuditEvent.user_id.isnot(None),
                         ).group_by(
@@ -388,9 +454,13 @@ if _API_AVAILABLE:
                             func.sum(AuditEvent.llm_cost).label("total_cost"),
                             func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                             func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
                                 + func.coalesce(AuditEvent.output_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_creation_tokens, 0)
                             ).label("total_tokens"),
                         ).filter(
                             AuditEvent.user_id.isnot(None),
@@ -405,8 +475,12 @@ if _API_AVAILABLE:
                             "total_cost": round(float(r.total_cost), 6) if r.total_cost else 0.0,
                             "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
                             "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
+                            "cache_read_cost": round(float(r.cache_read_cost), 6) if _model_price_available and r.cache_read_cost else 0.0,
+                            "cache_creation_cost": round(float(r.cache_creation_cost), 6) if _model_price_available and r.cache_creation_cost else 0.0,
                             "input_tokens": r.input_tokens or 0,
                             "output_tokens": r.output_tokens or 0,
+                            "cache_read_tokens": r.cache_read_tokens or 0,
+                            "cache_creation_tokens": r.cache_creation_tokens or 0,
                             "total_tokens": r.total_tokens or 0,
                         }
                         for r in user_rows
@@ -421,9 +495,13 @@ if _API_AVAILABLE:
                             func.sum(AuditEvent.llm_cost).label("total_cost"),
                             func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                             func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
                                 + func.coalesce(AuditEvent.output_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_creation_tokens, 0)
                             ).label("total_tokens"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
@@ -433,6 +511,14 @@ if _API_AVAILABLE:
                                 func.coalesce(AuditEvent.output_tokens, 0)
                                 * func.coalesce(ModelPrice.output_cost_per_token, 0)
                             ).label("output_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
+                            ).label("cache_read_cost"),
+                            func.sum(
+                                func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                                * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
+                            ).label("cache_creation_cost"),
                         ).group_by("day").order_by("day").all()
                     else:
                         daily_rows = base.with_entities(
@@ -440,9 +526,13 @@ if _API_AVAILABLE:
                             func.sum(AuditEvent.llm_cost).label("total_cost"),
                             func.sum(func.coalesce(AuditEvent.input_tokens, 0)).label("input_tokens"),
                             func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
+                            func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
                             func.sum(
                                 func.coalesce(AuditEvent.input_tokens, 0)
                                 + func.coalesce(AuditEvent.output_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_read_tokens, 0)
+                                + func.coalesce(AuditEvent.cache_creation_tokens, 0)
                             ).label("total_tokens"),
                         ).group_by("day").order_by("day").all()
 
@@ -452,8 +542,12 @@ if _API_AVAILABLE:
                             "total_cost": round(float(r.total_cost), 6) if r.total_cost else 0.0,
                             "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
                             "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
+                            "cache_read_cost": round(float(r.cache_read_cost), 6) if _model_price_available and r.cache_read_cost else 0.0,
+                            "cache_creation_cost": round(float(r.cache_creation_cost), 6) if _model_price_available and r.cache_creation_cost else 0.0,
                             "input_tokens": r.input_tokens or 0,
                             "output_tokens": r.output_tokens or 0,
+                            "cache_read_tokens": r.cache_read_tokens or 0,
+                            "cache_creation_tokens": r.cache_creation_tokens or 0,
                             "total_tokens": r.total_tokens or 0,
                         }
                         for r in daily_rows
