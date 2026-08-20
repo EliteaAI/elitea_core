@@ -1,5 +1,6 @@
 import flask
 import json
+import uuid
 from datetime import datetime
 from pylon.core.tools import log
 from tools import VaultClient, db, serialize, this
@@ -139,6 +140,14 @@ def load_context_settings_from_conversation(project_id: int, conversation_id: st
         context_strategy dict or None if not found
     """
     if not conversation_id:
+        return None
+
+    # Callers fall back to stream_id, which is only sometimes a conversation uuid: the evaluation
+    # runner mints synthetic ids like 'eval_agent_<hex>'. Comparing those against a uuid column
+    # aborts the transaction, so filter them out before touching the database.
+    try:
+        uuid.UUID(str(conversation_id))
+    except (ValueError, AttributeError, TypeError):
         return None
 
     try:
