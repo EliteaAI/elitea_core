@@ -18,6 +18,8 @@ _TABLE_NAME = 'audit_events'
 _REQUIRED_COLUMNS = {
     'input_tokens': 'INTEGER',
     'output_tokens': 'INTEGER',
+    'cache_read_tokens': 'INTEGER',
+    'cache_creation_tokens': 'INTEGER',
     'llm_cost': 'NUMERIC(18, 8)',
     # Provenance for the token/cost values written by the tracing plugin.
     # token_source ∈ {'langfuse', 'audit', NULL}; cost_source ∈ {'observed',

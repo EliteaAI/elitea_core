@@ -234,6 +234,10 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
         "percent_used": None if not limit else round(spent / limit * 100, 2),
         "warning_pct": _warning_pct(scope, is_personal),
         "total_tokens": detail.get("total_tokens", 0),
+        "input_tokens": detail.get("input_tokens", 0),
+        "output_tokens": detail.get("output_tokens", 0),
+        "cache_read_tokens": detail.get("cache_read_tokens", 0),
+        "cache_creation_tokens": detail.get("cache_creation_tokens", 0),
         "api_requests": detail.get("api_requests", 0),
         "models": _attach_display_names(
             detail.get("models") or [], _model_display_names(project_id),

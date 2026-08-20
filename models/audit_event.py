@@ -64,6 +64,8 @@ class AuditEvent(db.Base):
     # write-side model so a large upstream response_cost never overflows.
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
+    cache_creation_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
     llm_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 8), nullable=True)
     # Provenance stamps written by tracing/utils/audit_processor.py.
     # token_source ∈ {'langfuse', 'audit'}; cost_source ∈ {'observed',
