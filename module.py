@@ -14,6 +14,9 @@ from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
+from pydantic import ValidationError
+
+from .models.pd.sio import NextInputSuggestionPayload
 from .utils.sio_utils import SioEvents
 from .scripts.tool_icons import download_github_repo_zip, unzip_file
 from .utils.prompt_eliminate_utils import prompt_2_agent_migration
@@ -892,18 +895,15 @@ class Module(module.ModuleModel):
             self.context.sio.emit(SioEvents.asr_vad_flush, {}, to=sid)
 
     def next_input_suggestion_ready(self, event: str, payload: dict, *args):
-        sid = payload.get("sid")
-        suggestion = payload.get("suggestion")
-        if not sid or not suggestion:
+        try:
+            p = NextInputSuggestionPayload.model_validate(payload)
+        except ValidationError:
+            log.warning("next_input_suggestion_ready: invalid payload %s", payload)
             return
         self.context.sio.emit(
             SioEvents.next_input_suggestion_ready,
-            {
-                "stream_id": payload.get("stream_id"),
-                "message_id": payload.get("message_id"),
-                "suggestion": suggestion,
-            },
-            to=sid,
+            {"stream_id": p.stream_id, "message_id": p.message_id, "suggestions": p.suggestions},
+            to=p.sid,
         )
 
     def deinit(self):
