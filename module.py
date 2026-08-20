@@ -457,6 +457,10 @@ class Module(module.ModuleModel):
                 "migrate_eval_binding_constraints", self.migrate_eval_binding_constraints,
                 group="R-2.0.6",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_eval_platform_dimension_columns",
+                self.migrate_eval_platform_dimension_columns, group="R-2.0.6",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 

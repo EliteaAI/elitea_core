@@ -640,6 +640,42 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         log.info("migrate_eval_binding_constraints: %s", result)
         return result
 
+    @web.method("migrate_eval_platform_dimension_columns")
+    def migrate_eval_platform_dimension_columns(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: add allowed_engines to the platform dimension registry.
+
+        Platform dimensions are scored by AI or Human exactly like project-tier ones, so the
+        engine set belongs to the registry and is projected into every p_N.eval_dimension row.
+        Only environments whose registry table was created by a pre-release build lack the
+        column; fresh ones get it from create_tables. Without it every registry read fails
+        with UndefinedColumn.
+
+        Shared-schema table, so there is no per-project loop. Idempotent
+        (ADD COLUMN IF NOT EXISTS): safe to run more than once, no dry run needed.
+        """
+        from sqlalchemy import text  # pylint: disable=C0415
+
+        statements = [
+            f"ALTER TABLE {c.POSTGRES_SCHEMA}.eval_platform_dimension "
+            "ADD COLUMN IF NOT EXISTS allowed_engines JSONB NOT NULL DEFAULT '[\"ai\"]'::jsonb",
+        ]
+        #
+        applied = []
+        #
+        try:
+            with db.get_session(None) as session:
+                for statement in statements:
+                    session.execute(text(statement))
+                    applied.append(statement)
+                session.commit()
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("migrate_eval_platform_dimension_columns: failed")
+            return {"ok": False, "applied": len(applied), "error": str(exc)}
+        #
+        log.info("migrate_eval_platform_dimension_columns: applied %s statement(s)", len(applied))
+        #
+        return {"ok": True, "applied": len(applied)}
+
     @web.method()
     def migrate_audit_events_columns(self, *args, **kwargs):
         """Admin task: add the ADR-0008 token/cost columns to the shared audit_events table.

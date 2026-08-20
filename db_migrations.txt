@@ -243,6 +243,8 @@ Run admin task migrate_share_token_columns
 # Only needed where the table was created by a pre-release build without this column;
 # fresh environments get it from create_tables. Shared-schema table, so no per-project loop.
 # Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+Run admin task migrate_eval_platform_dimension_columns
+# Manual fallback if the admin task is unavailable:
 ALTER TABLE centry.eval_platform_dimension
     ADD COLUMN IF NOT EXISTS allowed_engines JSONB NOT NULL DEFAULT '["ai"]'::jsonb;
 
