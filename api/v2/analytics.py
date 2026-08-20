@@ -363,18 +363,37 @@ if _API_AVAILABLE:
                     daily_rows = base.with_entities(
                         cast(AuditEvent.timestamp, Date).label("day"),
                         func.count().label("events"),
-                        func.count(func.distinct(AuditEvent.user_id)).label("users"),
+                        # AI active users: only count users who had AI-related events
+                        func.count(func.distinct(case(
+                            (or_(
+                                AuditEvent.event_type.in_(["llm", "tool"]),
+                                AuditEvent.entity_type == "application",
+                            ), AuditEvent.user_id),
+                            else_=None,
+                        ))).label("active_users"),
                         func.sum(case(
                             (AuditEvent.is_error.is_(True), 1), else_=0,
                         )).label("errors"),
+                        func.sum(case(
+                            (AuditEvent.event_type == "llm", 1), else_=0,
+                        )).label("llm_calls"),
+                        func.sum(case(
+                            (AuditEvent.event_type == "tool", 1), else_=0,
+                        )).label("tool_runs"),
+                        func.sum(case(
+                            (AuditEvent.entity_type == "application", 1), else_=0,
+                        )).label("agent_runs"),
                     ).group_by("day").order_by("day").all()
 
                     daily_activity = [
                         {
                             "date": r.day.isoformat() if r.day else None,
                             "events": r.events,
-                            "users": r.users,
+                            "active_users": r.active_users,
                             "errors": r.errors or 0,
+                            "llm_calls": r.llm_calls or 0,
+                            "tool_runs": r.tool_runs or 0,
+                            "agent_runs": r.agent_runs or 0,
                         }
                         for r in daily_rows
                     ]
