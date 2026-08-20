@@ -95,6 +95,55 @@ def effective_engine(binding: dict) -> str:
 # Immutable snapshot (§3.4 / EvalRun.snapshot)
 # ---------------------------------------------------------------------------
 
+#: Per-field cap on the frozen case text, and the total budget the whole case list may spend.
+#: A dataset may hold ``MAX_CASES`` rows whose cells the import path caps at 100k each, so the
+#: product is what makes an uncapped snapshot dangerous rather than any single case.
+MAX_CASE_TEXT = 20_000
+MAX_CASES_BYTES = 4_000_000
+
+_CASE_TEXT_FIELDS = ('input', 'output', 'expected_output', 'structure')
+
+
+def _snapshot_cases(cases: List[dict]) -> List[dict]:
+    """Freeze the case set with its text bounded.
+
+    The snapshot is JSONB on one row and is read back whole — by ``execute_run``, by the results
+    API, and by the frontend scorecard — so an unbounded case list is both a storage and a
+    transfer hazard. Two bounds, because either alone leaves a hole: each text field is clipped at
+    ``MAX_CASE_TEXT``, and the list stops spending once it passes ``MAX_CASES_BYTES``, after which
+    later cases keep their identity but carry no text. Both mark themselves, so a reader (and the
+    scorecard) can tell clipped evidence from a genuinely empty case rather than silently scoring
+    against a shortened input.
+    """
+    frozen: List[dict] = []
+    spent = 0
+    for c in cases:
+        case = {
+            'id': c['id'],
+            'variables': c.get('variables') or {},
+            'order_index': c.get('order_index', 0),
+        }
+        dropped = spent > MAX_CASES_BYTES
+        truncated = False
+        for field in _CASE_TEXT_FIELDS:
+            value = c.get(field)
+            if dropped:
+                case[field] = None
+                continue
+            if isinstance(value, str) and len(value) > MAX_CASE_TEXT:
+                value = value[:MAX_CASE_TEXT] + _TRUNCATED_MARK
+                truncated = True
+            case[field] = value
+            spent += len(value) if isinstance(value, str) else 0
+        if dropped:
+            case['truncated'] = True
+            case['dropped'] = True
+        elif truncated:
+            case['truncated'] = True
+        frozen.append(case)
+    return frozen
+
+
 def build_run_snapshot(
     *,
     suite: dict,
@@ -160,18 +209,7 @@ def build_run_snapshot(
             }
             for b in bindings
         ],
-        'cases': [
-            {
-                'id': c['id'],
-                'input': c.get('input'),
-                'output': c.get('output'),
-                'expected_output': c.get('expected_output'),
-                'structure': c.get('structure'),
-                'variables': c.get('variables') or {},
-                'order_index': c.get('order_index', 0),
-            }
-            for c in cases
-        ],
+        'cases': _snapshot_cases(cases),
     }
 
 
@@ -994,6 +1032,17 @@ def execute_run(
                 'Suite has AI-scored validations but no judge model is configured '
                 '(set one on the suite or as the project default).'
             )
+        # Freeze what was actually used to judge. The snapshot's `suite.judge_model` is only the
+        # suite's configured *reference*, and `judge_llm_settings` may override it per run, so
+        # without this the one input that silently drifts between two runs of the same frozen
+        # suite — the model — is the one input the snapshot does not record.
+        snapshot['resolved_judge_model'] = settings
+        with db.get_session(project_id) as s:
+            row = s.query(EvalRun).filter(EvalRun.id == run_id).first()
+            if row is not None:
+                row.snapshot = {**(row.snapshot or {}), 'resolved_judge_model': settings}
+                s.commit()
+
         ai_scorer = _make_ai_scorer(project_id, settings, judge=judge)
         code_scorer = _make_code_scorer(snapshot, executor)
 

@@ -113,10 +113,21 @@ class SIO:
                 error=e.errors(include_url=False, include_context=False),
                 stream_id=str(data.get('run_id')) if isinstance(data, dict) else '',
             )
-        # Rooms are keyed by run id alone, so project membership is the only
-        # authorization boundary on the pushed progress.
         if not auth.is_sio_user_in_project(sid, parsed.project_id):
             log.warning("Sid %s is not in project %s", sid, parsed.project_id)
+            return
+        # Both ids come from the client and the room is keyed on run id alone, so membership of
+        # the *claimed* project proves nothing about the run: without this, a member of project A
+        # could name a run in project B and receive its frames, error text included. Run ids are
+        # unique only within a schema, so existence inside the claimed project is what ties the
+        # two together.
+        from ..utils.evaluation_run_utils import run_in_project  # local: keeps the sio import graph flat
+
+        if not run_in_project(parsed.project_id, parsed.run_id):
+            log.warning(
+                "Eval run %s is not in project %s — refusing room join for sid %s",
+                parsed.run_id, parsed.project_id, sid,
+            )
             return
         room = get_eval_run_room(parsed.run_id)
         self.context.sio.enter_room(sid, room)

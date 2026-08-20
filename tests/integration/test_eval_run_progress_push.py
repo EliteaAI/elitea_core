@@ -268,3 +268,17 @@ def test_orchestration_failure_publishes_an_errored_frame(harness):
 
     assert frames[-1]['status'] == EvalRunStatus.errored
     assert frames[-1]['error']
+
+
+def test_the_resolved_judge_model_is_frozen_onto_the_run(harness):
+    """The snapshot's `suite.judge_model` is only the configured reference, and a run may override
+    it, so without this the one input that drifts silently between two runs of the same frozen
+    suite — the model — would be the one input the snapshot does not record."""
+    orch, row_holder, _ = harness
+    row_holder['row'] = _FakeRow(8, _snapshot(orch, 1))
+
+    orch.execute_run(1, 8, task_node=object(),
+                     judge_llm_settings={'model_name': 'gpt-4o', 'integration_uid': 'u-1'})
+
+    assert row_holder['row'].snapshot['resolved_judge_model'] == {
+        'model_name': 'gpt-4o', 'integration_uid': 'u-1'}

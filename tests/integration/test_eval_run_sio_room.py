@@ -1,9 +1,11 @@
 """Integration tests for the eval run progress room handlers in ``sio/all.py`` (phase 2).
 
-The progress room is keyed by run id alone, which makes
-``auth.is_sio_user_in_project`` the *only* authorization boundary on the feed: if that check is
-dropped or inverted, any authenticated socket can name someone else's run id and watch their
-evaluation. Nothing else in the stack would notice, so it is pinned here.
+The progress room is keyed by run id alone, so the feed's authorization rests on *two* checks that
+have to hold together: ``auth.is_sio_user_in_project`` for the claimed project, and
+``run_in_project`` to establish that the claimed run actually lives there. Both ids come from the
+client, so dropping either one lets an authenticated socket name someone else's run id and watch
+their evaluation — including the exception text a failed run carries. Nothing else in the stack
+would notice, so both are pinned here.
 
 ``sio/all.py`` pulls in the whole chat surface (redis, ORM, SDK utils), so everything except the
 two dependency-free modules the eval handlers actually need — ``utils/sio_utils.py`` and the
@@ -70,6 +72,12 @@ def _load_sio_module():
         sys.modules[name] = mod
     sys.modules[PKG] = pkg
 
+    # The handler imports this lazily at call time, after the finder is gone, so it has to be
+    # sitting in sys.modules already. `_call` swaps in the verdict it wants per test.
+    run_utils = types.ModuleType(f'{PKG}.utils.evaluation_run_utils')
+    run_utils.run_in_project = MagicMock(return_value=True)
+    sys.modules[f'{PKG}.utils.evaluation_run_utils'] = run_utils
+
     try:
         for full, relpath in (
             (f'{PKG}.utils.sio_utils', 'utils/sio_utils.py'),
@@ -105,9 +113,11 @@ class _Handler:
         self.context = types.SimpleNamespace(sio=MagicMock())
 
 
-def _call(sio_all, name, data, *, allowed):
+def _call(sio_all, name, data, *, allowed, run_in_project=True):
     # `tools.auth` comes from the runner's pylon stubs, which do not carry this method.
     sio_all.auth.is_sio_user_in_project = MagicMock(return_value=allowed)
+    sys.modules[f'{PKG}.utils.evaluation_run_utils'].run_in_project = MagicMock(
+        return_value=run_in_project)
     handler = _Handler()
     getattr(sio_all.SIO, name)(handler, 'sid-1', data)
     return handler.context.sio
@@ -139,6 +149,20 @@ def test_enter_room_sends_no_ack_when_the_project_check_fails(sio_all):
     """Otherwise a refused socket looks live and never polls, so the dialog just stops moving."""
     sio = _call(sio_all, 'eval_run_enter_room', {'project_id': 1, 'run_id': 7}, allowed=False)
     sio.emit.assert_not_called()
+
+
+def test_enter_room_refuses_a_run_that_lives_in_another_project(sio_all):
+    """Both ids are client-supplied, so membership of the claimed project is not proof of
+    ownership: naming a foreign run id must not deliver that run's frames."""
+    sio = _call(sio_all, 'eval_run_enter_room', {'project_id': 1, 'run_id': 7},
+                allowed=True, run_in_project=False)
+    sio.enter_room.assert_not_called()
+    sio.emit.assert_not_called()
+
+
+def test_enter_room_checks_the_run_against_the_claimed_project(sio_all):
+    _call(sio_all, 'eval_run_enter_room', {'project_id': 42, 'run_id': 7}, allowed=True)
+    sys.modules[f'{PKG}.utils.evaluation_run_utils'].run_in_project.assert_called_once_with(42, 7)
 
 
 def test_enter_room_rejects_a_payload_without_a_run_id(sio_all):

@@ -311,6 +311,20 @@ def get_run(project_id: int, run_id: int, session=None):
         return run
 
 
+def run_in_project(project_id: int, run_id: int) -> bool:
+    """Whether ``run_id`` exists in *this* project's schema.
+
+    Run ids are only unique within a project schema, so a caller that receives both ids from the
+    client — the SIO progress room join — cannot treat membership of the claimed project as proof
+    that the run belongs to it. Existence here is that proof, and it is an id-only read so the
+    check costs one indexed hit.
+    """
+    from ..models.evaluation import EvalRun
+
+    with _session(None, project_id) as s:
+        return s.query(EvalRun.id).filter(EvalRun.id == run_id).first() is not None
+
+
 def request_cancel(project_id: int, run_id: int, session=None):
     """Ask a run to stop (§14.2 cancel). Returns the updated run.
 

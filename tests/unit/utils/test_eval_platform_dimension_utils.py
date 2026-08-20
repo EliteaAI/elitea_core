@@ -16,13 +16,44 @@ import pytest
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
+class _Criterion:
+    def __init__(self, column, match):
+        self.column = column
+        self.match = match
+
+    def holds(self, row):
+        return self.match(getattr(row, self.column, None))
+
+
+class _Col:
+    """Enough of a column expression for the util's filters: ``==`` and ``in_``.
+
+    The predicates are honoured (see ``_FakeQuery.filter``) rather than ignored, because the util
+    now pushes its uuid match into SQL instead of filtering the loaded rows in Python — a fake
+    that drops predicates would report every project as holding every dimension.
+    """
+
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return _Criterion(self.name, lambda v: str(v) == str(other))
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def in_(self, values):
+        wanted = {str(v) for v in values}
+        return _Criterion(self.name, lambda v: str(v) in wanted)
+
+
 class _Row:
-    # Class attributes so the util's `Model.column == value` filter expressions resolve;
-    # the fake query ignores the predicate and filters in Python instead.
-    tier = None
-    uuid = None
-    name = None
-    is_active = None
+    # Class attributes so the util's `Model.column == value` filter expressions resolve.
+    id = _Col('id')
+    tier = _Col('tier')
+    uuid = _Col('uuid')
+    name = _Col('name')
+    is_active = _Col('is_active')
 
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
@@ -32,8 +63,9 @@ class _FakeQuery:
     def __init__(self, rows):
         self._rows = rows
 
-    def filter(self, *_args, **_kwargs):
-        return self
+    def filter(self, *criteria, **_kwargs):
+        rows = [row for row in self._rows if all(c.holds(row) for c in criteria)]
+        return _FakeQuery(rows)
 
     def all(self):
         return list(self._rows)

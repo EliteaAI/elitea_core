@@ -8,6 +8,7 @@ what B5/B6 re-derive.
 ``evaluation_run_orchestration`` does ``from .evaluation_scoring import ...``, so the sibling is
 pre-loaded into sys.modules under its package name before the module itself is loaded.
 """
+import json
 import pathlib
 import sys
 
@@ -74,6 +75,36 @@ def test_snapshot_freezes_dimensions_bindings_cases(orch):
     assert snap['dimensions']['5']['scale_type'] == 'binary'  # keyed by str(id)
     assert snap['bindings'][0]['weight'] == 2.0
     assert snap['cases'][0]['id'] == 7
+
+
+def test_snapshot_clips_oversized_case_text_and_marks_the_case(orch):
+    """The snapshot is one JSONB value read back whole — by the run, the results API and the
+    scorecard — so a dataset of large cells must not be frozen verbatim."""
+    snap = _snapshot(orch, cases=[{'id': 1, 'input': 'x' * (orch.MAX_CASE_TEXT + 500)}])
+    case = snap['cases'][0]
+    assert case['truncated'] is True
+    assert len(case['input']) < orch.MAX_CASE_TEXT + 500
+    assert case['input'].endswith('[truncated]')
+
+
+def test_snapshot_stops_spending_text_once_the_case_budget_is_gone(orch):
+    """Per-field clipping alone still lets MAX_CASES rows multiply into a huge value, so the list
+    keeps identity but drops text past the budget rather than growing without bound."""
+    big = 'y' * orch.MAX_CASE_TEXT
+    cases = [{'id': i, 'input': big, 'output': big} for i in range(1, 200)]
+    snap = _snapshot(orch, cases=cases)
+    assert snap['cases'][0]['input'] == big                  # early cases are intact
+    last = snap['cases'][-1]
+    assert last['id'] == 199 and last['dropped'] is True     # identity kept, text gone
+    assert last['input'] is None and last['output'] is None
+    assert len(json.dumps(snap['cases'])) < 2 * orch.MAX_CASES_BYTES
+
+
+def test_snapshot_leaves_a_normal_case_unmarked(orch):
+    """`truncated` has to mean something, so it must be absent when nothing was clipped."""
+    snap = _snapshot(orch, cases=[{'id': 1, 'input': 'q', 'output': 'a'}])
+    assert 'truncated' not in snap['cases'][0]
+    assert snap['cases'][0]['output'] == 'a'
 
 
 # ---------------------------------------------------------------------------

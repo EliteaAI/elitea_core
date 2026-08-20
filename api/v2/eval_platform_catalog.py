@@ -10,9 +10,11 @@ projection or orphan a binding.
 """
 
 from flask import request
+from pydantic import ValidationError
 
 from tools import api_tools, config as c, auth, register_openapi
 
+from ...models.pd.eval_platform_dimension import EvalPlatformAttachModel
 from ...utils.evaluation_library_utils import EvalLibraryError
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -56,13 +58,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def post(self, project_id: int, **kwargs):
-        dimension_uuid = (request.json or {}).get("uuid")
-        if not dimension_uuid:
-            return {"error": "uuid is required"}, 400
+        try:
+            body = EvalPlatformAttachModel.model_validate(request.json or {})
+        except ValidationError as e:
+            return e.errors(include_url=False, include_context=False, include_input=False), 400
 
         try:
             dimension = self._rpc.elitea_core_platform_catalog_materialize(
-                project_id=project_id, dimension_uuid=dimension_uuid,
+                project_id=project_id, dimension_uuid=body.uuid,
             )
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status

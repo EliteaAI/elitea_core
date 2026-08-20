@@ -123,3 +123,53 @@ def test_plain_subscripting_still_passes(screen):
 
 def test_ordinary_strings_are_not_mistaken_for_dunders(screen):
     assert screen('result = text == "__" or text == "a__b__c"') == []
+
+
+# ---------------------------------------------------------------------------
+# Import allow-list + the false positives the first widening introduced
+# (second review on elitea_core#336)
+#
+# The deny-list was answered with seven stdlib modules nobody had enumerated — `pdb.run`,
+# `cProfile.run`, `timeit.timeit` and `code.InteractiveInterpreter().runsource` all execute
+# arbitrary strings, and `linecache`/`zipfile`/`tarfile` read arbitrary paths — so imports are
+# now an allow-list. The same review showed the widened rules rejected two *legitimate*
+# snippets; both are pinned below so a future tightening cannot bring them back.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('module', [
+    'pdb', 'cProfile', 'timeit', 'code', 'linecache', 'zipfile', 'tarfile',
+])
+def test_modules_outside_the_allow_list_are_rejected(screen, module):
+    assert any(module in v for v in screen(f'import {module}\nresult = True'))
+
+
+@pytest.mark.parametrize('snippet', [
+    'import math\nresult = math.isclose(len(input), 3)',
+    'import re\nresult = bool(re.search(r"\\d+", input))',
+    'import json\nresult = bool(json.dumps({"a": 1}))',
+    'import statistics as st\nresult = st.mean([1, 2, 3]) > 1',
+    'from decimal import Decimal\nresult = Decimal("1.5") > 1',
+])
+def test_allow_listed_modules_pass(screen, snippet):
+    assert screen(snippet) == []
+
+
+def test_a_module_method_is_not_mistaken_for_the_builtin_of_the_same_name(screen):
+    """`re.compile` is not the `compile` builtin. The attribute rule matches on the name alone,
+    so without the module exemption every regex-based validation was rejected."""
+    assert screen("import re\nresult = bool(re.compile(r'\\d+').search(input))") == []
+
+
+def test_a_harmless_dunder_mentioned_as_data_passes(screen):
+    """Asserting on the *text* of an agent's output is the normal job of a scoring snippet;
+    only the dunders that actually reach the object graph are refused."""
+    assert screen("result = '__init__' not in input") == []
+    assert screen("result = '__globals__' not in input")  # ...but a reachable one still is
+
+
+def test_an_alias_for_a_rejected_module_is_still_screened(screen):
+    """The exemption is keyed on allow-listed imports only, so aliasing a refused module does not
+    launder its calls past the builtin rule."""
+    violations = screen("import pdb as m\nresult = m.eval('1')")
+    assert any('pdb' in v for v in violations)
+    assert any('eval' in v for v in violations)

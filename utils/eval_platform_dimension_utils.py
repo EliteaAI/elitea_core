@@ -250,16 +250,19 @@ def _holds_any(project_id: int, uuids: List[str]) -> bool:
 
     A read-only probe so the resync only opens a write transaction on the projects it will
     actually change — most projects attach none of the catalog, and a resync that commits in
-    every schema is what pushes the request past its timeout.
+    every schema is what pushes the request past its timeout. The match is an id-only existence
+    query rather than loading every projected row and filtering in Python: this runs once per
+    active project, so it is the one place where per-project cost multiplies.
     """
-    wanted = set(uuids)
     with db.get_session(project_id) as session:
-        rows = (
-            session.query(EvalDimension)
-            .filter(EvalDimension.tier == EvalTier.platform)
-            .all()
-        )
-        return any(str(row.uuid) in wanted for row in rows)
+        return (
+            session.query(EvalDimension.id)
+            .filter(
+                EvalDimension.tier == EvalTier.platform,
+                EvalDimension.uuid.in_(uuids),
+            )
+            .first()
+        ) is not None
 
 
 def _resync(entries: List[EvalPlatformDimension]) -> dict:

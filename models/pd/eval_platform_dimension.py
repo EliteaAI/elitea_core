@@ -82,6 +82,17 @@ class EvalPlatformDimensionUpdateModel(EvalPlatformDimensionBaseModel):
     is_active: Optional[bool] = None
 
 
+class EvalPlatformAttachModel(BaseModel):
+    """Body of the project-side attach (``POST`` on the catalog): which registry entry to copy."""
+
+    uuid: str = Field(..., min_length=1)
+
+    @field_validator('uuid', mode='before')
+    @classmethod
+    def _coerce_uuid(cls, v):
+        return str(v) if v is not None else v
+
+
 class EvalPlatformDimensionDetailModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

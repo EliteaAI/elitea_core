@@ -47,10 +47,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 run = get_run(project_id, run_id, session=session)
             except EvalLibraryError as exc:
                 return {"error": str(exc)}, exc.http_status
-            payload = EvalRunDetailModel.model_validate(run).model_dump(mode='json')
-            if "snapshot" not in include:
-                payload.pop("snapshot", None)
-            return payload, 200
+            detail = EvalRunDetailModel.model_validate(run)
+            # Excluded during the dump rather than popped afterwards: serialising the whole frozen
+            # case set only to discard it is the expensive half of the work, and this endpoint is
+            # the one the client falls back to polling.
+            exclude = set() if "snapshot" in include else {"snapshot"}
+            return detail.model_dump(mode='json', exclude=exclude), 200
 
 
 class API(api_tools.APIBase):

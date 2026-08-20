@@ -186,7 +186,10 @@ class EvalSuite(db_tools.AbstractBaseMixin, db.Base):
     )
     # optional per-suite judge model override (§18.7); null -> project low-tier default
     judge_model: Mapped[dict] = mapped_column(JSONB, nullable=True)
-    # baseline pointer (§21.6) — names a run id, not a copy; SET NULL if that run is purged
+    # Baseline pointer (§21.6) — names a run id, not a copy. Deliberately *not* a foreign key:
+    # a comparison baseline is advisory, and an FK here would make purging an old run either fail
+    # or silently rewrite live suite config. Readers must therefore tolerate a dangling id and
+    # treat "run not found" as "no baseline" rather than an error.
     baseline_run_id: Mapped[int] = mapped_column(Integer, nullable=True)
     trigger_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
