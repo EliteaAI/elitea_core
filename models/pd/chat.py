@@ -177,6 +177,10 @@ class LLMChatRequest(MergeUpdateBase):
         default=None,
         description="Context settings for the LLM"
     )
+    truncated_content: Optional[str] = Field(
+        default='',
+        description="Visible partial response from a token-limit continuation",
+    )
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 

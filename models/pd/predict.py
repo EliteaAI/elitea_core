@@ -166,6 +166,10 @@ class SioContinuePredictModel(BaseModel):
     user_declined_mcp_servers: Optional[List[dict]] = Field(default=None, description="MCP servers the user explicitly declined this session, with full OAuth metadata for LLM context and re-auth")
     # Always True for Continue flow - used by generate_payload to signal resume from checkpoint
     should_continue: bool = Field(default=True, description="Always True for Continue flow")
+    token_limit_continuation: bool = Field(
+        default=False,
+        description="Continue output truncated by the model token limit, not a paused checkpoint",
+    )
     # User input for continue flow - if provided, uses this instead of 'continue'
     user_input: Optional[str] = Field(default=None, description="User input to use instead of 'continue'")
     hitl_resume: bool = Field(default=False, description="Whether this continue request resumes a HITL interrupt")

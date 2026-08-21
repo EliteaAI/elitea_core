@@ -116,6 +116,10 @@ AUTH_FIELDS = {
     'authorization_request_id': 'mcp_auth_root',
 }
 
+TOKEN_CONTINUATION_FIELDS = {
+    'truncated_content': 'Visible partial answer',
+}
+
 
 def test_application_and_llm_models_preserve_toolkit_authorization_resume():
     common = {
@@ -133,6 +137,24 @@ def test_application_and_llm_models_preserve_toolkit_authorization_resume():
 
     for parsed in (application, llm):
         assert parsed.model_dump(include=set(AUTH_FIELDS)) == AUTH_FIELDS
+
+
+def test_application_and_llm_models_preserve_visible_token_continuation():
+    common = {
+        'project_id': 2,
+        'user_input': 'continue',
+        'llm_settings': {'model_name': 'test-model'},
+        **TOKEN_CONTINUATION_FIELDS,
+    }
+
+    application = ApplicationChatRequest.model_validate({
+        **common,
+        'version_details': {'agent_type': 'agent'},
+    })
+    llm = LLMChatRequest.model_validate(common)
+
+    for parsed in (application, llm):
+        assert parsed.model_dump(include=set(TOKEN_CONTINUATION_FIELDS)) == TOKEN_CONTINUATION_FIELDS
 
 
 def test_generate_predict_payload_forwards_toolkit_authorization_resume(monkeypatch):
