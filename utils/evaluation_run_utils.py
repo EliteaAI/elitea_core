@@ -311,6 +311,23 @@ def get_run(project_id: int, run_id: int, session=None):
         return run
 
 
+def delete_run(project_id: int, run_id: int, session=None) -> None:
+    """Hard-deletes a run and its results/human-scores (#6348). Does not touch the dataset, suite,
+    or dimension definitions the run referenced — those FKs are ``SET NULL``/independent, while
+    :class:`EvalResult` and :class:`EvalHumanScore` cascade on ``run_id`` at the DB level.
+
+    Raises :class:`EvalRunNotFoundError` if absent.
+    """
+    from ..models.evaluation import EvalRun
+
+    with _session(session, project_id) as s:
+        run = s.query(EvalRun).filter(EvalRun.id == run_id).first()
+        if not run:
+            raise EvalRunNotFoundError(run_id)
+        s.delete(run)
+        s.flush()
+
+
 def run_in_project(project_id: int, run_id: int) -> bool:
     """Whether ``run_id`` exists in *this* project's schema.
 

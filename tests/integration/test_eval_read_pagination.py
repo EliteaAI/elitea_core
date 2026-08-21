@@ -88,6 +88,7 @@ def _install_package(calls):
         'id': run_id, 'status': 'finished', 'progress': {'done': 2, 'total': 2},
         'headline_score': 7.5, 'error': None, 'snapshot': {'cases': [{'input': 'q'}]},
     }
+    run_utils.delete_run = lambda project_id, run_id, session=None: None
 
     result_utils = types.ModuleType(f'{PKG}.utils.evaluation_result_utils')
     result_utils.DEFAULT_RESULT_LIMIT = 500
