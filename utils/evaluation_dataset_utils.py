@@ -83,9 +83,16 @@ def _attach_counts(dataset: EvalDataset) -> EvalDataset:
     return dataset
 
 
-def list_datasets(project_id: int, session=None) -> List[EvalDataset]:
+def list_datasets(project_id: int, agent_id: Optional[int] = None, session=None) -> List[EvalDataset]:
+    """All project datasets, or (§6350) just the ones a given agent's suite config may pick from:
+    datasets it owns plus any dataset another agent opted into sharing."""
     with _session(session, project_id) as s:
-        rows = s.query(EvalDataset).order_by(EvalDataset.name.asc(), EvalDataset.id.asc()).all()
+        query = s.query(EvalDataset)
+        if agent_id is not None:
+            query = query.filter(
+                (EvalDataset.agent_id == agent_id) | (EvalDataset.is_shared.is_(True))
+            )
+        rows = query.order_by(EvalDataset.name.asc(), EvalDataset.id.asc()).all()
         return [_attach_counts(d) for d in rows]
 
 
@@ -132,6 +139,8 @@ def create_dataset(project_id: int, data: EvalDatasetCreateModel, owner_id: int,
         dataset = EvalDataset(
             name=data.name,
             description=data.description,
+            agent_id=data.agent_id,
+            is_shared=data.is_shared,
             owner_id=owner_id,
             meta=data.meta,
         )
