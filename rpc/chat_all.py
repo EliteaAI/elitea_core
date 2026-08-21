@@ -61,6 +61,10 @@ from ..utils.internal_tools import (
 )
 from ..utils.utils import get_public_project_id
 from ..utils.predict_utils import get_project_context, prepend_project_context
+from ..utils.token_limit_continuation import (
+    is_token_limit_continuation,
+    prepare_token_limit_payload,
+)
 
 
 TIMEOUT_CANCEL_TEXT = "No response, cancelled by timeout"
@@ -1614,12 +1618,14 @@ class RPC:
         log.debug(
             "Continue predict: message_id=%s conversation_uuid=%s sid=%s "
             "hitl_resume=%s mcp_auth_resume=%s authorization_request_id=%s "
-            "hitl_decisions=%d mcp_auth_decisions=%d user_input=%s",
+            "hitl_decisions=%d mcp_auth_decisions=%d "
+            "token_limit_continuation=%s user_input=%s",
             data.get("message_id"), data.get("conversation_uuid"), sid,
             bool(data.get("hitl_resume")), bool(data.get("mcp_auth_resume")),
             data.get("authorization_request_id"),
             len(data.get("hitl_decisions") or []),
             len(data.get("mcp_auth_decisions") or []),
+            bool(data.get("token_limit_continuation")),
             data.get("user_input"),
         )
         try:
@@ -1954,16 +1960,18 @@ class RPC:
                 if _is_clean_text_item(item)
             )
 
-            # Token-limit detection: only apply continuation logic when:
-            # 1. There IS partial content to continue from.
-            # 2. There is NO active HITL/MCP interrupt — those must resume
-            #    from a live checkpoint, not start a fresh run.
-            is_token_limit_continuation = (
-                bool(truncated_content)
-                and not parsed.hitl_resume
-                and not parsed.mcp_auth_resume
-                and not pending_interrupts(response_msg.meta)
-                and not pending_authorization_requests(response_msg.meta)
+            # The UI explicitly identifies a token-limit Continue. Visible
+            # partial content remains a legacy signal for older UI versions.
+            # HITL and MCP actions always resume their exact checkpoints.
+            is_token_limit_continuation_request = is_token_limit_continuation(
+                explicitly_requested=parsed.token_limit_continuation,
+                truncated_content=truncated_content,
+                hitl_resume=parsed.hitl_resume,
+                mcp_auth_resume=parsed.mcp_auth_resume,
+                has_pending_interrupts=bool(
+                    pending_interrupts(response_msg.meta)
+                    or pending_authorization_requests(response_msg.meta)
+                ),
             )
 
             # For token-limit continuations: purge dirty items from the DB so
@@ -1972,7 +1980,7 @@ class RPC:
             # broken continuation run (e.g. [ATTACHMENTS] / <runtime_context>).
             # Also trim trailing newlines from the last clean item so there is
             # no blank gap between the truncated text and the appended continuation.
-            if is_token_limit_continuation:
+            if is_token_limit_continuation_request:
                 dirty_items = [item for item in sorted_items if not _is_clean_text_item(item)]
                 for dirty_item in dirty_items:
                     session.delete(dirty_item)
@@ -2008,58 +2016,8 @@ class RPC:
                 payload['chat_history'] = generate_chat_history(
                     message_groups=chat_history_groups, summaries=summaries
                 )
-                if is_token_limit_continuation:
-                    # Assistant-prefill continuation. The sequence sent to the LLM:
-                    #   [... history ...]
-                    #   [user:      original question]
-                    #   [assistant: tail of truncated text (last 600 chars)]  ← prefill
-                    #   [user:      explicit instruction to complete the incomplete response]
-                    #
-                    # Only the tail is used as the assistant prefill, not the full truncated
-                    # content. The original question in chat_history already provides all
-                    # structural context (e.g. "write a market report covering sections A, B, C").
-                    # The tail (600 chars) gives the model a precise cutoff anchor so it can
-                    # complete the current sentence seamlessly.
-                    #
-                    # Using the full truncated content causes reasoning models to spend most
-                    # of their output budget on thinking — they reason about the entire
-                    # document's coherence when they see their own incomplete long-form output,
-                    # leaving almost no tokens for actual text.
-                    _tc_stripped = truncated_content.rstrip('\n\r')
-                    _tail_chars = 600
-                    _prefill_content = _tc_stripped[-_tail_chars:] if len(_tc_stripped) > _tail_chars else _tc_stripped
-                    original_user_input = payload.get('user_input', '')
-                    if original_user_input:
-                        payload['chat_history'].append({
-                            'role': 'user',
-                            'content': original_user_input,
-                        })
-                    payload['chat_history'].append({
-                        'role': 'assistant',
-                        'content': _prefill_content,
-                    })
-                    _word_count = len(_tc_stripped.split())
-                    _original_q = original_user_input or ''
-                    _original_q_clause = (
-                        f' The original request was: "{_original_q}".' if _original_q else ''
-                    )
-                    payload['user_input'] = (
-                        f'Your previous response above was cut off due to token limits and is incomplete.'
-                        f'{_original_q_clause}'
-                        f' It already contains approximately {_word_count} words.'
-                        f' Please complete it: output only the missing ending that finishes the response,'
-                        f' strictly respecting all constraints from the original request (length, format, scope).'
-                        f' Do not repeat anything already written.'
-                    )
-                    payload['truncated_content'] = truncated_content
-                    if isinstance(payload.get('llm'), dict):
-                        llm_kwargs = payload['llm'].get('kwargs', {})
-                        if 'reasoning_effort' in llm_kwargs:
-                            llm_kwargs['reasoning_effort'] = 'low'
-                    app_vd = (payload.get('application') or {}).get('version_details') or {}
-                    llm_settings_vd = app_vd.get('llm_settings') or {}
-                    if 'reasoning_effort' in llm_settings_vd:
-                        llm_settings_vd['reasoning_effort'] = 'low'
+                if is_token_limit_continuation_request:
+                    prepare_token_limit_payload(payload, truncated_content)
                 payload['message_id'] = str(response_msg.uuid)
                 payload[EXECUTION_GENERATION_KEY] = execution_generation
 
