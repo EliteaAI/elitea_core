@@ -158,45 +158,50 @@ class PromptLibAPI(api_tools.APIModeHandler):
         try:
             parsed = list_model(applications=some_result['applications'])
 
-            # Enrich with folder info (bulk query)
-            app_ids = [app.id for app in parsed.applications]
-            if app_ids:
-                user_id = auth.current_user().get("id")
-                folder_map = {}
+            # Enrich with folder info (bulk query) - non-blocking
+            try:
+                app_ids = [app.id for app in parsed.applications]
+                if app_ids:
+                    user_id = auth.current_user().get("id")
+                    folder_map = {}
 
-                # Common params for folder lookup
-                folder_params = {
-                    'project_id': project_id,
-                    'entity_ids': app_ids,
-                    'user_id': user_id
-                }
+                    # Common params for folder lookup
+                    folder_params = {
+                        'project_id': project_id,
+                        'entity_ids': app_ids,
+                        'user_id': user_id
+                    }
 
-                # Determine which entity types to query based on agents_type filter
-                agents_type_normalized = (agents_type or '').strip().lower()
-                if agents_type_normalized == 'classic':
-                    folder_map = rpc_tools.RpcMixin().rpc.timeout(3).get_entities_folder_info_bulk(
-                        entity_type='agent', **folder_params
-                    )
-                elif agents_type_normalized == 'pipeline':
-                    folder_map = rpc_tools.RpcMixin().rpc.timeout(3).get_entities_folder_info_bulk(
-                        entity_type='pipeline', **folder_params
-                    )
-                else:
-                    # Mixed list (all) - need to query both types
-                    agent_folder_map = rpc_tools.RpcMixin().rpc.timeout(3).get_entities_folder_info_bulk(
-                        entity_type='agent', **folder_params
-                    )
-                    pipeline_folder_map = rpc_tools.RpcMixin().rpc.timeout(3).get_entities_folder_info_bulk(
-                        entity_type='pipeline', **folder_params
-                    )
-                    folder_map = {**agent_folder_map, **pipeline_folder_map}
+                    # Determine which entity types to query based on agents_type filter
+                    agents_type_normalized = (agents_type or '').strip().lower()
+                    if agents_type_normalized == 'classic':
+                        folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
+                            entity_type='agent', **folder_params
+                        )
+                    elif agents_type_normalized == 'pipeline':
+                        folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
+                            entity_type='pipeline', **folder_params
+                        )
+                    else:
+                        # Mixed list (all) - need to query both types
+                        agent_folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
+                            entity_type='agent', **folder_params
+                        )
+                        pipeline_folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
+                            entity_type='pipeline', **folder_params
+                        )
+                        folder_map = {**agent_folder_map, **pipeline_folder_map}
 
-                # Enrich applications with folder info
-                for app in parsed.applications:
-                    folder_info = folder_map.get(app.id)
-                    if folder_info:
-                        app.folder_id = folder_info.get('folder_id')
-                        app.folder_name = folder_info.get('folder_name')
+                    # Enrich applications with folder info
+                    for app in parsed.applications:
+                        folder_info = folder_map.get(app.id)
+                        if folder_info:
+                            app.folder_id = folder_info.get('folder_id')
+                            app.folder_name = folder_info.get('folder_name')
+            except Empty:
+                log.debug("Folder info RPC not available, skipping folder enrichment")
+            except Exception as folder_err:
+                log.warning(f"Failed to enrich applications with folder info: {folder_err}")
 
             return {
                 'total': some_result['total'],
