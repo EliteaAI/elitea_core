@@ -14,25 +14,10 @@ except ImportError:
 
 
 if _API_AVAILABLE:
-    from datetime import datetime, timedelta, timezone
     from flask import request
     from sqlalchemy import func, case, cast, Date, desc
 
-    def _parse_dates(args):
-        date_from = args.get("date_from")
-        date_to = args.get("date_to")
-        try:
-            dt_from = datetime.fromisoformat(date_from) if date_from else None
-        except (ValueError, TypeError):
-            dt_from = None
-        try:
-            dt_to = datetime.fromisoformat(date_to) if date_to else None
-        except (ValueError, TypeError):
-            dt_to = None
-        if not dt_from and not dt_to:
-            dt_to = datetime.now(timezone.utc)
-            dt_from = dt_to - timedelta(days=7)
-        return dt_from, dt_to
+    from ...utils.date_range import parse_date_range as _parse_dates
 
     class PromptLibAPI(api_tools.APIModeHandler):
         """Per-user detail analytics."""
@@ -295,6 +280,7 @@ if _API_AVAILABLE:
                         )
                     llm_kpi = llm_kpi_query.filter(
                         AuditEvent.event_type == "llm",
+                        AuditEvent.is_error.is_(False),
                     ).first()
 
                     # Daily activity by event type
