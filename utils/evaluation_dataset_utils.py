@@ -41,6 +41,34 @@ class EvalDatasetCaseNotFoundError(EvalLibraryError):
         self.case_id = case_id
 
 
+# P1 hard cap (#6349) — the single source of truth for the per-dataset case limit. Datasets that
+# already exceed this (grandfathered) keep their existing cases but cannot add more.
+MAX_CASES_PER_DATASET = 10
+
+
+class EvalDatasetCaseLimitError(EvalLibraryError):
+    http_status = 400
+
+    def __init__(self, current: int, adding: int, limit: int = MAX_CASES_PER_DATASET):
+        if adding <= 1:
+            message = (
+                f'This dataset already has {limit} cases, which is the current maximum. '
+                'Remove a case before adding a new one.'
+            )
+        else:
+            message = (
+                f'Import contains {adding} cases; only {limit} are allowed per dataset — '
+                'reduce the file or split it into multiple datasets.'
+            ) if current == 0 else (
+                f'This dataset has {current} case(s); adding {adding} more would exceed the '
+                f'{limit}-case maximum — reduce the file or split it into multiple datasets.'
+            )
+        super().__init__(message)
+        self.current = current
+        self.adding = adding
+        self.limit = limit
+
+
 # ----------------------------------------------------------------------------
 # Datasets
 # ----------------------------------------------------------------------------
@@ -55,9 +83,16 @@ def _attach_counts(dataset: EvalDataset) -> EvalDataset:
     return dataset
 
 
-def list_datasets(project_id: int, session=None) -> List[EvalDataset]:
+def list_datasets(project_id: int, agent_id: Optional[int] = None, session=None) -> List[EvalDataset]:
+    """All project datasets, or (§6350) just the ones a given agent's suite config may pick from:
+    datasets it owns plus any dataset another agent opted into sharing."""
     with _session(session, project_id) as s:
-        rows = s.query(EvalDataset).order_by(EvalDataset.name.asc(), EvalDataset.id.asc()).all()
+        query = s.query(EvalDataset)
+        if agent_id is not None:
+            query = query.filter(
+                (EvalDataset.agent_id == agent_id) | (EvalDataset.is_shared.is_(True))
+            )
+        rows = query.order_by(EvalDataset.name.asc(), EvalDataset.id.asc()).all()
         return [_attach_counts(d) for d in rows]
 
 
@@ -79,8 +114,9 @@ def list_cases(
 ) -> dict:
     """One page of a dataset's cases, ordered by ``order_index``, plus the full ``total``.
 
-    Paginated because a dataset holds up to ``MAX_CASES`` (5000) rows, each with unbounded
-    ``input``/``expected_output`` text — the relationship-backed read returned all of them.
+    Paginated because a case's ``input``/``expected_output`` text is unbounded — the
+    relationship-backed read returned all of them. The dataset itself is capped at
+    :data:`MAX_CASES_PER_DATASET` cases (#6349), well under either limit here.
     """
     with _session(session, project_id) as s:
         _require_dataset(s, dataset_id)
@@ -103,6 +139,8 @@ def create_dataset(project_id: int, data: EvalDatasetCreateModel, owner_id: int,
         dataset = EvalDataset(
             name=data.name,
             description=data.description,
+            agent_id=data.agent_id,
+            is_shared=data.is_shared,
             owner_id=owner_id,
             meta=data.meta,
         )
@@ -150,9 +188,16 @@ def _next_order_index(s, dataset_id: int) -> int:
     return 0 if current_max is None else current_max + 1
 
 
+def _case_count(s, dataset_id: int) -> int:
+    return s.query(EvalDatasetCase).filter(EvalDatasetCase.dataset_id == dataset_id).count()
+
+
 def add_case(project_id: int, dataset_id: int, data: EvalDatasetCaseCreateModel, session=None) -> EvalDatasetCase:
     with _session(session, project_id) as s:
         _require_dataset(s, dataset_id)
+        current = _case_count(s, dataset_id)
+        if current >= MAX_CASES_PER_DATASET:
+            raise EvalDatasetCaseLimitError(current, 1)
         case = EvalDatasetCase(
             dataset_id=dataset_id,
             order_index=_next_order_index(s, dataset_id),
@@ -206,7 +251,15 @@ def delete_case(project_id: int, dataset_id: int, case_id: int, session=None) ->
 # ----------------------------------------------------------------------------
 
 def _append_rows(s, dataset_id: int, rows: List[dict], source_type: str) -> List[EvalDatasetCase]:
-    """Append validated row dicts as cases with contiguous ``order_index`` at the end."""
+    """Append validated row dicts as cases with contiguous ``order_index`` at the end.
+
+    All-or-nothing against :data:`MAX_CASES_PER_DATASET` (#6349): a bulk append that would push
+    the dataset over the cap is rejected before any row is added, rather than accepting as many
+    as fit.
+    """
+    current = _case_count(s, dataset_id)
+    if rows and current + len(rows) > MAX_CASES_PER_DATASET:
+        raise EvalDatasetCaseLimitError(current, len(rows))
     start = _next_order_index(s, dataset_id)
     created: List[EvalDatasetCase] = []
     for offset, row in enumerate(rows):

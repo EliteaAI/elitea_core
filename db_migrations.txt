@@ -260,3 +260,9 @@ ALTER TABLE centry.eval_platform_dimension
 # reports the duplicate rows to resolve, and the real run refuses while any remain.
 Run admin task migrate_eval_binding_constraints with param: project_id=all;dry_run
 Run admin task migrate_eval_binding_constraints with param: project_id=all
+
+# Issue #6350: dataset scoping decision — eval_dataset gets an owning agent_id (nullable, for
+# rows created before this column existed) and an is_shared opt-in flag. Fresh environments get
+# both from create_all; existing p_N schemas need the columns backfilled. Per-project loop.
+# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+Run admin task migrate_eval_dataset_columns with param: project_id=all
