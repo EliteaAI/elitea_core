@@ -34,8 +34,23 @@ from ..utils.sio_utils import SioEvents
 from ..utils.toolkit_authorization import merge_authorization_request
 
 
-# Fallback only; the aborting worker normally supplies this text itself (#6245).
+# Fallback only; an aborting worker that can still talk supplies its own text (#6245).
 FORK_PROBE_USER_MESSAGE = "Temporary server error, please try again"
+
+# Supervised HITL phases that _maybe_recover_supervised_hitl can still replay.
+RECOVERABLE_SUPERVISOR_PHASES = frozenset({
+    "queued", "offered", "committed", "resuming", "fallback_pending",
+})
+
+# Task names whose failure must reach the UI: everything dispatched into the agents pool
+# that opens a stream the user is watching.
+REPORTABLE_TASK_NAMES = (
+    "indexer_agent",
+    "indexer_predict_agent",
+    "indexer_test_toolkit_tool",
+    "indexer_test_mcp_connection",
+    "indexer_mcp_sync_tools",
+)
 
 
 class Method:
@@ -134,10 +149,7 @@ class Method:
                 return
             decisions = [
                 item for item in pending_supervisor_decisions(response_msg.meta)
-                if item.get('phase') in {
-                    'queued', 'offered', 'committed', 'resuming',
-                    'fallback_pending',
-                }
+                if item.get('phase') in RECOVERABLE_SUPERVISOR_PHASES
                 and isinstance(item.get('pending_interrupt'), dict)
             ]
             if not decisions:
@@ -218,25 +230,72 @@ class Method:
         )
 
     @web.method()
-    def _report_fork_probe_failure(self, task_id, meta, result):
-        """End the chat stream for a worker that aborted on the fork-DNS probe (#6245)."""
-        # The child exits without touching Redis, so its agent_exception/full_message
-        # never arrive; only the result file does. Synthesize both here.
-        stream_id = result.get("stream_id")
-        message_id = result.get("message_id") or meta.get("message_id")
+    def _chat_stream_already_closed(self, chat_project_id, message_id):
+        """Whether the run's terminal state belongs to someone else, so we must stay quiet."""
+        # Two owners: a child that already reported its own specific error (is_streaming
+        # went False on the stream-end/pause handlers), or the supervised-HITL recovery that
+        # runs right after us and will resume this run - painting an error over either is wrong.
+        if not chat_project_id or not message_id:
+            return False
+        try:
+            with db.get_session(chat_project_id) as session:
+                msg_group = session.query(ConversationMessageGroup).filter(
+                    ConversationMessageGroup.uuid == message_id
+                ).first()
+                if not msg_group:
+                    return False
+                if not msg_group.is_streaming:
+                    return True
+                return any(
+                    item.get("phase") in RECOVERABLE_SUPERVISOR_PHASES
+                    and isinstance(item.get("pending_interrupt"), dict)
+                    for item in pending_supervisor_decisions(msg_group.meta)
+                )
+        except Exception:  # pylint: disable=W0703
+            # Fails open: double-reporting is recoverable, an endless spinner is not.
+            log.exception("Terminal-state check failed (message_id=%s)", message_id)
+            return False
+
+    @web.method()
+    def _report_task_failure(self, task_id, meta, result=None):
+        """End the chat stream for a worker task that died without reporting itself (#6288)."""
+        # A wedged or hard-killed child never reaches Redis, so its agent_exception and
+        # full_message never arrive. Meta is the only source that always survives; a
+        # result dict is a bonus the older in-worker guard still supplies.
+        result = result if isinstance(result, dict) else {}
+        stream_id = meta.get("stream_id") or result.get("stream_id")
+        message_id = meta.get("message_id") or result.get("message_id")
         sio_event = meta.get("sio_event") or SioEvents.application_predict.value
         content = result.get("human_readable") or FORK_PROBE_USER_MESSAGE
+        chat_project_id = meta.get("chat_project_id")
+        #
+        if not stream_id:
+            log.warning("Cannot report failure of task %s: no stream_id in meta", task_id)
+            return
+        #
+        # A user Stop normally leaves no result at all, but a task that raced the kill and
+        # raised must not paint an error over the text the stopper already wrote.
+        if message_id and self.is_chat_run_stopped(message_id):
+            log.info("Task %s failed after a user Stop; not reporting", task_id)
+            return
+        #
+        if self._chat_stream_already_closed(chat_project_id, message_id):
+            log.info(
+                "Task %s failed after its message was already closed; not reporting "
+                "(message_id=%s)", task_id, message_id,
+            )
+            return
         #
         log.warning(
-            "Agent task %s aborted on the fork DNS probe; reporting to the UI "
-            "(message_id=%s)", task_id, message_id,
+            "Task %s died without reporting itself; reporting to the UI (message_id=%s)",
+            task_id, message_id,
         )
         #
         response_metadata = {
             "project_id": meta.get("project_id"),
-            "chat_project_id": meta.get("chat_project_id"),
+            "chat_project_id": chat_project_id,
             "is_error": True,
-            "error": result.get("error") or "fork_dns_probe_failed",
+            "error": result.get("error") or "task_failed",
         }
         base_payload = {
             "stream_id": stream_id,
@@ -245,14 +304,16 @@ class Method:
             "sio_event": sio_event,
             "content": content,
             "response_metadata": response_metadata,
-            "execution_generation": result.get("execution_generation"),
+            "execution_generation": (
+                meta.get("execution_generation") or result.get("execution_generation")
+            ),
         }
         #
         # Live UI: clears the spinner and shows the error box in the running chat.
         try:
             self.stream_response(sio_event, {**base_payload, "type": "agent_exception"})
         except Exception:  # pylint: disable=W0703
-            log.exception("Fork-probe agent_exception emit failed (task_id=%s)", task_id)
+            log.exception("Task-failure agent_exception emit failed (task_id=%s)", task_id)
         #
         # Persistence: same event the child's full_message would have triggered, so the
         # row stops streaming and the error survives a reload.
@@ -262,7 +323,7 @@ class Method:
                     "chat_message_stream_end", {**base_payload, "type": "full_message"},
                 )
             except Exception:  # pylint: disable=W0703
-                log.exception("Fork-probe stream_end fire failed (task_id=%s)", task_id)
+                log.exception("Task-failure stream_end fire failed (task_id=%s)", task_id)
 
     @web.method()
     def reconcile_stopped_index_metas(self, task_id):
@@ -333,13 +394,12 @@ class Method:
 
     @web.method()
     def _maybe_handle_parallel_dispatch(self, task_id):
-        """Route a stopped task into parked-parent launch, child reconcile, or fork-probe report.
+        """Route a stopped task into parked-parent launch, child reconcile, or failure report.
 
         Reads meta first (cheap) to branch:
           * child  — meta carries reconcile_epoch → advance the reconcile gate.
-          * parent — task_name is an agent runner; its result is either parked
-                     (launch one durable child per spec) or a fork-DNS-probe abort
-                     (report the failure to the UI, #6245).
+          * parent — task_name is a reportable runner; its result is parked (launch one
+                     durable child per spec), an abort dict, or a raise (report to the UI).
         Anything else (ordinary agent run, index task, unknown) is ignored. The
         result is only deserialized when the cheap meta check already matched, so
         the common no-op path stays O(meta lookup).
@@ -362,17 +422,24 @@ class Method:
             self.parallel_dispatch_on_child_terminal(meta, child_result)
             return
 
-        # Parent candidate: only the two agent runners can park.
-        if meta.get("task_name") not in ("indexer_agent", "indexer_predict_agent"):
+        # Parent candidate: agent runners can park; every name here can fail visibly.
+        if meta.get("task_name") not in REPORTABLE_TASK_NAMES:
             return
         try:
             result = self.task_node.get_task_result(task_id)  # pylint: disable=E1101
         except Exception:  # pylint: disable=W0703
+            # A raised task, e.g. the arbiter fork-DNS guard. Swallowing it here is what
+            # left the UI spinning forever (#6288).
+            log.exception(
+                "Task %s failed (task_name=%s)", task_id, meta.get("task_name"),
+            )
+            self._report_task_failure(task_id, meta)
             return
         if not isinstance(result, dict):
             return
         if result.get("fork_dns_probe_failed"):
-            self._report_fork_probe_failure(task_id, meta, result)
+            # Legacy in-worker guard, still present on images whose arbiter predates #6288.
+            self._report_task_failure(task_id, meta, result)
             return
         if not result.get("parallel_parked"):
             return

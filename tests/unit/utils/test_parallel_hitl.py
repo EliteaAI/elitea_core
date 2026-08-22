@@ -526,7 +526,7 @@ def test_supervised_fallback_cannot_launch_a_competing_root_worker():
     ]
     recovery = callback_source[
         callback_source.index('def _maybe_recover_supervised_hitl'):
-        callback_source.index('def _report_fork_probe_failure')
+        callback_source.index('def _chat_stream_already_closed')
     ]
 
     assert "task_status != 'stopped'" in claim

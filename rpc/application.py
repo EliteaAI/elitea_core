@@ -301,6 +301,11 @@ class RPC:
                     "task_name": "indexer_agent",
                     "project_id": parsed.project_id,
                     "message_id": parsed.message_id,
+                    # Reporting a task that died without a result has only the meta to
+                    # work from: stream_id is the SIO room, and a missing generation makes
+                    # the terminal event look superseded and get dropped (#6288).
+                    "stream_id": parsed.stream_id,
+                    "execution_generation": payload.get("execution_generation"),
                     "question_id": start_event_content.get('question_id') if start_event_content else None,
                     "sio_event": f'{sio_event}',  # enums like this
                     'chat_project_id': chat_project_id,
@@ -508,6 +513,8 @@ class RPC:
                     "task_name": "indexer_predict_agent",
                     "project_id": parsed.project_id,
                     "message_id": parsed.message_id,
+                    "stream_id": parsed.stream_id,
+                    "execution_generation": payload.get("execution_generation"),
                     "question_id": start_event_content.get('question_id') if start_event_content else None,
                     "sio_event": f'{sio_event}',
                     'chat_project_id': chat_project_id,
@@ -1396,6 +1403,7 @@ class RPC:
                     "project_id": project_id,
                     'chat_project_id': chat_project_id,
                     "message_id": data['message_id'],
+                    "stream_id": data['stream_id'],
                     "question_id": start_event_content.get('question_id') if start_event_content else None,
                     "sio_event": sio_event,
                     "toolkit_config": meta_toolkit_config,
@@ -1601,6 +1609,7 @@ class RPC:
                 "project_id": project_id,
                 'chat_project_id': chat_project_id,
                 "message_id": data['message_id'],
+                "stream_id": data['stream_id'],
                 "question_id": start_event_content.get('question_id') if start_event_content else None,
                 "sio_event": sio_event,
                 "user_input_preview": "test MCP connection",
@@ -1745,6 +1754,7 @@ class RPC:
                 "task_name": "indexer_mcp_sync_tools",
                 "project_id": project_id,
                 "message_id": data['message_id'],
+                "stream_id": data['stream_id'],
                 "sio_event": sio_event,
                 "user_input_preview": f"sync MCP tools {data.get('url', '')}"[:100],
                 "url": data.get('url', ''),
