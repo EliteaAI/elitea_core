@@ -315,7 +315,12 @@ if _API_AVAILABLE:
                             "input_tokens": (llm_kpi.input_tokens if llm_kpi else 0) or 0,
                             "output_tokens": (llm_kpi.output_tokens if llm_kpi else 0) or 0,
                             "total_tokens": (
-                                ((llm_kpi.input_tokens or 0) + (llm_kpi.output_tokens or 0))
+                                (
+                                    (llm_kpi.input_tokens or 0)
+                                    + (llm_kpi.output_tokens or 0)
+                                    + (llm_kpi.cache_read_tokens or 0)
+                                    + (llm_kpi.cache_creation_tokens or 0)
+                                )
                                 if llm_kpi else 0
                             ),
                             "cache_read_tokens": (llm_kpi.cache_read_tokens if llm_kpi else 0) or 0,
