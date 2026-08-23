@@ -251,54 +251,42 @@ if _API_AVAILABLE:
                     errors_col = func.sum(case(
                         (AuditEvent.is_error.is_(True), 1), else_=0,
                     )).label("errors")
-                    total_tokens_col = func.sum(case(
-                        (AuditEvent.is_error.is_(True), 0),
-                        else_=func.coalesce(AuditEvent.input_tokens, 0)
-                        + func.coalesce(AuditEvent.output_tokens, 0),
-                    )).label("total_tokens")
-                    input_tokens_col = func.sum(case(
-                        (AuditEvent.is_error.is_(True), 0),
-                        else_=func.coalesce(AuditEvent.input_tokens, 0),
-                    )).label("input_tokens")
-                    output_tokens_col = func.sum(case(
-                        (AuditEvent.is_error.is_(True), 0),
-                        else_=func.coalesce(AuditEvent.output_tokens, 0),
-                    )).label("output_tokens")
-                    cache_read_tokens_col = func.sum(case(
-                        (AuditEvent.is_error.is_(True), 0),
-                        else_=func.coalesce(AuditEvent.cache_read_tokens, 0),
-                    )).label("cache_read_tokens")
-                    cache_creation_tokens_col = func.sum(case(
-                        (AuditEvent.is_error.is_(True), 0),
-                        else_=func.coalesce(AuditEvent.cache_creation_tokens, 0),
-                    )).label("cache_creation_tokens")
-                    llm_cost_col = func.sum(case(
-                        (AuditEvent.is_error.is_(True), 0),
-                        else_=func.coalesce(AuditEvent.llm_cost, 0),
-                    )).label("llm_cost")
+                    total_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.input_tokens, 0)
+                        + func.coalesce(AuditEvent.output_tokens, 0)
+                    ).label("total_tokens")
+                    input_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.input_tokens, 0)
+                    ).label("input_tokens")
+                    output_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.output_tokens, 0)
+                    ).label("output_tokens")
+                    cache_read_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.cache_read_tokens, 0)
+                    ).label("cache_read_tokens")
+                    cache_creation_tokens_col = func.sum(
+                        func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                    ).label("cache_creation_tokens")
+                    llm_cost_col = func.sum(AuditEvent.llm_cost).label("llm_cost")
 
                     extra_cost_cols = []
                     if _model_price_available:
-                        input_cost_col = func.sum(case(
-                            (AuditEvent.is_error.is_(True), 0),
-                            else_=func.coalesce(AuditEvent.input_tokens, 0)
-                            * func.coalesce(ModelPrice.input_cost_per_token, 0),
-                        )).label("input_cost")
-                        output_cost_col = func.sum(case(
-                            (AuditEvent.is_error.is_(True), 0),
-                            else_=func.coalesce(AuditEvent.output_tokens, 0)
-                            * func.coalesce(ModelPrice.output_cost_per_token, 0),
-                        )).label("output_cost")
-                        cache_read_cost_col = func.sum(case(
-                            (AuditEvent.is_error.is_(True), 0),
-                            else_=func.coalesce(AuditEvent.cache_read_tokens, 0)
-                            * func.coalesce(ModelPrice.cache_read_input_token_cost, 0),
-                        )).label("cache_read_cost")
-                        cache_creation_cost_col = func.sum(case(
-                            (AuditEvent.is_error.is_(True), 0),
-                            else_=func.coalesce(AuditEvent.cache_creation_tokens, 0)
-                            * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0),
-                        )).label("cache_creation_cost")
+                        input_cost_col = func.sum(
+                            func.coalesce(AuditEvent.input_tokens, 0)
+                            * func.coalesce(ModelPrice.input_cost_per_token, 0)
+                        ).label("input_cost")
+                        output_cost_col = func.sum(
+                            func.coalesce(AuditEvent.output_tokens, 0)
+                            * func.coalesce(ModelPrice.output_cost_per_token, 0)
+                        ).label("output_cost")
+                        cache_read_cost_col = func.sum(
+                            func.coalesce(AuditEvent.cache_read_tokens, 0)
+                            * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
+                        ).label("cache_read_cost")
+                        cache_creation_cost_col = func.sum(
+                            func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                            * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
+                        ).label("cache_creation_cost")
                         extra_cost_cols = [
                             input_cost_col, output_cost_col,
                             cache_read_cost_col, cache_creation_cost_col,

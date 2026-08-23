@@ -15,11 +15,36 @@ except ImportError:
 
 
 if _API_AVAILABLE:
+    from datetime import datetime, timedelta, timezone
     from flask import request
     from sqlalchemy import func, case, cast, Float, Date, String, or_
 
-    from ...utils.constants import SYSTEM_USER_EMAILS, SYSTEM_USER_EMAIL_PATTERN
-    from ...utils.date_range import parse_date_range as _parse_dates
+    from ...utils.constants import (
+        DEFAULT_DATE_RANGE_DAYS,
+        SYSTEM_USER_EMAILS,
+        SYSTEM_USER_EMAIL_PATTERN,
+    )
+
+    def _parse_dates(args):
+        """Parse date_from / date_to from request args, default to last 7 days."""
+        date_from = args.get("date_from")
+        date_to = args.get("date_to")
+        try:
+            dt_from = datetime.fromisoformat(date_from) if date_from else None
+        except (ValueError, TypeError):
+            dt_from = None
+        try:
+            dt_to = datetime.fromisoformat(date_to) if date_to else None
+        except (ValueError, TypeError):
+            dt_to = None
+        if not dt_from and not dt_to:
+            dt_to = datetime.now(timezone.utc)
+            dt_from = dt_to - timedelta(days=DEFAULT_DATE_RANGE_DAYS)
+        elif not dt_from:
+            dt_from = dt_to - timedelta(days=DEFAULT_DATE_RANGE_DAYS)
+        elif not dt_to:
+            dt_to = datetime.now(timezone.utc)
+        return dt_from, dt_to
 
     def _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to):
         """Build base query with project + date filters, excluding system users."""
@@ -213,15 +238,11 @@ if _API_AVAILABLE:
                         func.sum(case(
                             (AuditEvent.entity_type == "application", 1), else_=0,
                         )).label("agent_runs"),
-                        func.sum(case(
-                            (AuditEvent.is_error.is_(True), 0),
-                            else_=func.coalesce(AuditEvent.input_tokens, 0)
-                            + func.coalesce(AuditEvent.output_tokens, 0),
-                        )).label("total_tokens"),
-                        func.sum(case(
-                            (AuditEvent.is_error.is_(True), 0),
-                            else_=func.coalesce(AuditEvent.llm_cost, 0),
-                        )).label("total_llm_cost"),
+                        func.sum(
+                            func.coalesce(AuditEvent.input_tokens, 0)
+                            + func.coalesce(AuditEvent.output_tokens, 0)
+                        ).label("total_tokens"),
+                        func.sum(AuditEvent.llm_cost).label("total_llm_cost"),
                     ).first()
 
                     total_events = kpi_row.total_events or 0
@@ -261,23 +282,6 @@ if _API_AVAILABLE:
                                 and u['email'] not in SYSTEM_USER_EMAILS
                                 and not (u['email'].startswith('system_user_') and u['email'].endswith('@centry.user'))
                             ]
-                            # Exclude global platform super-admins: they hold an
-                            # "admin" role on every project for oversight, not as
-                            # genuine team members. If a super-admin actually has
-                            # activity on the project, the unique_users floor
-                            # below still surfaces them.
-                            from tools import rpc_tools
-                            non_admin_users = []
-                            for u in filtered_users:
-                                try:
-                                    roles = rpc_tools.RpcMixin().rpc.timeout(5).auth_get_user_roles(
-                                        u['id'], 'administration'
-                                    )
-                                except Exception:
-                                    roles = []
-                                if 'super_admin' not in (roles or []):
-                                    non_admin_users.append(u)
-                            filtered_users = non_admin_users
                             total_project_users = len(filtered_users)
                         else:
                             total_project_users = 0
@@ -567,24 +571,11 @@ if _API_AVAILABLE:
             from ...models.audit_event import AuditEvent
 
             project_id = request.args.get("project_id")
-            all_projects = request.args.get("all_projects", "").lower() == "true"
-            if not project_id and not all_projects:
-                return {"error": "project_id is required unless all_projects=true"}, 400
-
             dt_from, dt_to = _parse_dates(request.args)
 
             try:
                 with db.with_project_schema_session(None) as session:
-                    base = session.query(AuditEvent).filter(
-                        or_(
-                            AuditEvent.user_email.is_(None),
-                            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
-                        ),
-                        or_(
-                            AuditEvent.user_email.is_(None),
-                            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
-                        ),
-                    )
+                    base = session.query(AuditEvent)
                     if project_id:
                         base = base.filter(AuditEvent.project_id == int(project_id))
                     if dt_from:

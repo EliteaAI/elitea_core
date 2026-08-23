@@ -31,15 +31,7 @@ _REQUIRED_COLUMNS = {
     'cost_source': 'VARCHAR(64)',
 }
 _REQUIRED_INDEXES = {
-    'ix_audit_events_timestamp': '(timestamp)',
-    'ix_audit_events_user_id': '(user_id)',
-    'ix_audit_events_project_id': '(project_id)',
-    'ix_audit_events_trace_id': '(trace_id)',
-    'ix_audit_events_entity': '(entity_type, entity_id)',
     'ix_audit_events_model_name': '(model_name)',
-    'ix_audit_events_project_timestamp': '(project_id, timestamp)',
-    'ix_audit_events_tool_name': '(tool_name) WHERE tool_name IS NOT NULL',
-    'ix_audit_events_is_error': '(is_error) WHERE is_error IS TRUE',
 }
 
 

@@ -15,9 +15,7 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import func, or_
-
-    from ...utils.constants import SYSTEM_USER_EMAILS, SYSTEM_USER_EMAIL_PATTERN
+    from sqlalchemy import func
 
     class AdminAPI(api_tools.APIModeHandler):
         """Admin API for per-project user activity."""
@@ -45,7 +43,7 @@ if _API_AVAILABLE:
                     "in": "query",
                     "required": False,
                     "schema": {"type": "string", "format": "date-time"},
-                    "description": "Start datetime (ISO 8601). Defaults to 7 days ago.",
+                    "description": "Start datetime (ISO 8601).",
                     "example": "2025-01-01T00:00:00",
                 },
                 {
@@ -53,7 +51,7 @@ if _API_AVAILABLE:
                     "in": "query",
                     "required": False,
                     "schema": {"type": "string", "format": "date-time"},
-                    "description": "End datetime (ISO 8601). Defaults to now.",
+                    "description": "End datetime (ISO 8601).",
                     "example": "2025-01-31T23:59:59",
                 },
             ],
@@ -99,9 +97,9 @@ if _API_AVAILABLE:
             Returns list of users with event counts for a given project,
             optionally filtered by date range.
             """
+            from datetime import datetime
             from tools import db
             from ...models.audit_event import AuditEvent
-            from ...utils.date_range import parse_date_range
 
             project_id = request.args.get("project_id")
             if not project_id:
@@ -112,7 +110,8 @@ if _API_AVAILABLE:
             except (ValueError, TypeError):
                 return {"error": "project_id must be an integer"}, 400
 
-            dt_from, dt_to = parse_date_range(request.args)
+            date_from = request.args.get("date_from")
+            date_to = request.args.get("date_to")
 
             try:
                 with db.with_project_schema_session(None) as db_session:
@@ -123,28 +122,20 @@ if _API_AVAILABLE:
                     ).filter(
                         AuditEvent.project_id == project_id,
                         AuditEvent.user_id.isnot(None),
-                        or_(
-                            AuditEvent.user_email.is_(None),
-                            ~AuditEvent.user_email.in_(SYSTEM_USER_EMAILS),
-                        ),
-                        or_(
-                            AuditEvent.user_email.is_(None),
-                            ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
-                        ),
                     )
 
-                    if dt_from:
-                        query = query.filter(AuditEvent.timestamp >= dt_from)
-                    if dt_to:
-                        query = query.filter(AuditEvent.timestamp <= dt_to)
+                    if date_from:
+                        query = query.filter(
+                            AuditEvent.timestamp >= datetime.fromisoformat(date_from)
+                        )
+                    if date_to:
+                        query = query.filter(
+                            AuditEvent.timestamp <= datetime.fromisoformat(date_to)
+                        )
 
-                    query = query.group_by(
+                    rows = query.group_by(
                         AuditEvent.user_id,
                         AuditEvent.user_email,
-                    )
-
-                    rows = query.order_by(
-                        func.count().desc()
                     ).all()
 
                     return {

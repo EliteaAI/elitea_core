@@ -14,11 +14,30 @@ except ImportError:
 
 
 if _API_AVAILABLE:
+    from datetime import datetime, timedelta, timezone
     from flask import request
     from sqlalchemy import func, case, cast, Date, desc, or_
 
-    from ...utils.constants import SYSTEM_USER_EMAILS, SYSTEM_USER_EMAIL_PATTERN
-    from ...utils.date_range import parse_date_range as _parse_dates
+    from ...utils.constants import (
+        SYSTEM_USER_EMAILS,
+        SYSTEM_USER_EMAIL_PATTERN,
+    )
+
+    def _parse_dates(args):
+        date_from = args.get("date_from")
+        date_to = args.get("date_to")
+        try:
+            dt_from = datetime.fromisoformat(date_from) if date_from else None
+        except (ValueError, TypeError):
+            dt_from = None
+        try:
+            dt_to = datetime.fromisoformat(date_to) if date_to else None
+        except (ValueError, TypeError):
+            dt_to = None
+        if not dt_from and not dt_to:
+            dt_to = datetime.now(timezone.utc)
+            dt_from = dt_to - timedelta(days=7)
+        return dt_from, dt_to
 
     class PromptLibAPI(api_tools.APIModeHandler):
         """Per-agent detail analytics."""
@@ -266,7 +285,6 @@ if _API_AVAILABLE:
                             session.query(trace_subq.c.trace_id)
                         ),
                         AuditEvent.event_type == "llm",
-                        AuditEvent.is_error.is_(False),
                     )
                     if dt_from:
                         cost_row = cost_row.filter(AuditEvent.timestamp >= dt_from)
