@@ -261,6 +261,8 @@ if _API_AVAILABLE:
                         func.sum(
                             func.coalesce(llm_ev.input_tokens, 0)
                             + func.coalesce(llm_ev.output_tokens, 0)
+                            + func.coalesce(llm_ev.cache_read_tokens, 0)
+                            + func.coalesce(llm_ev.cache_creation_tokens, 0)
                         ).label("total_tokens"),
                         func.count().label("llm_calls"),
                     )
@@ -276,6 +278,8 @@ if _API_AVAILABLE:
                             func.sum(
                                 func.coalesce(llm_ev.input_tokens, 0)
                                 + func.coalesce(llm_ev.output_tokens, 0)
+                                + func.coalesce(llm_ev.cache_read_tokens, 0)
+                                + func.coalesce(llm_ev.cache_creation_tokens, 0)
                             ).label("total_tokens"),
                             func.count().label("llm_calls"),
                             func.sum(
