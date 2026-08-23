@@ -216,9 +216,7 @@ if _API_AVAILABLE:
                         func.sum(case(
                             (AuditEvent.is_error.is_(True), 0),
                             else_=func.coalesce(AuditEvent.input_tokens, 0)
-                            + func.coalesce(AuditEvent.output_tokens, 0)
-                            + func.coalesce(AuditEvent.cache_read_tokens, 0)
-                            + func.coalesce(AuditEvent.cache_creation_tokens, 0),
+                            + func.coalesce(AuditEvent.output_tokens, 0),
                         )).label("total_tokens"),
                         func.sum(case(
                             (AuditEvent.is_error.is_(True), 0),

@@ -295,12 +295,7 @@ if _API_AVAILABLE:
                             "input_tokens": (cost_row.input_tokens if cost_row else 0) or 0,
                             "output_tokens": (cost_row.output_tokens if cost_row else 0) or 0,
                             "total_tokens": (
-                                (
-                                    (cost_row.input_tokens or 0)
-                                    + (cost_row.output_tokens or 0)
-                                    + (cost_row.cache_read_tokens or 0)
-                                    + (cost_row.cache_creation_tokens or 0)
-                                )
+                                ((cost_row.input_tokens or 0) + (cost_row.output_tokens or 0))
                                 if cost_row else 0
                             ),
                             "cache_read_tokens": (cost_row.cache_read_tokens if cost_row else 0) or 0,
