@@ -283,3 +283,50 @@ def build_edit_system_prompt(
         pipelines="\n".join(_format_pipeline_lines(pipelines)),
         skills="\n".join(_format_skill_lines(skills)),
     )
+
+
+def fetch_application_instructions(
+    project_id: int,
+    application_id: int,
+    version_id: Optional[int] = None,
+) -> Optional[dict]:
+    """Resolve an agent's name + instructions for eval-dimension generation.
+
+    Uses ``version_id`` when given, else the application's default/base version
+    (``Application.get_default_version``). Returns ``None`` if the application or the
+    resolved version doesn't exist.
+    """
+    with db.with_project_schema_session(project_id) as session:
+        application = session.get(Application, application_id)
+        if not application:
+            return None
+
+        if version_id is not None:
+            version = session.query(ApplicationVersion).filter(
+                ApplicationVersion.id == version_id,
+                ApplicationVersion.application_id == application_id,
+            ).first()
+        else:
+            version = application.get_default_version()
+
+        if not version:
+            return None
+
+        return {
+            "application_name": application.name,
+            "version_id": version.id,
+            "instructions": version.instructions or "",
+        }
+
+
+def build_eval_dimensions_system_prompt(
+    template: str,
+    application_name: str,
+    instructions: str,
+    count_hint: Optional[int] = None,
+) -> str:
+    return template.format(
+        application_name=application_name,
+        instructions=instructions or "(no instructions set)",
+        count_hint=count_hint or "",
+    )
