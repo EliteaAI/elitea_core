@@ -81,6 +81,10 @@ class _RecordingQuery:
         self._log.append(('populate_existing', None))
         return self
 
+    def with_for_update(self):
+        self._log.append(('with_for_update', None))
+        return self
+
     def all(self):
         self._log.append(('all', None))
         return list(self._rows)
@@ -275,6 +279,8 @@ def dataset_utils(cleanup):
         types.ModuleType(f'{PKG}.models.evaluation'), explicit)
     sys.modules[f'{PKG}.models.pd.evaluation'] = _permissive(
         types.ModuleType(f'{PKG}.models.pd.evaluation'), {})
+    sys.modules[f'{PKG}.models.all'] = _permissive(
+        types.ModuleType(f'{PKG}.models.all'), {'Application': type('Application', (), {})})
     for extra in ('conversation', 'message_group'):
         sys.modules[f'{PKG}.models.{extra}'] = _permissive(
             types.ModuleType(f'{PKG}.models.{extra}'), {})
@@ -282,23 +288,26 @@ def dataset_utils(cleanup):
     return _load('evaluation_dataset_utils')
 
 
-def test_appending_rows_issues_no_per_row_refresh(dataset_utils):
+def test_appending_rows_issues_no_per_row_refresh(dataset_utils, monkeypatch):
+    monkeypatch.setattr(dataset_utils, 'MAX_CASES_PER_DATASET', 250)
     session = _RecordingSession(rows=[])
     rows = [{'input': f'q{i}'} for i in range(250)]
 
     dataset_utils._append_rows(session, 4, rows, 'import')
 
     assert len(session.added) == 250
-    # The regression this guards: 250 rows used to mean 250 sequential `refresh` statements.
+    # The regression this guards: N rows used to mean N sequential `refresh` statements.
     assert session.refreshes == []
     assert session.flushes >= 1
 
 
-def test_appending_rows_reads_the_whole_block_back_in_one_query(dataset_utils):
+def test_appending_rows_reads_the_whole_block_back_in_one_query(dataset_utils, monkeypatch):
     """`created_at` is a server_default, so the block still has to be re-read — but once."""
+    monkeypatch.setattr(dataset_utils, 'MAX_CASES_PER_DATASET', 50)
     session = _RecordingSession(rows=[])
 
-    dataset_utils._append_rows(session, 4, [{'input': 'q'} for _ in range(50)], 'import')
+    dataset_utils._append_rows(
+        session, 4, [{'input': 'q'} for _ in range(50)], 'import')
 
     reads = [entry for entry in session.log if entry[0] == 'all']
     assert len(reads) == 1
@@ -313,3 +322,90 @@ def test_appending_no_rows_touches_the_database_only_for_the_order_index(dataset
     assert created == []
     assert session.refreshes == []
     assert not any(entry[0] == 'populate_existing' for entry in session.log)
+
+
+# ---------------------------------------------------------------------------
+# #6349 — 10-case-per-dataset hard cap, enforced atomically before any row is added
+# ---------------------------------------------------------------------------
+
+def test_append_rows_rejects_a_bulk_import_that_would_exceed_the_cap(dataset_utils):
+    limit = dataset_utils.MAX_CASES_PER_DATASET
+    session = _RecordingSession(rows=[object()] * (limit - 1))  # dataset already has limit-1 cases
+
+    with pytest.raises(dataset_utils.EvalDatasetCaseLimitError):
+        dataset_utils._append_rows(session, 4, [{'input': 'q'} for _ in range(2)], 'import')
+
+    # All-or-nothing: nothing was added once the cap check failed.
+    assert session.added == []
+
+
+def test_append_rows_allows_a_bulk_import_that_exactly_fills_the_cap(dataset_utils):
+    limit = dataset_utils.MAX_CASES_PER_DATASET
+    session = _RecordingSession(rows=[object()] * (limit - 2))
+
+    created = dataset_utils._append_rows(session, 4, [{'input': 'q'} for _ in range(2)], 'import')
+
+    assert len(session.added) == 2
+    assert created is not None
+
+
+def test_add_case_rejects_the_case_at_the_cap(dataset_utils):
+    limit = dataset_utils.MAX_CASES_PER_DATASET
+    session = _RecordingSession(rows=[object()] * limit)
+
+    with pytest.raises(dataset_utils.EvalDatasetCaseLimitError):
+        dataset_utils.add_case(1, 4, types.SimpleNamespace(
+            input='q', variables=None, expected_output=None, source_type='manual',
+            source_ref=None, meta=None,
+        ), session=session)
+
+    assert session.added == []
+
+
+def test_case_limit_error_message_names_the_limit_for_a_single_add(dataset_utils):
+    exc = dataset_utils.EvalDatasetCaseLimitError(dataset_utils.MAX_CASES_PER_DATASET, 1)
+
+    assert str(dataset_utils.MAX_CASES_PER_DATASET) in str(exc)
+    assert exc.http_status == 400
+
+
+def test_case_limit_error_message_names_the_row_count_for_a_bulk_import(dataset_utils):
+    exc = dataset_utils.EvalDatasetCaseLimitError(0, 25)
+
+    assert '25' in str(exc)
+    assert str(dataset_utils.MAX_CASES_PER_DATASET) in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# #6350 — agent scoping / opt-in sharing access checks
+# ---------------------------------------------------------------------------
+
+def _dataset(agent_id=None, is_shared=False):
+    return types.SimpleNamespace(id=4, agent_id=agent_id, is_shared=is_shared)
+
+
+def test_unscoped_caller_bypasses_the_access_check(dataset_utils):
+    # agent_id=None means the caller didn't opt into scoping (pre-#6350 contract).
+    dataset_utils._check_dataset_access(_dataset(agent_id=5, is_shared=False), None, require_owner=True)
+
+
+def test_legacy_dataset_with_no_agent_is_accessible_to_any_agent(dataset_utils):
+    dataset_utils._check_dataset_access(_dataset(agent_id=None), agent_id=5, require_owner=True)
+
+
+def test_owner_always_has_read_and_write_access(dataset_utils):
+    dataset_utils._check_dataset_access(_dataset(agent_id=5, is_shared=False), agent_id=5, require_owner=True)
+
+
+def test_non_owner_can_read_a_shared_dataset(dataset_utils):
+    dataset_utils._check_dataset_access(_dataset(agent_id=5, is_shared=True), agent_id=9, require_owner=False)
+
+
+def test_non_owner_cannot_write_a_shared_dataset(dataset_utils):
+    with pytest.raises(dataset_utils.EvalDatasetNotFoundError):
+        dataset_utils._check_dataset_access(_dataset(agent_id=5, is_shared=True), agent_id=9, require_owner=True)
+
+
+def test_non_owner_cannot_read_a_private_dataset(dataset_utils):
+    with pytest.raises(dataset_utils.EvalDatasetNotFoundError):
+        dataset_utils._check_dataset_access(_dataset(agent_id=5, is_shared=False), agent_id=9, require_owner=False)

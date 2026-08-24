@@ -23,9 +23,14 @@ from ...utils.constants import PROMPT_LIB_MODE
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="List eval datasets in a project",
-        description="Returns the project's eval datasets with case counters (total + with expected output).",
+        description=(
+            "Returns the project's eval datasets with case counters (total + with expected output). "
+            "Pass agent_id (#6350) to scope the list to that agent's own datasets plus any dataset "
+            "another agent has opted to share project-wide; omit it for the unfiltered project view."
+        ),
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "required": False},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -37,8 +42,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def get(self, project_id: int, **kwargs):
+        agent_id = request.args.get('agent_id', type=int)
         with db.get_session(project_id) as session:
-            rows = list_datasets(project_id, session=session)
+            rows = list_datasets(project_id, agent_id=agent_id, session=session)
             return [
                 EvalDatasetSummaryModel.model_validate(r).model_dump(mode='json')
                 for r in rows

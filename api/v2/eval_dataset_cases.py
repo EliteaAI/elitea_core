@@ -51,10 +51,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             offset = int(request.args.get("offset", 0))
         except ValueError:
             return {"error": "limit and offset must be integers"}, 400
+        agent_id = request.args.get('agent_id', type=int)
         with db.get_session(project_id) as session:
             try:
                 page = list_cases(
-                    project_id, dataset_id, session=session, limit=limit, offset=offset,
+                    project_id, dataset_id, agent_id=agent_id, session=session,
+                    limit=limit, offset=offset,
                 )
             except EvalLibraryError as exc:
                 return {"error": str(exc)}, exc.http_status
@@ -91,8 +93,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             return e.errors(include_url=False, include_context=False, include_input=False), 400
 
+        agent_id = request.args.get('agent_id', type=int)
         try:
-            case = add_case(project_id, dataset_id, data)
+            case = add_case(project_id, dataset_id, data, agent_id=agent_id)
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status
 

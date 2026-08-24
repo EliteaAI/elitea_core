@@ -43,8 +43,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             return e.errors(include_url=False, include_context=False, include_input=False), 400
 
+        agent_id = request.args.get('agent_id', type=int)
         try:
-            case = update_case(project_id, dataset_id, case_id, data)
+            case = update_case(project_id, dataset_id, case_id, data, agent_id=agent_id)
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status
 
@@ -68,8 +69,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, dataset_id: int, case_id: int, **kwargs):
+        agent_id = request.args.get('agent_id', type=int)
         try:
-            delete_case(project_id, dataset_id, case_id)
+            delete_case(project_id, dataset_id, case_id, agent_id=agent_id)
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status
         return '', 204

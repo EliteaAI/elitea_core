@@ -270,6 +270,15 @@ class EvalDataset(db_tools.AbstractBaseMixin, db.Base):
     uuid: Mapped[str] = mapped_column(UUID(as_uuid=True), unique=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(256), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=True)
+    # Owning agent (#6350): a dataset is authored in the context of one agent. Nullable only to
+    # tolerate any pre-decision rows created before this column existed — new datasets always set it.
+    agent_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.{Application.__tablename__}.id', ondelete='CASCADE'),
+        nullable=True, index=True,
+    )
+    # Opt-in (#6350): when true, selectable from any agent's suite config in the project (§13);
+    # when false, only the owning agent's suite config can pick it.
+    is_shared: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     owner_id: Mapped[int] = mapped_column(Integer, nullable=False)
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())

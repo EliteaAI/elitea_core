@@ -454,10 +454,14 @@ class EvalDatasetBaseModel(BaseModel):
 
 class EvalDatasetCreateModel(EvalDatasetBaseModel):
     name: str = Field(..., min_length=1, max_length=256)
+    # Owning agent (#6350) — every dataset is authored in the context of one agent.
+    agent_id: int
+    is_shared: bool = False
 
 
 class EvalDatasetUpdateModel(EvalDatasetBaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=256)
+    is_shared: Optional[bool] = None
 
 
 class EvalDatasetSummaryModel(BaseModel):
@@ -468,6 +472,8 @@ class EvalDatasetSummaryModel(BaseModel):
     uuid: str
     name: str
     description: Optional[str] = None
+    agent_id: Optional[int] = None
+    is_shared: bool = False
     owner_id: int
     meta: dict = Field(default_factory=dict)
     case_count: int = 0
@@ -493,6 +499,8 @@ class EvalDatasetDetailModel(BaseModel):
     uuid: str
     name: str
     description: Optional[str] = None
+    agent_id: Optional[int] = None
+    is_shared: bool = False
     owner_id: int
     meta: dict = Field(default_factory=dict)
     created_at: Optional[datetime] = None

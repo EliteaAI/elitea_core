@@ -11,8 +11,10 @@ traffic via :func:`evaluation_turn_extraction.extract_conversation_turns`, §8.3
 Errors subclass ``EvalLibraryError`` so the v2 API boundary returns ``exc.http_status``.
 """
 
+import os
 from typing import List, Optional
 
+from ..models.all import Application
 from ..models.evaluation import EvalDataset, EvalDatasetCase, EvalCaseSource
 from ..models.pd.evaluation import (
     EvalDatasetCreateModel,
@@ -33,12 +35,62 @@ class EvalDatasetNotFoundError(EvalLibraryError):
         self.dataset_id = dataset_id
 
 
+class EvalDatasetAgentNotFoundError(EvalLibraryError):
+    """Raised on create when ``agent_id`` doesn't name an application in this project (#6350)."""
+    http_status = 400
+
+    def __init__(self, agent_id: int):
+        super().__init__(f'Agent (application) with id {agent_id} not found in this project')
+        self.agent_id = agent_id
+
+
 class EvalDatasetCaseNotFoundError(EvalLibraryError):
     http_status = 404
 
     def __init__(self, case_id: int):
         super().__init__(f'Eval dataset case with id {case_id} not found')
         self.case_id = case_id
+
+
+# P1 hard cap (#6349) — the single source of truth for the per-dataset case limit. Datasets that
+# already exceed this (grandfathered) keep their existing cases but cannot add more.
+# Overridable via EVAL_MAX_CASES_PER_DATASET so the ceiling can be raised without a code change.
+MAX_CASES_PER_DATASET = int(os.environ.get('EVAL_MAX_CASES_PER_DATASET', 10))
+
+
+class EvalDatasetCaseLimitError(EvalLibraryError):
+    http_status = 400
+
+    def __init__(
+        self, current: int, adding: int, limit: int = MAX_CASES_PER_DATASET, source: str = 'import',
+    ):
+        # `source` picks the wording for how to work around the cap — a promoted conversation
+        # can't be "reduced" or "split into multiple files" the way an import file can (#6350 review).
+        reduce_hint = (
+            'reduce the file or split it into multiple datasets' if source == 'import'
+            else 'promote fewer turns, or include_expected=false to shrink each case, or split '
+                 'across multiple datasets'
+        )
+        if adding <= 1:
+            # `current` (not `limit`) so a grandfathered dataset (current > limit) reports its
+            # real count rather than silently understating it as the current limit.
+            message = (
+                f'This dataset already has {current} case(s), which is at or above the current '
+                f'maximum of {limit}. Remove a case before adding a new one.'
+            )
+        else:
+            message = (
+                f'{"Import" if source == "import" else "This promotion"} contains {adding} cases; '
+                f'only {limit} are allowed per dataset — {reduce_hint}.'
+            ) if current == 0 else (
+                f'This dataset has {current} case(s); adding {adding} more would exceed the '
+                f'{limit}-case maximum — {reduce_hint}.'
+            )
+        super().__init__(message)
+        self.current = current
+        self.adding = adding
+        self.limit = limit
+        self.source = source
 
 
 # ----------------------------------------------------------------------------
@@ -55,15 +107,34 @@ def _attach_counts(dataset: EvalDataset) -> EvalDataset:
     return dataset
 
 
-def list_datasets(project_id: int, session=None) -> List[EvalDataset]:
+def list_datasets(project_id: int, agent_id: Optional[int] = None, session=None) -> List[EvalDataset]:
+    """All project datasets, or (#6350) just the ones a given agent's suite config may pick from:
+    datasets it owns plus any dataset another agent opted into sharing."""
     with _session(session, project_id) as s:
-        rows = s.query(EvalDataset).order_by(EvalDataset.name.asc(), EvalDataset.id.asc()).all()
+        query = s.query(EvalDataset)
+        if agent_id is not None:
+            query = query.filter(
+                (EvalDataset.agent_id == agent_id) | (EvalDataset.is_shared.is_(True))
+            )
+        rows = query.order_by(EvalDataset.name.asc(), EvalDataset.id.asc()).all()
         return [_attach_counts(d) for d in rows]
 
 
-def get_dataset(project_id: int, dataset_id: int, session=None) -> Optional[EvalDataset]:
+def get_dataset(
+    project_id: int, dataset_id: int, agent_id: Optional[int] = None, session=None,
+) -> Optional[EvalDataset]:
+    """Returns ``None`` both when the dataset doesn't exist and when ``agent_id`` doesn't have
+    access to it (#6350) — callers already treat a ``None`` result as a 404, and a private
+    dataset's existence shouldn't be distinguishable from it never existing."""
     with _session(session, project_id) as s:
-        return s.query(EvalDataset).filter(EvalDataset.id == dataset_id).first()
+        dataset = s.query(EvalDataset).filter(EvalDataset.id == dataset_id).first()
+        if dataset is None:
+            return None
+        try:
+            _check_dataset_access(dataset, agent_id, require_owner=False)
+        except EvalDatasetNotFoundError:
+            return None
+        return dataset
 
 
 DEFAULT_CASE_LIMIT = 200
@@ -73,17 +144,19 @@ MAX_CASE_LIMIT = 1000
 def list_cases(
     project_id: int,
     dataset_id: int,
+    agent_id: Optional[int] = None,
     session=None,
     limit: Optional[int] = None,
     offset: int = 0,
 ) -> dict:
     """One page of a dataset's cases, ordered by ``order_index``, plus the full ``total``.
 
-    Paginated because a dataset holds up to ``MAX_CASES`` (5000) rows, each with unbounded
-    ``input``/``expected_output`` text — the relationship-backed read returned all of them.
+    Paginated because a case's ``input``/``expected_output`` text is unbounded — the
+    relationship-backed read returned all of them. The dataset itself is capped at
+    :data:`MAX_CASES_PER_DATASET` cases (#6349), well under either limit here.
     """
     with _session(session, project_id) as s:
-        _require_dataset(s, dataset_id)
+        _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=False)
         page_size = min(limit or DEFAULT_CASE_LIMIT, MAX_CASE_LIMIT)
         ordered = (
             s.query(EvalDatasetCase)
@@ -100,9 +173,13 @@ def list_cases(
 
 def create_dataset(project_id: int, data: EvalDatasetCreateModel, owner_id: int, session=None) -> EvalDataset:
     with _session(session, project_id) as s:
+        if not s.query(Application.id).filter(Application.id == data.agent_id).first():
+            raise EvalDatasetAgentNotFoundError(data.agent_id)
         dataset = EvalDataset(
             name=data.name,
             description=data.description,
+            agent_id=data.agent_id,
+            is_shared=data.is_shared,
             owner_id=owner_id,
             meta=data.meta,
         )
@@ -112,9 +189,14 @@ def create_dataset(project_id: int, data: EvalDatasetCreateModel, owner_id: int,
         return dataset
 
 
-def update_dataset(project_id: int, dataset_id: int, data: EvalDatasetUpdateModel, session=None) -> EvalDataset:
+def update_dataset(
+    project_id: int, dataset_id: int, data: EvalDatasetUpdateModel,
+    agent_id: Optional[int] = None, session=None,
+) -> EvalDataset:
     with _session(session, project_id) as s:
-        dataset = _require_dataset(s, dataset_id)
+        # require_owner=True: is_shared is an authoring decision the owner opts into, not
+        # something another agent should be able to flip just because it was shared with them.
+        dataset = _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True)
         for key, value in data.model_dump(exclude_unset=True).items():
             setattr(dataset, key, value)
         s.flush()
@@ -122,9 +204,11 @@ def update_dataset(project_id: int, dataset_id: int, data: EvalDatasetUpdateMode
         return dataset
 
 
-def delete_dataset(project_id: int, dataset_id: int, session=None) -> None:
+def delete_dataset(
+    project_id: int, dataset_id: int, agent_id: Optional[int] = None, session=None,
+) -> None:
     with _session(session, project_id) as s:
-        dataset = _require_dataset(s, dataset_id)
+        dataset = _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True)
         s.delete(dataset)  # cases cascade (delete-orphan)
 
 
@@ -132,10 +216,40 @@ def delete_dataset(project_id: int, dataset_id: int, session=None) -> None:
 # Cases
 # ----------------------------------------------------------------------------
 
-def _require_dataset(s, dataset_id: int) -> EvalDataset:
-    dataset = s.query(EvalDataset).filter(EvalDataset.id == dataset_id).first()
+def _check_dataset_access(dataset: EvalDataset, agent_id: Optional[int], require_owner: bool) -> None:
+    """Enforce agent scoping (#6350) — not just filter it, as list_datasets does.
+
+    ``agent_id is None`` means the caller didn't scope the request (internal/admin callers,
+    or clients on an older contract) — no check is applied, matching pre-#6350 behavior.
+    A dataset with ``agent_id is None`` is a legacy row from before scoping existed and stays
+    accessible to any agent. Otherwise: the owning agent always has access; a non-owner only
+    gets read access (``require_owner=False``) when the dataset opted into ``is_shared``.
+    Failure raises 404 (not 403) so a private dataset's existence isn't leaked by id-guessing.
+    """
+    if agent_id is None or dataset.agent_id is None:
+        return
+    if dataset.agent_id == agent_id:
+        return
+    if not require_owner and dataset.is_shared:
+        return
+    raise EvalDatasetNotFoundError(dataset.id)
+
+
+def _require_dataset(
+    s, dataset_id: int, agent_id: Optional[int] = None, require_owner: bool = False,
+    lock: bool = False,
+) -> EvalDataset:
+    query = s.query(EvalDataset).filter(EvalDataset.id == dataset_id)
+    if lock:
+        # Row-locks the dataset for the rest of this transaction so a concurrent add/import
+        # against the same dataset blocks until this one commits (#6349 review: the cap check
+        # wasn't actually atomic — two concurrent adds could both pass `_case_count` before
+        # either inserted). Serializes writers per-dataset; readers are unaffected.
+        query = query.with_for_update()
+    dataset = query.first()
     if not dataset:
         raise EvalDatasetNotFoundError(dataset_id)
+    _check_dataset_access(dataset, agent_id, require_owner)
     return dataset
 
 
@@ -150,9 +264,19 @@ def _next_order_index(s, dataset_id: int) -> int:
     return 0 if current_max is None else current_max + 1
 
 
-def add_case(project_id: int, dataset_id: int, data: EvalDatasetCaseCreateModel, session=None) -> EvalDatasetCase:
+def _case_count(s, dataset_id: int) -> int:
+    return s.query(EvalDatasetCase).filter(EvalDatasetCase.dataset_id == dataset_id).count()
+
+
+def add_case(
+    project_id: int, dataset_id: int, data: EvalDatasetCaseCreateModel,
+    agent_id: Optional[int] = None, session=None,
+) -> EvalDatasetCase:
     with _session(session, project_id) as s:
-        _require_dataset(s, dataset_id)
+        _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True, lock=True)
+        current = _case_count(s, dataset_id)
+        if current >= MAX_CASES_PER_DATASET:
+            raise EvalDatasetCaseLimitError(current, 1)
         case = EvalDatasetCase(
             dataset_id=dataset_id,
             order_index=_next_order_index(s, dataset_id),
@@ -170,9 +294,11 @@ def add_case(project_id: int, dataset_id: int, data: EvalDatasetCaseCreateModel,
 
 
 def update_case(
-    project_id: int, dataset_id: int, case_id: int, data: EvalDatasetCaseUpdateModel, session=None,
+    project_id: int, dataset_id: int, case_id: int, data: EvalDatasetCaseUpdateModel,
+    agent_id: Optional[int] = None, session=None,
 ) -> EvalDatasetCase:
     with _session(session, project_id) as s:
+        _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True)
         case = (
             s.query(EvalDatasetCase)
             .filter(EvalDatasetCase.dataset_id == dataset_id, EvalDatasetCase.id == case_id)
@@ -189,8 +315,12 @@ def update_case(
         return case
 
 
-def delete_case(project_id: int, dataset_id: int, case_id: int, session=None) -> None:
+def delete_case(
+    project_id: int, dataset_id: int, case_id: int,
+    agent_id: Optional[int] = None, session=None,
+) -> None:
     with _session(session, project_id) as s:
+        _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True)
         case = (
             s.query(EvalDatasetCase)
             .filter(EvalDatasetCase.dataset_id == dataset_id, EvalDatasetCase.id == case_id)
@@ -205,8 +335,19 @@ def delete_case(project_id: int, dataset_id: int, case_id: int, session=None) ->
 # Bulk sources — import (§17.2 CSV/JSON) and promote (§17.2 conversations)
 # ----------------------------------------------------------------------------
 
-def _append_rows(s, dataset_id: int, rows: List[dict], source_type: str) -> List[EvalDatasetCase]:
-    """Append validated row dicts as cases with contiguous ``order_index`` at the end."""
+def _append_rows(
+    s, dataset_id: int, rows: List[dict], source_type: str, error_source: str = 'import',
+) -> List[EvalDatasetCase]:
+    """Append validated row dicts as cases with contiguous ``order_index`` at the end.
+
+    All-or-nothing against :data:`MAX_CASES_PER_DATASET` (#6349): a bulk append that would push
+    the dataset over the cap is rejected before any row is added, rather than accepting as many
+    as fit. Callers lock the dataset row (``_require_dataset(..., lock=True)``) before calling
+    this, so the count check below and the inserts are atomic with respect to other writers.
+    """
+    current = _case_count(s, dataset_id)
+    if rows and current + len(rows) > MAX_CASES_PER_DATASET:
+        raise EvalDatasetCaseLimitError(current, len(rows), source=error_source)
     start = _next_order_index(s, dataset_id)
     created: List[EvalDatasetCase] = []
     for offset, row in enumerate(rows):
@@ -241,13 +382,16 @@ def _append_rows(s, dataset_id: int, rows: List[dict], source_type: str) -> List
     )
 
 
-def import_cases(project_id: int, dataset_id: int, fmt: str, content: str, session=None) -> dict:
+def import_cases(
+    project_id: int, dataset_id: int, fmt: str, content: str,
+    agent_id: Optional[int] = None, session=None,
+) -> dict:
     """Parse ``content`` (§17.2) and append valid rows as ``import`` cases. Returns an
     ``{accepted, rejected, errors, cases}`` report; invalid rows never abort the import."""
     rows, errors = parse_import(fmt, content)
     with _session(session, project_id) as s:
-        _require_dataset(s, dataset_id)
-        created = _append_rows(s, dataset_id, rows, EvalCaseSource.import_)
+        _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True, lock=True)
+        created = _append_rows(s, dataset_id, rows, EvalCaseSource.import_, error_source='import')
         return {
             'accepted': len(created),
             'rejected': len(errors),
@@ -257,14 +401,15 @@ def import_cases(project_id: int, dataset_id: int, fmt: str, content: str, sessi
 
 
 def promote_from_conversation(
-    project_id: int, dataset_id: int, conversation_id: int, include_expected: bool = True, session=None,
+    project_id: int, dataset_id: int, conversation_id: int, include_expected: bool = True,
+    agent_id: Optional[int] = None, session=None,
 ) -> dict:
     """Promote a stored conversation into golden cases (§17.2, §8.3). Each user turn → a case
     ``input``; the agent reply → ``expected_output`` when ``include_expected``. ``source_type=
     conversation`` + ``source_ref=<conversation_id>`` link back to the origin. Returns
     ``{accepted, cases}``."""
     with _session(session, project_id) as s:
-        _require_dataset(s, dataset_id)
+        _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True, lock=True)
         pairs = extract_conversation_turns(project_id, conversation_id, session=s)
         rows = [
             {
@@ -275,5 +420,5 @@ def promote_from_conversation(
             for input_text, output_text in pairs
             if input_text and input_text.strip()
         ]
-        created = _append_rows(s, dataset_id, rows, EvalCaseSource.conversation)
+        created = _append_rows(s, dataset_id, rows, EvalCaseSource.conversation, error_source='promote')
         return {'accepted': len(created), 'cases': created}
