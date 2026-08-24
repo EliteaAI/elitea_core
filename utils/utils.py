@@ -7,7 +7,7 @@ from typing import Callable, List, Set, Generator, Optional
 from sqlalchemy import distinct, func
 
 from pylon.core.tools import log
-from tools import db, SecretString, config as c
+from tools import db, context, SecretString, config as c
 
 from .exceptions import VerifySignatureError
 
@@ -23,6 +23,26 @@ except ImportError:  # pragma: no cover - gevent absent in non-gevent deploys
 def make_yield_to_hub(web_runtime: str) -> Callable[[], None]:
     """Cooperative yield only when gevent is the actual web runtime; no-op under flask/waitress/hypercorn."""
     return (lambda: gevent.sleep(0)) if (gevent is not None and web_runtime == "gevent") else (lambda: None)
+
+
+def end_ambient_transaction() -> None:
+    """Commit the thread-local session so a long loop does not hold one transaction open for its whole duration."""
+    from pylon.core.tools import db_support  # pylint: disable=C0415
+    #
+    db_support.check_local_entities()
+    local_session = context.local.db_session
+    # Absent or not yet materialised means nothing is open, and going through the
+    # proxy here would create a session this caller has no hook to close.
+    if local_session is None or isinstance(local_session, db_support.LazyLocalSession):
+        return
+    #
+    try:
+        local_session.commit()
+    except Exception:  # pylint: disable=W0703
+        try:
+            local_session.rollback()
+        except Exception:  # pylint: disable=W0703
+            pass
 
 
 # Redis cache for public project ID (ai_project_id)
