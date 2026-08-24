@@ -42,8 +42,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             return e.errors(include_url=False, include_context=False, include_input=False), 400
 
+        agent_id = request.args.get('agent_id', type=int)
         try:
-            report = import_cases(project_id, dataset_id, data.format, data.content)
+            report = import_cases(project_id, dataset_id, data.format, data.content, agent_id=agent_id)
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status
 

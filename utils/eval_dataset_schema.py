@@ -14,6 +14,13 @@ _MIGRATION_STATEMENTS = (
     "ALTER TABLE p_{pid}.eval_dataset ADD COLUMN IF NOT EXISTS agent_id INTEGER",
     "ALTER TABLE p_{pid}.eval_dataset "
     "ADD COLUMN IF NOT EXISTS is_shared BOOLEAN NOT NULL DEFAULT false",
+    "DO $$ BEGIN "
+    "ALTER TABLE p_{pid}.eval_dataset "
+    "ADD CONSTRAINT eval_dataset_agent_id_fkey "
+    "FOREIGN KEY (agent_id) REFERENCES p_{pid}.applications(id) ON DELETE CASCADE; "
+    "EXCEPTION WHEN duplicate_object THEN NULL; END $$",
+    "CREATE INDEX IF NOT EXISTS eval_dataset_agent_id_idx "
+    "ON p_{pid}.eval_dataset (agent_id)",
 )
 
 

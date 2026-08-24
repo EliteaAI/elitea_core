@@ -68,7 +68,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         tags=["elitea_core/evaluation"],
     )
     @auth.decorators.check_api({
-        "permissions": ["models.applications.evaluation.run.create"],
+        "permissions": ["models.applications.evaluation.run.delete"],
         "recommended_roles": {
             c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
@@ -80,7 +80,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 delete_run(project_id, run_id, session=session)
             except EvalLibraryError as exc:
                 return {"error": str(exc)}, exc.http_status
-            return {}, 204
+            return '', 204
 
 
 class API(api_tools.APIBase):

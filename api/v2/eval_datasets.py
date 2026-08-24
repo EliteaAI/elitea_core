@@ -25,7 +25,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="List eval datasets in a project",
         description=(
             "Returns the project's eval datasets with case counters (total + with expected output). "
-            "Pass agent_id (§6350) to scope the list to that agent's own datasets plus any dataset "
+            "Pass agent_id (#6350) to scope the list to that agent's own datasets plus any dataset "
             "another agent has opted to share project-wide; omit it for the unfiltered project view."
         ),
         parameters=[

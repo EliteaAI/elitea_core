@@ -27,6 +27,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dataset_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "required": False,
+             "description": "Must be the dataset's owning agent (#6350) unless the dataset is "
+                             "unscoped (legacy). Being shared does not permit promoting into it."},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -43,9 +46,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             return e.errors(include_url=False, include_context=False, include_input=False), 400
 
+        agent_id = request.args.get('agent_id', type=int)
         try:
             report = promote_from_conversation(
-                project_id, dataset_id, data.conversation_id, include_expected=data.include_expected,
+                project_id, dataset_id, data.conversation_id,
+                include_expected=data.include_expected, agent_id=agent_id,
             )
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status

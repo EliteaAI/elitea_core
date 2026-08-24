@@ -33,6 +33,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dataset_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "required": False,
+             "description": "Scopes access (#6350): required to read another agent's dataset "
+                             "unless it is shared. Omit only for legacy, unscoped datasets."},
             {"name": "limit", "in": "query", "schema": {"type": "integer"},
              "description": f"Embedded cases per page (default {DEFAULT_CASE_LIMIT}, max {MAX_CASE_LIMIT})."},
             {"name": "offset", "in": "query", "schema": {"type": "integer"},
@@ -53,12 +56,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
             offset = int(request.args.get("offset", 0))
         except ValueError:
             return {"error": "limit and offset must be integers"}, 400
+        agent_id = request.args.get('agent_id', type=int)
         with db.get_session(project_id) as session:
-            dataset = get_dataset(project_id, dataset_id, session=session)
+            dataset = get_dataset(project_id, dataset_id, agent_id=agent_id, session=session)
             if not dataset:
                 return {"error": f"Eval dataset with id {dataset_id} not found"}, 404
             page = list_cases(
-                project_id, dataset_id, session=session, limit=limit, offset=offset,
+                project_id, dataset_id, agent_id=agent_id, session=session, limit=limit, offset=offset,
             )
             payload = EvalDatasetDetailModel.model_validate(dataset).model_dump(mode='json')
             payload['cases'] = [
@@ -76,6 +80,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dataset_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "required": False,
+             "description": "Must be the dataset's owning agent (#6350) unless the dataset is "
+                             "unscoped (legacy). Being shared does not permit editing it."},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -92,8 +99,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             return e.errors(include_url=False, include_context=False, include_input=False), 400
 
+        agent_id = request.args.get('agent_id', type=int)
         try:
-            dataset = update_dataset(project_id, dataset_id, data)
+            dataset = update_dataset(project_id, dataset_id, data, agent_id=agent_id)
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status
 
@@ -105,6 +113,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dataset_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "required": False,
+             "description": "Must be the dataset's owning agent (#6350) unless the dataset is "
+                             "unscoped (legacy). Being shared does not permit deleting it."},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -116,8 +127,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, dataset_id: int, **kwargs):
+        agent_id = request.args.get('agent_id', type=int)
         try:
-            delete_dataset(project_id, dataset_id)
+            delete_dataset(project_id, dataset_id, agent_id=agent_id)
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status
         return '', 204

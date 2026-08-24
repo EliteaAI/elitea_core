@@ -27,7 +27,16 @@ class _EvalLibraryError(Exception):
 
 
 class _Args(dict):
-    """Stand-in for ``request.args`` — ``get`` with a default is all the handlers use."""
+    """Stand-in for ``request.args`` — mimics Flask's MultiDict.get(key, default, type=...)."""
+
+    def get(self, key, default=None, type=None):  # noqa: A002 - matches Flask's signature
+        value = super().get(key, default)
+        if value is None or type is None:
+            return value
+        try:
+            return type(value)
+        except (TypeError, ValueError):
+            return default
 
 
 class _Request:
@@ -105,12 +114,12 @@ def _install_package(calls):
     dataset_utils = types.ModuleType(f'{PKG}.utils.evaluation_dataset_utils')
     dataset_utils.DEFAULT_CASE_LIMIT = 200
     dataset_utils.MAX_CASE_LIMIT = 1000
-    dataset_utils.get_dataset = lambda project_id, dataset_id, session=None: {'id': dataset_id}
+    dataset_utils.get_dataset = lambda project_id, dataset_id, agent_id=None, session=None: {'id': dataset_id}
     dataset_utils.update_dataset = lambda *a, **k: {}
     dataset_utils.delete_dataset = lambda *a, **k: None
     dataset_utils.add_case = lambda *a, **k: {}
 
-    def _list_cases(project_id, dataset_id, session=None, limit=None, offset=0):
+    def _list_cases(project_id, dataset_id, agent_id=None, session=None, limit=None, offset=0):
         calls.append({'limit': limit, 'offset': offset})
         window = min(limit or 200, 1000)
         return {
@@ -300,7 +309,7 @@ def test_dataset_get_does_not_flag_truncation_on_the_last_page(api):
 def test_dataset_get_still_404s_for_a_missing_dataset(api):
     modules, _, request = api
     request.args = _Args()
-    modules['eval_dataset'].get_dataset = lambda project_id, dataset_id, session=None: None
+    modules['eval_dataset'].get_dataset = lambda project_id, dataset_id, agent_id=None, session=None: None
 
     payload, status = modules['eval_dataset'].PromptLibAPI().get(1, 404)
 
