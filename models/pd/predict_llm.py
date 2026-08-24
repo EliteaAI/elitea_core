@@ -86,7 +86,8 @@ class LLMPredictRequest(BaseModel):
     await_task_timeout: Optional[int] = Field(
         default=30,
         ge=0,
-        description="Seconds to wait for response (0=async, >0=blocking). Default: 30"
+        le=300,
+        description="Seconds to wait for response (0=async, >0=blocking, max 300s). Default: 30"
     )
     sid: Optional[str] = Field(
         default=None,
