@@ -2,6 +2,7 @@ import json
 import re
 from typing import List, Tuple, Optional
 
+from pylon.core.tools import log
 from tools import db
 
 from ..models.all import Application, ApplicationVersion
@@ -13,6 +14,14 @@ _MAX_MCP = 10
 _MAX_AGENTS = 5
 _MAX_PIPELINES = 5
 _MAX_SKILLS = 10
+
+
+class ServicePromptTemplateError(Exception):
+    """Raised when a service-prompt template fails to ``.format()`` against its context.
+
+    Templates are user-editable admin records (§ configurations/service_prompt_seed.py), so a
+    malformed edit should surface as a diagnosable 500, not an uncaught KeyError/IndexError.
+    """
 
 
 def _score_item(query_tokens: set, name: str, description: str, extra: str = "") -> int:
@@ -324,9 +333,29 @@ def build_eval_dimensions_system_prompt(
     application_name: str,
     instructions: str,
     count_hint: Optional[int] = None,
+    existing_dimension_names: Optional[list] = None,
 ) -> str:
-    return template.format(
-        application_name=application_name,
-        instructions=instructions or "(no instructions set)",
-        count_hint=count_hint or "",
+    count_clause = (
+        f"Propose at most {count_hint} dimensions."
+        if count_hint
+        else "Propose 3-6 dimensions, using your judgment."
     )
+    if existing_dimension_names:
+        existing_clause = (
+            "The project's dimension library already has these names — do not re-propose "
+            "them, even under a slightly different name; propose something that adds new "
+            "coverage instead: " + ", ".join(existing_dimension_names)
+        )
+    else:
+        existing_clause = "The project's dimension library is currently empty."
+
+    try:
+        return template.format(
+            application_name=application_name,
+            instructions=instructions or "(no instructions set)",
+            count_clause=count_clause,
+            existing_dimensions=existing_clause,
+        )
+    except (KeyError, IndexError, ValueError):
+        log.exception("build_eval_dimensions_system_prompt: malformed service prompt template")
+        raise ServicePromptTemplateError("generate_eval_dimensions template is malformed")

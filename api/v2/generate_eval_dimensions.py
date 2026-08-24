@@ -40,9 +40,12 @@ from ...utils.exceptions import PoolSaturationError
 from ...utils.generate_application_utils import (
     fetch_application_instructions,
     build_eval_dimensions_system_prompt,
+    ServicePromptTemplateError,
 )
 from ...utils.service_prompt_utils import get_service_prompt
+from ...utils.evaluation_library_utils import list_dimensions
 from ...utils.utils import extract_json_from_text
+from ...models.evaluation import EvalTier
 
 _SERVICE_PROMPT_KEY = "generate_eval_dimensions"
 
@@ -85,14 +88,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 )
                 if not llm_settings or not llm_settings.get("model_name"):
                     return {"error": "No default LLM model configured for this project"}, 400
-                llm_settings.setdefault("temperature", 0.3)
-                llm_settings.setdefault("max_tokens", 4096)
                 if req.llm_settings:
                     overrides = req.llm_settings.model_dump(exclude_none=True, exclude={"model_name"})
                     llm_settings.update(overrides)
             except Exception:
                 log.exception("generate_eval_dimensions: failed to get default model")
                 return {"error": "Failed to resolve project default LLM model"}, 400
+
+        # Applies on both the explicit-model and default-model paths — this endpoint's output
+        # (one JSON object with several fully-specified dimensions) is large enough to hit the
+        # truncation branch below if a caller supplies model_name without max_tokens.
+        llm_settings.setdefault("temperature", 0.3)
+        llm_settings.setdefault("max_tokens", 4096)
 
         agent = fetch_application_instructions(project_id, req.application_id, req.version_id)
         if agent is None:
@@ -102,12 +109,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not template:
             return {"error": "Service prompt 'generate_eval_dimensions' is not configured"}, 500
 
-        system_prompt = build_eval_dimensions_system_prompt(
-            template,
-            application_name=agent["application_name"],
-            instructions=agent["instructions"],
-            count_hint=req.count_hint,
-        )
+        existing_names = [
+            d.name for d in list_dimensions(project_id, include_platform=False)
+            if d.tier == EvalTier.project
+        ]
+
+        try:
+            system_prompt = build_eval_dimensions_system_prompt(
+                template,
+                application_name=agent["application_name"],
+                instructions=agent["instructions"],
+                count_hint=req.count_hint,
+                existing_dimension_names=existing_names,
+            )
+        except ServicePromptTemplateError as exc:
+            log.exception("generate_eval_dimensions: %s", exc)
+            return {"error": "Service prompt 'generate_eval_dimensions' template is malformed"}, 500
 
         try:
             result = self.module.predict_sio_llm(
@@ -162,7 +179,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.warning("generate_eval_dimensions: validation failed: %s", e.errors())
             return {"error": "Generated draft failed validation", "details": e.errors(), "raw": parsed}, 422
 
-        return draft.model_dump(exclude_none=True), 200
+        draft.version_id = agent["version_id"]
+
+        return draft.model_dump(), 200
 
 
 class API(api_tools.APIBase):

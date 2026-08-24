@@ -22,10 +22,6 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = 'evalpkg_generate_dimensions_test'
 
 
-class _EvalLibraryError(Exception):
-    http_status = 400
-
-
 class _PredictPayloadError(Exception):
     pass
 
@@ -125,14 +121,24 @@ def _install_package():
 
     predict_llm.LLMSettingsRequest = LLMSettingsRequest
 
+    class _ServicePromptTemplateError(Exception):
+        pass
+
     generate_app_utils = types.ModuleType(f'{PKG}.utils.generate_application_utils')
     generate_app_utils.fetch_application_instructions = lambda *a, **k: {
         'application_name': 'Support Bot', 'version_id': 1, 'instructions': 'Answer support tickets politely.',
     }
-    generate_app_utils.build_eval_dimensions_system_prompt = lambda template, **kw: template.format(**kw)
+    generate_app_utils.build_eval_dimensions_system_prompt = lambda template, **kw: template.format(
+        application_name=kw.get('application_name', ''),
+        instructions=kw.get('instructions', ''),
+    )
+    generate_app_utils.ServicePromptTemplateError = _ServicePromptTemplateError
 
     service_prompt_utils = types.ModuleType(f'{PKG}.utils.service_prompt_utils')
     service_prompt_utils.get_service_prompt = lambda key: 'generate dimensions for {application_name}: {instructions}'
+
+    eval_library_utils = types.ModuleType(f'{PKG}.utils.evaluation_library_utils')
+    eval_library_utils.list_dimensions = lambda *a, **k: []
 
     predict_utils = types.ModuleType(f'{PKG}.utils.predict_utils')
     predict_utils.PredictPayloadError = _PredictPayloadError
@@ -208,6 +214,7 @@ def _install_package():
         f'{PKG}.utils': utils_pkg,
         f'{PKG}.utils.generate_application_utils': generate_app_utils,
         f'{PKG}.utils.service_prompt_utils': service_prompt_utils,
+        f'{PKG}.utils.evaluation_library_utils': eval_library_utils,
         f'{PKG}.utils.predict_utils': predict_utils,
         f'{PKG}.utils.exceptions': exceptions,
         f'{PKG}.utils.utils': utils_utils,
@@ -265,14 +272,15 @@ def test_happy_path_returns_validated_draft(api):
     payload, status = handler.post(1)
 
     assert status == 200
+    assert payload['version_id'] == 1
     assert payload['dimensions'][0]['name'] == 'Politeness'
-    assert payload['dimensions'][0]['tier'] == 'project'
+    assert payload['dimensions'][0]['tier'] == 'agent_adhoc'
     assert payload['dimensions'][0]['evidence_scope'] == {'input': True, 'output': True}
     assert handler.module.calls[0]['data']['project_id'] == 1
 
 
 def test_missing_application_returns_404(api):
-    module, generate_app_utils, *_rest = api
+    module, *_rest = api
     module.fetch_application_instructions = lambda *a, **k: None
     module.request.json = {'application_id': 999}
     handler = module.PromptLibAPI()
@@ -285,7 +293,7 @@ def test_missing_application_returns_404(api):
 
 
 def test_unconfigured_service_prompt_returns_500(api):
-    module, _generate_app_utils, service_prompt_utils, *_rest = api
+    module, *_rest = api
     module.get_service_prompt = lambda key: ''
     module.request.json = {'application_id': 1}
     handler = module.PromptLibAPI()
@@ -370,3 +378,33 @@ def test_schema_invalid_draft_returns_422(api):
 
     assert status == 422
     assert payload['error'] == 'Generated draft failed validation'
+
+
+def test_duplicate_names_in_draft_returns_422(api):
+    module, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    dupe_draft = {
+        'dimensions': [
+            {'name': 'Politeness', 'description': 'x', 'evidence_scope': {'output': True}, 'weight': 1.0},
+            {'name': 'politeness', 'description': 'y', 'evidence_scope': {'output': True}, 'weight': 1.0},
+        ]
+    }
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(dupe_draft)))
+
+    payload, status = handler.post(1)
+
+    assert status == 422
+    assert payload['error'] == 'Generated draft failed validation'
+
+
+def test_default_tier_is_agent_adhoc(api):
+    module, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(_VALID_DRAFT)))
+
+    payload, status = handler.post(1)
+
+    assert status == 200
+    assert payload['dimensions'][0]['tier'] == 'agent_adhoc'
