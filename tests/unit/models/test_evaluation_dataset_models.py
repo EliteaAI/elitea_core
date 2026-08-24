@@ -71,7 +71,7 @@ def test_dataset_create_rejects_blank_name(pd_eval):
 
 
 def test_dataset_create_minimal(pd_eval):
-    m = pd_eval.EvalDatasetCreateModel(name='Support QA v3')
+    m = pd_eval.EvalDatasetCreateModel(name='Support QA v3', agent_id=1)
     assert m.name == 'Support QA v3' and m.description is None and m.meta == {}
 
 
