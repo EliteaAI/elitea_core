@@ -275,21 +275,24 @@ class RPC:
                 "project_id": parsed.project_id,
             }
 
-        # TODO probably better move to toolkits expand, check OpenAPI
-        vc = VaultClient(parsed.project_id)
-        payload = vc.unsecret(payload)
+        # Backstop: commit any ambient-session reads (VaultClient, project lookups)
+        # done in this block before the blocking wait below (#6378 leaves the tx open).
+        with db.session:
+            # TODO probably better move to toolkits expand, check OpenAPI
+            vc = VaultClient(parsed.project_id)
+            payload = vc.unsecret(payload)
 
-        # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
-        # so the indexer worker doesn't have to resolve DNS/vault itself inside a
-        # forked worker process, which is exposed to a getaddrinfo hang (#6245).
-        # Scoped strictly to this project_id — never shared across projects.
-        try:
-            payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
-        except Exception as e:
-            log.warning(
-                "Failed to prefetch pgvector_connstr for project_id=%s: %s",
-                parsed.project_id, e
-            )
+            # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
+            # so the indexer worker doesn't have to resolve DNS/vault itself inside a
+            # forked worker process, which is exposed to a getaddrinfo hang (#6245).
+            # Scoped strictly to this project_id — never shared across projects.
+            try:
+                payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
+            except Exception as e:
+                log.warning(
+                    "Failed to prefetch pgvector_connstr for project_id=%s: %s",
+                    parsed.project_id, e
+                )
 
         try:
             task_id = self.task_node.start_task(
@@ -482,21 +485,24 @@ class RPC:
             else:
                 raise PredictPayloadError(str(e))
 
-        # TODO probably better move to toolkits expand, check OpenAPI
-        vc = VaultClient(parsed.project_id)
-        payload = vc.unsecret(payload)
+        # Backstop: commit any ambient-session reads (VaultClient, project lookups)
+        # done in this block before the blocking wait below (#6378 leaves the tx open).
+        with db.session:
+            # TODO probably better move to toolkits expand, check OpenAPI
+            vc = VaultClient(parsed.project_id)
+            payload = vc.unsecret(payload)
 
-        # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
-        # so the indexer worker doesn't have to resolve DNS/vault itself inside a
-        # forked worker process, which is exposed to a getaddrinfo hang (#6245).
-        # Scoped strictly to this project_id — never shared across projects.
-        try:
-            payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
-        except Exception as e:
-            log.warning(
-                "Failed to prefetch pgvector_connstr for project_id=%s: %s",
-                parsed.project_id, e
-            )
+            # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
+            # so the indexer worker doesn't have to resolve DNS/vault itself inside a
+            # forked worker process, which is exposed to a getaddrinfo hang (#6245).
+            # Scoped strictly to this project_id — never shared across projects.
+            try:
+                payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
+            except Exception as e:
+                log.warning(
+                    "Failed to prefetch pgvector_connstr for project_id=%s: %s",
+                    parsed.project_id, e
+                )
 
         try:
             task_id = self.task_node.start_task(
