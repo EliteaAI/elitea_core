@@ -23,6 +23,7 @@ from fixtures.helpers import load_utils_module  # noqa: E402
 @pytest.fixture(scope='module')
 def orch(utils_path):
     load_utils_module(utils_path, 'evaluation_scoring')  # sibling for the relative import
+    load_utils_module(utils_path, 'evaluation_ai_judge')  # sibling for the budget-split lazy import
     return load_utils_module(utils_path, 'evaluation_run_orchestration')
 
 
@@ -268,6 +269,32 @@ def test_ai_distinct_scopes_split_into_separate_calls(orch):
     )
     orch.assemble_case_results({'id': 1, 'output': 'x'}, snap, ai_scorer=ai_scorer)
     assert calls == [[1], [2]]         # different evidence scopes -> separate calls
+
+
+def test_ai_oversized_group_splits_into_multiple_judge_calls(orch):
+    calls = []
+
+    def ai_scorer(evidence, dims):
+        calls.append([d['id'] for d in dims])
+        return [_ai_result(d['id'], 1) for d in dims]
+
+    dims = [{'id': i, 'scale_type': 'binary', 'name': f'dim{i}',
+             'description': 'x' * 500} for i in range(1, 6)]
+    bindings = [
+        {'engine': 'ai', 'dimension_id': i, 'evidence_scope': {'input': True, 'output': True}}
+        for i in range(1, 6)
+    ]
+    snap = _snapshot(orch, dimensions=dims, bindings=bindings)
+
+    results = orch.assemble_case_results(
+        {'id': 1, 'output': 'x'}, snap, ai_scorer=ai_scorer,
+        judge_budget_tokens=200, judge_model_name='m',
+    )
+
+    assert len(calls) >= 2                              # the group was split into multiple calls
+    assert sorted(d for call in calls for d in call) == [1, 2, 3, 4, 5]  # every dim scored once
+    assert {r['dimension_id'] for r in results} == {1, 2, 3, 4, 5}
+    assert all(r['status'] == 'ok' for r in results)
 
 
 def test_ai_judge_error_is_error_row_run_survives(orch):

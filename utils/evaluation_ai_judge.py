@@ -10,9 +10,13 @@ measures). It is a thin, deterministic layer over the schema-agnostic judge prim
   * a judge failure (timeout / unparseable / predict error) becomes a **per-dimension error
     result**, never an exception — so one bad case cannot sink a batch run (feeds H5).
 
-Scope note: this prototype batches ALL requested dimensions into one prompt. Enforcing the
-Axis-C **evidence-scope grouping** (D1 — one judge call per identical evidence-scope group) is an
-H5 acceptance criterion and is intentionally deferred here.
+Scope note: this module batches whatever dimension group ``evaluation_run_orchestration``
+hands it into one prompt; the Axis-C **evidence-scope grouping** (D1 — one judge call per
+identical evidence-scope group) is enforced by that caller. This module additionally bounds a
+group's own token cost against the judge model's context window
+(:func:`estimate_group_tokens`, :func:`split_dimensions_for_budget`,
+:func:`_truncate_evidence_for_budget`) so an oversized group is split into multiple smaller
+calls rather than overflowing the judge's context window.
 """
 import json
 from typing import Callable, List, Optional
@@ -162,6 +166,86 @@ def _parse_dimension_scores(data: dict, dimensions: List[dict]) -> List[dict]:
             'native_score': native, 'rationale': rationale, 'status': 'scored', 'error': None,
         })
     return results
+
+
+def estimate_group_tokens(evidence: dict, dims: List[dict], model: Optional[str] = None) -> int:
+    """Estimate the token cost of one judge call for this evidence + dimension group.
+
+    Builds the exact prompt/payload :func:`evaluate_case` would send and measures it with the
+    shared :mod:`context_manager` estimator (model-aware; falls back to a ``len // 4`` heuristic
+    when that plugin/RPC is unavailable, e.g. in this module's unit tests)."""
+    text = build_judge_system_prompt(dims) + build_case_payload(evidence, dims)
+    try:
+        from context_manager.utils.token_estimation import estimate_tokens
+        return estimate_tokens(text, model)
+    except Exception:  # noqa: BLE001 - estimator unavailable: fall back rather than block scoring
+        return len(text) // 4
+
+
+def split_dimensions_for_budget(
+    evidence: dict, dims: List[dict], budget_tokens: int, model: Optional[str] = None,
+) -> List[List[dict]]:
+    """Greedily bin-pack ``dims`` into the fewest judge-call batches that each fit ``budget_tokens``.
+
+    Recomputes the estimate on the real candidate batch at each step (not a running sum) since
+    prompt/payload overhead is not linear per dimension. A single dimension that still overflows
+    the budget on its own is returned as its own one-item batch — the caller
+    (``_score_ai_group_with_budget``) is responsible for shrinking its evidence via
+    :func:`_truncate_evidence_for_budget` before dispatching it."""
+    if not dims:
+        return []
+    batches: List[List[dict]] = []
+    current: List[dict] = []
+    for dim in dims:
+        candidate = current + [dim]
+        if current and estimate_group_tokens(evidence, candidate, model) > budget_tokens:
+            batches.append(current)
+            current = [dim]
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+    return batches
+
+
+_TRUNCATE_ORDER = ('output', 'input', 'structure', 'expected_output')
+
+
+def _truncate_evidence_for_budget(
+    evidence: dict, dims: List[dict], budget_tokens: int, model: Optional[str] = None,
+) -> dict:
+    """Shrink ``evidence`` until a single-dimension judge call fits ``budget_tokens``.
+
+    Only reached when a batch of exactly one dimension still overflows the budget on its own
+    (:func:`split_dimensions_for_budget` cannot split further). Trims the largest text fields in
+    ``_TRUNCATE_ORDER`` by half repeatedly, marks the result with ``_truncated_for_budget`` (read
+    by the persisted ``evidence`` JSONB, same convention as the snapshot's ``_TRUNCATED_MARK``),
+    and gives up after a bounded number of rounds rather than looping forever on a budget that
+    can never be met (e.g. the dimension list/prompt overhead alone already exceeds it)."""
+    from .evaluation_run_orchestration import _TRUNCATED_MARK
+
+    shrunk = dict(evidence)
+    for _round in range(20):
+        if estimate_group_tokens(shrunk, dims, model) <= budget_tokens:
+            break
+        field = next((f for f in _TRUNCATE_ORDER
+                      if isinstance(shrunk.get(f), str) and len(shrunk[f]) > 200), None)
+        if field is None:
+            break
+        value = shrunk[field]
+        shrunk[field] = value[:max(100, len(value) // 2)] + _TRUNCATED_MARK
+    shrunk['_truncated_for_budget'] = True
+
+    try:
+        from pylon.core.tools import log
+        log.warning(
+            'Eval AI judge: evidence truncated to fit token budget %s for dimensions %s',
+            budget_tokens, [d.get('id') for d in dims],
+        )
+    except Exception:  # noqa: BLE001 - logging must never block scoring
+        pass
+
+    return shrunk
 
 
 def evaluate_case(
