@@ -24,10 +24,6 @@ from ..utils.maintenance_gate import is_maintenance_active
 # flight. The scheduler thread fires every minute regardless of prior state.
 _check_index_scheduling_lock = threading.Lock()
 
-# Above this many index-bearing toolkits, bound the ambient tx per toolkit as well as
-# per project: one project's inner fan-out can otherwise run long on its own.
-_TOOLKIT_COMMIT_THRESHOLD = 16
-
 
 class RPC:
     @web.rpc("applications_check_index_scheduling")
@@ -69,22 +65,16 @@ class RPC:
                 # every table it touched for the whole tick, blocking DDL/migrations.
                 end_ambient_transaction()
                 with db.get_session(project_id) as project_session:
-                    toolkits = project_session.query(EliteATool).filter(
+                    for toolkit in project_session.query(EliteATool).filter(
                         EliteATool.meta['indexes_meta'].isnot(None)
-                    ).all()
-                    commit_per_toolkit = len(toolkits) > _TOOLKIT_COMMIT_THRESHOLD
-                    if commit_per_toolkit:
-                        log.debug(
-                            f"check_index_scheduling: project {project_id} has {len(toolkits)} "
-                            f"index-bearing toolkits, committing ambient tx per toolkit"
-                        )
-                    for toolkit in toolkits:
+                    ).all():
                         # Cooperative yield per toolkit: parse_obj + local-inline
                         # scheduling_time_to_run RPC are pure Python and accumulate
                         # CPU time between the outer DB I/O yields.
                         yield_to_hub()
-                        if commit_per_toolkit:
-                            end_ambient_transaction()
+                        # A single due toolkit can run for seconds (config expand, remote
+                        # pgvector connect, dispatch), so bound the ambient tx here too.
+                        end_ambient_transaction()
                         indexes_meta = toolkit.meta['indexes_meta']
                         log.debug(f'Indexes meta: {indexes_meta}')
                         for index_meta_id, index_entry in indexes_meta.items():
