@@ -9,7 +9,7 @@ model — was to let it burn through the whole dataset. Gated on the ``run.creat
 whoever may spend the budget may stop spending it.
 """
 
-from tools import api_tools, config as c, db, auth, register_openapi
+from tools import api_tools, config as c, auth, register_openapi
 
 from ...models.pd.evaluation import EvalRunDetailModel
 from ...utils.evaluation_run_utils import request_cancel
@@ -40,12 +40,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def post(self, project_id: int, run_id: int, **kwargs):
-        with db.get_session(project_id) as session:
-            try:
-                run = request_cancel(project_id, run_id, session=session)
-            except EvalLibraryError as exc:
-                return {"error": str(exc)}, exc.http_status
-            return EvalRunDetailModel.model_validate(run).model_dump(mode='json'), 200
+        try:
+            run = request_cancel(project_id, run_id)
+        except EvalLibraryError as exc:
+            return {"error": str(exc)}, exc.http_status
+        return EvalRunDetailModel.model_validate(run).model_dump(mode='json'), 200
 
 
 class API(api_tools.APIBase):
