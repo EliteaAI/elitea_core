@@ -259,6 +259,24 @@ def mask_secret(secret: str, visible_chars: int = 4) -> str:
         return '*' * (len(secret) - visible_chars) + secret[-visible_chars:]
     return '*' * len(secret)
 
+def parse_ids_filter(ids: str | list | None, max_ids: int = 100) -> list[int]:
+    """
+    Parse and validate an IDs filter parameter.
+
+    Args:
+        ids: Comma-separated string or list of IDs
+        max_ids: Maximum number of IDs allowed (default 100)
+
+    Returns:
+        List of integer IDs, capped at max_ids
+    """
+    if not ids:
+        return []
+    if isinstance(ids, str):
+        ids = [int(id_str.strip()) for id_str in ids.split(',') if id_str.strip().isdigit()]
+    return ids[:max_ids]
+
+
 def extract_json_from_text(text: str) -> str:
     """Extract a JSON object from text, stripping markdown fences if present."""
     match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)

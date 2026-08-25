@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from tools import context, db, serialize, store_secrets, rpc_tools, auth
 from pylon.core.tools import log
 
-from .utils import get_public_project_id
+from .utils import get_public_project_id, parse_ids_filter
 from ..models.enums.all import AgentTypes
 from ..models.enums.all import PublishStatus
 from ..models.all import Application, ApplicationVersion, ApplicationVariable
@@ -1220,13 +1220,11 @@ def list_applications_api(
     filters = []
 
     # Filter by specific IDs (used for folder contents)
-    # Max 100 IDs to prevent query explosion
-    if ids:
-        if isinstance(ids, str):
-            ids = [int(id.strip()) for id in ids.split(',') if id.strip().isdigit()]
-        ids = ids[:100]
-        if ids:
-            filters.append(Application.id.in_(ids))
+    parsed_ids = parse_ids_filter(ids)
+    if parsed_ids:
+        filters.append(Application.id.in_(parsed_ids))
+        # Auto-adjust limit to match requested IDs count
+        limit = max(limit, len(parsed_ids))
 
     if author_id:
         filters.append(Application.versions.any(ApplicationVersion.author_id == author_id))

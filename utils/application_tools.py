@@ -17,6 +17,7 @@ from ..models.enums.all import ToolEntityTypes, AgentTypes
 from ..models.enums.all import InitiatorType
 from ..models.enums.all import IndexDataStatus
 from ..utils.exceptions import PoolSaturationError
+from ..utils.utils import parse_ids_filter
 
 RPC_CALL_TIMEOUT = 3
 
@@ -548,12 +549,11 @@ def toolkits_listing(
         q = q.filter(EliteATool.type != 'application')
 
         # Filter by specific IDs (used for folder contents)
-        if ids:
-            if isinstance(ids, str):
-                ids = [int(id.strip()) for id in ids.split(',') if id.strip().isdigit()]
-            ids = ids[:100]
-            if ids:
-                q = q.filter(EliteATool.id.in_(ids))
+        parsed_ids = parse_ids_filter(ids)
+        if parsed_ids:
+            q = q.filter(EliteATool.id.in_(parsed_ids))
+            # Auto-adjust limit to match requested IDs count
+            limit = max(limit, len(parsed_ids))
 
         if search_artifact:
             q = q.filter(EliteATool.name.ilike(f"%{search_artifact}%"))
