@@ -118,6 +118,8 @@ class SkillListModel(BaseModel):
     is_forked: bool = False
     is_pinned: bool = False
     has_published_version: bool = False
+    folder_id: Optional[int] = None
+    folder_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
