@@ -29,6 +29,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dimension_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "Scope access to this agent (agent_adhoc dimensions owned by another agent return 404)"},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -40,7 +41,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def get(self, project_id: int, dimension_id: int, **kwargs):
-        dimension = get_dimension(project_id, dimension_id)
+        agent_id = request.args.get("agent_id", type=int)
+        dimension = get_dimension(project_id, dimension_id, agent_id=agent_id)
         if not dimension:
             return {"error": f"Eval dimension with id {dimension_id} not found"}, 404
         return EvalDimensionDetailModel.model_validate(dimension).model_dump(mode='json'), 200
@@ -52,6 +54,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dimension_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "Scope access to this agent (agent_adhoc dimensions owned by another agent return 404)"},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -68,8 +71,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             return e.errors(include_url=False, include_context=False, include_input=False), 400
 
+        agent_id = request.args.get("agent_id", type=int)
         try:
-            dimension = update_dimension(project_id, dimension_id, data)
+            dimension = update_dimension(project_id, dimension_id, data, agent_id=agent_id)
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status
 
@@ -81,6 +85,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dimension_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "Scope access to this agent (agent_adhoc dimensions owned by another agent return 404)"},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -92,8 +97,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, dimension_id: int, **kwargs):
+        agent_id = request.args.get("agent_id", type=int)
         try:
-            delete_dimension(project_id, dimension_id)
+            delete_dimension(project_id, dimension_id, agent_id=agent_id)
         except EvalLibraryError as exc:
             return {"error": str(exc)}, exc.http_status
         return '', 204
