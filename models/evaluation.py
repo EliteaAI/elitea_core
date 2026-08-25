@@ -114,6 +114,13 @@ class EvalDimension(db_tools.AbstractBaseMixin, db.Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=True)  # rubric = the judge prompt (§18)
 
+    # Owning agent for tier=agent_adhoc dimensions: nullable so pre-existing rows (created before
+    # this column existed) stay visible everywhere rather than becoming orphaned/hidden.
+    agent_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.{Application.__tablename__}.id', ondelete='CASCADE'),
+        nullable=True, index=True,
+    )
+
     # allowed engines this definition permits, e.g. ["ai", "human"] (binding picks one)
     allowed_engines: Mapped[list] = mapped_column(JSONB, nullable=False, default=lambda: [EvalEngine.ai])
 

@@ -93,14 +93,25 @@ def _session(session, project_id):
 def list_dimensions(
     project_id: int,
     include_platform: bool = True,
+    agent_id: Optional[int] = None,
     session=None,
 ) -> List[EvalDimension]:
     """List dimension definitions visible to a project: project + agent_adhoc tiers,
-    plus (read-only) platform-tier seeds when ``include_platform``."""
+    plus (read-only) platform-tier seeds when ``include_platform``.
+
+    When ``agent_id`` is given, ``agent_adhoc`` rows are additionally scoped to that
+    agent: only dimensions owned by it, or legacy rows predating the ownership column
+    (``agent_id IS NULL``, treated as visible everywhere), are included."""
     with _session(session, project_id) as s:
         query = s.query(EvalDimension)
         if not include_platform:
             query = query.filter(EvalDimension.tier != EvalTier.platform)
+        if agent_id is not None:
+            query = query.filter(
+                (EvalDimension.tier != EvalTier.agent_adhoc)
+                | (EvalDimension.agent_id == agent_id)
+                | (EvalDimension.agent_id.is_(None))
+            )
         return query.order_by(EvalDimension.name.asc(), EvalDimension.id.asc()).all()
 
 
@@ -120,6 +131,7 @@ def create_dimension(
             tier=data.tier,
             name=data.name,
             description=data.description,
+            agent_id=data.agent_id,
             allowed_engines=data.allowed_engines,
             scale_type=data.scale_type,
             scale_min=data.scale_min,
@@ -156,6 +168,7 @@ def update_dimension(
 
         fields = data.model_dump(exclude_unset=True)
         fields.pop('tier', None)  # tier is immutable post-create
+        fields.pop('agent_id', None)  # ownership is coupled to tier; immutable post-create
         for key, value in fields.items():
             setattr(dimension, key, value)
         try:
