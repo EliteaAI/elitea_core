@@ -117,6 +117,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Filter by agent type: 'pipeline' for pipelines, 'classic' for classic agents. Omit for all."},
             {"name": "my_liked", "in": "query", "required": False, "schema": {"type": "boolean", "default": False},
              "description": "If true, return only agents/pipelines liked by the current user."},
+            {"name": "ids", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Comma-separated list of application IDs to filter by. When provided, returns only applications with these IDs (max 100). Used for folder contents."},
         ],
         available_to_users=True,
     )
@@ -132,6 +134,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, project_id: int | None = None, **kwargs):
         agents_type = request.args.get('agents_type')
+        ids_param = request.args.get('ids')
         with db.get_session(project_id) as session:
             some_result = list_applications_api(
                 project_id=project_id,
@@ -148,6 +151,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 statuses=request.args.get('statuses'),
                 agents_type=agents_type,
                 without_tags=request.args.get('without_tags', False),
+                ids=ids_param,
                 session=session
             )
         list_model = (

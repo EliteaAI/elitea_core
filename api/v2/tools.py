@@ -40,6 +40,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Filter by author user ID."},
             {"name": "search_artifact", "in": "query", "required": False, "schema": {"type": "string"},
              "description": "Filter toolkits that reference a specific artifact."},
+            {"name": "ids", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Comma-separated list of toolkit IDs to filter by (max 100). Used for folder contents."},
         ],
         available_to_users=True,
     )
@@ -64,6 +66,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         filter_application = request.args.get('application', 'false').lower() == 'true'
         author_id = request.args.get('author_id', type=int)
         search_artifact = request.args.get('search_artifact')
+        ids_param = request.args.get('ids')
 
         try:
             result = toolkits_listing(
@@ -78,6 +81,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 filter_application=filter_application,
                 author_id=author_id,
                 search_artifact=search_artifact,
+                ids=ids_param,
             )
             return result, 200
         except Exception as e:

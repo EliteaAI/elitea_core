@@ -1203,6 +1203,7 @@ def list_applications_api(
         agents_type: str = 'all',
         without_tags: bool = False,
         category: str | None = None,
+        ids: str | list | None = None,
         session=None,
 ) -> dict:
     # OPTIMIZATION: Only include likes subqueries for Agent Studio (public library)
@@ -1217,6 +1218,15 @@ def list_applications_api(
         log.warning(f"[PERF] Failed to check ai_project_id: {e}")
 
     filters = []
+
+    # Filter by specific IDs (used for folder contents)
+    # Max 100 IDs to prevent query explosion
+    if ids:
+        if isinstance(ids, str):
+            ids = [int(id.strip()) for id in ids.split(',') if id.strip().isdigit()]
+        ids = ids[:100]
+        if ids:
+            filters.append(Application.id.in_(ids))
 
     if author_id:
         filters.append(Application.versions.any(ApplicationVersion.author_id == author_id))

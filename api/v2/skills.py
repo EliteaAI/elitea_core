@@ -33,6 +33,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}},
             {"name": "sort_by", "in": "query", "schema": {"type": "string", "default": "created_at"}},
             {"name": "sort_order", "in": "query", "schema": {"type": "string", "default": "desc"}},
+            {"name": "ids", "in": "query", "schema": {"type": "string"}, "description": "Comma-separated list of skill IDs to filter by (max 100). Used for folder contents."},
         ],
         tags=["elitea_core/skills"],
         mcp_tool=True,
@@ -60,6 +61,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 offset=request.args.get("offset", default=0, type=int),
                 sort_by=request.args.get("sort_by", default="created_at"),
                 sort_order=request.args.get("sort_order", default='desc'),
+                ids=request.args.get('ids'),
                 session=session,
             )
             try:

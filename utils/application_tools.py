@@ -531,6 +531,7 @@ def toolkits_listing(
     filter_application: Optional[bool] = None,
     author_id: Optional[int] = None,
     search_artifact: Optional[str] = None,
+    ids: Optional[str] = None,
 ):
     from ..models.all import EliteATool
     from ..models.pd.tool import ToolDetails, sanitization_pattern
@@ -545,6 +546,14 @@ def toolkits_listing(
         q = session.query(EliteATool)
 
         q = q.filter(EliteATool.type != 'application')
+
+        # Filter by specific IDs (used for folder contents)
+        if ids:
+            if isinstance(ids, str):
+                ids = [int(id.strip()) for id in ids.split(',') if id.strip().isdigit()]
+            ids = ids[:100]
+            if ids:
+                q = q.filter(EliteATool.id.in_(ids))
 
         if search_artifact:
             q = q.filter(EliteATool.name.ilike(f"%{search_artifact}%"))

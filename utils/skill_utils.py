@@ -278,6 +278,7 @@ def list_skills_api(
     offset: int = 0,
     sort_by: str = 'created_at',
     sort_order: Literal['asc', 'desc'] = 'desc',
+    ids: str | list | None = None,
     session=None,
 ) -> dict:
     """
@@ -293,12 +294,21 @@ def list_skills_api(
         offset: Results to skip
         sort_by: Sort field
         sort_order: Sort direction
+        ids: Skill IDs to filter by (comma-separated string or list, max 100). Used for folder contents.
         session: Database session
 
     Returns:
         Dictionary with 'total' and 'skills' keys
     """
     filters = []
+
+    # Filter by specific IDs (used for folder contents)
+    if ids:
+        if isinstance(ids, str):
+            ids = [int(id.strip()) for id in ids.split(',') if id.strip().isdigit()]
+        ids = ids[:100]
+        if ids:
+            filters.append(Skill.id.in_(ids))
 
     # Author filter
     if author_id:
