@@ -1,7 +1,9 @@
+from queue import Empty
+
 from flask import request
 from pydantic import ValidationError
 
-from tools import api_tools, config as c, db, auth, serialize, store_secrets, register_openapi
+from tools import api_tools, config as c, db, auth, serialize, store_secrets, register_openapi, rpc_tools
 from pylon.core.tools import log
 
 from ...models.all import EliteATool
@@ -83,6 +85,31 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 search_artifact=search_artifact,
                 ids=ids_param,
             )
+
+            # Enrich with folder info (bulk query) - non-blocking
+            try:
+                rows = result.get('rows', [])
+                toolkit_ids = [row['id'] for row in rows if row.get('id')]
+                if toolkit_ids:
+                    user_id = auth.current_user().get("id")
+                    # Determine entity type based on filter_mcp
+                    entity_type = 'mcp' if filter_mcp else 'toolkit'
+                    folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
+                        entity_type=entity_type,
+                        project_id=project_id,
+                        entity_ids=toolkit_ids,
+                        user_id=user_id
+                    )
+                    for row in rows:
+                        folder_info = folder_map.get(row['id'])
+                        if folder_info:
+                            row['folder_id'] = folder_info.get('folder_id')
+                            row['folder_name'] = folder_info.get('folder_name')
+            except Empty:
+                log.debug("Folder info RPC not available, skipping folder enrichment")
+            except Exception as folder_err:
+                log.warning(f"Failed to enrich toolkits with folder info: {folder_err}")
+
             return result, 200
         except Exception as e:
             log.error(str(e))

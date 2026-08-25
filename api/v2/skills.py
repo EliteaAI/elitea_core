@@ -1,9 +1,10 @@
 from traceback import format_exc
+from queue import Empty
 
 from flask import request
 from pydantic import ValidationError
 
-from tools import api_tools, config as c, db, auth, serialize, register_openapi
+from tools import api_tools, config as c, db, auth, serialize, register_openapi, rpc_tools
 
 from ...models.pd.skill import (
     SkillCreateModel,
@@ -66,6 +67,28 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             try:
                 parsed = MultipleSkillListModel(skills=result['skills'])
+
+                # Enrich with folder info (bulk query) - non-blocking
+                try:
+                    skill_ids = [skill.id for skill in parsed.skills]
+                    if skill_ids:
+                        user_id = auth.current_user().get("id")
+                        folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
+                            entity_type='skill',
+                            project_id=project_id,
+                            entity_ids=skill_ids,
+                            user_id=user_id
+                        )
+                        for skill in parsed.skills:
+                            folder_info = folder_map.get(skill.id)
+                            if folder_info:
+                                skill.folder_id = folder_info.get('folder_id')
+                                skill.folder_name = folder_info.get('folder_name')
+                except Empty:
+                    log.debug("Folder info RPC not available, skipping folder enrichment")
+                except Exception as folder_err:
+                    log.warning(f"Failed to enrich skills with folder info: {folder_err}")
+
                 return {
                     'total': result['total'],
                     'rows': [serialize(i) for i in parsed.skills],
