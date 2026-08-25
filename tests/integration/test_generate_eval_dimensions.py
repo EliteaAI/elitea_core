@@ -128,17 +128,38 @@ def _install_package():
     generate_app_utils.fetch_application_instructions = lambda *a, **k: {
         'application_name': 'Support Bot', 'version_id': 1, 'instructions': 'Answer support tickets politely.',
     }
-    generate_app_utils.build_eval_dimensions_system_prompt = lambda template, **kw: template.format(
-        application_name=kw.get('application_name', ''),
-        instructions=kw.get('instructions', ''),
-    )
+    # Records its kwargs so tests can assert on what the endpoint resolved (notably
+    # existing_dimension_names); the real builder is unit-tested in
+    # unit/test_eval_dimensions_prompt.py.
+    def _build_prompt(template, **kw):
+        generate_app_utils.last_build_kwargs = kw
+        return template.format(
+            application_name=kw.get('application_name', ''),
+            instructions=kw.get('instructions', ''),
+        )
+
+    generate_app_utils.last_build_kwargs = None
+    generate_app_utils.build_eval_dimensions_system_prompt = _build_prompt
     generate_app_utils.ServicePromptTemplateError = _ServicePromptTemplateError
 
     service_prompt_utils = types.ModuleType(f'{PKG}.utils.service_prompt_utils')
     service_prompt_utils.get_service_prompt = lambda key: 'generate dimensions for {application_name}: {instructions}'
 
     eval_library_utils = types.ModuleType(f'{PKG}.utils.evaluation_library_utils')
-    eval_library_utils.list_dimensions = lambda *a, **k: []
+    # Non-empty and spanning both writable tiers: the endpoint must forward names from
+    # agent_adhoc too, since (tier, name) is project-wide for either tier.
+    _Dim = type('Dim', (), {})
+
+    def _dim(name, tier):
+        d = _Dim()
+        d.name = name
+        d.tier = tier
+        return d
+
+    eval_library_utils.list_dimensions = lambda *a, **k: [
+        _dim('Politeness', 'project'),
+        _dim('Groundedness', 'agent_adhoc'),
+    ]
 
     predict_utils = types.ModuleType(f'{PKG}.utils.predict_utils')
     predict_utils.PredictPayloadError = _PredictPayloadError
@@ -408,3 +429,54 @@ def test_default_tier_is_agent_adhoc(api):
 
     assert status == 200
     assert payload['dimensions'][0]['tier'] == 'agent_adhoc'
+
+
+def test_existing_names_span_both_writable_tiers(api):
+    """Regression guard: drafts default to agent_adhoc, and (tier, name) is unique per tier,
+    so filtering the do-not-repropose list down to the project tier would exclude exactly the
+    namespace drafts land in."""
+    module, generate_app_utils, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(_VALID_DRAFT)))
+
+    _payload, status = handler.post(1)
+
+    assert status == 200
+    assert generate_app_utils.last_build_kwargs['existing_dimension_names'] == [
+        'Politeness', 'Groundedness',
+    ]
+
+
+def test_malformed_template_returns_500(api):
+    module, generate_app_utils, *_rest = api
+
+    def _raise(*a, **k):
+        raise generate_app_utils.ServicePromptTemplateError('boom')
+
+    module.build_eval_dimensions_system_prompt = _raise
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler()
+
+    payload, status = handler.post(1)
+
+    assert status == 500
+    assert 'malformed' in payload['error']
+
+
+def test_dimension_library_read_failure_returns_500(api):
+    module, *_rest = api
+
+    def _boom(*a, **k):
+        raise RuntimeError('db down')
+
+    module.list_dimensions = _boom
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler()
+
+    payload, status = handler.post(1)
+
+    assert status == 500
+    assert 'dimension library' in payload['error']

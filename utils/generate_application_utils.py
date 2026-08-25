@@ -14,6 +14,7 @@ _MAX_MCP = 10
 _MAX_AGENTS = 5
 _MAX_PIPELINES = 5
 _MAX_SKILLS = 10
+_MAX_EXISTING_DIMENSIONS = 50
 
 
 class ServicePromptTemplateError(Exception):
@@ -344,7 +345,8 @@ def build_eval_dimensions_system_prompt(
         existing_clause = (
             "The project's dimension library already has these names — do not re-propose "
             "them, even under a slightly different name; propose something that adds new "
-            "coverage instead: " + ", ".join(existing_dimension_names)
+            "coverage instead: "
+            + ", ".join(existing_dimension_names[:_MAX_EXISTING_DIMENSIONS])
         )
     else:
         existing_clause = "The project's dimension library is currently empty."

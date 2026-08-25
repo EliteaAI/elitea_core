@@ -45,7 +45,6 @@ from ...utils.generate_application_utils import (
 from ...utils.service_prompt_utils import get_service_prompt
 from ...utils.evaluation_library_utils import list_dimensions
 from ...utils.utils import extract_json_from_text
-from ...models.evaluation import EvalTier
 
 _SERVICE_PROMPT_KEY = "generate_eval_dimensions"
 
@@ -109,10 +108,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not template:
             return {"error": "Service prompt 'generate_eval_dimensions' is not configured"}, 500
 
-        existing_names = [
-            d.name for d in list_dimensions(project_id, include_platform=False)
-            if d.tier == EvalTier.project
-        ]
+        # Both writable tiers, not just project: `_eval_dimension_tier_name_uc` is (tier, name)
+        # and EvalDimension has no application_id, so agent_adhoc is a project-wide namespace
+        # shared by every agent — the tier drafts default to is the one most likely to collide.
+        try:
+            existing_names = [
+                d.name for d in list_dimensions(project_id, include_platform=False)
+            ]
+        except Exception:
+            log.exception("generate_eval_dimensions: failed to list existing dimensions")
+            return {"error": "Failed to read the project's dimension library"}, 500
 
         try:
             system_prompt = build_eval_dimensions_system_prompt(
@@ -173,13 +178,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 }, 422
             return {"error": "LLM returned unparseable output", "parse_error": str(e)}, 422
 
+        # The server owns version_id — overwrite anything the model invented before validating,
+        # so the pin the caller gets is the version the instructions were actually read from.
+        if isinstance(parsed, dict):
+            parsed["version_id"] = agent["version_id"]
+
         try:
             draft = GenerateEvalDimensionsResponse.model_validate(parsed)
         except ValidationError as e:
             log.warning("generate_eval_dimensions: validation failed: %s", e.errors())
             return {"error": "Generated draft failed validation", "details": e.errors(), "raw": parsed}, 422
-
-        draft.version_id = agent["version_id"]
 
         return draft.model_dump(), 200
 
