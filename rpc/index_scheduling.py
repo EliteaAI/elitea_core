@@ -13,7 +13,7 @@ from ..models.enums import InitiatorType
 from ..models.enums.indexer import IndexingSchedule
 from ..models.pd.index import ToolkitIndexingSchedule
 from ..utils.application_tools import get_session_for_schema, start_index_task, update_toolkit_index_meta_history_with_failed_state
-from ..utils.utils import make_yield_to_hub
+from ..utils.utils import make_yield_to_hub, end_ambient_transaction
 from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
 from ..utils.index_scheduling import resolve_credentials, handle_failed_index_schedule
@@ -60,6 +60,10 @@ class RPC:
                 # Yield between projects so a long scheduler tick does not starve
                 # the gevent hub and stall request greenlets / EventNode.
                 yield_to_hub()
+                # Nested inline RPCs read on the scheduler thread's ambient session and
+                # nothing commits it until the tick ends, so it holds AccessShareLock on
+                # every table it touched for the whole tick, blocking DDL/migrations.
+                end_ambient_transaction()
                 with db.get_session(project_id) as project_session:
                     for toolkit in project_session.query(EliteATool).filter(
                         EliteATool.meta['indexes_meta'].isnot(None)
@@ -68,6 +72,9 @@ class RPC:
                         # scheduling_time_to_run RPC are pure Python and accumulate
                         # CPU time between the outer DB I/O yields.
                         yield_to_hub()
+                        # A single due toolkit can run for seconds (config expand, remote
+                        # pgvector connect, dispatch), so bound the ambient tx here too.
+                        end_ambient_transaction()
                         indexes_meta = toolkit.meta['indexes_meta']
                         log.debug(f'Indexes meta: {indexes_meta}')
                         for index_meta_id, index_entry in indexes_meta.items():

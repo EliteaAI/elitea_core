@@ -18,7 +18,7 @@ from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
 from ..utils.cron_utils import is_cron_due
 from ..utils.maintenance_gate import is_maintenance_active
-from ..utils.utils import make_yield_to_hub
+from ..utils.utils import make_yield_to_hub, end_ambient_transaction
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
@@ -296,6 +296,10 @@ class RPC:
                 # Yield between projects so a long scheduler tick does not starve
                 # the gevent hub and stall request greenlets / EventNode.
                 yield_to_hub()
+                # Nested inline RPCs read on the scheduler thread's ambient session and
+                # nothing commits it until the tick ends, so it holds AccessShareLock on
+                # every table it touched for the whole tick, blocking DDL/migrations.
+                end_ambient_transaction()
                 try:
                     _check_project_pipelines(project_id, yield_to_hub=yield_to_hub)
                 except Exception as exc:  # pylint: disable=W0703
