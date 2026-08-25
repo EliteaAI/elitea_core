@@ -2,6 +2,7 @@ import json
 import re
 from typing import List, Tuple, Optional
 
+from pylon.core.tools import log
 from tools import db
 
 from ..models.all import Application, ApplicationVersion
@@ -13,6 +14,15 @@ _MAX_MCP = 10
 _MAX_AGENTS = 5
 _MAX_PIPELINES = 5
 _MAX_SKILLS = 10
+_MAX_EXISTING_DIMENSIONS = 50
+
+
+class ServicePromptTemplateError(Exception):
+    """Raised when a service-prompt template fails to ``.format()`` against its context.
+
+    Templates are user-editable admin records (§ configurations/service_prompt_seed.py), so a
+    malformed edit should surface as a diagnosable 500, not an uncaught KeyError/IndexError.
+    """
 
 
 def _score_item(query_tokens: set, name: str, description: str, extra: str = "") -> int:
@@ -283,3 +293,71 @@ def build_edit_system_prompt(
         pipelines="\n".join(_format_pipeline_lines(pipelines)),
         skills="\n".join(_format_skill_lines(skills)),
     )
+
+
+def fetch_application_instructions(
+    project_id: int,
+    application_id: int,
+    version_id: Optional[int] = None,
+) -> Optional[dict]:
+    """Resolve an agent's name + instructions for eval-dimension generation.
+
+    Uses ``version_id`` when given, else the application's default/base version
+    (``Application.get_default_version``). Returns ``None`` if the application or the
+    resolved version doesn't exist.
+    """
+    with db.with_project_schema_session(project_id) as session:
+        application = session.get(Application, application_id)
+        if not application:
+            return None
+
+        if version_id is not None:
+            version = session.query(ApplicationVersion).filter(
+                ApplicationVersion.id == version_id,
+                ApplicationVersion.application_id == application_id,
+            ).first()
+        else:
+            version = application.get_default_version()
+
+        if not version:
+            return None
+
+        return {
+            "application_name": application.name,
+            "version_id": version.id,
+            "instructions": version.instructions or "",
+        }
+
+
+def build_eval_dimensions_system_prompt(
+    template: str,
+    application_name: str,
+    instructions: str,
+    count_hint: Optional[int] = None,
+    existing_dimension_names: Optional[list] = None,
+) -> str:
+    count_clause = (
+        f"Propose at most {count_hint} dimensions."
+        if count_hint
+        else "Propose 3-6 dimensions, using your judgment."
+    )
+    if existing_dimension_names:
+        existing_clause = (
+            "The project's dimension library already has these names — do not re-propose "
+            "them, even under a slightly different name; propose something that adds new "
+            "coverage instead: "
+            + ", ".join(existing_dimension_names[:_MAX_EXISTING_DIMENSIONS])
+        )
+    else:
+        existing_clause = "The project's dimension library is currently empty."
+
+    try:
+        return template.format(
+            application_name=application_name,
+            instructions=instructions or "(no instructions set)",
+            count_clause=count_clause,
+            existing_dimensions=existing_clause,
+        )
+    except (KeyError, IndexError, ValueError):
+        log.exception("build_eval_dimensions_system_prompt: malformed service prompt template")
+        raise ServicePromptTemplateError("generate_eval_dimensions template is malformed")
