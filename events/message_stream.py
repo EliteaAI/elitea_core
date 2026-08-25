@@ -27,6 +27,7 @@ from ..utils.attachments import (
     process_multimodal_content,
     update_attachment_thumbnails,
 )
+from ..utils.token_limit_continuation import trim_continuation_overlap
 
 from ..utils.sio_utils import SioEvents
 
@@ -155,11 +156,7 @@ class Event:
                                 existing_parts.append(str(item.content))
                         existing_tail = ''.join(existing_parts)[-150:]
                         if existing_tail:
-                            stripped = text_content.lstrip('\n\r')
-                            for overlap in range(min(len(existing_tail), len(stripped)), 0, -1):
-                                if existing_tail[-overlap:] == stripped[:overlap]:
-                                    text_content = stripped[overlap:]
-                                    break
+                            text_content = trim_continuation_overlap(existing_tail, text_content)
                     _ARTIFACT_BLOCKS = frozenset(('{}', '{ }'))
                     if not text_content.strip() or text_content.strip() in _ARTIFACT_BLOCKS:
                         log.debug(
