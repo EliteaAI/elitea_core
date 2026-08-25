@@ -101,6 +101,16 @@ def effective_engine(binding: dict) -> str:
 MAX_CASE_TEXT = 20_000
 MAX_CASES_BYTES = 4_000_000
 
+#: Reserved headroom below `context_window - max_output_tokens` when budgeting an AI-judge call
+#: (see `execute_run`'s judge-settings resolution) — estimates are approximate (token-estimator
+#: fallback, prompt overhead) so a call that lands exactly at the computed ceiling should not be
+#: the one that overflows the real model.
+JUDGE_TOKEN_SAFETY_MARGIN = 2_000
+#: Cheap belt-and-suspenders cap on dimensions per judge call, independent of token estimation —
+#: catches a pathologically dimension-heavy evidence_scope group even if every dimension's own
+#: text is small enough that the token estimate alone would not have forced a split.
+MAX_DIMENSIONS_PER_JUDGE_CALL = 40
+
 _CASE_TEXT_FIELDS = ('input', 'output', 'expected_output', 'structure')
 
 
@@ -504,12 +514,55 @@ def _dimension_specs(bindings: List[dict], snapshot: dict) -> List[dict]:
     return specs
 
 
+def _score_ai_group_with_budget(
+    evidence: dict,
+    dims: List[dict],
+    ai_scorer: Callable[[dict, List[dict]], List[dict]],
+    budget_tokens: Optional[int],
+    model_name: Optional[str],
+) -> List[dict]:
+    """Dispatch one evidence_scope group's dimensions to ``ai_scorer``, splitting into multiple
+    judge calls when the group would otherwise overflow the judge model's context window.
+
+    The common case (few dimensions, comfortably under budget) costs nothing extra: it falls
+    straight through to a single ``ai_scorer(evidence, dims)`` call, exactly as before this
+    budgeting existed. Splitting only kicks in once a group actually risks overflow — either
+    ``MAX_DIMENSIONS_PER_JUDGE_CALL`` (a cheap count-only cap, checked even with no
+    ``budget_tokens``) or the token estimate for the whole group exceeds ``budget_tokens``. A
+    single dimension that still overflows after splitting gets its evidence and, if needed, its
+    own rubric text trimmed (:func:`evaluation_ai_judge._truncate_evidence_for_budget`) rather
+    than sent whole — the run always finishes and every dimension always gets scored."""
+    if budget_tokens is None and len(dims) <= MAX_DIMENSIONS_PER_JUDGE_CALL:
+        return ai_scorer(evidence, dims)
+
+    from .evaluation_ai_judge import (
+        estimate_group_tokens, split_dimensions_for_budget, _truncate_evidence_for_budget,
+    )
+
+    results: List[dict] = []
+    for i in range(0, len(dims), MAX_DIMENSIONS_PER_JUDGE_CALL):
+        chunk = dims[i:i + MAX_DIMENSIONS_PER_JUDGE_CALL]
+        if budget_tokens is not None and estimate_group_tokens(evidence, chunk, model_name) > budget_tokens:
+            batches = split_dimensions_for_budget(evidence, chunk, budget_tokens, model_name)
+        else:
+            batches = [chunk]
+        for batch in batches:
+            batch_evidence, batch_dims = evidence, batch
+            if (budget_tokens is not None and len(batch) == 1
+                    and estimate_group_tokens(evidence, batch, model_name) > budget_tokens):
+                batch_evidence, batch_dims = _truncate_evidence_for_budget(evidence, batch, budget_tokens, model_name)
+            results.extend(ai_scorer(batch_evidence, batch_dims))
+    return results
+
+
 def assemble_case_results(
     case: dict,
     snapshot: dict,
     *,
     ai_scorer: Optional[Callable[[dict, List[dict]], List[dict]]] = None,
     code_scorer: Optional[Callable[[dict, dict], dict]] = None,
+    judge_budget_tokens: Optional[int] = None,
+    judge_model_name: Optional[str] = None,
 ) -> List[dict]:
     """Score one case against every binding → a list of EvalResult dicts.
 
@@ -551,7 +604,10 @@ def assemble_case_results(
         evidence = select_evidence(case, scope)
         dims = _dimension_specs(group, snapshot)
         try:
-            scored = ai_scorer(evidence, dims) if ai_scorer else []
+            scored = (
+                _score_ai_group_with_budget(evidence, dims, ai_scorer, judge_budget_tokens, judge_model_name)
+                if ai_scorer else []
+            )
         except Exception as exc:  # noqa: BLE001 - fail-closed (E4): a scorer crash is per-group error
             scored = [{'dimension_id': d['id'], 'dimension_name': d.get('name'),
                        'native_score': None, 'rationale': None,
@@ -598,6 +654,8 @@ def run_one_case(
     agent_runner: Optional[Callable[[dict], dict]] = None,
     ai_scorer: Optional[Callable[[dict, List[dict]], List[dict]]] = None,
     code_scorer: Optional[Callable[[dict, dict], dict]] = None,
+    judge_budget_tokens: Optional[int] = None,
+    judge_model_name: Optional[str] = None,
 ) -> tuple:
     """Resolve one case's output (H4) then score it → ``(resolved_case, result_rows)``.
 
@@ -614,6 +672,7 @@ def run_one_case(
                     outcome.get('error') or f"agent execution {outcome.get('status')}"}
     return case, assemble_case_results(
         case, snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
+        judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name,
     )
 
 
@@ -627,6 +686,8 @@ def orchestrate_run(
     should_cancel: Optional[Callable[[], bool]] = None,
     case_concurrency: int = 1,
     time_budget_seconds: Optional[int] = RUN_TIME_BUDGET_SECONDS,
+    judge_budget_tokens: Optional[int] = None,
+    judge_model_name: Optional[str] = None,
 ) -> dict:
     """Run every case in the snapshot → ``{results, headline_score, progress}``.
 
@@ -718,7 +779,8 @@ def orchestrate_run(
                 break
             resolved[index], results_by_index[index] = run_one_case(
                 cases[index], snapshot, agent_runner=agent_runner,
-                ai_scorer=ai_scorer, code_scorer=code_scorer)
+                ai_scorer=ai_scorer, code_scorer=code_scorer,
+                judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name)
             _report(len(resolved))
     else:
         import threading
@@ -742,7 +804,9 @@ def orchestrate_run(
                         break
                     pending[pool.submit(
                         run_one_case, cases[next_index], snapshot, agent_runner=agent_runner,
-                        ai_scorer=ai_scorer, code_scorer=code_scorer)] = next_index
+                        ai_scorer=ai_scorer, code_scorer=code_scorer,
+                        judge_budget_tokens=judge_budget_tokens,
+                        judge_model_name=judge_model_name)] = next_index
                     next_index += 1
                 if not pending:
                     break
@@ -1043,6 +1107,28 @@ def execute_run(
                 row.snapshot = {**(row.snapshot or {}), 'resolved_judge_model': settings}
                 s.commit()
 
+        # Resolve the judge model's context window once per run (not per case/group) so every
+        # AI-judge call this run makes can be bounded against it. A lookup failure (model not
+        # found in configurations, RPC unavailable) falls back to `LlmModel`'s own defaults
+        # rather than blocking the run over a config lookup (E4 posture).
+        judge_model_name = settings.get('model_name')
+        context_window, max_output_tokens = 128_000, 16_000
+        if judge_model_name:
+            try:
+                from tools import context as pylon_context  # pylint: disable=E0401
+                model_limits = pylon_context.rpc_manager.timeout(30).configurations_get_configuration_model(
+                    project_id, judge_model_name,
+                ) or {}
+                context_window = int(model_limits.get('context_window') or context_window)
+                max_output_tokens = int(model_limits.get('max_output_tokens') or max_output_tokens)
+            except Exception:  # noqa: BLE001 - a lookup failure must not block the run
+                from pylon.core.tools import log  # local: this module loads without pylon present
+                log.warning(
+                    'Eval run %s: could not resolve context window for judge model %s, '
+                    'using defaults', run_id, judge_model_name,
+                )
+        judge_budget_tokens = context_window - max_output_tokens - JUDGE_TOKEN_SAFETY_MARGIN
+
         ai_scorer = _make_ai_scorer(project_id, settings, judge=judge)
         code_scorer = _make_code_scorer(snapshot, executor)
 
@@ -1057,7 +1143,9 @@ def execute_run(
                                   on_case_done=_publish_progress,
                                   should_cancel=_cancel_requested,
                                   case_concurrency=case_concurrency,
-                                  time_budget_seconds=time_budget_seconds)
+                                  time_budget_seconds=time_budget_seconds,
+                                  judge_budget_tokens=judge_budget_tokens,
+                                  judge_model_name=judge_model_name)
     except Exception as exc:  # noqa: BLE001 - orchestration-level failure marks the run errored
         _mark_errored(str(exc))
         raise
