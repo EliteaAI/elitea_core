@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from tools import db, auth, serialize, rpc_tools, this, context
 
-from .utils import set_columns_as_attrs, get_public_project_id
+from .utils import set_columns_as_attrs, get_public_project_id, parse_ids_filter
 from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag, ApplicationVersion, Application
@@ -278,6 +278,7 @@ def list_skills_api(
     offset: int = 0,
     sort_by: str = 'created_at',
     sort_order: Literal['asc', 'desc'] = 'desc',
+    ids: str | list | None = None,
     session=None,
 ) -> dict:
     """
@@ -293,12 +294,20 @@ def list_skills_api(
         offset: Results to skip
         sort_by: Sort field
         sort_order: Sort direction
+        ids: Skill IDs to filter by (comma-separated string or list, max 100). Used for folder contents.
         session: Database session
 
     Returns:
         Dictionary with 'total' and 'skills' keys
     """
     filters = []
+
+    # Filter by specific IDs (used for folder contents)
+    parsed_ids = parse_ids_filter(ids)
+    if parsed_ids:
+        filters.append(Skill.id.in_(parsed_ids))
+        # Auto-adjust limit to match requested IDs count
+        limit = max(limit, len(parsed_ids))
 
     # Author filter
     if author_id:

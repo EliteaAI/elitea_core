@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from tools import context, db, serialize, store_secrets, rpc_tools, auth
 from pylon.core.tools import log
 
-from .utils import get_public_project_id
+from .utils import get_public_project_id, parse_ids_filter
 from ..models.enums.all import AgentTypes
 from ..models.enums.all import PublishStatus
 from ..models.all import Application, ApplicationVersion, ApplicationVariable
@@ -1203,6 +1203,7 @@ def list_applications_api(
         agents_type: str = 'all',
         without_tags: bool = False,
         category: str | None = None,
+        ids: str | list | None = None,
         session=None,
 ) -> dict:
     # OPTIMIZATION: Only include likes subqueries for Agent Studio (public library)
@@ -1217,6 +1218,13 @@ def list_applications_api(
         log.warning(f"[PERF] Failed to check ai_project_id: {e}")
 
     filters = []
+
+    # Filter by specific IDs (used for folder contents)
+    parsed_ids = parse_ids_filter(ids)
+    if parsed_ids:
+        filters.append(Application.id.in_(parsed_ids))
+        # Auto-adjust limit to match requested IDs count
+        limit = max(limit, len(parsed_ids))
 
     if author_id:
         filters.append(Application.versions.any(ApplicationVersion.author_id == author_id))

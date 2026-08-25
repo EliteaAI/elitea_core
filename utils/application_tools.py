@@ -17,6 +17,7 @@ from ..models.enums.all import ToolEntityTypes, AgentTypes
 from ..models.enums.all import InitiatorType
 from ..models.enums.all import IndexDataStatus
 from ..utils.exceptions import PoolSaturationError
+from ..utils.utils import parse_ids_filter
 
 RPC_CALL_TIMEOUT = 3
 
@@ -531,6 +532,7 @@ def toolkits_listing(
     filter_application: Optional[bool] = None,
     author_id: Optional[int] = None,
     search_artifact: Optional[str] = None,
+    ids: Optional[str] = None,
 ):
     from ..models.all import EliteATool
     from ..models.pd.tool import ToolDetails, sanitization_pattern
@@ -545,6 +547,13 @@ def toolkits_listing(
         q = session.query(EliteATool)
 
         q = q.filter(EliteATool.type != 'application')
+
+        # Filter by specific IDs (used for folder contents)
+        parsed_ids = parse_ids_filter(ids)
+        if parsed_ids:
+            q = q.filter(EliteATool.id.in_(parsed_ids))
+            # Auto-adjust limit to match requested IDs count
+            limit = max(limit, len(parsed_ids))
 
         if search_artifact:
             q = q.filter(EliteATool.name.ilike(f"%{search_artifact}%"))
