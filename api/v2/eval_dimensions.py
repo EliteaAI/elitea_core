@@ -29,6 +29,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "include_platform", "in": "query", "schema": {"type": "boolean", "default": True}, "description": "Include read-only platform-tier seeds"},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "Scope agent_adhoc-tier results to this agent (legacy NULL-owner rows stay visible to all)"},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -41,8 +42,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, project_id: int, **kwargs):
         include_platform = request.args.get("include_platform", default="true").lower() != "false"
+        agent_id = request.args.get("agent_id", type=int)
         with db.get_session(project_id) as session:
-            rows = list_dimensions(project_id, include_platform=include_platform, session=session)
+            rows = list_dimensions(
+                project_id, include_platform=include_platform, agent_id=agent_id, session=session)
             return [
                 EvalDimensionDetailModel.model_validate(r).model_dump(mode='json')
                 for r in rows

@@ -266,3 +266,9 @@ Run admin task migrate_eval_binding_constraints with param: project_id=all
 # both from create_all; existing p_N schemas need the columns backfilled. Per-project loop.
 # Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
 Run admin task migrate_eval_dataset_columns with param: project_id=all
+
+# Dimension tier=agent_adhoc scoping: eval_dimension gets an owning agent_id (nullable, for rows
+# created before this column existed, which stay visible everywhere). Fresh environments get it
+# from create_all; existing p_N schemas need the column backfilled. Per-project loop.
+# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+Run admin task migrate_eval_dimension_columns with param: project_id=all

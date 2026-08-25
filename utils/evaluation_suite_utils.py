@@ -20,6 +20,7 @@ from ..models.evaluation import (
     EvalDimension,
     EvalCodeValidation,
     EvalEngine,
+    EvalTier,
 )
 from ..models.all import ApplicationVersion
 from ..models.pd.evaluation import (
@@ -164,9 +165,19 @@ def _require_suite(s, suite_id: int) -> EvalSuite:
     return suite
 
 
-def _validate_source(s, data: EvalBindingCreateModel) -> None:
+def _validate_source(s, suite: EvalSuite, data: EvalBindingCreateModel) -> None:
     if data.dimension_id is not None:
-        if not s.query(EvalDimension).filter(EvalDimension.id == data.dimension_id).first():
+        dimension = s.query(EvalDimension).filter(EvalDimension.id == data.dimension_id).first()
+        if not dimension:
+            raise EvalBindingSourceError(f'dimension {data.dimension_id} not found')
+        # agent_adhoc dimensions are only visible/usable from their owning agent's suites; a NULL
+        # owner is a legacy row that predates agent-scoping and stays usable everywhere (matches
+        # the same convention used by list_dimensions).
+        if (
+            dimension.tier == EvalTier.agent_adhoc
+            and dimension.agent_id is not None
+            and dimension.agent_id != suite.application_id
+        ):
             raise EvalBindingSourceError(f'dimension {data.dimension_id} not found')
     elif data.code_validation_id is not None:
         if not s.query(EvalCodeValidation).filter(EvalCodeValidation.id == data.code_validation_id).first():
@@ -245,7 +256,7 @@ def get_binding(project_id: int, suite_id: int, binding_id: int, session=None) -
 def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, session=None) -> EvalBinding:
     with _session(session, project_id) as s:
         suite = _require_suite(s, suite_id)
-        _validate_source(s, data)
+        _validate_source(s, suite, data)
         _validate_version_pin(s, suite, data.application_version_id)
         # Code-validation and platform bindings always run on the code engine (§12);
         # only dimension bindings honor the editable engine column (ai/human). Normalize

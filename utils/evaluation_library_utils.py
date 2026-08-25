@@ -93,20 +93,47 @@ def _session(session, project_id):
 def list_dimensions(
     project_id: int,
     include_platform: bool = True,
+    agent_id: Optional[int] = None,
     session=None,
 ) -> List[EvalDimension]:
     """List dimension definitions visible to a project: project + agent_adhoc tiers,
-    plus (read-only) platform-tier seeds when ``include_platform``."""
+    plus (read-only) platform-tier seeds when ``include_platform``.
+
+    When ``agent_id`` is given, ``agent_adhoc`` rows are additionally scoped to that
+    agent: only dimensions owned by it, or legacy rows predating the ownership column
+    (``agent_id IS NULL``, treated as visible everywhere), are included."""
     with _session(session, project_id) as s:
         query = s.query(EvalDimension)
         if not include_platform:
             query = query.filter(EvalDimension.tier != EvalTier.platform)
+        if agent_id is not None:
+            query = query.filter(
+                (EvalDimension.tier != EvalTier.agent_adhoc)
+                | (EvalDimension.agent_id == agent_id)
+                | (EvalDimension.agent_id.is_(None))
+            )
         return query.order_by(EvalDimension.name.asc(), EvalDimension.id.asc()).all()
 
 
-def get_dimension(project_id: int, dimension_id: int, session=None) -> Optional[EvalDimension]:
+def _visible_to_agent(dimension: EvalDimension, agent_id: Optional[int]) -> bool:
+    """Mirror ``list_dimensions``' agent scoping for a single already-fetched row: an
+    ``agent_adhoc`` dimension owned by a different agent is treated as not found, same as
+    it's simply absent from that agent's list."""
+    if agent_id is None:
+        return True
+    if dimension.tier != EvalTier.agent_adhoc:
+        return True
+    return dimension.agent_id is None or dimension.agent_id == agent_id
+
+
+def get_dimension(
+    project_id: int, dimension_id: int, agent_id: Optional[int] = None, session=None,
+) -> Optional[EvalDimension]:
     with _session(session, project_id) as s:
-        return s.query(EvalDimension).filter(EvalDimension.id == dimension_id).first()
+        dimension = s.query(EvalDimension).filter(EvalDimension.id == dimension_id).first()
+        if dimension is not None and not _visible_to_agent(dimension, agent_id):
+            return None
+        return dimension
 
 
 def create_dimension(
@@ -120,6 +147,7 @@ def create_dimension(
             tier=data.tier,
             name=data.name,
             description=data.description,
+            agent_id=data.agent_id,
             allowed_engines=data.allowed_engines,
             scale_type=data.scale_type,
             scale_min=data.scale_min,
@@ -145,17 +173,19 @@ def update_dimension(
     project_id: int,
     dimension_id: int,
     data: EvalDimensionUpdateModel,
+    agent_id: Optional[int] = None,
     session=None,
 ) -> EvalDimension:
     with _session(session, project_id) as s:
         dimension = s.query(EvalDimension).filter(EvalDimension.id == dimension_id).first()
-        if not dimension:
+        if not dimension or not _visible_to_agent(dimension, agent_id):
             raise EvalDimensionNotFoundError(dimension_id)
         if dimension.tier == EvalTier.platform:
             raise EvalTierImmutableError(dimension.tier)
 
         fields = data.model_dump(exclude_unset=True)
         fields.pop('tier', None)  # tier is immutable post-create
+        fields.pop('agent_id', None)  # ownership is coupled to tier; immutable post-create
         for key, value in fields.items():
             setattr(dimension, key, value)
         try:
@@ -167,10 +197,12 @@ def update_dimension(
         return dimension
 
 
-def delete_dimension(project_id: int, dimension_id: int, session=None) -> None:
+def delete_dimension(
+    project_id: int, dimension_id: int, agent_id: Optional[int] = None, session=None,
+) -> None:
     with _session(session, project_id) as s:
         dimension = s.query(EvalDimension).filter(EvalDimension.id == dimension_id).first()
-        if not dimension:
+        if not dimension or not _visible_to_agent(dimension, agent_id):
             raise EvalDimensionNotFoundError(dimension_id)
         if dimension.tier == EvalTier.platform:
             raise EvalTierImmutableError(dimension.tier)

@@ -604,6 +604,47 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
+    def migrate_eval_dimension_columns(self, *args, **kwargs):
+        """Admin task: add the dimension agent-scoping column to each project schema.
+
+        Adds ``agent_id`` (owning agent, nullable) to ``eval_dimension`` on every
+        project schema. Idempotent (``ADD COLUMN IF NOT EXISTS``): safe to run
+        multiple times.
+
+        Param format (optional):
+            "project_id=<all|N>"
+        """
+        from ..utils.eval_dimension_schema import apply_eval_dimension_columns
+
+        param = kwargs.get("param", "") or ""
+        project_id_filter = None
+        for seg in [s.strip() for s in param.split(";")]:
+            if seg.lower().startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.warning(
+                            "migrate_eval_dimension_columns: invalid project_id '%s', scanning all", value)
+
+        try:
+            if project_id_filter is not None:
+                project_ids = [project_id_filter]
+            else:
+                project_ids = [
+                    p["id"] for p in (
+                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                    )
+                ]
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_eval_dimension_columns: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_eval_dimension_columns(project_ids)
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
+
+    @web.method()
     def migrate_eval_binding_constraints(self, *args, **kwargs):
         """Admin task: add the eval_binding uniqueness constraints to each project schema.
 

@@ -110,6 +110,9 @@ class EvalDimensionCreateModel(EvalDimensionBaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     # project library is home; platform-tier authoring is not exposed here.
     tier: str = EvalTier.project
+    # Owning agent, required when tier=agent_adhoc (scopes visibility to that agent) and
+    # forbidden otherwise (project/platform dimensions are not owned by a single agent).
+    agent_id: Optional[int] = None
 
     @field_validator('tier')
     @classmethod
@@ -120,6 +123,14 @@ class EvalDimensionCreateModel(EvalDimensionBaseModel):
                 '(platform-tier definitions are managed via the admin console)'
             )
         return v
+
+    @model_validator(mode='after')
+    def _validate_agent_id(self):
+        if self.tier == EvalTier.agent_adhoc and self.agent_id is None:
+            raise ValueError('agent_id is required when tier is agent_adhoc')
+        if self.tier != EvalTier.agent_adhoc and self.agent_id is not None:
+            raise ValueError('agent_id must not be set unless tier is agent_adhoc')
+        return self
 
 
 class EvalDimensionUpdateModel(EvalDimensionBaseModel):
@@ -135,6 +146,7 @@ class EvalDimensionDetailModel(BaseModel):
     tier: str
     name: str
     description: Optional[str] = None
+    agent_id: Optional[int] = None
     allowed_engines: List[str]
     scale_type: str
     scale_min: float
