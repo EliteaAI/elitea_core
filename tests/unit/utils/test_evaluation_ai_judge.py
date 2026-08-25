@@ -206,12 +206,13 @@ def test_truncate_evidence_for_budget_shrinks_largest_field_and_marks_it(aij, tr
     monkeypatch.setattr(aij, 'estimate_group_tokens', fake_estimate)
     big_output = 'x' * 1000
     evidence = {'input': 'q', 'output': big_output}
-    shrunk = aij._truncate_evidence_for_budget(evidence, [DIMS[0]], budget_tokens=10, model='m')
+    shrunk, shrunk_dims = aij._truncate_evidence_for_budget(evidence, [DIMS[0]], budget_tokens=10, model='m')
 
     assert shrunk['_truncated_for_budget'] is True
     assert len(shrunk['output']) < len(big_output)
     assert shrunk['output'].endswith(truncated_mark)
     assert shrunk['input'] == 'q'  # output is trimmed first, per _TRUNCATE_ORDER
+    assert shrunk_dims == [DIMS[0]]  # definition untouched — evidence trimming was enough
 
 
 def test_truncate_evidence_for_budget_gives_up_gracefully_when_nothing_left_to_trim(aij, monkeypatch):
@@ -219,17 +220,43 @@ def test_truncate_evidence_for_budget_gives_up_gracefully_when_nothing_left_to_t
     # bail out instead of looping forever, but still marks the evidence as truncated-attempted.
     monkeypatch.setattr(aij, 'estimate_group_tokens', lambda evidence, dims, model=None: 999)
     evidence = {'input': 'short', 'output': 'also short'}
-    shrunk = aij._truncate_evidence_for_budget(evidence, [DIMS[0]], budget_tokens=10, model='m')
+    shrunk, shrunk_dims = aij._truncate_evidence_for_budget(evidence, [DIMS[0]], budget_tokens=10, model='m')
     assert shrunk['_truncated_for_budget'] is True
     assert shrunk['input'] == 'short'
     assert shrunk['output'] == 'also short'
+    assert shrunk_dims == [DIMS[0]]  # definition is also short (<200 chars) — nothing to trim
+
+
+def test_truncate_evidence_for_budget_shrinks_oversized_definition_when_evidence_is_minimal(
+    aij, truncated_mark, monkeypatch,
+):
+    # the reviewer's exact scenario: evidence is tiny (nothing worth trimming) but the
+    # dimension's own rubric text alone keeps the call over budget — must fall back to
+    # shrinking `definition`, not give up.
+    calls = {'n': 0}
+
+    def fake_estimate(evidence, dims, model=None):
+        calls['n'] += 1
+        return 999 if calls['n'] == 1 else 1
+
+    monkeypatch.setattr(aij, 'estimate_group_tokens', fake_estimate)
+    big_definition = 'x' * 1000
+    dim = {**DIMS[0], 'definition': big_definition}
+    evidence = {'input': 'q', 'output': 'a'}
+
+    shrunk, shrunk_dims = aij._truncate_evidence_for_budget(evidence, [dim], budget_tokens=10, model='m')
+
+    assert shrunk['input'] == 'q'
+    assert shrunk['output'] == 'a'
+    assert len(shrunk_dims[0]['definition']) < len(big_definition)
+    assert shrunk_dims[0]['definition'].endswith(truncated_mark)
 
 
 def test_truncate_evidence_for_budget_result_still_reaches_ai_scorer(aij, monkeypatch):
     monkeypatch.setattr(aij, 'estimate_group_tokens', lambda evidence, dims, model=None: 1)
     evidence = {'input': 'q', 'output': 'a'}
-    shrunk = aij._truncate_evidence_for_budget(evidence, [DIMS[0]], budget_tokens=1000, model='m')
+    shrunk, shrunk_dims = aij._truncate_evidence_for_budget(evidence, [DIMS[0]], budget_tokens=1000, model='m')
 
     judge = _judge_returning({'scores': [{'dimension_id': 1, 'score': 50, 'rationale': 'ok'}]})
-    res = aij.evaluate_case(2, {}, shrunk, [DIMS[0]], judge=judge)
+    res = aij.evaluate_case(2, {}, shrunk, shrunk_dims, judge=judge)
     assert res[0]['status'] == 'scored' and res[0]['native_score'] == 50.0

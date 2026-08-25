@@ -211,41 +211,67 @@ def split_dimensions_for_budget(
 _TRUNCATE_ORDER = ('output', 'input', 'structure', 'expected_output')
 
 
+def _shrink_longest_definition(dims: List[dict], mark: str) -> bool:
+    """Halve the longest dimension ``definition`` (rubric) text in place. Returns ``False`` when
+    none is worth shrinking further, so the caller knows to stop trying.
+
+    ``EvalDimensionBaseModel.description`` is unbounded author-controlled text and is embedded
+    verbatim in the judge system prompt (:func:`build_judge_system_prompt`) — evidence alone is
+    not always what pushes a single-dimension call over budget."""
+    longest = max(
+        (d for d in dims if isinstance(d.get('definition'), str) and len(d['definition']) > 200),
+        key=lambda d: len(d['definition']),
+        default=None,
+    )
+    if longest is None:
+        return False
+    value = longest['definition']
+    longest['definition'] = value[:max(100, len(value) // 2)] + mark
+    return True
+
+
 def _truncate_evidence_for_budget(
     evidence: dict, dims: List[dict], budget_tokens: int, model: Optional[str] = None,
-) -> dict:
-    """Shrink ``evidence`` until a single-dimension judge call fits ``budget_tokens``.
+) -> tuple:
+    """Shrink ``evidence`` and, if that alone isn't enough, the dimensions' own rubric text,
+    until a single-dimension judge call fits ``budget_tokens``. Returns ``(evidence, dims)``.
 
     Only reached when a batch of exactly one dimension still overflows the budget on its own
-    (:func:`split_dimensions_for_budget` cannot split further). Trims the largest text fields in
-    ``_TRUNCATE_ORDER`` by half repeatedly, marks the result with ``_truncated_for_budget`` (read
-    by the persisted ``evidence`` JSONB, same convention as the snapshot's ``_TRUNCATED_MARK``),
-    and gives up after a bounded number of rounds rather than looping forever on a budget that
-    can never be met (e.g. the dimension list/prompt overhead alone already exceeds it)."""
+    (:func:`split_dimensions_for_budget` cannot split further). Trims the largest evidence text
+    fields in ``_TRUNCATE_ORDER`` by half repeatedly first; once evidence has nothing left worth
+    trimming, falls back to shrinking the dimension's own ``definition`` (a large rubric alone
+    can keep a call oversized even with empty evidence). Marks the evidence with
+    ``_truncated_for_budget`` (same ``_TRUNCATED_MARK`` convention as the snapshot) and gives up
+    after a bounded number of rounds rather than looping forever on a budget that can never be
+    met (e.g. prompt overhead alone already exceeds it)."""
     from .evaluation_run_orchestration import _TRUNCATED_MARK
 
-    shrunk = dict(evidence)
+    shrunk_evidence = dict(evidence)
+    shrunk_dims = [dict(d) for d in dims]
     for _round in range(20):
-        if estimate_group_tokens(shrunk, dims, model) <= budget_tokens:
+        if estimate_group_tokens(shrunk_evidence, shrunk_dims, model) <= budget_tokens:
             break
         field = next((f for f in _TRUNCATE_ORDER
-                      if isinstance(shrunk.get(f), str) and len(shrunk[f]) > 200), None)
-        if field is None:
-            break
-        value = shrunk[field]
-        shrunk[field] = value[:max(100, len(value) // 2)] + _TRUNCATED_MARK
-    shrunk['_truncated_for_budget'] = True
+                      if isinstance(shrunk_evidence.get(f), str) and len(shrunk_evidence[f]) > 200), None)
+        if field is not None:
+            value = shrunk_evidence[field]
+            shrunk_evidence[field] = value[:max(100, len(value) // 2)] + _TRUNCATED_MARK
+            continue
+        if _shrink_longest_definition(shrunk_dims, _TRUNCATED_MARK):
+            continue
+        break
+    shrunk_evidence['_truncated_for_budget'] = True
 
     try:
         from pylon.core.tools import log
         log.warning(
-            'Eval AI judge: evidence truncated to fit token budget %s for dimensions %s',
+            'Eval AI judge: evidence/definition truncated to fit token budget %s for dimensions %s',
             budget_tokens, [d.get('id') for d in dims],
         )
     except Exception:  # noqa: BLE001 - logging must never block scoring
         pass
 
-    return shrunk
+    return shrunk_evidence, shrunk_dims
 
 
 def evaluate_case(

@@ -529,9 +529,9 @@ def _score_ai_group_with_budget(
     budgeting existed. Splitting only kicks in once a group actually risks overflow — either
     ``MAX_DIMENSIONS_PER_JUDGE_CALL`` (a cheap count-only cap, checked even with no
     ``budget_tokens``) or the token estimate for the whole group exceeds ``budget_tokens``. A
-    single dimension whose own evidence still overflows after splitting gets its evidence
-    trimmed (:func:`evaluation_ai_judge._truncate_evidence_for_budget`) rather than sent whole —
-    the run always finishes and every dimension always gets scored."""
+    single dimension that still overflows after splitting gets its evidence and, if needed, its
+    own rubric text trimmed (:func:`evaluation_ai_judge._truncate_evidence_for_budget`) rather
+    than sent whole — the run always finishes and every dimension always gets scored."""
     if budget_tokens is None and len(dims) <= MAX_DIMENSIONS_PER_JUDGE_CALL:
         return ai_scorer(evidence, dims)
 
@@ -547,11 +547,11 @@ def _score_ai_group_with_budget(
         else:
             batches = [chunk]
         for batch in batches:
-            batch_evidence = evidence
+            batch_evidence, batch_dims = evidence, batch
             if (budget_tokens is not None and len(batch) == 1
                     and estimate_group_tokens(evidence, batch, model_name) > budget_tokens):
-                batch_evidence = _truncate_evidence_for_budget(evidence, batch, budget_tokens, model_name)
-            results.extend(ai_scorer(batch_evidence, batch))
+                batch_evidence, batch_dims = _truncate_evidence_for_budget(evidence, batch, budget_tokens, model_name)
+            results.extend(ai_scorer(batch_evidence, batch_dims))
     return results
 
 
