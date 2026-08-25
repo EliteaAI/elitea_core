@@ -82,7 +82,7 @@ class SioEvents(StrEnum):
 
 
 class SioValidationError(Exception):
-    def __init__(self, sio, sid: str | None, event: str, error, stream_id: str, message_id: str | None = None):
+    def __init__(self, sio, sid: str | None, event: str, error, stream_id: str = '', message_id: str | None = None):
         self.sio = sio
         self.type = 'error'
         self.event = event

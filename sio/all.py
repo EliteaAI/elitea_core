@@ -57,6 +57,7 @@ class SIO:
                 sid=sid,
                 event=SioEvents.chat_enter_room.value,
                 error=e.errors(include_url=False, include_context=False),
+                stream_id=str(data.get('conversation_id')) if isinstance(data, dict) else '',
             )
         #
         if not auth.is_sio_user_in_project(sid, parsed.project_id):
@@ -87,6 +88,7 @@ class SIO:
                 sid=sid,
                 event=SioEvents.test_toolkit_enter_room.value,
                 error=e.errors(include_url=False, include_context=False),
+                stream_id=str(data.get('stream_id')) if isinstance(data, dict) else '',
             )
         # Build the room name using the same pattern as test_toolkit_tool_sio
         room = get_event_room(
@@ -226,6 +228,7 @@ class SIO:
                 sid=sid,
                 event=SioEvents.chat_canvas_join.value,
                 error=e.errors(include_url=False, include_context=False),
+                stream_id=str(data.get('canvas_uuid')) if isinstance(data, dict) else '',
             )
         current_user = auth.current_user(
             auth_data=auth.sio_users[sid]
@@ -342,6 +345,7 @@ class SIO:
                 sid=sid,
                 event=SioEvents.chat_canvas_edit.value,
                 error=e.errors(include_url=False, include_context=False),
+                stream_id=str(data.get('canvas_uuid')) if isinstance(data, dict) else '',
             )
         current_user = auth.current_user(
             auth_data=auth.sio_users[sid]
