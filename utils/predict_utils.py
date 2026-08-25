@@ -250,6 +250,10 @@ def generate_predict_payload(
                     'X-SECRET': all_secrets.get('secrets_header_value', 'secret'),
                     'X-USERSESSION': auth_session if auth_session else '-',
                     'X-Project-Id': str(parsed.project_id),
+                    # Runtime execution is already audited by the tracing plugin
+                    # (LangChain/Langfuse generation spans) - tells the LLM proxy
+                    # not to emit a second audit event for the same call
+                    'X-Elitea-Audited': '1',
                 }
             }
         },
