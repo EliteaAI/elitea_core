@@ -39,6 +39,17 @@ PROBE_BUDGET_SEC = 240
 SWEEP_STATEMENT_TIMEOUT_MS = 30000
 
 
+def _read_ceiling_factor(reclaim_cfg: dict) -> float:
+    """Admin-writable, and config on disk bypasses the schema's validation, so it is
+    clamped here too: a zero would put every candidate past the ceiling at once and
+    reclaim live runs without ever asking whether they are alive."""
+    try:
+        configured = float(reclaim_cfg.get('hard_ceiling_factor', RECLAIM_HARD_CEILING_FACTOR))
+    except (TypeError, ValueError):
+        return float(RECLAIM_HARD_CEILING_FACTOR)
+    return max(1.0, configured)
+
+
 def _max_confirms_per_tick(task_node) -> int:
     """Every probe pays the node's query_wait, because the liveness check evicts the
     cached entry to force a real query, and each candidate is probed once per pass."""
@@ -167,11 +178,8 @@ def _bound_query_time(executor):
 def _schemas_with_embeddings(connection_string: str) -> set:
     """Schemas in this database that already hold an embeddings table.
 
-    Narrows how often the sweep reaches get_session_for_schema, which creates whatever
-    is missing on first touch. It does not eliminate that: a schema holding the
-    embeddings table but not its companion collection table still gets DDL from a
-    service account in the customer's audit log. Passing create_if_missing through
-    would close it properly.
+    Both the reader and the writer take create_if_missing=False on the strength of
+    this, so the sweep never emits DDL into a customer's database.
     """
     engine = _get_pgvector_engine(connection_string)
     with engine.begin() as connection:
@@ -184,7 +192,9 @@ def _schemas_with_embeddings(connection_string: str) -> set:
 
 
 def _fetch_in_progress_rows(connection_string: str, schema: str) -> list:
-    with get_session_for_schema(connection_string, schema) as session:
+    # create_if_missing=False: _schemas_with_embeddings already proved the table is
+    # there, and an unattended sweep must not emit DDL into a customer's database.
+    with get_session_for_schema(connection_string, schema, create_if_missing=False) as session:
         _bound_query_time(session)
         rows = session.query(
             EmbeddingStore.id,

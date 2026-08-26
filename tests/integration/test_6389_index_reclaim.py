@@ -212,9 +212,13 @@ class TestShouldReclaimPredicate:
 class _FakeSession:
     def __init__(self):
         self.commits = 0
+        self.statements = []
 
     def commit(self):
         self.commits += 1
+
+    def execute(self, statement):
+        self.statements.append(str(statement))
 
 
 def _meta_row(cmetadata):
@@ -330,7 +334,7 @@ class TestFinalizeWrite:
                 return False
 
         m.get_toolkit_index_meta = lambda s, index_name, for_update=False: meta
-        m.get_session_for_schema = lambda conn, schema: _Ctx()
+        m.get_session_for_schema = lambda conn, schema, create_if_missing=True: _Ctx()
         m.reclaim_toolkit_index_meta(
             "conn", "42", "idx",
             expected_task_id="task-1",
@@ -406,8 +410,11 @@ class TestFinalizeWrite:
             def __exit__(self, *exc):
                 return False
 
+        asked_to_create = []
         m.get_toolkit_index_meta = fake_get
-        m.get_session_for_schema = lambda conn, schema: _Ctx()
+        m.get_session_for_schema = lambda conn, schema, create_if_missing=True: (
+            asked_to_create.append(create_if_missing) or _Ctx()
+        )
         result = m.reclaim_toolkit_index_meta(
             "conn", "42", "idx",
             expected_task_id="task-1",
@@ -416,6 +423,8 @@ class TestFinalizeWrite:
         )
         assert result is True
         assert seen_for_update == [True]
+        # An unattended sweep must not emit DDL into a customer's database.
+        assert asked_to_create == [False]
         assert meta.cmetadata["state"] == "interrupted"
         assert meta.cmetadata["task_id"] == "task-1"
         assert f"over {TIMEOUT}s" in meta.cmetadata["error"]

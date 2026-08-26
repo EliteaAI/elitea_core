@@ -1381,11 +1381,15 @@ _ENSURED_SCHEMAS = set()
 _ENSURED_SCHEMAS_LOCK = threading.Lock()
 
 
-def get_session_for_schema(connection_string: str, schema: str):
+def get_session_for_schema(connection_string: str, schema: str, create_if_missing: bool = True):
     # DDL is idempotent but costs reflection round-trips, so run it once per schema
     # instead of on every session. Assumes no live path drops these schemas.
+    # create_if_missing=False for readers that have already established the schema
+    # exists: an unattended caller must not put DDL from a service account into a
+    # customer's audit log, and the reflection runs under a process-global lock that
+    # a stalled tenant host would hold against every other pgvector caller.
     key = (connection_string, schema)
-    if key not in _ENSURED_SCHEMAS:
+    if create_if_missing and key not in _ENSURED_SCHEMAS:
         with _ENSURED_SCHEMAS_LOCK:
             if key not in _ENSURED_SCHEMAS:
                 ensure_pgvector_schema_and_tables(connection_string, schema)
@@ -1626,6 +1630,8 @@ RECLAIM_HARD_CEILING_FACTOR = 3
 
 DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC = 7200
 MIN_TASK_DISCONNECTED_TIMEOUT_SEC = 300
+RECLAIM_LOCK_TIMEOUT_MS = 5000
+RECLAIM_STATEMENT_TIMEOUT_MS = 30000
 
 
 def read_task_disconnected_timeout(project_id: int) -> int:
@@ -1819,7 +1825,11 @@ def reclaim_toolkit_index_meta(connection_string: str, toolkit_name_id: str, ind
         f"(no progress for over {int(min_updated_age)}s). No source error occurred. "
         f"Reindex to try again."
     )
-    with get_session_for_schema(connection_string, toolkit_name_id) as session:
+    with get_session_for_schema(connection_string, toolkit_name_id, create_if_missing=False) as session:
+        # A contended row means someone else is writing it, which means the run is not
+        # abandoned — so failing fast is the right answer, not waiting.
+        session.execute(text(f'SET LOCAL lock_timeout = {int(RECLAIM_LOCK_TIMEOUT_MS)}'))
+        session.execute(text(f'SET LOCAL statement_timeout = {int(RECLAIM_STATEMENT_TIMEOUT_MS)}'))
         return _finalize_index_meta_in_session(
             session, index_name, IndexDataStatus.interrupted.value, expected_task_id,
             delete_embeddings=False, require_in_progress=True,
