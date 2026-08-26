@@ -423,14 +423,18 @@ def _get_pgvector_engine(conn_str: str):
             entry[1] = time.monotonic()
             _PGVECTOR_ENGINE_CACHE.move_to_end(conn_str)
             return entry[0]
-        # Customer-owned databases, so both halves of a hang need a bound: a host
-        # that never answers the handshake, and one that never returns from a query.
-        # libpq-only, hence the dialect check.
-        statement_timeout_ms = _pgvector_cache_cfg('statement_timeout_sec', 60) * 1000
+        # Customer-owned databases, so a host that stops answering must not hold the
+        # caller's thread. Client-side only: a server-side statement_timeout would
+        # have to travel as a libpq startup `options`, which PgBouncer rejects under
+        # transaction pooling (see get_session_for_schema), and would cap the
+        # request path's long deletes as well. Callers that want a query bound issue
+        # SET LOCAL inside their own transaction.
         connect_args = (
             {
                 'connect_timeout': _pgvector_cache_cfg('connect_timeout', 10),
-                'options': f'-c statement_timeout={statement_timeout_ms}',
+                'tcp_user_timeout': _pgvector_cache_cfg('tcp_user_timeout_ms', 30000),
+                'keepalives': 1,
+                'keepalives_idle': 10,
             }
             if conn_str.startswith('postgres') else {}
         )

@@ -35,12 +35,35 @@ LIVENESS_CONFIRM_DELAY_SEC = 20
 # is skipped by the lock rather than queued, so it costs throughput, not correctness.
 PROBE_BUDGET_SEC = 60
 
+SWEEP_STATEMENT_TIMEOUT_MS = 30000
+
 
 def _max_confirms_per_tick(task_node) -> int:
     """Every probe pays the node's query_wait, because the liveness check evicts the
     cached entry to force a real query, and each candidate is probed once per pass."""
     probe_cost = max(1, getattr(task_node, 'query_wait', 5))
     return max(1, int((PROBE_BUDGET_SEC - LIVENESS_CONFIRM_DELAY_SEC) // (2 * probe_cost)))
+
+
+def _memoize(produce):
+    """Defer a value until something needs it, then hold it for the tick."""
+    cached = []
+
+    def read():
+        if not cached:
+            cached.append(produce())
+        return cached[0]
+
+    return read
+
+
+def _restore_task_state(task_node, task_id: str, evicted) -> None:
+    """Put back what the probe evicted when no fresh answer replaced it, so a
+    background job cannot cost the task views an entry they had."""
+    if evicted is None:
+        return
+    with task_node.lock:
+        task_node.global_task_state.setdefault(task_id, evicted)
 
 
 def _resolve_task_liveness(task_node, task_id: str, verdicts: dict) -> str:
@@ -56,12 +79,11 @@ def _resolve_task_liveness(task_node, task_id: str, verdicts: dict) -> str:
         verdict = task_node.get_task_status(task_id)
     except RuntimeError:
         verdict = TASK_LOST
-        if evicted is not None:
-            with task_node.lock:
-                task_node.global_task_state.setdefault(task_id, evicted)
+        _restore_task_state(task_node, task_id, evicted)
     except Exception as e:
         log.warning(f"Task liveness query failed for task {task_id}: {e}")
         verdict = 'unknown'
+        _restore_task_state(task_node, task_id, evicted)
     verdicts[task_id] = verdict
     return verdict
 
@@ -132,6 +154,15 @@ def _resolve_pgvector_connection(project_id: int, ref, author_id, memo: dict):
     return memo[key]
 
 
+def _bound_query_time(executor):
+    """Cap this transaction's queries without touching the shared engine.
+
+    SET LOCAL dies with the transaction, so it is safe through a pooler and leaves
+    the request path's long-running deletes alone.
+    """
+    executor.execute(text(f'SET LOCAL statement_timeout = {SWEEP_STATEMENT_TIMEOUT_MS}'))
+
+
 def _schemas_with_embeddings(connection_string: str) -> set:
     """Schemas in this database that already hold an embeddings table.
 
@@ -142,7 +173,8 @@ def _schemas_with_embeddings(connection_string: str) -> set:
     would close it properly.
     """
     engine = _get_pgvector_engine(connection_string)
-    with engine.connect() as connection:
+    with engine.begin() as connection:
+        _bound_query_time(connection)
         rows = connection.execute(text(
             "SELECT table_schema FROM information_schema.tables "
             "WHERE table_name = 'langchain_pg_embedding'"
@@ -152,6 +184,7 @@ def _schemas_with_embeddings(connection_string: str) -> set:
 
 def _fetch_in_progress_rows(connection_string: str, schema: str) -> list:
     with get_session_for_schema(connection_string, schema) as session:
+        _bound_query_time(session)
         rows = session.query(
             EmbeddingStore.id,
             EmbeddingStore.cmetadata,
@@ -167,7 +200,7 @@ def _fetch_in_progress_rows(connection_string: str, schema: str) -> list:
 
 
 def _scan_toolkit_candidates(module, project_id: int, toolkit_id: int, connection_string: str,
-                             timeout: int, reclaim_untracked: bool) -> list:
+                             read_timeout, reclaim_untracked: bool) -> list:
     """Rows that would be reclaimed if their task turned out to be dead.
 
     Assuming the worst costs nothing and defers every network round-trip until the
@@ -175,8 +208,12 @@ def _scan_toolkit_candidates(module, project_id: int, toolkit_id: int, connectio
     this tick — probing here would spend the tick's budget in discovery order.
     """
     schema = str(toolkit_id)
+    rows = _fetch_in_progress_rows(connection_string, schema)
+    if not rows:
+        return []
+    timeout = read_timeout()
     candidates = []
-    for cmetadata in _fetch_in_progress_rows(connection_string, schema):
+    for cmetadata in rows:
         probed = dict(cmetadata)
         if not probed.get('task_id'):
             registered = _find_registered_task(module, project_id, toolkit_id, probed.get('collection'))
@@ -209,7 +246,7 @@ def _confirm_dead(module, candidate, reclaim_untracked: bool, hard_ceiling_facto
 
 
 def _collect_project_candidates(module, project_id: int, yield_to_hub, reclaim_untracked: bool,
-                                conn_memo: dict) -> list:
+                                conn_memo: dict, schema_memo: dict) -> list:
     with db.get_session(project_id) as project_session:
         toolkits = [
             (row.id, row.author_id, row.ref) for row in project_session.query(
@@ -222,9 +259,10 @@ def _collect_project_candidates(module, project_id: int, yield_to_hub, reclaim_u
         ]
     if not toolkits:
         return []
-    # Below the cheap query: a project with nothing indexable should not cost a vault
-    # round-trip every tick.
-    timeout = read_task_disconnected_timeout(project_id)
+    # Resolved on the first in-progress row rather than up front: nearly every project
+    # has nothing stuck on nearly every tick, and under a managed vault this read is an
+    # approle login plus a KV fetch landing on the request path's Vault.
+    read_timeout = _memoize(lambda: read_task_disconnected_timeout(project_id))
     by_connection = {}
     for toolkit_id, author_id, ref in toolkits:
         yield_to_hub()
@@ -235,10 +273,18 @@ def _collect_project_candidates(module, project_id: int, yield_to_hub, reclaim_u
     for connection_string, toolkit_ids in by_connection.items():
         yield_to_hub()
         end_ambient_transaction()
-        try:
-            populated_schemas = _schemas_with_embeddings(connection_string)
-        except Exception as e:
-            log.error(f"reclaim: cannot inspect pgvector database for project {project_id}: {e}")
+        if connection_string not in schema_memo:
+            # Keyed by database, not project: in the default deployment every project
+            # resolves the same DSN, so this is one query per tick rather than one per
+            # project — and a failure is remembered too, or an unreachable host is
+            # retried once per project at the full connect timeout.
+            try:
+                schema_memo[connection_string] = _schemas_with_embeddings(connection_string)
+            except Exception as e:
+                log.error(f"reclaim: cannot inspect pgvector database for project {project_id}: {e}")
+                schema_memo[connection_string] = None
+        populated_schemas = schema_memo[connection_string]
+        if populated_schemas is None:
             continue
         for toolkit_id in toolkit_ids:
             if str(toolkit_id) not in populated_schemas:
@@ -247,7 +293,7 @@ def _collect_project_candidates(module, project_id: int, yield_to_hub, reclaim_u
             end_ambient_transaction()
             try:
                 candidates.extend(_scan_toolkit_candidates(
-                    module, project_id, toolkit_id, connection_string, timeout,
+                    module, project_id, toolkit_id, connection_string, read_timeout,
                     reclaim_untracked,
                 ))
             except Exception as e:
@@ -275,7 +321,13 @@ class RPC:
         if not _tick_in_progress.acquire(blocking=False):
             log.warning("reclaim_interrupted_indexes: previous tick still running, skipping")
             return None
-        threading.Thread(target=_run_tick, args=(self,), name="index-reclaim-tick", daemon=True).start()
+        try:
+            threading.Thread(target=_run_tick, args=(self,), name="index-reclaim-tick", daemon=True).start()
+        except Exception:
+            # The release lives in the thread's finally, which never runs if the thread
+            # never starts — and thread exhaustion is exactly when reclaim is wanted.
+            _tick_in_progress.release()
+            raise
         return None
 
 
@@ -314,13 +366,14 @@ def _sweep(module):
             return None
 
         conn_memo = {}
+        schema_memo = {}
         candidates = []
         for project_id in all_project_ids:
             yield_to_hub()
             end_ambient_transaction()
             try:
                 candidates.extend(_collect_project_candidates(
-                    module, project_id, yield_to_hub, reclaim_untracked, conn_memo,
+                    module, project_id, yield_to_hub, reclaim_untracked, conn_memo, schema_memo,
                 ))
             except Exception as e:
                 log.error(f"reclaim_interrupted_indexes: project {project_id} failed: {e}")
