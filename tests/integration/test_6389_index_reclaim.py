@@ -313,6 +313,33 @@ class TestFinalizeWrite:
         history = json.loads(meta.cmetadata["history"])
         assert history[-1]["state"] == "cancelled"
 
+    def test_reclaim_dates_the_run_when_it_stopped_reporting(self, application_tools_module):
+        # Advancing it would invent a duration for History and float a dead index to
+        # the top of a list ordered by recency.
+        m = application_tools_module
+        meta = _meta_row(_row())
+        stopped_at = time.time() - TIMEOUT * 1.5
+        meta.cmetadata["updated_on"] = stopped_at
+        meta.cmetadata["created_on"] = stopped_at - 60
+
+        class _Ctx:
+            def __enter__(self):
+                return _FakeSession()
+
+            def __exit__(self, *exc):
+                return False
+
+        m.get_toolkit_index_meta = lambda s, index_name, for_update=False: meta
+        m.get_session_for_schema = lambda conn, schema: _Ctx()
+        m.reclaim_toolkit_index_meta(
+            "conn", "42", "idx",
+            expected_task_id="task-1",
+            expected_created_on=meta.cmetadata["created_on"],
+            min_updated_age=TIMEOUT,
+        )
+        assert meta.cmetadata["updated_on"] == stopped_at
+        assert json.loads(meta.cmetadata["history"])[-1]["updated_on"] == stopped_at
+
     def test_ensure_task_id_resolves_from_ids_on_the_agent_path(self, application_tools_module):
         # The agent/chat path emits no toolkit_config.
         m = application_tools_module

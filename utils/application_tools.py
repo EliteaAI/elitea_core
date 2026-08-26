@@ -1478,6 +1478,10 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         "task_id": task_id,
         "conversation_id": data.get('conversation_id', None),
         "toolkit_id": int(toolkit_name_id),
+        # Toolkit ids are per-project sequences and the schema name is the toolkit id,
+        # so on a pgvector credential shared between projects two projects' rows are
+        # otherwise indistinguishable.
+        "project_id": project_id,
     }
     reset_or_create_toolkit_index_meta(connection_string, toolkit_name_id, index_name, cmetadata)
     #
@@ -1621,6 +1625,7 @@ RECLAIM_HARD_CEILING_FACTOR = 3
 
 
 DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC = 7200
+MIN_TASK_DISCONNECTED_TIMEOUT_SEC = 300
 
 
 def read_task_disconnected_timeout(project_id: int) -> int:
@@ -1631,7 +1636,13 @@ def read_task_disconnected_timeout(project_id: int) -> int:
     """
     from tools import VaultClient  # pylint: disable=C0415
     secrets = VaultClient(project_id).get_secrets()
-    return int(secrets.get('task_disconnected_timeout_sec', DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC))
+    try:
+        configured = int(secrets.get('task_disconnected_timeout_sec', DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC))
+    except (TypeError, ValueError):
+        return DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC
+    # Floored: this secret is project-editable, and a tiny value would put every run
+    # past the reclaim's ceiling immediately, skipping the liveness check entirely.
+    return max(MIN_TASK_DISCONNECTED_TIMEOUT_SEC, configured)
 
 
 def should_reclaim_index_meta(cmetadata: dict, now: float, task_disconnected_timeout: float,
@@ -1674,7 +1685,8 @@ def _finalize_index_meta_in_session(session, index_name: str, target_state: str,
                                     error: Optional[str] = None,
                                     for_update: bool = False,
                                     min_updated_age: Optional[float] = None,
-                                    clear_task_id: bool = True) -> bool:
+                                    clear_task_id: bool = True,
+                                    advance_updated_on: bool = True) -> bool:
     """Core terminal-state write against an already-open session. Shared by the cancel
     paths (see cancel_toolkit_index_meta) and the abandoned-run reclaim
     (see reclaim_toolkit_index_meta)."""
@@ -1731,7 +1743,8 @@ def _finalize_index_meta_in_session(session, index_name: str, target_state: str,
     meta.cmetadata["state"] = target_state
     if clear_task_id:
         meta.cmetadata["task_id"] = None
-    meta.cmetadata["updated_on"] = time.time()
+    if advance_updated_on:
+        meta.cmetadata["updated_on"] = time.time()
     if error is not None:
         meta.cmetadata["error"] = error
     history_raw = meta.cmetadata.pop("history", "[]")
@@ -1815,6 +1828,10 @@ def reclaim_toolkit_index_meta(connection_string: str, toolkit_name_id: str, ind
             # Keep the id: if this reclaim turns out to be wrong, it is the only thing
             # Stop can corroborate against to kill a run that is still writing.
             clear_task_id=False,
+            # The run stopped when it stopped reporting, not when a sweep noticed hours
+            # later. Advancing it would invent a duration for History and float a dead
+            # index to the top of a list ordered by recency.
+            advance_updated_on=False,
         )
 
 

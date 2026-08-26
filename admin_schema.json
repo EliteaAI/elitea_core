@@ -347,6 +347,15 @@
       "default": "*/10 * * * *",
       "visible_when": { "field": "index_reclaim_enabled", "value": true }
     },
+    "index_reclaim_hard_ceiling_factor": {
+      "type": "integer",
+      "title": "Index Reclaim Hard Ceiling (× disconnect timeout)",
+      "description": "How many disconnect timeouts a run may go without reporting progress before it is marked interrupted regardless of what the task network says. Task state is cached fleet-wide and never retracted for a hard-killed run, so this is the path most reclaims take and it governs how long a dead index keeps claiming to be indexing. Lower recovers sooner; too low can mark a slow-but-live run interrupted.",
+      "path": "scheduler.index_reclaim.hard_ceiling_factor",
+      "section": "runtime",
+      "default": 3,
+      "visible_when": { "field": "index_reclaim_enabled", "value": true }
+    },
     "analytics_enabled": {
       "type": "boolean",
       "title": "Show Analytics",

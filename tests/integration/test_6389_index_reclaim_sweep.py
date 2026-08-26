@@ -356,6 +356,34 @@ class TestTickBudget:
         assert sorted(name for name, _ in result['reclaimed']) == ['free', 'probed']
 
 
+class TestSharedDatabaseIsolation:
+
+    def _scan(self, reclaim, monkeypatch, rows, project_id=2):
+        monkeypatch.setattr(reclaim, '_fetch_in_progress_rows', lambda conn, schema: rows)
+        monkeypatch.setattr(reclaim, 'should_reclaim_index_meta', lambda *a, **k: True)
+        return reclaim._scan_toolkit_candidates(
+            types.SimpleNamespace(), project_id, 56, "postgresql://shared",
+            lambda: TIMEOUT, False,
+        )
+
+    def test_skips_a_row_belonging_to_another_project(self, reclaim, monkeypatch):
+        # Toolkit ids are per-project sequences and the schema is the toolkit id, so a
+        # shared credential puts two projects' rows in the same place.
+        rows = [{"collection": "theirs", "task_id": "t", "updated_on": 0, "project_id": 99}]
+
+        assert self._scan(reclaim, monkeypatch, rows) == []
+
+    def test_claims_its_own_rows(self, reclaim, monkeypatch):
+        rows = [{"collection": "mine", "task_id": "t", "updated_on": 0, "project_id": 2}]
+
+        assert [c['cmetadata']['collection'] for c in self._scan(reclaim, monkeypatch, rows)] == ['mine']
+
+    def test_claims_a_row_that_predates_the_stamp(self, reclaim, monkeypatch):
+        rows = [{"collection": "legacy", "task_id": "t", "updated_on": 0}]
+
+        assert [c['cmetadata']['collection'] for c in self._scan(reclaim, monkeypatch, rows)] == ['legacy']
+
+
 class TestTwoPassConfirm:
 
     def test_a_candidate_must_survive_both_passes(self, reclaim, monkeypatch):

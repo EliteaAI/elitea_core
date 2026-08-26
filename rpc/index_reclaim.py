@@ -31,9 +31,10 @@ _tick_in_progress = threading.Lock()
 # masquerade as a dead task across both liveness probes.
 LIVENESS_CONFIRM_DELAY_SEC = 20
 
-# Bounds the probing phase only; discovery and the writes are not budgeted. An overrun
-# is skipped by the lock rather than queued, so it costs throughput, not correctness.
-PROBE_BUDGET_SEC = 60
+# Bounds the probing phase only; discovery and the writes are not budgeted. The tick
+# runs off the scheduler thread, so a long one delays nothing but the next tick, which
+# the lock skips — it costs throughput, not correctness.
+PROBE_BUDGET_SEC = 240
 
 SWEEP_STATEMENT_TIMEOUT_MS = 30000
 
@@ -214,6 +215,12 @@ def _scan_toolkit_candidates(module, project_id: int, toolkit_id: int, connectio
     timeout = read_timeout()
     candidates = []
     for cmetadata in rows:
+        # On a pgvector credential shared between projects the schema name — the
+        # toolkit id — is not unique, so a row that names a different project belongs
+        # to that project's sweep. A row with no project_id predates the stamp.
+        row_project_id = cmetadata.get('project_id')
+        if row_project_id is not None and str(row_project_id) != str(project_id):
+            continue
         probed = dict(cmetadata)
         if not probed.get('task_id'):
             registered = _find_registered_task(module, project_id, toolkit_id, probed.get('collection'))
