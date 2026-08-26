@@ -1526,10 +1526,7 @@ def ensure_index_data_has_task_id(ctx, event_data: dict):
         if toolkit_config:
             toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
         else:
-            # Agent/chat path: the worker's event mapper strips toolkit_config, so
-            # resolve from ids the same way the Stop reconciler does. Without this,
-            # every agent-inline run keeps task_id=None for its whole life and is
-            # invisible to any task-liveness check.
+            # The agent/chat path emits no toolkit_config, so ids are all there is.
             connection_string, toolkit_name_id = resolve_toolkit_index_connection(
                 event_data.get('project_id'),
                 event_data.get('toolkit_id'),
@@ -1592,30 +1589,38 @@ def is_index_stale(updated_on: float, index_data_state: str, task_disconnected_t
     return time_since_update > task_disconnected_timeout
 
 
-# Sentinel for "no node in the task network owns this task_id" — distinct from the
-# arbiter's own 'unknown' status, which means a node knows the task but not its state.
+# Distinct from the arbiter's own 'unknown', which means a node knows the task but not
+# its state.
 TASK_LOST = 'task_lost'
 
-# A row with no task_id has no liveness oracle, so it is only reclaimed on age — at a
-# stricter multiple of the timeout, since age alone cannot prove the run dead.
 UNTRACKED_RECLAIM_AGE_FACTOR = 2
+
+
+DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC = 7200
+
+
+def read_task_disconnected_timeout(project_id: int) -> int:
+    """Seconds without an index_meta refresh after which a run counts as disconnected.
+
+    Single source for the read-time `stale` flag and the reclaim sweep, which must
+    agree on the cutoff.
+    """
+    from tools import VaultClient  # pylint: disable=C0415
+    secrets = VaultClient(project_id).get_secrets()
+    return int(secrets.get('task_disconnected_timeout_sec', DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC))
 
 
 def should_reclaim_index_meta(cmetadata: dict, now: float, task_disconnected_timeout: float,
                               resolve_task_status, reclaim_untracked: bool = False) -> bool:
-    """Decide whether an in_progress index_meta row belongs to a dead run.
+    """Whether an in_progress index_meta row belongs to a dead run.
 
-    resolve_task_status: callable(task_id) -> arbiter status string, or TASK_LOST when
-        no node owns the task. Only consulted past the age gate, so young rows never
-        pay for a network round-trip.
+    resolve_task_status: callable(task_id) -> arbiter status, or TASK_LOST when no node
+        owns the task. Consulted only past the age gate, since it costs a network
+        round-trip. Any live status means a slow-but-alive run, which must be left alone.
 
-    Only a task the network reports lost or stopped is reclaimed; any live status means
-    a slow-but-alive run (e.g. a long document-loading phase) and must be left alone.
-
-    reclaim_untracked: an agent-inline run holds task_id=None for its entire life (the
-        SDK writes None and the worker's event path cannot stamp it), so age alone
-        cannot tell a live untracked run from a dead one. Off by default; an operator
-        can enable it for one tick to backfill legacy rows.
+    reclaim_untracked: off by default because a row without a task id has no liveness
+        oracle at all, and an agent-inline run carries none for its entire life. An
+        operator can enable it for a tick to backfill legacy rows.
     """
     if cmetadata.get('state') != IndexDataStatus.in_progress.value:
         return False
@@ -1652,8 +1657,8 @@ def _finalize_index_meta_in_session(session, index_name: str, target_state: str,
         return False
     #
     if min_updated_age is not None:
-        # Re-checked under the row lock: a heartbeat that landed between the caller's
-        # scan and this read proves the run alive, so the reclaim must stand down.
+        # A heartbeat landing between the caller's scan and this locked read proves
+        # the run alive.
         try:
             age = time.time() - float(meta.cmetadata.get("updated_on") or 0)
         except (TypeError, ValueError):

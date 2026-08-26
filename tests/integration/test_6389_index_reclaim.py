@@ -141,7 +141,6 @@ class TestShouldReclaimPredicate:
         assert calls == []
 
     def test_old_run_with_live_task_is_left_alone(self, application_tools_module):
-        # A slow loader past the timeout answers 'running' - alive, never reclaimed.
         decision, calls = self._call(application_tools_module, _row(), status="running")
         assert decision is False
         assert calls == ["task-1"]
@@ -160,8 +159,7 @@ class TestShouldReclaimPredicate:
         assert decision is False
 
     def test_untracked_row_is_never_reclaimed_by_default(self, application_tools_module):
-        # An agent-inline run holds task_id=None for its entire life, so age alone
-        # cannot prove it dead — the age-only branch must be opt-in.
+        # An agent-inline run carries no task_id for its entire life.
         m = application_tools_module
         for age in (TIMEOUT * 1.5, TIMEOUT * 2.5, TIMEOUT * 100):
             decision, calls = self._call(m, _row(task_id=None, age=age))
@@ -239,7 +237,6 @@ class TestFinalizeWrite:
         assert session.commits == 0
 
     def test_newer_run_on_same_index_is_protected(self, application_tools_module):
-        # The sweep scanned run A, but run B re-created the row before the write.
         m = application_tools_module
         meta = _meta_row(_row(task_id="task-B", created_on=999.0))
         result, session = _finalize(
@@ -273,7 +270,6 @@ class TestFinalizeWrite:
         assert meta.cmetadata["state"] == "interrupted"
 
     def test_cancel_wrapper_still_lands_cancelled(self, application_tools_module):
-        # Regression pin for the Stop path after the generalization.
         m = application_tools_module
         meta = _meta_row(_row())
         session = _FakeSession()
@@ -291,9 +287,7 @@ class TestFinalizeWrite:
         assert history[-1]["state"] == "cancelled"
 
     def test_ensure_task_id_resolves_from_ids_on_the_agent_path(self, application_tools_module):
-        # The worker's event mapper strips toolkit_config on the agent/chat path, so
-        # stamping must fall back to id-based resolution or every agent-inline run
-        # keeps task_id=None forever.
+        # The agent/chat path emits no toolkit_config.
         m = application_tools_module
         meta = _meta_row(_row(task_id=None))
         created_on = meta.cmetadata["created_on"]

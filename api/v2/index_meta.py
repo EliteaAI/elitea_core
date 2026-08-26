@@ -16,6 +16,7 @@ from ...utils.application_tools import (
     load_and_validate_toolkit_for_index,
     get_session_for_schema,
     is_index_stale,
+    read_task_disconnected_timeout,
     clean_up_schedule_in_toolkit,
     _get_pgvector_engine,
 )
@@ -57,11 +58,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     )
                 ).all()
                 result = []
-                # Get task disconnect timeout from vault secrets
-                vault_client = VaultClient(project_id)
-                secrets = vault_client.get_secrets()
-                task_disconnected_timeout = int(secrets.get('task_disconnected_timeout_sec', 7200))
-                
+                task_disconnected_timeout = read_task_disconnected_timeout(project_id)
+
                 for id, cmetadata in meta:
                     for key in ['index_configuration', 'history', 'report']:
                         # 'report' is cleared to null when a reindex starts.
