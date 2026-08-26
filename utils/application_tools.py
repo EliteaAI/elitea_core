@@ -1191,11 +1191,14 @@ def validate_toolkit_for_index(toolkit_config):
     return toolkit_schema, connection_string
 
 
-def get_toolkit_index_meta(session: Session, index_name: str):
-    return session.query(EmbeddingStore).filter(
+def get_toolkit_index_meta(session: Session, index_name: str, for_update: bool = False):
+    query = session.query(EmbeddingStore).filter(
         EmbeddingStore.cmetadata['type'].astext == "index_meta",
         func.jsonb_extract_path_text(EmbeddingStore.cmetadata, 'collection') == index_name
-    ).first()
+    )
+    if for_update:
+        query = query.with_for_update()
+    return query.first()
 
 
 def reset_or_create_toolkit_index_meta(connection_string: str, toolkit_name_id: str, index_name: str, default: dict):
@@ -1520,7 +1523,21 @@ def ensure_index_data_has_task_id(ctx, event_data: dict):
             return
 
         # Get connection details
-        toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
+        if toolkit_config:
+            toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
+        else:
+            # Agent/chat path: the worker's event mapper strips toolkit_config, so
+            # resolve from ids the same way the Stop reconciler does. Without this,
+            # every agent-inline run keeps task_id=None for its whole life and is
+            # invisible to any task-liveness check.
+            connection_string, toolkit_name_id = resolve_toolkit_index_connection(
+                event_data.get('project_id'),
+                event_data.get('toolkit_id'),
+                user_id=event_data.get('user_id'),
+            )
+            if not connection_string or not toolkit_name_id:
+                log.warning(f"Cannot resolve index connection to stamp task_id for index_name={index_name}")
+                return
 
         # Get session and update if needed
         with get_session_for_schema(connection_string, toolkit_name_id) as session:
@@ -1575,21 +1592,77 @@ def is_index_stale(updated_on: float, index_data_state: str, task_disconnected_t
     return time_since_update > task_disconnected_timeout
 
 
-def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Optional[str],
-                                  delete_embeddings: bool, require_in_progress: bool,
-                                  expected_created_on: Optional[float]) -> bool:
-    """Core cancel write against an already-open session. See cancel_toolkit_index_meta."""
-    meta = get_toolkit_index_meta(session, index_name)
+# Sentinel for "no node in the task network owns this task_id" — distinct from the
+# arbiter's own 'unknown' status, which means a node knows the task but not its state.
+TASK_LOST = 'task_lost'
+
+# A row with no task_id has no liveness oracle, so it is only reclaimed on age — at a
+# stricter multiple of the timeout, since age alone cannot prove the run dead.
+UNTRACKED_RECLAIM_AGE_FACTOR = 2
+
+
+def should_reclaim_index_meta(cmetadata: dict, now: float, task_disconnected_timeout: float,
+                              resolve_task_status, reclaim_untracked: bool = False) -> bool:
+    """Decide whether an in_progress index_meta row belongs to a dead run.
+
+    resolve_task_status: callable(task_id) -> arbiter status string, or TASK_LOST when
+        no node owns the task. Only consulted past the age gate, so young rows never
+        pay for a network round-trip.
+
+    Only a task the network reports lost or stopped is reclaimed; any live status means
+    a slow-but-alive run (e.g. a long document-loading phase) and must be left alone.
+
+    reclaim_untracked: an agent-inline run holds task_id=None for its entire life (the
+        SDK writes None and the worker's event path cannot stamp it), so age alone
+        cannot tell a live untracked run from a dead one. Off by default; an operator
+        can enable it for one tick to backfill legacy rows.
+    """
+    if cmetadata.get('state') != IndexDataStatus.in_progress.value:
+        return False
+    try:
+        age = now - float(cmetadata.get('updated_on') or 0)
+    except (TypeError, ValueError):
+        return False
+    if age <= task_disconnected_timeout:
+        return False
+    task_id = cmetadata.get('task_id')
+    if task_id:
+        return resolve_task_status(task_id) in (TASK_LOST, 'stopped')
+    return bool(reclaim_untracked) and age > UNTRACKED_RECLAIM_AGE_FACTOR * task_disconnected_timeout
+
+
+def _finalize_index_meta_in_session(session, index_name: str, target_state: str,
+                                    expected_task_id: Optional[str],
+                                    delete_embeddings: bool, require_in_progress: bool,
+                                    expected_created_on: Optional[float],
+                                    error: Optional[str] = None,
+                                    for_update: bool = False,
+                                    min_updated_age: Optional[float] = None) -> bool:
+    """Core terminal-state write against an already-open session. Shared by the cancel
+    paths (see cancel_toolkit_index_meta) and the abandoned-run reclaim
+    (see reclaim_toolkit_index_meta)."""
+    meta = get_toolkit_index_meta(session, index_name, for_update=for_update)
     if not meta:
-        log.debug(f"No index_meta to cancel for index_name={index_name}")
+        log.debug(f"No index_meta to finalize for index_name={index_name}")
         return False
     #
     current_state = meta.cmetadata.get("state")
     if require_in_progress and current_state != IndexDataStatus.in_progress.value:
-        log.debug(f"Skipping cancel for index_name={index_name}: state is '{current_state}', not in_progress")
+        log.debug(f"Skipping finalize for index_name={index_name}: state is '{current_state}', not in_progress")
         return False
     #
-    if expected_task_id is not None:
+    if min_updated_age is not None:
+        # Re-checked under the row lock: a heartbeat that landed between the caller's
+        # scan and this read proves the run alive, so the reclaim must stand down.
+        try:
+            age = time.time() - float(meta.cmetadata.get("updated_on") or 0)
+        except (TypeError, ValueError):
+            age = None
+        if age is not None and age <= min_updated_age:
+            log.debug(f"Skipping finalize for index_name={index_name}: refreshed {age:.0f}s ago")
+            return False
+    #
+    if expected_task_id is not None or expected_created_on is not None:
         row_task_id = meta.cmetadata.get("task_id")
         # created_on is refreshed at every run start, so a match proves the row belongs
         # to the stopping run whatever task_id it carries. Both sides are the same float
@@ -1607,20 +1680,22 @@ def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Op
             # A mismatched task_id can be a stale leftover adopted from a zombie
             # in_progress row (crashed run) — created_on match overrides it.
             if created_on_matches is not True:
-                log.debug(f"Skipping cancel for index_name={index_name}: "
+                log.debug(f"Skipping finalize for index_name={index_name}: "
                           f"task_id mismatch (row={row_task_id}, expected={expected_task_id})")
                 return False
         elif row_task_id is None and created_on_matches is False:
             # Null task_id (agent path): a reused index_name may be a NEWER run, so only
             # a confirmed mismatch skips. Warning, not debug — this fires spuriously if
             # any writer other than the SDK ever lands last on a null-id row.
-            log.warning(f"Skipping cancel for index_name={index_name}: created_on mismatch "
+            log.warning(f"Skipping finalize for index_name={index_name}: created_on mismatch "
                         f"(row={meta.cmetadata.get('created_on')}, expected={expected_created_on}) - likely a newer run")
             return False
     #
-    meta.cmetadata["state"] = IndexDataStatus.cancelled.value
+    meta.cmetadata["state"] = target_state
     meta.cmetadata["task_id"] = None
     meta.cmetadata["updated_on"] = time.time()
+    if error is not None:
+        meta.cmetadata["error"] = error
     history_raw = meta.cmetadata.pop("history", "[]")
     try:
         history = json.loads(history_raw) if history_raw.strip() else []
@@ -1643,7 +1718,8 @@ def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Op
         ).delete(synchronize_session=False)
         session.commit()
     #
-    log.debug(f"Cancelled index_meta for index_name={index_name} (delete_embeddings={delete_embeddings})")
+    log.debug(f"Finalized index_meta as '{target_state}' for index_name={index_name} "
+              f"(delete_embeddings={delete_embeddings})")
     return True
 
 
@@ -1665,14 +1741,39 @@ def cancel_toolkit_index_meta(connection_string: str, toolkit_name_id: str, inde
     session: reuse an open session instead of opening a second engine.
     """
     if session is not None:
-        return _cancel_index_meta_in_session(
-            session, index_name, expected_task_id, delete_embeddings,
-            require_in_progress, expected_created_on,
+        return _finalize_index_meta_in_session(
+            session, index_name, IndexDataStatus.cancelled.value, expected_task_id,
+            delete_embeddings, require_in_progress, expected_created_on,
         )
     with get_session_for_schema(connection_string, toolkit_name_id) as session:
-        return _cancel_index_meta_in_session(
-            session, index_name, expected_task_id, delete_embeddings,
-            require_in_progress, expected_created_on,
+        return _finalize_index_meta_in_session(
+            session, index_name, IndexDataStatus.cancelled.value, expected_task_id,
+            delete_embeddings, require_in_progress, expected_created_on,
+        )
+
+
+def reclaim_toolkit_index_meta(connection_string: str, toolkit_name_id: str, index_name: str,
+                               expected_task_id: Optional[str],
+                               expected_created_on: Optional[float],
+                               min_updated_age: float) -> bool:
+    """Transition an abandoned in_progress index_meta row to 'interrupted'.
+
+    Driven by the index_reclaim sweep for runs whose worker died without writing a
+    terminal state (hard kill, OOM, restart). The ownership guards and the in-lock
+    min_updated_age re-check make a reclaim for run A unable to touch a newer run B
+    or a run that proved itself alive after the sweep's scan.
+    """
+    error = (
+        f"Indexing was interrupted: the worker stopped without reporting a result "
+        f"(no progress for over {int(min_updated_age)}s). No source error occurred. "
+        f"Reindex to try again."
+    )
+    with get_session_for_schema(connection_string, toolkit_name_id) as session:
+        return _finalize_index_meta_in_session(
+            session, index_name, IndexDataStatus.interrupted.value, expected_task_id,
+            delete_embeddings=False, require_in_progress=True,
+            expected_created_on=expected_created_on, error=error,
+            for_update=True, min_updated_age=min_updated_age,
         )
 
 

@@ -63,6 +63,7 @@ class IndexDataStatus(StrEnum):
     cancelled = 'cancelled'
     created = 'created'
     scheduled_reindex = 'scheduled_reindex'
+    interrupted = 'interrupted'
 
 
 class ToolEntityTypes(StrEnum):

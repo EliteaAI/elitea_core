@@ -508,6 +508,7 @@ class Module(module.ModuleModel):
             scheduler_cfg = self.descriptor.config.get('scheduler', {}) or {}
             idx_cfg = scheduler_cfg.get('index_scheduling', {}) or {}
             pipe_cfg = scheduler_cfg.get('pipeline_scheduling', {}) or {}
+            reclaim_cfg = scheduler_cfg.get('index_reclaim', {}) or {}
 
             self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
                 'rpc_func': 'applications_empty_state',
@@ -550,6 +551,13 @@ class Module(module.ModuleModel):
                 'name': 'pat_expiration_check',
                 'cron': '0 * * * *',
                 'active': True
+            })
+            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
+                'rpc_func': 'elitea_core_reclaim_interrupted_indexes',
+                'rpc_kwargs': {},
+                'name': 'index_reclaim',
+                'cron': reclaim_cfg.get('cron', '*/10 * * * *'),
+                'active': bool(reclaim_cfg.get('enabled', True)),
             })
             self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
                 'rpc_func': 'pipelines_check_scheduling',
@@ -1038,6 +1046,7 @@ class Module(module.ModuleModel):
         targets = (
             ('index_scheduling', scheduler_cfg.get('index_scheduling', {}) or {}),
             ('pipeline_scheduling', scheduler_cfg.get('pipeline_scheduling', {}) or {}),
+            ('index_reclaim', scheduler_cfg.get('index_reclaim', {}) or {}),
         )
         for name, sub in targets:
             cron = sub.get('cron')
