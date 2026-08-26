@@ -330,6 +330,23 @@
       "default": "* * * * *",
       "visible_when": { "field": "index_scheduling_enabled", "value": true }
     },
+    "index_reclaim_enabled": {
+      "type": "boolean",
+      "title": "Index Reclaim Enabled",
+      "description": "Master switch for the sweep that marks abandoned index runs as interrupted. Disable to stop the sweep platform-wide; stuck runs then stay 'in progress' until it is re-enabled.",
+      "path": "scheduler.index_reclaim.enabled",
+      "section": "runtime",
+      "default": true
+    },
+    "index_reclaim_cron": {
+      "type": "string",
+      "title": "Index Reclaim Cron",
+      "description": "How often the reclaim sweep fires. Standard 5-field cron expression. Each tick walks every project's indexable toolkits, so slowing this down reduces baseline platform load and delays recovery of stuck runs by up to that interval.",
+      "path": "scheduler.index_reclaim.cron",
+      "section": "runtime",
+      "default": "*/10 * * * *",
+      "visible_when": { "field": "index_reclaim_enabled", "value": true }
+    },
     "analytics_enabled": {
       "type": "boolean",
       "title": "Show Analytics",

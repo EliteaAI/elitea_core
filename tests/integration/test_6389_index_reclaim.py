@@ -145,6 +145,33 @@ class TestShouldReclaimPredicate:
         assert decision is False
         assert calls == ["task-1"]
 
+    def test_running_verdict_stops_protecting_past_the_hard_ceiling(self, application_tools_module):
+        m = application_tools_module
+        ceiling = m.RECLAIM_HARD_CEILING_FACTOR * TIMEOUT
+        below, _ = self._call(m, _row(age=ceiling - 1), status="running")
+        above, calls = self._call(m, _row(age=ceiling + 1), status="running")
+        assert below is False
+        assert above is True
+        assert calls == []
+
+    def test_hard_ceiling_factor_is_overridable(self, application_tools_module):
+        m = application_tools_module
+        stale_for_four_timeouts = _row(age=TIMEOUT * 4)
+        widened = m.should_reclaim_index_meta(
+            stale_for_four_timeouts, self.NOW, TIMEOUT, lambda _: 'running', False, 6,
+        )
+        tightened = m.should_reclaim_index_meta(
+            stale_for_four_timeouts, self.NOW, TIMEOUT, lambda _: 'running', False, 2,
+        )
+        assert widened is False
+        assert tightened is True
+
+    def test_hard_ceiling_never_applies_to_a_young_row(self, application_tools_module):
+        m = application_tools_module
+        decision, calls = self._call(m, _row(age=TIMEOUT * 0.5), status="running")
+        assert decision is False
+        assert calls == []
+
     def test_old_run_with_stopped_task_is_reclaimed(self, application_tools_module):
         decision, _ = self._call(application_tools_module, _row(), status="stopped")
         assert decision is True
@@ -214,7 +241,7 @@ def _finalize(m, meta, target_state="interrupted", **kwargs):
 
 class TestFinalizeWrite:
 
-    def test_reclaim_writes_state_error_and_history_consistently(self, application_tools_module):
+    def test_finalize_writes_state_error_and_history_consistently(self, application_tools_module):
         m = application_tools_module
         meta = _meta_row(_row())
         result, session = _finalize(m, meta, error="interrupted by the platform")
@@ -282,7 +309,7 @@ class TestFinalizeWrite:
         )
         assert result is True
         assert meta.cmetadata["state"] == "cancelled"
-        assert "error" not in meta.cmetadata or meta.cmetadata["error"] != ""
+        assert meta.cmetadata["task_id"] is None
         history = json.loads(meta.cmetadata["history"])
         assert history[-1]["state"] == "cancelled"
 
@@ -363,4 +390,5 @@ class TestFinalizeWrite:
         assert result is True
         assert seen_for_update == [True]
         assert meta.cmetadata["state"] == "interrupted"
+        assert meta.cmetadata["task_id"] == "task-1"
         assert f"over {TIMEOUT}s" in meta.cmetadata["error"]

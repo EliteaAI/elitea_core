@@ -22,6 +22,11 @@ scheduler:
   index_scheduling:
     enabled: true
     cron: "* * * * *"
+  index_reclaim:
+    enabled: true
+    cron: "*/10 * * * *"
+    reclaim_untracked: false
+    hard_ceiling_factor: 3
 
 pgvector_engine_cache:
   pool_size: 5              # persistent connections per cached engine

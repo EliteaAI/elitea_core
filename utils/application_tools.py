@@ -423,12 +423,24 @@ def _get_pgvector_engine(conn_str: str):
             entry[1] = time.monotonic()
             _PGVECTOR_ENGINE_CACHE.move_to_end(conn_str)
             return entry[0]
+        # Customer-owned databases, so both halves of a hang need a bound: a host
+        # that never answers the handshake, and one that never returns from a query.
+        # libpq-only, hence the dialect check.
+        statement_timeout_ms = _pgvector_cache_cfg('statement_timeout_sec', 60) * 1000
+        connect_args = (
+            {
+                'connect_timeout': _pgvector_cache_cfg('connect_timeout', 10),
+                'options': f'-c statement_timeout={statement_timeout_ms}',
+            }
+            if conn_str.startswith('postgres') else {}
+        )
         engine = create_engine(
             conn_str,
             pool_recycle=3600,
             pool_pre_ping=True,
             pool_size=_pgvector_cache_cfg('pool_size', 5),
             max_overflow=_pgvector_cache_cfg('max_overflow', 10, minimum=0),
+            connect_args=connect_args,
         )
         _PGVECTOR_ENGINE_CACHE[conn_str] = [engine, time.monotonic()]
         overflowed = _evict_pgvector_overflow()
@@ -1595,6 +1607,14 @@ TASK_LOST = 'task_lost'
 
 UNTRACKED_RECLAIM_AGE_FACTOR = 2
 
+# Task state is cached by every node on the bus and pruned only on a 'stopped' a
+# hard-killed run never sends, so a surviving node answers 'running' for a dead run
+# indefinitely — making this the path most reclaims take, not a backstop. A live run
+# rewrites updated_on every INDEX_META_UPDATE_INTERVAL and never approaches even one
+# timeout; the margin is for an SDK predating the load-phase heartbeat, which can go
+# quiet for a whole source enumeration.
+RECLAIM_HARD_CEILING_FACTOR = 3
+
 
 DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC = 7200
 
@@ -1611,12 +1631,15 @@ def read_task_disconnected_timeout(project_id: int) -> int:
 
 
 def should_reclaim_index_meta(cmetadata: dict, now: float, task_disconnected_timeout: float,
-                              resolve_task_status, reclaim_untracked: bool = False) -> bool:
+                              resolve_task_status, reclaim_untracked: bool = False,
+                              hard_ceiling_factor: float = RECLAIM_HARD_CEILING_FACTOR) -> bool:
     """Whether an in_progress index_meta row belongs to a dead run.
 
     resolve_task_status: callable(task_id) -> arbiter status, or TASK_LOST when no node
         owns the task. Consulted only past the age gate, since it costs a network
-        round-trip. Any live status means a slow-but-alive run, which must be left alone.
+        round-trip. A live status protects the run up to the hard ceiling, beyond which
+        no run still refreshes its heartbeat and the verdict is treated as a stale
+        cache entry.
 
     reclaim_untracked: off by default because a row without a task id has no liveness
         oracle at all, and an agent-inline run carries none for its entire life. An
@@ -1632,6 +1655,10 @@ def should_reclaim_index_meta(cmetadata: dict, now: float, task_disconnected_tim
         return False
     task_id = cmetadata.get('task_id')
     if task_id:
+        # Past the ceiling the verdict cannot change the outcome, so skip the probe
+        # rather than pay a network round-trip per tick to be told 'running'.
+        if age > hard_ceiling_factor * task_disconnected_timeout:
+            return True
         return resolve_task_status(task_id) in (TASK_LOST, 'stopped')
     return bool(reclaim_untracked) and age > UNTRACKED_RECLAIM_AGE_FACTOR * task_disconnected_timeout
 
@@ -1642,7 +1669,8 @@ def _finalize_index_meta_in_session(session, index_name: str, target_state: str,
                                     expected_created_on: Optional[float],
                                     error: Optional[str] = None,
                                     for_update: bool = False,
-                                    min_updated_age: Optional[float] = None) -> bool:
+                                    min_updated_age: Optional[float] = None,
+                                    clear_task_id: bool = True) -> bool:
     """Core terminal-state write against an already-open session. Shared by the cancel
     paths (see cancel_toolkit_index_meta) and the abandoned-run reclaim
     (see reclaim_toolkit_index_meta)."""
@@ -1697,7 +1725,8 @@ def _finalize_index_meta_in_session(session, index_name: str, target_state: str,
             return False
     #
     meta.cmetadata["state"] = target_state
-    meta.cmetadata["task_id"] = None
+    if clear_task_id:
+        meta.cmetadata["task_id"] = None
     meta.cmetadata["updated_on"] = time.time()
     if error is not None:
         meta.cmetadata["error"] = error
@@ -1779,6 +1808,9 @@ def reclaim_toolkit_index_meta(connection_string: str, toolkit_name_id: str, ind
             delete_embeddings=False, require_in_progress=True,
             expected_created_on=expected_created_on, error=error,
             for_update=True, min_updated_age=min_updated_age,
+            # Keep the id: if this reclaim turns out to be wrong, it is the only thing
+            # Stop can corroborate against to kill a run that is still writing.
+            clear_task_id=False,
         )
 
 

@@ -8,7 +8,7 @@ from sqlalchemy import cast, inspect, Numeric, nullslast
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm.attributes import flag_modified
 
-from tools import api_tools, auth, config as c, serialize, db, VaultClient
+from tools import api_tools, auth, config as c, serialize, db
 from ...models.elitea_tools import EliteATool
 from ...models.indexer import EmbeddingStore
 from ...models.pd.index import UpdateIndexingSchedule, ToolkitIndexingSchedule
