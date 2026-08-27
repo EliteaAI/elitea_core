@@ -81,12 +81,11 @@ class EvalRunJudgeUnconfiguredError(Exception):
 def effective_engine(binding: dict) -> str:
     """Engine a binding actually runs on, independent of a possibly-stale stored value.
 
-    Only dimension bindings honor the editable ``engine`` column (ai/human); code
-    validations and platform validations always run on the code engine (§12 — engine
-    is overridable for a dimension only). Mirrors the UI ``getBindingEngineLabel`` so a
-    binding stored with the wrong engine (e.g. a code validation left at ``'ai'``) still
-    dispatches to the code path instead of the AI judge."""
-    if binding.get('code_validation_id') is not None or binding.get('platform_key') is not None:
+    A dimension binding's engine is whatever the binding stores (ai/human/code — validated
+    against the dimension's ``allowed_engines`` at binding time); only platform-validation
+    bindings are force-mapped, since those always run on the code engine (§12). Mirrors the
+    UI ``getBindingEngineLabel``."""
+    if binding.get('platform_key') is not None:
         return ENGINE_CODE
     return binding.get('engine') or ENGINE_AI
 
@@ -158,7 +157,6 @@ def build_run_snapshot(
     *,
     suite: dict,
     dimensions: List[dict],
-    code_validations: List[dict],
     bindings: List[dict],
     cases: List[dict],
     application_id: int,
@@ -168,8 +166,9 @@ def build_run_snapshot(
 ) -> dict:
     """Freeze suite config + definitions + bindings + case set + scale specs into one snapshot
     (§3.4 — later edits must never mutate history). Shape is consumed both here and by the B5/B6
-    re-aggregation path: ``dimensions`` is keyed by ``str(id)`` (scale lookups), ``bindings`` is a
-    flat list (weight map + engine split). ``application_version_id`` is mandatory (D3, §21.6)."""
+    re-aggregation path: ``dimensions`` is keyed by ``str(id)`` (scale lookups; carries ``code``/
+    ``return_contract`` for code-engine dimensions), ``bindings`` is a flat list (weight map +
+    engine split). ``application_version_id`` is mandatory (D3, §21.6)."""
     if application_version_id is None:
         raise ValueError('application_version_id is required (D3, §21.6 version pin)')
 
@@ -191,25 +190,15 @@ def build_run_snapshot(
                 'scale_min': d.get('scale_min'),
                 'scale_max': d.get('scale_max'),
                 'polarity': d.get('polarity', 'higher_better'),
+                'code': d.get('code'),
+                'return_contract': d.get('return_contract', 'bool'),
             }
             for d in dimensions
-        },
-        'code_validations': {
-            str(cv['id']): {
-                'name': cv.get('name'),
-                'code': cv.get('code'),
-                'return_contract': cv.get('return_contract', 'bool'),
-                'scale_min': cv.get('scale_min'),
-                'scale_max': cv.get('scale_max'),
-                'polarity': cv.get('polarity', 'higher_better'),
-            }
-            for cv in code_validations
         },
         'bindings': [
             {
                 'engine': b.get('engine', ENGINE_AI),
                 'dimension_id': b.get('dimension_id'),
-                'code_validation_id': b.get('code_validation_id'),
                 'platform_key': b.get('platform_key'),
                 'evidence_scope': b.get('evidence_scope') or {},
                 'weight': b.get('weight', 1.0),
@@ -396,7 +385,7 @@ def cap_envelope(value, max_text: int = MAX_ENVELOPE_TEXT, max_bytes: int = MAX_
 
 def _result_row(
     case_id, *, engine, status, evidence,
-    dimension_id=None, code_validation_id=None, platform_key=None,
+    dimension_id=None, platform_key=None,
     native_score=None, normalized_score=None, verdict=None,
 ) -> dict:
     """One EvalResult-shaped dict (persistence layer splats it onto a row). Keys mirror the
@@ -407,7 +396,6 @@ def _result_row(
     return {
         'dataset_case_id': case_id,
         'dimension_id': dimension_id,
-        'code_validation_id': code_validation_id,
         'platform_key': platform_key,
         'engine': engine,
         'status': status,
@@ -430,8 +418,8 @@ def _normalize_dimension(native, snapshot: dict, dimension_id) -> Optional[float
         return None  # degenerate scale never sinks the run — item just contributes no score
 
 
-def _normalize_code(native, snapshot: dict, code_validation_id) -> Optional[float]:
-    spec = (snapshot.get('code_validations') or {}).get(str(code_validation_id)) or {}
+def _normalize_code(native, snapshot: dict, dimension_id) -> Optional[float]:
+    spec = (snapshot.get('dimensions') or {}).get(str(dimension_id)) or {}
     scale_type = 'binary' if spec.get('return_contract', 'bool') == 'bool' else 'continuous'
     try:
         return normalize_score(
@@ -468,7 +456,7 @@ def _map_code_verdict(case_id, binding: dict, verdict: dict, snapshot: dict, evi
     """code_validation verdict → EvalResult dict. 'scored' → ok with normalized native; 'error'
     (timeout/OOM/exception) and 'unavailable' (Deno absent, §19.7) both degrade to an error row so
     the run survives; 'na' maps to skipped."""
-    cv_id = binding.get('code_validation_id')
+    dim_id = binding.get('dimension_id')
     vstatus = verdict.get('status')
     base_verdict = {
         'passed': verdict.get('passed'),
@@ -481,14 +469,14 @@ def _map_code_verdict(case_id, binding: dict, verdict: dict, snapshot: dict, evi
         native = verdict.get('native_score')
         return _result_row(
             case_id, engine=ENGINE_CODE, status=STATUS_OK, evidence=evidence,
-            code_validation_id=cv_id, native_score=native,
-            normalized_score=_normalize_code(native, snapshot, cv_id),
+            dimension_id=dim_id, native_score=native,
+            normalized_score=_normalize_code(native, snapshot, dim_id),
             verdict=base_verdict,
         )
     status = STATUS_SKIPPED if vstatus == 'na' else STATUS_ERROR
     return _result_row(
         case_id, engine=ENGINE_CODE, status=status, evidence=evidence,
-        code_validation_id=cv_id, verdict=base_verdict,
+        dimension_id=dim_id, verdict=base_verdict,
     )
 
 
@@ -588,7 +576,7 @@ def assemble_case_results(
             else:
                 results.append(_result_row(
                     case['id'], engine=engine, status=STATUS_ERROR, evidence=evidence,
-                    dimension_id=b.get('dimension_id'), code_validation_id=b.get('code_validation_id'),
+                    dimension_id=b.get('dimension_id'),
                     platform_key=b.get('platform_key'), verdict={'error': agent_error}))
         return results
 
@@ -834,7 +822,7 @@ def orchestrate_run(
     weight_map = snapshot_weight_map(snapshot)
     scored_items = [
         (r['dataset_case_id'],
-         binding_item_key(r.get('dimension_id'), r.get('code_validation_id'), r.get('platform_key')),
+         binding_item_key(r.get('dimension_id'), r.get('platform_key')),
          r['normalized_score'])
         for r in all_results if r['status'] == STATUS_OK
     ]
@@ -930,11 +918,11 @@ def _make_code_scorer(snapshot: dict, executor):
     from .code_validation import run_code_validation, _RESULT_SENTINEL
 
     def _score(binding: dict, evidence: dict) -> dict:
-        cv_id = binding.get('code_validation_id')
-        spec = (snapshot.get('code_validations') or {}).get(str(cv_id)) or {}
+        dim_id = binding.get('dimension_id')
+        spec = (snapshot.get('dimensions') or {}).get(str(dim_id)) or {}
         return run_code_validation(
             spec.get('code', ''),
-            code_validation_id=cv_id, name=spec.get('name', ''),
+            dimension_id=dim_id, name=spec.get('name', ''),
             output=evidence.get('output'),
             expected=evidence.get('expected_output', _RESULT_SENTINEL)
             if 'expected_output' in evidence else _RESULT_SENTINEL,

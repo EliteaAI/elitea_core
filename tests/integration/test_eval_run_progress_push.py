@@ -190,7 +190,6 @@ def _snapshot(orch, case_count):
         suite={'id': 1, 'name': 'S', 'judge_model': None},
         dimensions=[{'id': 5, 'name': 'tone', 'scale_type': 'continuous',
                      'scale_min': 0, 'scale_max': 10}],
-        code_validations=[],
         bindings=[{'engine': 'human', 'dimension_id': 5, 'weight': 1.0}],
         cases=[{'id': i, 'input': f'q{i}', 'output': f'a{i}'} for i in range(case_count)],
         application_id=10,

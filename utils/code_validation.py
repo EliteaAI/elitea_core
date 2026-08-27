@@ -100,34 +100,34 @@ def _coerce_to_contract(value: Any, return_contract: str):
     return (1.0 if passed else 0.0), passed, None
 
 
-def _base_verdict(code_validation_id: Optional[int], name: str) -> dict:
+def _base_verdict(dimension_id: Optional[int], name: str) -> dict:
     return {
-        'code_validation_id': code_validation_id, 'name': name,
+        'dimension_id': dimension_id, 'name': name,
         'native_score': None, 'passed': None,
         'stdout': None, 'execution_time': None,
         'status': STATUS_ERROR, 'error': None,
     }
 
 
-def na_verdict(code_validation_id: Optional[int], name: str) -> dict:
+def na_verdict(dimension_id: Optional[int], name: str) -> dict:
     """Reference-based validation skipped: case has no ``expected_output`` (§17.5).
     Excluded from the aggregate; never counts as pass or fail."""
-    v = _base_verdict(code_validation_id, name)
+    v = _base_verdict(dimension_id, name)
     v.update(status=STATUS_NA, error='Skipped: validation needs expected_output, case has none.')
     return v
 
 
-def unavailable_verdict(code_validation_id: Optional[int], name: str,
+def unavailable_verdict(dimension_id: Optional[int], name: str,
                         detail: str = 'Sandbox runtime unavailable.') -> dict:
     """Deno/Pyodide runtime absent — a clear 'unavailable' verdict, never an unsandboxed
     fallback (§19.7)."""
-    v = _base_verdict(code_validation_id, name)
+    v = _base_verdict(dimension_id, name)
     v.update(status=STATUS_UNAVAILABLE, error=detail)
     return v
 
 
-def error_verdict(code_validation_id: Optional[int], name: str, error: str) -> dict:
-    v = _base_verdict(code_validation_id, name)
+def error_verdict(dimension_id: Optional[int], name: str, error: str) -> dict:
+    v = _base_verdict(dimension_id, name)
     v.update(status=STATUS_ERROR, error=error)
     return v
 
@@ -135,7 +135,7 @@ def error_verdict(code_validation_id: Optional[int], name: str, error: str) -> d
 def map_execution_result(
     exec_result: dict,
     *,
-    code_validation_id: Optional[int],
+    dimension_id: Optional[int],
     name: str,
     return_contract: str = 'bool',
 ) -> dict:
@@ -151,19 +151,19 @@ def map_execution_result(
     status = exec_result.get('status')
 
     if status != 'success':
-        v = error_verdict(code_validation_id, name,
+        v = error_verdict(dimension_id, name,
                           exec_result.get('stderr') or f'Sandbox execution {status}.')
         v.update(stdout=stdout, execution_time=exec_time)
         return v
 
     native, passed, err = _coerce_to_contract(exec_result.get('result'), return_contract)
     if err:
-        v = error_verdict(code_validation_id, name, err)
+        v = error_verdict(dimension_id, name, err)
         v.update(stdout=stdout, execution_time=exec_time)
         return v
 
     return {
-        'code_validation_id': code_validation_id, 'name': name,
+        'dimension_id': dimension_id, 'name': name,
         'native_score': native, 'passed': passed,
         'stdout': stdout, 'execution_time': exec_time,
         'status': STATUS_SCORED, 'error': None,
@@ -211,7 +211,7 @@ def make_task_node_executor(
 def run_code_validation(
     script: str,
     *,
-    code_validation_id: Optional[int],
+    dimension_id: Optional[int],
     name: str,
     output: Any,
     expected: Any = _RESULT_SENTINEL,
@@ -239,7 +239,7 @@ def run_code_validation(
     """
     violations = screen_validation_code(script)
     if violations:
-        return error_verdict(code_validation_id, name, '; '.join(violations))
+        return error_verdict(dimension_id, name, '; '.join(violations))
 
     prelude = build_validation_prelude(
         script, output=output, expected=expected, input=input, structure=structure,
@@ -248,10 +248,10 @@ def run_code_validation(
 
     if exec_result.get('status') == STATUS_UNAVAILABLE:
         return unavailable_verdict(
-            code_validation_id, name,
+            dimension_id, name,
             exec_result.get('stderr') or 'Sandbox runtime unavailable.',
         )
     return map_execution_result(
-        exec_result, code_validation_id=code_validation_id,
+        exec_result, dimension_id=dimension_id,
         name=name, return_contract=return_contract,
     )

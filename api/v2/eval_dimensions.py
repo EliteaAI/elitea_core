@@ -29,7 +29,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "include_platform", "in": "query", "schema": {"type": "boolean", "default": True}, "description": "Include read-only platform-tier seeds"},
-            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "Scope agent_adhoc-tier results to this agent (legacy NULL-owner rows stay visible to all)"},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "UX scoping only, not access control: hides agent_adhoc dimensions owned by other agents from this listing (legacy NULL-owner rows stay visible to all). Every project member already has permission to every dimension in the project regardless of this value."},
         ],
         tags=["elitea_core/evaluation"],
     )

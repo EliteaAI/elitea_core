@@ -1,5 +1,5 @@
-"""CRUD for the Agent-Evaluation **Library** — dimension + code-validation definitions
-(EVAL-P1-B1, §16 / §3.1 / §19).
+"""CRUD for the Agent-Evaluation **Library** — dimension definitions, any engine
+(EVAL-P1-B1, §16 / §3.1 / §19 / §2.1).
 
 Definitions only (bindings are B2). Tables are project-scoped (``p_<project_id>``) and
 already provisioned by H6. Errors follow the ``SkillError`` convention: each carries an
@@ -13,13 +13,8 @@ from sqlalchemy.exc import IntegrityError
 
 from tools import db
 
-from ..models.evaluation import EvalDimension, EvalCodeValidation, EvalTier
-from ..models.pd.evaluation import (
-    EvalDimensionCreateModel,
-    EvalDimensionUpdateModel,
-    EvalCodeValidationCreateModel,
-    EvalCodeValidationUpdateModel,
-)
+from ..models.evaluation import EvalDimension, EvalTier
+from ..models.pd.evaluation import EvalDimensionCreateModel, EvalDimensionUpdateModel
 from .evaluation_code_screen import screen_validation_code
 
 
@@ -34,14 +29,6 @@ class EvalDimensionNotFoundError(EvalLibraryError):
     def __init__(self, dimension_id: int):
         super().__init__(f'Eval dimension with id {dimension_id} not found')
         self.dimension_id = dimension_id
-
-
-class EvalCodeValidationNotFoundError(EvalLibraryError):
-    http_status = 404
-
-    def __init__(self, code_validation_id: int):
-        super().__init__(f'Code validation with id {code_validation_id} not found')
-        self.code_validation_id = code_validation_id
 
 
 class EvalNameConflictError(EvalLibraryError):
@@ -101,7 +88,19 @@ def list_dimensions(
 
     When ``agent_id`` is given, ``agent_adhoc`` rows are additionally scoped to that
     agent: only dimensions owned by it, or legacy rows predating the ownership column
-    (``agent_id IS NULL``, treated as visible everywhere), are included."""
+    (``agent_id IS NULL``, treated as visible everywhere), are included.
+
+    NOTE — this is UX scoping, not an access-control boundary. ``agent_id`` is caller
+    supplied (a query param at the API layer) and is not validated against the caller's
+    session; a caller can pass any agent id in the project. That is intentionally fine:
+    the actual security boundary is the project-level permission check already enforced
+    by ``@auth.decorators.check_api`` on every dimension endpoint (viewer/editor of the
+    *project*), and every project-tier dimension is visible to every project member
+    regardless of ``agent_id`` anyway. ``agent_id`` only decides which *agent_adhoc*
+    (per-agent draft) dimensions are hidden from a caller building/testing a different
+    agent in the same project — a decluttering nicety, not a privacy guarantee. Do not
+    use this parameter to gate access to data a caller shouldn't see at all; that must be
+    enforced via the project permission system instead."""
     with _session(session, project_id) as s:
         query = s.query(EvalDimension)
         if not include_platform:
@@ -142,6 +141,11 @@ def create_dimension(
     owner_id: int,
     session=None,
 ) -> EvalDimension:
+    if data.code:
+        violations = screen_validation_code(data.code)
+        if violations:
+            raise EvalCodeScreenError(violations)
+
     with _session(session, project_id) as s:
         dimension = EvalDimension(
             tier=data.tier,
@@ -156,6 +160,8 @@ def create_dimension(
             default_weight=data.default_weight,
             default_target=data.default_target,
             default_target_operator=data.default_target_operator,
+            code=data.code,
+            return_contract=data.return_contract,
             owner_id=owner_id,
             meta=data.meta,
         )
@@ -186,6 +192,10 @@ def update_dimension(
         fields = data.model_dump(exclude_unset=True)
         fields.pop('tier', None)  # tier is immutable post-create
         fields.pop('agent_id', None)  # ownership is coupled to tier; immutable post-create
+        if fields.get('code'):
+            violations = screen_validation_code(fields['code'])
+            if violations:
+                raise EvalCodeScreenError(violations)
         for key, value in fields.items():
             setattr(dimension, key, value)
         try:
@@ -207,100 +217,3 @@ def delete_dimension(
         if dimension.tier == EvalTier.platform:
             raise EvalTierImmutableError(dimension.tier)
         s.delete(dimension)
-
-
-# ----------------------------------------------------------------------------
-# Code-validation definitions (project-tier only — §19.6)
-# ----------------------------------------------------------------------------
-
-def list_code_validations(project_id: int, session=None) -> List[EvalCodeValidation]:
-    with _session(session, project_id) as s:
-        return (
-            s.query(EvalCodeValidation)
-            .order_by(EvalCodeValidation.name.asc(), EvalCodeValidation.id.asc())
-            .all()
-        )
-
-
-def get_code_validation(project_id: int, code_validation_id: int, session=None) -> Optional[EvalCodeValidation]:
-    with _session(session, project_id) as s:
-        return (
-            s.query(EvalCodeValidation)
-            .filter(EvalCodeValidation.id == code_validation_id)
-            .first()
-        )
-
-
-def create_code_validation(
-    project_id: int,
-    data: EvalCodeValidationCreateModel,
-    owner_id: int,
-    session=None,
-) -> EvalCodeValidation:
-    violations = screen_validation_code(data.code)
-    if violations:
-        raise EvalCodeScreenError(violations)
-
-    with _session(session, project_id) as s:
-        code_validation = EvalCodeValidation(
-            name=data.name,
-            description=data.description,
-            code=data.code,
-            return_contract=data.return_contract,
-            scale_min=data.scale_min,
-            scale_max=data.scale_max,
-            polarity=data.polarity,
-            owner_id=owner_id,
-            meta=data.meta,
-        )
-        s.add(code_validation)
-        try:
-            s.flush()
-        except IntegrityError:
-            s.rollback()
-            raise EvalNameConflictError(data.name)
-        s.refresh(code_validation)
-        return code_validation
-
-
-def update_code_validation(
-    project_id: int,
-    code_validation_id: int,
-    data: EvalCodeValidationUpdateModel,
-    session=None,
-) -> EvalCodeValidation:
-    fields = data.model_dump(exclude_unset=True)
-    if 'code' in fields:
-        violations = screen_validation_code(fields['code'])
-        if violations:
-            raise EvalCodeScreenError(violations)
-
-    with _session(session, project_id) as s:
-        code_validation = (
-            s.query(EvalCodeValidation)
-            .filter(EvalCodeValidation.id == code_validation_id)
-            .first()
-        )
-        if not code_validation:
-            raise EvalCodeValidationNotFoundError(code_validation_id)
-        for key, value in fields.items():
-            setattr(code_validation, key, value)
-        try:
-            s.flush()
-        except IntegrityError:
-            s.rollback()
-            raise EvalNameConflictError(fields.get('name') or code_validation.name)
-        s.refresh(code_validation)
-        return code_validation
-
-
-def delete_code_validation(project_id: int, code_validation_id: int, session=None) -> None:
-    with _session(session, project_id) as s:
-        code_validation = (
-            s.query(EvalCodeValidation)
-            .filter(EvalCodeValidation.id == code_validation_id)
-            .first()
-        )
-        if not code_validation:
-            raise EvalCodeValidationNotFoundError(code_validation_id)
-        s.delete(code_validation)

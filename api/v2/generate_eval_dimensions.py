@@ -108,12 +108,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not template:
             return {"error": "Service prompt 'generate_eval_dimensions' is not configured"}, 500
 
-        # Both writable tiers, not just project: `_eval_dimension_tier_name_uc` is (tier, name)
-        # and EvalDimension has no application_id, so agent_adhoc is a project-wide namespace
-        # shared by every agent — the tier drafts default to is the one most likely to collide.
+        # Both writable tiers, not just project. Scoped to this agent so agent_adhoc names
+        # owned by *other* agents (which this agent can't see, and can't collide with —
+        # uniqueness is per (name, agent_id) for agent_adhoc, see models/evaluation.py)
+        # aren't leaked into the LLM prompt as "existing names to avoid".
         try:
             existing_names = [
-                d.name for d in list_dimensions(project_id, include_platform=False)
+                d.name for d in list_dimensions(
+                    project_id, include_platform=False, agent_id=req.application_id,
+                )
             ]
         except Exception:
             log.exception("generate_eval_dimensions: failed to list existing dimensions")

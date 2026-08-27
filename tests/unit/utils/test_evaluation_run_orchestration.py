@@ -36,11 +36,10 @@ def scoring(utils_path):
 # helpers to build a snapshot
 # ---------------------------------------------------------------------------
 
-def _snapshot(orch, *, dimensions=(), code_validations=(), bindings=(), cases=()):
+def _snapshot(orch, *, dimensions=(), bindings=(), cases=()):
     return orch.build_run_snapshot(
         suite={'id': 1, 'name': 'S', 'judge_model': {'model_name': 'm'}},
         dimensions=list(dimensions),
-        code_validations=list(code_validations),
         bindings=list(bindings),
         cases=list(cases),
         application_id=10,
@@ -60,7 +59,7 @@ def _ai_result(dim_id, score, *, status='scored', error=None, name='d'):
 def test_snapshot_requires_application_version_id(orch):
     with pytest.raises(ValueError):
         orch.build_run_snapshot(
-            suite={}, dimensions=[], code_validations=[], bindings=[], cases=[],
+            suite={}, dimensions=[], bindings=[], cases=[],
             application_id=1, application_version_id=None,
         )
 
@@ -341,12 +340,12 @@ def test_ai_ordinal_normalization(orch):
 
 def test_code_scored_ok_and_normalized(orch):
     def code_scorer(binding, evidence):
-        return {'code_validation_id': 3, 'name': 'v', 'native_score': 1.0, 'passed': True,
+        return {'dimension_id': 3, 'name': 'v', 'native_score': 1.0, 'passed': True,
                 'stdout': 'ok', 'execution_time': 0.1, 'status': 'scored', 'error': None}
 
     snap = _snapshot(orch,
-                     code_validations=[{'id': 3, 'return_contract': 'bool'}],
-                     bindings=[{'engine': 'code', 'code_validation_id': 3}])
+                     dimensions=[{'id': 3, 'return_contract': 'bool'}],
+                     bindings=[{'engine': 'code', 'dimension_id': 3}])
     r = orch.assemble_case_results({'id': 1, 'output': 'x'}, snap, code_scorer=code_scorer)[0]
     assert r['engine'] == 'code' and r['status'] == 'ok'
     assert r['normalized_score'] == 100.0 and r['verdict']['passed'] is True
@@ -355,10 +354,10 @@ def test_code_scored_ok_and_normalized(orch):
 def test_code_unavailable_and_error_degrade_to_error(orch):
     for status in ('unavailable', 'error'):
         def code_scorer(binding, evidence, _s=status):
-            return {'code_validation_id': 3, 'status': _s, 'error': f'{_s} detail'}
+            return {'dimension_id': 3, 'status': _s, 'error': f'{_s} detail'}
 
-        snap = _snapshot(orch, code_validations=[{'id': 3}],
-                         bindings=[{'engine': 'code', 'code_validation_id': 3}])
+        snap = _snapshot(orch, dimensions=[{'id': 3}],
+                         bindings=[{'engine': 'code', 'dimension_id': 3}])
         r = orch.assemble_case_results({'id': 1, 'output': 'x'}, snap, code_scorer=code_scorer)[0]
         assert r['status'] == 'error' and r['normalized_score'] is None
 
@@ -367,15 +366,17 @@ def test_code_scorer_raising_degrades_to_error(orch):
     def code_scorer(binding, evidence):
         raise ValueError('dispatch blew up')
 
-    snap = _snapshot(orch, code_validations=[{'id': 3}],
-                     bindings=[{'engine': 'code', 'code_validation_id': 3}])
+    snap = _snapshot(orch, dimensions=[{'id': 3}],
+                     bindings=[{'engine': 'code', 'dimension_id': 3}])
     r = orch.assemble_case_results({'id': 1, 'output': 'x'}, snap, code_scorer=code_scorer)[0]
     assert r['status'] == 'error' and 'dispatch blew up' in r['verdict']['stderr']
 
 
-def test_code_validation_with_stale_ai_engine_still_runs_as_code(orch):
-    # A code-validation binding left with engine='ai' (stale creation default) must dispatch to
-    # the code scorer — never the AI judge, which would fail with no code_validation_id on the row.
+def test_code_dimension_with_stale_ai_engine_still_runs_as_code(orch):
+    # A code-engine dimension binding left with engine='ai' (stale creation default) must dispatch
+    # to the code scorer only when force-mapped; per current effective_engine, a dimension binding's
+    # engine is whatever is stored, so this exercises the AI branch instead — the code engine is
+    # only force-mapped for platform_key bindings. This binding, stored as 'ai', is scored as AI.
     ai_calls, code_calls = [], []
 
     def ai_scorer(evidence, dims):
@@ -384,22 +385,38 @@ def test_code_validation_with_stale_ai_engine_still_runs_as_code(orch):
 
     def code_scorer(binding, evidence):
         code_calls.append(binding)
-        return {'code_validation_id': 3, 'native_score': 1.0, 'passed': True,
+        return {'dimension_id': 3, 'native_score': 1.0, 'passed': True,
                 'stdout': 'ok', 'execution_time': 0.1, 'status': 'scored', 'error': None}
 
     snap = _snapshot(orch,
-                     code_validations=[{'id': 3, 'return_contract': 'bool'}],
-                     bindings=[{'engine': 'ai', 'code_validation_id': 3}])
+                     dimensions=[{'id': 3, 'return_contract': 'bool', 'scale_type': 'binary'}],
+                     bindings=[{'engine': 'ai', 'dimension_id': 3}])
     r = orch.assemble_case_results(
         {'id': 1, 'output': 'x'}, snap, ai_scorer=ai_scorer, code_scorer=code_scorer)[0]
-    assert ai_calls == []                                  # not routed to the judge
-    assert len(code_calls) == 1                            # routed to code scorer
+    assert code_calls == []                                # not routed to the code scorer
+    assert len(ai_calls) == 1                               # routed to the AI judge (stored engine)
+    assert r['engine'] == 'ai'
+
+
+def test_platform_binding_always_routes_to_code(orch):
+    # A platform-validation binding is always force-mapped to the code engine (§12), regardless of
+    # its stored engine value.
+    code_calls = []
+
+    def code_scorer(binding, evidence):
+        code_calls.append(binding)
+        return {'native_score': 1.0, 'passed': True,
+                'stdout': 'ok', 'execution_time': 0.1, 'status': 'scored', 'error': None}
+
+    snap = _snapshot(orch, bindings=[{'engine': 'ai', 'platform_key': 'pii'}])
+    r = orch.assemble_case_results(
+        {'id': 1, 'output': 'x'}, snap, code_scorer=code_scorer)[0]
+    assert len(code_calls) == 1
     assert r['engine'] == 'code' and r['status'] == 'ok'
-    assert r['code_validation_id'] == 3                    # row is joinable in the scorecard
 
 
 def test_effective_engine_derives_from_kind(orch):
-    assert orch.effective_engine({'engine': 'ai', 'code_validation_id': 3}) == 'code'
+    assert orch.effective_engine({'engine': 'ai', 'dimension_id': 3}) == 'ai'
     assert orch.effective_engine({'engine': 'human', 'platform_key': 'pii'}) == 'code'
     assert orch.effective_engine({'engine': 'human', 'dimension_id': 1}) == 'human'
     assert orch.effective_engine({'engine': 'ai', 'dimension_id': 1}) == 'ai'
@@ -465,28 +482,27 @@ def test_orchestrate_headline_matches_shared_aggregation(orch, scoring):
     # equals the shared path recomputed independently (B5/B6 parity)
     weight_map = scoring.snapshot_weight_map(snap)
     items = [(r['dataset_case_id'],
-              scoring.binding_item_key(r.get('dimension_id'), r.get('code_validation_id'),
-                                       r.get('platform_key')),
+              scoring.binding_item_key(r.get('dimension_id'), r.get('platform_key')),
               r['normalized_score'])
              for r in out['results'] if r['status'] == 'ok']
     assert scoring.aggregate_run_score(items, weight_map) == 50.0
 
 
 def test_orchestrate_weights_dim_and_code_on_same_case(orch):
-    # dim binary pass=100 weight 3; code bool fail=0 weight 1 -> (100*3+0*1)/4 = 75
+    # ai dim binary pass=100 weight 3; code dim bool fail=0 weight 1 -> (100*3+0*1)/4 = 75
     def ai_scorer(evidence, dims):
         return [_ai_result(1, 1)]
 
     def code_scorer(binding, evidence):
-        return {'code_validation_id': 9, 'native_score': 0.0, 'passed': False, 'status': 'scored'}
+        return {'dimension_id': 9, 'native_score': 0.0, 'passed': False, 'status': 'scored'}
 
     snap = _snapshot(
         orch,
-        dimensions=[{'id': 1, 'scale_type': 'binary'}],
-        code_validations=[{'id': 9, 'return_contract': 'bool'}],
+        dimensions=[{'id': 1, 'scale_type': 'binary'},
+                    {'id': 9, 'return_contract': 'bool'}],
         bindings=[
             {'engine': 'ai', 'dimension_id': 1, 'weight': 3.0},
-            {'engine': 'code', 'code_validation_id': 9, 'weight': 1.0},
+            {'engine': 'code', 'dimension_id': 9, 'weight': 1.0},
         ],
         cases=[{'id': 1, 'output': 'x'}],
     )
@@ -984,20 +1000,20 @@ def test_no_agent_runner_leaves_output_none(orch):
 def test_snapshot_weight_map_keys_by_item(orch, scoring):
     snap = _snapshot(orch, bindings=[
         {'engine': 'ai', 'dimension_id': 1, 'weight': 2.0},
-        {'engine': 'code', 'code_validation_id': 9, 'weight': 5.0},
+        {'engine': 'code', 'dimension_id': 9, 'weight': 5.0},
     ])
     wm = scoring.snapshot_weight_map(snap)
-    assert wm[(1, None, None)] == 2.0
-    assert wm[(None, 9, None)] == 5.0
+    assert wm[(1, None)] == 2.0
+    assert wm[(9, None)] == 5.0
 
 
 def test_aggregate_run_score_defaults_and_excludes(scoring):
     # case A: one item normalized 80, weight default 1 -> 80
     # case B: item None (excluded) + item 40 weight 1 -> 40 ; headline mean = 60
     items = [
-        ('A', (1, None, None), 80.0),
-        ('B', (1, None, None), None),
-        ('B', (None, 9, None), 40.0),
+        ('A', (1, None), 80.0),
+        ('B', (1, None), None),
+        ('B', (9, None), 40.0),
     ]
     assert scoring.aggregate_run_score(items, {}) == 60.0
 
@@ -1067,7 +1083,8 @@ def test_snapshot_needs_judge_true_for_an_ai_dimension_binding(orch):
 def test_snapshot_needs_judge_false_for_human_and_code_only(orch):
     snapshot = {'bindings': [
         {'engine': 'human', 'dimension_id': 1},
-        {'engine': 'ai', 'code_validation_id': 9},  # stored engine ignored: code always runs on code
+        {'engine': 'code', 'dimension_id': 9},
+        {'engine': 'ai', 'platform_key': 'pii'},  # stored engine ignored: platform always runs on code
     ]}
     assert orch.snapshot_needs_judge(snapshot) is False
 

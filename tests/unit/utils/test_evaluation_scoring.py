@@ -146,33 +146,33 @@ def test_headline_no_scored_cases_returns_none(scoring):
 def test_fold_machine_only(scoring):
     # two dimensions on one case -> two distinct keyed items, no overrides
     items = scoring.fold_latest_normalized(
-        [(10, 1, None, None, 80.0), (10, 2, None, None, 60.0)],
+        [(10, 1, None, 80.0), (10, 2, None, 60.0)],
         [],
     )
-    assert set(items) == {(10, (1, None, None), 80.0), (10, (2, None, None), 60.0)}
+    assert set(items) == {(10, (1, None), 80.0), (10, (2, None), 60.0)}
 
 
 def test_fold_human_overrides_machine_on_dimension_key(scoring):
     # human annotation on (case 10, dim 1) supersedes the machine result for that key (§15.3)
     items = scoring.fold_latest_normalized(
-        [(10, 1, None, None, 80.0)],
+        [(10, 1, None, 80.0)],
         [(10, 1, 40.0)],
     )
-    assert items == [(10, (1, None, None), 40.0)]
+    assert items == [(10, (1, None), 40.0)]
 
 
 def test_fold_human_does_not_touch_code_or_platform_items(scoring):
-    # a code validation and a platform key keep their own keys; the human dim override lands only
-    # on the dimension key, so nothing collapses (§16.2 — exactly one identity per item)
+    # a code-engine dimension and a platform key keep their own keys; the human dim override lands
+    # only on the dimension key, so nothing collapses (§16.2 — exactly one identity per item)
     items = dict(((c, k), v) for (c, k, v) in scoring.fold_latest_normalized(
-        [(10, 1, None, None, 80.0),
-         (10, None, 7, None, 100.0),
-         (10, None, None, 'schema_valid', 0.0)],
+        [(10, 1, None, 80.0),
+         (10, 7, None, 100.0),
+         (10, None, 'schema_valid', 0.0)],
         [(10, 1, 40.0)],
     ))
-    assert items[(10, (1, None, None))] == 40.0        # human override
-    assert items[(10, (None, 7, None))] == 100.0       # code untouched
-    assert items[(10, (None, None, 'schema_valid'))] == 0.0  # platform untouched
+    assert items[(10, (1, None))] == 40.0        # human override
+    assert items[(10, (7, None))] == 100.0       # code-engine dimension untouched
+    assert items[(10, (None, 'schema_valid'))] == 0.0  # platform untouched
 
 
 def test_fold_then_aggregate_matches_manual(scoring):
@@ -180,9 +180,9 @@ def test_fold_then_aggregate_matches_manual(scoring):
     # case 10: dim1 w2 = 80, dim2 w1 = 60  -> (80*2+60*1)/3 = 73.333...
     # case 11: dim1 w2 = 100              -> 100
     # run headline = mean(73.333, 100) = 86.666...
-    weight_map = {(1, None, None): 2, (2, None, None): 1}
+    weight_map = {(1, None): 2, (2, None): 1}
     items = scoring.fold_latest_normalized(
-        [(10, 1, None, None, 80.0), (10, 2, None, None, 60.0), (11, 1, None, None, 100.0)],
+        [(10, 1, None, 80.0), (10, 2, None, 60.0), (11, 1, None, 100.0)],
         [],
     )
     headline = scoring.aggregate_run_score(items, weight_map)
@@ -214,7 +214,7 @@ def test_canonical_worked_example_headline_is_86_5(scoring):
     for dim_id, native, scale_type, lo, hi, polarity, weight, expected in CANONICAL_ITEMS:
         normalized = scoring.normalize_score(native, scale_type, lo, hi, polarity)
         assert normalized == expected, f'dimension {dim_id} normalized to {normalized}'
-        machine_items.append((CANONICAL_CASE_ID, dim_id, None, None, normalized))
+        machine_items.append((CANONICAL_CASE_ID, dim_id, None, normalized))
         weight_map[scoring.binding_item_key(dim_id)] = weight
 
     items = scoring.fold_latest_normalized(machine_items, [])
@@ -237,7 +237,7 @@ def test_canonical_example_via_snapshot_weight_map(scoring):
 def test_fold_none_scores_survive_to_aggregate_as_provisional(scoring):
     # an errored machine item (normalized None) is folded but excluded by the aggregate (§20.6)
     items = scoring.fold_latest_normalized(
-        [(10, 1, None, None, None), (10, 2, None, None, 90.0)],
+        [(10, 1, None, None), (10, 2, None, 90.0)],
         [],
     )
     assert scoring.aggregate_run_score(items, {}) == pytest.approx(90.0)

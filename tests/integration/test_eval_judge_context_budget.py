@@ -204,7 +204,6 @@ def _ai_snapshot(orch, case_count=1, dims=None, evidence=None):
     return orch.build_run_snapshot(
         suite={'id': 1, 'name': 'S', 'judge_model': {'model_name': 'gpt-4o', 'integration_uid': 'u-1'}},
         dimensions=dims,
-        code_validations=[],
         bindings=bindings,
         cases=cases,
         application_id=10,

@@ -4,7 +4,7 @@ Project-scoped tables (schema ``p_<project_id>``) implementing the entity model 
 AGENT_EVALUATION_DESIGN.md §3 / §16.2 / §17.1 / §20.10 / §21.6.
 
 Shape:
-  Library (reusable definitions)   -> EvalDimension, EvalCodeValidation
+  Library (reusable definitions)   -> EvalDimension (engine: ai/human/code)
   Binding (per-agent application)  -> EvalSuite, EvalBinding
   Dataset                          -> EvalDataset, EvalDatasetCase
   Immutable run + results          -> EvalRun (frozen snapshot), EvalResult
@@ -33,7 +33,7 @@ from typing import List, Optional
 from tools import db_tools, db, config as c
 from sqlalchemy import (
     Integer, String, Text, DateTime, Float, Boolean, func, ForeignKey,
-    UniqueConstraint,
+    UniqueConstraint, Index, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -100,11 +100,28 @@ class EvalResultStatus:
 # ----------------------------------------------------------------------------
 
 class EvalDimension(db_tools.AbstractBaseMixin, db.Base):
-    """A reusable dimension *definition* (the 'what & how'). Weight/target/engine/
-    evidence-scope live on the binding (§16.2)."""
+    """A reusable dimension *definition* (the 'what & how'). Weight/target/evidence-scope
+    live on the binding (§16.2); engine choice (AI/Human) also lives on the binding where
+    the definition allows both. A Code-engine definition carries a script instead of a
+    rubric — the judging instrument swaps with engine, everything else about the entity
+    (weight/target/scale/scorecard row) is shared (§2.1)."""
     __tablename__ = 'eval_dimension'
     __table_args__ = (
-        UniqueConstraint('tier', 'name', name='_eval_dimension_tier_name_uc'),
+        # A plain UniqueConstraint('tier', 'name') would make agent_adhoc a single global
+        # namespace: agent B could never create a name agent A already used, even though
+        # agent B cannot see agent A's dimension (evaluation_library_utils._visible_to_agent).
+        # Split into two partial unique indexes instead: project/platform tiers keep a
+        # tier-wide namespace (agent_id is always null there), while agent_adhoc is unique
+        # per (name, agent_id) — same name, different agent, no collision. Mirrored 1:1 in
+        # utils/eval_dimension_schema.py for schemas provisioned before this change.
+        Index(
+            'uq_eval_dimension_tier_name', 'tier', 'name', unique=True,
+            postgresql_where=text("tier != 'agent_adhoc'"),
+        ),
+        Index(
+            'uq_eval_dimension_tier_name_agent', 'tier', 'name', 'agent_id', unique=True,
+            postgresql_where=text("tier = 'agent_adhoc'"),
+        ),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
@@ -112,17 +129,25 @@ class EvalDimension(db_tools.AbstractBaseMixin, db.Base):
     uuid: Mapped[str] = mapped_column(UUID(as_uuid=True), unique=True, default=uuid.uuid4)
     tier: Mapped[str] = mapped_column(String(32), nullable=False, default=EvalTier.project, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=True)  # rubric = the judge prompt (§18)
+    description: Mapped[str] = mapped_column(Text, nullable=True)  # rubric = the judge prompt (§18); unused when engine=code
 
     # Owning agent for tier=agent_adhoc dimensions: nullable so pre-existing rows (created before
     # this column existed) stay visible everywhere rather than becoming orphaned/hidden.
+    # Code-engine dimensions never carry tier=agent_adhoc (§16.5) so agent_id stays null for them.
     agent_id: Mapped[int] = mapped_column(
         ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.{Application.__tablename__}.id', ondelete='CASCADE'),
         nullable=True, index=True,
     )
 
-    # allowed engines this definition permits, e.g. ["ai", "human"] (binding picks one)
+    # allowed engines this definition permits: ["ai"], ["human"], ["ai", "human"], or ["code"].
+    # Code is exclusive of ai/human on a single definition — a rubric and a script aren't
+    # reinterpretations of each other (§2.1) — enforced at create/update time, not by the schema.
     allowed_engines: Mapped[list] = mapped_column(JSONB, nullable=False, default=lambda: [EvalEngine.ai])
+
+    # Folded from the former EvalCodeValidation entity (§2.1). Populated only when
+    # allowed_engines == ["code"]; null for AI/Human dimensions.
+    code: Mapped[str] = mapped_column(Text, nullable=True)  # python body; returns `result` (bool/number)
+    return_contract: Mapped[str] = mapped_column(String(16), nullable=True)  # 'bool' -> pass/fail, 'number' -> numeric (§19.4)
 
     scale_type: Mapped[str] = mapped_column(String(32), nullable=False, default=EvalScaleType.continuous)
     scale_min: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -133,33 +158,6 @@ class EvalDimension(db_tools.AbstractBaseMixin, db.Base):
     default_weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     default_target: Mapped[float] = mapped_column(Float, nullable=True)
     default_target_operator: Mapped[str] = mapped_column(String(8), nullable=True)  # '>=', '>', ...
-
-    owner_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())
-
-
-class EvalCodeValidation(db_tools.AbstractBaseMixin, db.Base):
-    """A code-validation *definition* (Code engine only, project-tier only — §19.6).
-    Executed via the indexer RPC (EVAL-H2); this table only stores the authored script."""
-    __tablename__ = 'eval_code_validation'
-    __table_args__ = (
-        UniqueConstraint('name', name='_eval_code_validation_name_uc'),
-        {'schema': c.POSTGRES_TENANT_SCHEMA},
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    uuid: Mapped[str] = mapped_column(UUID(as_uuid=True), unique=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(128), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=True)
-    code: Mapped[str] = mapped_column(Text, nullable=False)  # python body; returns `result` (bool/number)
-
-    # 'bool' -> pass/fail, 'number' -> numeric score (§19.4)
-    return_contract: Mapped[str] = mapped_column(String(16), nullable=False, default='bool')
-    scale_min: Mapped[float] = mapped_column(Float, nullable=True)
-    scale_max: Mapped[float] = mapped_column(Float, nullable=True)
-    polarity: Mapped[str] = mapped_column(String(32), nullable=False, default=EvalPolarity.higher_better)
 
     owner_id: Mapped[int] = mapped_column(Integer, nullable=False)
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
@@ -212,16 +210,16 @@ class EvalSuite(db_tools.AbstractBaseMixin, db.Base):
 
 
 class EvalBinding(db_tools.AbstractBaseMixin, db.Base):
-    """One library item (dimension | code | platform) applied within a suite, pinned to a
+    """One library item (dimension | platform) applied within a suite, pinned to a
     concrete ApplicationVersion (H6 versioning seam). Binding values override definition
-    defaults (§16.2). Exactly one of dimension_id / code_validation_id / platform_key is set."""
+    defaults (§16.2). Exactly one of dimension_id / platform_key is set — a dimension may
+    be AI/Human/Code engine (§2.1); code validations are no longer a separate slot."""
     __tablename__ = 'eval_binding'
     # A library item may only be bound once per suite: a duplicate binding scores the same
     # criterion twice, silently doubling its weight in the headline. Postgres treats NULLs as
     # distinct, so each constraint only bites on the column that is actually set.
     __table_args__ = (
         UniqueConstraint('suite_id', 'dimension_id', name='_eval_binding_suite_dimension_uc'),
-        UniqueConstraint('suite_id', 'code_validation_id', name='_eval_binding_suite_code_uc'),
         UniqueConstraint('suite_id', 'platform_key', name='_eval_binding_suite_platform_uc'),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
@@ -242,9 +240,6 @@ class EvalBinding(db_tools.AbstractBaseMixin, db.Base):
     # exactly one source of the item being bound
     dimension_id: Mapped[int] = mapped_column(
         ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.eval_dimension.id', ondelete='CASCADE'), nullable=True,
-    )
-    code_validation_id: Mapped[int] = mapped_column(
-        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.eval_code_validation.id', ondelete='CASCADE'), nullable=True,
     )
     platform_key: Mapped[str] = mapped_column(String(128), nullable=True)  # platform validation catalog key
 
@@ -325,8 +320,8 @@ class EvalDatasetCase(db_tools.AbstractBaseMixin, db.Base):
 
 class EvalRun(db_tools.AbstractBaseMixin, db.Base):
     """Immutable snapshot of one evaluation execution. ``snapshot`` freezes the suite
-    config + dimension/code definitions + bindings + dataset case set + scale specs at
-    run time so later edits never mutate history (§3.4)."""
+    config + dimension definitions (any engine) + bindings + dataset case set + scale
+    specs at run time so later edits never mutate history (§3.4)."""
     __tablename__ = 'eval_run'
     __table_args__ = ({'schema': c.POSTGRES_TENANT_SCHEMA},)
 
@@ -379,7 +374,6 @@ class EvalResult(db_tools.AbstractBaseMixin, db.Base):
     # frozen alignment keys (§21: align by case id + dimension definition id)
     dataset_case_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
     dimension_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
-    code_validation_id: Mapped[int] = mapped_column(Integer, nullable=True)
     platform_key: Mapped[str] = mapped_column(String(128), nullable=True)
 
     engine: Mapped[str] = mapped_column(String(16), nullable=False)

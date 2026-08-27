@@ -1,9 +1,10 @@
 """Idempotent per-project schema setup for eval dimension agent-scoping.
 
-Adds the columns eval dimension agent-scoping relies on to each project (tenant) schema.
-`create_all` provisions these for new projects automatically; existing project
-schemas predate the columns and are brought up to date here via the admin
-migration task.
+Adds the column/index/constraint changes eval dimension agent-scoping relies on to each
+project (tenant) schema. `create_all` provisions these for new projects automatically
+from models/evaluation.py's __table_args__; existing project schemas predate them and are
+brought up to date here via the admin migration task. Keep the index/constraint names here
+identical to what SQLAlchemy generates for a fresh schema, or the two paths diverge.
 """
 from sqlalchemy import text
 
@@ -17,8 +18,21 @@ _MIGRATION_STATEMENTS = (
     "ADD CONSTRAINT eval_dimension_agent_id_fkey "
     "FOREIGN KEY (agent_id) REFERENCES p_{pid}.applications(id) ON DELETE CASCADE; "
     "EXCEPTION WHEN duplicate_object THEN NULL; END $$",
-    "CREATE INDEX IF NOT EXISTS eval_dimension_agent_id_idx "
+    # Named to match what SQLAlchemy's index=True generates for a fresh schema
+    # (ix_<table>_<column>) so existing and freshly-provisioned schemas don't diverge.
+    "CREATE INDEX IF NOT EXISTS ix_eval_dimension_agent_id "
     "ON p_{pid}.eval_dimension (agent_id)",
+    "DROP INDEX IF EXISTS p_{pid}.eval_dimension_agent_id_idx",
+    # Replace the blanket (tier, name) unique constraint with two partial unique indexes —
+    # see models/evaluation.py's __table_args__ comment for why: agent_adhoc must be unique
+    # per (name, agent_id), not a single project-wide namespace, while project/platform tiers
+    # keep the tier-wide namespace unchanged.
+    "ALTER TABLE p_{pid}.eval_dimension "
+    "DROP CONSTRAINT IF EXISTS _eval_dimension_tier_name_uc",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_eval_dimension_tier_name "
+    "ON p_{pid}.eval_dimension (tier, name) WHERE tier != 'agent_adhoc'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_eval_dimension_tier_name_agent "
+    "ON p_{pid}.eval_dimension (tier, name, agent_id) WHERE tier = 'agent_adhoc'",
 )
 
 
