@@ -88,7 +88,19 @@ def list_dimensions(
 
     When ``agent_id`` is given, ``agent_adhoc`` rows are additionally scoped to that
     agent: only dimensions owned by it, or legacy rows predating the ownership column
-    (``agent_id IS NULL``, treated as visible everywhere), are included."""
+    (``agent_id IS NULL``, treated as visible everywhere), are included.
+
+    NOTE — this is UX scoping, not an access-control boundary. ``agent_id`` is caller
+    supplied (a query param at the API layer) and is not validated against the caller's
+    session; a caller can pass any agent id in the project. That is intentionally fine:
+    the actual security boundary is the project-level permission check already enforced
+    by ``@auth.decorators.check_api`` on every dimension endpoint (viewer/editor of the
+    *project*), and every project-tier dimension is visible to every project member
+    regardless of ``agent_id`` anyway. ``agent_id`` only decides which *agent_adhoc*
+    (per-agent draft) dimensions are hidden from a caller building/testing a different
+    agent in the same project — a decluttering nicety, not a privacy guarantee. Do not
+    use this parameter to gate access to data a caller shouldn't see at all; that must be
+    enforced via the project permission system instead."""
     with _session(session, project_id) as s:
         query = s.query(EvalDimension)
         if not include_platform:

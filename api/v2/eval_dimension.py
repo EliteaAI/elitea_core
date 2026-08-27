@@ -29,7 +29,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dimension_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "Scope access to this agent (agent_adhoc dimensions owned by another agent return 404)"},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "UX scoping only, not access control: hides agent_adhoc dimensions owned by other agents from this response. Every project member already has permission to every dimension in the project regardless of this value."},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -54,7 +54,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dimension_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "Scope access to this agent (agent_adhoc dimensions owned by another agent return 404)"},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "UX scoping only, not access control: hides agent_adhoc dimensions owned by other agents from this response. Every project member already has permission to every dimension in the project regardless of this value."},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -85,7 +85,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "dimension_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "Scope access to this agent (agent_adhoc dimensions owned by another agent return 404)"},
+            {"name": "agent_id", "in": "query", "schema": {"type": "integer"}, "description": "UX scoping only, not access control: hides agent_adhoc dimensions owned by other agents from this response. Every project member already has permission to every dimension in the project regardless of this value."},
         ],
         tags=["elitea_core/evaluation"],
     )

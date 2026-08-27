@@ -33,7 +33,7 @@ from typing import List, Optional
 from tools import db_tools, db, config as c
 from sqlalchemy import (
     Integer, String, Text, DateTime, Float, Boolean, func, ForeignKey,
-    UniqueConstraint,
+    UniqueConstraint, Index, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -107,7 +107,21 @@ class EvalDimension(db_tools.AbstractBaseMixin, db.Base):
     (weight/target/scale/scorecard row) is shared (§2.1)."""
     __tablename__ = 'eval_dimension'
     __table_args__ = (
-        UniqueConstraint('tier', 'name', name='_eval_dimension_tier_name_uc'),
+        # A plain UniqueConstraint('tier', 'name') would make agent_adhoc a single global
+        # namespace: agent B could never create a name agent A already used, even though
+        # agent B cannot see agent A's dimension (evaluation_library_utils._visible_to_agent).
+        # Split into two partial unique indexes instead: project/platform tiers keep a
+        # tier-wide namespace (agent_id is always null there), while agent_adhoc is unique
+        # per (name, agent_id) — same name, different agent, no collision. Mirrored 1:1 in
+        # utils/eval_dimension_schema.py for schemas provisioned before this change.
+        Index(
+            'uq_eval_dimension_tier_name', 'tier', 'name', unique=True,
+            postgresql_where=text("tier != 'agent_adhoc'"),
+        ),
+        Index(
+            'uq_eval_dimension_tier_name_agent', 'tier', 'name', 'agent_id', unique=True,
+            postgresql_where=text("tier = 'agent_adhoc'"),
+        ),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
