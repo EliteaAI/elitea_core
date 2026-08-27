@@ -14,7 +14,7 @@ from .tool import (
 from ..enums.all import AgentTypes
 from ...models.enums.all import PublishStatus
 from ...models.pd.llm import LLMSettingsModel, LLMSettingsWriteModel
-from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel
+from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel, VersionAuthorMixin
 from ...models.pd.tag import TagDetailModel
 from ...utils.pipeline_utils import validate_yaml_from_str
 
@@ -359,7 +359,7 @@ class ApplicationExportVersionDetailModel(ApplicationVersionDetailModel, Applica
     model_config = ConfigDict(from_attributes=False)
 
 
-class ApplicationVersionListModel(BaseModel):
+class ApplicationVersionListModel(VersionAuthorMixin):
     id: int
     name: str
     status: PublishStatus
@@ -373,15 +373,6 @@ class ApplicationVersionListModel(BaseModel):
     instructions: str
 
     model_config = ConfigDict(from_attributes=True)
-
-    @model_validator(mode='after')
-    def resolve_author(self, info: ValidationInfo) -> 'ApplicationVersionListModel':
-        authors_map = (info.context or {}).get('authors_map', {})
-        if self.author_id and self.author_id in authors_map:
-            entry = authors_map[self.author_id]
-            self.author_name = entry.get('name')
-            self.author_email = entry.get('email')
-        return self
 
 
 class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):

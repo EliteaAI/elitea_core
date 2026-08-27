@@ -9,7 +9,7 @@ from pydantic import (
     ValidationInfo,
 )
 
-from .collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel
+from .collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel, VersionAuthorMixin
 from .tag import TagDetailModel
 from ...utils.authors import get_authors_data
 
@@ -24,7 +24,7 @@ class SkillVersionCreateModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class SkillVersionListModel(BaseModel):
+class SkillVersionListModel(VersionAuthorMixin):
     id: int
     name: str
     status: Optional[str] = None
@@ -36,15 +36,6 @@ class SkillVersionListModel(BaseModel):
     meta: Optional[dict] = Field(None, exclude=True)
 
     model_config = ConfigDict(from_attributes=True)
-
-    @model_validator(mode='after')
-    def resolve_author(self, info: ValidationInfo) -> 'SkillVersionListModel':
-        authors_map = (info.context or {}).get('authors_map', {})
-        if self.author_id and self.author_id in authors_map:
-            entry = authors_map[self.author_id]
-            self.author_name = entry.get('name')
-            self.author_email = entry.get('email')
-        return self
 
 
 class SkillVersionDetailModel(BaseModel):
