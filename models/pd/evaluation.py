@@ -161,6 +161,25 @@ class EvalDimensionUpdateModel(EvalDimensionBaseModel):
     # name optional on update; everything else may be edited. tier is immutable post-create.
     name: Optional[str] = Field(None, min_length=1, max_length=128)
 
+    @model_validator(mode='after')
+    def _validate_code_fields(self):
+        # Overrides the base check: update_dimension() applies this model with
+        # exclude_unset=True, so a PUT that only sends {"code": "..."} without re-sending
+        # allowed_engines must not be judged against the ['ai'] default it never asked for
+        # (that previously made every code-only edit fail with "code / return_contract are
+        # only valid for a code-engine dimension"). Only enforce the pairing when the caller
+        # actually set allowed_engines in this request.
+        if 'allowed_engines' not in self.model_fields_set:
+            return self
+        is_code = self.allowed_engines == [EvalEngine.code]
+        if is_code and not self.code:
+            raise ValueError('code is required when allowed_engines is [\'code\']')
+        if not is_code and (self.code is not None or self.return_contract is not None):
+            raise ValueError('code / return_contract are only valid for a code-engine dimension')
+        if is_code and self.return_contract is None:
+            self.return_contract = 'bool'
+        return self
+
 
 class EvalDimensionDetailModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
