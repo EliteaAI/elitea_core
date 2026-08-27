@@ -378,7 +378,12 @@ class McpService:
     def __get_toolkit_tools(self, toolkit_id: int) -> list[types.Tool]:
         """Get tools for a specific toolkit"""
         tools = []
-        toolkits = toolkits_listing(project_id=self.session.project_id, query=None, limit=None)["rows"]
+        # filter_mcp=None: include both regular toolkits and user-connected MCP
+        # toolkits (type == 'mcp'), which are excluded by the default
+        # filter_mcp=False behavior (see EliteaAI/elitea_issues#6273).
+        toolkits = toolkits_listing(
+            project_id=self.session.project_id, query=None, limit=None, filter_mcp=None
+        )["rows"]
         toolkit = next((tk for tk in toolkits if tk.get("id") == toolkit_id), None)
 
         if not toolkit:
@@ -447,10 +452,15 @@ class McpService:
         """Get all tools (legacy behavior)"""
         tools = []
         #
-        # Expand toolkits to export as mcp server tools
+        # Expand toolkits to export as mcp server tools.
+        # filter_mcp=None: include both regular toolkits and user-connected MCP
+        # toolkits (type == 'mcp'); the default filter_mcp=False would silently
+        # drop connected MCP toolkits from this list (EliteaAI/elitea_issues#6273).
         toolkits = [
             toolkit
-            for toolkit in toolkits_listing(project_id=self.session.project_id, query=None, limit=None)["rows"]
+            for toolkit in toolkits_listing(
+                project_id=self.session.project_id, query=None, limit=None, filter_mcp=None
+            )["rows"]
             if toolkit.get("meta", {}).get("mcp_options", {}).get("available_by_mcp", False)
         ]
         tk_schemas = get_toolkit_schemas(project_id=self.session.project_id, user_id=auth.current_user()["id"]) if toolkits else {}
@@ -561,7 +571,12 @@ class McpService:
         return None
 
     def __get_toolkit_by_name(self, toolkit_name: str) -> dict | None:
-        toolkits = toolkits_listing(project_id=self.session.project_id, query=None, limit=None)
+        # filter_mcp=None: match against both regular and connected MCP toolkits
+        # so tool-call dispatch works for MCP-connected toolkits too
+        # (EliteaAI/elitea_issues#6273).
+        toolkits = toolkits_listing(
+            project_id=self.session.project_id, query=None, limit=None, filter_mcp=None
+        )
         #
         for toolkit in toolkits["rows"]:
             tk_name = toolkit.get("name")
