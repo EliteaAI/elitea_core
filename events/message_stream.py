@@ -28,6 +28,7 @@ from ..utils.attachments import (
     update_attachment_thumbnails,
 )
 from ..utils.token_limit_continuation import trim_continuation_overlap
+from ..utils.pipeline_hitl_history import persist_pipeline_hitl_prompt
 
 from ..utils.sio_utils import SioEvents
 
@@ -531,6 +532,9 @@ class Event:
                 elif hitl_interrupt or hitl_interrupts:
                     if msg_group.meta is None:
                         msg_group.meta = {}
+                    persist_pipeline_hitl_prompt(
+                        session, msg_group, response_metadata,
+                    )
                     merged = merge_interrupts(msg_group.meta, response_metadata)
                     if not merged:
                         log.info(
