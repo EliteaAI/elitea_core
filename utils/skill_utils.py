@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from tools import db, auth, serialize, rpc_tools, this, context
 
+from .authors import get_authors_data
 from .utils import set_columns_as_attrs, get_public_project_id, parse_ids_filter
 from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
@@ -784,7 +785,13 @@ def get_skill_details(
         if not skill:
             return {'data': None}
 
-        result = SkillDetailModel.model_validate(skill)
+        all_author_ids = {v.author_id for v in skill.versions if v.author_id}
+        authors_map = {}
+        if all_author_ids:
+            authors_data = get_authors_data(list(all_author_ids))
+            authors_map = {a['id']: a for a in authors_data}
+
+        result = SkillDetailModel.model_validate(skill, context={'authors_map': authors_map})
 
         # Get specific version details
         version = None
@@ -857,12 +864,23 @@ def create_skill(
     return skill
 
 
+def _build_authors_map(skill: Skill) -> dict:
+    all_author_ids = {v.author_id for v in skill.versions if v.author_id}
+    if not all_author_ids:
+        return {}
+    authors_data = get_authors_data(list(all_author_ids))
+    return {a['id']: a for a in authors_data}
+
+
 def build_skill_detail(skill: Skill) -> SkillDetailModel:
     """Build a SkillDetailModel with version_details from a refreshed skill."""
-    result = SkillDetailModel.model_validate(skill)
+    authors_map = _build_authors_map(skill)
+    result = SkillDetailModel.model_validate(skill, context={'authors_map': authors_map})
     if skill.versions:
         selected = skill.get_default_version() or min(skill.versions, key=lambda version_item: version_item.created_at)
-        result.version_details = SkillVersionDetailModel.model_validate(selected)
+        result.version_details = SkillVersionDetailModel.model_validate(
+            selected, context={'authors_map': authors_map}
+        )
     return result
 
 
@@ -910,7 +928,8 @@ def update_skill(
         if version:
             _update_version_fields(s, version, update_data.version)
 
-        return serialize(SkillDetailModel.model_validate(skill))
+        authors_map = _build_authors_map(skill)
+        return serialize(SkillDetailModel.model_validate(skill, context={'authors_map': authors_map}))
 
 
 def delete_skill(

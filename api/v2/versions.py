@@ -12,6 +12,7 @@ from ...models.pd.version import (
     ApplicationVersionCreateModel
 )
 from ...models.all import Application, ApplicationVersion
+from ...utils.authors import get_authors_data
 from ...utils.create_utils import create_version
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -57,7 +58,15 @@ class ProjectAPI(api_tools.APIModeHandler):
                     "error": f"Application with id '{application_id}' doesn't exist"
                 }, 400
             
-            return [ApplicationVersionListModel.from_orm(version).model_dump(mode='json') for version in application.versions]
+            all_author_ids = {v.author_id for v in application.versions if v.author_id}
+            authors_map = {}
+            if all_author_ids:
+                authors_data = get_authors_data(list(all_author_ids))
+                authors_map = {a['id']: a for a in authors_data}
+            return [
+                ApplicationVersionListModel.model_validate(version, context={'authors_map': authors_map}).model_dump(mode='json')
+                for version in application.versions
+            ]
             
     @register_openapi(
         name="Add a new named draft version to an existing agent or pipeline — version name must not be 'base', agent type must match the parent application",

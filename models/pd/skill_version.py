@@ -9,7 +9,7 @@ from pydantic import (
     ValidationInfo,
 )
 
-from .collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel
+from .collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel, VersionAuthorMixin
 from .tag import TagDetailModel
 from ...utils.authors import get_authors_data
 
@@ -24,12 +24,14 @@ class SkillVersionCreateModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class SkillVersionListModel(BaseModel):
+class SkillVersionListModel(VersionAuthorMixin):
     id: int
     name: str
     status: Optional[str] = None
     created_at: datetime
     author_id: int = Field(..., exclude=True)
+    author_name: Optional[str] = None
+    author_email: Optional[str] = None
     tags: List[TagDetailModel] = Field(default_factory=list, exclude=True)
     meta: Optional[dict] = Field(None, exclude=True)
 

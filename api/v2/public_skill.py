@@ -6,6 +6,7 @@ from ...models.skill import Skill, SkillVersion
 from ...models.pd.skill import SkillDetailModel
 from ...models.pd.skill_version import SkillVersionDetailModel
 from ...models.enums.all import PublishStatus
+from ...utils.authors import get_authors_data
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.utils import add_public_project_id
 
@@ -46,14 +47,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     'error': f"No skill found with id '{skill_id}' or no published version"
                 }, 404
 
-            result = SkillDetailModel.model_validate(skill_version.skill)
+            all_author_ids = {v.author_id for v in skill_version.skill.versions if v.author_id}
+            authors_map = {}
+            if all_author_ids:
+                authors_data = get_authors_data(list(all_author_ids))
+                authors_map = {a['id']: a for a in authors_data}
+
+            result = SkillDetailModel.model_validate(skill_version.skill, context={'authors_map': authors_map})
             # Public catalog must only expose published versions (mirrors the
             # applications public detail, which filters versions the same way).
             result.versions = [
                 v for v in result.versions if v.status == PublishStatus.published
             ]
             # Version details carry the instructions the catalog modal renders inline.
-            result.version_details = SkillVersionDetailModel.model_validate(skill_version)
+            result.version_details = SkillVersionDetailModel.model_validate(
+                skill_version, context={'authors_map': authors_map}
+            )
             # Version meta carries source-project lineage ids stamped at publish;
             # the public payload only needs presentation keys (icon_meta).
             if result.version_details.meta:

@@ -14,7 +14,7 @@ from .tool import (
 from ..enums.all import AgentTypes
 from ...models.enums.all import PublishStatus
 from ...models.pd.llm import LLMSettingsModel, LLMSettingsWriteModel
-from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel
+from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel, VersionAuthorMixin
 from ...models.pd.tag import TagDetailModel
 from ...utils.pipeline_utils import validate_yaml_from_str
 
@@ -359,12 +359,14 @@ class ApplicationExportVersionDetailModel(ApplicationVersionDetailModel, Applica
     model_config = ConfigDict(from_attributes=False)
 
 
-class ApplicationVersionListModel(BaseModel):
+class ApplicationVersionListModel(VersionAuthorMixin):
     id: int
     name: str
     status: PublishStatus
     created_at: datetime  # probably delete this
     author_id: int = Field(..., exclude=True)
+    author_name: Optional[str] = None
+    author_email: Optional[str] = None
     meta: Optional[dict] = Field(default_factory=dict)
     tags: List[TagListModel] = Field(..., exclude=True)
     agent_type: AgentTypes = Field(..., exclude=True)

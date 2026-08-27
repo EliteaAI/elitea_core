@@ -1,7 +1,7 @@
 from typing import Optional, Annotated
 
 from pydantic import (
-    BaseModel, AnyUrl, ConfigDict, PlainSerializer
+    BaseModel, AnyUrl, ConfigDict, PlainSerializer, model_validator, ValidationInfo
 )
 
 # Serializable URL string
@@ -24,6 +24,37 @@ class AuthorBaseModel(BaseModel):
     email: str
     name: Optional[str] = None
     avatar: Optional[UrlStr] = None
+
+
+class VersionAuthorMixin(BaseModel):
+    """Mixin that populates author_name / author_email on version list models.
+
+    Requires the subclass to declare:
+        author_id: int = Field(..., exclude=True)
+        author_name: Optional[str] = None
+        author_email: Optional[str] = None
+
+    Resolution order:
+      1. Use pre-fetched authors_map from Pydantic validation context (batch path).
+      2. Fall back to a single get_authors_data() RPC call (legacy / missing context).
+    """
+
+    @model_validator(mode='after')
+    def resolve_author(self, info: ValidationInfo) -> 'VersionAuthorMixin':
+        from ...utils.authors import get_authors_data  # local import to avoid circular
+
+        authors_map = (info.context or {}).get('authors_map', {})
+        if self.author_id and self.author_id in authors_map:
+            entry = authors_map[self.author_id]
+            self.author_name = entry.get('name')
+            self.author_email = entry.get('email')
+        elif self.author_id and info.context is None:
+            # No context was supplied — legacy call site; fall back to single fetch.
+            authors_data = get_authors_data(author_ids=[self.author_id])
+            if authors_data:
+                self.author_name = authors_data[0].get('name')
+                self.author_email = authors_data[0].get('email')
+        return self
 
 
 class AuthorDetailModel(AuthorBaseModel):
