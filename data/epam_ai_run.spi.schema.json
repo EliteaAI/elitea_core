@@ -94,8 +94,7 @@
             "Started",
             "InProgress",
             "Completed",
-            "Error",
-            "Failed"
+            "Error"
           ]
         },
         "result": {
@@ -124,11 +123,11 @@
         },
         "error_category": {
           "type": "string",
-          "description": "Machine-readable failure category when status is Error or Failed."
+          "description": "Machine-readable failure category when status is Error."
         },
         "error_type": {
           "type": "string",
-          "description": "Machine-readable failure sub-type when status is Error or Failed."
+          "description": "Machine-readable failure sub-type when status is Error."
         },
         "custom_events": {
           "type": "array",
