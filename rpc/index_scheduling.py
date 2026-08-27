@@ -5,14 +5,14 @@ from datetime import datetime, UTC
 
 from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
-from tools import db, rpc_tools, this
+from tools import VaultClient, db, rpc_tools, this
 
 from ..models.elitea_tools import EliteATool
 from ..models.indexer import EmbeddingStore
 from ..models.enums import InitiatorType
 from ..models.enums.indexer import IndexingSchedule
 from ..models.pd.index import ToolkitIndexingSchedule
-from ..utils.application_tools import get_session_for_schema, start_index_task, update_toolkit_index_meta_history_with_failed_state
+from ..utils.application_tools import get_session_for_schema, is_index_stale, should_trigger_scheduled_index, start_index_task, update_toolkit_index_meta_history_with_failed_state
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
 from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
@@ -179,7 +179,53 @@ class RPC:
 
                                         running_state = index.cmetadata.get('state')
 
-                                        if running_state and running_state.lower() != 'in_progress':
+                                        is_in_progress = bool(running_state) and running_state.lower() == 'in_progress'
+                                        stale_retry = False
+                                        if is_in_progress:
+                                            # A worker that died without a terminal write leaves the row
+                                            # in_progress forever, and skipping it here starves the schedule
+                                            # silently. The rule is the one the index list GET applies
+                                            # (api/v2/index_meta.py), so both surfaces agree on when a run
+                                            # stopped counting as alive.
+                                            secrets = VaultClient(project_id).get_secrets()
+                                            task_disconnected_timeout = int(
+                                                secrets.get('task_disconnected_timeout_sec', 7200)
+                                            )
+                                            stale_retry = is_index_stale(
+                                                index.cmetadata.get('updated_on', 0),
+                                                running_state.lower(),
+                                                task_disconnected_timeout,
+                                            )
+                                            if stale_retry:
+                                                log.warning(
+                                                    f"check_index_scheduling: retrying stale in_progress index "
+                                                    f"{index_meta_id} (toolkit {toolkit.id}, project {project_id}): "
+                                                    f"no update since updated_on="
+                                                    f"{index.cmetadata.get('updated_on')}, "
+                                                    f"timeout={task_disconnected_timeout}s"
+                                                )
+                                                # Best-effort supersede: staleness is a heuristic, and the
+                                                # retry is about to overwrite this run's row either way — a
+                                                # straggler that is somehow still alive must not keep writing
+                                                # the collection alongside the new run. A dead task makes
+                                                # this a no-op.
+                                                stale_task_id = index.cmetadata.get('task_id')
+                                                if stale_task_id:
+                                                    try:
+                                                        self.task_node.stop_task(stale_task_id)
+                                                    except Exception as stop_error:
+                                                        log.warning(
+                                                            f"check_index_scheduling: could not stop stale task "
+                                                            f"{stale_task_id} before retry: {stop_error}"
+                                                        )
+                                            else:
+                                                log.debug(
+                                                    f"check_index_scheduling: index {index_meta_id} "
+                                                    f"(toolkit {toolkit.id}, project {project_id}) is "
+                                                    f"in_progress and fresh, skipping"
+                                                )
+
+                                        if should_trigger_scheduled_index(running_state, stale_retry):
                                             trigger_started = time.monotonic()
                                             log.info(
                                                 f"Index trigger started at {datetime.now(UTC).isoformat()} "

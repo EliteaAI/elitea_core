@@ -1557,6 +1557,19 @@ def ensure_index_data_has_task_id(ctx, event_data: dict):
         log.exception(f"Failed to ensure task_id for index: {e}")
 
 
+def should_trigger_scheduled_index(running_state, stale_retry: bool) -> bool:
+    """Whether the index scheduler may dispatch over the row's current state.
+
+    Any terminal state triggers. An in_progress row triggers only when the caller
+    established it is stale (see is_index_stale): a worker that died without a
+    terminal write must not starve its schedule forever, but a fresh run keeps
+    its slot.
+    """
+    if not running_state:
+        return False
+    return running_state.lower() != 'in_progress' or bool(stale_retry)
+
+
 def is_index_stale(updated_on: float, index_data_state: str, task_disconnected_timeout: int) -> bool:
     """
     Determine if an index task is stale (hasn't been updated within the timeout period).
