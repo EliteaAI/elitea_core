@@ -117,25 +117,25 @@ class TestIsIndexStale:
         assert application_tools.is_index_stale(0, "in_progress", TIMEOUT) is True
 
 
-def _gate(running_state, stale_retry):
-    """The scheduler's composed trigger condition (rpc/index_scheduling.py)."""
-    is_in_progress = bool(running_state) and running_state.lower() == "in_progress"
-    return bool(running_state) and (not is_in_progress or stale_retry)
-
-
 class TestScheduleTriggerGate:
+    """Exercises the production predicate the scheduler RPC calls — not a mirror of
+    it, so a change there fails here."""
 
-    def test_a_terminal_state_still_triggers(self):
-        assert _gate("completed", stale_retry=False) is True
-        assert _gate("failed", stale_retry=False) is True
+    def test_a_terminal_state_still_triggers(self, application_tools):
+        gate = application_tools.should_trigger_scheduled_index
+        assert gate("completed", stale_retry=False) is True
+        assert gate("failed", stale_retry=False) is True
 
-    def test_a_fresh_in_progress_run_still_skips(self):
-        assert _gate("in_progress", stale_retry=False) is False
+    def test_a_fresh_in_progress_run_still_skips(self, application_tools):
+        assert application_tools.should_trigger_scheduled_index("in_progress", stale_retry=False) is False
 
-    def test_a_stale_in_progress_run_now_triggers(self):
+    def test_a_stale_in_progress_run_now_triggers(self, application_tools):
         # The fix: the schedule no longer starves forever behind a dead run's row.
-        assert _gate("in_progress", stale_retry=True) is True
+        assert application_tools.should_trigger_scheduled_index("in_progress", stale_retry=True) is True
 
-    def test_a_missing_state_still_skips(self):
-        assert _gate(None, stale_retry=True) is False
-        assert _gate("", stale_retry=True) is False
+    def test_a_missing_state_still_skips(self, application_tools):
+        assert application_tools.should_trigger_scheduled_index(None, stale_retry=True) is False
+        assert application_tools.should_trigger_scheduled_index("", stale_retry=True) is False
+
+    def test_case_drift_in_the_stored_state_does_not_reopen_the_gate(self, application_tools):
+        assert application_tools.should_trigger_scheduled_index("In_Progress", stale_retry=False) is False

@@ -12,7 +12,7 @@ from ..models.indexer import EmbeddingStore
 from ..models.enums import InitiatorType
 from ..models.enums.indexer import IndexingSchedule
 from ..models.pd.index import ToolkitIndexingSchedule
-from ..utils.application_tools import get_session_for_schema, is_index_stale, start_index_task, update_toolkit_index_meta_history_with_failed_state
+from ..utils.application_tools import get_session_for_schema, is_index_stale, should_trigger_scheduled_index, start_index_task, update_toolkit_index_meta_history_with_failed_state
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
 from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
@@ -204,6 +204,20 @@ class RPC:
                                                     f"{index.cmetadata.get('updated_on')}, "
                                                     f"timeout={task_disconnected_timeout}s"
                                                 )
+                                                # Best-effort supersede: staleness is a heuristic, and the
+                                                # retry is about to overwrite this run's row either way — a
+                                                # straggler that is somehow still alive must not keep writing
+                                                # the collection alongside the new run. A dead task makes
+                                                # this a no-op.
+                                                stale_task_id = index.cmetadata.get('task_id')
+                                                if stale_task_id:
+                                                    try:
+                                                        self.task_node.stop_task(stale_task_id)
+                                                    except Exception as stop_error:
+                                                        log.warning(
+                                                            f"check_index_scheduling: could not stop stale task "
+                                                            f"{stale_task_id} before retry: {stop_error}"
+                                                        )
                                             else:
                                                 log.debug(
                                                     f"check_index_scheduling: index {index_meta_id} "
@@ -211,7 +225,7 @@ class RPC:
                                                     f"in_progress and fresh, skipping"
                                                 )
 
-                                        if running_state and (not is_in_progress or stale_retry):
+                                        if should_trigger_scheduled_index(running_state, stale_retry):
                                             trigger_started = time.monotonic()
                                             log.info(
                                                 f"Index trigger started at {datetime.now(UTC).isoformat()} "
