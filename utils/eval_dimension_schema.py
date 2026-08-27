@@ -1,10 +1,13 @@
-"""Idempotent per-project schema setup for eval dimension agent-scoping.
+"""Idempotent per-project schema setup for eval dimension agent-scoping and the
+folded-in Code engine columns.
 
-Adds the column/index/constraint changes eval dimension agent-scoping relies on to each
-project (tenant) schema. `create_all` provisions these for new projects automatically
-from models/evaluation.py's __table_args__; existing project schemas predate them and are
-brought up to date here via the admin migration task. Keep the index/constraint names here
-identical to what SQLAlchemy generates for a fresh schema, or the two paths diverge.
+Adds the column/index/constraint changes eval dimension agent-scoping (and, since the
+Code-engine fold, the `code`/`return_contract` columns formerly on the now-deleted
+`eval_code_validation` table) rely on to each project (tenant) schema. `create_all`
+provisions these for new projects automatically from models/evaluation.py's
+__table_args__; existing project schemas predate them and are brought up to date here
+via the admin migration task. Keep the index/constraint names here identical to what
+SQLAlchemy generates for a fresh schema, or the two paths diverge.
 """
 from sqlalchemy import text
 
@@ -13,6 +16,10 @@ from tools import db
 
 _MIGRATION_STATEMENTS = (
     "ALTER TABLE p_{pid}.eval_dimension ADD COLUMN IF NOT EXISTS agent_id INTEGER",
+    # Code-engine fold (EL-2444): dimensions with allowed_engines == ['code'] author
+    # their verdict via a Python script instead of a rubric.
+    "ALTER TABLE p_{pid}.eval_dimension ADD COLUMN IF NOT EXISTS code TEXT",
+    "ALTER TABLE p_{pid}.eval_dimension ADD COLUMN IF NOT EXISTS return_contract VARCHAR(16)",
     "DO $$ BEGIN "
     "ALTER TABLE p_{pid}.eval_dimension "
     "ADD CONSTRAINT eval_dimension_agent_id_fkey "
