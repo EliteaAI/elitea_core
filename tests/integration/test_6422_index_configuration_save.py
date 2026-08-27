@@ -12,6 +12,7 @@ Run via:
 import importlib.util
 import pathlib
 import sys
+import time
 import types
 
 import pytest
@@ -104,40 +105,57 @@ class TestBuildIndexConfiguration:
         result = application_tools.build_index_configuration('{"index_name": "docs", "chunk_size": 500}')
         assert result == {"index_name": "docs", "chunk_size": 500}
 
-    def test_a_stored_json_string_still_yields_the_index_name(self, application_tools):
-        # The Figma migration wrote index_configuration as a JSON string.
-        result = application_tools.build_index_configuration(
-            {"chunk_size": 500}, '{"index_name": "docs"}'
-        )
-        assert result["index_name"] == "docs"
-
     def test_undecodable_input_degrades_to_an_empty_dict(self, application_tools):
         assert application_tools.build_index_configuration("not json at all") == {}
 
     def test_none_yields_an_empty_dict(self, application_tools):
         assert application_tools.build_index_configuration(None) == {}
 
-    def test_index_name_is_restored_when_the_client_omits_it(self, application_tools):
+    def test_index_name_is_stamped_when_the_client_omits_it(self, application_tools):
         # The UI filters index_name out as immutable, so a save payload never carries it.
-        result = application_tools.build_index_configuration(
-            {"chunk_size": 500}, {"index_name": "docs", "chunk_size": 1000}
-        )
-        assert result == {"index_name": "docs", "chunk_size": 500}
+        result = application_tools.build_index_configuration({"chunk_size": 500}, "docs")
+        assert result == {"chunk_size": 500, "index_name": "docs"}
 
-    def test_a_blank_index_name_is_replaced_by_the_stored_one(self, application_tools):
-        result = application_tools.build_index_configuration(
-            {"index_name": ""}, {"index_name": "docs"}
-        )
+    def test_a_blank_index_name_is_replaced(self, application_tools):
+        result = application_tools.build_index_configuration({"index_name": ""}, "docs")
         assert result["index_name"] == "docs"
 
-    def test_a_client_supplied_index_name_is_not_overwritten(self, application_tools):
-        result = application_tools.build_index_configuration(
-            {"index_name": "fresh"}, {"index_name": "docs"}
-        )
-        assert result["index_name"] == "fresh"
+    def test_a_client_supplied_index_name_is_overridden(self, application_tools):
+        # A payload naming another index would aim the next scheduled run at that index's
+        # collection and reset its metadata, so the caller's name always wins.
+        result = application_tools.build_index_configuration({"index_name": "other"}, "docs")
+        assert result["index_name"] == "docs"
 
-    def test_no_stored_config_leaves_the_payload_alone(self, application_tools):
+    def test_no_authoritative_name_leaves_the_payload_alone(self, application_tools):
         assert application_tools.build_index_configuration({"chunk_size": 500}) == {"chunk_size": 500}
+
+
+TIMEOUT = 7200
+
+
+def _stored(**overrides):
+    base = {
+        "collection": "docs",
+        "type": "index_meta",
+        "state": "completed",
+        "history": '[{"state": "completed"}]',
+        "task_id": "task-1",
+        "report": {"documents": 12},
+        "error": None,
+        "created_on": 100.0,
+        "updated_on": 200.0,
+        "index_configuration": {"index_name": "docs", "chunk_size": 1000},
+    }
+    base.update(overrides)
+    return base
+
+
+def _arrange(application_tools, monkeypatch, cmetadata):
+    meta = types.SimpleNamespace(cmetadata=cmetadata) if cmetadata is not None else None
+    session = _FakeSession()
+    monkeypatch.setattr(application_tools, "get_session_for_schema", lambda *a: session)
+    monkeypatch.setattr(application_tools, "get_toolkit_index_meta", lambda *a, **kw: meta)
+    return meta, session
 
 
 class TestSaveTouchesOnlyTheConfiguration:
@@ -145,43 +163,90 @@ class TestSaveTouchesOnlyTheConfiguration:
     survive, and updated_on in particular drives both list ordering and is_index_stale."""
 
     def test_every_other_metadata_key_survives(self, application_tools, monkeypatch):
-        stored = {
-            "collection": "docs",
-            "type": "index_meta",
-            "state": "completed",
-            "history": '[{"state": "completed"}]',
-            "task_id": "task-1",
-            "report": {"documents": 12},
-            "error": None,
-            "created_on": 100.0,
-            "updated_on": 200.0,
-            "index_configuration": {"index_name": "docs", "chunk_size": 1000},
-        }
-        meta = types.SimpleNamespace(cmetadata=stored)
-        session = _FakeSession()
-
-        monkeypatch.setattr(application_tools, "get_session_for_schema", lambda *a: session)
-        monkeypatch.setattr(application_tools, "get_toolkit_index_meta", lambda *a: meta)
+        stored = _stored()
+        meta, session = _arrange(application_tools, monkeypatch, stored.copy())
 
         returned = application_tools.save_toolkit_index_configuration(
-            "postgresql://", "42", "docs", {"chunk_size": 500}
+            "postgresql://", "42", "docs", {"chunk_size": 500}, TIMEOUT
         )
 
-        assert returned == {"index_name": "docs", "chunk_size": 500}
-        assert meta.cmetadata["index_configuration"] == {"index_name": "docs", "chunk_size": 500}
+        assert returned == {"chunk_size": 500, "index_name": "docs"}
+        assert meta.cmetadata["index_configuration"] == {"chunk_size": 500, "index_name": "docs"}
         assert session.committed is True
         for key in ("state", "history", "task_id", "report", "created_on", "updated_on"):
             assert meta.cmetadata[key] == stored[key]
 
+    def test_the_route_index_name_overrides_the_payload(self, application_tools, monkeypatch):
+        meta, _ = _arrange(application_tools, monkeypatch, _stored())
+
+        application_tools.save_toolkit_index_configuration(
+            "postgresql://", "42", "docs", {"index_name": "other"}, TIMEOUT
+        )
+
+        assert meta.cmetadata["index_configuration"]["index_name"] == "docs"
+
     def test_a_missing_index_returns_none_and_does_not_commit(self, application_tools, monkeypatch):
-        session = _FakeSession()
-        monkeypatch.setattr(application_tools, "get_session_for_schema", lambda *a: session)
-        monkeypatch.setattr(application_tools, "get_toolkit_index_meta", lambda *a: None)
+        _, session = _arrange(application_tools, monkeypatch, None)
 
         assert application_tools.save_toolkit_index_configuration(
-            "postgresql://", "42", "missing", {"chunk_size": 500}
+            "postgresql://", "42", "missing", {"chunk_size": 500}, TIMEOUT
         ) is None
         assert session.committed is False
+
+    def test_the_row_is_locked_for_the_check_and_the_write(self, application_tools, monkeypatch):
+        """Without the lock a run committing between the check and this write would be reverted."""
+        seen = {}
+        session = _FakeSession()
+        meta = types.SimpleNamespace(cmetadata=_stored())
+
+        def _capture(_session, _index_name, for_update=False):
+            seen["for_update"] = for_update
+            return meta
+
+        monkeypatch.setattr(application_tools, "get_session_for_schema", lambda *a: session)
+        monkeypatch.setattr(application_tools, "get_toolkit_index_meta", _capture)
+
+        application_tools.save_toolkit_index_configuration(
+            "postgresql://", "42", "docs", {"chunk_size": 500}, TIMEOUT
+        )
+
+        assert seen["for_update"] is True
+
+
+class TestSaveRefusesToRaceALiveRun:
+
+    def test_a_live_run_blocks_the_save(self, application_tools, monkeypatch):
+        _, session = _arrange(
+            application_tools, monkeypatch,
+            _stored(state="in_progress", updated_on=time.time()),
+        )
+
+        with pytest.raises(application_tools.IndexRunInProgressError):
+            application_tools.save_toolkit_index_configuration(
+                "postgresql://", "42", "docs", {"chunk_size": 500}, TIMEOUT
+            )
+        assert session.committed is False
+
+    def test_a_run_that_stopped_reporting_does_not_lock_edits_out(self, application_tools, monkeypatch):
+        meta, session = _arrange(
+            application_tools, monkeypatch,
+            _stored(state="in_progress", updated_on=time.time() - TIMEOUT * 2),
+        )
+
+        application_tools.save_toolkit_index_configuration(
+            "postgresql://", "42", "docs", {"chunk_size": 500}, TIMEOUT
+        )
+
+        assert session.committed is True
+        assert meta.cmetadata["state"] == "in_progress"
+
+    def test_a_terminal_state_never_blocks(self, application_tools, monkeypatch):
+        for state in ("completed", "failed", "cancelled", "scheduled_reindex"):
+            _, session = _arrange(application_tools, monkeypatch, _stored(state=state))
+            application_tools.save_toolkit_index_configuration(
+                "postgresql://", "42", "docs", {"chunk_size": 500}, TIMEOUT
+            )
+            assert session.committed is True
 
 
 class _FakeSession:

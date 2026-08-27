@@ -6,9 +6,7 @@ from tools import api_tools, auth, config as c, register_openapi, VaultClient
 
 from ...models.pd.index import SaveIndexConfiguration
 from ...utils.application_tools import (
-    get_session_for_schema,
-    get_toolkit_index_meta,
-    is_index_stale,
+    IndexRunInProgressError,
     load_and_validate_toolkit_for_index,
     save_toolkit_index_configuration,
 )
@@ -35,7 +33,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def put(self, project_id: int, toolkit_id: int, index_name: str):
         try:
-            payload = SaveIndexConfiguration.parse_obj(dict(request.json or {}))
+            # A body that is valid JSON but not an object (a list, a bare string) has to reach the
+            # model to be rejected as a validation error rather than blowing up on coercion.
+            payload = SaveIndexConfiguration.parse_obj(request.get_json(silent=True) or {})
         except ValidationError as e:
             log.error(f"Validation error on index configuration save: {e.errors()}")
             return {"ok": False, "error": f"Validation error on index configuration save: {e.errors()}"}, 400
@@ -45,41 +45,24 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if validation_error:
             return validation_error
 
-        try:
-            running_error = self._reject_if_running(project_id, connection_string, toolkit_name_id, index_name)
-            if running_error:
-                return running_error
+        task_disconnected_timeout = int(
+            VaultClient(project_id).get_secrets().get('task_disconnected_timeout_sec', 7200)
+        )
 
+        try:
             configuration = save_toolkit_index_configuration(
-                connection_string, toolkit_name_id, index_name, payload.configuration
+                connection_string, toolkit_name_id, index_name,
+                payload.configuration, task_disconnected_timeout,
             )
             if configuration is None:
                 return {"ok": False, "error": f"Index '{index_name}' not found"}, 404
 
             return {"ok": True, "configuration": configuration}, 200
+        except IndexRunInProgressError as e:
+            return {"ok": False, "error": str(e)}, 409
         except Exception as e:
             log.error(f"Error occurred while saving configuration for index '{index_name}': {e}")
             return {"ok": False, "error": "Error occurred while saving index configuration"}, 400
-
-    def _reject_if_running(self, project_id: int, connection_string: str, toolkit_name_id: str, index_name: str):
-        """
-        A save during a live run would be silently overwritten by that run's own metadata write,
-        so the config tab is disabled while indexing. A stale run never writes again, so it must
-        not lock the configuration out indefinitely.
-        """
-        with get_session_for_schema(connection_string, toolkit_name_id) as session:
-            meta = get_toolkit_index_meta(session, index_name)
-            if not meta:
-                return {"ok": False, "error": f"Index '{index_name}' not found"}, 404
-
-            cmetadata = meta.cmetadata or {}
-            timeout = int(VaultClient(project_id).get_secrets().get('task_disconnected_timeout_sec', 7200))
-            stale = is_index_stale(cmetadata.get('updated_on', 0), cmetadata.get('state', ''), timeout)
-
-            if cmetadata.get('state') == 'in_progress' and not stale:
-                return {"ok": False, "error": "Cannot save configuration while indexing is in progress"}, 409
-
-        return None
 
 
 class API(api_tools.APIBase):
