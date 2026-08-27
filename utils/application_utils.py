@@ -603,7 +603,7 @@ def get_application_details(project_id: int, application_id: int,
                 ApplicationVersion.application_id == application_id,
                 ApplicationVersion.name == version_name
             ).options(
-                joinedload(ApplicationVersion.application),
+                joinedload(ApplicationVersion.application).selectinload(Application.versions),
                 selectinload(ApplicationVersion.tools),
                 selectinload(ApplicationVersion.tool_mappings),
                 selectinload(ApplicationVersion.variables),
@@ -616,7 +616,7 @@ def get_application_details(project_id: int, application_id: int,
                 session.query(ApplicationVersion)
                 .filter(ApplicationVersion.application_id == application_id)
                 .options(
-                    joinedload(ApplicationVersion.application),
+                    joinedload(ApplicationVersion.application).selectinload(Application.versions),
                     selectinload(ApplicationVersion.tools),
                     selectinload(ApplicationVersion.tool_mappings),
                     selectinload(ApplicationVersion.variables),
@@ -632,13 +632,18 @@ def get_application_details(project_id: int, application_id: int,
                 'msg': f'No application found with id \'{application_id}\' or no version \'{version_name}\''
             }
 
-        # OPTIMIZATION: Pre-fetch version author data in a single batch call
+        # OPTIMIZATION: Pre-fetch version author data in a single batch call for all versions.
         # Application has no author_id - only version does. Tool authors not needed.
         authors_map = {}
+        all_author_ids = {
+            v.author_id for v in application_version.application.versions if v.author_id
+        }
         if application_version.author_id:
-            authors_data = get_authors_data([application_version.author_id])
+            all_author_ids.add(application_version.author_id)
+        if all_author_ids:
+            authors_data = get_authors_data(list(all_author_ids))
             authors_map = {a['id']: a for a in authors_data}
-            log.debug(f"[PERF] Application details: pre-fetched {len(authors_map)} authors (version only)")
+            log.debug(f"[PERF] Application details: pre-fetched {len(authors_map)} authors")
 
         # Pass authors_map via validation context to avoid repeated RPC calls
         validation_context = {'authors_map': authors_map}

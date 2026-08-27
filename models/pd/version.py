@@ -365,12 +365,23 @@ class ApplicationVersionListModel(BaseModel):
     status: PublishStatus
     created_at: datetime  # probably delete this
     author_id: int = Field(..., exclude=True)
+    author_name: Optional[str] = None
+    author_email: Optional[str] = None
     meta: Optional[dict] = Field(default_factory=dict)
     tags: List[TagListModel] = Field(..., exclude=True)
     agent_type: AgentTypes = Field(..., exclude=True)
     instructions: str
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='after')
+    def resolve_author(self, info: ValidationInfo) -> 'ApplicationVersionListModel':
+        authors_map = (info.context or {}).get('authors_map', {})
+        if self.author_id and self.author_id in authors_map:
+            entry = authors_map[self.author_id]
+            self.author_name = entry.get('name')
+            self.author_email = entry.get('email')
+        return self
 
 
 class ApplicationVersionFullUpdateModel(ApplicationVersionBaseModel, ApplicationVersionArgsForwardingModel):

@@ -30,10 +30,21 @@ class SkillVersionListModel(BaseModel):
     status: Optional[str] = None
     created_at: datetime
     author_id: int = Field(..., exclude=True)
+    author_name: Optional[str] = None
+    author_email: Optional[str] = None
     tags: List[TagDetailModel] = Field(default_factory=list, exclude=True)
     meta: Optional[dict] = Field(None, exclude=True)
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='after')
+    def resolve_author(self, info: ValidationInfo) -> 'SkillVersionListModel':
+        authors_map = (info.context or {}).get('authors_map', {})
+        if self.author_id and self.author_id in authors_map:
+            entry = authors_map[self.author_id]
+            self.author_name = entry.get('name')
+            self.author_email = entry.get('email')
+        return self
 
 
 class SkillVersionDetailModel(BaseModel):

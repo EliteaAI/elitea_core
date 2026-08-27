@@ -784,7 +784,14 @@ def get_skill_details(
         if not skill:
             return {'data': None}
 
-        result = SkillDetailModel.model_validate(skill)
+        from .authors import get_authors_data
+        all_author_ids = {v.author_id for v in skill.versions if v.author_id}
+        authors_map = {}
+        if all_author_ids:
+            authors_data = get_authors_data(list(all_author_ids))
+            authors_map = {a['id']: a for a in authors_data}
+
+        result = SkillDetailModel.model_validate(skill, context={'authors_map': authors_map})
 
         # Get specific version details
         version = None
