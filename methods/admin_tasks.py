@@ -605,9 +605,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def migrate_eval_dimension_columns(self, *args, **kwargs):
-        """Admin task: add the dimension agent-scoping column to each project schema.
+        """Admin task: add the dimension agent-scoping + Code-engine columns to each
+        project schema.
 
-        Adds ``agent_id`` (owning agent, nullable) to ``eval_dimension`` on every
+        Adds ``agent_id`` (owning agent, nullable), and ``code`` / ``return_contract``
+        (EL-2444: Code-engine fold — the script/verdict-contract fields formerly on the
+        now-deleted ``eval_code_validation`` table) to ``eval_dimension`` on every
         project schema. Idempotent (``ADD COLUMN IF NOT EXISTS``): safe to run
         multiple times.
 
