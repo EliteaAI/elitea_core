@@ -65,6 +65,10 @@ from ..utils.token_limit_continuation import (
     is_token_limit_continuation,
     prepare_token_limit_payload,
 )
+from ..utils.pipeline_hitl_history import (
+    create_pipeline_hitl_resume_segments,
+    get_direct_pipeline_hitl_interrupt,
+)
 
 
 TIMEOUT_CANCEL_TEXT = "No response, cancelled by timeout"
@@ -1446,11 +1450,25 @@ class RPC:
             'message_id=%s',
             len(requested), response_msg.uuid,
         )
-        return {
+        result = {
             'queued': False,
             'live_resume': False,
             'already_resolved': True,
         }
+        pipeline_resolution = meta.get('pipeline_hitl_resolution')
+        if (
+            isinstance(pipeline_resolution, dict)
+            and str(pipeline_resolution.get('interrupt_id') or '') in requested
+        ):
+            result.update({
+                'decision_message_id': pipeline_resolution.get(
+                    'decision_message_id'
+                ),
+                'continuation_message_id': pipeline_resolution.get(
+                    'continuation_message_id'
+                ),
+            })
+        return result
 
     @web.method()
     def _claim_stopped_supervisor_fallback(
@@ -1789,6 +1807,7 @@ class RPC:
             if parsed.hitl_resume:
                 pending = pending_interrupts(response_msg.meta)
                 pending_auth = pending_authorization_requests(response_msg.meta)
+                pipeline_history_resume = None
                 decisions = [
                     dict(item) for item in (parsed.hitl_decisions or [])
                     if isinstance(item, dict)
@@ -1813,6 +1832,25 @@ class RPC:
                             stream_id=str(parsed.conversation_uuid),
                             message_id=parsed.message_id,
                         ) from exc
+                    if len(decisions) == 1:
+                        decision = decisions[0]
+                        selected_interrupt = next((
+                            item for item in pending
+                            if interrupt_identity(item) == str(
+                                decision.get('interrupt_id') or ''
+                            )
+                        ), None)
+                        durable_interrupt = get_direct_pipeline_hitl_interrupt(
+                            response_msg,
+                            response_msg.meta,
+                            selected_interrupt,
+                        ) if selected_interrupt else None
+                        if durable_interrupt:
+                            pipeline_history_resume = (
+                                durable_interrupt,
+                                decision.get('action'),
+                                decision.get('value', ''),
+                            )
                 else:
                     if len(pending) != 1:
                         raise SioValidationError(
@@ -1843,6 +1881,17 @@ class RPC:
                         )
                     resolved_ids = [interrupt_identity(pending[0])]
                     resolved_auth_ids = []
+                    durable_interrupt = get_direct_pipeline_hitl_interrupt(
+                        response_msg,
+                        response_msg.meta,
+                        pending[0],
+                    )
+                    if durable_interrupt:
+                        pipeline_history_resume = (
+                            durable_interrupt,
+                            parsed.hitl_action,
+                            parsed.hitl_value,
+                        )
                 response_msg.meta = retire_interrupts(
                     response_msg.meta, resolved_ids,
                 )
@@ -1850,6 +1899,51 @@ class RPC:
                     response_msg.meta, resolved_auth_ids,
                 )
                 flag_modified(response_msg, 'meta')
+
+                if pipeline_history_resume:
+                    paused_response = response_msg
+                    durable_interrupt, decision_action, decision_value = (
+                        pipeline_history_resume
+                    )
+                    author_participant, _ = get_or_create_one(
+                        session=session,
+                        entity_name=ParticipantTypes.user,
+                        entity_meta=ParticipantEntityUser(id=current_user['id']),
+                    )
+                    msg_group, response_msg = create_pipeline_hitl_resume_segments(
+                        session,
+                        conversation=conversation,
+                        paused_response=paused_response,
+                        author_participant=author_participant,
+                        interrupt=durable_interrupt,
+                        action=decision_action,
+                        value=decision_value,
+                        execution_generation=str(uuid4()),
+                    )
+                    if msg_group is None or response_msg is None:
+                        return {
+                            'queued': False,
+                            'already_resolved': True,
+                        }
+                    session.commit()
+                    room = get_chat_room(conversation.uuid)
+                    self.context.sio.emit(
+                        event=SioEvents.chat_message_sync,
+                        data=serialize(
+                            MessageGroupDetail.model_validate(paused_response)
+                        ),
+                        room=room,
+                    )
+                    self.context.sio.emit(
+                        event=SioEvents.chat_predict.value,
+                        data={
+                            'type': 'chat_user_message',
+                            **serialize(
+                                MessageGroupDetail.model_validate(msg_group)
+                            ),
+                        },
+                        room=room,
+                    )
 
             if parsed.mcp_auth_resume:
                 pending_auth = pending_authorization_requests(response_msg.meta)
