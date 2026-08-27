@@ -1311,6 +1311,65 @@ def update_toolkit_index_meta_failed_state(connection_string: str, toolkit_name_
             log.warning(f"No metadata found for index_name={index_name}, cannot update failed state")
 
 
+def _as_index_configuration_dict(value) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value.strip() else {}
+        except (json.JSONDecodeError, TypeError):
+            log.warning(f"Failed to decode index configuration: {value}. Setting to empty dict.")
+            value = {}
+    #
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def build_index_configuration(tool_params, stored_config=None) -> dict:
+    """
+    Normalize an index configuration payload into the shape the scheduler expects.
+
+    Scheduled runs pass cmetadata['index_configuration'] straight into start_index_task, which
+    subscripts it immediately - so a JSON string persisted here breaks every scheduled run. Older
+    migration scripts did write strings, hence the tolerance on both inputs.
+
+    index_name is filtered out of the configuration form as immutable, so the client never sends
+    it back and it has to be restored from the stored value.
+    """
+    configuration = _as_index_configuration_dict(tool_params)
+    stored_index_name = _as_index_configuration_dict(stored_config).get('index_name')
+    #
+    if not configuration.get('index_name') and stored_index_name:
+        configuration['index_name'] = stored_index_name
+    #
+    return configuration
+
+
+def save_toolkit_index_configuration(connection_string: str, toolkit_name_id: str, index_name: str, tool_params) -> dict:
+    """
+    Persist only the index configuration, leaving the rest of the index metadata as-is.
+
+    A sibling of update_toolkit_index_meta_failed_state rather than a branch of
+    reset_or_create_toolkit_index_meta: that one replaces the whole row and appends a history
+    entry, which would show up in the UI as a phantom run. Saving a configuration is not a run,
+    so state, history, task_id, report, error and the timestamps must survive untouched -
+    updated_on in particular drives both list ordering and is_index_stale.
+
+    Returns the stored configuration so the caller can echo it back to the client.
+    """
+    with get_session_for_schema(connection_string, toolkit_name_id) as session:
+        meta = get_toolkit_index_meta(session, index_name)
+        if not meta:
+            log.warning(f"No metadata found for index_name={index_name}, cannot save index configuration")
+            return None
+        #
+        current_metadata = meta.cmetadata.copy()
+        configuration = build_index_configuration(tool_params, current_metadata.get('index_configuration'))
+        current_metadata['index_configuration'] = configuration
+        meta.cmetadata = current_metadata
+        session.commit()
+        log.debug(f"Saved index configuration for index_name={index_name}")
+        #
+        return configuration
+
+
 def ensure_pgvector_schema_and_tables(connection_string: str, schema: str, vector_dimension: int = None):
     import sqlalchemy
     from sqlalchemy import create_engine, text, Column, String, ForeignKey, Index
@@ -1462,7 +1521,7 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         "indexed": 0,
         "updated": 0,
         "state": "in_progress",
-        "index_configuration": tool_params,
+        "index_configuration": build_index_configuration(tool_params),
         "created_on": created_on,
         "updated_on": created_on,
         "task_id": task_id,
