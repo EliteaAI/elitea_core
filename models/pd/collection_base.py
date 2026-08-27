@@ -48,7 +48,8 @@ class VersionAuthorMixin(BaseModel):
             entry = authors_map[self.author_id]
             self.author_name = entry.get('name')
             self.author_email = entry.get('email')
-        elif self.author_id and not authors_map:
+        elif self.author_id and info.context is None:
+            # No context was supplied — legacy call site; fall back to single fetch.
             authors_data = get_authors_data(author_ids=[self.author_id])
             if authors_data:
                 self.author_name = authors_data[0].get('name')
