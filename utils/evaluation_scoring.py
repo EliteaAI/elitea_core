@@ -98,20 +98,19 @@ def run_headline(case_scores: Iterable[Optional[float]]) -> Optional[float]:
 # produces at finish time equals the number B5 re-derives when results are read
 # and the number B6 recomputes after a human override (§20.6/§20.10). Both call
 # ``aggregate_run_score`` with items keyed by ``binding_item_key`` and weighted by
-# ``snapshot_weight_map`` — a code validation and a platform validation on the same
-# case no longer collapse onto the dimension key, and each carries its own binding
+# ``snapshot_weight_map`` — a code-engine dimension and a platform validation on the
+# same case no longer collapse onto each other, and each carries its own binding
 # weight instead of silently defaulting.
 
 
 def binding_item_key(
     dimension_id: Optional[int] = None,
-    code_validation_id: Optional[int] = None,
     platform_key: Optional[str] = None,
 ) -> tuple:
     """Identity of the validated item within a case (§16.2 — exactly one is set). Used both to
     bucket scores and to look up a binding weight, so a human dimension override lands on the same
-    key as the machine dimension result it supersedes ``(dimension_id, None, None)``."""
-    return (dimension_id, code_validation_id, platform_key)
+    key as the machine dimension result it supersedes ``(dimension_id, None)``."""
+    return (dimension_id, platform_key)
 
 
 def snapshot_weight_map(snapshot: dict) -> dict:
@@ -123,7 +122,6 @@ def snapshot_weight_map(snapshot: dict) -> dict:
             continue
         key = binding_item_key(
             binding.get('dimension_id'),
-            binding.get('code_validation_id'),
             binding.get('platform_key'),
         )
         weights[key] = binding['weight']
@@ -138,7 +136,7 @@ def fold_latest_normalized(machine_items, human_items) -> List[tuple]:
     score supersedes the machine verdict for that dimension while code/platform items keep their own
     keys and are never collapsed onto the dimension.
 
-    ``machine_items``: iterable of ``(case_id, dimension_id, code_validation_id, platform_key, normalized)``.
+    ``machine_items``: iterable of ``(case_id, dimension_id, platform_key, normalized)``.
     ``human_items``:   iterable of ``(case_id, dimension_id, normalized)`` (latest per key).
 
     Returns a list of ``(case_id, item_key, normalized)`` ready for :func:`aggregate_run_score`.
@@ -146,8 +144,8 @@ def fold_latest_normalized(machine_items, human_items) -> List[tuple]:
     is derived in exactly one way regardless of who asks (§20.6/§20.10).
     """
     latest: dict = {}
-    for case_id, dimension_id, code_validation_id, platform_key, normalized in machine_items:
-        latest[(case_id, binding_item_key(dimension_id, code_validation_id, platform_key))] = normalized
+    for case_id, dimension_id, platform_key, normalized in machine_items:
+        latest[(case_id, binding_item_key(dimension_id, platform_key))] = normalized
     for case_id, dimension_id, normalized in human_items:
         latest[(case_id, binding_item_key(dimension_id))] = normalized
     return [(case_id, item_key, normalized) for (case_id, item_key), normalized in latest.items()]

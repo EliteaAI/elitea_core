@@ -154,7 +154,7 @@ def _ok(result, **extra):
 
 
 def test_map_success_bool_scored(cv):
-    v = cv.map_execution_result(_ok(True), code_validation_id=7, name='v1')
+    v = cv.map_execution_result(_ok(True), dimension_id=7, name='v1')
     assert v['status'] == cv.STATUS_SCORED
     assert v['passed'] is True and v['native_score'] == 1.0
     assert v['stdout'] == 'out' and v['execution_time'] == 0.5
@@ -162,14 +162,14 @@ def test_map_success_bool_scored(cv):
 
 
 def test_map_success_number_scored(cv):
-    v = cv.map_execution_result(_ok(0.8), code_validation_id=7, name='v1',
+    v = cv.map_execution_result(_ok(0.8), dimension_id=7, name='v1',
                                 return_contract='number')
     assert v['status'] == cv.STATUS_SCORED
     assert v['native_score'] == 0.8 and v['passed'] is None
 
 
 def test_map_missing_result_is_error(cv):
-    v = cv.map_execution_result(_ok(None), code_validation_id=7, name='v1')
+    v = cv.map_execution_result(_ok(None), dimension_id=7, name='v1')
     assert v['status'] == cv.STATUS_ERROR
     assert 'result' in v['error']
     # stdout/exec_time still surfaced on the error verdict
@@ -180,7 +180,7 @@ def test_map_sandbox_timeout_is_error(cv):
     exec_result = {'result': None, 'stdout': None,
                    'stderr': 'Execution timed out after 55 seconds',
                    'status': 'error', 'execution_time': 55.0}
-    v = cv.map_execution_result(exec_result, code_validation_id=7, name='v1')
+    v = cv.map_execution_result(exec_result, dimension_id=7, name='v1')
     assert v['status'] == cv.STATUS_ERROR
     assert 'timed out' in v['error']
     assert v['execution_time'] == 55.0
@@ -189,7 +189,7 @@ def test_map_sandbox_timeout_is_error(cv):
 def test_map_sandbox_error_without_stderr_has_fallback(cv):
     exec_result = {'result': None, 'stdout': None, 'stderr': None,
                    'status': 'oom', 'execution_time': None}
-    v = cv.map_execution_result(exec_result, code_validation_id=7, name='v1')
+    v = cv.map_execution_result(exec_result, dimension_id=7, name='v1')
     assert v['status'] == cv.STATUS_ERROR
     assert 'oom' in v['error']
 
@@ -263,7 +263,7 @@ def test_run_screen_violation_is_error_verdict(cv):
 
     v = cv.run_code_validation(
         'import os\nresult = True',
-        code_validation_id=1, name='v', output='x', executor=executor,
+        dimension_id=1, name='v', output='x', executor=executor,
     )
     assert v['status'] == cv.STATUS_ERROR
     assert 'not allowed' in v['error']
@@ -278,7 +278,7 @@ def test_run_unavailable_is_unavailable_verdict(cv):
 
     v = cv.run_code_validation(
         'result = output == "x"',
-        code_validation_id=1, name='v', output='x', executor=executor,
+        dimension_id=1, name='v', output='x', executor=executor,
     )
     assert v['status'] == cv.STATUS_UNAVAILABLE
     assert 'not available' in v['error']
@@ -293,12 +293,12 @@ def test_run_success_scored_verdict(cv):
 
     v = cv.run_code_validation(
         'result = output == expected',
-        code_validation_id=42, name='exact-match',
+        dimension_id=42, name='exact-match',
         output='foo', expected='foo', executor=executor,
     )
     assert v['status'] == cv.STATUS_SCORED
     assert v['passed'] is True and v['native_score'] == 1.0
-    assert v['code_validation_id'] == 42 and v['name'] == 'exact-match'
+    assert v['dimension_id'] == 42 and v['name'] == 'exact-match'
     # evidence made it into the prelude the executor received
     assert "output = 'foo'" in captured['prelude']
     assert "expected = 'foo'" in captured['prelude']
@@ -310,7 +310,7 @@ def test_run_number_contract_scored(cv):
 
     v = cv.run_code_validation(
         'result = 0.75',
-        code_validation_id=5, name='sim', output='x',
+        dimension_id=5, name='sim', output='x',
         return_contract='number', executor=executor,
     )
     assert v['status'] == cv.STATUS_SCORED
@@ -323,7 +323,7 @@ def test_run_missing_result_is_error_verdict(cv):
 
     v = cv.run_code_validation(
         'x = 1',  # never assigns result (passes screen, fails contract)
-        code_validation_id=5, name='v', output='x', executor=executor,
+        dimension_id=5, name='v', output='x', executor=executor,
     )
     assert v['status'] == cv.STATUS_ERROR
     assert 'result' in v['error']

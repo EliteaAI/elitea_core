@@ -167,7 +167,7 @@ def _reaggregate_run(session, run: EvalRun) -> Optional[float]:
     # latest normalized score per (case, item) via the one shared fold: machine results first,
     # then human dimension overrides (§15.3). Same path B5 read uses → identical headline.
     scored_items = fold_latest_normalized(
-        ((r.dataset_case_id, r.dimension_id, r.code_validation_id, r.platform_key, r.normalized_score)
+        ((r.dataset_case_id, r.dimension_id, r.platform_key, r.normalized_score)
          for r in results),
         ((h.dataset_case_id, h.dimension_id, h.normalized_score) for h in human),
     )

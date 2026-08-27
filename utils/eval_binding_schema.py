@@ -20,7 +20,6 @@ from tools import db
 #: Postgres, so each constraint only bites on the column actually set for that binding kind.
 _BINDING_CONSTRAINTS = (
     ('_eval_binding_suite_dimension_uc', 'suite_id, dimension_id'),
-    ('_eval_binding_suite_code_uc', 'suite_id, code_validation_id'),
     ('_eval_binding_suite_platform_uc', 'suite_id, platform_key'),
 )
 

@@ -1,7 +1,7 @@
 """CRUD for Agent-Evaluation **suites + bindings** (EVAL-P1-B2, §13 / §16.2 / §3).
 
 A *suite* is a named set of *bindings* on an agent (``Application``); each binding applies
-one library item (dimension / code-validation / platform key) with per-agent weight/target/
+one library item (dimension — any engine — or platform key) with per-agent weight/target/
 engine/evidence, pinned to a concrete ``ApplicationVersion`` (H6 versioning seam, §16.3).
 
 Definitions live in the library (B1); this module owns the *binding* side. Errors subclass
@@ -18,7 +18,6 @@ from ..models.evaluation import (
     EvalSuite,
     EvalBinding,
     EvalDimension,
-    EvalCodeValidation,
     EvalEngine,
     EvalTier,
 )
@@ -179,9 +178,6 @@ def _validate_source(s, suite: EvalSuite, data: EvalBindingCreateModel) -> None:
             and dimension.agent_id != suite.application_id
         ):
             raise EvalBindingSourceError(f'dimension {data.dimension_id} not found')
-    elif data.code_validation_id is not None:
-        if not s.query(EvalCodeValidation).filter(EvalCodeValidation.id == data.code_validation_id).first():
-            raise EvalBindingSourceError(f'code-validation {data.code_validation_id} not found')
     # platform_key references an external catalog (not a project row) — no DB check here.
 
 
@@ -221,7 +217,6 @@ def _require_not_already_bound(s, suite_id: int, data: EvalBindingCreateModel) -
     instead of surfacing an IntegrityError from the flush."""
     column, value = (
         (EvalBinding.dimension_id, data.dimension_id) if data.dimension_id is not None
-        else (EvalBinding.code_validation_id, data.code_validation_id) if data.code_validation_id is not None
         else (EvalBinding.platform_key, data.platform_key)
     )
     existing = (
@@ -258,11 +253,11 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
         suite = _require_suite(s, suite_id)
         _validate_source(s, suite, data)
         _validate_version_pin(s, suite, data.application_version_id)
-        # Code-validation and platform bindings always run on the code engine (§12);
-        # only dimension bindings honor the editable engine column (ai/human). Normalize
-        # at the source so a defaulted 'ai' engine can't be persisted for a code/platform item.
+        # Platform bindings always run on the code engine (§12); dimension bindings (any
+        # engine, including a code-engine dimension) honor the editable engine column. Normalize
+        # at the source so a defaulted 'ai' engine can't be persisted for a platform item.
         engine = data.engine
-        if data.code_validation_id is not None or data.platform_key is not None:
+        if data.platform_key is not None:
             engine = EvalEngine.code
         _validate_dimension_engine(s, data.dimension_id, engine)
         _require_not_already_bound(s, suite_id, data)
@@ -270,7 +265,6 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
             suite_id=suite_id,
             application_version_id=data.application_version_id,
             dimension_id=data.dimension_id,
-            code_validation_id=data.code_validation_id,
             platform_key=data.platform_key,
             engine=engine,
             evidence_scope=data.evidence_scope,

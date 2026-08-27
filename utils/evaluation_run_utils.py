@@ -58,7 +58,6 @@ def _binding_dict(b) -> dict:
     return {
         'engine': b.engine,
         'dimension_id': b.dimension_id,
-        'code_validation_id': b.code_validation_id,
         'platform_key': b.platform_key,
         'application_version_id': b.application_version_id,
         'evidence_scope': b.evidence_scope or {},
@@ -73,15 +72,7 @@ def _dimension_dict(d) -> dict:
     return {
         'id': d.id, 'name': d.name, 'description': d.description,
         'scale_type': d.scale_type, 'scale_min': d.scale_min, 'scale_max': d.scale_max,
-        'polarity': d.polarity,
-    }
-
-
-def _code_validation_dict(cv) -> dict:
-    return {
-        'id': cv.id, 'name': cv.name, 'code': cv.code,
-        'return_contract': cv.return_contract, 'scale_min': cv.scale_min,
-        'scale_max': cv.scale_max, 'polarity': cv.polarity,
+        'polarity': d.polarity, 'code': d.code, 'return_contract': d.return_contract,
     }
 
 
@@ -108,9 +99,9 @@ def _case_dict(c) -> dict:
 
 
 def _load_suite_config(s, suite_id: int, *, judge_model_override: Optional[dict] = None):
-    """Load a suite + its ordered bindings + the dimensions / code-validations those bindings
-    reference, all as pure dicts. Raises :class:`EvalSuiteNotFoundError` if the suite is gone."""
-    from ..models.evaluation import EvalSuite, EvalBinding, EvalDimension, EvalCodeValidation
+    """Load a suite + its ordered bindings + the dimensions those bindings reference, all as pure
+    dicts. Raises :class:`EvalSuiteNotFoundError` if the suite is gone."""
+    from ..models.evaluation import EvalSuite, EvalBinding, EvalDimension
 
     suite = s.query(EvalSuite).filter(EvalSuite.id == suite_id).first()
     if not suite:
@@ -125,17 +116,11 @@ def _load_suite_config(s, suite_id: int, *, judge_model_override: Optional[dict]
     bindings = [_binding_dict(b) for b in binding_rows]
 
     dim_ids = {b['dimension_id'] for b in bindings if b['dimension_id'] is not None}
-    cv_ids = {b['code_validation_id'] for b in bindings if b['code_validation_id'] is not None}
     dimensions = (
         [_dimension_dict(d) for d in s.query(EvalDimension).filter(EvalDimension.id.in_(dim_ids)).all()]
         if dim_ids else []
     )
-    code_validations = (
-        [_code_validation_dict(cv)
-         for cv in s.query(EvalCodeValidation).filter(EvalCodeValidation.id.in_(cv_ids)).all()]
-        if cv_ids else []
-    )
-    return suite, bindings, dimensions, code_validations
+    return suite, bindings, dimensions
 
 
 def _resolve_version(bindings: List[dict], override: Optional[int]) -> int:
@@ -190,7 +175,7 @@ def create_batch_run(
     from ..models.evaluation import EvalRun, EvalDataset, EvalRunStatus, EvalRunTrigger
 
     with _session(session, project_id) as s:
-        suite, bindings, dimensions, code_validations = _load_suite_config(
+        suite, bindings, dimensions = _load_suite_config(
             s, suite_id, judge_model_override=judge_model)
 
         ds_id = dataset_id if dataset_id is not None else suite.dataset_id
@@ -209,7 +194,7 @@ def create_batch_run(
         _assert_version_in_application(s, version_id, suite.application_id)
         snapshot = build_run_snapshot(
             suite=_suite_dict(suite, judge_model),
-            dimensions=dimensions, code_validations=code_validations,
+            dimensions=dimensions,
             bindings=bindings, cases=cases,
             application_id=suite.application_id, application_version_id=version_id,
             dataset_id=ds_id, trigger_type=TRIGGER_OFFLINE_BATCH,
@@ -247,7 +232,7 @@ def create_on_demand_run(
     from .evaluation_turn_extraction import extract_conversation_turns
 
     with _session(session, project_id) as s:
-        suite, bindings, dimensions, code_validations = _load_suite_config(
+        suite, bindings, dimensions = _load_suite_config(
             s, suite_id, judge_model_override=judge_model)
 
         version_id = _resolve_version(bindings, application_version_id)
@@ -258,7 +243,7 @@ def create_on_demand_run(
 
         snapshot = build_run_snapshot(
             suite=_suite_dict(suite, judge_model),
-            dimensions=dimensions, code_validations=code_validations,
+            dimensions=dimensions,
             bindings=bindings, cases=cases,
             application_id=suite.application_id, application_version_id=version_id,
             dataset_id=None, trigger_type=TRIGGER_ON_DEMAND,

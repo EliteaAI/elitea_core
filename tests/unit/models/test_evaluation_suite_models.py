@@ -68,12 +68,12 @@ def test_binding_requires_exactly_one_source(pd_eval):
 
 def test_binding_rejects_two_sources(pd_eval):
     with pytest.raises(ValidationError):
-        pd_eval.EvalBindingCreateModel(dimension_id=1, code_validation_id=2)
+        pd_eval.EvalBindingCreateModel(dimension_id=1, platform_key='safety')
 
 
 def test_binding_accepts_single_dimension(pd_eval):
     m = pd_eval.EvalBindingCreateModel(dimension_id=7)
-    assert m.dimension_id == 7 and m.code_validation_id is None
+    assert m.dimension_id == 7 and m.platform_key is None
 
 
 def test_binding_accepts_platform_key(pd_eval):

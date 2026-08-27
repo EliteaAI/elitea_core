@@ -1,8 +1,8 @@
 """Pydantic request/response models for the Agent-Evaluation **Library** (EVAL-P1-B1).
 
 Covers the library *definition* types (§16, §3.1, §19):
-  * dimension definitions   -> EvalDimension  (AI / Human / Code criteria)
-  * code-validation defs     -> EvalCodeValidation (Code engine, project-tier only)
+  * dimension definitions   -> EvalDimension  (AI / Human / Code criteria; a Code-engine
+                               dimension carries a script instead of a rubric, §2.1)
 
 and the **suite + binding** models (EVAL-P1-B2, §13, §16.2):
   * suite                    -> EvalSuite    (named binding set on an agent + version)
@@ -66,6 +66,10 @@ class EvalDimensionBaseModel(BaseModel):
     default_weight: float = Field(1.0, ge=0)
     default_target: Optional[float] = None
     default_target_operator: Optional[str] = None
+    # Code-engine authoring (§2.1): a dimension with allowed_engines == ['code'] carries a
+    # script instead of a rubric. Required together, forbidden for any AI/Human dimension.
+    code: Optional[str] = Field(None, min_length=1)
+    return_contract: Optional[str] = None
     meta: dict = Field(default_factory=dict)
 
     @field_validator('allowed_engines')
@@ -76,6 +80,8 @@ class EvalDimensionBaseModel(BaseModel):
         bad = [e for e in v if e not in _ENGINES]
         if bad:
             raise ValueError(f'unknown engine(s): {bad}; allowed: {sorted(_ENGINES)}')
+        if EvalEngine.code in v and len(v) > 1:
+            raise ValueError('a code-engine dimension cannot also allow ai/human')
         return v
 
     @field_validator('scale_type')
@@ -99,10 +105,28 @@ class EvalDimensionBaseModel(BaseModel):
             raise ValueError(f'default_target_operator must be one of {sorted(_OPERATORS)}')
         return v
 
+    @field_validator('return_contract')
+    @classmethod
+    def _validate_contract(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _RETURN_CONTRACTS:
+            raise ValueError(f'return_contract must be one of {sorted(_RETURN_CONTRACTS)}')
+        return v
+
     @model_validator(mode='after')
     def _validate_scale_bounds(self):
         if self.scale_min >= self.scale_max:
             raise ValueError('scale_min must be strictly less than scale_max')
+        return self
+
+    @model_validator(mode='after')
+    def _validate_code_fields(self):
+        is_code = self.allowed_engines == [EvalEngine.code]
+        if is_code and not self.code:
+            raise ValueError('code is required when allowed_engines is [\'code\']')
+        if not is_code and (self.code is not None or self.return_contract is not None):
+            raise ValueError('code / return_contract are only valid for a code-engine dimension')
+        if is_code and self.return_contract is None:
+            self.return_contract = 'bool'
         return self
 
 
@@ -155,66 +179,8 @@ class EvalDimensionDetailModel(BaseModel):
     default_weight: float
     default_target: Optional[float] = None
     default_target_operator: Optional[str] = None
-    owner_id: int
-    meta: dict = Field(default_factory=dict)
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-    @field_validator('uuid', mode='before')
-    @classmethod
-    def _coerce_uuid(cls, v):
-        return str(v) if v is not None else v
-
-
-# ----------------------------------------------------------------------------
-# Code-validation definitions (Code engine, project-tier only — §19.6)
-# ----------------------------------------------------------------------------
-
-class EvalCodeValidationBaseModel(BaseModel):
-    description: Optional[str] = None
-    return_contract: str = 'bool'
-    scale_min: Optional[float] = None
-    scale_max: Optional[float] = None
-    polarity: str = EvalPolarity.higher_better
-    meta: dict = Field(default_factory=dict)
-
-    @field_validator('return_contract')
-    @classmethod
-    def _validate_contract(cls, v: str) -> str:
-        if v not in _RETURN_CONTRACTS:
-            raise ValueError(f'return_contract must be one of {sorted(_RETURN_CONTRACTS)}')
-        return v
-
-    @field_validator('polarity')
-    @classmethod
-    def _validate_polarity(cls, v: str) -> str:
-        if v not in _POLARITIES:
-            raise ValueError(f'polarity must be one of {sorted(_POLARITIES)}')
-        return v
-
-
-class EvalCodeValidationCreateModel(EvalCodeValidationBaseModel):
-    name: str = Field(..., min_length=1, max_length=128)
-    code: str = Field(..., min_length=1)
-
-
-class EvalCodeValidationUpdateModel(EvalCodeValidationBaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=128)
-    code: Optional[str] = Field(None, min_length=1)
-
-
-class EvalCodeValidationDetailModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    uuid: str
-    name: str
-    description: Optional[str] = None
-    code: str
-    return_contract: str
-    scale_min: Optional[float] = None
-    scale_max: Optional[float] = None
-    polarity: str
+    code: Optional[str] = None
+    return_contract: Optional[str] = None
     owner_id: int
     meta: dict = Field(default_factory=dict)
     created_at: Optional[datetime] = None
@@ -271,17 +237,14 @@ class EvalBindingBaseModel(BaseModel):
 class EvalBindingCreateModel(EvalBindingBaseModel):
     # exactly one source of the item being bound (§16.3)
     dimension_id: Optional[int] = None
-    code_validation_id: Optional[int] = None
     platform_key: Optional[str] = Field(None, max_length=128)
 
     @model_validator(mode='after')
     def _validate_single_source(self):
-        sources = [self.dimension_id, self.code_validation_id, self.platform_key]
+        sources = [self.dimension_id, self.platform_key]
         provided = [s for s in sources if s is not None]
         if len(provided) != 1:
-            raise ValueError(
-                'exactly one of dimension_id / code_validation_id / platform_key must be set'
-            )
+            raise ValueError('exactly one of dimension_id / platform_key must be set')
         return self
 
 
@@ -312,7 +275,6 @@ class EvalBindingDetailModel(BaseModel):
     suite_id: int
     application_version_id: Optional[int] = None
     dimension_id: Optional[int] = None
-    code_validation_id: Optional[int] = None
     platform_key: Optional[str] = None
     engine: str
     evidence_scope: dict = Field(default_factory=dict)
@@ -631,7 +593,6 @@ class EvalResultDetailModel(BaseModel):
     run_id: int
     dataset_case_id: Optional[int] = None
     dimension_id: Optional[int] = None
-    code_validation_id: Optional[int] = None
     platform_key: Optional[str] = None
     engine: str
     status: str

@@ -88,7 +88,7 @@ def get_run_results(
         scored_rows = (
             s.query(
                 EvalResult.dataset_case_id, EvalResult.dimension_id,
-                EvalResult.code_validation_id, EvalResult.platform_key,
+                EvalResult.platform_key,
                 EvalResult.normalized_score,
             )
             .filter(

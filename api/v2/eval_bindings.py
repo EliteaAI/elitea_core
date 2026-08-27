@@ -54,7 +54,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Add a binding to an eval suite",
-        description="Adds a binding for exactly one library item (dimension_id | code_validation_id | platform_key). If application_version_id is set it must belong to the suite's agent.",
+        description="Adds a binding for exactly one library item (dimension_id | platform_key). If application_version_id is set it must belong to the suite's agent.",
         request_body=EvalBindingCreateModel,
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
