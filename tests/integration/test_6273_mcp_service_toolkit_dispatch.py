@@ -91,6 +91,10 @@ def mcp_service_module(monkeypatch):
     mcp_session.SseSession = type("SseSession", (), {})
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.mcp_session", mcp_session)
 
+    mcp_versioning = types.ModuleType("plugins.elitea_core.utils.mcp_versioning")
+    mcp_versioning.INTERNAL_MCP_ENVIRON_KEY = 'elitea.internal_mcp_request'
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.mcp_versioning", mcp_versioning)
+
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.mcp_service",
         PLUGIN_ROOT / "utils" / "mcp_service.py",
@@ -141,3 +145,16 @@ class TestGetToolkitByNameCollisionSafety:
         service = _service(mcp_service_module, toolkits)
         found = service._McpService__get_toolkit_by_name("jira_get_issue")
         assert found is not None and found["id"] == 2
+
+
+def test_internal_api_wsgi_request_is_marked_as_mcp(mcp_service_module, monkeypatch):
+    flask_stub = types.ModuleType('flask')
+    flask_stub.g = types.SimpleNamespace()
+    flask_stub.request = types.SimpleNamespace(headers={}, cookies={})
+    monkeypatch.setitem(sys.modules, 'flask', flask_stub)
+
+    environ = mcp_service_module.McpApiToolExecutor._build_wsgi_environ(
+        'PUT', '/v2/version/prompt_lib/1/2/3', {}, {'name': 'base'},
+    )
+
+    assert environ['elitea.internal_mcp_request'] is True
