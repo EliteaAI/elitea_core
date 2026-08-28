@@ -17,9 +17,13 @@ import json
 from importlib.metadata import version as _pkg_version
 
 import pytest
-from datamodel_code_generator import DataModelType, PythonVersion
-from datamodel_code_generator.model import get_data_model_types
-from datamodel_code_generator.parser.jsonschema import JsonSchemaParser
+
+# Deferred: CI's unit-only job doesn't install datamodel-code-generator, and pytest
+# imports every test file at collection time regardless of -m unit marker filtering.
+pytest.importorskip("datamodel_code_generator")
+from datamodel_code_generator import DataModelType, PythonVersion  # noqa: E402
+from datamodel_code_generator.model import get_data_model_types  # noqa: E402
+from datamodel_code_generator.parser.jsonschema import JsonSchemaParser  # noqa: E402
 
 
 MALICIOUS_EXPR = "__import__('os').system('id')"
