@@ -36,6 +36,12 @@ class ToolkitChangeRelationError(Exception):
     pass
 
 
+class IndexRunInProgressError(Exception):
+    def __init__(self, index_name: str):
+        self.index_name = index_name
+        super().__init__(f"Cannot save configuration for index '{index_name}' while indexing is in progress")
+
+
 class ConfigurationExpandError(Exception):
     def __init__(self, errors):
         super().__init__(str(errors))
@@ -1200,11 +1206,17 @@ def validate_toolkit_for_index(toolkit_config):
     return toolkit_schema, connection_string
 
 
-def get_toolkit_index_meta(session: Session, index_name: str):
-    return session.query(EmbeddingStore).filter(
+def get_toolkit_index_meta(session: Session, index_name: str, for_update: bool = False):
+    query = session.query(EmbeddingStore).filter(
         EmbeddingStore.cmetadata['type'].astext == "index_meta",
         func.jsonb_extract_path_text(EmbeddingStore.cmetadata, 'collection') == index_name
-    ).first()
+    )
+    # Callers that rewrite the whole cmetadata column lock the row so a concurrent run's write
+    # cannot be silently reverted by a read-modify-write built on a pre-run snapshot.
+    if for_update:
+        query = query.with_for_update()
+    #
+    return query.first()
 
 
 def reset_or_create_toolkit_index_meta(connection_string: str, toolkit_name_id: str, index_name: str, default: dict):
@@ -1309,6 +1321,80 @@ def update_toolkit_index_meta_failed_state(connection_string: str, toolkit_name_
             log.debug(f"Updated failed state for index_name={index_name} without touching history")
         else:
             log.warning(f"No metadata found for index_name={index_name}, cannot update failed state")
+
+
+def _as_index_configuration_dict(value) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value.strip() else {}
+        except (json.JSONDecodeError, TypeError):
+            log.warning(f"Failed to decode index configuration: {value}. Setting to empty dict.")
+            value = {}
+    #
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def build_index_configuration(tool_params, index_name: str = None) -> dict:
+    """
+    Normalize an index configuration payload into the shape the scheduler expects.
+
+    Scheduled runs pass cmetadata['index_configuration'] straight into start_index_task, which
+    subscripts it immediately, so the stored value has to be a dict. Older migration scripts
+    wrote JSON strings, hence the tolerance on the input.
+
+    index_name identifies which collection a run writes into, so it is taken from the caller's
+    authoritative source rather than trusted from the payload: the configuration form hides it as
+    immutable and never sends it back, and a payload naming a different index would aim the next
+    scheduled run at that other index's collection and metadata.
+    """
+    configuration = _as_index_configuration_dict(tool_params)
+    #
+    if index_name:
+        configuration['index_name'] = index_name
+    #
+    return configuration
+
+
+def save_toolkit_index_configuration(
+        connection_string: str, toolkit_name_id: str, index_name: str,
+        tool_params, task_disconnected_timeout: int,
+) -> dict:
+    """
+    Persist only the index configuration, leaving the rest of the index metadata as-is.
+
+    A sibling of update_toolkit_index_meta_failed_state rather than a branch of
+    reset_or_create_toolkit_index_meta: that one replaces the whole row and appends a history
+    entry, which would show up in the UI as a phantom run. Saving a configuration is not a run,
+    so state, history, task_id, report, error and the timestamps must survive untouched -
+    updated_on in particular drives both list ordering and is_index_stale.
+
+    The live-run check and the write share one transaction and take a row lock, because the write
+    rewrites the whole cmetadata column: a run starting between an unlocked check and this commit
+    would have its state, task_id and created_on reverted, leaving the UI showing a finished index
+    while a worker is still going and no task_id to stop it with. A run that stopped reporting
+    never writes again, so staleness reopens the row rather than locking edits out forever.
+
+    Returns the stored configuration so the caller can echo it back to the client.
+    """
+    with get_session_for_schema(connection_string, toolkit_name_id) as session:
+        meta = get_toolkit_index_meta(session, index_name, for_update=True)
+        if not meta:
+            log.warning(f"No metadata found for index_name={index_name}, cannot save index configuration")
+            return None
+        #
+        current_metadata = meta.cmetadata.copy()
+        state = current_metadata.get('state', '')
+        if state == 'in_progress' and not is_index_stale(
+                current_metadata.get('updated_on', 0), state, task_disconnected_timeout):
+            raise IndexRunInProgressError(index_name)
+        #
+        configuration = build_index_configuration(tool_params, index_name)
+        current_metadata['index_configuration'] = configuration
+        meta.cmetadata = current_metadata
+        session.commit()
+        log.debug(f"Saved index configuration for index_name={index_name}")
+        #
+        return configuration
 
 
 def ensure_pgvector_schema_and_tables(connection_string: str, schema: str, vector_dimension: int = None):
@@ -1462,7 +1548,7 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         "indexed": 0,
         "updated": 0,
         "state": "in_progress",
-        "index_configuration": tool_params,
+        "index_configuration": build_index_configuration(tool_params, index_name),
         "created_on": created_on,
         "updated_on": created_on,
         "task_id": task_id,

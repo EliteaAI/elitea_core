@@ -123,6 +123,11 @@ class ToolkitIndexingSchedule(BaseModel):
         return _validate_cron_expression(v)
 
 
+class SaveIndexConfiguration(BaseModel):
+    # The tool schema is owned by the SDK, so the payload is only shape-checked here.
+    configuration: dict
+
+
 class IndexDataRemovedEvent(BaseModel):
     index_name: str
     toolkit_id: int = Field(gt=0)
