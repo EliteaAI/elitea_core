@@ -1,4 +1,5 @@
 """Reusable tools package stubs."""
+import re
 import sys
 import types
 
@@ -53,6 +54,18 @@ class _FakeVaultClient:
         return cls()
 
 
+_INVALID_PROPERTY_CHARS = re.compile(r"[^a-zA-Z0-9_.-]")
+_PROPERTY_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
+
+
+def _sanitize_property_name(name: str) -> str:
+    """Mirror of shared.tools.openapi_tools.sanitize_property_name."""
+    if _PROPERTY_NAME_PATTERN.match(name):
+        return name
+    sanitized = _INVALID_PROPERTY_CHARS.sub("", name)
+    return (sanitized or "field")[:64]
+
+
 def install_tools_stubs():
     """Install minimal tools package stubs.
 
@@ -65,6 +78,8 @@ def install_tools_stubs():
     tools.config = _FakeConfig()
     tools.VaultClient = _FakeVaultClient
     tools.this = types.SimpleNamespace()
+    tools.openapi_registry = types.SimpleNamespace()
+    tools.sanitize_property_name = _sanitize_property_name
 
     sys.modules["tools"] = tools
     return tools

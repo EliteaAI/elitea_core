@@ -64,6 +64,7 @@ def mcp_service_module(monkeypatch):
     tools_pkg.auth = types.SimpleNamespace(current_user=lambda: {"id": 1})
     tools_pkg.this = types.SimpleNamespace()
     tools_pkg.openapi_registry = types.SimpleNamespace(get_mcp_api_tools=lambda *a, **k: [])
+    tools_pkg.sanitize_property_name = lambda name: name
     monkeypatch.setitem(sys.modules, "tools", tools_pkg)
 
     models_all = types.ModuleType("plugins.elitea_core.models.all")

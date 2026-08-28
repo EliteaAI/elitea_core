@@ -5,7 +5,7 @@ import json
 from mcp import types
 from pylon.core.tools import log
 from sqlalchemy.orm import joinedload
-from tools import db, auth, this, openapi_registry
+from tools import db, auth, this, openapi_registry, sanitize_property_name
 
 from ..models.all import Application, ApplicationVersion
 from ..utils.application_tools import toolkits_listing
@@ -60,26 +60,34 @@ class McpApiToolExecutor:
 
         For path parameters with schema defaults (e.g. 'mode'), applies the default
         when the argument is not provided by the MCP client.
+
+        Clients send the sanitized property name that build_mcp_input_schema
+        published (e.g. 'fname' for the 'fname[]' query param), so arguments are
+        looked up by the sanitized name but forwarded under the original one.
         """
         path_params = {}
         query_params = {}
         body_params = {}
+        consumed = set()
 
         for param in parameters:
             param_name = param.get("name")
             param_in = param.get("in")
             param_schema = param.get("schema", {})
+            arg_name = sanitize_property_name(param_name)
 
-            if param_name in arguments:
+            if arg_name in arguments:
                 if param_in == "path":
-                    path_params[param_name] = arguments[param_name]
+                    path_params[param_name] = arguments[arg_name]
+                    consumed.add(arg_name)
                 elif param_in == "query":
-                    query_params[param_name] = arguments[param_name]
+                    query_params[param_name] = arguments[arg_name]
+                    consumed.add(arg_name)
             elif param_in == "path" and "default" in param_schema:
                 path_params[param_name] = param_schema["default"]
 
         for key, value in arguments.items():
-            if key not in path_params and key not in query_params:
+            if key not in consumed:
                 body_params[key] = value
 
         return path_params, query_params, body_params
@@ -106,7 +114,9 @@ class McpApiToolExecutor:
         environ = {
             'REQUEST_METHOD': method,
             'PATH_INFO': url_path,
-            'QUERY_STRING': urlencode(query_params) if query_params else '',
+            # doseq repeats the key for list values ("fname[]=a&fname[]=b"), which is what
+            # request.args.getlist() on the receiving endpoint expects.
+            'QUERY_STRING': urlencode(query_params, doseq=True) if query_params else '',
             'wsgi.version': (1, 0),
             'wsgi.url_scheme': 'http',
             'wsgi.input': BytesIO(b''),
