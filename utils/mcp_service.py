@@ -379,7 +379,7 @@ class McpService:
         """Get tools for a specific toolkit"""
         tools = []
         # filter_mcp=None: include both regular toolkits and user-connected MCP
-        # toolkits (type == 'mcp'), which are excluded by the default
+        # toolkits (persisted with meta['mcp'] == True), which are excluded by the default
         # filter_mcp=False behavior (see EliteaAI/elitea_issues#6273).
         toolkits = toolkits_listing(
             project_id=self.session.project_id, query=None, limit=None, filter_mcp=None
@@ -454,7 +454,7 @@ class McpService:
         #
         # Expand toolkits to export as mcp server tools.
         # filter_mcp=None: include both regular toolkits and user-connected MCP
-        # toolkits (type == 'mcp'); the default filter_mcp=False would silently
+        # toolkits (persisted with meta['mcp'] == True); the default filter_mcp=False would silently
         # drop connected MCP toolkits from this list (EliteaAI/elitea_issues#6273).
         toolkits = [
             toolkit
@@ -465,6 +465,12 @@ class McpService:
         ]
         tk_schemas = get_toolkit_schemas(project_id=self.session.project_id, user_id=auth.current_user()["id"]) if toolkits else {}
         #
+        # Track exported tool names across toolkits, agents, and API tools so
+        # a non-unique name can't silently shadow another tool (dispatch in
+        # __get_toolkit_by_name resolves by name too, so names must stay
+        # unique here).
+        known_tool_names = set()
+        #
         for toolkit in toolkits:
             tk_type = toolkit.get("type")
             tk_name = toolkit.get("name")
@@ -473,9 +479,20 @@ class McpService:
             tk_schema = tk_schemas.get(tk_type, {})
             #
             for tool in selected_tools:
+                tool_name = _build_agent_identifier(f"{tk_name}_{tool}")
+                #
+                if tool_name in known_tool_names:
+                    log.warning(
+                        "Skipping toolkit tool with colliding name: %s (toolkit id=%s) -> %s",
+                        tk_name, toolkit.get("id"), tool_name,
+                    )
+                    continue
+                #
+                known_tool_names.add(tool_name)
+                #
                 tools.append(
                     types.Tool(
-                        name=_build_agent_identifier(f"{tk_name}_{tool}"),
+                        name=tool_name,
                         description=f"Tool '{tool}' from toolkit type '{tk_type}'. Toolkit description: {tk_description}",
                         inputSchema=tk_schema.get('properties', {}).get('selected_tools', {}).get('args_schemas',
                                                                                                   {}).get(tool, {})
@@ -483,7 +500,6 @@ class McpService:
                 )
         #
         # Expand agents(applications) to export as mcp server tools
-        known_tool_names = set()
         #
         if self.session.tags:
             with db.get_session(self.session.project_id) as session:
@@ -578,15 +594,40 @@ class McpService:
             project_id=self.session.project_id, query=None, limit=None, filter_mcp=None
         )
         #
+        # Only toolkits explicitly opted into MCP exposure may be dispatched to
+        # here. This mirrors the gate already applied in __get_toolkit_tools /
+        # __get_all_tools: without it, widening the underlying listing to
+        # include MCP-connected toolkits (which carry the user's own remote
+        # credentials) would make them callable by name even though the owner
+        # never opted them into this path.
+        # `_COLLISION` marks a tool name seen on more than one toolkit, so the
+        # lookup below can tell "not found" apart from "ambiguous" and refuse
+        # to dispatch either candidate rather than silently pick whichever
+        # toolkit was iterated first.
+        _COLLISION = object()
+        known_tool_names = {}
         for toolkit in toolkits["rows"]:
+            if not toolkit.get("meta", {}).get("mcp_options", {}).get("available_by_mcp", False):
+                continue
+            #
             tk_name = toolkit.get("name")
             selected_tools = toolkit.get('settings', {}).get('selected_tools', [])
             #
             for tool in selected_tools:
-                if _build_agent_identifier(f"{tk_name}_{tool}") == toolkit_name:
-                    return toolkit
+                tool_name = _build_agent_identifier(f"{tk_name}_{tool}")
+                if tool_name in known_tool_names:
+                    # Non-unique tool name across toolkits: don't silently route
+                    # to whichever toolkit happened to be seen first.
+                    log.warning(
+                        "Ambiguous toolkit tool name, refusing to dispatch: %s (toolkit id=%s)",
+                        tool_name, toolkit.get("id"),
+                    )
+                    known_tool_names[tool_name] = _COLLISION
+                    continue
+                known_tool_names[tool_name] = toolkit
         #
-        return None
+        result = known_tool_names.get(toolkit_name)
+        return result if result is not _COLLISION else None
 
     def __get_api_tool_by_name(self, tool_name: str) -> dict | None:
         """Find an API tool by its MCP tool name."""

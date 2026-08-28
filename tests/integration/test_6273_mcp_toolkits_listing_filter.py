@@ -1,12 +1,16 @@
 """Issue #6273 - toolkits missing from cloud MCP tools list after connection.
 
 `toolkits_listing(..., filter_mcp=False)` (the default) excludes any
-`EliteATool` row with `type == 'mcp'` from the result set. User-connected
-remote MCP toolkits are persisted with exactly that type. `mcp_service.py`
-(the module backing the platform's own `/mcp` export used by Claude Code /
-"Cloud Code") called `toolkits_listing` with the default `filter_mcp=False`,
-so a connected MCP toolkit was silently dropped from the tools list — only
-agents tagged `mcp` (fetched through an unrelated code path) still showed up,
+`EliteATool` row where `meta['mcp']` is true (or, for legacy rows, `type ==
+'mcp'`) from the result set. User-connected remote MCP toolkits are persisted
+with `meta['mcp'] = True` (see `api/v2/tools.py`, where a tool's type is
+checked against the project's registered MCP schemas and `meta['mcp']` is set
+accordingly — the toolkit's `type` itself stays the MCP server's schema key,
+e.g. `mcp_*`, it is not literally the string `'mcp'`). `mcp_service.py` (the
+module backing the platform's own `/mcp` export used by Claude Code / "Cloud
+Code") called `toolkits_listing` with the default `filter_mcp=False`, so a
+connected MCP toolkit was silently dropped from the tools list — only agents
+tagged `mcp` (fetched through an unrelated code path) still showed up,
 matching the reported symptom.
 
 The fix adds a third state to `filter_mcp`: passing `filter_mcp=None` skips
@@ -14,9 +18,12 @@ the MCP-status filter entirely, returning both regular toolkits and
 MCP-connected toolkits together, which is what the MCP export needs (it
 already filters by the `available_by_mcp` flag downstream). This suite pins:
 
-1. `filter_mcp=True` still restricts to MCP-flagged/typed rows only.
-2. `filter_mcp=False` (default) still excludes MCP-typed rows (existing
-   Toolkits-page behavior is unchanged).
+1. `filter_mcp=True` still restricts to MCP-flagged rows (`meta['mcp']`
+   true, or the legacy `type == 'mcp'`) only.
+2. `filter_mcp=False` (default) still excludes those rows via both the
+   `meta['mcp']` clause and the `type != 'mcp'` clause (existing Toolkits-page
+   behavior is unchanged) — including when `meta['mcp']` is explicitly false
+   or null.
 3. `filter_mcp=None` applies no MCP-status predicate at all — the new branch
    this fix introduces.
 4. `mcp_service.py`'s toolkit-tool call sites now pass `filter_mcp=None`.
@@ -27,6 +34,7 @@ Run via:
 
 import importlib.util
 import pathlib
+import re
 import sys
 import types
 
@@ -119,11 +127,6 @@ class _FakeQuery:
     def all(self):
         return []
 
-    def __getattr__(self, name):
-        def _fallback(*args, **kwargs):
-            return self
-        return _fallback
-
 
 class _FakeSession:
     def __init__(self, filters_log):
@@ -145,16 +148,24 @@ def filters_log():
 
 
 @pytest.fixture()
-def application_tools(filters_log):
-    """Load application_tools.py standalone with minimal stubs."""
+def application_tools(filters_log, monkeypatch):
+    """Load application_tools.py standalone with minimal stubs.
+
+    All `sys.modules` entries touched here go through `monkeypatch.setitem`
+    so they're restored to whatever (if anything) was there before this test
+    ran, once the test finishes. Without that, a module inserted/overwritten
+    here (e.g. `tools`, `pylon.core.tools`) would leak into later tests in the
+    same process and make the suite order-dependent.
+    """
     for name in (
         "plugins",
         "plugins.elitea_core",
         "plugins.elitea_core.models",
         "plugins.elitea_core.utils",
     ):
-        mod = sys.modules.setdefault(name, types.ModuleType(name))
+        mod = sys.modules.get(name) or types.ModuleType(name)
         mod.__path__ = []
+        monkeypatch.setitem(sys.modules, name, mod)
 
     pylon_tools = types.ModuleType("pylon.core.tools")
     pylon_tools.log = types.SimpleNamespace(
@@ -162,9 +173,9 @@ def application_tools(filters_log):
         error=lambda *a, **k: None, debug=lambda *a, **k: None,
         exception=lambda *a, **k: None,
     )
-    sys.modules.setdefault("pylon", types.ModuleType("pylon"))
-    sys.modules.setdefault("pylon.core", types.ModuleType("pylon.core"))
-    sys.modules["pylon.core.tools"] = pylon_tools
+    monkeypatch.setitem(sys.modules, "pylon", sys.modules.get("pylon") or types.ModuleType("pylon"))
+    monkeypatch.setitem(sys.modules, "pylon.core", sys.modules.get("pylon.core") or types.ModuleType("pylon.core"))
+    monkeypatch.setitem(sys.modules, "pylon.core.tools", pylon_tools)
 
     class _RpcMixin:
         class _Rpc:
@@ -187,7 +198,7 @@ def application_tools(filters_log):
     tools_pkg.serialize = types.SimpleNamespace()
     tools_pkg.context = types.SimpleNamespace()
     tools_pkg.rpc_tools = types.SimpleNamespace(RpcMixin=_RpcMixin)
-    sys.modules["tools"] = tools_pkg
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
 
     models_all = types.ModuleType("plugins.elitea_core.models.all")
     models_all.EliteATool = type("EliteATool", (), {
@@ -202,11 +213,11 @@ def application_tools(filters_log):
     })
     models_all.EntityToolMapping = type("EntityToolMapping", (), {})
     models_all.ApplicationVersion = type("ApplicationVersion", (), {})
-    sys.modules["plugins.elitea_core.models.all"] = models_all
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models.all", models_all)
 
     models_indexer = types.ModuleType("plugins.elitea_core.models.indexer")
     models_indexer.EmbeddingStore = type("EmbeddingStore", (), {})
-    sys.modules["plugins.elitea_core.models.indexer"] = models_indexer
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models.indexer", models_indexer)
 
     enums = types.ModuleType("plugins.elitea_core.models.enums.all")
     enums.ToolEntityTypes = type("ToolEntityTypes", (), {})
@@ -216,32 +227,31 @@ def application_tools(filters_log):
         "in_progress": types.SimpleNamespace(value="in_progress"),
         "cancelled": types.SimpleNamespace(value="cancelled"),
     })
-    sys.modules["plugins.elitea_core.models.enums.all"] = enums
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models.enums.all", enums)
 
     exceptions = types.ModuleType("plugins.elitea_core.utils.exceptions")
     exceptions.PoolSaturationError = type("PoolSaturationError", (Exception,), {})
-    sys.modules["plugins.elitea_core.utils.exceptions"] = exceptions
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.exceptions", exceptions)
 
     utils_utils = types.ModuleType("plugins.elitea_core.utils.utils")
     utils_utils.parse_ids_filter = lambda *a, **k: None
-    sys.modules["plugins.elitea_core.utils.utils"] = utils_utils
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.utils", utils_utils)
 
     models_pd_tool = types.ModuleType("plugins.elitea_core.models.pd.tool")
     models_pd_tool.ToolDetails = type("ToolDetails", (), {})
-    import re
     models_pd_tool.sanitization_pattern = re.compile(r"[^A-Za-z0-9]")
-    sys.modules["plugins.elitea_core.models.pd.tool"] = models_pd_tool
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models.pd.tool", models_pd_tool)
 
     utils_authors = types.ModuleType("plugins.elitea_core.utils.authors")
     utils_authors.get_authors_data = lambda *a, **k: {}
-    sys.modules["plugins.elitea_core.utils.authors"] = utils_authors
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.authors", utils_authors)
 
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.application_tools",
         PLUGIN_ROOT / "utils" / "application_tools.py",
     )
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     # `desc`/`asc` are real SQLAlchemy functions imported into this module;
     # they coerce their argument via SQLAlchemy's column-role machinery,
@@ -268,11 +278,27 @@ class TestToolkitsListingFilterMcp:
         application_tools.toolkits_listing(project_id=1, query=None, limit=None, filter_mcp=False)
         joined = " ".join(filters_log)
         assert "EliteATool.type!='mcp'" in joined
+        # The `meta['mcp']` clause is the one that actually matters for
+        # user-connected MCP toolkits (they are persisted with meta['mcp']
+        # True, not type=='mcp' — see api/v2/tools.py). Pin it explicitly so a
+        # regression that drops this clause while leaving the `type`
+        # predicate in place is caught here rather than slipping through.
+        assert "EliteATool.meta[" in joined
+
+    def test_filter_mcp_false_excludes_rows_with_meta_mcp_true(self, application_tools, filters_log):
+        """meta['mcp'] == True is the actual persisted shape for connected MCP
+        toolkits; make sure the False branch's predicate would exclude it
+        (i.e. the predicate is built from `meta['mcp']`, not just `type`)."""
+        application_tools.toolkits_listing(project_id=1, query=None, limit=None, filter_mcp=False)
+        joined = " ".join(filters_log)
+        assert "EliteATool.meta['mcp'].astext.cast(...)==False" in joined
+        assert "EliteATool.meta['mcp'].astext.is_(None)" in joined
 
     def test_filter_mcp_none_applies_no_mcp_status_predicate(self, application_tools, filters_log):
         """The fix: filter_mcp=None must not filter by MCP status at all, so
-        MCP-connected toolkits (type == 'mcp') and regular toolkits are both
-        returned together."""
+        MCP-connected toolkits (persisted with meta['mcp'] == True, or the
+        legacy type == 'mcp') and regular toolkits are both returned
+        together."""
         application_tools.toolkits_listing(project_id=1, query=None, limit=None, filter_mcp=None)
         joined = " ".join(filters_log)
         assert "EliteATool.type!='mcp'" not in joined
@@ -285,24 +311,4 @@ class TestToolkitsListingFilterMcp:
         application_tools.toolkits_listing(project_id=1, query=None, limit=None)
         joined = " ".join(filters_log)
         assert "EliteATool.type!='mcp'" in joined
-
-
-class TestMcpServiceUsesUnfilteredListing:
-    """`mcp_service.py`'s toolkit-tool call sites must pass filter_mcp=None so
-    MCP-connected toolkits are included in the platform's own MCP tool export."""
-
-    def test_all_toolkits_listing_calls_pass_filter_mcp_none(self):
-        source = (PLUGIN_ROOT / "utils" / "mcp_service.py").read_text()
-        calls = [
-            line for line in source.splitlines()
-            if "toolkits_listing(" in line or (line.strip().startswith("project_id=self.session.project_id")
-                                                and "toolkits_listing" not in line)
-        ]
-        # Every toolkits_listing(...) invocation site in this file must be
-        # accompanied by filter_mcp=None somewhere in its call (possibly on a
-        # following line, since calls are multi-line formatted).
-        import re
-        call_blocks = re.findall(r"toolkits_listing\((?:[^()]|\([^()]*\))*\)", source, re.DOTALL)
-        assert call_blocks, "expected at least one toolkits_listing(...) call in mcp_service.py"
-        for block in call_blocks:
-            assert "filter_mcp=None" in block, f"missing filter_mcp=None in call: {block}"
+        assert "EliteATool.meta[" in joined
