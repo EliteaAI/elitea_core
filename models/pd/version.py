@@ -438,22 +438,21 @@ class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "summary": "Update agent system prompt",
+                    "summary": "Update agent model settings",
                     "value": {
                         "id": 101,
                         "application_id": 7,
                         "agent_type": "openai",
-                        "instructions": "Updated system prompt: respond concisely.",
                         "llm_settings": {"model_name": "gpt-5-mini", "temperature": 0.1}
                     }
                 },
                 {
-                    "summary": "Update pipeline YAML graph",
+                    "summary": "Update pipeline welcome message",
                     "value": {
                         "id": 202,
                         "application_id": 15,
                         "agent_type": "pipeline",
-                        "instructions": "nodes:\n  - id: start\n    type: llm\nedges:\n  - from: start\n    to: END"
+                        "welcome_message": "Pipeline ready."
                     }
                 }
             ]
@@ -462,7 +461,7 @@ class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
 
     id: int
     application_id: int
-    tags: Optional[List[PromptTagUpdateModel]] = []
+    tags: Optional[List[PromptTagUpdateModel]] = None
     pipeline_settings: Optional[dict] = None
     meta: Optional[dict] = Field(default_factory=dict)
     llm_settings: Optional[LLMSettingsWriteModel] = None
@@ -500,9 +499,27 @@ class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
         return self
 
 
+class ApplicationVersionInstructionsPatchModel(BaseModel):
+    """Small, optimistic-concurrency payload for internal-MCP prompt edits."""
+
+    expected_instructions_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r'^[0-9a-fA-F]{64}$',
+    )
+    replacement: str
+    old_text: Optional[str] = None
+    replace_all: bool = False
+
+    @model_validator(mode='after')
+    def require_old_text_for_exact_replace(self):
+        if not self.replace_all and not self.old_text:
+            raise ValueError('old_text is required unless replace_all is true')
+        return self
+
+
 class ApplicationVersionModel(ApplicationVersionBaseModel):
     status: Optional[PublishStatus] = None
     tags: Optional[List[TagListModel]] = None
 
     model_config = ConfigDict(from_attributes=True)
-

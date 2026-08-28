@@ -4,7 +4,12 @@ from ..models.all import ApplicationVersion, Application, ApplicationVariable, E
 from ..models.pd.application import (
     ApplicationCreateModel, ApplicationImportModel,
 )
-from ..models.pd.version import ApplicationVersionCreateModel, ApplicationVersionBaseCreateModel, TagBaseModel
+from ..models.pd.version import (
+    ApplicationVersionBaseCreateModel,
+    ApplicationVersionCloneModel,
+    ApplicationVersionCreateModel,
+    TagBaseModel,
+)
 from typing import Generator, List
 
 from ..models.all import Tag
@@ -133,6 +138,40 @@ def create_version(
             session.add(application_tool_to_application)
             session.flush()
     return application_version
+
+
+def clone_persisted_application_version(
+    *,
+    source_version: ApplicationVersion,
+    application: Application,
+    new_version_name: str,
+    author_id: int,
+    session,
+) -> ApplicationVersion:
+    """Clone a persisted version and all version-scoped connections in one transaction.
+
+    The caller owns the session and commit. Reusing ``create_version`` keeps toolkit
+    selections, variables, tags, and skill mappings aligned with the existing
+    Save-As-Version behavior.
+    """
+    version_payload = source_version.to_dict()
+    version_payload.update({
+        'name': new_version_name,
+        'project_id': application.owner_id,
+        'author_id': author_id,
+        'user_id': author_id,
+        'status': 'draft',
+        # A backup is a new local version, not another reference to a shared origin.
+        'shared_id': None,
+        'shared_owner_id': None,
+    })
+    clone_data = ApplicationVersionCloneModel.model_validate(version_payload)
+    return create_version(
+        clone_data,
+        application=application,
+        session=session,
+        copy_skills_from_version_id=source_version.id,
+    )
 
 
 def create_application(application_data: ApplicationCreateModel | ApplicationImportModel, session, project_id: int) -> Application:

@@ -134,7 +134,7 @@ class VersionNotUpdatableError(Exception):
     pass
 
 
-def applications_update_version(version_data, session) -> dict:
+def applications_update_version(version_data, session, *, commit: bool = True) -> dict:
     if 'id' in version_data.model_fields and version_data.id:
         version: ApplicationVersion = session.query(ApplicationVersion).filter(
             ApplicationVersion.id == version_data.id
@@ -184,7 +184,7 @@ def applications_update_version(version_data, session) -> dict:
                 ).update(
                     var.model_dump(exclude_none=True)
                 )
-                session.commit()
+                session.flush()
 
     dumped = version_data.model_dump(exclude={'tags', 'variables', 'tools'}, exclude_unset=True)
 
@@ -211,21 +211,26 @@ def applications_update_version(version_data, session) -> dict:
         version.meta = merged_meta
 
     try:
-        # Explicitly delete tag associations first to avoid unique constraint violations
-        session.flush()
-        version.tags.clear()
-        session.flush()
+        # A partial update must not clear tags merely because the Pydantic model has
+        # a default value. An explicitly supplied empty list still means "clear".
+        if 'tags' in version_data.model_fields_set:
+            session.flush()
+            version.tags.clear()
+            session.flush()
 
-        if version_data.tags:
-            existing_tags = session.query(Tag).filter(
-                Tag.name.in_({i.name for i in version_data.tags})
-            ).all()
-            existing_tags_map = {i.name: i for i in existing_tags}
-            for tag in version_data.tags:
-                application_tag = existing_tags_map.get(tag.name, Tag(**tag.model_dump()))
-                version.tags.append(application_tag)
-            session.add(version)
-        session.commit()
+            if version_data.tags:
+                existing_tags = session.query(Tag).filter(
+                    Tag.name.in_({i.name for i in version_data.tags})
+                ).all()
+                existing_tags_map = {i.name: i for i in existing_tags}
+                for tag in version_data.tags:
+                    application_tag = existing_tags_map.get(tag.name, Tag(**tag.model_dump()))
+                    version.tags.append(application_tag)
+                session.add(version)
+        if commit:
+            session.commit()
+        else:
+            session.flush()
         result = ApplicationVersionDetailModel.from_orm(version)
         project_id = version_data.project_id
         for tool in result.tools:

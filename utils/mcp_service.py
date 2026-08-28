@@ -13,6 +13,7 @@ from ..utils.application_utils import list_applications_api
 from ..utils.toolkits_utils import get_toolkit_schemas
 from ..utils.exceptions import PoolSaturationError
 from .mcp_session import SseSession
+from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 
 
 class McpApiToolExecutor:
@@ -124,6 +125,10 @@ class McpApiToolExecutor:
             'SERVER_NAME': 'internal',
             'SERVER_PORT': '0',
             'SERVER_PROTOCOL': 'HTTP/1.1',
+            # A WSGI-only marker cannot be spoofed by a public HTTP header. Mutating
+            # API handlers use it to apply internal-MCP safety rules without changing
+            # the normal UI/API contract.
+            INTERNAL_MCP_ENVIRON_KEY: True,
         }
 
         McpApiToolExecutor._add_auth_headers(environ, flask_g, flask_request)
