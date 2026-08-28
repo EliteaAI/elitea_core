@@ -57,6 +57,31 @@ class EvalCodeScreenError(EvalLibraryError):
         self.violations = violations
 
 
+class EvalDimensionEngineFieldsError(EvalLibraryError):
+    """The engine/code pairing invariant (allowed_engines == ['code'] iff code is set) would be
+    violated by the *merged* row (existing columns + the fields this request actually sends) —
+    not just by the request fragment in isolation. Update requests may omit ``allowed_engines``
+    entirely (``exclude_unset``), so a bare ``{"code": "..."}`` PUT on an AI/Human dimension must
+    still be caught here even though :class:`EvalDimensionUpdateModel` only validates the pairing
+    when the caller explicitly sends ``allowed_engines``."""
+    http_status = 400
+
+
+class EvalDimensionEngineBindingConflictError(EvalLibraryError):
+    """Changing ``allowed_engines`` would strand an existing binding whose stored ``engine`` (fixed
+    at bind time) would no longer be one of the dimension's allowed engines — the binding would
+    still be dispatched by its own stored engine, silently disagreeing with the definition."""
+    http_status = 409
+
+    def __init__(self, binding_ids: List[int], engine: str):
+        super().__init__(
+            f"cannot change allowed_engines: binding(s) {binding_ids} are bound with engine "
+            f"'{engine}', which would no longer be allowed; unbind or rebind them first"
+        )
+        self.binding_ids = binding_ids
+        self.engine = engine
+
+
 @contextmanager
 def _session(session, project_id):
     """Yield a usable session; own commit/rollback/close only when we created it."""
@@ -196,6 +221,37 @@ def update_dimension(
             violations = screen_validation_code(fields['code'])
             if violations:
                 raise EvalCodeScreenError(violations)
+
+        # Validate the *merged* row (existing columns + only the fields this request actually
+        # sends), not just the request fragment: EvalDimensionUpdateModel skips the pairing check
+        # when allowed_engines is omitted, so e.g. a bare {"code": "..."} PUT on an AI dimension
+        # must still be rejected here rather than silently persisting an invalid combination.
+        final_engines = fields.get('allowed_engines', dimension.allowed_engines)
+        final_code = fields['code'] if 'code' in fields else dimension.code
+        final_contract = fields['return_contract'] if 'return_contract' in fields else dimension.return_contract
+        is_code = final_engines == ['code']
+        if is_code and not final_code:
+            raise EvalDimensionEngineFieldsError("code is required when allowed_engines is ['code']")
+        if not is_code and (final_code is not None or final_contract is not None):
+            raise EvalDimensionEngineFieldsError(
+                'code / return_contract are only valid for a code-engine dimension')
+        if is_code and final_contract is None:
+            fields['return_contract'] = 'bool'
+
+        if 'allowed_engines' in fields and final_engines != dimension.allowed_engines:
+            from ..models.evaluation import EvalBinding
+
+            stale = (
+                s.query(EvalBinding.id, EvalBinding.engine)
+                .filter(EvalBinding.dimension_id == dimension.id,
+                        ~EvalBinding.engine.in_(final_engines))
+                .all()
+            )
+            if stale:
+                stale_ids = [row[0] for row in stale]
+                stale_engine = stale[0][1]
+                raise EvalDimensionEngineBindingConflictError(stale_ids, stale_engine)
+
         for key, value in fields.items():
             setattr(dimension, key, value)
         try:

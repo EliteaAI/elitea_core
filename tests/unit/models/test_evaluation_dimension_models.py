@@ -73,12 +73,16 @@ def test_create_code_engine_with_code_defaults_return_contract(pd_eval):
     assert m.return_contract == 'bool'
 
 
-# --- Update: partial-update must not spuriously reject code-only edits -------
-# Regression for PR #366 review finding #1: EvalDimensionUpdateModel inherited a
-# model_validator that judged code/return_contract against allowed_engines' ['ai'] default,
-# even though update_dimension() applies the model with exclude_unset=True. A PUT sending
-# only {"code": "..."} — the common case of editing a script without re-sending
-# allowed_engines — was spuriously rejected.
+# --- Update: no code/engine pairing validation at the request-fragment level -------------
+# Regression for PR #366 review finding #1 (and its follow-up, discussion_r3875690565):
+# EvalDimensionUpdateModel used to judge code/return_contract pairing against the request
+# fragment alone. Even gating that check on `allowed_engines` actually being sent was not
+# enough: {"allowed_engines": ["code"], "name": "Renamed"} is a valid partial update of an
+# *existing* code dimension (it keeps its stored `code`), but as a bare fragment it looks
+# like a code-engine dimension missing its code and was spuriously rejected. The model can
+# never see the existing row, so it must not attempt this validation at all — pairing is
+# judged solely against the merged row in update_dimension() (see
+# tests/unit/utils/test_evaluation_library_utils.py).
 
 def test_update_code_only_without_resending_engines_is_valid(pd_eval):
     m = pd_eval.EvalDimensionUpdateModel(code='return score > 50')
@@ -90,19 +94,24 @@ def test_update_return_contract_only_without_resending_engines_is_valid(pd_eval)
     assert m.model_dump(exclude_unset=True) == {'return_contract': 'number'}
 
 
-def test_update_still_rejects_code_when_engines_explicitly_set_to_ai(pd_eval):
-    with pytest.raises(ValidationError):
-        pd_eval.EvalDimensionUpdateModel(allowed_engines=['ai'], code='return True')
+def test_update_allows_code_when_engines_explicitly_set_to_ai(pd_eval):
+    # Looks contradictory as a bare fragment, but update_dimension() is the sole enforcer now.
+    m = pd_eval.EvalDimensionUpdateModel(allowed_engines=['ai'], code='return True')
+    assert m.model_dump(exclude_unset=True) == {'allowed_engines': ['ai'], 'code': 'return True'}
 
 
-def test_update_still_requires_code_when_engines_explicitly_set_to_code(pd_eval):
-    with pytest.raises(ValidationError):
-        pd_eval.EvalDimensionUpdateModel(allowed_engines=['code'])
+def test_update_allows_switching_to_code_engine_without_resending_code(pd_eval):
+    # An existing code dimension retaining its stored `code`: renaming it while re-affirming
+    # allowed_engines=['code'] must not require resending the (unchanged) script body.
+    m = pd_eval.EvalDimensionUpdateModel(allowed_engines=['code'], name='Renamed')
+    assert m.model_dump(exclude_unset=True) == {'allowed_engines': ['code'], 'name': 'Renamed'}
 
 
-def test_update_code_engine_with_code_defaults_return_contract_when_explicit(pd_eval):
+def test_update_does_not_default_return_contract_itself(pd_eval):
+    # Defaulting return_contract to 'bool' for a code dimension now happens in
+    # update_dimension() against the merged row, not here.
     m = pd_eval.EvalDimensionUpdateModel(allowed_engines=['code'], code='return True')
-    assert m.return_contract == 'bool'
+    assert m.return_contract is None
 
 
 def test_update_name_only_is_valid(pd_eval):
