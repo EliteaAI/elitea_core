@@ -587,13 +587,13 @@ def toolkits_listing(
         if author_id:
             q = q.filter(EliteATool.author_id == author_id)
 
-        if filter_mcp:
+        if filter_mcp is True:
             # Filter for MCP toolkits: either meta['mcp'] is True OR type is 'mcp'
             q = q.filter(
                 (EliteATool.meta['mcp'].astext.cast(Boolean) == True) |
                 (EliteATool.type == 'mcp')
             )
-        else:
+        elif filter_mcp is False:
             # Filter out MCP toolkits: meta['mcp'] must be False/None AND type must not be 'mcp'
             q = q.filter(
                 (EliteATool.meta['mcp'].astext.cast(Boolean) == False) |
@@ -601,6 +601,11 @@ def toolkits_listing(
             ).filter(
                 EliteATool.type != 'mcp'
             )
+        # filter_mcp is None: no filtering by MCP status - return both regular
+        # toolkits and MCP-connected toolkits together. Used by the platform's
+        # own MCP export (see mcp_service.py) which needs to expose *all*
+        # available_by_mcp toolkits regardless of whether they are regular
+        # toolkits or user-connected remote MCP servers (EliteaAI/elitea_issues#6273).
 
         if filter_application is True:
             # Filter for application toolkits: meta['application'] is True
