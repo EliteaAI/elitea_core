@@ -34,8 +34,8 @@ from ..utils.sio_utils import SioEvents
 from ..utils.toolkit_authorization import merge_authorization_request
 
 
-# Fallback only; an aborting worker that can still talk supplies its own text (#6245).
-FORK_PROBE_USER_MESSAGE = "Temporary server error, please try again"
+# Deliberately non-technical: the traceback goes to the pylon log, never to the user.
+TASK_FAILURE_USER_MESSAGE = "Temporary server error, please try again"
 
 # Supervised HITL phases that _maybe_recover_supervised_hitl can still replay.
 RECOVERABLE_SUPERVISOR_PHASES = frozenset({
@@ -257,16 +257,14 @@ class Method:
             return False
 
     @web.method()
-    def _report_task_failure(self, task_id, meta, result=None):
+    def _report_task_failure(self, task_id, meta):
         """End the chat stream for a worker task that died without reporting itself (#6288)."""
         # A wedged or hard-killed child never reaches Redis, so its agent_exception and
-        # full_message never arrive. Meta is the only source that always survives; a
-        # result dict is a bonus the older in-worker guard still supplies.
-        result = result if isinstance(result, dict) else {}
-        stream_id = meta.get("stream_id") or result.get("stream_id")
-        message_id = meta.get("message_id") or result.get("message_id")
+        # full_message never arrive. Meta is the only source that survives a raise.
+        stream_id = meta.get("stream_id")
+        message_id = meta.get("message_id")
         sio_event = meta.get("sio_event") or SioEvents.application_predict.value
-        content = result.get("human_readable") or FORK_PROBE_USER_MESSAGE
+        content = TASK_FAILURE_USER_MESSAGE
         chat_project_id = meta.get("chat_project_id")
         #
         if not stream_id:
@@ -295,7 +293,7 @@ class Method:
             "project_id": meta.get("project_id"),
             "chat_project_id": chat_project_id,
             "is_error": True,
-            "error": result.get("error") or "task_failed",
+            "error": "task_failed",
         }
         base_payload = {
             "stream_id": stream_id,
@@ -304,9 +302,7 @@ class Method:
             "sio_event": sio_event,
             "content": content,
             "response_metadata": response_metadata,
-            "execution_generation": (
-                meta.get("execution_generation") or result.get("execution_generation")
-            ),
+            "execution_generation": meta.get("execution_generation"),
         }
         #
         # Live UI: clears the spinner and shows the error box in the running chat.
@@ -436,10 +432,6 @@ class Method:
             self._report_task_failure(task_id, meta)
             return
         if not isinstance(result, dict):
-            return
-        if result.get("fork_dns_probe_failed"):
-            # Legacy in-worker guard, still present on images whose arbiter predates #6288.
-            self._report_task_failure(task_id, meta, result)
             return
         if not result.get("parallel_parked"):
             return
