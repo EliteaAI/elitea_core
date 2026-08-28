@@ -49,6 +49,7 @@ def application_tools():
     tools_pkg.this = types.SimpleNamespace(descriptor=types.SimpleNamespace(config={}))
     tools_pkg.serialize = types.SimpleNamespace()
     tools_pkg.context = types.SimpleNamespace()
+    tools_pkg.VaultClient = type("VaultClient", (), {"get_secrets": lambda self: {}})
     sys.modules["tools"] = tools_pkg
 
     models_all = types.ModuleType("plugins.elitea_core.models.all")
@@ -59,6 +60,12 @@ def application_tools():
 
     models_indexer = types.ModuleType("plugins.elitea_core.models.indexer")
     models_indexer.EmbeddingStore = type("EmbeddingStore", (), {})
+    models_indexer.IndexRun = type("IndexRun", (), {})
+    models_indexer.INDEX_RUN_PENDING = "pending"
+    models_indexer.INDEX_RUN_CANCELLED = "cancelled"
+    models_indexer.INDEX_RUN_STATUSES = ("pending", "cancelled", "promoted", "discarded")
+    models_indexer.INDEX_RUN_LIVE_INDEX_NAME = "uq_elitea_index_runs_live"
+    models_indexer.INDEX_RUN_LIVE_INDEX_PREDICATE = "status = 'pending'"
     sys.modules["plugins.elitea_core.models.indexer"] = models_indexer
 
     enums = types.ModuleType("plugins.elitea_core.models.enums.all")
@@ -252,12 +259,16 @@ class TestSaveRefusesToRaceALiveRun:
 class _FakeSession:
     def __init__(self):
         self.committed = False
+        self.executed = []
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc_info):
         return False
+
+    def execute(self, statement):
+        self.executed.append(str(statement))
 
     def commit(self):
         self.committed = True

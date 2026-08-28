@@ -7,13 +7,13 @@ import uuid
 from flask import request
 from pylon.core.tools import log
 from sqlalchemy import Boolean, cast, create_engine, inspect, Integer, Numeric, nullslast, String, Table, text, \
-    MetaData, select, func, insert
+    MetaData, select, func, insert, or_
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import Mapped, mapped_column, Session
 
 from tools import api_tools, auth, config as c, serialize, db, context
-from ...models.indexer import EmbeddingStore
-from ...utils.application_tools import get_session_for_schema, toolkits_listing
+from ...models.indexer import EmbeddingStore, INDEX_RUN_CANCELLED, INDEX_RUN_PENDING
+from ...utils.application_tools import get_session_for_schema, query_index_runs, toolkits_listing
 
 
 class Configuration(db.Base):
@@ -140,9 +140,28 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     if exists:
                         log.info(f"index_meta already exists for collection '{collection}' in schema '{schema}'.")
                     else:
-                        indexed = session.query(func.count()).filter(
-                            EmbeddingStore.cmetadata['collection'].astext == collection
-                        ).scalar()
+                        # The collection's own meta row and any in-flight/tombstoned run's
+                        # invisible rows must not inflate the recorded count.
+                        excluded_runs = query_index_runs(
+                            session, collection,
+                            statuses=(INDEX_RUN_PENDING, INDEX_RUN_CANCELLED),
+                        )
+                        excluded_run_ids = [row.run_id for row in excluded_runs or []]
+                        indexed_query = session.query(func.count()).filter(
+                            EmbeddingStore.cmetadata['collection'].astext == collection,
+                            or_(
+                                EmbeddingStore.cmetadata['type'].astext.is_(None),
+                                EmbeddingStore.cmetadata['type'].astext != 'index_meta',
+                            ),
+                        )
+                        if excluded_run_ids:
+                            indexed_query = indexed_query.filter(
+                                or_(
+                                    EmbeddingStore.cmetadata['_elitea_run_id'].astext.is_(None),
+                                    EmbeddingStore.cmetadata['_elitea_run_id'].astext.notin_(excluded_run_ids),
+                                )
+                            )
+                        indexed = indexed_query.scalar()
                         created_on = time.time()
                         meta = {
                             "type": "index_meta",

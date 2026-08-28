@@ -85,16 +85,60 @@ def summarize_indexing_report(report):
     return summary
 
 
+def summarize_index_error(error):
+    """Single-line error summary capped at ~200 characters."""
+    summary = ' '.join(str(error or '').split())
+    if len(summary) > 200:
+        summary = summary[:200].rstrip() + '…'
+    return summary
+
+
+def index_retains_data(index_data_status):
+    """The single retention predicate: `indexed_chunks` is the live pending-excluded
+    count recomputed at failure time, so it is the only field that proves searchable
+    rows exist. Never gate a retention claim on `reindex` — that is a remembered
+    history fact which stays truthy over an EMPTY index (a zero-chunk completed first
+    run, a whole-index delete)."""
+    try:
+        return float(index_data_status.get('indexed_chunks') or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def build_index_notification_message(index_data_status, initiator=None):
-    """Notification text for a finished indexing run."""
+    """Notification text for a finished indexing run.
+
+    Branches on the event's state, never on error presence: a promoted partly_indexed
+    run carries its error text yet published, so error presence alone cannot mean
+    failure.
+    """
     index_name = index_data_status.get('index_name') or 'Index'
     link = f'[{index_name}]()'
+    state = index_data_status.get('state') or ''
+    report = parse_indexing_report(index_data_status.get('report'))
+    error = summarize_index_error(index_data_status.get('error'))
 
-    if (index_data_status.get('error') or '').strip():
-        return f'Index {link} is failed.'
+    if state == 'partly_indexed':
+        totals = (report or {}).get('totals') or {}
+        failed = totals.get('failed') or index_data_status.get('failed') or 0
+        failed_noun = _noun(failed, (report or {}).get('item_labels'), DEFAULT_ITEM_LABELS)
+        return (
+            f'Index {link} was partially reindexed: {failed} {failed_noun} could not be updated'
+            f' ({error}). Their previously indexed data remains available for search.'
+        )
+
+    if state == 'failed' or (not state and error):
+        retained = (
+            ' Previously indexed data remains available for search.'
+            if index_retains_data(index_data_status) else ''
+        )
+        if not index_data_status.get('reindex'):
+            return f'Indexing of {link} failed: {error}.{retained}'
+        if initiator == 'schedule':
+            return f'Index {link} scheduled reindex failed: {error}.{retained}'
+        return f'Index {link} reindex failed: {error}.{retained}'
 
     scheduled_text = ' by schedule' if initiator == 'schedule' else ''
-    report = parse_indexing_report(index_data_status.get('report'))
 
     if report and is_up_to_date_run(report.get('totals') or {}):
         totals = report.get('totals') or {}

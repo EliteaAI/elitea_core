@@ -1,5 +1,6 @@
 from tools import api_tools, auth, config as c, log
 from ...utils.application_tools import (
+    IndexMetaLockTimeoutError,
     get_toolkit_index_meta,
     load_and_validate_toolkit_for_index,
     get_session_for_schema,
@@ -80,6 +81,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     )
                     if not cancelled:
                         log.warning(f"Manual cancel transitioned no row for index {index_name} (task {task_id})")
+                except IndexMetaLockTimeoutError as e:
+                    return {
+                        "ok": False,
+                        "error": str(e)
+                    }, 409
                 except Exception as e:
                     return {
                         "ok": False,

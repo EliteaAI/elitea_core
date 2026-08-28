@@ -7,12 +7,21 @@ from typing import Optional, List
 from uuid import uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import asc, create_engine, desc, func, inspect, String, text, Integer, Boolean
+from sqlalchemy import asc, create_engine, desc, func, inspect, or_, String, text, Integer, Boolean
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, selectinload
-from tools import auth, db, this, serialize, context
+from tools import auth, db, this, serialize, context, VaultClient
 
 from ..models.all import EliteATool, EntityToolMapping, ApplicationVersion
-from ..models.indexer import EmbeddingStore
+from ..models.indexer import (
+    EmbeddingStore,
+    IndexRun,
+    INDEX_RUN_CANCELLED,
+    INDEX_RUN_LIVE_INDEX_NAME,
+    INDEX_RUN_LIVE_INDEX_PREDICATE,
+    INDEX_RUN_PENDING,
+    INDEX_RUN_STATUSES,
+)
 from ..models.enums.all import ToolEntityTypes, AgentTypes
 from ..models.enums.all import InitiatorType
 from ..models.enums.all import IndexDataStatus
@@ -37,9 +46,19 @@ class ToolkitChangeRelationError(Exception):
 
 
 class IndexRunInProgressError(Exception):
+    def __init__(self, index_name: str, message: str = None):
+        self.index_name = index_name
+        super().__init__(
+            message or f"Cannot save configuration for index '{index_name}' while indexing is in progress"
+        )
+
+
+class IndexMetaLockTimeoutError(Exception):
     def __init__(self, index_name: str):
         self.index_name = index_name
-        super().__init__(f"Cannot save configuration for index '{index_name}' while indexing is in progress")
+        super().__init__(
+            f"Index '{index_name}' metadata is locked by another operation, please retry shortly"
+        )
 
 
 class ConfigurationExpandError(Exception):
@@ -1219,9 +1238,166 @@ def get_toolkit_index_meta(session: Session, index_name: str, for_update: bool =
     return query.first()
 
 
+DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC = 7200
+
+# The promote/discard path in the SDK holds the meta row's FOR UPDATE across batched chunk
+# deletes — seconds to minutes on large corpora — so every core-side FOR UPDATE bounds its
+# wait and surfaces a retryable error instead of hanging a request or the scheduler tick.
+INDEX_META_LOCK_TIMEOUT = "5s"
+
+INDEX_META_PRESERVED_KEYS = ("indexed", "updated", "total", "report", "indexed_chunks")
+
+
+def lock_toolkit_index_meta(session: Session, index_name: str):
+    session.execute(text(f"SET LOCAL lock_timeout = '{INDEX_META_LOCK_TIMEOUT}'"))
+    try:
+        return get_toolkit_index_meta(session, index_name, for_update=True)
+    except OperationalError as error:
+        raise IndexMetaLockTimeoutError(index_name) from error
+
+
+UNDEFINED_TABLE_SQLSTATE = "42P01"
+
+
+def _is_undefined_table_error(error: ProgrammingError) -> bool:
+    orig = getattr(error, 'orig', None)
+    sqlstate = getattr(orig, 'pgcode', None) or getattr(orig, 'sqlstate', None)
+    return sqlstate == UNDEFINED_TABLE_SQLSTATE
+
+
+def query_index_runs(session: Session, index_name: str, statuses=None, for_update: bool = False):
+    """Read the collection's rows in elitea_index_runs; None when the table is not provisioned.
+
+    The probe runs in a savepoint: an UndefinedTable caught inside an open FOR UPDATE
+    transaction would leave it aborted and fail the legitimate meta write that follows.
+    Only UndefinedTable means "pre-P2 world" — any other ProgrammingError (dropped
+    column, lost grant) must abort the caller loudly: cancel treats None as
+    not-run-aware and would fall back to the legacy collection-wide delete, wiping a
+    promoted corpus over a transient query error.
+    """
+    savepoint = session.begin_nested()
+    try:
+        query = session.query(IndexRun).filter(IndexRun.collection == index_name)
+        if statuses:
+            query = query.filter(IndexRun.status.in_(statuses))
+        if for_update:
+            query = query.with_for_update()
+        rows = query.all()
+        savepoint.commit()
+        return rows
+    except ProgrammingError as error:
+        savepoint.rollback()
+        if not _is_undefined_table_error(error):
+            raise
+        return None
+
+
+def has_live_index_run(session: Session, index_name: str) -> bool:
+    return bool(query_index_runs(session, index_name, statuses=(INDEX_RUN_PENDING,)))
+
+
+def get_pending_index_run_heartbeat(session: Session, index_name: str) -> Optional[float]:
+    rows = query_index_runs(session, index_name, statuses=(INDEX_RUN_PENDING,))
+    if not rows:
+        return None
+    return max(row.heartbeat for row in rows)
+
+
+def reject_index_dispatch_when_run_live(connection_string: str, toolkit_name_id: str,
+                                        index_name: str, task_disconnected_timeout: int):
+    """Advisory dispatch guard: refuse to dispatch over a live registered run.
+
+    Deliberately lock-free — the SDK's registration INSERT (arbitrated by the partial
+    unique index on elitea_index_runs) is the atomic backstop for the dispatch→registration
+    window this guard cannot see. Stale rows never block: the next run's init sweep
+    reclaims them.
+    """
+    with get_session_for_schema(connection_string, toolkit_name_id) as session:
+        session.execute(text(f"SET LOCAL lock_timeout = '{INDEX_META_LOCK_TIMEOUT}'"))
+        rows = query_index_runs(session, index_name, statuses=(INDEX_RUN_PENDING,))
+    if not rows:
+        return
+    now = time.time()
+    for row in rows:
+        if now - row.heartbeat <= task_disconnected_timeout:
+            raise IndexRunInProgressError(
+                index_name,
+                f"An indexing run is already in progress for index '{index_name}'",
+            )
+
+
+INDEX_RUN_SUCCESS_STATES = ('completed', 'partly_indexed', 'scheduled_reindex')
+
+
+def find_last_successful_run(history: list) -> Optional[dict]:
+    for entry in reversed(history or []):
+        if isinstance(entry, dict) and entry.get('state') in INDEX_RUN_SUCCESS_STATES:
+            return entry
+    return None
+
+
+def derive_index_reindex_flag(index_data_status: dict) -> bool:
+    """Server-side 'reindex' for events that carry no such key.
+
+    The worker-synthesized failed event (a crashed or Stop-surviving index_data tool)
+    has no 'reindex' key, and without it the notification renders first-index wording
+    with no retention statement. Derived with the same success predicate as
+    last_successful_run so the wording and the display field cannot drift. Best-effort:
+    an unresolvable event keeps the first-index wording.
+    """
+    index_name = index_data_status.get('index_name')
+    toolkit_config = index_data_status.get('toolkit_config')
+    if not index_name or not toolkit_config:
+        return False
+    try:
+        toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
+        with get_session_for_schema(connection_string, toolkit_name_id) as session:
+            meta = get_toolkit_index_meta(session, index_name)
+            if not meta:
+                return False
+            history_raw = meta.cmetadata.get('history', '[]')
+        if isinstance(history_raw, list):
+            history = history_raw
+        else:
+            history = json.loads(history_raw) if (history_raw or '').strip() else []
+        return find_last_successful_run(history) is not None
+    except Exception as error:
+        log.warning(f"Could not derive the reindex flag for index_name={index_name}; "
+                    f"keeping first-index wording: {error}")
+        return False
+
+
+def should_suppress_index_failure_notification(index_data_status: dict) -> bool:
+    """Notify fence for 'failed' index events — deliberately NOT the failure-writer predicate.
+
+    Suppress ONLY on positively-observed state for a resolved schema+collection: a live
+    pending run row (a straggler's failure must not alarm over run B in flight) or a
+    'cancelled' meta row (a Stop-survivor's worker-synthesized failed event must not read
+    as a real failure — after a Stop no pending row exists, so the pending probe alone
+    cannot cover it). Everything unresolvable NOTIFIES: the scheduler's start-failure
+    payload carries no toolkit_config and is the only notification a credential-failed
+    scheduled reindex produces.
+    """
+    index_name = index_data_status.get('index_name')
+    toolkit_config = index_data_status.get('toolkit_config')
+    if not index_name or not toolkit_config:
+        return False
+    try:
+        toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
+        with get_session_for_schema(connection_string, toolkit_name_id) as session:
+            if has_live_index_run(session, index_name):
+                return True
+            meta = get_toolkit_index_meta(session, index_name)
+            return bool(meta) and meta.cmetadata.get('state') == IndexDataStatus.cancelled.value
+    except Exception as error:
+        log.warning(f"Index failure notification fence could not resolve index_name={index_name}; "
+                    f"notifying: {error}")
+        return False
+
+
 def reset_or_create_toolkit_index_meta(connection_string: str, toolkit_name_id: str, index_name: str, default: dict):
     with get_session_for_schema(connection_string, toolkit_name_id) as session:
-        meta = get_toolkit_index_meta(session, index_name)
+        meta = lock_toolkit_index_meta(session, index_name)
         if meta:
             history_raw = meta.cmetadata.get("history", "[]")
             try:
@@ -1230,9 +1406,21 @@ def reset_or_create_toolkit_index_meta(connection_string: str, toolkit_name_id: 
                 log.warning(f"Failed to load index history: {history_raw}. Setting to empty list.")
                 history = []
             #
-            # Update current meta with new data and put the same item to history
-            history.append(default)
-            meta.cmetadata = {**default, "history": json.dumps(history)}
+            # The previous run's promoted counts/report stay readable until the new run
+            # finishes — the reset replaces every platform-owned key but never the
+            # measurements, and a stale error must not survive into the in-progress row.
+            # The history entry stays the per-run reset stub: carrying the preserved
+            # measurements into it would render a completed-looking breakdown for a run
+            # that has indexed nothing yet.
+            preserved = {
+                key: meta.cmetadata[key]
+                for key in INDEX_META_PRESERVED_KEYS
+                if key in meta.cmetadata
+            }
+            merged = {**default, **preserved}
+            merged.pop('error', None)
+            history.append(dict(default))
+            meta.cmetadata = {**merged, "history": json.dumps(history)}
         else:
             # create new index meta with history containing only current initial state
             meta = EmbeddingStore(
@@ -1245,29 +1433,62 @@ def reset_or_create_toolkit_index_meta(connection_string: str, toolkit_name_id: 
         session.commit()
 
 
-def update_toolkit_index_meta_history_with_failed_state(connection_string: str, toolkit_id, index_name: str, error: str):
+def update_toolkit_index_meta_history_with_failed_state(connection_string: str, toolkit_id,
+                                                        index_name: str, error: str,
+                                                        initiator=None) -> dict:
+    """Flip the row to failed and append a history entry; returns the write outcome.
+
+    The caller gates its failure notification on the returned outcome — suppression must
+    key on this writer's locked-read decision, never on a separate unlocked pre-check.
+    """
     with get_session_for_schema(connection_string, str(toolkit_id)) as session:
-        meta = get_toolkit_index_meta(session, index_name)
-        if meta:
-            current_metadata = meta.cmetadata.copy()
-            current_metadata['state'] = 'failed'
-            current_metadata['updated_on'] = time.time()
-            current_metadata['error'] = error
-            history_raw = current_metadata.pop("history", "[]")
-            try:
-                history = json.loads(history_raw) if history_raw.strip() else []
-            except (json.JSONDecodeError, TypeError):
-                log.warning(f"Failed to load index history: {history_raw}. Setting to empty list.")
-                history = []
-            #
-            # Update current meta with new data and put the same item to history
-            history.append(current_metadata)# add item with no history
-            current_metadata['history'] = json.dumps(history)
-            meta.cmetadata = current_metadata
-            session.commit()
-            log.debug(f"Updated failed state for index_name={index_name} and add to history")
-        else:
+        meta = lock_toolkit_index_meta(session, index_name)
+        if not meta:
             log.warning(f"No metadata found for index_name={index_name}, cannot update failed state and history")
+            return {'flipped': False, 'skipped_live_run': False}
+        # Identity-free guard: any live registered run suppresses the flip — the event's
+        # task_id has no reliable provenance (a second dispatch overwrites the row's id
+        # before the first worker reads it), so no identity comparison is sound. Deliberately
+        # narrower than update_toolkit_index_meta_failed_state: no cancelled-meta skip here,
+        # because this writer APPENDS a history entry rather than popping history[-1], and a
+        # cron credential failure on a days-old cancelled row is new information that must
+        # still flip and notify.
+        if has_live_index_run(session, index_name):
+            log.info(f"Skipping failed-state history write for index_name={index_name}: "
+                     f"a live indexing run is registered")
+            return {'flipped': False, 'skipped_live_run': True}
+        current_metadata = meta.cmetadata.copy()
+        current_metadata['state'] = 'failed'
+        current_metadata['updated_on'] = time.time()
+        current_metadata['error'] = error
+        history_raw = current_metadata.pop("history", "[]")
+        try:
+            history = json.loads(history_raw) if history_raw.strip() else []
+        except (json.JSONDecodeError, TypeError):
+            log.warning(f"Failed to load index history: {history_raw}. Setting to empty list.")
+            history = []
+        #
+        current_metadata['reindex'] = find_last_successful_run(history) is not None
+        if initiator is not None:
+            current_metadata['initiator'] = str(initiator)
+        # The failure entry must not alias the previous run: an inherited conversation_id
+        # groups it under that run in Toolkit History, hiding its error.
+        current_metadata['task_id'] = None
+        current_metadata['conversation_id'] = None
+        # Update current meta with new data and put the same item to history
+        history.append(current_metadata)# add item with no history
+        current_metadata['history'] = json.dumps(history)
+        meta.cmetadata = current_metadata
+        session.commit()
+        log.debug(f"Updated failed state for index_name={index_name} and add to history")
+        return {
+            'flipped': True,
+            'skipped_live_run': False,
+            'reindex': current_metadata['reindex'],
+            'indexed': current_metadata.get('indexed', 0),
+            'updated': current_metadata.get('updated', 0),
+            'indexed_chunks': current_metadata.get('indexed_chunks', 0),
+        }
 
 
 def update_toolkit_index_meta_failed_state(connection_string: str, toolkit_name_id: str, index_name: str, error: str):
@@ -1284,8 +1505,24 @@ def update_toolkit_index_meta_failed_state(connection_string: str, toolkit_name_
         error: Error message to store
     """
     with get_session_for_schema(connection_string, toolkit_name_id) as session:
-        meta = get_toolkit_index_meta(session, index_name)
+        meta = lock_toolkit_index_meta(session, index_name)
         if meta:
+            # Identity-free guard inside the locked read: any live registered run suppresses
+            # the flip — the event's task_id has no reliable provenance, and on a genuine
+            # failure the SDK's own failed write lands before the event, so the flip stays
+            # live exactly for rows with no registered run (pre-P2 rows, the
+            # dispatch→registration window, late callbacks after discard).
+            if has_live_index_run(session, index_name):
+                log.info(f"Skipping failed-state write for index_name={index_name}: "
+                         f"a live indexing run is registered")
+                return
+            # A Stop flips run rows to 'cancelled', so the pending probe alone cannot
+            # protect cancel's snapshot from the worker-synthesized late failed event —
+            # unguarded it would flip cancelled→failed and pop cancel's history[-1].
+            if meta.cmetadata.get('state') == IndexDataStatus.cancelled.value:
+                log.info(f"Skipping failed-state write for index_name={index_name}: "
+                         f"the run was cancelled")
+                return
             # Update only state, updated_on, and error - preserve history as-is
             current_metadata = meta.cmetadata.copy()
             current_metadata['state'] = 'failed'
@@ -1377,7 +1614,7 @@ def save_toolkit_index_configuration(
     Returns the stored configuration so the caller can echo it back to the client.
     """
     with get_session_for_schema(connection_string, toolkit_name_id) as session:
-        meta = get_toolkit_index_meta(session, index_name, for_update=True)
+        meta = lock_toolkit_index_meta(session, index_name)
         if not meta:
             log.warning(f"No metadata found for index_name={index_name}, cannot save index configuration")
             return None
@@ -1399,8 +1636,8 @@ def save_toolkit_index_configuration(
 
 def ensure_pgvector_schema_and_tables(connection_string: str, schema: str, vector_dimension: int = None):
     import sqlalchemy
-    from sqlalchemy import create_engine, text, Column, String, ForeignKey, Index
-    from sqlalchemy.dialects.postgresql import UUID, JSONB, JSON
+    from sqlalchemy import create_engine, text, CheckConstraint, Column, String, ForeignKey, Index
+    from sqlalchemy.dialects.postgresql import UUID, JSONB, JSON, DOUBLE_PRECISION
     from sqlalchemy.orm import declarative_base, relationship, Session
     from sqlalchemy.schema import CreateSchema
     from pgvector.sqlalchemy import Vector
@@ -1450,6 +1687,35 @@ def ensure_pgvector_schema_and_tables(connection_string: str, schema: str, vecto
             {"schema": schema},
         )
 
+    # DDL twin of models.indexer.IndexRun (canonical definition in the elitea-sdk —
+    # see the twin-contract note there). The partial unique index arbitrates the SDK's
+    # registration ON CONFLICT, so its name and predicate come from the shared constants.
+    class IndexRunStore(Base):
+        __tablename__ = "elitea_index_runs"
+
+        run_id = Column(String, primary_key=True)
+        collection = Column(String, nullable=False)
+        status = Column(String, nullable=False, server_default=INDEX_RUN_PENDING)
+        task_id = Column(String, nullable=True)
+        started_on = Column(DOUBLE_PRECISION, nullable=False)
+        heartbeat = Column(DOUBLE_PRECISION, nullable=False)
+        promoted_on = Column(DOUBLE_PRECISION, nullable=True)
+
+        __table_args__ = (
+            Index(
+                INDEX_RUN_LIVE_INDEX_NAME,
+                "collection",
+                unique=True,
+                postgresql_where=text(INDEX_RUN_LIVE_INDEX_PREDICATE),
+            ),
+            Index("ix_elitea_index_runs_collection", "collection"),
+            CheckConstraint(
+                "status IN ({})".format(", ".join(f"'{status}'" for status in INDEX_RUN_STATUSES)),
+                name="ck_elitea_index_runs_status",
+            ),
+            {"schema": schema},
+        )
+
     Base.metadata.create_all(engine)
 
 
@@ -1495,6 +1761,23 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
     if isinstance(tool_params, str):
         tool_params = json.loads(tool_params)
 
+    # Guard before dispatch: a rejection after start_task would leave a live task to kill
+    # best-effort, re-creating the concurrent-run problem at dispatch time.
+    index_name = tool_params.get('index_name')
+    toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
+    try:
+        task_disconnected_timeout = int(
+            VaultClient(project_id).get_secrets().get(
+                'task_disconnected_timeout_sec', DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC
+            )
+        )
+    except Exception as e:
+        log.warning(f"Failed to read task_disconnected_timeout_sec for project {project_id}: {e}")
+        task_disconnected_timeout = DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC
+    reject_index_dispatch_when_run_live(
+        connection_string, toolkit_name_id, index_name, task_disconnected_timeout
+    )
+
     #
     task_kwargs = deepcopy(data)
     stream_id = task_kwargs.pop('stream_id', None)
@@ -1539,8 +1822,6 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
 
     #
     # Save index_meta data for index_data tool
-    index_name = tool_params.get('index_name')
-    toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
     created_on = time.time()
     cmetadata = {
         "collection": index_name,
@@ -1554,6 +1835,11 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         "task_id": task_id,
         "conversation_id": data.get('conversation_id', None),
         "toolkit_id": int(toolkit_name_id),
+        "initiator": str(initiator),
+        # The SDK's stale-run sweep reads its timeout from the meta row so both sides
+        # reclaim on the same threshold; tool_params is persisted verbatim as
+        # index_configuration and must not carry it.
+        "task_disconnected_timeout_sec": task_disconnected_timeout,
     }
     reset_or_create_toolkit_index_meta(connection_string, toolkit_name_id, index_name, cmetadata)
     #
@@ -1687,7 +1973,7 @@ def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Op
                                   delete_embeddings: bool, require_in_progress: bool,
                                   expected_created_on: Optional[float]) -> bool:
     """Core cancel write against an already-open session. See cancel_toolkit_index_meta."""
-    meta = get_toolkit_index_meta(session, index_name)
+    meta = lock_toolkit_index_meta(session, index_name)
     if not meta:
         log.debug(f"No index_meta to cancel for index_name={index_name}")
         return False
@@ -1726,6 +2012,18 @@ def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Op
                         f"(row={meta.cmetadata.get('created_on')}, expected={expected_created_on}) - likely a newer run")
             return False
     #
+    # Run ids are read before task_id is nulled, and the whole cancel — meta snapshot,
+    # run-row tombstones, chunk deletes — commits as ONE transaction under the meta row's
+    # lock (lock order meta → run rows → chunk rows, matching the SDK's promote/discard,
+    # so a queued cancel re-evaluates after promote commits and deletes nothing).
+    try:
+        run_rows = query_index_runs(session, index_name, for_update=True)
+    except OperationalError as error:
+        raise IndexMetaLockTimeoutError(index_name) from error
+    pending_run_ids = [
+        row.run_id for row in (run_rows or []) if row.status == INDEX_RUN_PENDING
+    ]
+    #
     meta.cmetadata["state"] = IndexDataStatus.cancelled.value
     meta.cmetadata["task_id"] = None
     meta.cmetadata["updated_on"] = time.time()
@@ -1742,16 +2040,41 @@ def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Op
         history = [meta.cmetadata]
     #
     meta.cmetadata["history"] = json.dumps(history)
-    session.commit()
+    #
+    # The tombstone outlives a best-effort stop_task: a surviving worker's promote aborts
+    # on the cancelled status, and an in-flight write landing after the delete stays
+    # invisible until the next run's sweep reclaims it.
+    for row in run_rows or []:
+        if row.status == INDEX_RUN_PENDING:
+            row.status = INDEX_RUN_CANCELLED
     #
     if delete_embeddings:
-        session.query(EmbeddingStore).filter(
-            EmbeddingStore.cmetadata["collection"].astext == index_name,
-            EmbeddingStore.cmetadata['type'].astext != "index_meta",
-        ).delete(synchronize_session=False)
-        session.commit()
+        if run_rows:
+            # Run-scoped delete, no collection conjunct: multi-index chunks carry
+            # appended collections ("a;b"), so a collection anchor would leak them as
+            # permanently visible garbage once the run is tombstoned. The type conjunct
+            # protects the meta row and must not spare untyped stamped rows.
+            for run_id in pending_run_ids:
+                session.query(EmbeddingStore).filter(
+                    EmbeddingStore.cmetadata.contains({"_elitea_run_id": run_id}),
+                    or_(
+                        EmbeddingStore.cmetadata['type'].astext.is_(None),
+                        EmbeddingStore.cmetadata['type'].astext != "index_meta",
+                    ),
+                ).delete(synchronize_session=False)
+        else:
+            # No run row of any status (or no runs table): this collection was never
+            # indexed by a run-aware SDK, so fall back to today's collection-wide clean.
+            # Rows-exist-but-none-pending means a run-aware SDK owns the index — its
+            # previous generation must survive a Stop, so nothing is deleted above.
+            session.query(EmbeddingStore).filter(
+                EmbeddingStore.cmetadata["collection"].astext == index_name,
+                EmbeddingStore.cmetadata['type'].astext != "index_meta",
+            ).delete(synchronize_session=False)
     #
-    log.debug(f"Cancelled index_meta for index_name={index_name} (delete_embeddings={delete_embeddings})")
+    session.commit()
+    log.debug(f"Cancelled index_meta for index_name={index_name} (delete_embeddings={delete_embeddings}, "
+              f"cancelled_runs={pending_run_ids})")
     return True
 
 

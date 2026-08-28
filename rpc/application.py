@@ -22,6 +22,8 @@ from ..models.pd.search import MultipleApplicationSearchModel
 from ..models.pd.tool import ToolDetails, ToolImportModel, ToolValidatedDetails
 from ..models.pd.version import ApplicationVersionDetailModel, ApplicationVersionCloneModel
 from ..utils.application_tools import (
+    IndexMetaLockTimeoutError,
+    IndexRunInProgressError,
     toolkits_listing,
     expand_toolkit_settings,
     find_toolkit_schema_by_type_everywhere,
@@ -1384,7 +1386,20 @@ class RPC:
         # Start the test toolkit tool task
         meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         if tool_name == 'index_data':
-            task_id = start_index_task(self.task_node, data, sio_event)
+            try:
+                task_id = start_index_task(self.task_node, data, sio_event)
+            except (IndexRunInProgressError, IndexMetaLockTimeoutError) as e:
+                # Nothing above catches errors on this socket path, so an unplumbed
+                # dispatch refusal would kill the UI Reindex silently.
+                log.info(f"Index dispatch refused for project {project_id}: {e}")
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=str(e),
+                    stream_id=data['stream_id'],
+                    message_id=data['message_id'],
+                )
         else:
             task_id = self.task_node.start_task(
                 "indexer_test_toolkit_tool",

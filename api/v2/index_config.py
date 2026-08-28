@@ -6,6 +6,7 @@ from tools import api_tools, auth, config as c, register_openapi, VaultClient
 
 from ...models.pd.index import SaveIndexConfiguration
 from ...utils.application_tools import (
+    IndexMetaLockTimeoutError,
     IndexRunInProgressError,
     load_and_validate_toolkit_for_index,
     save_toolkit_index_configuration,
@@ -58,7 +59,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {"ok": False, "error": f"Index '{index_name}' not found"}, 404
 
             return {"ok": True, "configuration": configuration}, 200
-        except IndexRunInProgressError as e:
+        except (IndexRunInProgressError, IndexMetaLockTimeoutError) as e:
             return {"ok": False, "error": str(e)}, 409
         except Exception as e:
             log.error(f"Error occurred while saving configuration for index '{index_name}': {e}")

@@ -2,7 +2,10 @@ from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, VaultClient, rpc_tools, this
 from ..models.enums import InitiatorType
-from ..utils.application_tools import update_toolkit_index_meta_history_with_failed_state
+from ..utils.application_tools import (
+    IndexMetaLockTimeoutError,
+    update_toolkit_index_meta_history_with_failed_state,
+)
 
 
 def resolve_credentials(project_settings: dict, toolkit_type: str,
@@ -129,20 +132,36 @@ def handle_failed_index_schedule(
         user_id=expand_user_id if expand_user_id is not None else user_id,
         unsecret=True
     )
-    update_toolkit_index_meta_history_with_failed_state(
-        pgv_settings_expanded.get('connection_string'),
-        toolkit.id,
-        index_meta_id,
-        init_issue
-    )
+    try:
+        outcome = update_toolkit_index_meta_history_with_failed_state(
+            pgv_settings_expanded.get('connection_string'),
+            toolkit.id,
+            index_meta_id,
+            init_issue,
+            initiator=InitiatorType.schedule,
+        )
+    except IndexMetaLockTimeoutError as e:
+        # The row is locked by a live run's promote/registration — do not notify from an
+        # unknown state and do not abort the rest of the tick; last_run never advances on
+        # this path, so the next scheduler scan retries within a minute.
+        log.warning(f"[handle_failed_index_schedule] {e}; retrying next scan")
+        return
+    if outcome.get('skipped_live_run'):
+        # The notification is gated on the writer's locked-read outcome, never on a
+        # separate unlocked pre-check: a live registered run means this start failure
+        # must not flip the shared row or alarm over the run in flight.
+        log.info(f"[handle_failed_index_schedule] Live run registered for {index_meta_id}; "
+                 f"skipping failure notification")
+        return
     this.module.notify_index_data_status({
         'id': None,
         'index_name': index_meta_id,
         'state': 'failed',
         'error': init_issue,
-        'reindex': False,
-        'indexed': 0,
-        'updated': 0,
+        'reindex': outcome.get('reindex', False),
+        'indexed': outcome.get('indexed', 0),
+        'updated': outcome.get('updated', 0),
+        'indexed_chunks': outcome.get('indexed_chunks', 0),
         'toolkit_id': toolkit.id,
         'project_id': project_id,
         'user_id': int(user_id),
