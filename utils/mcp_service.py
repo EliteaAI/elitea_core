@@ -342,12 +342,7 @@ class McpService:
             nextCursor=None,
         ))
         #
-        # exclude 'nextCursor' from serialization if it is None
-        list_tools_result_json = list_tools_result.model_dump_json(
-            exclude={"result": {"nextCursor"}} \
-                if list_tools_result.result["nextCursor"] is None else None
-        )
-        self.session.dispatch_message(list_tools_result_json)
+        self.session.dispatch_message(list_tools_result.model_dump_json())
 
     def __get_scoped_tools(self) -> list[types.Tool]:
         """Get tools for a specific resource (toolkit or application)"""
@@ -675,14 +670,11 @@ def _build_initialize_result(id: str, resource_type: str = None, resource_id: in
 
 
 def _jrpc_server_response(id: str, inner_server_result) -> types.JSONRPCResponse:
-    result_dict = types.ServerResult(inner_server_result).model_dump(by_alias=True)
-    if "_meta" in result_dict and result_dict["_meta"] is None:
-        # _meta is expeted to be an object but not None/null
-        del result_dict["_meta"]
-    # annotations in content blocks must be an object or absent, not null
-    for item in result_dict.get("content") or []:
-        if "annotations" in item and item["annotations"] is None:
-            del item["annotations"]
+    # Optional fields must be absent rather than null: clients validate them as
+    # optional-but-not-nullable, and newer mcp releases keep adding such fields.
+    result_dict = types.ServerResult(inner_server_result).model_dump(
+        by_alias=True, exclude_none=True,
+    )
     return types.JSONRPCResponse(jsonrpc="2.0", id=id, result=result_dict)
 
 
