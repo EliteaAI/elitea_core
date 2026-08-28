@@ -162,6 +162,7 @@ class AgentsImportVersion(ImportVersionModel):
     embedded_toolkits: List[EmbeddedToolkitConfig] = Field(default_factory=list, exclude=True)
     # Explicitly declare meta to ensure it's properly serialized during import
     meta: Optional[dict] = Field(default_factory=dict)
+    tags: List[dict] = Field(default_factory=list)
 
     @model_validator(mode='before')
     @classmethod
