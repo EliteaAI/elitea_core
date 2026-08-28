@@ -65,19 +65,21 @@ class TestFailureReporting:
         assert "REPORTABLE_TASK_NAMES" in dispatch
 
     @staticmethod
-    def test_legacy_in_worker_abort_dict_still_reports(callbacks_source):
-        # Images whose arbiter predates the guard still return the old dict.
-        assert 'result.get("fork_dns_probe_failed")' in callbacks_source
-        assert "self._report_task_failure(task_id, meta, result)" in callbacks_source
+    def test_the_legacy_in_worker_abort_dict_is_no_longer_read(callbacks_source):
+        # The in-worker guard is gone (#6318), so nothing returns that dict any more and the
+        # reporter has one input. Pinned rather than just deleted: reintroducing a result-dict
+        # branch here would quietly re-create the reader that has to match a worker payload.
+        assert "fork_dns_probe_failed" not in callbacks_source
+        assert "def _report_task_failure(self, task_id, meta):" in callbacks_source
 
     @staticmethod
-    def test_reporter_reads_meta_first(callbacks_source):
+    def test_reporter_reads_meta_only(callbacks_source):
         report = callbacks_source[
             callbacks_source.index("def _report_task_failure"):
             callbacks_source.index("def reconcile_stopped_index_metas")
         ]
-        assert 'stream_id = meta.get("stream_id") or result.get("stream_id")' in report
-        assert 'meta.get("execution_generation") or result.get("execution_generation")' in report
+        assert 'stream_id = meta.get("stream_id")' in report
+        assert '"execution_generation": meta.get("execution_generation")' in report
         assert 'if not stream_id:' in report
 
     @staticmethod
