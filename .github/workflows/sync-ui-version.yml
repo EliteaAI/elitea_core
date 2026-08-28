@@ -1,0 +1,39 @@
+name: Sync EliteaUI Version
+
+on:
+  repository_dispatch:
+    types: [ui-version-updated]
+  workflow_dispatch:
+    inputs:
+      ui_version:
+        description: 'EliteaUI version to sync'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sync-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update metadata.json
+        id: update
+        env:
+          UI_VERSION: ${{ github.event.client_payload.ui_version || github.event.inputs.ui_version }}
+        run: |
+          jq --arg v "$UI_VERSION" '.ui_version = $v' metadata.json > tmp.json && mv tmp.json metadata.json
+          echo "ui_version=$UI_VERSION" >> $GITHUB_OUTPUT
+          git diff --quiet metadata.json && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Commit changes
+        if: steps.update.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add metadata.json
+          git commit -m "chore: sync EliteaUI version to ${{ steps.update.outputs.ui_version }} [skip ci]"
+          git push
