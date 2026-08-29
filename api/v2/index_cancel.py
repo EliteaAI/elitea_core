@@ -58,16 +58,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         corroborated = any(
                             (str(p), str(t), str(n)) == wanted for (p, t, n) in entries
                         )
-                # Try to stop the task (best-effort)
-                if corroborated and self.module.task_node is not None:
-                    try:
-                        log.debug(f"Attempting to stop indexer's task {task_id}")
-                        self.module.task_node.stop_task(task_id)
-                    except Exception as e:
-                        log.warning(f"Failed to stop task {task_id}: {e}. Proceeding with cleanup.")
-                elif task_id:
-                    log.warning(f"Skipping task stop for index {index_name}: task {task_id} not "
-                                f"corroborated by row or registry (task may already be dead)")
                 log.debug(f"Attempting to update index meta to 'cancelled' state for index {index_name}")
                 try:
                     cancelled = cancel_toolkit_index_meta(
@@ -81,6 +71,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     )
                     if not cancelled:
                         log.warning(f"Manual cancel transitioned no row for index {index_name} (task {task_id})")
+                    # Signalled only after the cancel has committed: the notify fence reads
+                    # the meta row, so a failure event raised in the gap would be reported to
+                    # the user as a genuine failure of a run they just stopped.
+                    if corroborated and self.module.task_node is not None:
+                        try:
+                            log.debug(f"Attempting to stop indexer's task {task_id}")
+                            self.module.task_node.stop_task(task_id)
+                        except Exception as e:
+                            log.warning(f"Failed to stop task {task_id}: {e}. Proceeding with cleanup.")
+                    elif task_id:
+                        log.warning(f"Skipping task stop for index {index_name}: task {task_id} not "
+                                    f"corroborated by row or registry (task may already be dead)")
                 except IndexMetaLockTimeoutError as e:
                     return {
                         "ok": False,

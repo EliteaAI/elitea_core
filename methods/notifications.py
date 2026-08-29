@@ -20,6 +20,7 @@ from pylon.core.tools import web, log  # pylint: disable=E0611,E0401
 
 from ..models.enums.all import NotificationEventTypes, IndexDataStatus
 from ..utils.application_tools import (
+    derive_index_indexed_chunks,
     derive_index_reindex_flag,
     should_suppress_index_failure_notification,
 )
@@ -48,8 +49,7 @@ class Method:
 
         if state == IndexDataStatus.failed and should_suppress_index_failure_notification(index_data_status):
             log.info(f"Suppressing failure notification for index "
-                     f"{index_data_status.get('index_name')}: a live run is registered "
-                     f"or the run was cancelled")
+                     f"{index_data_status.get('index_name')}: the run was cancelled")
             return
 
         initiator = index_data_status.get('initiator')
@@ -73,6 +73,12 @@ class Method:
             index_data_status = {
                 **index_data_status,
                 'reindex': derive_index_reindex_flag(index_data_status),
+            }
+
+        if index_data_status.get('indexed_chunks') is None:
+            index_data_status = {
+                **index_data_status,
+                'indexed_chunks': derive_index_indexed_chunks(index_data_status),
             }
 
         # Fire notification event for schedule and user initiators

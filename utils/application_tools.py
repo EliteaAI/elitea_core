@@ -1244,12 +1244,15 @@ DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC = 7200
 # deletes — seconds to minutes on large corpora — so every core-side FOR UPDATE bounds its
 # wait and surfaces a retryable error instead of hanging a request or the scheduler tick.
 INDEX_META_LOCK_TIMEOUT = "5s"
+# Second attempt for a write whose failure would strand an already-dispatched worker: the
+# first wait only proves someone holds the row, not that the hold is permanent.
+INDEX_META_RETRY_LOCK_TIMEOUT = "15s"
 
 INDEX_META_PRESERVED_KEYS = ("indexed", "updated", "total", "report", "indexed_chunks")
 
 
-def lock_toolkit_index_meta(session: Session, index_name: str):
-    session.execute(text(f"SET LOCAL lock_timeout = '{INDEX_META_LOCK_TIMEOUT}'"))
+def lock_toolkit_index_meta(session: Session, index_name: str, lock_timeout: str = INDEX_META_LOCK_TIMEOUT):
+    session.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout}'"))
     try:
         return get_toolkit_index_meta(session, index_name, for_update=True)
     except OperationalError as error:
@@ -1292,8 +1295,29 @@ def query_index_runs(session: Session, index_name: str, statuses=None, for_updat
         return None
 
 
-def has_live_index_run(session: Session, index_name: str) -> bool:
-    return bool(query_index_runs(session, index_name, statuses=(INDEX_RUN_PENDING,)))
+def resolve_index_run_timeout(meta) -> int:
+    """The disconnect timeout the run was started with, stamped on the meta row so core and
+    the SDK's stale-run sweep reclaim on the same threshold."""
+    try:
+        return int(meta.cmetadata.get('task_disconnected_timeout_sec')
+                   or DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC)
+    except (AttributeError, TypeError, ValueError):
+        return DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC
+
+
+def has_live_index_run(session: Session, index_name: str,
+                       task_disconnected_timeout: int = DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC) -> bool:
+    """Identity-free liveness probe shared by the failed-state writers and the dispatch guard.
+
+    Freshness is part of the predicate: a pending row left behind by a killed worker is
+    only reclaimed by the SDK sweep when a NEXT run starts, so suppression keyed on bare
+    row presence would silence failures forever on an index that never runs again.
+    """
+    rows = query_index_runs(session, index_name, statuses=(INDEX_RUN_PENDING,))
+    if not rows:
+        return False
+    now = time.time()
+    return any(now - row.heartbeat <= task_disconnected_timeout for row in rows)
 
 
 def get_pending_index_run_heartbeat(session: Session, index_name: str) -> Optional[float]:
@@ -1314,16 +1338,12 @@ def reject_index_dispatch_when_run_live(connection_string: str, toolkit_name_id:
     """
     with get_session_for_schema(connection_string, toolkit_name_id) as session:
         session.execute(text(f"SET LOCAL lock_timeout = '{INDEX_META_LOCK_TIMEOUT}'"))
-        rows = query_index_runs(session, index_name, statuses=(INDEX_RUN_PENDING,))
-    if not rows:
-        return
-    now = time.time()
-    for row in rows:
-        if now - row.heartbeat <= task_disconnected_timeout:
-            raise IndexRunInProgressError(
-                index_name,
-                f"An indexing run is already in progress for index '{index_name}'",
-            )
+        live = has_live_index_run(session, index_name, task_disconnected_timeout)
+    if live:
+        raise IndexRunInProgressError(
+            index_name,
+            f"An indexing run is already in progress for index '{index_name}'",
+        )
 
 
 INDEX_RUN_SUCCESS_STATES = ('completed', 'partly_indexed', 'scheduled_reindex')
@@ -1367,16 +1387,54 @@ def derive_index_reindex_flag(index_data_status: dict) -> bool:
         return False
 
 
+def derive_index_indexed_chunks(index_data_status: dict) -> int:
+    """Server-side 'indexed_chunks' for events that carry no such key.
+
+    Workers older than the event-field whitelist fix drop the count on its way through the
+    node interface, and the retention predicate reads it as "no searchable rows" — claiming
+    a wipe over an index that still serves data. The meta row's count is only trustworthy
+    where a run row proves a run-aware SDK owns the collection: a run-unaware SDK empties
+    and rewrites the collection without ever recomputing the count, so its stored number
+    describes a generation that may already be destroyed. Best-effort: an unresolvable
+    event keeps 0 and the message stays silent about retention.
+    """
+    index_name = index_data_status.get('index_name')
+    toolkit_config = index_data_status.get('toolkit_config')
+    if not index_name or not toolkit_config:
+        return 0
+    try:
+        toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
+        with get_session_for_schema(connection_string, toolkit_name_id) as session:
+            if not query_index_runs(session, index_name):
+                return 0
+            meta = get_toolkit_index_meta(session, index_name)
+            if not meta:
+                return 0
+            return int(meta.cmetadata.get('indexed_chunks') or 0)
+    except Exception as error:
+        log.warning(f"Could not derive indexed_chunks for index_name={index_name}; "
+                    f"claiming no retained data: {error}")
+        return 0
+
+
 def should_suppress_index_failure_notification(index_data_status: dict) -> bool:
     """Notify fence for 'failed' index events — deliberately NOT the failure-writer predicate.
 
-    Suppress ONLY on positively-observed state for a resolved schema+collection: a live
-    pending run row (a straggler's failure must not alarm over run B in flight) or a
-    'cancelled' meta row (a Stop-survivor's worker-synthesized failed event must not read
-    as a real failure — after a Stop no pending row exists, so the pending probe alone
-    cannot cover it). Everything unresolvable NOTIFIES: the scheduler's start-failure
-    payload carries no toolkit_config and is the only notification a credential-failed
-    scheduled reindex produces.
+    Suppress ONLY on a 'cancelled' meta row for a resolved schema+collection: a Stop flips
+    the row to 'cancelled' and its run rows out of 'pending', so this is the sole positive
+    evidence that the generation the event describes was deliberately ended, and it is what
+    keeps a Stop-survivor's worker-synthesized failed event from reading as a real failure.
+
+    A live pending run row is NOT part of the predicate, unlike the failed-state writers
+    below: those defend a SHARED row a live run is still writing, whereas losing a
+    notification loses the failure itself — for a scheduled run it is the only push channel.
+    Keyed on pending rows this fence swallowed a run's own failure whenever its staged-row
+    discard failed (the row stays 'pending'), and every failure concurrent with a foreign
+    live run. A duplicate notification is the accepted price.
+
+    Everything unresolvable NOTIFIES: the scheduler's start-failure payload carries no
+    toolkit_config and is the only notification a credential-failed scheduled reindex
+    produces.
     """
     index_name = index_data_status.get('index_name')
     toolkit_config = index_data_status.get('toolkit_config')
@@ -1385,8 +1443,6 @@ def should_suppress_index_failure_notification(index_data_status: dict) -> bool:
     try:
         toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
         with get_session_for_schema(connection_string, toolkit_name_id) as session:
-            if has_live_index_run(session, index_name):
-                return True
             meta = get_toolkit_index_meta(session, index_name)
             return bool(meta) and meta.cmetadata.get('state') == IndexDataStatus.cancelled.value
     except Exception as error:
@@ -1395,9 +1451,10 @@ def should_suppress_index_failure_notification(index_data_status: dict) -> bool:
         return False
 
 
-def reset_or_create_toolkit_index_meta(connection_string: str, toolkit_name_id: str, index_name: str, default: dict):
+def reset_or_create_toolkit_index_meta(connection_string: str, toolkit_name_id: str, index_name: str, default: dict,
+                                       lock_timeout: str = INDEX_META_LOCK_TIMEOUT):
     with get_session_for_schema(connection_string, toolkit_name_id) as session:
-        meta = lock_toolkit_index_meta(session, index_name)
+        meta = lock_toolkit_index_meta(session, index_name, lock_timeout)
         if meta:
             history_raw = meta.cmetadata.get("history", "[]")
             try:
@@ -1453,7 +1510,7 @@ def update_toolkit_index_meta_history_with_failed_state(connection_string: str, 
         # because this writer APPENDS a history entry rather than popping history[-1], and a
         # cron credential failure on a days-old cancelled row is new information that must
         # still flip and notify.
-        if has_live_index_run(session, index_name):
+        if has_live_index_run(session, index_name, resolve_index_run_timeout(meta)):
             log.info(f"Skipping failed-state history write for index_name={index_name}: "
                      f"a live indexing run is registered")
             return {'flipped': False, 'skipped_live_run': True}
@@ -1512,7 +1569,7 @@ def update_toolkit_index_meta_failed_state(connection_string: str, toolkit_name_
             # failure the SDK's own failed write lands before the event, so the flip stays
             # live exactly for rows with no registered run (pre-P2 rows, the
             # dispatch→registration window, late callbacks after discard).
-            if has_live_index_run(session, index_name):
+            if has_live_index_run(session, index_name, resolve_index_run_timeout(meta)):
                 log.info(f"Skipping failed-state write for index_name={index_name}: "
                          f"a live indexing run is registered")
                 return
@@ -1841,7 +1898,28 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         # index_configuration and must not carry it.
         "task_disconnected_timeout_sec": task_disconnected_timeout,
     }
-    reset_or_create_toolkit_index_meta(connection_string, toolkit_name_id, index_name, cmetadata)
+    try:
+        try:
+            reset_or_create_toolkit_index_meta(connection_string, toolkit_name_id, index_name, cmetadata)
+        except IndexMetaLockTimeoutError:
+            log.warning(f"Index meta write for index_name={index_name} timed out on the lock; "
+                        f"retrying with lock_timeout={INDEX_META_RETRY_LOCK_TIMEOUT}")
+            reset_or_create_toolkit_index_meta(
+                connection_string, toolkit_name_id, index_name, cmetadata,
+                lock_timeout=INDEX_META_RETRY_LOCK_TIMEOUT,
+            )
+    except Exception:  # pylint: disable=W0703
+        # The worker is already dispatched, and every failure of this write leaves it
+        # reindexing against the previous run's meta row — a dropped connection at the
+        # COMMIT strands it exactly as a lock timeout does — so kill the task whatever
+        # the cause, before the refusal reaches the caller.
+        log.error(f"Index meta write for index_name={index_name} failed; "
+                  f"stopping dispatched task {task_id}")
+        try:
+            task_node.stop_task(task_id)
+        except Exception as stop_error:  # pylint: disable=W0703
+            log.warning(f"Could not stop task {task_id} after a failed index meta write: {stop_error}")
+        raise
     #
     return task_id
 
@@ -2038,6 +2116,14 @@ def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Op
     except (json.JSONDecodeError, TypeError):
         log.warning(f"Failed to load index history: {history_raw}. Create new with only current item.")
         history = [meta.cmetadata]
+    #
+    # The legacy clean below empties the collection, and every retention surface (the
+    # cancelled banner, the unblocked search) reads indexed_chunks — which no cancel path
+    # recomputes and the reset even preserves — so the count is zeroed in the same
+    # transaction that destroys the rows it describes.
+    legacy_collection_clean = delete_embeddings and not run_rows
+    if legacy_collection_clean:
+        meta.cmetadata["indexed_chunks"] = 0
     #
     meta.cmetadata["history"] = json.dumps(history)
     #

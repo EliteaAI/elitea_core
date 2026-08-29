@@ -26,6 +26,7 @@ import json
 
 DEFAULT_ITEM_LABELS = {'singular': 'document', 'plural': 'documents'}
 DEFAULT_DEPENDENT_LABELS = {'singular': 'attachment', 'plural': 'attachments'}
+RETENTION_CLAIM = 'Previously indexed data remains available for search.'
 
 
 def parse_indexing_report(report):
@@ -86,8 +87,16 @@ def summarize_indexing_report(report):
 
 
 def summarize_index_error(error):
-    """Single-line error summary capped at ~200 characters."""
+    """Single-line error summary capped at ~200 characters.
+
+    The retention claim belongs to this layer, which decides it from the live chunk count:
+    an SDK message that already ends with the sentence would otherwise render it twice. The
+    sentence the builder wraps the summary in supplies the closing period too.
+    """
     summary = ' '.join(str(error or '').split())
+    if summary.endswith(RETENTION_CLAIM):
+        summary = summary[:-len(RETENTION_CLAIM)].rstrip()
+    summary = summary.rstrip('.')
     if len(summary) > 200:
         summary = summary[:200].rstrip() + '…'
     return summary
@@ -122,9 +131,23 @@ def build_index_notification_message(index_data_status, initiator=None):
         totals = (report or {}).get('totals') or {}
         failed = totals.get('failed') or index_data_status.get('failed') or 0
         failed_noun = _noun(failed, (report or {}).get('item_labels'), DEFAULT_ITEM_LABELS)
+        # A partly_indexed run can carry no failure count at all: the SDK's damaged-doc
+        # path fills none of the report's FAILED groups, and a backfilled row stored no
+        # report either. Name the quantity vaguely rather than claim a zero.
+        subject = f'{failed} {failed_noun}' if failed else f'some {failed_noun}'
+        # The SDK sets partly_indexed from the run's counts alone, so this state says
+        # nothing about a previous generation. The retention clause speaks about the FAILED
+        # items, whose chunks this run never wrote, so `indexed_chunks` — which counts the
+        # run's own promoted chunks — cannot carry it alone: on a first index those items
+        # have no earlier generation at all.
+        verb = 'partially reindexed' if index_data_status.get('reindex') else 'partially indexed'
+        retained = (
+            ' Their previously indexed data remains available for search.'
+            if index_data_status.get('reindex') and index_retains_data(index_data_status) else ''
+        )
         return (
-            f'Index {link} was partially reindexed: {failed} {failed_noun} could not be updated'
-            f' ({error}). Their previously indexed data remains available for search.'
+            f'Index {link} was {verb}: {subject} could not be updated'
+            f' ({error}).{retained}'
         )
 
     if state == 'failed' or (not state and error):
