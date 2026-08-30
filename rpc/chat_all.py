@@ -1528,10 +1528,20 @@ class RPC:
         session.add(response_msg)
         session.commit()
 
+        # A live parallel supervisor keeps the original worker and SDK
+        # Application objects alive while the browser completes OAuth. Those
+        # objects hold the pre-auth token snapshot, so transport the fresh token
+        # context with the in-memory decision. Keep it out of ``decision``
+        # above: message metadata is durable UI state and must never persist
+        # credentials. ``persist_supervisor_decision`` also strips this private
+        # key defensively.
+        transport_decision = dict(decision)
+        if parsed.mcp_auth_resume and parsed.mcp_tokens:
+            transport_decision['_mcp_tokens'] = dict(parsed.mcp_tokens)
         event_base = {
             'root_thread_id': root_thread_id,
             'thread_id': root_thread_id,
-            'decision': decision,
+            'decision': transport_decision,
         }
         this.module.event_node.emit('predict_events', {
             'type': 'parallel_hitl_decision_offer', **event_base,
