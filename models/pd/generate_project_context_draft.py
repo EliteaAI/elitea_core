@@ -3,7 +3,10 @@ from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 from .predict_llm import LLMSettingsRequest
-from .project_context import PROJECT_CONTEXT_MAX_LEN
+from .project_context import (
+    PROJECT_CONTEXT_ACTIVATION_DESCRIPTION_MAX_LEN,
+    PROJECT_CONTEXT_MAX_LEN,
+)
 
 PROJECT_BACKGROUND_MAX_LENGTH = PROJECT_CONTEXT_MAX_LEN
 
@@ -33,6 +36,11 @@ class GenerateProjectContextDraftRequest(BaseModel):
         description="Existing Project Background to refine. When provided, the draft is generated in "
         "edit mode (the suggestion refines this content) instead of create mode.",
     )
+    current_activation_description: Optional[str] = Field(
+        default=None,
+        max_length=PROJECT_CONTEXT_ACTIVATION_DESCRIPTION_MAX_LEN,
+        description="Existing activation description to refine together with the Project Background.",
+    )
     llm_settings: Optional[LLMSettingsRequest] = Field(
         default=None,
         description="LLM model override. If not provided, "
@@ -45,11 +53,10 @@ class GenerateProjectContextDraftRequest(BaseModel):
 
 
 class GenerateProjectContextDraftResponse(BaseModel):
-    """AI-generated Project Background draft.
+    """AI-generated Project Context draft.
 
-    The single ``project_background`` field is truncated to its cap rather than
-    rejected when slightly over, so a usable draft always reaches the review form.
-    A 422 is only raised when the field is missing/empty.
+    Text fields are truncated to their caps rather than rejected when slightly
+    over, so a usable draft always reaches the review form.
     There are deliberately NO suggested tools/agents/pipelines/MCPs/resources.
     """
 
@@ -58,8 +65,20 @@ class GenerateProjectContextDraftResponse(BaseModel):
         max_length=PROJECT_BACKGROUND_MAX_LENGTH,
         description=f"Project Background in Markdown (truncated to {PROJECT_BACKGROUND_MAX_LENGTH} characters)",
     )
+    activation_description: str = Field(
+        min_length=1,
+        max_length=PROJECT_CONTEXT_ACTIVATION_DESCRIPTION_MAX_LEN,
+        description="Concise description of the user intents that should activate this Project Context.",
+    )
 
     @field_validator("project_background", mode="before")
     @classmethod
     def _truncate_project_background(cls, v):
         return v[:PROJECT_BACKGROUND_MAX_LENGTH].rstrip() if isinstance(v, str) else v
+
+    @field_validator("activation_description", mode="before")
+    @classmethod
+    def _normalize_activation_description(cls, v):
+        if not isinstance(v, str):
+            return v
+        return ' '.join(v.split())[:PROJECT_CONTEXT_ACTIVATION_DESCRIPTION_MAX_LEN].rstrip()

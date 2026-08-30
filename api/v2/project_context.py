@@ -55,19 +55,28 @@ class PromptLibAPI(api_tools.APIModeHandler):
         )
 
         rpc = rpc_tools.RpcMixin().rpc.timeout(5)
+        data = {'content': parsed.content, 'enabled': parsed.enabled}
+        if 'activation_description' in parsed.model_fields_set:
+            if parsed.activation_description:
+                data['activation_description'] = parsed.activation_description
+        elif config is not None:
+            existing_activation_description = (config.get('data') or {}).get('activation_description')
+            if existing_activation_description:
+                data['activation_description'] = existing_activation_description
+
         if config is None:
             result, _ = rpc.configurations_create_if_not_exists(payload={
                 'project_id': project_id,
                 'elitea_title': f'project_context_{project_id}',
                 'label': 'Project Context',
                 'type': 'project_context',
-                'data': {'content': parsed.content, 'enabled': parsed.enabled},
+                'data': data,
             })
         else:
             result = rpc.configurations_update(
                 project_id=project_id,
                 config_id=config['id'],
-                payload={'data': {'content': parsed.content, 'enabled': parsed.enabled}},
+                payload={'data': data},
             )
 
         return ProjectContextDetail.from_config(result).model_dump(mode='json'), 200

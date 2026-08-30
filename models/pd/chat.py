@@ -68,6 +68,10 @@ class ApplicationChatRequest(MergeUpdateBase):
     interaction_uuid: str | uuid.UUID | None = None
     version_details: Optional[dict] = None
     internal_tools: Optional[List[str]] = []
+    project_context: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Enabled Project Context prepared for SDK-side on-demand loading.",
+    )
     invoked_skills: Optional[List[dict]] = Field(
         default=None,
         description="Per-turn resolved skill bodies (from ~skill refs) injected at the LLM node",
@@ -138,6 +142,10 @@ class LLMChatRequest(MergeUpdateBase):
     checkpoint_id: Optional[str] = None
     interaction_uuid: str | uuid.UUID | None = None
     internal_tools: Optional[List[str]] = []
+    project_context: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Enabled Project Context prepared for SDK-side on-demand loading.",
+    )
     invoked_skills: Optional[List[dict]] = Field(
         default=None,
         description="Per-turn resolved skill bodies (from ~skill refs) injected at the LLM node",

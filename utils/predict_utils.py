@@ -2,10 +2,12 @@ import flask
 import json
 import uuid
 from datetime import datetime
+from hashlib import sha256
+from typing import Optional, Union
+
 from pylon.core.tools import log
 from tools import VaultClient, db, serialize, this
 from tools import auth, rpc_tools, VaultClient, serialize, context
-from typing import Optional, Union
 
 from .llm_settings import get_default_max_tokens
 from .next_input_suggestion_utils import next_input_suggestion_config
@@ -267,6 +269,7 @@ def generate_predict_payload(
             'instructions': parsed.instructions,
         },
         'internal_tools': parsed.internal_tools or [],
+        'project_context': getattr(parsed, 'project_context', None),
         'steps_limit': parsed.steps_limit if isinstance(parsed, LLMChatRequest) else None,
         'mcp_tokens': parsed.mcp_tokens or {},
         'ignored_mcp_servers': parsed.ignored_mcp_servers or [],
@@ -474,7 +477,7 @@ def get_toolkit_config(project_id: int, user_id: int, toolkit_id: int):
     return toolkit_config
 
 
-def get_project_context(project_id: int) -> tuple[str, bool]:
+def get_project_context(project_id: int) -> dict:
     try:
         config = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_first_filtered_project(
             project_id=project_id,
@@ -482,14 +485,24 @@ def get_project_context(project_id: int) -> tuple[str, bool]:
         )
         if config:
             data = config.get('data') or {}
-            return data.get('content', ''), data.get('enabled', True)
+            content = str(data.get('content') or '')
+            activation_description = ' '.join(
+                str(data.get('activation_description') or '').split()
+            ) or None
+            return {
+                'content': content,
+                'enabled': data.get('enabled', True),
+                'activation_description': activation_description,
+                'revision': sha256(content.encode('utf-8')).hexdigest(),
+            }
     except Exception:
         log.exception('Failed to fetch project context')
-    return '', False
-
-
-def prepend_project_context(instructions: str, ctx_content: str) -> str:
-    return f"# Project Context\n\n{ctx_content}\n\n---\n\n{instructions}"
+    return {
+        'content': '',
+        'enabled': False,
+        'activation_description': None,
+        'revision': None,
+    }
 
 
 def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, tool_name: str, tool_params: dict, sid: str = None) -> dict:
