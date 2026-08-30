@@ -68,6 +68,21 @@ def test_supervisor_decision_and_roster_are_bounded_durable_message_state():
     assert 'parallel_hitl_roster' not in retired
 
 
+def test_supervised_oauth_tokens_are_transport_only_not_durable_metadata():
+    meta = persist_supervisor_decision({}, {
+        'decision_id': 'd-auth',
+        'interrupt_id': 'i-auth',
+        'action': 'authorize',
+        '_mcp_tokens': {
+            'https://mcp.example.test': {'access_token': 'test-secret'},
+        },
+    })
+
+    persisted = pending_supervisor_decisions(meta)[0]
+    assert persisted['decision_id'] == 'd-auth'
+    assert '_mcp_tokens' not in persisted
+
+
 def test_supervisor_fallback_has_one_phase_owner():
     meta = persist_supervisor_decision({}, {
         'decision_id': 'd-fallback',
@@ -536,6 +551,21 @@ def test_supervised_fallback_cannot_launch_a_competing_root_worker():
     assert 'self.chat_continue_predict_sio(' in recovery
     assert 'self.continue_predict_sio(' not in recovery
     assert '_internal_token=INTERNAL_CONTINUE_TOKEN' in recovery
+
+
+def test_live_supervised_mcp_resume_forwards_fresh_tokens_only_on_event_bus():
+    plugin_root = pathlib.Path(__file__).resolve().parents[3]
+    continue_source = (plugin_root / 'rpc' / 'chat_all.py').read_text()
+    offer = continue_source[
+        continue_source.index('def _offer_supervised_decision'):
+        continue_source.index('@web.rpc("chat_continue_predict_sio"')
+    ]
+
+    persist_index = offer.index('persist_supervisor_decision(')
+    transport_index = offer.index("transport_decision['_mcp_tokens']")
+    emit_index = offer.index("'decision': transport_decision")
+    assert persist_index < transport_index < emit_index
+    assert "parsed.mcp_auth_resume and parsed.mcp_tokens" in offer
 
 
 def test_repeated_resolved_supervised_decision_cannot_replay_the_root():

@@ -22,6 +22,7 @@ SUPERVISOR_DECISIONS_KEY = 'parallel_hitl_decisions'
 SUPERVISOR_ROSTER_KEY = 'parallel_hitl_roster'
 MAX_SUPERVISOR_DECISIONS = 256
 INTERNAL_CONTINUE_TOKEN = object()
+TRANSIENT_SUPERVISOR_DECISION_KEYS = {'_mcp_tokens'}
 
 
 def decision_ack_key(message_id, decision_id, phase):
@@ -40,7 +41,11 @@ def persist_supervisor_decision(meta, decision, phase='queued'):
     decision_id = str((decision or {}).get('decision_id') or '')
     if not decision_id:
         return updated
-    incoming = {**dict(decision), 'phase': phase}
+    incoming = {
+        key: value for key, value in dict(decision).items()
+        if key not in TRANSIENT_SUPERVISOR_DECISION_KEYS
+    }
+    incoming['phase'] = phase
     by_id = {
         str(item.get('decision_id')): item
         for item in current if item.get('decision_id')
