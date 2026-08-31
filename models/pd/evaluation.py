@@ -310,6 +310,7 @@ class EvalBindingReorderModel(BaseModel):
 # ----------------------------------------------------------------------------
 
 class EvalSuiteBaseModel(BaseModel):
+    description: Optional[str] = None
     dataset_id: Optional[int] = None
     judge_model: Optional[dict] = None           # per-suite judge override (§18.7)
     baseline_run_id: Optional[int] = None         # comparison baseline pointer (§21.6)
@@ -334,6 +335,7 @@ class EvalSuiteDetailModel(BaseModel):
     uuid: str
     application_id: int
     name: str
+    description: Optional[str] = None
     dataset_id: Optional[int] = None
     judge_model: Optional[dict] = None
     baseline_run_id: Optional[int] = None

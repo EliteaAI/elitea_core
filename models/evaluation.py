@@ -185,6 +185,7 @@ class EvalSuite(db_tools.AbstractBaseMixin, db.Base):
         nullable=False, index=True,
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False, default='Default suite')
+    description: Mapped[str] = mapped_column(Text, nullable=True)
 
     dataset_id: Mapped[int] = mapped_column(
         ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.eval_dataset.id', ondelete='SET NULL'), nullable=True,
