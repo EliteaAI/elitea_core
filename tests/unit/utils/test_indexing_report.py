@@ -100,12 +100,166 @@ class TestSummarizeIndexingReport:
 
 
 class TestBuildIndexNotificationMessage:
-    def test_failure_wins_over_everything(self, indexing_report):
+    def test_a_failed_first_index_names_the_cause(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'failed', 'error': 'boom', 'report': make_report()}
+        )
+
+        assert message == 'Indexing of [docs]() failed: boom.'
+
+    def test_a_failed_reindex_with_retained_chunks_states_retention(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'failed', 'error': 'boom', 'reindex': True,
+             'indexed_chunks': 4321}
+        )
+
+        assert message == (
+            'Index [docs]() reindex failed: boom.'
+            ' Previously indexed data remains available for search.'
+        )
+
+    def test_a_failed_reindex_over_an_empty_index_makes_no_retention_claim(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'failed', 'error': 'boom', 'reindex': True,
+             'indexed_chunks': 0}
+        )
+
+        assert message == 'Index [docs]() reindex failed: boom.'
+
+    def test_a_failed_scheduled_reindex_is_named_as_such(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'failed', 'error': 'boom', 'reindex': True,
+             'indexed_chunks': 4321},
+            initiator='schedule',
+        )
+
+        assert message == (
+            'Index [docs]() scheduled reindex failed: boom.'
+            ' Previously indexed data remains available for search.'
+        )
+
+    def test_a_stateless_error_event_still_reads_as_failure(self, indexing_report):
         message = indexing_report.build_index_notification_message(
             {'index_name': 'docs', 'error': 'boom', 'report': make_report()}
         )
 
-        assert message == 'Index [docs]() is failed.'
+        assert message == 'Indexing of [docs]() failed: boom.'
+
+    def test_a_partly_indexed_run_reads_as_partial_never_as_failed(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'partly_indexed', 'error': 'boom', 'reindex': True,
+             'indexed_chunks': 4321, 'report': make_report(failed=3)}
+        )
+
+        assert message == (
+            'Index [docs]() was partially reindexed: 3 pages could not be updated'
+            ' (boom). Their previously indexed data remains available for search.'
+        )
+
+    def test_a_partly_indexed_first_run_is_never_called_a_reindex(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'partly_indexed', 'error': 'boom',
+             'indexed_chunks': 4321, 'report': make_report(failed=3)}
+        )
+
+        assert message == (
+            'Index [docs]() was partially indexed: 3 pages could not be updated (boom).'
+        )
+
+    def test_a_first_run_never_claims_retention_for_items_it_never_indexed(self, indexing_report):
+        """The current run's own chunks satisfy the count, so the count alone cannot carry
+        a clause about the FAILED items' earlier generation."""
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'partly_indexed', 'error': 'boom',
+             'indexed_chunks': 176, 'report': make_report(indexed=176, failed=3)}
+        )
+
+        assert 'remains available for search' not in message
+
+    def test_a_partly_indexed_run_over_an_empty_index_makes_no_retention_claim(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'partly_indexed', 'error': 'boom', 'reindex': True,
+             'indexed_chunks': 0, 'report': make_report(failed=3)}
+        )
+
+        assert message == (
+            'Index [docs]() was partially reindexed: 3 pages could not be updated (boom).'
+        )
+
+    def test_a_partly_indexed_run_with_no_chunk_count_makes_no_retention_claim(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'partly_indexed', 'error': 'boom', 'reindex': True,
+             'report': make_report(failed=3)}
+        )
+
+        assert 'remains available for search' not in message
+
+    def test_a_missing_failure_count_is_omitted_never_rendered_as_zero(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'partly_indexed', 'error': 'boom',
+             'reindex': True, 'indexed_chunks': 4321}
+        )
+
+        assert message == (
+            'Index [docs]() was partially reindexed: some documents could not be updated'
+            ' (boom). Their previously indexed data remains available for search.'
+        )
+        assert '0 documents' not in message
+
+    def test_a_damaged_doc_run_reporting_no_failed_group_is_not_rendered_as_zero(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'partly_indexed', 'error': 'boom',
+             'reindex': True, 'indexed_chunks': 4321, 'report': make_report(failed=0)}
+        )
+
+        assert message.startswith('Index [docs]() was partially reindexed: some pages')
+
+    def test_an_error_already_claiming_retention_states_it_once(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'failed', 'reindex': True, 'indexed_chunks': 4321,
+             'error': 'Indexing failed: the loader returned no content while the index holds'
+                      ' data from previous runs.'
+                      ' Previously indexed data remains available for search.'}
+        )
+
+        assert message == (
+            'Index [docs]() reindex failed: Indexing failed: the loader returned no content'
+            ' while the index holds data from previous runs.'
+            ' Previously indexed data remains available for search.'
+        )
+        assert message.count('remains available for search') == 1
+        assert '..' not in message
+
+    def test_an_error_claiming_retention_over_an_emptied_index_drops_the_claim(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'failed', 'reindex': True, 'indexed_chunks': 0,
+             'error': 'Loader empty. Previously indexed data remains available for search.'}
+        )
+
+        assert message == 'Index [docs]() reindex failed: Loader empty.'
+
+    def test_a_trailing_period_is_never_doubled(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'failed', 'error': 'boom.'}
+        )
+
+        assert message == 'Indexing of [docs]() failed: boom.'
+
+    def test_a_completed_state_with_a_leftover_error_reads_as_success(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'completed', 'error': 'stale', 'report': make_report()}
+        )
+
+        assert message == 'Index [docs]() is successfully created. 179 pages indexed.'
+
+    def test_the_error_summary_is_single_line_and_capped(self, indexing_report):
+        message = indexing_report.build_index_notification_message(
+            {'index_name': 'docs', 'state': 'failed', 'error': 'line one\nline two ' + 'x' * 500}
+        )
+
+        assert '\n' not in message
+        assert len(message) < 300
+        assert '…' in message
 
     def test_first_index_message(self, indexing_report):
         message = indexing_report.build_index_notification_message(

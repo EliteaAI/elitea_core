@@ -224,7 +224,8 @@ class Method:
                 for ek in evicted_over_cap:
                     log.warning(f"active_index_tasks over cap ({self.active_index_tasks_max}); evicted oldest task {ek} "
                                 f"(a later Stop for it will not auto-reconcile)")
-        elif state in (IndexDataStatus.completed, IndexDataStatus.failed, IndexDataStatus.cancelled):
+        elif state in (IndexDataStatus.completed, IndexDataStatus.failed, IndexDataStatus.cancelled,
+                       IndexDataStatus.partly_indexed):
             evicted = False
             with self.active_index_tasks_lock:
                 entries = self.active_index_tasks.get(task_key)

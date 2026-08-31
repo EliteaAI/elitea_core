@@ -22,6 +22,8 @@ from ..models.pd.search import MultipleApplicationSearchModel
 from ..models.pd.tool import ToolDetails, ToolImportModel, ToolValidatedDetails
 from ..models.pd.version import ApplicationVersionDetailModel, ApplicationVersionCloneModel
 from ..utils.application_tools import (
+    IndexMetaLockTimeoutError,
+    IndexRunInProgressError,
     toolkits_listing,
     expand_toolkit_settings,
     find_toolkit_schema_by_type_everywhere,
@@ -1391,7 +1393,65 @@ class RPC:
         # Start the test toolkit tool task
         meta_toolkit_config = redact_internal_mcp_secrets(task_kwargs.get('toolkit_config', {}))
         if tool_name == 'index_data':
-            task_id = start_index_task(self.task_node, data, sio_event)
+            # A chat-hosted participant waits on its own question_id; the response uuid
+            # was never sent to it, so an error addressed to that uuid leaves the entry
+            # spinning (same resolution as predict_sio).
+            client_placeholder_id = (
+                start_event_content.get('question_id') if start_event_content else None
+            ) or data.get('message_id')
+            try:
+                task_id = start_index_task(self.task_node, data, sio_event)
+            except (IndexRunInProgressError, IndexMetaLockTimeoutError) as e:
+                # Nothing above catches errors on this socket path, so an unplumbed
+                # dispatch refusal would kill the UI Reindex silently.
+                log.info(f"Index dispatch refused for project {project_id}: {e}")
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=str(e),
+                    stream_id=data.get('stream_id'),
+                    message_id=client_placeholder_id,
+                )
+            except (PoolSaturationError, MaintenanceInProgressError) as e:
+                # These carry the platform's own status mapping — saturation is a 503 with
+                # retry_after that clients back off on — so the typed exception must reach
+                # REST/RPC callers unchanged, including the ones that pass a sid. The socket
+                # has no other channel, so it gets a user-facing notice: constructing
+                # SioValidationError emits it, and it is deliberately not raised. Their
+                # str() names an internal pool/task and is for the log only.
+                log.info(f"Index dispatch refused for project {project_id}: {e}")
+                if sid:
+                    SioValidationError(
+                        sio=self.context.sio,
+                        sid=sid,
+                        event=sio_event,
+                        error=(
+                            'The service is busy processing other requests.'
+                            ' Please try again in a few seconds.'
+                            if isinstance(e, PoolSaturationError) else
+                            'Indexing is unavailable while maintenance is in progress.'
+                            ' Please try again shortly.'
+                        ),
+                        stream_id=data.get('stream_id'),
+                        message_id=client_placeholder_id,
+                    )
+                raise
+            except Exception as e:
+                # A meta write that fails stops the worker it already dispatched, so an
+                # unexpected error here aborts the run with no later event to report it.
+                # Callers with no socket keep the original exception and its status mapping.
+                log.exception(f"Index dispatch failed for project {project_id}: {e}")
+                if not sid:
+                    raise
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error="Failed to start indexing, please try again",
+                    stream_id=data.get('stream_id'),
+                    message_id=client_placeholder_id,
+                ) from e
         else:
             task_id = self.task_node.start_task(
                 "indexer_test_toolkit_tool",

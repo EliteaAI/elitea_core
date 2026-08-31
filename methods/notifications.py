@@ -19,6 +19,11 @@
 from pylon.core.tools import web, log  # pylint: disable=E0611,E0401
 
 from ..models.enums.all import NotificationEventTypes, IndexDataStatus
+from ..utils.application_tools import (
+    derive_index_indexed_chunks,
+    derive_index_reindex_flag,
+    should_suppress_index_failure_notification,
+)
 from ..utils.indexing_report import build_index_notification_message
 
 
@@ -38,9 +43,15 @@ class Method:
         
         # Only process terminal statuses that require notification
         state = index_data_status.get('state')
-        if state not in (IndexDataStatus.completed, IndexDataStatus.failed, IndexDataStatus.created, IndexDataStatus.scheduled_reindex):
+        if state not in (IndexDataStatus.completed, IndexDataStatus.failed, IndexDataStatus.created,
+                         IndexDataStatus.scheduled_reindex, IndexDataStatus.partly_indexed):
             return
-        
+
+        if state == IndexDataStatus.failed and should_suppress_index_failure_notification(index_data_status):
+            log.info(f"Suppressing failure notification for index "
+                     f"{index_data_status.get('index_name')}: the run was cancelled")
+            return
+
         initiator = index_data_status.get('initiator')
         project_id = index_data_status.get('project_id')
         
@@ -57,7 +68,19 @@ class Method:
         if not user_id or not project_id:
             log.warning(f"Cannot create notification: missing user_id or project_id in {index_data_status}")
             return
-        
+
+        if 'reindex' not in index_data_status:
+            index_data_status = {
+                **index_data_status,
+                'reindex': derive_index_reindex_flag(index_data_status),
+            }
+
+        if index_data_status.get('indexed_chunks') is None:
+            index_data_status = {
+                **index_data_status,
+                'indexed_chunks': derive_index_indexed_chunks(index_data_status),
+            }
+
         # Fire notification event for schedule and user initiators
         self.context.event_manager.fire_event(
             'notifications_stream', {
@@ -71,6 +94,9 @@ class Method:
                     'reindex': index_data_status.get('reindex'),
                     'indexed': index_data_status.get('indexed'),
                     'updated': index_data_status.get('updated'),
+                    # The twin backfill in the notifications plugin gates its retention
+                    # sentence on this live count — a remembered flag cannot prove data.
+                    'indexed_chunks': index_data_status.get('indexed_chunks'),
                     # Neither the report nor the run totals are stored: the rendered
                     # message below is all any reader needs, and this meta is size-audited.
                     'toolkit_id': index_data_status.get('toolkit_id'),

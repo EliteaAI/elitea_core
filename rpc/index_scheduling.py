@@ -12,7 +12,7 @@ from ..models.indexer import EmbeddingStore
 from ..models.enums import InitiatorType
 from ..models.enums.indexer import IndexingSchedule
 from ..models.pd.index import ToolkitIndexingSchedule
-from ..utils.application_tools import get_session_for_schema, is_index_stale, should_trigger_scheduled_index, start_index_task, update_toolkit_index_meta_history_with_failed_state
+from ..utils.application_tools import get_pending_index_run_heartbeat, get_session_for_schema, is_index_stale, should_trigger_scheduled_index, start_index_task, update_toolkit_index_meta_history_with_failed_state
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
 from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
@@ -191,11 +191,28 @@ class RPC:
                                             task_disconnected_timeout = int(
                                                 secrets.get('task_disconnected_timeout_sec', 7200)
                                             )
-                                            stale_retry = is_index_stale(
-                                                index.cmetadata.get('updated_on', 0),
-                                                running_state.lower(),
-                                                task_disconnected_timeout,
+                                            # A registered run's heartbeat is the staleness
+                                            # source when it exists: updated_on only advances
+                                            # per written document, so a healthy multi-hour
+                                            # loader phase would look stale and be superseded
+                                            # mid-run. Rows with no pending run (crashed
+                                            # pre-heartbeat runs, the dispatch window) keep
+                                            # the updated_on rule so their schedules are
+                                            # never starved.
+                                            pending_heartbeat = get_pending_index_run_heartbeat(
+                                                session, index_meta_id
                                             )
+                                            if pending_heartbeat is not None:
+                                                stale_retry = (
+                                                    time.time() - pending_heartbeat
+                                                    > task_disconnected_timeout
+                                                )
+                                            else:
+                                                stale_retry = is_index_stale(
+                                                    index.cmetadata.get('updated_on', 0),
+                                                    running_state.lower(),
+                                                    task_disconnected_timeout,
+                                                )
                                             if stale_retry:
                                                 log.warning(
                                                     f"check_index_scheduling: retrying stale in_progress index "

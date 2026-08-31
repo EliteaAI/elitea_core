@@ -4,20 +4,24 @@ from datetime import datetime, UTC
 from flask import request
 from pydantic import ValidationError
 from pylon.core.tools import log
-from sqlalchemy import cast, inspect, Numeric, nullslast
-from sqlalchemy.exc import NoResultFound
+from sqlalchemy import cast, inspect, Numeric, nullslast, text
+from sqlalchemy.exc import NoResultFound, OperationalError, ProgrammingError
 from sqlalchemy.orm.attributes import flag_modified
 
 from tools import api_tools, auth, config as c, serialize, db, VaultClient
 from ...models.elitea_tools import EliteATool
-from ...models.indexer import EmbeddingStore
+from ...models.indexer import EmbeddingStore, IndexRun
 from ...models.pd.index import UpdateIndexingSchedule, ToolkitIndexingSchedule
 from ...utils.application_tools import (
     load_and_validate_toolkit_for_index,
     get_session_for_schema,
     is_index_stale,
     clean_up_schedule_in_toolkit,
+    find_last_successful_run,
+    IndexMetaLockTimeoutError,
+    INDEX_META_LOCK_TIMEOUT,
     _get_pgvector_engine,
+    _is_undefined_table_error,
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import get_toolkit_config
@@ -70,6 +74,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
                                 cmetadata[key] = json.loads(cmetadata[key])
                             except (TypeError, json.JSONDecodeError):
                                 log.warning(f"Failed to decode {key} for index_meta {id}")
+                    # Display-only, never a search or retention gate (those key on
+                    # metadata.indexed_chunks). Computed from the RAW history before the
+                    # completed→created relabel below, or the flagship "first index
+                    # succeeded, first reindex failed" case would report null.
+                    history_entries = cmetadata.get('history')
+                    last_successful = find_last_successful_run(
+                        history_entries if isinstance(history_entries, list) else []
+                    )
+                    last_successful_run = {
+                        "updated_on": last_successful.get('updated_on'),
+                        "indexed": last_successful.get('indexed'),
+                    } if last_successful else None
                     # highlight the fist history item as 'created' if it is completed successfully
                     if 'history' in cmetadata and len(cmetadata['history']) > 0 and cmetadata['history'][0]['state'] == 'completed':
                         cmetadata['history'][0]['state'] = 'created'
@@ -82,7 +98,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     result.append({
                         "id": id,
                         "metadata": cmetadata,
-                        "stale": stale
+                        "stale": stale,
+                        "last_successful_run": last_successful_run
                     })
                 return serialize(result), 200
         except Exception as e:
@@ -107,9 +124,29 @@ class PromptLibAPI(api_tools.APIModeHandler):
         #
         try:
             with get_session_for_schema(connection_string, toolkit_name_id) as session:
-                obj = session.query(EmbeddingStore).filter(EmbeddingStore.id == index_meta_id).one()
+                # Universal lock order shared with cancel and the SDK's promote/discard:
+                # meta row → run rows → chunk rows. Deleting chunk rows first while a
+                # Stop holds the meta and run rows is a textbook AB-BA deadlock, and the
+                # promote path can hold the meta lock for minutes — hence the bounded
+                # wait surfaced as a retryable error instead of a hang.
+                session.execute(text(f"SET LOCAL lock_timeout = '{INDEX_META_LOCK_TIMEOUT}'"))
+                obj = session.query(EmbeddingStore).filter(
+                    EmbeddingStore.id == index_meta_id
+                ).with_for_update().one()
                 index_name = obj.cmetadata["collection"]
-                #
+                # Run rows of every status go with the index: a surviving pending row
+                # would refuse re-creating a same-named index for the full staleness
+                # timeout. Savepoint-guarded — the runs table may not be provisioned yet.
+                savepoint = session.begin_nested()
+                try:
+                    session.query(IndexRun).filter(
+                        IndexRun.collection == index_name
+                    ).delete(synchronize_session=False)
+                    savepoint.commit()
+                except ProgrammingError as error:
+                    savepoint.rollback()
+                    if not _is_undefined_table_error(error):
+                        raise
                 session.query(EmbeddingStore).filter(
                     EmbeddingStore.cmetadata["collection"].astext == index_name
                 ).delete(synchronize_session=False)
@@ -117,6 +154,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 log.debug(f"Deleted all index_meta with collection '{index_name}' from toolkit {toolkit_id}")
         except NoResultFound:
             return {"ok": False, "error": f"index_meta {index_meta_id} not found"}, 404
+        except OperationalError as e:
+            session.rollback()
+            log.warning(f"Lock timeout while deleting index_meta {index_meta_id}: {e}")
+            return {"ok": False, "error": str(IndexMetaLockTimeoutError(index_name or index_meta_id))}, 409
         except Exception as e:
             session.rollback()
             log.error(f"Error occurred while deleting index_meta {index_meta_id}: {e}")
