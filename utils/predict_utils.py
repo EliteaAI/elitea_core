@@ -9,7 +9,7 @@ from pylon.core.tools import log
 from tools import VaultClient, db, serialize, this
 from tools import auth, rpc_tools, VaultClient, serialize, context
 
-from .llm_settings import get_default_max_tokens
+from .llm_settings import normalize_runtime_max_tokens
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_utils import consume_invoked_skills, resolve_runtime_skills
 from ..models.elitea_tools import EliteATool
@@ -204,16 +204,19 @@ def generate_predict_payload(
 
     for param in ["max_tokens", "temperature", "reasoning_effort", "model_project_id"]:
         param_value = getattr(parsed.llm_settings, param, None)
+        if param == "max_tokens":
+            param_value = normalize_runtime_max_tokens(param_value)
         if param_value is None:
             continue
         # Skip temperature for reasoning models, skip reasoning_effort for non-reasoning models
         if (param == "temperature" and supports_reasoning) or (param == "reasoning_effort" and not supports_reasoning):
             continue
 
-        if param == "max_tokens" and param_value == -1:
-            param_value = get_default_max_tokens(supports_reasoning)
-
         model_parameters[param] = param_value
+
+    model_max_output_tokens = llm_model_configuration.get('max_output_tokens')
+    if model_max_output_tokens is not None:
+        model_parameters['max_output_tokens'] = model_max_output_tokens
 
     chat_history = [i.dict() for i in parsed.chat_history]
     user_input = parsed.user_input or 'continue'
@@ -423,7 +426,9 @@ def generate_predict_payload(
             llm_settings = payload['application']['version_details']['llm_settings']
             llm_settings['model_name'] = parsed.llm_settings.model_name
             llm_settings['model_project_id'] =  parsed.llm_settings.model_project_id
-            llm_settings['max_tokens'] =  parsed.llm_settings.max_tokens
+            llm_settings['max_tokens'] = normalize_runtime_max_tokens(parsed.llm_settings.max_tokens)
+            llm_settings['max_output_tokens'] = model_max_output_tokens
+            llm_settings['openai_compatible'] = openai_compatible
             llm_settings['temperature'] =  parsed.llm_settings.temperature
             llm_settings['reasoning_effort'] =  parsed.llm_settings.reasoning_effort
 
@@ -433,8 +438,6 @@ def generate_predict_payload(
             # check never handled.
             from ..models.pd.llm import _normalize_llm_settings_family  # pylint: disable=C0415
             llm_settings.update(_normalize_llm_settings_family(llm_settings, supports_reasoning))
-            if llm_settings['max_tokens'] == -1:
-                llm_settings['max_tokens'] = get_default_max_tokens(supports_reasoning)
 
     # Serialize first so request-level tools (Pydantic ToolChatModel) become plain dicts before
     # dedupe/resolve run — otherwise those tools are skipped and never get {project_id}/PAT filled.

@@ -31,7 +31,6 @@ from ..utils.chat_history import (
     generate_user_input
 )
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
-from ..utils.llm_settings import DEFAULT_REASONING_MODEL_MAX_TOKENS, DEFAULT_MAX_TOKENS
 from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation, notify_user_mentioned_in_conversation
 from ..utils.sio_utils import get_chat_room
 from ..models.message_items.attachment import AttachmentMessageItem
