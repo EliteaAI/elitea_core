@@ -10,7 +10,8 @@ from ..utils.application_tools import (
 
 def resolve_credentials(project_settings: dict, toolkit_type: str,
                                 user_config: dict, project_id: int,
-                                is_team_schedule: bool = False) -> bool:
+                                is_team_schedule: bool = False,
+                                creator_id: int | None = None) -> bool:
     """Apply user-provided credentials to project settings.
 
     Extracts credentials from user_config, validates them, and loads project-level configuration
@@ -25,6 +26,8 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
         is_team_schedule (bool): True when the schedule is stored under user_id=-1 (team/shared).
             Team schedules omit per-user credentials — the project-level configuration in
             project_settings is authoritative and no override is required.
+        creator_id (int | None): Schedule author. Required to resolve a credential marked
+            ``private``, which lives in that user's personal project rather than project_id.
 
     Returns:
         bool: True if no credentials or successfully applied, False if validation/loading failed
@@ -74,22 +77,49 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
         )
         return False
 
-    # Credentials valid - load and apply project-level configuration
-    try:
-        user_configuration = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_first_filtered_project(
-            project_id=project_id,
-            filter_fields={
-                'type': toolkit_type,
-                'elitea_title': config_title
-            }
+    # A credential the author marked private lives in their personal project, not in
+    # project_id, so the project-scoped lookup can never find it. This mirrors the
+    # resolution order in configurations.expand_configuration; keeping the two in step
+    # matters because that function re-resolves the same payload downstream.
+    is_private = bool(user_credentials.get('private'))
+    if is_private and creator_id is None:
+        log.warning(
+            f"Credential '{config_title}' for toolkit_type='{toolkit_type}' is private but "
+            f"the schedule carries no creator; cannot resolve a personal configuration"
         )
+        return False
+
+    try:
+        if is_private:
+            personal_configurations = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_filtered_personal(
+                user_id=creator_id,
+                include_shared=True,
+                filter_fields={
+                    'type': toolkit_type,
+                    'elitea_title': config_title
+                }
+            )
+            user_configuration = personal_configurations[0] if personal_configurations else None
+        else:
+            user_configuration = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_first_filtered_project(
+                project_id=project_id,
+                filter_fields={
+                    'type': toolkit_type,
+                    'elitea_title': config_title
+                }
+            )
 
         if not user_configuration:
             log.warning(
-                f"Project-level configuration not found: "
-                f"type='{toolkit_type}', title='{config_title}', project_id={project_id}"
+                f"Configuration not found: type='{toolkit_type}', title='{config_title}', "
+                f"private={is_private}, project_id={project_id}, creator_id={creator_id}"
             )
             return False
+
+        # ConfigurationDetails carries no `private` flag, so the substituted payload would
+        # read as project-level and send the downstream configurations_expand back to
+        # project_id — the same dead end this function just worked around.
+        user_configuration['private'] = is_private
 
         # Replace configuration in project_settings (in place)
         project_settings[config_key] = user_configuration

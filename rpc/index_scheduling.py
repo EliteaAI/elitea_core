@@ -126,6 +126,7 @@ class RPC:
                                     user_config=user_config,
                                     project_id=project_id,
                                     is_team_schedule=is_team_schedule,
+                                    creator_id=creator_id,
                                 )
 
                                 if not init_issue and not should_trigger_by_credentials:
