@@ -92,6 +92,7 @@ def create_suite(project_id: int, data: EvalSuiteCreateModel, owner_id: int, ses
         suite = EvalSuite(
             application_id=data.application_id,
             name=data.name,
+            description=data.description,
             dataset_id=data.dataset_id,
             judge_model=data.judge_model,
             baseline_run_id=data.baseline_run_id,

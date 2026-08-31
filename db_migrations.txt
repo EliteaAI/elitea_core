@@ -271,4 +271,11 @@ Run admin task migrate_eval_dataset_columns with param: project_id=all
 # created before this column existed, which stay visible everywhere). Fresh environments get it
 # from create_all; existing p_N schemas need the column backfilled. Per-project loop.
 # Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
+
+# eval_suite gains a free-text description column (nullable, no backfill needed).
+# SKIP on fresh environments: create_all already provisions this column via the ORM
+# model, so a brand-new deployment (no pre-existing p_N schemas) needs nothing here.
+# REQUIRED only on environments that already have eval_suite tables created before
+# this change (i.e. upgrading an existing deployment) — run once, per environment.
+Run admin task migrate_eval_suite_columns with param: project_id=all
 Run admin task migrate_eval_dimension_columns with param: project_id=all
