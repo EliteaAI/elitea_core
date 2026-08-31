@@ -1069,6 +1069,15 @@ def _application_to_md(app: dict, toolkits: list, applications: list = None, ver
     if variables:
         frontmatter['variables'] = variables
 
+    # Add tags if present
+    tags = version.get('tags', [])
+    if tags:
+        frontmatter['tags'] = [
+            t.get('name') if isinstance(t, dict) else t.name
+            for t in tags
+            if (t.get('name') if isinstance(t, dict) else getattr(t, 'name', None))
+        ]
+
     # Add attached skills if present (embedded so the MD file is self-contained)
     skill_blocks = _extract_skills_for_md(version, skills)
     if skill_blocks:
