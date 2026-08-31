@@ -60,7 +60,8 @@ from ..utils.internal_tools import (
     get_mcp_entity_link_instructions,
 )
 from ..utils.utils import get_public_project_id
-from ..utils.predict_utils import get_project_context, prepend_project_context
+from ..utils.predict_utils import get_project_context
+from ..utils.project_context_utils import prepare_project_context_delivery
 from ..utils.token_limit_continuation import (
     is_token_limit_continuation,
     prepare_token_limit_payload,
@@ -758,12 +759,15 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             _vd = result.get('version_details') or {}
             _is_pipeline = _vd.get('agent_type') == AgentTypes.pipeline.value
             if not _is_pipeline:
-                _ctx_content, _ctx_enabled = get_project_context(predict_payload.project_id)
-                if _ctx_enabled and _ctx_content:
-                    _ignore = (_vd.get('meta') or {}).get('ignore_project_context', False)
-                    if not _ignore:
-                        _vd['instructions'] = prepend_project_context(_vd.get('instructions') or '', _ctx_content)
-                    result['version_details'] = _vd
+                _ignore = (_vd.get('meta') or {}).get('ignore_project_context', False)
+                if not _ignore:
+                    _vd['instructions'], _runtime_ctx = prepare_project_context_delivery(
+                        _vd.get('instructions') or '',
+                        get_project_context(predict_payload.project_id),
+                    )
+                    if _runtime_ctx:
+                        result['project_context'] = _runtime_ctx
+                result['version_details'] = _vd
 
             # IMPORTANT: Use offset(1) to retrieve the previous agent message, skipping the newly created response
             last_agent_message: ConversationMessageGroup = session.query(ConversationMessageGroup).where(
@@ -839,9 +843,12 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 result['instructions'] = base_instructions
 
             # Inject project context into LLM chat instructions
-            _ctx_content, _ctx_enabled = get_project_context(predict_payload.project_id)
-            if _ctx_enabled and _ctx_content:
-                result['instructions'] = prepend_project_context(result.get('instructions') or '', _ctx_content)
+            result['instructions'], _runtime_ctx = prepare_project_context_delivery(
+                result.get('instructions') or '',
+                get_project_context(predict_payload.project_id),
+            )
+            if _runtime_ctx:
+                result['project_context'] = _runtime_ctx
 
             # Append MCP entity-link instruction when Elitea MCP Tools are enabled
             mcp_link_addon = get_mcp_entity_link_instructions(llm_chat_internal_tools)

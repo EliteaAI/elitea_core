@@ -30,7 +30,10 @@ from ...models.pd.generate_project_context_draft import (
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import PredictPayloadError
 from ...utils.exceptions import PoolSaturationError
-from ...utils.generate_project_context_utils import build_edit_project_context_system_prompt
+from ...utils.generate_project_context_utils import (
+    build_create_project_context_system_prompt,
+    build_edit_project_context_system_prompt,
+)
 from ...utils.service_prompt_utils import get_service_prompt
 from ...utils.utils import extract_json_from_text
 
@@ -42,7 +45,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Generate Project Context Draft from Natural Language",
         description=(
-            "Generate a draft Project Background (Markdown) from a plain-text description of the "
+            "Generate a draft Project Context from a plain-text description of the "
             "project. Uses the project's default LLM and the 'project_context_generator' service "
             "prompt. Returns a validated JSON payload; no toolkit/agent/pipeline/MCP/resource suggestions."
         ),
@@ -89,11 +92,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
             template = get_service_prompt(_SERVICE_PROMPT_KEY_EDIT)
             if not template:
                 return {"error": "Service prompt 'edit_project_context_draft' is not configured"}, 500
-            system_prompt = build_edit_project_context_system_prompt(template, req.current_project_background)
+            system_prompt = build_edit_project_context_system_prompt(
+                template,
+                req.current_project_background,
+                req.current_activation_description,
+            )
         else:
-            system_prompt = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
-            if not system_prompt:
+            template = get_service_prompt(_SERVICE_PROMPT_KEY_CREATE)
+            if not template:
                 return {"error": "Service prompt 'project_context_generator' is not configured"}, 500
+            system_prompt = build_create_project_context_system_prompt(template)
 
         try:
             result = self.module.predict_sio_llm(
