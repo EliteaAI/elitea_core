@@ -96,9 +96,14 @@ class McpApiToolExecutor:
     @staticmethod
     def _build_url_path(path_template: str, path_params: dict) -> str:
         """Replace path parameter placeholders with actual values."""
+        unresolved = sorted(set(re.findall(r"{([^}]+)}", path_template)) - set(path_params))
+        if unresolved:
+            raise ValueError(f"Missing required path parameter(s): {', '.join(unresolved)}")
+
         url_path = path_template
         for param_name, param_value in path_params.items():
             url_path = url_path.replace(f"{{{param_name}}}", str(param_value))
+
         return url_path
 
     @staticmethod

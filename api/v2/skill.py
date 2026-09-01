@@ -1,5 +1,6 @@
 from flask import request
 from pydantic import ValidationError
+from pylon.core.tools import log
 
 from tools import api_tools, config as c, auth, register_openapi
 
@@ -23,19 +24,38 @@ from ...utils.skill_utils import (
 from ...utils.constants import PROMPT_LIB_MODE
 
 
+SKILL_PATH = '<string:mode>/<int:project_id>/<int:skill_id>'
+
+
+def resolve_version_id(path_version_id: int | None):
+    """Return ``(version_id, error_response)`` for the version addressed by path or query."""
+    if path_version_id is not None:
+        return path_version_id, None
+
+    raw = request.args.get('version_id')
+    if not raw:
+        return None, None
+
+    try:
+        return int(raw), None
+    except ValueError:
+        return None, ({"error": "version_id must be an integer"}, 400)
+
+
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Retrieve full metadata and version configuration of a specific skill",
         description=(
-            "Returns the full details of the specified skill. If a version_id path segment is provided, "
+            "Returns the full details of the specified skill. If a version_id is provided, "
             "that version's details are included (404 if the version id does not exist); otherwise the "
             "default version is included. Response includes top-level default_version_id and version_id."
         ),
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to load details for"},
+            {"name": "version_id", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to load details for"},
         ],
+        path_suffix_override=SKILL_PATH,
         tags=["elitea_core/skills"],
         mcp_tool=True,
         available_to_users=True,
@@ -48,7 +68,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def get(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
-        # When a version id is addressed in the path, it must exist.
+        if ignored := sorted(set(request.args) - {'version_id'}):
+            log.warning("Ignoring unsupported query parameter(s): %s", ignored)
+
+        version_id, error = resolve_version_id(version_id)
+        if error:
+            return error
+
         if version_id is not None:
             version = get_skill_version_by_id(
                 project_id=project_id,
@@ -77,6 +103,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
         ],
+        path_suffix_override=SKILL_PATH,
         tags=["elitea_core/skills"],
         available_to_users=True,
     )
@@ -116,13 +143,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Update a skill's metadata or a specific skill version",
-        description="Without a version_id path segment, updates the skill metadata (name, description, meta) and optionally version content in the same transaction — the nested version.id selects the target version (default version when omitted). With a version_id segment, updates that specific version (resolved by numeric id). Published or embedded versions cannot be updated.",
+        description="Updates the skill metadata (name, description, meta) and optionally version content in the same transaction — the nested version.id selects the target version (default version when omitted). Published or embedded versions cannot be updated.",
         request_body=SkillUpdateModel,
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to update a specific version"},
         ],
+        path_suffix_override=SKILL_PATH,
         tags=["elitea_core/skills"],
         mcp_tool=True,
         available_to_users=True,
@@ -135,6 +162,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def put(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
+        if ignored := sorted(request.args):
+            log.warning("Ignoring unsupported query parameter(s): %s", ignored)
+
         # Update a specific version addressed by id.
         if version_id is not None:
             version = get_skill_version_by_id(
@@ -199,6 +229,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
         ],
+        path_suffix_override=SKILL_PATH,
         tags=["elitea_core/skills"],
         mcp_tool=True,
         available_to_users=True,
@@ -211,9 +242,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def patch(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
-        # PATCH does not address a specific version in the path.
+        if ignored := sorted(request.args):
+            log.warning("Ignoring unsupported query parameter(s): %s", ignored)
+
         if version_id is not None:
-            return {"error": "version_id path segment is not supported for PATCH"}, 400
+            return {"error": "version_id is not supported for PATCH; the attached version is skill_version_id in the body"}, 400
 
         try:
             relation_data = SkillUpdateRelationModel.model_validate(dict(request.json))
@@ -250,12 +283,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Delete a skill or a specific skill version",
-        description="Without a version_id path segment, permanently deletes the skill and all of its versions (agent attachments cascade-removed). With a version_id segment, deletes that specific version (cannot delete the only version or a version still attached to agents). Irreversible.",
+        description="Without a version_id, permanently deletes the skill and all of its versions (agent attachments cascade-removed). With a version_id, deletes that specific version (cannot delete the only version or a version still attached to agents). Irreversible.",
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to delete a specific version"},
+            {"name": "version_id", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to delete a specific version"},
         ],
+        path_suffix_override=SKILL_PATH,
         tags=["elitea_core/skills"],
         available_to_users=True,
     )
@@ -267,6 +301,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
+        if unsupported := sorted(set(request.args) - {'version_id'}):
+            return {"error": f"unsupported query parameter(s): {unsupported}"}, 400
+
+        version_id, error = resolve_version_id(version_id)
+        if error:
+            return error
+
         # Delete a specific version addressed by id.
         if version_id is not None:
             version = get_skill_version_by_id(
