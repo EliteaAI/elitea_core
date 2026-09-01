@@ -10,6 +10,7 @@ from ..models.enums.mappings import ENTITY_TYPE_MAP
 from ..utils.mcp_handler import CommunicationsHandler
 from ..utils.mcp_protocol import validate_session_id, handle_post_request, get_request_method
 from ..utils.mcp_config import is_mcp_exposure_enabled
+from ..utils.internal_tools import MCP_SCOPE_PROJECT_QUERY_ARG
 
 handler = CommunicationsHandler()
 
@@ -59,6 +60,9 @@ def _handle_mcp_request(
     if flask.request.method == "GET":
         return {"error": "The server does not offer an SSE stream at this endpoint"}, 405
 
+    # Confines this session's tools to one project; see MCP_PROJECT_SCOPED_SUFFIXES.
+    scope_project_id = flask.request.args.get(MCP_SCOPE_PROJECT_QUERY_ARG, type=int)
+
     # Check request type and settings
     request_method = get_request_method(flask.request)
     if request_method == "tools/call" and \
@@ -68,7 +72,7 @@ def _handle_mcp_request(
         stream, error_response, session = handler.create_session_and_stream(
             project_id, return_session=True, one_time=True,
             resource_type=resource_type, resource_id=resource_id,
-            entity_category=entity_category
+            entity_category=entity_category, scope_project_id=scope_project_id
         )
         if error_response:
             return error_response
@@ -88,7 +92,7 @@ def _handle_mcp_request(
         # HTTP mode
         session, error_response = handler.create_http_session(
             project_id, resource_type=resource_type, resource_id=resource_id,
-            entity_category=entity_category
+            entity_category=entity_category, scope_project_id=scope_project_id
         )
         if error_response:
             return error_response

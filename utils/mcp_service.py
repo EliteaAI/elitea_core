@@ -12,16 +12,34 @@ from ..utils.application_tools import toolkits_listing
 from ..utils.application_utils import list_applications_api
 from ..utils.toolkits_utils import get_toolkit_schemas
 from ..utils.exceptions import PoolSaturationError
-from .internal_tools import MCP_CURRENT_PROJECT_SUFFIXES
+from .internal_tools import MCP_CURRENT_PROJECT_SUFFIXES, MCP_PROJECT_SCOPED_SUFFIXES
 from .mcp_session import SseSession
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
+
+
+class McpProjectScopeError(Exception):
+    """Raised when a tool argument names a project the session is not confined to."""
+
+
+def _is_blank(value) -> bool:
+    """Models routinely emit an explicit null for an argument they mean to omit."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _same_path_value(supplied, scoped) -> bool:
+    """Compare numerically when both sides are numbers, so 2, '2' and 2.0 all match."""
+    try:
+        return float(supplied) == float(scoped)
+    except (TypeError, ValueError):
+        return str(supplied).strip() == str(scoped).strip()
 
 
 class McpApiToolExecutor:
     """Handles execution of MCP API tools via direct Flask WSGI calls."""
 
     @staticmethod
-    def execute(api_tool: dict, arguments: dict, default_path_params: dict = None) -> dict:
+    def execute(api_tool: dict, arguments: dict, default_path_params: dict = None,
+                scoped_path_params: dict = None) -> dict:
         """
         Execute an API tool by calling Flask WSGI app directly.
 
@@ -29,6 +47,7 @@ class McpApiToolExecutor:
             api_tool: API tool metadata from openapi_registry with path, method, parameters
             arguments: Tool arguments from MCP client
             default_path_params: Server-side values for path params the client omitted
+            scoped_path_params: Path params the session confines to a single value
 
         Returns:
             dict with 'result' or 'error' key
@@ -39,7 +58,7 @@ class McpApiToolExecutor:
             parameters = api_tool.get("parameters", [])
 
             path_params, query_params, body_params = McpApiToolExecutor._parse_arguments(
-                arguments, parameters, default_path_params
+                arguments, parameters, default_path_params, scoped_path_params
             )
             url_path = McpApiToolExecutor._build_url_path(path, path_params)
 
@@ -52,6 +71,9 @@ class McpApiToolExecutor:
 
             return McpApiToolExecutor._parse_response(status_code, body_data)
 
+        except McpProjectScopeError as exc:
+            log.warning("Refused out-of-scope API tool call %s: %s", api_tool.get('label'), exc)
+            return {"error": f"Access denied: {exc}"}
         except Exception as exc:
             log.error(f"Error calling API tool {api_tool.get('label')}: {exc}")
             log.error(traceback.format_exc())
@@ -60,12 +82,16 @@ class McpApiToolExecutor:
     @staticmethod
     def _parse_arguments(
         arguments: dict, parameters: list, default_path_params: dict = None,
+        scoped_path_params: dict = None,
     ) -> tuple[dict, dict, dict]:
         """Separate arguments into path, query, and body parameters.
 
         For path parameters with schema defaults (e.g. 'mode'), applies the default
         when the argument is not provided by the MCP client, then falls back to
         default_path_params; a client-supplied value always wins.
+
+        A path parameter listed in scoped_path_params is the exception: the session confines it
+        to one value, so a client naming anything else is refused rather than served.
 
         Clients send the sanitized property name that build_mcp_input_schema
         published (e.g. 'fname' for the 'fname[]' query param), so arguments are
@@ -75,6 +101,7 @@ class McpApiToolExecutor:
         query_params = {}
         body_params = {}
         consumed = set()
+        scoped_path_params = scoped_path_params or {}
 
         for param in parameters:
             param_name = param.get("name")
@@ -82,7 +109,17 @@ class McpApiToolExecutor:
             param_schema = param.get("schema", {})
             arg_name = sanitize_property_name(param_name)
 
-            if arg_name in arguments:
+            if param_in == "path" and param_name in scoped_path_params:
+                scoped_value = scoped_path_params[param_name]
+                supplied = arguments.get(arg_name)
+                if not _is_blank(supplied) and not _same_path_value(supplied, scoped_value):
+                    raise McpProjectScopeError(
+                        f"this tool operates in project {scoped_value}; "
+                        f"{param_name} {supplied} is outside the current project"
+                    )
+                path_params[param_name] = scoped_value
+                consumed.add(arg_name)
+            elif arg_name in arguments:
                 if param_in == "path":
                     path_params[param_name] = arguments[arg_name]
                     consumed.add(arg_name)
@@ -318,7 +355,8 @@ class McpService:
             elif api_tool := self.__get_api_tool_by_name(request.params.name):
                 log.debug("Starting API tool call: %s", request.params.name)
                 result = McpApiToolExecutor.execute(
-                    api_tool, request.params.arguments, self.__session_default_path_params()
+                    api_tool, request.params.arguments, self.__session_default_path_params(),
+                    self.__session_scoped_path_params()
                 )
                 if "error" not in result:
                     response_content = json.dumps(result["result"])
@@ -674,6 +712,12 @@ class McpService:
     def __session_default_path_params(self) -> dict:
         if self.session.entity_category in MCP_CURRENT_PROJECT_SUFFIXES:
             return {'project_id': self.session.project_id}
+        return {}
+
+    def __session_scoped_path_params(self) -> dict:
+        scope_project_id = getattr(self.session, 'scope_project_id', None)
+        if scope_project_id is not None and self.session.entity_category in MCP_PROJECT_SCOPED_SUFFIXES:
+            return {'project_id': scope_project_id}
         return {}
 
 

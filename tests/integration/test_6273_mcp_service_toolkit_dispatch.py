@@ -92,6 +92,9 @@ def mcp_service_module(monkeypatch):
     internal_tools.MCP_CURRENT_PROJECT_SUFFIXES = {
         'elitea_core/project_context', 'elitea_core/skills',
     }
+    internal_tools.MCP_PROJECT_SCOPED_SUFFIXES = (
+        internal_tools.MCP_CURRENT_PROJECT_SUFFIXES | {'elitea_core/applications'}
+    )
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.internal_tools", internal_tools)
 
     mcp_session = types.ModuleType("plugins.elitea_core.utils.mcp_session")
