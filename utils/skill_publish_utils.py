@@ -469,7 +469,7 @@ def run_skill_ai_validation(
             sid=None,
             data=data,
             await_task_timeout=timeout,
-            is_system_user=True,
+            skip_expansion=True,
             return_chat_history=True,
         )
     except Exception as exc:

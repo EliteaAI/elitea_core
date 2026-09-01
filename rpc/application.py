@@ -43,7 +43,8 @@ from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
 from ..utils.skill_utils import detach_skills_for_entity_versions
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
-    get_predict_token_and_session, load_context_settings_from_conversation, user_input_preview
+    get_predict_token_and_session, get_session_cookie_name, resolve_request_user_id, \
+    load_context_settings_from_conversation, user_input_preview
 from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
@@ -128,6 +129,7 @@ class RPC:
                     await_task_timeout: int = -1,
                     user_id: int = None,
                     is_system_user: bool = False,
+                    skip_expansion: bool = False,
                     return_chat_history: bool = False,
                     non_interactive: Optional[bool] = None,
                     eligible_for_autoapproval: bool = False,
@@ -256,8 +258,11 @@ class RPC:
                     from ..models.pd.chat import ContextStrategyModel
                     parsed.context_settings = ContextStrategyModel(**context_strategy)
 
+        if user_id is None and not is_system_user:
+            user_id = resolve_request_user_id()
+
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
         except PredictPayloadError as e:
             raise SioValidationError(
                 sio=self.context.sio,
@@ -376,6 +381,7 @@ class RPC:
                         await_task_timeout: int = -1,
                         user_id: Optional[int] = None,
                         is_system_user: bool = False,
+                        skip_expansion: bool = False,
                         return_chat_history: bool = False,
                         non_interactive: Optional[bool] = None,
                         eligible_for_autoapproval: bool = False,
@@ -395,7 +401,8 @@ class RPC:
             chat_project_id: Optional chat project ID
             await_task_timeout: -1 for SIO streaming, >0 for blocking API calls
             user_id: user id
-            is_system_user: WARN if True you can't do tool or configuration expand (used in summarization)
+            is_system_user: no real user behind the run (cron); implies skip_expansion
+            skip_expansion: skip tool/configuration expand but keep the real user's identity
 
         Returns:
             Dictionary with task_id (SIO) or result (API blocking)
@@ -474,8 +481,11 @@ class RPC:
                     from ..models.pd.chat import ContextStrategyModel
                     parsed.context_settings = ContextStrategyModel(**context_strategy)
 
+        if user_id is None and not is_system_user:
+            user_id = resolve_request_user_id()
+
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, return_chat_history=return_chat_history)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history)
         except PredictPayloadError as e:
             if sid:
                 raise SioValidationError(
@@ -1337,7 +1347,8 @@ class RPC:
 
         # Get project-specific auth_token from secrets (not exposed to user)
         try:
-            data['project_auth_token'], _ = get_predict_token_and_session(project_id, data['user_id'], sid)
+            data['project_auth_token'], data['auth_session'] = get_predict_token_and_session(project_id, data['user_id'], sid)
+            data['session_cookie_name'] = get_session_cookie_name() if data['auth_session'] else None
             data['deployment_url'] = get_predict_base_url(project_id)
         except Exception as e:
             log.warning(f"Failed to retrieve project secrets: {e}")
@@ -1473,6 +1484,8 @@ class RPC:
                     "user_id": task_kwargs.get('user_id', ''),
                     "deployment_url": task_kwargs.get('deployment_url', ''),
                     "project_auth_token": task_kwargs.get('project_auth_token', ''),
+                    "auth_session": task_kwargs.get('auth_session'),
+                    "session_cookie_name": task_kwargs.get('session_cookie_name'),
                     "user_context": {
                         "user_id": task_kwargs.get("user_id", None),
                         "project_id": project_id,
@@ -1633,7 +1646,8 @@ class RPC:
 
         # Get project-specific auth_token from secrets
         try:
-            data['project_auth_token'], _ = get_predict_token_and_session(project_id, data['user_id'], sid)
+            data['project_auth_token'], data['auth_session'] = get_predict_token_and_session(project_id, data['user_id'], sid)
+            data['session_cookie_name'] = get_session_cookie_name() if data['auth_session'] else None
             data['deployment_url'] = get_predict_base_url(project_id)
         except Exception as e:
             log.warning(f"Failed to retrieve project secrets: {e}")
@@ -1677,6 +1691,8 @@ class RPC:
                 "user_id": task_kwargs.get('user_id', ''),
                 "deployment_url": task_kwargs.get('deployment_url', ''),
                 "project_auth_token": task_kwargs.get('project_auth_token', ''),
+                "auth_session": task_kwargs.get('auth_session'),
+                "session_cookie_name": task_kwargs.get('session_cookie_name'),
                 "user_context": {
                     "user_id": task_kwargs.get("user_id", None),
                     "project_id": project_id,

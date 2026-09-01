@@ -140,7 +140,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 },
                 await_task_timeout=60,
                 user_id=user_id,
-                is_system_user=True,
+                skip_expansion=True,
             )
         except PredictPayloadError as exc:
             return {"error": str(exc)}, 400

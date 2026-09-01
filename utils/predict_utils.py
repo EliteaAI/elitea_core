@@ -101,23 +101,49 @@ def get_system_token(project_id: int) -> Optional[str]:
     return system_token
 
 
-def get_predict_token_and_session(project_id: int, user_id: int, sid: str = None) -> tuple[Optional[str], Optional[str]]:
-    ''' Returns user token OR project system user token + user auth session '''
-    auth_session = None
+def get_session_cookie_name() -> Optional[str]:
+    try:
+        return auth.get_session_cookie_name()
+    except Exception:
+        log.exception('Failed to resolve session cookie name')
+        return None
+
+
+def resolve_request_user_id() -> Optional[int]:
+    """Real user behind a non-SIO predict, taken from the live request."""
+    if not flask.has_request_context():
+        return None
+    g_auth = getattr(flask.g, 'auth', None)
+    if getattr(g_auth, 'type', None) != 'user':
+        return None
+    return getattr(g_auth, 'id', None)
+
+
+def resolve_auth_session(user_id: int, sid: str = None) -> Optional[str]:
+    # SIO handshake first, then the live HTTP request (covers request-bound callers with no sid).
+    _context = auth.sio_users.get('' if sid is None else sid)
+    if _context and _context.type == 'user' and _context.user.get('id') == user_id:
+        return _context.reference
+    if not flask.has_request_context():
+        return None
+    g_auth = getattr(flask.g, 'auth', None)
+    reference = getattr(g_auth, 'reference', None)
+    if getattr(g_auth, 'type', None) != 'user' or not reference or reference == '-':
+        return None
+    return reference if getattr(g_auth, 'id', None) == user_id else None
+
+
+def get_predict_token_and_session(  # pylint: disable=W0613
+        project_id: int, user_id: int, sid: str = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """ Returns the real user's PAT if they have one, otherwise their auth session reference """
     token: str = get_user_token(user_id)
-    if not token:
-        sid = '' if sid is None else sid
-        _context = auth.sio_users.get(sid)
-        if _context and _context.type == 'user' and _context.user.get('id') == user_id:
-            auth_session = _context.reference
-        else:
-            raise PredictPayloadError("User token not found. Please create user_token")
-        token: str = get_system_user_token(
-            project_id=project_id,
-            name='api',
-            create_if_not_exists=True
-        )
-    return token, auth_session
+    if token:
+        return token, None
+    auth_session = resolve_auth_session(user_id, sid)
+    if not auth_session:
+        raise PredictPayloadError("User token not found. Please create user_token")
+    return None, auth_session
 
 
 def get_predict_base_url(project_id: int) -> str:
@@ -172,21 +198,27 @@ def generate_predict_payload(
     user_id: int, sid: str = None, is_system_user: bool = False,
     eligible_for_autoapproval: bool = False,
     return_chat_history: bool = False,
+    skip_expansion: bool = False,
 ) -> dict:
     """
     :param parsed: payload
     :param user_id: User ID
     :param sid: Socket.IO session id
-    :param is_system_user: WARN if True, you can't do tool or configuration expand (used in summarization)
+    :param is_system_user: no real user behind the run (cron); implies skip_expansion
+    :param skip_expansion: skip tool/configuration expansion, but keep the real user's identity
     :return:
     """
     vault_client = VaultClient(parsed.project_id)
+    skip_expansion = skip_expansion or is_system_user
 
+    session_cookie_name = None
     if is_system_user:
         token = get_system_token(parsed.project_id)
         auth_session = None
     else:
         token, auth_session = get_predict_token_and_session(parsed.project_id, user_id, sid)
+        if auth_session:
+            session_cookie_name = get_session_cookie_name()
 
     base_url = get_predict_base_url(parsed.project_id)
 
@@ -243,6 +275,8 @@ def generate_predict_payload(
                 "base_url": base_url,
                 "model": parsed.llm_settings.model_name,
                 "api_key": token,
+                "auth_session": auth_session,
+                "session_cookie_name": session_cookie_name,
                 "project_id": parsed.project_id,
                 "openai_compatible": openai_compatible,
                 **model_parameters,
@@ -440,7 +474,7 @@ def generate_predict_payload(
     # dedupe/resolve run — otherwise those tools are skipped and never get {project_id}/PAT filled.
     payload = serialize(payload)
 
-    if not is_system_user:
+    if not skip_expansion:
         try:
             application = payload.get('application')
             version_details_tools = application.get('version_details', {}).get('tools') if isinstance(application, dict) else None
@@ -530,6 +564,8 @@ def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, t
         },
         "deployment_url": base_url,
         "project_auth_token": token,
+        "auth_session": auth_session,
+        "session_cookie_name": get_session_cookie_name() if auth_session else None,
         "project_id": project_id,
         "toolkit_config": get_toolkit_config(project_id, user_id, toolkit_id),
         "tool_name": tool_name,
