@@ -81,7 +81,10 @@ _module(
     rpc_tools=SimpleNamespace(RpcMixin=None),
     context=SimpleNamespace(),
 )
-_module('utils.llm_settings', get_default_max_tokens=lambda _supports_reasoning: 100)
+_module(
+    'utils.llm_settings',
+    normalize_runtime_max_tokens=lambda value: None if value in (None, -1) else value,
+)
 _module('utils.next_input_suggestion_utils', next_input_suggestion_config=lambda _project_id: {'enabled': False})
 _module(
     'utils.skill_utils',
@@ -170,7 +173,11 @@ def test_generate_predict_payload_forwards_toolkit_authorization_resume(monkeypa
     class FakeRpcCall:
         @staticmethod
         def configurations_get_configuration_model(_project_id, _model_name):
-            return {'supports_reasoning': False, 'openai_compatible': True}
+            return {
+                'supports_reasoning': False,
+                'openai_compatible': True,
+                'max_output_tokens': 64000,
+            }
 
     class FakeRpc:
         rpc = SimpleNamespace(call=FakeRpcCall())
@@ -194,7 +201,7 @@ def test_generate_predict_payload_forwards_toolkit_authorization_resume(monkeypa
         project_id=2,
         llm_settings=SimpleNamespace(
             model_name='test-model', model_project_id=None,
-            max_tokens=100, temperature=0.5, reasoning_effort=None,
+            max_tokens=-1, temperature=0.5, reasoning_effort=None,
         ),
         chat_history=[],
         user_input='continue',
@@ -224,3 +231,5 @@ def test_generate_predict_payload_forwards_toolkit_authorization_resume(monkeypa
     payload = predict_utils.generate_predict_payload(parsed, user_id=3, sid='sid-1')
 
     assert {key: payload[key] for key in AUTH_FIELDS} == AUTH_FIELDS
+    assert 'max_tokens' not in payload['llm']['kwargs']
+    assert payload['llm']['kwargs']['max_output_tokens'] == 64000

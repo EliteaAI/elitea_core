@@ -53,6 +53,30 @@ from uuid import uuid4
 from pylon.core.tools import web, log  # pylint: disable=E0401,E0611
 
 
+_PARALLEL_TERMINAL_ERROR_KEYS = (
+    'code', 'user_message', 'attempts', 'failure_reason', 'stop_reason',
+    'partial_output_available',
+)
+
+
+def _normalize_parallel_terminal_error(value):
+    """Normalize a bounded error envelope before parent reconciliation."""
+    if isinstance(value, dict):
+        normalized = {
+            key: value[key]
+            for key in _PARALLEL_TERMINAL_ERROR_KEYS
+            if value.get(key) is not None
+        }
+        message = value.get('user_message') or value.get('error')
+        if message and 'user_message' not in normalized:
+            normalized['user_message'] = str(message)[:1000]
+    else:
+        normalized = {'user_message': str(value or 'Parallel child execution failed.')[:1000]}
+    normalized.setdefault('code', 'parallel_child_failed')
+    normalized.setdefault('user_message', 'Parallel child execution failed.')
+    return normalized
+
+
 def _user_input_preview(source):
     """Resolve the shared preview helper lazily; best-effort (None if unavailable).
 
@@ -434,8 +458,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return
 
         terminal_error = None
-        if isinstance(child_result, dict) and child_result.get('error'):
-            terminal_error = child_result.get('error')
+        if isinstance(child_result, dict):
+            terminal_error = child_result.get('parallel_terminal_error') or child_result.get('error')
         self._parallel_settle_child(
             parent_thread_id, epoch, child_thread_id,
             terminal_error=terminal_error,
@@ -483,7 +507,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 pipe.hset(
                     _k_terminal_errors(parent_thread_id, epoch),
                     child_thread_id,
-                    json.dumps({'error': str(terminal_error)}),
+                    json.dumps(_normalize_parallel_terminal_error(terminal_error)),
                 )
                 pipe.expire(
                     _k_terminal_errors(parent_thread_id, epoch),

@@ -11,6 +11,7 @@ _SPEC = importlib.util.spec_from_file_location(
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 Method = _MODULE.Method
+normalize_parallel_terminal_error = _MODULE._normalize_parallel_terminal_error
 
 
 class _Redis:
@@ -57,6 +58,25 @@ class _Harness(Method):
 
     def _parallel_set_child_task_ids(self, *_args, **_kwargs):
         return None
+
+
+def test_parallel_terminal_error_preserves_bounded_structure_without_partial_output():
+    assert normalize_parallel_terminal_error({
+        'code': 'output_continuation_exhausted',
+        'user_message': 'The child response is incomplete.',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+        'partial_output_available': True,
+        'partial_output': 'must not reach the parent model',
+    }) == {
+        'code': 'output_continuation_exhausted',
+        'user_message': 'The child response is incomplete.',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+        'partial_output_available': True,
+    }
 
 
 def test_duplicate_delivery_of_same_dispatch_epoch_launches_each_child_once():

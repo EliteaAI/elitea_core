@@ -43,6 +43,19 @@ def test_supervised_pause_preserves_live_resume_strategy_without_worker_child_li
     assert normalized[0]['resume_strategy'] == 'supervised_child'
 
 
+def test_parallel_dispatch_prefers_structured_child_error_for_reconciliation():
+    source = (
+        pathlib.Path(__file__).resolve().parents[3]
+        / 'methods' / 'parallel_dispatch.py'
+    ).read_text()
+
+    assert (
+        "child_result.get('parallel_terminal_error') or child_result.get('error')"
+        in source
+    )
+    assert 'json.dumps(_normalize_parallel_terminal_error(terminal_error))' in source
+
+
 def test_supervisor_decision_and_roster_are_bounded_durable_message_state():
     meta = persist_supervisor_decision({}, {
         'decision_id': 'd-1',
@@ -390,11 +403,19 @@ def test_regenerate_generation_allows_reused_id_and_rejects_old_callbacks():
     old = retire_all_interrupts({
         'execution_generation': 'old-run',
         'hitl_interrupt': {'interrupt_id': 'stable-id'},
+        'continuation_error': {'code': 'output_continuation_exhausted'},
+        'budget_error_code': 'member_budget_exceeded',
+        'is_error': True,
+        'error': 'old failure',
     })
     fresh = begin_execution_generation(old, 'new-run')
 
     assert fresh['execution_generation'] == 'new-run'
     assert 'resolved_hitl_interrupt_ids' not in fresh
+    assert 'continuation_error' not in fresh
+    assert 'budget_error_code' not in fresh
+    assert 'is_error' not in fresh
+    assert 'error' not in fresh
     assert is_current_execution(fresh, {'execution_generation': 'new-run'})
     assert not is_current_execution(fresh, {'execution_generation': 'old-run'})
     assert not is_current_execution(fresh, {})
