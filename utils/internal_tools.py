@@ -66,6 +66,12 @@ MCP_BUILDER_TOOL_KEYS = {
 }
 
 
+def should_inject_runtime_context(internal_tools: list[str], is_pipeline: bool) -> bool:
+    if is_pipeline:
+        return False
+    return bool(set(internal_tools or []).intersection(MCP_BUILDER_TOOL_KEYS))
+
+
 class ImageGenConfigurationError(Exception):
     """Raised when image generation cannot be configured properly."""
     pass
@@ -874,6 +880,9 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
         f"{few_shot_instruction}"
         f"Only use MCP tools and only reference project context when the user explicitly requests it. "
         f"Do not proactively offer, suggest, or perform any MCP tool actions, and do not mention project details unless asked.\n"
+        f"When an Elitea MCP tool requires a `project_id` or `user_id` argument, take the value from the "
+        f"<runtime_context> block in the conversation (<project_id>, <user_id>). Do not ask the user for it "
+        f"and do not guess. Use a different project only when the user explicitly names one.\n"
         f"When you use an Elitea MCP tool to create an entity, do not include a URL or link to it in your response. "
         f"The UI will automatically display an interactive chip for the created entity."
     )

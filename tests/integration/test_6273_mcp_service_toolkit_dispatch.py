@@ -88,6 +88,12 @@ def mcp_service_module(monkeypatch):
     exceptions.PoolSaturationError = type("PoolSaturationError", (Exception,), {})
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.exceptions", exceptions)
 
+    internal_tools = types.ModuleType("plugins.elitea_core.utils.internal_tools")
+    internal_tools.MCP_CURRENT_PROJECT_SUFFIXES = {
+        'elitea_core/project_context', 'elitea_core/skills',
+    }
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.internal_tools", internal_tools)
+
     mcp_session = types.ModuleType("plugins.elitea_core.utils.mcp_session")
     mcp_session.SseSession = type("SseSession", (), {})
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.mcp_session", mcp_session)

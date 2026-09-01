@@ -255,3 +255,67 @@ class TestGenerateChatHistoryFromSummaries:
 
         text = result['content'][0]['text']
         assert 'Valid summary.' in text
+
+
+class FakeMessageItem:
+    def __init__(self, item_type, content=None, context_data=None, group_id=1):
+        self.item_type = item_type
+        self.content = content
+        self.context_data = context_data
+        self.message_group_id = group_id
+
+
+class FakeMessageGroup:
+    def __init__(self, message_items):
+        self.message_items = message_items
+        self.author_participant = type('P', (), {'entity_name': 'user'})()
+
+
+def _text_and_context_items():
+    return [
+        FakeMessageItem('context', context_data={'user_id': 7, 'project_id': 3}),
+        FakeMessageItem('text', content='what skills exist?'),
+    ]
+
+
+class TestContextExclusion:
+
+    def test_context_included_by_default(self, chat_history_module):
+        result = chat_history_module.generate_chat_history_from_message_items(
+            'user', _text_and_context_items()
+        )
+        rendered = str(result['content'])
+        assert '<runtime_context>' in rendered
+        assert 'what skills exist?' in rendered
+
+    def test_context_excluded_keeps_user_text(self, chat_history_module):
+        result = chat_history_module.generate_chat_history_from_message_items(
+            'user', _text_and_context_items(), include_context=False
+        )
+        rendered = str(result['content'])
+        assert '<runtime_context>' not in rendered
+        assert 'what skills exist?' in rendered
+
+    def test_history_excludes_context(self, chat_history_module):
+        groups = [FakeMessageGroup(_text_and_context_items())]
+        result = chat_history_module.generate_chat_history(groups, include_context=False)
+        assert '<runtime_context>' not in str(result)
+        assert 'what skills exist?' in str(result)
+
+    def test_context_only_group_dropped_when_excluded(self, chat_history_module):
+        groups = [FakeMessageGroup([
+            FakeMessageItem('context', context_data={'user_id': 7, 'project_id': 3}),
+        ])]
+        assert chat_history_module.generate_chat_history(groups, include_context=False) == []
+
+    def test_summaries_still_prepended_when_context_excluded(self, chat_history_module):
+        groups = [FakeMessageGroup(_text_and_context_items())]
+        result = chat_history_module.generate_chat_history(
+            groups, summaries=[{'summary_content': 'Earlier talk.'}], include_context=False
+        )
+        assert 'Earlier talk.' in str(result[0])
+        assert '<runtime_context>' not in str(result)
+
+    def test_user_input_still_carries_context(self, chat_history_module):
+        group = FakeMessageGroup(_text_and_context_items())
+        assert '<runtime_context>' in str(chat_history_module.generate_user_input(group))
