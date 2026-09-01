@@ -17,7 +17,7 @@ _SSE_KEEP_ALIVE_INTERVAL_SEC = this.descriptor.config.get("sse_keep_alive_interv
 class SseSession:
     def __init__(self, sid: UUID, project_id: int, tags: list[int], one_time=False,
                  resource_type: str = None, resource_id: int = None,
-                 entity_category: str = None) -> None:
+                 entity_category: str = None, scope_project_id: int = None) -> None:
         self.sid = sid
         self.project_id = project_id
         self.tags = tags
@@ -28,6 +28,10 @@ class SseSession:
         self.resource_type = resource_type  # 'toolkit', 'application', etc.
         self.resource_id = resource_id      # ID of the specific resource
         self.entity_category = entity_category  # 'applications', 'toolkits', 'api'
+        # The only project this session's tools may name; None leaves them unconfined.
+        # Distinct from project_id: the builder endpoints are served from the user's private
+        # project while acting on the project the conversation is in.
+        self.scope_project_id = scope_project_id
 
     def process_event_queue(self) -> callable:
         if not self.one_time:
@@ -119,10 +123,10 @@ class HttpSession(SseSession):
 
     def __init__(self, project_id: int, tags: list[int],
                  resource_type: str = None, resource_id: int = None,
-                 entity_category: str = None) -> None:
+                 entity_category: str = None, scope_project_id: int = None) -> None:
         super().__init__(uuid4(), project_id, tags,
                         resource_type=resource_type, resource_id=resource_id,
-                        entity_category=entity_category)
+                        entity_category=entity_category, scope_project_id=scope_project_id)
 
     def _dispatch_sse_event(self, data: str, event: str) -> None:
         if event != "message":

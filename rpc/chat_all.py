@@ -57,7 +57,7 @@ from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
     inject_mcp_toolkits, should_inject_runtime_context,
-    get_mcp_entity_link_instructions,
+    get_mcp_entity_link_instructions, resolve_builder_scope_project_id,
 )
 from ..utils.utils import get_public_project_id
 from ..utils.predict_utils import get_project_context
@@ -112,7 +112,8 @@ def generate_toolkit_payload(
     conversation_project_id: int,
     current_participant_id: int = None,
     internal_tools: list[str] = None,
-    is_llm_chat: bool = False
+    is_llm_chat: bool = False,
+    scope_project_id: int = None
 ) -> Optional[list]:
     """
     Generate toolkit payload for SDK. This is a transport layer - no filtering logic.
@@ -122,6 +123,7 @@ def generate_toolkit_payload(
         current_participant_id: The participant being predicted to. Passed to SDK for self-identification.
         internal_tools: List of enabled internal tools (from conversation + agent version meta).
         is_llm_chat: If True, always inject attachment toolkit (LLM/dummy chats).
+        scope_project_id: The only project the injected builder MCP toolkits may act on.
     """
     tools = []
     conversation = session.query(Conversation).filter(
@@ -292,6 +294,7 @@ def generate_toolkit_payload(
             current_project_id=conversation_project_id,
             internal_tools=internal_tools or [],
             existing_tools=tools,
+            scope_project_id=scope_project_id,
         )
         tools.extend(mcp_tools)
     except Exception as e:
@@ -555,6 +558,25 @@ def generate_toolkit_participant_payload(
     return result
 
 
+def resolve_turn_runtime_context(msg_group: ConversationMessageGroup, predict_payload) -> dict | None:
+    """The runtime context governing this turn.
+
+    Continue and regenerate rebuild the payload from `SioContinuePredictModel` / a stored payload,
+    neither of which carries runtime_context. Falling back to the conversation's own project would
+    scope a support-assistant turn to the support project while the block already persisted on the
+    question group still names the project the user was viewing — so the model reads one project,
+    the server enforces another, and every resumed turn is refused. Read it back instead.
+    """
+    live_context = getattr(predict_payload, 'runtime_context', None)
+    if live_context:
+        return live_context
+    for item in msg_group.message_items or []:
+        persisted = getattr(item, 'context_data', None)
+        if persisted:
+            return persisted
+    return None
+
+
 def generate_application_version_payload(
     session,
     msg_group: ConversationMessageGroup,
@@ -638,7 +660,10 @@ def generate_application_version_payload(
         conversation_project_id=predict_payload.project_id,
         current_participant_id=msg_group.sent_to_id,
         internal_tools=merged_internal_tools,
-        is_llm_chat=False
+        is_llm_chat=False,
+        scope_project_id=resolve_builder_scope_project_id(
+            predict_payload.project_id, resolve_turn_runtime_context(msg_group, predict_payload)
+        )
     )
     if participants_toolkits:
         # Pass all tools to SDK - deduplication happens there
@@ -828,7 +853,11 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 conversation_project_id=predict_payload.project_id,
                 current_participant_id=msg_group.sent_to_id,
                 internal_tools=llm_chat_internal_tools,
-                is_llm_chat=True
+                is_llm_chat=True,
+                scope_project_id=resolve_builder_scope_project_id(
+                    predict_payload.project_id,
+                    resolve_turn_runtime_context(msg_group, predict_payload)
+                )
             )
             # Pass current participant ID so SDK can identify self for loop prevention
             result['current_participant_id'] = msg_group.sent_to_id
@@ -1196,8 +1225,9 @@ class RPC:
 
                 # Always set server-side truth values
                 effective_runtime_context['user_id'] = current_user['id']
-                if 'project_id' not in effective_runtime_context:
-                    effective_runtime_context['project_id'] = parsed.project_id
+                effective_runtime_context['project_id'] = resolve_builder_scope_project_id(
+                    parsed.project_id, parsed.runtime_context
+                )
 
                 from ..models.message_items.context import ContextMessageItem
                 context_msg = ContextMessageItem(

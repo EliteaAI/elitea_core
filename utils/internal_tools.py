@@ -13,6 +13,7 @@ from pylon.core.tools import log
 from tools import VaultClient, rpc_tools, this, config as c, auth
 
 from .mcp_config import is_mcp_exposure_enabled
+from .support_utils import get_support_config
 
 
 # ImageGen Constants
@@ -59,6 +60,12 @@ MCP_CURRENT_PROJECT_SUFFIXES = {
     "elitea_core/project_context",
     "elitea_core/skills",
 }
+# The builder entity groups a conversation may act on: agents/pipelines, skills, project context.
+# Their `project_id` tool argument is clamped to the scope project carried on the MCP session.
+MCP_PROJECT_SCOPED_SUFFIXES = MCP_CURRENT_PROJECT_SUFFIXES | {
+    "elitea_core/applications",
+}
+MCP_SCOPE_PROJECT_QUERY_ARG = 'scope_project_id'
 MCP_BUILDER_TOOL_KEYS = {
     MCP_INTERNAL_TOOL_KEY,
     MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY,
@@ -70,6 +77,33 @@ def should_inject_runtime_context(internal_tools: list[str], is_pipeline: bool) 
     if is_pipeline:
         return False
     return bool(set(internal_tools or []).intersection(MCP_BUILDER_TOOL_KEYS))
+
+
+def resolve_builder_scope_project_id(
+    conversation_project_id: int, runtime_context: dict = None
+) -> int:
+    """Return the project the conversation's builder tools are allowed to act on.
+
+    Normally that is the conversation's own project and any client-supplied value is ignored.
+    The support assistant is the exception: it runs from a dedicated project of its own but acts
+    on the project the user is currently viewing, which it sends in the runtime context.
+    """
+    viewed_project_id = (runtime_context or {}).get('project_id')
+    if not viewed_project_id:
+        return conversation_project_id
+    if get_support_config().get('project_id') != conversation_project_id:
+        # get_support_config() fails open to project_id=None, so an RPC hiccup lands here too
+        # and silently confines the support assistant to its own project.
+        log.info(
+            "Ignoring client-supplied project %r for a chat in project %s; not the support project",
+            viewed_project_id, conversation_project_id,
+        )
+        return conversation_project_id
+    try:
+        return int(viewed_project_id)
+    except (TypeError, ValueError):
+        log.warning("Support assistant sent an unusable project_id %r", viewed_project_id)
+        return conversation_project_id
 
 
 class ImageGenConfigurationError(Exception):
@@ -588,6 +622,7 @@ def inject_mcp_toolkits(
     current_project_id: int | None = None,
     internal_tools: list[str] = None,
     existing_tools: list[dict] = None,
+    scope_project_id: int | None = None,
 ) -> list[dict]:
     """
     Dynamically compute and inject MCP toolkits at runtime. No DB records created.
@@ -605,6 +640,8 @@ def inject_mcp_toolkits(
         current_project_id: Active project ID from current runtime context
         internal_tools: List of enabled internal tools from conversation/agent meta
         existing_tools: Toolkits already in the payload, used to dedupe against manual toolkits
+        scope_project_id: Project the builder groups are confined to; the endpoint refuses a
+            `project_id` argument naming any other project. Omit to leave them unconfined.
 
     Returns:
         List of MCP toolkit payloads with id=None, or empty list if not enabled
@@ -656,6 +693,8 @@ def inject_mcp_toolkits(
         if ep['suffix'] in MCP_CURRENT_PROJECT_SUFFIXES and current_project_id is not None:
             target_project_id = current_project_id
         url = f"{base_url}/app/{target_project_id}/mcp/{ep['suffix']}"
+        if ep['suffix'] in MCP_PROJECT_SCOPED_SUFFIXES and scope_project_id is not None:
+            url = f"{url}?{MCP_SCOPE_PROJECT_QUERY_ARG}={scope_project_id}"
         tool = {
             'type': 'mcp',
             'name': f'{ep["name"]}',
@@ -882,7 +921,9 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
         f"Do not proactively offer, suggest, or perform any MCP tool actions, and do not mention project details unless asked.\n"
         f"When an Elitea MCP tool requires a `project_id` or `user_id` argument, take the value from the "
         f"<runtime_context> block in the conversation (<project_id>, <user_id>). Do not ask the user for it "
-        f"and do not guess. Use a different project only when the user explicitly names one.\n"
+        f"and do not guess. Agents, pipelines, skills and project context can only be read or changed in "
+        f"that project: never pass a different `project_id`. If the user asks you to work in another "
+        f"project, tell them to switch to it instead.\n"
         f"When you use an Elitea MCP tool to create an entity, do not include a URL or link to it in your response. "
         f"The UI will automatically display an interactive chip for the created entity."
     )

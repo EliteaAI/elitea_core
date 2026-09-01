@@ -139,6 +139,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         # to the resolved end-user (own private project + own token) — see
         # inject_mcp_toolkits(). Guarded and non-fatal: agents without 'internal_mcp' return
         # before any RPC/token work.
+        # project_id is the SDK client's project, which is the conversation's
+        # (predict_utils.py sets llm.kwargs.project_id = parsed.project_id), and the SDK only
+        # reaches this endpoint for a sub-agent in that same project — a cross-project one is
+        # served by get_public_app_details instead. So it is the right scope: without it, a
+        # sub-agent carrying builder tools would be an unclamped route out of a clamped
+        # conversation.
         try:
             from ...utils.internal_tools import inject_mcp_toolkits
             agent_internal_tools = (version_details.get('meta') or {}).get('internal_tools', [])
@@ -147,6 +153,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 current_project_id=project_id,
                 internal_tools=agent_internal_tools,
                 existing_tools=version_details.get('tools'),
+                scope_project_id=project_id,
             )
             if mcp_tools:
                 version_details.setdefault('tools', [])
