@@ -1307,34 +1307,44 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         }
 
     @web.method()
-    def migrate_confluence_space_key(self, *args, **kwargs):
-        """Admin task (Issue #5997): backfill Confluence toolkit settings key
-        ``space`` -> ``space_key``.
+    def migrate_toolkit_settings_fields(self, *args, **kwargs):
+        """Admin task: backfill/rename keys in EliteATool.settings for a given
+        toolkit type.
 
-        Background:
-            The Confluence toolkit's config field was renamed from the
-            ambiguous ``space`` to ``space_key`` in elitea-sdk (PR #578) to
-            make clear that the Space *Key* (not the human-readable Space
-            Name) is required. The SDK reads ``space_key`` first, falling
-            back to the legacy ``space`` key at runtime, so this task is not
-            required for toolkits to keep working — it backfills the new key
-            in the database so already-saved configs show the current field
-            name (e.g. in the admin UI) and so the legacy key can eventually
-            be dropped.
+        Generic replacement for one-off "rename this Confluence/Jira/whatever
+        settings field" tasks (e.g. Issue #5997: Confluence ``space`` ->
+        ``space_key``). Reusable for any future settings-key rename by
+        passing the toolkit type and an old->new field mapping in the param
+        string — no new code required.
 
-            The old ``space`` key is intentionally left in place after the
-            backfill for backward compatibility; it is not deleted.
-
-        Idempotent: safe to re-run. Rows that already have ``space_key`` are
-        skipped.
+        For each mapping ``old_key>new_key``, a toolkit row is migrated when
+        ``old_key`` is present in its settings and ``new_key`` is not. The
+        value is copied (not moved) from ``old_key`` to ``new_key``; ``old_key``
+        is intentionally left in place for backward compatibility with any
+        code/config still reading the legacy key.
 
         Param format:
-            "project_id=<all|N>[;dry_run]"
+            "<toolkit_type>;<old_key>>' + '<new_key>[,<old_key2>>'+'<new_key2>...];project_id=<all|N>[;dry_run]"
+
+            (i.e. toolkit type, then one or more comma-separated
+            ``old_key>new_key`` mappings, then project_id, then optional dry_run)
 
         Examples:
-            "project_id=all;dry_run"  - dry run across all projects
-            "project_id=all"          - migrate all projects
-            "project_id=3"            - migrate project 3 only
+            "confluence;space>space_key;project_id=all;dry_run"
+                Dry run across all projects, confluence toolkits:
+                backfill settings.space_key from settings.space
+
+            "confluence;space>space_key;project_id=all"
+                Same, applied for real
+
+            "jira;old_field>new_field;project_id=34"
+                Project 34 only, jira toolkits: backfill new_field from old_field
+
+            "github;field_a>field_1,field_b>field_2;project_id=all"
+                All projects, github toolkits: backfill two fields at once
+
+        Idempotent: safe to re-run. Rows that already have the new key (or
+        never had the old key) are skipped.
 
         Always run with dry_run first to verify expected changes.
         """
@@ -1344,11 +1354,39 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         from ..models.all import EliteATool  # pylint: disable=C0415
 
         param = kwargs.get("param", "") or ""
+        segments = [s.strip() for s in param.split(";")]
+
+        toolkit_type = segments[0].strip() if segments else ""
+        if not toolkit_type:
+            log.error(
+                "migrate_toolkit_settings_fields: toolkit_type is required. "
+                "Format: <toolkit_type>;<old_key>>'<new_key>[,...];project_id=<all|N>[;dry_run]"
+            )
+            return {"migrated": 0, "error": "toolkit_type is required (first ';'-separated segment)"}
+
+        field_mapping_raw = segments[1].strip() if len(segments) > 1 else ""
+        field_mapping = {}
+        for mapping in [m.strip() for m in field_mapping_raw.split(",") if m.strip()]:
+            if ">" not in mapping:
+                log.error("migrate_toolkit_settings_fields: invalid mapping '%s', expected 'old_key>new_key'", mapping)
+                return {"migrated": 0, "error": f"invalid mapping '{mapping}', expected 'old_key>new_key'"}
+            old_key, new_key = (part.strip() for part in mapping.split(">", 1))
+            if not old_key or not new_key:
+                log.error("migrate_toolkit_settings_fields: invalid mapping '%s'", mapping)
+                return {"migrated": 0, "error": f"invalid mapping '{mapping}'"}
+            field_mapping[old_key] = new_key
+
+        if not field_mapping:
+            log.error(
+                "migrate_toolkit_settings_fields: at least one 'old_key>new_key' mapping is required"
+            )
+            return {"migrated": 0, "error": "at least one 'old_key>new_key' mapping is required"}
+
         dry_run = False
         project_id_filter = None
         project_id_found = False
 
-        for seg in [s.strip() for s in param.split(";")]:
+        for seg in segments[2:]:
             seg_lower = seg.lower()
             if seg_lower.startswith("project_id="):
                 project_id_found = True
@@ -1357,25 +1395,26 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     try:
                         project_id_filter = int(value)
                     except ValueError:
-                        log.error("migrate_confluence_space_key: invalid project_id '%s'", value)
+                        log.error("migrate_toolkit_settings_fields: invalid project_id '%s'", value)
                         return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
             elif seg_lower == "dry_run":
                 dry_run = True
 
         if not project_id_found:
             log.error(
-                "migrate_confluence_space_key: project_id= is required. "
-                "Format: project_id=<all|N>[;dry_run]"
+                "migrate_toolkit_settings_fields: project_id= is required. "
+                "Format: <toolkit_type>;<old_key>>'<new_key>[,...];project_id=<all|N>[;dry_run]"
             )
             return {
                 "migrated": 0,
-                "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]",
+                "error": "project_id= is required. Format: <toolkit_type>;<old_key>>'<new_key>[,...];project_id=<all|N>[;dry_run]",
             }
 
         prefix = "[DRY RUN] " if dry_run else ""
         log.info(
-            "Starting migrate_confluence_space_key (dry_run=%s, project_id_filter=%s)",
-            dry_run, project_id_filter,
+            "Starting migrate_toolkit_settings_fields (toolkit_type=%s, field_mapping=%s, "
+            "dry_run=%s, project_id_filter=%s)",
+            toolkit_type, field_mapping, dry_run, project_id_filter,
         )
         start_ts = time.time()
 
@@ -1388,7 +1427,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             else:
                 projects = self.context.rpc_manager.call.project_list() or []
         except Exception:  # pylint: disable=W0703
-            log.exception("migrate_confluence_space_key: failed to list projects")
+            log.exception("migrate_toolkit_settings_fields: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
 
         for project in projects:
@@ -1397,25 +1436,30 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             try:
                 with db.with_project_schema_session(project_id) as session:
                     toolkits = session.query(EliteATool).filter(
-                        EliteATool.type == 'confluence'
+                        EliteATool.type == toolkit_type
                     ).all()
 
                     any_changed = False
 
                     for toolkit in toolkits:
                         settings = toolkit.settings or {}
-                        if 'space_key' in settings or 'space' not in settings:
+                        pending = {
+                            new_key: settings[old_key]
+                            for old_key, new_key in field_mapping.items()
+                            if old_key in settings and new_key not in settings
+                        }
+                        if not pending:
                             continue
 
                         log.info(
-                            "%sproject %s, toolkit id=%s (confluence) name='%s': "
-                            "settings.space -> settings.space_key",
-                            prefix, project_id, toolkit.id, toolkit.name,
+                            "%sproject %s, toolkit id=%s (%s) name='%s': backfilling %s",
+                            prefix, project_id, toolkit.id, toolkit_type, toolkit.name,
+                            pending,
                         )
 
                         if not dry_run:
                             new_settings = deepcopy(settings)
-                            new_settings['space_key'] = new_settings['space']
+                            new_settings.update(pending)
                             toolkit.settings = new_settings
                             flag_modified(toolkit, 'settings')
                             any_changed = True
@@ -1427,13 +1471,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             except Exception:  # pylint: disable=W0703
                 log.exception(
-                    "%smigrate_confluence_space_key: error in project %s", prefix, project_id
+                    "%smigrate_toolkit_settings_fields: error in project %s", prefix, project_id
                 )
                 failed_projects += 1
 
         end_ts = time.time()
         log.info(
-            "%sExiting migrate_confluence_space_key — %s %s toolkit(s) "
+            "%sExiting migrate_toolkit_settings_fields — %s %s toolkit(s) "
             "(failed projects: %s) (duration = %ss)",
             prefix, "would migrate" if dry_run else "migrated", total_migrated,
             failed_projects, round(end_ts - start_ts, 2),

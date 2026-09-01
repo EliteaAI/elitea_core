@@ -285,6 +285,7 @@ Run admin task migrate_eval_dimension_columns with param: project_id=all
 # reads space_key first and falls back to the legacy space key, so this is a
 # non-blocking backfill (existing configs keep working without it). The old
 # 'space' key is left in place after the backfill for backward compatibility.
-# Idempotent (skips rows that already have space_key); run dry_run first.
-Run admin task migrate_confluence_space_key with param: project_id=all;dry_run
-Run admin task migrate_confluence_space_key with param: project_id=all
+# Uses the generic migrate_toolkit_settings_fields task (reusable for future
+# per-toolkit settings-key renames). Idempotent; run dry_run first.
+Run admin task migrate_toolkit_settings_fields with param: confluence;space>space_key;project_id=all;dry_run
+Run admin task migrate_toolkit_settings_fields with param: confluence;space>space_key;project_id=all
