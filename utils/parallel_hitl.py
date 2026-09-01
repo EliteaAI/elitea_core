@@ -148,6 +148,8 @@ def begin_execution_generation(meta, generation):
     """
     updated = dict(meta or {})
     updated.pop(RESOLVED_INTERRUPT_IDS_KEY, None)
+    for key in ('continuation_error', 'budget_error_code', 'is_error', 'error'):
+        updated.pop(key, None)
     updated[EXECUTION_GENERATION_KEY] = generation
     return updated
 
