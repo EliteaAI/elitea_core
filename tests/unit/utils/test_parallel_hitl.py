@@ -16,6 +16,7 @@ claim_supervisor_decision_phase = _MODULE.claim_supervisor_decision_phase
 is_current_execution = _MODULE.is_current_execution
 merge_interrupts = _MODULE.merge_interrupts
 merge_supervisor_roster = _MODULE.merge_supervisor_roster
+normalize_parallel_terminal_error = _MODULE.normalize_parallel_terminal_error
 normalize_interrupts = _MODULE.normalize_interrupts
 pending_interrupts = _MODULE.pending_interrupts
 pending_supervisor_decisions = _MODULE.pending_supervisor_decisions
@@ -41,6 +42,38 @@ def test_supervised_pause_preserves_live_resume_strategy_without_worker_child_li
     normalized = normalize_interrupts(response)
 
     assert normalized[0]['resume_strategy'] == 'supervised_child'
+
+
+def test_parallel_terminal_error_preserves_bounded_structure_without_partial_output():
+    assert normalize_parallel_terminal_error({
+        'code': 'output_continuation_exhausted',
+        'user_message': 'The child response is incomplete.',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+        'partial_output_available': True,
+        'partial_output': 'must not reach the parent model',
+    }) == {
+        'code': 'output_continuation_exhausted',
+        'user_message': 'The child response is incomplete.',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+        'partial_output_available': True,
+    }
+
+
+def test_parallel_dispatch_prefers_structured_child_error_for_reconciliation():
+    source = (
+        pathlib.Path(__file__).resolve().parents[3]
+        / 'methods' / 'parallel_dispatch.py'
+    ).read_text()
+
+    assert (
+        "child_result.get('parallel_terminal_error') or child_result.get('error')"
+        in source
+    )
+    assert 'json.dumps(normalize_parallel_terminal_error(terminal_error))' in source
 
 
 def test_supervisor_decision_and_roster_are_bounded_durable_message_state():

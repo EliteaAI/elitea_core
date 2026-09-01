@@ -23,6 +23,28 @@ SUPERVISOR_ROSTER_KEY = 'parallel_hitl_roster'
 MAX_SUPERVISOR_DECISIONS = 256
 INTERNAL_CONTINUE_TOKEN = object()
 TRANSIENT_SUPERVISOR_DECISION_KEYS = {'_mcp_tokens'}
+PARALLEL_TERMINAL_ERROR_KEYS = (
+    'code', 'user_message', 'attempts', 'failure_reason', 'stop_reason',
+    'partial_output_available',
+)
+
+
+def normalize_parallel_terminal_error(value):
+    """Normalize a bounded error envelope before parent reconciliation."""
+    if isinstance(value, dict):
+        normalized = {
+            key: value[key]
+            for key in PARALLEL_TERMINAL_ERROR_KEYS
+            if value.get(key) is not None
+        }
+        message = value.get('user_message') or value.get('error')
+        if message and 'user_message' not in normalized:
+            normalized['user_message'] = str(message)[:1000]
+    else:
+        normalized = {'user_message': str(value or 'Parallel child execution failed.')[:1000]}
+    normalized.setdefault('code', 'parallel_child_failed')
+    normalized.setdefault('user_message', 'Parallel child execution failed.')
+    return normalized
 
 
 def decision_ack_key(message_id, decision_id, phase):
