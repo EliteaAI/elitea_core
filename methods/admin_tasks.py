@@ -1307,6 +1307,144 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         }
 
     @web.method()
+    def migrate_confluence_space_key(self, *args, **kwargs):
+        """Admin task (Issue #5997): backfill Confluence toolkit settings key
+        ``space`` -> ``space_key``.
+
+        Background:
+            The Confluence toolkit's config field was renamed from the
+            ambiguous ``space`` to ``space_key`` in elitea-sdk (PR #578) to
+            make clear that the Space *Key* (not the human-readable Space
+            Name) is required. The SDK reads ``space_key`` first, falling
+            back to the legacy ``space`` key at runtime, so this task is not
+            required for toolkits to keep working — it backfills the new key
+            in the database so already-saved configs show the current field
+            name (e.g. in the admin UI) and so the legacy key can eventually
+            be dropped.
+
+            The old ``space`` key is intentionally left in place after the
+            backfill for backward compatibility; it is not deleted.
+
+        Idempotent: safe to re-run. Rows that already have ``space_key`` are
+        skipped.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - dry run across all projects
+            "project_id=all"          - migrate all projects
+            "project_id=3"            - migrate project 3 only
+
+        Always run with dry_run first to verify expected changes.
+        """
+        from copy import deepcopy  # pylint: disable=C0415
+        from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
+        from tools import db  # pylint: disable=C0415
+        from ..models.all import EliteATool  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_confluence_space_key: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error(
+                "migrate_confluence_space_key: project_id= is required. "
+                "Format: project_id=<all|N>[;dry_run]"
+            )
+            return {
+                "migrated": 0,
+                "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]",
+            }
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info(
+            "Starting migrate_confluence_space_key (dry_run=%s, project_id_filter=%s)",
+            dry_run, project_id_filter,
+        )
+        start_ts = time.time()
+
+        total_migrated = 0
+        failed_projects = 0
+
+        try:
+            if project_id_filter is not None:
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list() or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_confluence_space_key: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        for project in projects:
+            project_id = project['id']
+
+            try:
+                with db.with_project_schema_session(project_id) as session:
+                    toolkits = session.query(EliteATool).filter(
+                        EliteATool.type == 'confluence'
+                    ).all()
+
+                    any_changed = False
+
+                    for toolkit in toolkits:
+                        settings = toolkit.settings or {}
+                        if 'space_key' in settings or 'space' not in settings:
+                            continue
+
+                        log.info(
+                            "%sproject %s, toolkit id=%s (confluence) name='%s': "
+                            "settings.space -> settings.space_key",
+                            prefix, project_id, toolkit.id, toolkit.name,
+                        )
+
+                        if not dry_run:
+                            new_settings = deepcopy(settings)
+                            new_settings['space_key'] = new_settings['space']
+                            toolkit.settings = new_settings
+                            flag_modified(toolkit, 'settings')
+                            any_changed = True
+
+                        total_migrated += 1
+
+                    if any_changed and not dry_run:
+                        session.commit()
+
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "%smigrate_confluence_space_key: error in project %s", prefix, project_id
+                )
+                failed_projects += 1
+
+        end_ts = time.time()
+        log.info(
+            "%sExiting migrate_confluence_space_key — %s %s toolkit(s) "
+            "(failed projects: %s) (duration = %ss)",
+            prefix, "would migrate" if dry_run else "migrated", total_migrated,
+            failed_projects, round(end_ts - start_ts, 2),
+        )
+        return {
+            "migrated": total_migrated,
+            "failed_projects": failed_projects,
+            "dry_run": dry_run,
+        }
+
+    @web.method()
     def migrate_mcp_client_secrets(self, *args, **kwargs):
         """Admin task: vault-wrap plain-text client_secret in MCP toolkit settings.
 
