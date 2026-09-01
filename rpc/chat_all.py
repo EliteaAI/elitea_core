@@ -2574,7 +2574,7 @@ class RPC:
                         chat_project_id=project_id,
                         await_task_timeout=SUMMARIZATION_LOCKING_TTL,
                         user_id=user_id,
-                        is_system_user=True
+                        skip_expansion=True
                     )
                 except Exception:
                     log.exception("Error during RPC call to LLM model in predict_summary_content")

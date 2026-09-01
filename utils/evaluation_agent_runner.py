@@ -184,7 +184,7 @@ def run_agent(
                                     case.get('variables'))
     try:
         result = predict(sid=None, data=data, await_task_timeout=timeout,
-                         is_system_user=True, return_chat_history=True)
+                         skip_expansion=True, return_chat_history=True)
     except Exception as exc:  # noqa: BLE001 - execution-level failure is a value, not a raise
         return {'status': 'predict_exception', 'output': None, 'error': str(exc)}
 

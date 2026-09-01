@@ -89,7 +89,7 @@ def test_invocation_is_toolless_and_temp_pinned(judge_env):
     assert 'reasoning_effort' not in ls and 'max_tokens' not in ls  # stripped
     assert sent['stream_id'].startswith('publish_validate_5_')
     assert sent['message_id'].startswith('publish_validate_5_')
-    assert calls['predict'][0]['is_system_user'] is True
+    assert calls['predict'][0]['skip_expansion'] is True
     assert calls['predict'][0]['await_task_timeout'] == 45
 
 
