@@ -276,6 +276,8 @@ MCP_STUBS = (
     ('plugins.elitea_core.utils.toolkits_utils', {'get_toolkit_schemas': lambda *a, **k: {}}),
     ('plugins.elitea_core.utils.exceptions',
      {'PoolSaturationError': type('PoolSaturationError', (Exception,), {})}),
+    ('plugins.elitea_core.utils.internal_tools',
+     {'MCP_CURRENT_PROJECT_SUFFIXES': {'elitea_core/project_context', 'elitea_core/skills'}}),
     ('plugins.elitea_core.utils.mcp_session', {'SseSession': type('SseSession', (), {})}),
     ('plugins.elitea_core.utils.mcp_versioning',
      {'INTERNAL_MCP_ENVIRON_KEY': 'elitea.internal_mcp_request'}),

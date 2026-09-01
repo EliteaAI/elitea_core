@@ -45,7 +45,7 @@ def generate_chat_history_from_summaries(summaries: List['dict'] = None) -> dict
     ).dict(exclude_none=False)
 
 
-def generate_chat_history_from_message_items(role, message_items) -> dict:
+def generate_chat_history_from_message_items(role, message_items, include_context: bool = True) -> dict:
     assert all(m.message_group_id == message_items[0].message_group_id for m in message_items)
 
     chat_history_chunk = []
@@ -72,6 +72,8 @@ def generate_chat_history_from_message_items(role, message_items) -> dict:
                 # Fallback for any legacy data that might still be dict
                 chat_history_chunk.append(message.content)
         elif message.item_type == ContextMessageItem.__mapper_args__['polymorphic_identity']:
+            if not include_context:
+                continue
             context_text = format_context_for_llm(message.context_data)
             if context_text:
                 chat_history_chunk.append({"type": "text", "text": context_text})
@@ -128,7 +130,11 @@ def format_context_for_llm(context_data: dict) -> str:
     )
 
 
-def generate_chat_history(message_groups: List[ConversationMessageGroup], summaries: List['dict'] = None) -> List[dict]:
+def generate_chat_history(
+        message_groups: List[ConversationMessageGroup],
+        summaries: List['dict'] = None,
+        include_context: bool = True,
+) -> List[dict]:
     chat_history = []
 
     if summaries:
@@ -138,7 +144,9 @@ def generate_chat_history(message_groups: List[ConversationMessageGroup], summar
 
     for msg_group in message_groups:
         role = get_role(msg_group)
-        chat_history_item = generate_chat_history_from_message_items(role, msg_group.message_items)
+        chat_history_item = generate_chat_history_from_message_items(
+            role, msg_group.message_items, include_context=include_context
+        )
         if chat_history_item['content']:
             chat_history.append(
                 chat_history_item

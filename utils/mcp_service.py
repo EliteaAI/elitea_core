@@ -12,6 +12,7 @@ from ..utils.application_tools import toolkits_listing
 from ..utils.application_utils import list_applications_api
 from ..utils.toolkits_utils import get_toolkit_schemas
 from ..utils.exceptions import PoolSaturationError
+from .internal_tools import MCP_CURRENT_PROJECT_SUFFIXES
 from .mcp_session import SseSession
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 
@@ -20,13 +21,14 @@ class McpApiToolExecutor:
     """Handles execution of MCP API tools via direct Flask WSGI calls."""
 
     @staticmethod
-    def execute(api_tool: dict, arguments: dict) -> dict:
+    def execute(api_tool: dict, arguments: dict, default_path_params: dict = None) -> dict:
         """
         Execute an API tool by calling Flask WSGI app directly.
 
         Args:
             api_tool: API tool metadata from openapi_registry with path, method, parameters
             arguments: Tool arguments from MCP client
+            default_path_params: Server-side values for path params the client omitted
 
         Returns:
             dict with 'result' or 'error' key
@@ -37,7 +39,7 @@ class McpApiToolExecutor:
             parameters = api_tool.get("parameters", [])
 
             path_params, query_params, body_params = McpApiToolExecutor._parse_arguments(
-                arguments, parameters
+                arguments, parameters, default_path_params
             )
             url_path = McpApiToolExecutor._build_url_path(path, path_params)
 
@@ -56,11 +58,14 @@ class McpApiToolExecutor:
             return {"error": f"Failed to call API: {str(exc)}"}
 
     @staticmethod
-    def _parse_arguments(arguments: dict, parameters: list) -> tuple[dict, dict, dict]:
+    def _parse_arguments(
+        arguments: dict, parameters: list, default_path_params: dict = None,
+    ) -> tuple[dict, dict, dict]:
         """Separate arguments into path, query, and body parameters.
 
         For path parameters with schema defaults (e.g. 'mode'), applies the default
-        when the argument is not provided by the MCP client.
+        when the argument is not provided by the MCP client, then falls back to
+        default_path_params; a client-supplied value always wins.
 
         Clients send the sanitized property name that build_mcp_input_schema
         published (e.g. 'fname' for the 'fname[]' query param), so arguments are
@@ -86,6 +91,12 @@ class McpApiToolExecutor:
                     consumed.add(arg_name)
             elif param_in == "path" and "default" in param_schema:
                 path_params[param_name] = param_schema["default"]
+            elif param_in == "path" and param_name in (default_path_params or {}):
+                path_params[param_name] = default_path_params[param_name]
+                log.warning(
+                    "MCP client omitted required path param '%s'; defaulting to %s",
+                    param_name, default_path_params[param_name],
+                )
 
         for key, value in arguments.items():
             if key not in consumed:
@@ -306,7 +317,9 @@ class McpService:
                     response_content = json.dumps(result["result"])
             elif api_tool := self.__get_api_tool_by_name(request.params.name):
                 log.debug("Starting API tool call: %s", request.params.name)
-                result = McpApiToolExecutor.execute(api_tool, request.params.arguments)
+                result = McpApiToolExecutor.execute(
+                    api_tool, request.params.arguments, self.__session_default_path_params()
+                )
                 if "error" not in result:
                     response_content = json.dumps(result["result"])
             else:
@@ -657,6 +670,11 @@ class McpService:
                 return api_tool
         #
         return None
+
+    def __session_default_path_params(self) -> dict:
+        if self.session.entity_category in MCP_CURRENT_PROJECT_SUFFIXES:
+            return {'project_id': self.session.project_id}
+        return {}
 
 
 def _build_initialize_result(id: str, resource_type: str = None, resource_id: int = None) -> types.JSONRPCResponse:

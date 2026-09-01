@@ -13,7 +13,7 @@ from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
 from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items
 from ...utils.chat_history import generate_chat_history
-from ...models.enums.all import ChatHistoryRole
+from ...models.enums.all import ChatHistoryRole, AgentTypes
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, retire_all_interrupts,
@@ -111,8 +111,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 reply_msg.conversation, reply_msg,
             )
 
+            regenerates_pipeline = (
+                (regenerate_payload.get('version_details') or {}).get('agent_type') == AgentTypes.pipeline.value
+            )
             regenerate_payload['chat_history'] = generate_chat_history(
-                message_groups=chat_history_groups, summaries=summaries
+                message_groups=chat_history_groups, summaries=summaries,
+                include_context=not regenerates_pipeline,
             )
             if not preserve_instructions:
                 regenerate_payload['instructions'] = None

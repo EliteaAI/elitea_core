@@ -56,7 +56,7 @@ from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
-    inject_mcp_toolkits, MCP_INTERNAL_TOOL_KEY,
+    inject_mcp_toolkits, should_inject_runtime_context,
     get_mcp_entity_link_instructions,
 )
 from ..utils.utils import get_public_project_id
@@ -435,7 +435,7 @@ def generate_summary_payload(
     """
     try:
         # Convert message groups to chat history format using existing utility
-        chat_history = generate_chat_history(message_groups)
+        chat_history = generate_chat_history(message_groups, include_context=False)
 
         # Default summary instructions if not provided
         if not summary_instructions:
@@ -885,6 +885,65 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
     return result
 
 
+def resolve_target_application_context(
+    session, conversation_id: int, participant, chat_project_id: int,
+) -> tuple:
+    application_id = participant.entity_meta.get('id')
+    version_id = _pinned_version_id(session, conversation_id, participant.id)
+    owner_project_id = participant.entity_meta.get('project_id')
+
+    if owner_project_id is None or owner_project_id == chat_project_id:
+        return _read_application_context(session, application_id, version_id)
+
+    try:
+        with db.get_session(owner_project_id) as owner_session:
+            return _read_application_context(owner_session, application_id, version_id)
+    except Exception:
+        log.warning(
+            "Could not read project %s for application %s; treating as an agent with no "
+            "stored builder tools",
+            owner_project_id, application_id, exc_info=True,
+        )
+        return False, []
+
+
+def _pinned_version_id(session, conversation_id: int, participant_id: int):
+    participant_mapping = session.query(ParticipantMapping.entity_settings).where(
+        ParticipantMapping.participant_id == participant_id,
+        ParticipantMapping.conversation_id == conversation_id,
+    ).first()
+    if not participant_mapping:
+        return None
+    return (participant_mapping.entity_settings or {}).get('version_id')
+
+
+def _read_application_context(session, application_id, version_id) -> tuple:
+    return (
+        _has_any_pipeline_version(session, application_id),
+        _version_internal_tools(session, version_id),
+    )
+
+
+def _has_any_pipeline_version(session, application_id) -> bool:
+    if not application_id:
+        return False
+    return session.query(ApplicationVersion.id).filter(
+        ApplicationVersion.application_id == application_id,
+        ApplicationVersion.agent_type == AgentTypes.pipeline.value,
+    ).first() is not None
+
+
+def _version_internal_tools(session, version_id) -> list:
+    if not version_id:
+        return []
+    version_row = session.query(ApplicationVersion.meta).filter(
+        ApplicationVersion.id == version_id
+    ).first()
+    if not version_row:
+        return []
+    return list((version_row[0] or {}).get('internal_tools') or [])
+
+
 def prepare_conversation_history(
     session, sio, conversation: Conversation, msg_group: ConversationMessageGroup,
 ):
@@ -1115,6 +1174,7 @@ class RPC:
             # the synthetic <runtime_context> block (see below) or attachment
             # graph-state handling further down.
             target_is_pipeline = False
+            target_version_internal_tools = []
             if parsed.participant_id:
                 target_participant = session.query(Participant).filter(
                     Participant.id == parsed.participant_id
@@ -1123,18 +1183,15 @@ class RPC:
                     target_participant is not None
                     and str(target_participant.entity_name) == ParticipantTypes.application.value
                 ):
-                    target_app_id = target_participant.entity_meta.get('id')
-                    if target_app_id:
-                        target_is_pipeline = session.query(ApplicationVersion).filter(
-                            ApplicationVersion.application_id == target_app_id,
-                            ApplicationVersion.agent_type == AgentTypes.pipeline.value,
-                        ).first() is not None
+                    target_is_pipeline, target_version_internal_tools = (
+                        resolve_target_application_context(
+                            session, conversation.id, target_participant, parsed.project_id
+                        )
+                    )
 
-            # Inject context only when internal_mcp is enabled for this conversation.
-            # Support assistant conversations always have 'internal_mcp' in internal_tools.
-            # Skip for pipelines: the injected metadata pollutes their input (see #5981).
             conversation_internal_tools = (conversation.meta or {}).get('internal_tools', [])
-            if 'internal_mcp' in conversation_internal_tools and not target_is_pipeline:
+            turn_internal_tools = list(conversation_internal_tools) + target_version_internal_tools
+            if should_inject_runtime_context(turn_internal_tools, target_is_pipeline):
                 effective_runtime_context = dict(parsed.runtime_context) if parsed.runtime_context else {}
 
                 # Always set server-side truth values
@@ -1286,7 +1343,8 @@ class RPC:
                         payload['instructions'] = None
 
                     payload['chat_history'] = generate_chat_history(
-                        message_groups=chat_history_groups, summaries=summaries
+                        message_groups=chat_history_groups, summaries=summaries,
+                        include_context=not is_pipeline,
                     )
                     log.debug('chat payload["chat_history"]=%s', payload["chat_history"])
 
@@ -2124,8 +2182,12 @@ class RPC:
                 if not preserve_instructions:
                     payload['instructions'] = None
 
+                continues_pipeline = (
+                    (payload.get('version_details') or {}).get('agent_type') == AgentTypes.pipeline.value
+                )
                 payload['chat_history'] = generate_chat_history(
-                    message_groups=chat_history_groups, summaries=summaries
+                    message_groups=chat_history_groups, summaries=summaries,
+                    include_context=not continues_pipeline,
                 )
                 if is_token_limit_continuation_request:
                     prepare_token_limit_payload(payload, truncated_content)
