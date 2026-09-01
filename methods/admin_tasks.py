@@ -1346,12 +1346,25 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         Idempotent: safe to re-run. Rows that already have the new key (or
         never had the old key) are skipped.
 
+        Guardrails:
+            - ``old_key`` must differ from ``new_key`` (rejected otherwise).
+            - Neither key may be one of the reserved settings keys that have
+              special meaning elsewhere (``RESERVED_SETTINGS_KEYS`` below,
+              e.g. ``toolkit``, ``provider``, ``selected_tools``) — those are
+              owned by other migrations/loader code and must not be touched
+              by a generic field rename.
+            - The response always includes ``toolkits_scanned`` per project
+              so a mistyped ``toolkit_type`` (0 rows matched) is obvious in
+              dry-run output rather than looking identical to "nothing to do".
+
         Always run with dry_run first to verify expected changes.
         """
         from copy import deepcopy  # pylint: disable=C0415
         from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
         from tools import db  # pylint: disable=C0415
         from ..models.all import EliteATool  # pylint: disable=C0415
+
+        RESERVED_SETTINGS_KEYS = {"toolkit", "provider", "selected_tools", "type"}
 
         param = kwargs.get("param", "") or ""
         segments = [s.strip() for s in param.split(";")]
@@ -1374,6 +1387,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             if not old_key or not new_key:
                 log.error("migrate_toolkit_settings_fields: invalid mapping '%s'", mapping)
                 return {"migrated": 0, "error": f"invalid mapping '{mapping}'"}
+            if old_key == new_key:
+                log.error("migrate_toolkit_settings_fields: old_key and new_key must differ ('%s')", mapping)
+                return {"migrated": 0, "error": f"old_key and new_key must differ: '{mapping}'"}
+            reserved_hit = {old_key, new_key} & RESERVED_SETTINGS_KEYS
+            if reserved_hit:
+                log.error(
+                    "migrate_toolkit_settings_fields: '%s' is a reserved settings key and cannot "
+                    "be used in a generic field rename", reserved_hit,
+                )
+                return {
+                    "migrated": 0,
+                    "error": f"reserved settings key(s) not allowed: {sorted(reserved_hit)}",
+                }
             field_mapping[old_key] = new_key
 
         if not field_mapping:
@@ -1419,6 +1445,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         start_ts = time.time()
 
         total_migrated = 0
+        total_scanned = 0
         failed_projects = 0
 
         try:
@@ -1438,6 +1465,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     toolkits = session.query(EliteATool).filter(
                         EliteATool.type == toolkit_type
                     ).all()
+                    total_scanned += len(toolkits)
 
                     any_changed = False
 
@@ -1476,14 +1504,20 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 failed_projects += 1
 
         end_ts = time.time()
+        if total_scanned == 0:
+            log.warning(
+                "migrate_toolkit_settings_fields: no toolkits of type '%s' were found — "
+                "check for a typo in toolkit_type", toolkit_type,
+            )
         log.info(
-            "%sExiting migrate_toolkit_settings_fields — %s %s toolkit(s) "
+            "%sExiting migrate_toolkit_settings_fields — %s %s toolkit(s) out of %s scanned "
             "(failed projects: %s) (duration = %ss)",
             prefix, "would migrate" if dry_run else "migrated", total_migrated,
-            failed_projects, round(end_ts - start_ts, 2),
+            total_scanned, failed_projects, round(end_ts - start_ts, 2),
         )
         return {
             "migrated": total_migrated,
+            "toolkits_scanned": total_scanned,
             "failed_projects": failed_projects,
             "dry_run": dry_run,
         }
