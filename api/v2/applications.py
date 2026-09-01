@@ -271,23 +271,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
         for version in raw.get("versions", []):
             version["author_id"] = author_id
          
-        # Apply default internal tools from user personalization if not explicitly set
+        # Apply default internal tools from the user's project-scoped module settings (#6285),
+        # not the legacy global personalization blob, so toggles don't leak across projects.
         try:
-            user_personalization = rpc_tools.RpcMixin().rpc.timeout(2).social_get_user(author_id)
-            if user_personalization and 'personalization' in user_personalization:
-                default_internal_tools = get_enabled_agent_internal_tools(
-                    user_personalization['personalization']
-                )
-                # Apply to all versions that don't already have internal_tools set in meta
-                for version in raw.get("versions", []):
-                    meta = version.get('meta') or {}
-                    if 'internal_tools' not in meta and default_internal_tools:
-                        meta['internal_tools'] = default_internal_tools
-                        version['meta'] = meta
+            module_settings = rpc_tools.RpcMixin().rpc.timeout(2).social_get_project_module_settings(
+                author_id, project_id,
+            )
+            default_internal_tools = get_enabled_agent_internal_tools(module_settings)
+            # Apply to all versions that don't already have internal_tools set in meta
+            for version in raw.get("versions", []):
+                meta = version.get('meta') or {}
+                if 'internal_tools' not in meta and default_internal_tools:
+                    meta['internal_tools'] = default_internal_tools
+                    version['meta'] = meta
         except Empty:
-            log.debug(f"social_get_user RPC not available, skipping default internal tools")
+            log.debug(f"social_get_project_module_settings RPC not available, skipping default internal tools")
         except Exception as e:
-            log.warning(f"Failed to fetch user personalization for default internal tools: {e}")
+            log.warning(f"Failed to fetch project module settings for default internal tools: {e}")
          
         try:
             application_data = ApplicationCreateModel.model_validate(raw)
