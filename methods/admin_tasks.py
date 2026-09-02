@@ -1371,7 +1371,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         Always run with dry_run first to verify expected changes.
         """
         import re  # pylint: disable=C0415
-        from copy import deepcopy  # pylint: disable=C0415
         from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
         from tools import db  # pylint: disable=C0415
         from ..models.all import EliteATool  # pylint: disable=C0415
@@ -1513,7 +1512,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         )
 
                         if not dry_run:
-                            new_settings = deepcopy(settings)
+                            # Shallow copy is sufficient: only new top-level keys are
+                            # added, existing nested values are never mutated in place.
+                            new_settings = dict(settings)
                             new_settings.update(pending)
                             toolkit.settings = new_settings
                             flag_modified(toolkit, 'settings')
