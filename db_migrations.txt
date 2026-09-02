@@ -279,3 +279,13 @@ Run admin task migrate_eval_dataset_columns with param: project_id=all
 # this change (i.e. upgrading an existing deployment) — run once, per environment.
 Run admin task migrate_eval_suite_columns with param: project_id=all
 Run admin task migrate_eval_dimension_columns with param: project_id=all
+
+# Issue #5997: Backfill Confluence toolkit settings key 'space' -> 'space_key'.
+# elitea-sdk renamed the ambiguous 'space' field to 'space_key' (PR #578); the SDK
+# reads space_key first and falls back to the legacy space key, so this is a
+# non-blocking backfill (existing configs keep working without it). The old
+# 'space' key is left in place after the backfill for backward compatibility.
+# Uses the generic migrate_toolkit_settings_fields task (reusable for future
+# per-toolkit settings-key renames). Idempotent; run dry_run first.
+Run admin task migrate_toolkit_settings_fields with param: confluence;space>space_key;project_id=all;dry_run
+Run admin task migrate_toolkit_settings_fields with param: confluence;space>space_key;project_id=all
