@@ -15,6 +15,8 @@ from .utils import get_public_project_id
 
 ERROR_LINE_MAX_LENGTH = 300
 MAX_LISTED_MODEL_NAMES = 20
+PARSE_FAILURE_WINDOW = 120
+PARSE_FAILURE_TAIL = 80
 
 
 def _available_llm_models(project_id: int) -> Optional[dict]:
@@ -160,6 +162,27 @@ def _last_exception_line(error_text) -> str:
     return line
 
 
+def _thinking_steps(result) -> list:
+    inner = result.get("result") if isinstance(result, dict) else None
+    steps = inner.get("thinking_steps") if isinstance(inner, dict) else None
+    return [step for step in steps if isinstance(step, dict)] if isinstance(steps, list) else []
+
+
+def finish_reasons(result) -> list:
+    """One entry per step, None where the worker reported no usable ``generation_info``.
+
+    Read from inside the parse-failure handler, where raising would turn a described 422 into a
+    bare 500 - so a step whose ``generation_info`` is not a mapping counts as unknown, not fatal.
+    """
+    reasons = []
+    for step in _thinking_steps(result):
+        generation_info = step.get("generation_info")
+        reasons.append(
+            generation_info.get("finish_reason") if isinstance(generation_info, dict) else None
+        )
+    return reasons
+
+
 def hit_token_limit(result) -> bool:
     """Whether any part of the generation ran out of budget.
 
@@ -169,15 +192,7 @@ def hit_token_limit(result) -> bool:
     stop`` for one skill draft at ``max_tokens=400``). Only consulted once the draft is missing or
     unparseable, so a run that recovered and produced valid JSON never reaches it.
     """
-    inner = result.get("result") if isinstance(result, dict) else None
-    steps = inner.get("thinking_steps") if isinstance(inner, dict) else None
-    if not isinstance(steps, list):
-        return False
-    return any(
-        isinstance(step, dict)
-        and (step.get("generation_info") or {}).get("finish_reason") == "length"
-        for step in steps
-    )
+    return "length" in finish_reasons(result)
 
 
 def _already_states(curated: str, detail: str) -> bool:
@@ -235,14 +250,40 @@ def describe_predict_failure(result) -> Optional[str]:
 
 def extract_draft_text(result) -> str:
     """Return the last non-empty assistant text from a blocking predict result."""
-    task_result = result.get("result") if isinstance(result, dict) else None
-    thinking_steps = task_result.get("thinking_steps", []) if isinstance(task_result, dict) else []
     return next(
-        (
-            step["text"] for step in reversed(thinking_steps)
-            if isinstance(step, dict) and step.get("text")
-        ),
+        (step["text"] for step in reversed(_thinking_steps(result)) if step.get("text")),
         "",
+    )
+
+
+def describe_parse_failure(raw_text: str, candidate: str, error, result) -> str:
+    """Why a draft would not parse, in the detail needed to tell the causes apart.
+
+    A completion cut off mid-string and a control character the model emitted inside one produce
+    the same 422 and the same truncated prefix in the log. The **message class** separates them —
+    ``Unterminated string starting at`` against ``Invalid control character at`` — and the rest of
+    the line is what makes that classification checkable rather than taken on faith.
+
+    ``pos`` is labelled per class because it means something different in each: for an unterminated
+    string it marks the opening quote, which for a long value sits hundreds of characters from the
+    cut, so a distance "from the end" there would read as a mid-draft failure for exactly the
+    truncation it identifies. That offset is reported only where ``pos`` marks the failure itself.
+
+    The window is ``repr``'d because the log formatter would otherwise render the offending
+    character as ordinary whitespace; the tail shows a cut draft ending mid-prose with nothing
+    closing it; the finish reasons say whether the model thought it had finished. All are bounded
+    slices rather than the whole draft — they carry the evidence, and the draft is user content.
+    """
+    if error.msg.startswith("Unterminated string"):
+        location = f"pos {error.pos}, never closed"
+    else:
+        location = f"pos {error.pos}, {len(candidate) - error.pos} chars from the end"
+    window_start = max(0, error.pos - PARSE_FAILURE_WINDOW)
+    return (
+        f"{error.msg} ({location}; {len(candidate)} extracted chars, {len(raw_text)} raw); "
+        f"finish_reasons={finish_reasons(result)}; "
+        f"window={candidate[window_start:error.pos + PARSE_FAILURE_WINDOW]!r}; "
+        f"tail={candidate[-PARSE_FAILURE_TAIL:]!r}"
     )
 
 

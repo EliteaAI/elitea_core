@@ -30,6 +30,7 @@ from ...models.pd.generate_skill_draft import (
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.draft_llm_utils import (
     caller_chose,
+    describe_parse_failure,
     describe_predict_failure,
     extract_draft_text,
     hit_token_limit,
@@ -171,10 +172,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             return {"error": failure or "LLM returned an empty response"}, 500
 
+        extracted = extract_json_from_text(raw_text)
         try:
-            parsed = json.loads(extract_json_from_text(raw_text))
+            parsed = json.loads(extracted)
         except json.JSONDecodeError as e:
-            log.debug("generate_skill_draft: LLM output is not valid JSON: %s", raw_text[:300])
+            log.warning(
+                "generate_skill_draft: draft did not parse: %s",
+                describe_parse_failure(raw_text, extracted, e, result),
+            )
             if hit_token_limit(result) or is_truncated_json(raw_text):
                 return {
                     "error": "LLM response was truncated. Increase max_tokens in llm_settings "

@@ -4,6 +4,7 @@ Re-broken by rejecting a model that only exists in the public project, by blocki
 when the availability lookup itself fails, or by flattening a worker failure back into a single
 generic string.
 """
+import json
 import pathlib
 import sys
 import types
@@ -364,6 +365,117 @@ def test_caller_chose(draft_llm_utils, settings, field, chosen):
 
 def test_non_dict_result_is_reported(draft_llm_utils):
     assert draft_llm_utils.describe_predict_failure(None)
+
+
+def _decode_error(candidate):
+    try:
+        json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        return exc
+    raise AssertionError(f'{candidate!r} parsed cleanly')
+
+
+def _stopped(*reasons):
+    return {'result': {'thinking_steps': [
+        {'text': '', 'generation_info': {'finish_reason': reason}} for reason in reasons
+    ]}}
+
+
+# a real cut-off loses a *long* value, so the opening quote `pos` reports sits nowhere near the
+# cut - the shape that makes a naive "chars from the end" figure read as a mid-draft failure
+CUT_OFF = (
+    '{"name": "release-notes", "description": "Summarizes release notes.", '
+    '"instructions": "' + 'Summarize each change and its impact. ' * 20
+)
+STRAY_CONTROL = '{"name": "release-notes", "instructions": "Line one\nLine two", "description": "ok"}'
+
+
+def test_a_cut_off_draft_is_named_by_its_message_and_unclosed_tail(draft_llm_utils):
+    """`pos` points at the opening quote, not the cut, so the tail is what shows the draft simply
+    stopping - it ends mid-prose with nothing closing it."""
+    error = _decode_error(CUT_OFF)
+    reason = draft_llm_utils.describe_parse_failure(CUT_OFF, CUT_OFF, error, _stopped('stop'))
+
+    assert 'Unterminated string' in reason
+    assert f'pos {error.pos}, never closed' in reason
+    assert f'{len(CUT_OFF)} extracted chars' in reason
+    assert reason.endswith("its impact. '")
+
+
+def test_an_unterminated_string_is_not_reported_as_a_distance_from_the_end(draft_llm_utils):
+    """That offset would claim a mid-draft failure for a draft that stopped at the very end."""
+    error = _decode_error(CUT_OFF)
+    assert len(CUT_OFF) - error.pos > 2 * draft_llm_utils.PARSE_FAILURE_WINDOW
+
+    reason = draft_llm_utils.describe_parse_failure(CUT_OFF, CUT_OFF, error, _stopped('stop'))
+
+    assert 'from the end' not in reason
+
+
+def test_a_stray_control_character_is_described_as_failing_mid_draft(draft_llm_utils):
+    """The decisive difference from a cut-off: the rest of the draft is still behind the failure."""
+    error = _decode_error(STRAY_CONTROL)
+    reason = draft_llm_utils.describe_parse_failure(
+        STRAY_CONTROL, STRAY_CONTROL, error, _stopped('stop'),
+    )
+
+    assert 'Invalid control character' in reason
+    assert f'pos {error.pos}, {len(STRAY_CONTROL) - error.pos} chars from the end' in reason
+    # repr'd, or the log formatter renders the newline as ordinary whitespace and hides the cause
+    assert '\\n' in reason
+
+
+def test_the_window_is_bounded_and_centred_on_the_failure(draft_llm_utils):
+    """Bounded before repr, so nothing is claimed about the rendered length - an escape expands."""
+    filler = 'x' * (3 * draft_llm_utils.PARSE_FAILURE_WINDOW)
+    candidate = f'{{"a": "FARLEFT{filler}NEARLEFT\nNEARRIGHT{filler}FARRIGHT"}}'
+
+    reason = draft_llm_utils.describe_parse_failure(
+        candidate, candidate, _decode_error(candidate), _stopped('stop'),
+    )
+    window = reason.split('window=')[1].split('; tail=')[0]
+
+    assert 'NEARLEFT' in window and 'NEARRIGHT' in window
+    assert 'FARLEFT' not in window and 'FARRIGHT' not in window
+
+
+def test_the_diagnostic_carries_what_the_model_thought_it_did(draft_llm_utils):
+    reason = draft_llm_utils.describe_parse_failure(
+        CUT_OFF, CUT_OFF, _decode_error(CUT_OFF), _stopped('length', 'stop'),
+    )
+
+    assert "finish_reasons=['length', 'stop']" in reason
+
+
+def test_extraction_that_trimmed_the_output_reports_both_lengths(draft_llm_utils):
+    raw = 'Here is your draft:\n```json\n' + CUT_OFF + '\n```'
+
+    reason = draft_llm_utils.describe_parse_failure(
+        raw, CUT_OFF, _decode_error(CUT_OFF), _stopped('stop'),
+    )
+
+    assert f'{len(CUT_OFF)} extracted chars' in reason
+    assert f'{len(raw)} raw' in reason
+
+
+@pytest.mark.parametrize('result, expected', [
+    ({'result': {'thinking_steps': [{'generation_info': {'finish_reason': 'stop'}}]}}, ['stop']),
+    ({'result': {'thinking_steps': [{'text': 'x'}]}}, [None]),
+    ({'result': {'thinking_steps': []}}, []),
+    ({'task_id': 'abc'}, []),
+    (None, []),
+    # a diagnostic that raises inside the failure handler costs the caller its described 422
+    ({'result': {'thinking_steps': [{'generation_info': 'stop'}]}}, [None]),
+    ({'result': {'thinking_steps': [{'generation_info': []}]}}, [None]),
+])
+def test_finish_reasons(draft_llm_utils, result, expected):
+    assert draft_llm_utils.finish_reasons(result) == expected
+
+
+def test_a_malformed_generation_info_does_not_break_the_token_limit_check(draft_llm_utils):
+    assert draft_llm_utils.hit_token_limit(
+        {'result': {'thinking_steps': [{'generation_info': 'length'}]}}
+    ) is False
 
 
 @pytest.mark.parametrize('raw_text, truncated', [
