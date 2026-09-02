@@ -155,7 +155,10 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
     user_roles = _safe_rpc(
         rpc, "admin_get_users_roles_in_project", 15, {}, project_id, filter_system_user=True,
     ) or {}
-    roles_by_id = {int(user_id): roles for user_id, roles in user_roles.items()}
+    # A role row without an individual owner (e.g. a group-level assignment) has user_id=None
+    roles_by_id = {
+        int(user_id): roles for user_id, roles in user_roles.items() if user_id is not None
+    }
     #
     spend_data = _safe_rpc(rpc, "litellm_list_member_spend", 30, None, project_id=project_id)
     degraded = spend_data is None
