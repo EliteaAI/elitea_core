@@ -36,12 +36,11 @@ from ...models.pd.generate_eval_dimensions import (
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.draft_llm_utils import (
+    answer_was_cut_short,
     caller_chose,
     describe_parse_failure,
     describe_predict_failure,
-    extract_draft_text,
-    hit_token_limit,
-    is_truncated_json,
+    extract_answer,
     resolve_model,
     timeout_response,
 )
@@ -175,6 +174,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 await_task_timeout=_AWAIT_TASK_TIMEOUT,
                 user_id=user_id,
                 skip_expansion=True,
+                return_chat_history=True,
             )
         except PredictPayloadError as exc:
             return {"error": str(exc)}, 400
@@ -192,7 +192,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if timed_out:
             return timed_out
 
-        raw_text = extract_draft_text(result)
+        raw_text = extract_answer(result)
         if not raw_text:
             failure = describe_predict_failure(result)
             log.warning(
@@ -209,7 +209,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "generate_eval_dimensions: draft did not parse: %s",
                 describe_parse_failure(raw_text, extracted, e, result),
             )
-            if hit_token_limit(result) or is_truncated_json(raw_text):
+            if answer_was_cut_short(result, raw_text):
                 return {
                     "error": "LLM response was truncated. Increase max_tokens in llm_settings (recommended: 4096+)."
                 }, 422

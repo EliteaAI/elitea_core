@@ -1,8 +1,8 @@
 """Shared failure reporting for the "generate draft with AI" endpoints.
 
-The draft generators dispatch one blocking ``predict_sio_llm`` call and read the answer out of
-``thinking_steps``. A worker exception, a join timeout, an exhausted token budget and a genuinely
-empty completion all leave that text empty, so without these helpers they collapse into one
+The draft generators dispatch one blocking ``predict_sio_llm`` call and read the answer out of the
+result it returns. A worker exception, a join timeout, an exhausted token budget and a genuinely
+empty completion all leave that answer empty, so without these helpers they collapse into one
 indistinguishable "empty response" string.
 """
 
@@ -186,13 +186,28 @@ def finish_reasons(result) -> list:
 def hit_token_limit(result) -> bool:
     """Whether any part of the generation ran out of budget.
 
-    Authoritative where brace-counting is not: a truncated draft often ends mid-prose with its
-    braces balanced. *Any* step counts, not the last one — the worker continues after a cut-off,
-    so a run that lost its JSON to the budget still ends ``stop`` (observed: ``length, length,
-    stop`` for one skill draft at ``max_tokens=400``). Only consulted once the draft is missing or
-    unparseable, so a run that recovered and produced valid JSON never reaches it.
+    *Any* step counts, because this is only asked when the run produced no readable text at all:
+    with nothing to show for it, a step that stopped on ``length`` is the explanation. A run that
+    produced an answer must be judged by :func:`answer_was_cut_short` instead, where a ``length``
+    step means something quite different.
     """
     return "length" in finish_reasons(result)
+
+
+def answer_was_cut_short(result, answer: str) -> bool:
+    """Whether output was lost, as opposed to merely assembled from several calls.
+
+    ``length, length, stop`` is the ordinary signature of a *complete* answer: the SDK continues a
+    completion that hit the output limit and merges the rounds. Only the final round matters, and
+    when the model reported one, it settles the question — ``is_truncated_json`` counts braces
+    without regard for strings, so a draft whose Markdown contains a ``{`` reads as unbalanced and
+    would send a caller after ``max_tokens`` when the real fault was in the content.
+    """
+    reasons = finish_reasons(result)
+    last_reason = reasons[-1] if reasons else None
+    if last_reason is not None:
+        return last_reason == "length"
+    return is_truncated_json(answer)
 
 
 def _already_states(curated: str, detail: str) -> bool:
@@ -249,11 +264,41 @@ def describe_predict_failure(result) -> Optional[str]:
 
 
 def extract_draft_text(result) -> str:
-    """Return the last non-empty assistant text from a blocking predict result."""
+    """Return the last non-empty assistant text from the run's *trace*.
+
+    Kept only as :func:`extract_answer`'s fallback — see there for why a trace step is not the
+    answer.
+    """
     return next(
         (step["text"] for step in reversed(_thinking_steps(result)) if step.get("text")),
         "",
     )
+
+
+def extract_answer(result) -> str:
+    """Return the model's answer, preferring the result channel over the trace channel.
+
+    ``thinking_steps`` holds one entry per LLM call. When a completion stops on ``length`` the SDK
+    asks for the rest and merges the rounds outside any callback, so the merged answer is never
+    traced and the last step is a fragment starting mid-sentence. ``chat_history`` is where that
+    merged text reaches a blocking caller; the trace is the fallback for a worker that omits it.
+    """
+    task_result = result.get("result") if isinstance(result, dict) else None
+    history = task_result.get("chat_history") if isinstance(task_result, dict) else None
+    if isinstance(history, list):
+        answer = next(
+            (
+                entry["content"] for entry in reversed(history)
+                if isinstance(entry, dict)
+                and entry.get("role") == "assistant"
+                and isinstance(entry.get("content"), str)
+                and entry["content"].strip()
+            ),
+            None,
+        )
+        if answer:
+            return answer
+    return extract_draft_text(result)
 
 
 def describe_parse_failure(raw_text: str, candidate: str, error, result) -> str:

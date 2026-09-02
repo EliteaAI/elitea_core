@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import re
 from functools import wraps
 from typing import Callable, List, Set, Generator, Optional
@@ -278,12 +279,21 @@ def parse_ids_filter(ids: str | list | None, max_ids: int = 100) -> list[int]:
 
 
 def extract_json_from_text(text: str) -> str:
-    """Extract a JSON object from text, stripping markdown fences if present."""
+    """Extract a JSON object from text, stripping markdown fences if present.
+
+    The object ends where the decoder says it ends, not at the last brace: a model signing off with
+    "use {placeholders} as needed" would otherwise drag that sentence in and fail as ``Extra data``.
+    A slice that will not decode falls back to the widest span, so callers still have something to
+    report their own parse error against.
+    """
     match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     if match:
         return match.group(1)
     start = text.find("{")
-    end = text.rfind("}") + 1
-    if start != -1 and end > start:
-        return text[start:end]
-    return text
+    if start == -1:
+        return text
+    try:
+        _, end = json.JSONDecoder().raw_decode(text, start)
+    except ValueError:
+        end = text.rfind("}") + 1
+    return text[start:end] if end > start else text

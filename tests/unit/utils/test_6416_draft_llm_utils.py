@@ -367,6 +367,91 @@ def test_non_dict_result_is_reported(draft_llm_utils):
     assert draft_llm_utils.describe_predict_failure(None)
 
 
+def _merged(answer, *reasons):
+    """A worker result carrying both channels: a merged answer and the trace of the calls."""
+    return {'result': {
+        'chat_history': [
+            {'role': 'user', 'content': 'make me a skill'},
+            {'role': 'assistant', 'content': answer},
+        ],
+        'thinking_steps': [
+            {'text': f'fragment {i}', 'generation_info': {'finish_reason': reason}}
+            for i, reason in enumerate(reasons)
+        ],
+    }}
+
+
+DRAFT = '{"name": "release-notes", "description": "d", "instructions": "# T"}'
+
+
+def test_the_answer_is_read_from_the_result_channel(draft_llm_utils):
+    """The trace holds continuation fragments; only chat_history holds the merged answer."""
+    assert draft_llm_utils.extract_answer(_merged(DRAFT, 'length', 'length', 'stop')) == DRAFT
+
+
+def test_a_worker_that_omits_chat_history_falls_back_to_the_trace(draft_llm_utils):
+    result = {'result': {'thinking_steps': [{'text': DRAFT, 'generation_info': {'finish_reason': 'stop'}}]}}
+
+    assert draft_llm_utils.extract_answer(result) == DRAFT
+
+
+@pytest.mark.parametrize('history', [
+    [],
+    [{'role': 'user', 'content': 'make me a skill'}],
+    [{'role': 'assistant', 'content': ''}],
+    [{'role': 'assistant', 'content': '   '}],
+    [{'role': 'assistant', 'content': {'not': 'a string'}}],
+    ['not a dict'],
+])
+def test_an_unusable_result_channel_falls_back_to_the_trace(draft_llm_utils, history):
+    result = {'result': {'chat_history': history, 'thinking_steps': [{'text': DRAFT}]}}
+
+    assert draft_llm_utils.extract_answer(result) == DRAFT
+
+
+@pytest.mark.parametrize('result', [{'task_id': 'abc'}, {'result': None}, None])
+def test_extract_answer_survives_a_resultless_envelope(draft_llm_utils, result):
+    assert draft_llm_utils.extract_answer(result) == ''
+
+
+def test_a_continued_run_is_not_reported_as_truncated(draft_llm_utils):
+    """The whole point: length,length,stop is a complete answer, not a lost one."""
+    result = _merged(DRAFT, 'length', 'length', 'stop')
+
+    assert draft_llm_utils.answer_was_cut_short(result, DRAFT) is False
+    # the old predicate is still right for its own question - nothing was produced at all
+    assert draft_llm_utils.hit_token_limit(result) is True
+
+
+def test_a_run_whose_last_round_stopped_short_is_truncated(draft_llm_utils):
+    assert draft_llm_utils.answer_was_cut_short(_merged(DRAFT, 'length', 'length'), DRAFT) is True
+
+
+def test_a_model_that_reported_stop_is_believed_over_brace_counting(draft_llm_utils):
+    """Markdown instructions legitimately contain braces, so an unbalanced count is not evidence
+    of truncation once the model has said it finished."""
+    braces_in_markdown = '{"name": "x", "instructions": "Use {placeholder} in your template"}'
+
+    assert draft_llm_utils.answer_was_cut_short(
+        _merged(braces_in_markdown, 'length', 'stop'), braces_in_markdown
+    ) is False
+
+
+def test_a_clean_run_is_not_truncated(draft_llm_utils):
+    assert draft_llm_utils.answer_was_cut_short(_merged(DRAFT, 'stop'), DRAFT) is False
+
+
+@pytest.mark.parametrize('result', [
+    {'task_id': 'abc'},
+    {'result': {'thinking_steps': []}},
+    # a step the worker gave no generation_info for reports None, which is not a verdict
+    {'result': {'thinking_steps': [{'text': 'x'}]}},
+])
+def test_an_unknown_finish_reason_falls_back_to_the_answer_s_shape(draft_llm_utils, result):
+    assert draft_llm_utils.answer_was_cut_short(result, DRAFT) is False
+    assert draft_llm_utils.answer_was_cut_short(result, '{"a": [1') is True
+
+
 def _decode_error(candidate):
     try:
         json.loads(candidate)
