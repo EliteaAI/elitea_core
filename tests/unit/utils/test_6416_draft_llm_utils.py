@@ -1,0 +1,363 @@
+"""Pins the failure reporting the AI draft generators depend on (#6416, #6415).
+
+Re-broken by rejecting a model that only exists in the public project, by blocking generation
+when the availability lookup itself fails, or by flattening a worker failure back into a single
+generic string.
+"""
+import pathlib
+import sys
+import types
+
+import pytest
+
+TESTS_DIR = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(TESTS_DIR))
+
+from fixtures.helpers import load_utils_module
+
+PROJECT = 2
+PUBLIC_PROJECT = 1
+
+TRACEBACK = (
+    'Traceback (most recent call last):\n'
+    '  File "/data/methods/indexer_predict_agent.py", line 520, in predict\n'
+    '    response = agent.invoke(...)\n'
+    'litellm.exceptions.BadRequestError: LLM Provider NOT provided for global.anthropic.claude\n'
+)
+
+
+@pytest.fixture(scope='module')
+def draft_llm_utils():
+    utils_stub = types.ModuleType('utils')
+    utils_stub.get_public_project_id = lambda: PUBLIC_PROJECT
+
+    return load_utils_module(
+        TESTS_DIR.parent / 'utils',
+        'draft_llm_utils',
+        extra_stubs={'plugins.elitea_core.utils.utils': utils_stub},
+    )
+
+
+@pytest.fixture
+def available_models(draft_llm_utils, monkeypatch):
+    def _configure(available=None, fails=False, resolvable=(), unreadable=()):
+        class _Caller:
+            def timeout(self, _seconds):
+                return self
+
+            def configurations_get_available_models(self, project_id, section='llm', include_shared=True):
+                if fails:
+                    raise RuntimeError('rpc unavailable')
+                return available
+
+            def configurations_get_configuration_model(self, project_id, model_name):
+                if project_id in unreadable:
+                    raise RuntimeError(f'no schema for project {project_id}')
+                return {'name': model_name} if (project_id, model_name) in resolvable else {}
+
+        monkeypatch.setattr(
+            draft_llm_utils,
+            'rpc_tools',
+            types.SimpleNamespace(
+                RpcMixin=lambda: types.SimpleNamespace(rpc=_Caller())
+            ),
+        )
+
+    return _configure
+
+
+DEFAULT_MODEL_NAME = 'gpt-5-mini'
+
+PRIVATE_AND_SHARED = {
+    (PROJECT, DEFAULT_MODEL_NAME): {'supports_reasoning': False},
+    (PUBLIC_PROJECT, 'claude-sonnet-5'): {'supports_reasoning': True, 'shared': True},
+}
+
+
+def test_model_in_own_project_passes(draft_llm_utils, available_models):
+    available_models(PRIVATE_AND_SHARED)
+
+    assert draft_llm_utils.check_model_availability(PROJECT, 'gpt-5-mini') is None
+
+
+def test_public_shared_model_passes_without_model_project_id(draft_llm_utils, available_models):
+    """The LLM proxy falls back to the public project, so this call succeeds today."""
+    available_models(PRIVATE_AND_SHARED)
+
+    assert draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5') is None
+
+
+def test_exact_project_and_model_pair_passes(draft_llm_utils, available_models):
+    available_models(PRIVATE_AND_SHARED)
+
+    assert draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5', PUBLIC_PROJECT) is None
+
+
+def test_unknown_model_names_itself_and_the_alternatives(draft_llm_utils, available_models):
+    available_models(PRIVATE_AND_SHARED)
+
+    reason = draft_llm_utils.check_model_availability(PROJECT, 'nonexistent-model-xyz-999')
+
+    assert 'nonexistent-model-xyz-999' in reason
+    assert 'not available' in reason
+    assert 'gpt-5-mini' in reason
+
+
+def test_wrong_model_project_id_points_at_the_owning_project(draft_llm_utils, available_models):
+    available_models(PRIVATE_AND_SHARED)
+
+    reason = draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5', PROJECT)
+
+    assert f'available in project {PUBLIC_PROJECT}' in reason
+    assert 'model_project_id' in reason
+
+
+def test_a_third_project_that_really_has_the_model_is_accepted(draft_llm_utils, available_models):
+    """The available set says nothing about a project that is neither the caller's nor public."""
+    available_models(PRIVATE_AND_SHARED, resolvable={(7, 'partner-model')})
+
+    assert draft_llm_utils.check_model_availability(PROJECT, 'partner-model', 7) is None
+
+
+def test_model_project_id_is_verified_before_being_blamed(draft_llm_utils, available_models):
+    """A name the caller's project also has must not make a valid model_project_id look wrong."""
+    available_models(PRIVATE_AND_SHARED, resolvable={(7, DEFAULT_MODEL_NAME)})
+
+    assert draft_llm_utils.check_model_availability(PROJECT, DEFAULT_MODEL_NAME, 7) is None
+
+
+def test_a_model_owned_by_another_project_names_that_project(draft_llm_utils, available_models):
+    available_models(PRIVATE_AND_SHARED, resolvable=())
+
+    reason = draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5', 999)
+
+    assert f'available in project {PUBLIC_PROJECT}' in reason
+
+
+def test_an_unopenable_model_project_id_is_named_not_waved_through(draft_llm_utils, available_models):
+    """A project with no schema throws; that is a bad argument, and it is fatal further down."""
+    available_models(PRIVATE_AND_SHARED, unreadable={999})
+
+    reason = draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5', 999)
+
+    assert 'not configured in project 999' in reason
+
+
+def test_an_unreadable_public_project_does_not_cost_a_working_model(draft_llm_utils, available_models):
+    available_models(PRIVATE_AND_SHARED, unreadable={PUBLIC_PROJECT})
+
+    assert draft_llm_utils.check_model_availability(PROJECT, 'externally-managed') is None
+
+
+def test_an_unresolvable_public_project_id_does_not_cost_a_working_model(draft_llm_utils,
+                                                                         available_models,
+                                                                         monkeypatch):
+    """No public project id is an unanswered question, not a definitive absence."""
+    available_models(PRIVATE_AND_SHARED, resolvable=())
+    monkeypatch.setattr(draft_llm_utils, '_public_project_id', lambda: None)
+
+    assert draft_llm_utils.check_model_availability(PROJECT, 'externally-managed') is None
+
+
+def test_unshared_public_model_is_not_rejected(draft_llm_utils, available_models):
+    """_map_model_name falls back to the public project, and that project's non-shared rows are
+    absent from the available set."""
+    available_models(PRIVATE_AND_SHARED, resolvable={(PUBLIC_PROJECT, 'unshared-public-model')})
+
+    assert draft_llm_utils.check_model_availability(PROJECT, 'unshared-public-model') is None
+
+
+def test_lookup_failure_does_not_block_generation(draft_llm_utils, available_models):
+    available_models(fails=True)
+
+    assert draft_llm_utils.check_model_availability(PROJECT, 'anything') is None
+
+
+def test_model_list_is_capped(draft_llm_utils, available_models):
+    available_models({(PROJECT, f'model-{i:02d}'): {} for i in range(25)})
+
+    reason = draft_llm_utils.check_model_availability(PROJECT, 'missing')
+
+    assert '+5 more' in reason
+
+
+def test_project_without_models_says_so(draft_llm_utils, available_models):
+    available_models({})
+
+    reason = draft_llm_utils.check_model_availability(PROJECT, 'gpt-5-mini')
+
+    assert 'No LLM models are configured' in reason
+
+
+def test_successful_result_reports_no_failure(draft_llm_utils):
+    result = {'result': {'thinking_steps': [{'text': '{"name": "x"}'}]}}
+
+    assert draft_llm_utils.describe_predict_failure(result) is None
+
+
+def test_join_timeout_is_a_504_not_a_failed_generation(draft_llm_utils):
+    """The model took too long; that is not the same condition as the model failing."""
+    body, status = draft_llm_utils.timeout_response({'task_id': 'abc'}, 60)
+
+    assert status == 504
+    # a sentence, like every other error these endpoints return - the draft modals render `error`
+    assert 'timed out after 60s' in body['error']
+    # an identical retry would take just as long, and cancellation is best-effort
+    assert 'try again' not in body['error'].lower()
+
+
+def test_a_timeout_envelope_reaching_the_failure_path_is_not_described(draft_llm_utils):
+    assert draft_llm_utils.describe_predict_failure({'task_id': 'abc'}) is None
+
+
+def test_worker_message_leads_and_the_exception_line_qualifies_it(draft_llm_utils):
+    """human_readable is often the catch-all, so the exception line must survive alongside it."""
+    result = {'result': {
+        'chat_history': [],
+        'error': TRACEBACK,
+        'human_readable': 'An unexpected error occurred while processing your request',
+    }}
+
+    reason = draft_llm_utils.describe_predict_failure(result)
+
+    assert 'An unexpected error occurred' in reason
+    assert 'LLM Provider NOT provided' in reason
+    assert 'Traceback' not in reason
+
+
+def test_exception_line_is_not_repeated_when_already_quoted(draft_llm_utils):
+    result = {'result': {
+        'error': 'ValueError: bad model',
+        'human_readable': 'Configuration problem: ValueError: bad model',
+    }}
+
+    reason = draft_llm_utils.describe_predict_failure(result)
+
+    assert reason.count('ValueError: bad model') == 1
+
+
+def test_traceback_falls_back_to_its_last_line(draft_llm_utils):
+    reason = draft_llm_utils.describe_predict_failure({'result': {'error': TRACEBACK}})
+
+    assert 'LLM Provider NOT provided' in reason
+    assert 'indexer_predict_agent.py' not in reason
+
+
+def test_long_error_line_is_truncated(draft_llm_utils):
+    reason = draft_llm_utils.describe_predict_failure({'result': {'error': 'x' * 900}})
+
+    assert reason.endswith('...')
+    assert len(reason) < 400
+
+
+def test_output_cut_off_by_max_tokens_says_so(draft_llm_utils):
+    """A budget too small for any output leaves empty steps that all stopped on 'length'."""
+    result = {'result': {'error': None, 'thinking_steps': [
+        {'text': '', 'generation_info': {'finish_reason': 'length'}},
+        {'text': '', 'generation_info': {'finish_reason': 'length'}},
+    ]}}
+
+    reason = draft_llm_utils.describe_predict_failure(result)
+
+    assert 'cut off' in reason
+    assert 'max_tokens' in reason
+
+
+def test_any_step_reporting_the_token_limit_counts(draft_llm_utils):
+    """Observed shape: the worker continues after a cut-off, so the run still ends 'stop'."""
+    result = {'result': {'thinking_steps': [
+        {'text': '', 'midturn_injection_id': 'inj-1'},
+        {'text': '', 'generation_info': {'finish_reason': 'length'}},
+        {'text': '', 'generation_info': {'finish_reason': 'stop'}},
+    ]}}
+
+    assert 'cut off' in draft_llm_utils.describe_predict_failure(result)
+
+
+def test_hit_token_limit_is_false_when_nothing_was_cut_off(draft_llm_utils):
+    assert draft_llm_utils.hit_token_limit(
+        {'result': {'thinking_steps': [{'generation_info': {'finish_reason': 'stop'}}]}}
+    ) is False
+    assert draft_llm_utils.hit_token_limit({'task_id': 'abc'}) is False
+    assert draft_llm_utils.hit_token_limit(None) is False
+
+
+def test_normally_finished_empty_steps_are_not_a_budget_problem(draft_llm_utils):
+    result = {'result': {'thinking_steps': [{'text': '', 'generation_info': {'finish_reason': 'stop'}}]}}
+
+    assert draft_llm_utils.describe_predict_failure(result) is None
+
+
+@pytest.mark.parametrize('result, expected', [
+    ({'result': {'thinking_steps': [{'text': 'first'}, {'text': 'last'}]}}, 'last'),
+    ({'result': {'thinking_steps': [{'text': 'kept'}, {'text': ''}]}}, 'kept'),
+    ({'result': {'thinking_steps': []}}, ''),
+    ({'result': None}, ''),
+    ({'task_id': 'abc'}, ''),
+    (None, ''),
+])
+def test_extract_draft_text(draft_llm_utils, result, expected):
+    assert draft_llm_utils.extract_draft_text(result) == expected
+
+
+def test_specific_worker_message_is_not_padded_with_the_exception(draft_llm_utils):
+    """The worker's specific branches interpolate the exception; repeating it adds only noise."""
+    result = {'result': {
+        'error': 'Traceback…\nAuthenticationError: model access denied for team',
+        'human_readable': (
+            'Authentication error with the AI provider: model access denied for team. '
+            'Please check your model configuration and API credentials.'
+        ),
+    }}
+
+    reason = draft_llm_utils.describe_predict_failure(result)
+
+    assert 'AuthenticationError' not in reason
+    assert reason.endswith('API credentials.')
+
+
+def test_top_level_envelope_prefers_its_message(draft_llm_utils):
+    result = {'error': 'some_platform_state', 'message': 'The platform said no.'}
+
+    reason = draft_llm_utils.describe_predict_failure(result)
+
+    assert reason == 'LLM generation failed: The platform said no.'
+
+
+def test_maintenance_is_named_by_the_generic_path(draft_llm_utils):
+    """Not special-cased: the platform's envelope carries a sentence, and that is what surfaces."""
+    envelope = {'error': 'maintenance_in_progress', 'message': 'The platform is in maintenance mode.'}
+
+    assert draft_llm_utils.timeout_response(envelope, 60) is None
+    assert 'maintenance mode' in draft_llm_utils.describe_predict_failure(envelope)
+
+
+def test_timeout_response_ignores_everything_else(draft_llm_utils):
+    assert draft_llm_utils.timeout_response({'result': {'thinking_steps': []}}, 60) is None
+    assert draft_llm_utils.timeout_response({'error': 'temporarily_unavailable'}, 60) is None
+    assert draft_llm_utils.timeout_response(None, 60) is None
+
+
+@pytest.mark.parametrize('settings, field, chosen', [
+    (None, 'max_tokens', False),
+    (types.SimpleNamespace(model_fields_set=set(), max_tokens=2048), 'max_tokens', False),
+    (types.SimpleNamespace(model_fields_set={'max_tokens'}, max_tokens=None), 'max_tokens', False),
+    (types.SimpleNamespace(model_fields_set={'max_tokens'}, max_tokens=512), 'max_tokens', True),
+    (types.SimpleNamespace(model_fields_set={'temperature'}, temperature=0), 'temperature', True),
+])
+def test_caller_chose(draft_llm_utils, settings, field, chosen):
+    assert draft_llm_utils.caller_chose(settings, field) is chosen
+
+
+def test_non_dict_result_is_reported(draft_llm_utils):
+    assert draft_llm_utils.describe_predict_failure(None)
+
+
+@pytest.mark.parametrize('raw_text, truncated', [
+    ('{"a": 1}', False),
+    ('{"a": {"b": 1}', True),
+    ('{"a": [1, 2', True),
+    ('prose {"a": 1} more prose', False),
+])
+def test_is_truncated_json(draft_llm_utils, raw_text, truncated):
+    assert draft_llm_utils.is_truncated_json(raw_text) is truncated

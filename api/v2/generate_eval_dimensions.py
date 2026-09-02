@@ -35,6 +35,15 @@ from ...models.pd.generate_eval_dimensions import (
     GenerateEvalDimensionsResponse,
 )
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.draft_llm_utils import (
+    caller_chose,
+    check_model_availability,
+    describe_predict_failure,
+    extract_draft_text,
+    hit_token_limit,
+    is_truncated_json,
+    timeout_response,
+)
 from ...utils.predict_utils import PredictPayloadError
 from ...utils.exceptions import PoolSaturationError
 from ...utils.generate_application_utils import (
@@ -47,6 +56,9 @@ from ...utils.evaluation_library_utils import list_dimensions
 from ...utils.utils import extract_json_from_text
 
 _SERVICE_PROMPT_KEY = "generate_eval_dimensions"
+_AWAIT_TASK_TIMEOUT = 60
+_DEFAULT_MAX_TOKENS = 4096
+_DEFAULT_TEMPERATURE = 0.3
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -78,8 +90,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         user_id = auth.current_user().get("id")
 
+        # 2048 is below this endpoint's output size and 0.7 is too loose for JSON-only output, so
+        # neither pydantic default may survive into the request
+        caller_set_max_tokens = caller_chose(req.llm_settings, "max_tokens")
+        caller_set_temperature = caller_chose(req.llm_settings, "temperature")
+
         if req.llm_settings and req.llm_settings.model_name:
             llm_settings = req.llm_settings.model_dump(exclude_none=True)
+            unavailable = check_model_availability(
+                project_id, llm_settings["model_name"], llm_settings.get("model_project_id")
+            )
+            if unavailable:
+                return {"error": unavailable}, 400
         else:
             try:
                 llm_settings = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_default_model(
@@ -88,17 +110,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 if not llm_settings or not llm_settings.get("model_name"):
                     return {"error": "No default LLM model configured for this project"}, 400
                 if req.llm_settings:
-                    overrides = req.llm_settings.model_dump(exclude_none=True, exclude={"model_name"})
+                    # model_project_id only qualifies a model_name; with none supplied there is
+                    # nothing for it to qualify, and the default model brings its own
+                    overrides = req.llm_settings.model_dump(
+                        exclude_none=True, exclude={"model_name", "model_project_id"}
+                    )
                     llm_settings.update(overrides)
             except Exception:
                 log.exception("generate_eval_dimensions: failed to get default model")
                 return {"error": "Failed to resolve project default LLM model"}, 400
 
-        # Applies on both the explicit-model and default-model paths — this endpoint's output
-        # (one JSON object with several fully-specified dimensions) is large enough to hit the
-        # truncation branch below if a caller supplies model_name without max_tokens.
-        llm_settings.setdefault("temperature", 0.3)
-        llm_settings.setdefault("max_tokens", 4096)
+        if not caller_set_temperature:
+            llm_settings["temperature"] = _DEFAULT_TEMPERATURE
+        if not caller_set_max_tokens:
+            llm_settings["max_tokens"] = _DEFAULT_MAX_TOKENS
 
         agent = fetch_application_instructions(project_id, req.application_id, req.version_id)
         if agent is None:
@@ -142,9 +167,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     "user_input": agent["instructions"],
                     "instructions": system_prompt,
                     "llm_settings": llm_settings,
-                    "await_task_timeout": 60,
+                    "await_task_timeout": _AWAIT_TASK_TIMEOUT,
                 },
-                await_task_timeout=60,
+                await_task_timeout=_AWAIT_TASK_TIMEOUT,
                 user_id=user_id,
                 skip_expansion=True,
             )
@@ -160,22 +185,25 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.exception("generate_eval_dimensions: LLM call failed")
             return {"error": "LLM generation failed"}, 500
 
-        task_result = result.get("result") or {}
-        thinking_steps = task_result.get("thinking_steps", []) if isinstance(task_result, dict) else []
-        raw_text = next(
-            (s["text"] for s in reversed(thinking_steps) if s.get("text")),
-            "",
-        )
+        timed_out = timeout_response(result, _AWAIT_TASK_TIMEOUT)
+        if timed_out:
+            return timed_out
+
+        raw_text = extract_draft_text(result)
         if not raw_text:
-            log.warning("generate_eval_dimensions: empty response, full result=%s", result)
-            return {"error": "LLM returned an empty response"}, 500
+            failure = describe_predict_failure(result)
+            log.warning(
+                "generate_eval_dimensions: no draft text; %s; full result=%s",
+                failure or "no error reported", result,
+            )
+            return {"error": failure or "LLM returned an empty response"}, 500
 
         try:
             extracted = extract_json_from_text(raw_text)
             parsed = json.loads(extracted)
         except json.JSONDecodeError as e:
             log.debug("generate_eval_dimensions: LLM output is not valid JSON: %s", raw_text[:500])
-            if raw_text.count('{') > raw_text.count('}') or raw_text.count('[') > raw_text.count(']'):
+            if hit_token_limit(result) or is_truncated_json(raw_text):
                 return {
                     "error": "LLM response was truncated. Increase max_tokens in llm_settings (recommended: 4096+)."
                 }, 422
