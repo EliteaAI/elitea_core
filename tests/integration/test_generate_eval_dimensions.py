@@ -115,9 +115,12 @@ def _install_package():
     from typing import Optional as _Optional
 
     class LLMSettingsRequest(_BaseModel):
+        # Mirrors models/pd/predict_llm.py — the defaults are the point: they arrive whether or
+        # not the caller asked for them
         model_name: _Optional[str] = None
-        temperature: _Optional[float] = None
-        max_tokens: _Optional[int] = None
+        model_project_id: _Optional[int] = None
+        temperature: _Optional[float] = 0.7
+        max_tokens: _Optional[int] = 2048
 
     predict_llm.LLMSettingsRequest = LLMSettingsRequest
 
@@ -169,6 +172,7 @@ def _install_package():
 
     utils_utils = types.ModuleType(f'{PKG}.utils.utils')
     utils_utils.extract_json_from_text = _extract_json_from_text
+    utils_utils.get_public_project_id = lambda: 1
 
     constants = types.ModuleType(f'{PKG}.utils.constants')
     constants.PROMPT_LIB_MODE = 'prompt_lib'
@@ -193,6 +197,12 @@ def _install_package():
 
         def configurations_get_default_model(self, project_id, section='llm'):
             return dict(default_model)
+
+        def configurations_get_available_models(self, project_id, section='llm', include_shared=True):
+            return {(project_id, default_model['model_name']): {}}
+
+        def configurations_get_configuration_model(self, project_id, model_name):
+            return {}
 
     class _RpcMixin:
         rpc = _RpcCaller()
@@ -247,6 +257,14 @@ def _install_package():
         'tools': tools,
     }.items():
         sys.modules[name] = mod
+
+    # Loaded for real (no relative imports of its own) — it owns this endpoint's failure reporting
+    draft_llm_utils_name = f'{PKG}.utils.draft_llm_utils'
+    draft_spec = importlib.util.spec_from_file_location(
+        draft_llm_utils_name, PLUGIN_ROOT / 'utils' / 'draft_llm_utils.py')
+    draft_module = importlib.util.module_from_spec(draft_spec)
+    sys.modules[draft_llm_utils_name] = draft_module
+    draft_spec.loader.exec_module(draft_module)
 
     full = f'{PKG}.api.v2.generate_eval_dimensions'
     spec = importlib.util.spec_from_file_location(
@@ -373,6 +391,80 @@ def test_empty_llm_response_returns_500(api):
 
     assert status == 500
     assert 'empty response' in payload['error']
+
+
+def test_unknown_model_is_rejected_before_the_llm_call(api):
+    module, *_rest = api
+    module.request.json = {'application_id': 1, 'llm_settings': {'model_name': 'nonexistent-xyz'}}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler()
+
+    payload, status = handler.post(1)
+
+    assert status == 400
+    assert 'nonexistent-xyz' in payload['error']
+    assert handler.module.calls == []
+
+
+def test_worker_failure_reports_the_real_reason(api):
+    module, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler(predict_result={'result': {
+        'chat_history': [],
+        'error': 'Traceback (most recent call last):\nBadRequestError: no such model',
+        'human_readable': 'An unexpected error occurred while processing your request',
+    }})
+
+    payload, status = handler.post(1)
+
+    assert status == 500
+    assert 'An unexpected error occurred' in payload['error']
+    assert 'BadRequestError: no such model' in payload['error']
+
+
+def test_caller_supplied_model_gets_the_full_token_budget(api):
+    """The pydantic defaults (2048 / 0.7) are wrong for a multi-dimension JSON-only draft."""
+    module, _generate_app_utils, _service_prompt_utils, default_model, _Request = api
+    module.request.json = {
+        'application_id': 1,
+        'llm_settings': {'model_name': default_model['model_name']},
+    }
+    handler = module.PromptLibAPI()
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(_VALID_DRAFT)))
+
+    _payload, _status = handler.post(1)
+
+    sent = handler.module.calls[0]['data']['llm_settings']
+    assert sent['max_tokens'] == 4096
+    assert sent['temperature'] == 0.3
+
+
+def test_explicit_llm_settings_values_are_respected(api):
+    module, _generate_app_utils, _service_prompt_utils, default_model, _Request = api
+    module.request.json = {
+        'application_id': 1,
+        'llm_settings': {'model_name': default_model['model_name'], 'temperature': 0.9, 'max_tokens': 512},
+    }
+    handler = module.PromptLibAPI()
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(_VALID_DRAFT)))
+
+    _payload, _status = handler.post(1)
+
+    sent = handler.module.calls[0]['data']['llm_settings']
+    assert sent['max_tokens'] == 512
+    assert sent['temperature'] == 0.9
+
+
+def test_default_model_path_also_pins_the_deterministic_temperature(api):
+    module, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(_VALID_DRAFT)))
+
+    _payload, _status = handler.post(1)
+
+    assert handler.module.calls[0]['data']['llm_settings']['temperature'] == 0.3
 
 
 def test_truncated_json_returns_422_with_truncation_hint(api):
