@@ -3,6 +3,7 @@ from tools import api_tools, config as c, auth, register_openapi
 from ...utils.skill_utils import (
     get_available_skills_for_agent,
     MAX_SKILLS_PER_AGENT,
+    SkillError,
 )
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -23,10 +24,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def get(self, project_id: int, app_version_id: int, **kwargs):
-        skills = get_available_skills_for_agent(
-            project_id=project_id,
-            entity_version_id=app_version_id,
-        )
+        try:
+            skills = get_available_skills_for_agent(
+                project_id=project_id,
+                entity_version_id=app_version_id,
+            )
+        except SkillError as exc:
+            return {"error": str(exc)}, exc.http_status
+
         return {
             'skills': skills,
             'max_skills': MAX_SKILLS_PER_AGENT,

@@ -105,6 +105,15 @@ class SkillCreateModel(SkillArgsForwardingModel):
             raise ValueError('Exactly 1 version must be provided when creating a skill')
         return value
 
+    @model_validator(mode='after')
+    def check_initial_version_is_base(self):
+        if self.versions[0].name != 'base':
+            raise ValueError(
+                "A skill's initial version must be named 'base'; "
+                'add further versions to the skill afterwards'
+            )
+        return self
+
 
 class SkillListModel(BaseModel):
     id: int
