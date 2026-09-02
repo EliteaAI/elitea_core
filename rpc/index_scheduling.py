@@ -16,7 +16,7 @@ from ..utils.application_tools import get_pending_index_run_heartbeat, get_sessi
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
 from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
-from ..utils.index_scheduling import resolve_credentials, handle_failed_index_schedule
+from ..utils.index_scheduling import resolve_credentials, handle_failed_index_schedule, index_log_context
 from ..utils.maintenance_gate import is_maintenance_active
 
 
@@ -47,6 +47,14 @@ class RPC:
         log.info(
             f"check_index_scheduling tick started at {datetime.now(UTC).isoformat()}"
         )
+        # Every per-schedule diagnostic below is debug-level, which is off in production, so
+        # a tick that silently stops part-way through the project list leaves no trace. These
+        # counters are reported once per tick at info level: 'projects' short of the total or a
+        # 'last_project' well below the highest project id is the starvation signal.
+        stats = {
+            'projects': 0, 'toolkits': 0, 'due': 0,
+            'dispatched': 0, 'failed': 0, 'last_project': None,
+        }
         try:
             yield_to_hub = make_yield_to_hub(self.context.web_runtime)
 
@@ -56,7 +64,11 @@ class RPC:
                 )
             ]
 
+            stats['total_projects'] = len(all_project_ids)
+
             for project_id in all_project_ids:
+                stats['projects'] += 1
+                stats['last_project'] = project_id
                 # Yield between projects so a long scheduler tick does not starve
                 # the gevent hub and stall request greenlets / EventNode.
                 yield_to_hub()
@@ -68,6 +80,7 @@ class RPC:
                     for toolkit in project_session.query(EliteATool).filter(
                         EliteATool.meta['indexes_meta'].isnot(None)
                     ).all():
+                        stats['toolkits'] += 1
                         # Cooperative yield per toolkit: parse_obj + local-inline
                         # scheduling_time_to_run RPC are pure Python and accumulate
                         # CPU time between the outer DB I/O yields.
@@ -76,14 +89,28 @@ class RPC:
                         # pgvector connect, dispatch), so bound the ambient tx here too.
                         end_ambient_transaction()
                         indexes_meta = toolkit.meta['indexes_meta']
-                        log.debug(f'Indexes meta: {indexes_meta}')
+                        # Names only, never the entry bodies: an f-string is built even when
+                        # debug is off, so dumping every index_configuration here cost ~3 KiB
+                        # of throwaway string per toolkit per minute and leaked credential
+                        # titles into the log.
+                        log.debug(
+                            f'[idx project={project_id} toolkit={toolkit.id}] '
+                            f'indexes: {sorted(indexes_meta)}'
+                        )
                         for index_meta_id, index_entry in indexes_meta.items():
                             yield_to_hub()
                             schedules = index_entry.get('schedules', {})
-                            log.debug(f'Schedules: {schedules}')
+                            # Owners only — a schedule body carries the credential title.
+                            log.debug(
+                                f'[idx project={project_id} toolkit={toolkit.id} '
+                                f'index={index_meta_id}] schedule owners: {sorted(schedules)}'
+                            )
                             for user_id, user_config in schedules.items():
                                 yield_to_hub()
                                 init_issue = None
+                                ctx = index_log_context(
+                                    project_id, toolkit.id, index_meta_id, user_id
+                                )
                                 # JSON serialises int keys as strings; team/shared schedules
                                 # are stored under user_id=-1 (see index_meta PATCH endpoint).
                                 is_team_schedule = str(user_id) == "-1"
@@ -95,10 +122,10 @@ class RPC:
                                 except Exception as e:
                                     # If schedule configuration is invalid, log error and skip this schedule
                                     log.error(
-                                        f"Invalid schedule configuration for project {project_id}, "
-                                        f"toolkit {toolkit.id} ({toolkit.type}), index_meta {index_meta_id}, "
-                                        f"user {user_id}: {e!r}"
+                                        f"{ctx} invalid schedule configuration for toolkit type "
+                                        f"'{toolkit.type}': {e!r}"
                                     )
+                                    stats['failed'] += 1
                                     continue
 
                                 # Inline cron evaluation: avoid an RPC round-trip
@@ -109,60 +136,91 @@ class RPC:
                                     schedule_model.timezone,
                                 )
                                 log.debug(
-                                    f'Should trigger by time: {should_trigger_by_time}, {index_meta_id}, '
-                                    f'user {user_id} in project {project_id}, toolkit {toolkit.type} {toolkit.id}'
+                                    f'{ctx} should trigger by time: {should_trigger_by_time} '
+                                    f'(toolkit type {toolkit.type})'
                                 )
 
                                 if not should_trigger_by_time:
                                     continue
 
-                                # Start with a copy of toolkit settings
-                                updated_settings = deepcopy(toolkit.settings)
+                                stats['due'] += 1
 
-                                # Apply user-provided credentials if present
-                                should_trigger_by_credentials = resolve_credentials(
-                                    project_settings=updated_settings,
-                                    toolkit_type=toolkit.type,
-                                    user_config=user_config,
-                                    project_id=project_id,
-                                    is_team_schedule=is_team_schedule,
-                                    creator_id=creator_id,
-                                )
+                                # Settings resolution reaches into other projects' vaults and
+                                # configurations, so it can raise for reasons specific to this one
+                                # schedule. The tick walks every project in one sequential pass,
+                                # so an escape here silently starves every later project.
+                                try:
+                                    # Start with a copy of toolkit settings
+                                    updated_settings = deepcopy(toolkit.settings)
 
-                                if not init_issue and not should_trigger_by_credentials:
-                                    init_issue = "toolkit credentials resolving issue"
-
-                                user_token = get_system_user_token(project_id)
-                                if not init_issue and not user_token:
-                                    init_issue = "missing valid user token"
-
-                                if init_issue:
-                                    handle_failed_index_schedule(
-                                        project_id, updated_settings, creator_id, toolkit,
-                                        index_meta_id, init_issue,
-                                        expand_user_id=creator_id,
+                                    # Apply user-provided credentials if present
+                                    credentials_ok, credentials_issue = resolve_credentials(
+                                        project_settings=updated_settings,
+                                        toolkit_type=toolkit.type,
+                                        user_config=user_config,
+                                        project_id=project_id,
+                                        is_team_schedule=is_team_schedule,
+                                        creator_id=creator_id,
+                                        toolkit_id=toolkit.id,
+                                        index_name=index_meta_id,
+                                        user_id=user_id,
                                     )
+
+                                    # The specific reason, not a generic label: init_issue is
+                                    # written to the index history and shown to whoever owns
+                                    # the schedule, and "missing" vs "not found" vs "lookup
+                                    # failed" need different actions from them.
+                                    if not init_issue and not credentials_ok:
+                                        init_issue = credentials_issue
+
+                                    user_token = get_system_user_token(project_id)
+                                    if not init_issue and not user_token:
+                                        init_issue = "missing valid user token"
+
+                                    if init_issue:
+                                        handle_failed_index_schedule(
+                                            project_id, updated_settings, creator_id, toolkit,
+                                            index_meta_id, init_issue,
+                                            expand_user_id=creator_id,
+                                        )
+                                        stats['failed'] += 1
+                                        continue
+
+                                    # Expand the updated settings. For team schedules (user_id=-1)
+                                    # use the schedule creator to avoid get_personal_project_id(-1),
+                                    # which raises when any nested config is private=True.
+                                    # int(): schedules are keyed by user id in JSON, so user_id
+                                    # is a string here, and configurations_expand feeds it to
+                                    # get_personal_project_id which needs a real int.
+                                    expand_user_id = creator_id if is_team_schedule else int(user_id)
+                                    settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
+                                        project_id=project_id,
+                                        settings=updated_settings,
+                                        user_id=expand_user_id,
+                                        unsecret=True
+                                    )
+                                    connection_string = (settings_expanded.get('pgvector_configuration') or {}).get(
+                                        'connection_string'
+                                    )
+                                except Exception as e:
+                                    # exception(), not error(): these come from vault reads and
+                                    # cross-project config expansion, where the repr alone does
+                                    # not say which nested call failed.
+                                    log.exception(
+                                        f"{ctx} failed to resolve settings for scheduled indexing "
+                                        f"of toolkit type '{toolkit.type}': {e!r}"
+                                    )
+                                    stats['failed'] += 1
                                     continue
 
-                                # Expand the updated settings. For team schedules (user_id=-1)
-                                # use the schedule creator to avoid get_personal_project_id(-1),
-                                # which raises when any nested config is private=True.
-                                expand_user_id = creator_id if is_team_schedule else user_id
-                                settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
-                                    project_id=project_id,
-                                    settings=updated_settings,
-                                    user_id=expand_user_id,
-                                    unsecret=True
-                                )
-                                connection_string = settings_expanded.get('pgvector_configuration').get('connection_string')
                                 if not connection_string:
-                                    log.warning(f"Skipping indexing for toolkit {toolkit.id}, "
-                                                f"index {index_meta_id}, user {user_id} "
-                                                f"in project {project_id} due to missing connection string")
+                                    log.warning(
+                                        f"{ctx} skipping indexing due to missing connection string"
+                                    )
+                                    stats['failed'] += 1
                                     continue
 
-                                log.debug(f"Checking index_meta for toolkit {toolkit.id}, "
-                                          f"index {index_meta_id}, user {user_id} in project {project_id}")
+                                log.debug(f"{ctx} checking index_meta")
 
                                 try:
                                     with get_session_for_schema(connection_string, str(toolkit.id)) as session:
@@ -175,7 +233,8 @@ class RPC:
                                         ).first()
 
                                         if not index:
-                                            log.warning(f"Index {index_meta_id} not found in database")
+                                            log.warning(f"{ctx} index not found in database")
+                                            stats['failed'] += 1
                                             continue
 
                                         running_state = index.cmetadata.get('state')
@@ -216,9 +275,8 @@ class RPC:
                                                 )
                                             if stale_retry:
                                                 log.warning(
-                                                    f"check_index_scheduling: retrying stale in_progress index "
-                                                    f"{index_meta_id} (toolkit {toolkit.id}, project {project_id}): "
-                                                    f"no update since updated_on="
+                                                    f"{ctx} retrying stale in_progress index: no update "
+                                                    f"since updated_on="
                                                     f"{index.cmetadata.get('updated_on')}, "
                                                     f"timeout={task_disconnected_timeout}s"
                                                 )
@@ -233,23 +291,20 @@ class RPC:
                                                         self.task_node.stop_task(stale_task_id)
                                                     except Exception as stop_error:
                                                         log.warning(
-                                                            f"check_index_scheduling: could not stop stale task "
+                                                            f"{ctx} could not stop stale task "
                                                             f"{stale_task_id} before retry: {stop_error}"
                                                         )
                                             else:
                                                 log.debug(
-                                                    f"check_index_scheduling: index {index_meta_id} "
-                                                    f"(toolkit {toolkit.id}, project {project_id}) is "
-                                                    f"in_progress and fresh, skipping"
+                                                    f"{ctx} in_progress and fresh, skipping"
                                                 )
 
                                         if should_trigger_scheduled_index(running_state, stale_retry):
                                             trigger_started = time.monotonic()
                                             log.info(
-                                                f"Index trigger started at {datetime.now(UTC).isoformat()} "
-                                                f"for toolkit {toolkit.id}, index {index_meta_id}, "
-                                                f"user {user_id}, project {project_id}, "
-                                                f"cron '{user_config.get('cron')}'"
+                                                f"{ctx} index trigger started at "
+                                                f"{datetime.now(UTC).isoformat()} for toolkit type "
+                                                f"'{toolkit.type}', cron '{user_config.get('cron')}'"
                                             )
 
                                             toolkit_config = {
@@ -275,6 +330,7 @@ class RPC:
                                                 None,
                                                 initiator=InitiatorType.schedule
                                             )
+                                            stats['dispatched'] += 1
 
                                             # Update last_run timestamp in toolkit meta.
                                             # Re-read the row to avoid clobbering a concurrent deletion
@@ -289,8 +345,8 @@ class RPC:
                                             )
                                             if user_id not in live_schedules:
                                                 log.info(
-                                                    f"Schedule for user {user_id} on {index_meta_id} "
-                                                    f"was deleted mid-tick, skipping last_run update"
+                                                    f"{ctx} schedule was deleted mid-tick, "
+                                                    f"skipping last_run update"
                                                 )
                                             else:
                                                 toolkit.meta['indexes_meta'][index_meta_id]['schedules'][user_id]['last_run'] = current_time
@@ -298,17 +354,27 @@ class RPC:
                                                 project_session.commit()
 
                                             log.info(
-                                                f"Index trigger finished at {current_time} "
-                                                f"for toolkit {toolkit.id}, index {index_meta_id}, "
-                                                f"user {user_id}, project {project_id} "
+                                                f"{ctx} index trigger finished at {current_time} "
                                                 f"(dispatched in {time.monotonic() - trigger_started:.3f}s)"
                                             )
                                 except Exception as e:
-                                    log.error(f"Error occurred while scheduled indexing for user {user_id}: {e}")
+                                    # Catch-all around the pgvector connect, the staleness
+                                    # checks and the dispatch: the frame that raised is the
+                                    # only thing that distinguishes them, so keep the traceback.
+                                    log.exception(f"{ctx} error occurred while scheduled indexing: {e!r}")
+                                    stats['failed'] += 1
+            return None
+        except Exception as e:
+            # Projects are walked in one sequential pass, so an escape from the loop leaves
+            # every project after the failing one unscanned. Never let that be silent.
+            log.exception(f"check_index_scheduling tick aborted before scanning all projects: {e!r}")
             return None
         finally:
             log.info(
                 f"check_index_scheduling tick finished at {datetime.now(UTC).isoformat()} "
-                f"(total {time.monotonic() - tick_started:.3f}s)"
+                f"(total {time.monotonic() - tick_started:.3f}s): "
+                f"projects={stats['projects']}/{stats.get('total_projects', '?')} "
+                f"last_project={stats['last_project']} toolkits={stats['toolkits']} "
+                f"due={stats['due']} dispatched={stats['dispatched']} failed={stats['failed']}"
             )
             _check_index_scheduling_lock.release()

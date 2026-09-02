@@ -136,7 +136,7 @@ class TestPrivateCredentialResolution:
         rpc = install_rpc(FakeRpc(personal_configs={(CREATOR, "LFAADOWikiPrivateCreds"): dict(PRIVATE_CONFIG)}))
         settings = _settings()
 
-        ok = index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=settings,
             toolkit_type=TOOLKIT_TYPE,
             user_config={"credentials": {"elitea_title": "LFAADOWikiPrivateCreds", "private": True}},
@@ -191,7 +191,7 @@ class TestPrivateCredentialResolution:
             personal_configs={},
         ))
 
-        ok = index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=_settings(),
             toolkit_type=TOOLKIT_TYPE,
             user_config={"credentials": {"elitea_title": "LFAADOWikiPrivateCreds", "private": True}},
@@ -205,7 +205,7 @@ class TestPrivateCredentialResolution:
     def test_a_private_credential_without_a_creator_fails_loudly(self, index_scheduling, install_rpc):
         rpc = install_rpc(FakeRpc())
 
-        ok = index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=_settings(),
             toolkit_type=TOOLKIT_TYPE,
             user_config={"credentials": {"elitea_title": "LFAADOWikiPrivateCreds", "private": True}},
@@ -226,7 +226,7 @@ class TestProjectCredentialResolutionUnchanged:
         rpc = install_rpc(FakeRpc(project_configs={(TEAM_PROJECT, "Ado_wiki"): dict(PROJECT_CONFIG)}))
         settings = _settings()
 
-        ok = index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=settings,
             toolkit_type=TOOLKIT_TYPE,
             user_config={"credentials": {"elitea_title": "Ado_wiki", "private": False}},
@@ -241,7 +241,7 @@ class TestProjectCredentialResolutionUnchanged:
     def test_an_omitted_private_flag_reads_as_project_level(self, index_scheduling, install_rpc):
         rpc = install_rpc(FakeRpc(project_configs={(TEAM_PROJECT, "Ado_wiki"): dict(PROJECT_CONFIG)}))
 
-        ok = index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=_settings(),
             toolkit_type=TOOLKIT_TYPE,
             user_config={"credentials": {"elitea_title": "Ado_wiki"}},
@@ -254,12 +254,16 @@ class TestProjectCredentialResolutionUnchanged:
     def test_a_missing_project_credential_still_fails(self, index_scheduling, install_rpc):
         install_rpc(FakeRpc())
 
-        assert index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=_settings(),
             toolkit_type=TOOLKIT_TYPE,
             user_config={"credentials": {"elitea_title": "Ado_wiki"}},
             project_id=TEAM_PROJECT,
-        ) is False
+        )
+
+        assert ok is False
+        # Distinct from a lookup that errored: the owner must re-pick a credential.
+        assert "no longer exists" in issue
 
 
 class TestTeamSchedulePassthroughUnchanged:
@@ -269,7 +273,7 @@ class TestTeamSchedulePassthroughUnchanged:
         rpc = install_rpc(FakeRpc())
         settings = _settings()
 
-        ok = index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=settings,
             toolkit_type=TOOLKIT_TYPE,
             user_config={},
@@ -284,21 +288,29 @@ class TestTeamSchedulePassthroughUnchanged:
     def test_a_personal_schedule_with_no_credentials_still_fails(self, index_scheduling, install_rpc):
         install_rpc(FakeRpc())
 
-        assert index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=_settings(),
             toolkit_type=TOOLKIT_TYPE,
             user_config={},
             project_id=TEAM_PROJECT,
             is_team_schedule=False,
-        ) is False
+        )
 
-    def test_a_toolkit_without_the_config_key_needs_no_resolution(self, index_scheduling, install_rpc):
+        assert ok is False
+        assert issue == "schedule has no credentials selected"
+
+    def test_a_toolkit_without_any_credential_slot_and_no_credentials_needs_no_resolution(
+        self, index_scheduling, install_rpc
+    ):
         rpc = install_rpc(FakeRpc())
 
-        assert index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings={},
             toolkit_type=TOOLKIT_TYPE,
-            user_config={"credentials": {"elitea_title": "Ado_wiki", "private": True}},
+            user_config={},
             project_id=TEAM_PROJECT,
-        ) is True
+            is_team_schedule=True,
+        )
+
+        assert (ok, issue) == (True, None)
         assert rpc.calls == []

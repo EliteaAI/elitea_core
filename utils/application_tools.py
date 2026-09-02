@@ -455,6 +455,12 @@ def _get_pgvector_engine(conn_str: str):
             pool_pre_ping=True,
             pool_size=_pgvector_cache_cfg('pool_size', 5),
             max_overflow=_pgvector_cache_cfg('max_overflow', 10, minimum=0),
+            # These point at per-project, sometimes external, pgvector hosts. A host that
+            # accepts the TCP connection but never completes the handshake would otherwise
+            # block forever: that stalls the caller, and in the scheduler it strands the
+            # tick's re-entrancy lock so every later tick skips and no project is ever
+            # scanned again. libpq applies this per connection attempt (psycopg2/psycopg3).
+            connect_args={'connect_timeout': _pgvector_cache_cfg('connect_timeout_sec', 10)},
         )
         _PGVECTOR_ENGINE_CACHE[conn_str] = [engine, time.monotonic()]
         overflowed = _evict_pgvector_overflow()
