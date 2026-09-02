@@ -17,6 +17,8 @@ ERROR_LINE_MAX_LENGTH = 300
 MAX_LISTED_MODEL_NAMES = 20
 PARSE_FAILURE_WINDOW = 120
 PARSE_FAILURE_TAIL = 80
+# mirrors llm_judge and evaluation_agent_runner, which keep their own copies to stay ORM-free
+ASSISTANT_ROLES = ("assistant", "ai")
 
 
 def _available_llm_models(project_id: int) -> Optional[dict]:
@@ -290,7 +292,7 @@ def extract_answer(result) -> str:
             (
                 entry["content"] for entry in reversed(history)
                 if isinstance(entry, dict)
-                and entry.get("role") == "assistant"
+                and (entry.get("role") in ASSISTANT_ROLES or entry.get("type") == "ai")
                 and isinstance(entry.get("content"), str)
                 and entry["content"].strip()
             ),

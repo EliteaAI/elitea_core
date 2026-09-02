@@ -389,6 +389,17 @@ def test_the_answer_is_read_from_the_result_channel(draft_llm_utils):
     assert draft_llm_utils.extract_answer(_merged(DRAFT, 'length', 'length', 'stop')) == DRAFT
 
 
+@pytest.mark.parametrize('entry', [
+    {'role': 'assistant', 'content': DRAFT},
+    {'role': 'ai', 'content': DRAFT},
+    {'type': 'ai', 'content': DRAFT},
+])
+def test_every_shape_the_sibling_readers_accept_is_accepted_here(draft_llm_utils, entry):
+    """llm_judge and evaluation_agent_runner read this channel too; a narrower predicate here
+    would silently fall back to the trace, which is the bug this function exists to avoid."""
+    assert draft_llm_utils.extract_answer({'result': {'chat_history': [entry]}}) == DRAFT
+
+
 def test_a_worker_that_omits_chat_history_falls_back_to_the_trace(draft_llm_utils):
     result = {'result': {'thinking_steps': [{'text': DRAFT, 'generation_info': {'finish_reason': 'stop'}}]}}
 

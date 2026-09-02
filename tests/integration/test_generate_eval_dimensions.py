@@ -67,6 +67,17 @@ def _thinking_result(text):
     return {'result': {'thinking_steps': [{'text': text}]}}
 
 
+def _continued_result(answer):
+    """A run the SDK continued: the merged answer in chat_history, fragments in the trace."""
+    return {'result': {
+        'chat_history': [{'role': 'assistant', 'content': answer}],
+        'thinking_steps': [
+            {'text': '...fragment, no JSON here', 'generation_info': {'finish_reason': 'length'}},
+            {'text': '...tail fragment', 'generation_info': {'finish_reason': 'stop'}},
+        ],
+    }}
+
+
 def _install_package():
     pkg = types.ModuleType(PKG)
     pkg.__path__ = []
@@ -572,3 +583,29 @@ def test_dimension_library_read_failure_returns_500(api):
 
     assert status == 500
     assert 'dimension library' in payload['error']
+
+
+def test_the_merged_answer_is_asked_for_and_read_from_the_result_channel(api):
+    """#6416 Issue A on this endpoint: the trace holds continuation fragments, not the answer."""
+    module, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler(predict_result=_continued_result(json.dumps(_VALID_DRAFT)))
+
+    payload, _status = handler.post(1)
+
+    assert handler.module.calls[0]['return_chat_history'] is True
+    assert payload.get('error') != 'LLM returned unparseable output'
+
+
+def test_a_continued_run_is_not_blamed_on_max_tokens(api):
+    """length,length,stop is a complete answer; the trace fragment must not read as truncation."""
+    module, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler(predict_result=_continued_result('not json at all'))
+
+    payload, status = handler.post(1)
+
+    assert status == 422
+    assert payload['error'] == 'LLM returned unparseable output'
