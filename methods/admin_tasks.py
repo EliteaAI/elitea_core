@@ -1353,18 +1353,32 @@ class Method:  # pylint: disable=E1101,R0903,W0201
               e.g. ``toolkit``, ``provider``, ``selected_tools``) — those are
               owned by other migrations/loader code and must not be touched
               by a generic field rename.
+            - Neither key may look like a secret (``SECRET_KEY_PATTERN``
+              below, e.g. anything containing ``password``/``token``/
+              ``secret``/``api_key``/``credential``/``auth``). This task
+              copies values verbatim into logs/return payloads and is not a
+              safe path for secret-bearing fields; use a dedicated,
+              Vault-aware migration (see ``migrate_provider_hub_secrets``)
+              for those instead.
             - The response always includes ``toolkits_scanned`` per project
               so a mistyped ``toolkit_type`` (0 rows matched) is obvious in
               dry-run output rather than looking identical to "nothing to do".
 
+        Note: only the set of migrated *key names* is ever logged, never the
+        values themselves, since this is a generic task that could in
+        principle be pointed at any settings field.
+
         Always run with dry_run first to verify expected changes.
         """
-        from copy import deepcopy  # pylint: disable=C0415
+        import re  # pylint: disable=C0415
         from sqlalchemy.orm.attributes import flag_modified  # pylint: disable=C0415
         from tools import db  # pylint: disable=C0415
         from ..models.all import EliteATool  # pylint: disable=C0415
 
         RESERVED_SETTINGS_KEYS = {"toolkit", "provider", "selected_tools", "type"}
+        SECRET_KEY_PATTERN = re.compile(
+            r"password|token|secret|api_key|apikey|credential|auth", re.IGNORECASE
+        )
 
         param = kwargs.get("param", "") or ""
         segments = [s.strip() for s in param.split(";")]
@@ -1399,6 +1413,18 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 return {
                     "migrated": 0,
                     "error": f"reserved settings key(s) not allowed: {sorted(reserved_hit)}",
+                }
+            secret_hit = {
+                key for key in (old_key, new_key) if SECRET_KEY_PATTERN.search(key)
+            }
+            if secret_hit:
+                log.error(
+                    "migrate_toolkit_settings_fields: '%s' looks like a secret-bearing key and "
+                    "is not allowed in a generic field rename", secret_hit,
+                )
+                return {
+                    "migrated": 0,
+                    "error": f"secret-like settings key(s) not allowed: {sorted(secret_hit)}",
                 }
             field_mapping[old_key] = new_key
 
@@ -1467,7 +1493,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     ).all()
                     total_scanned += len(toolkits)
 
-                    any_changed = False
+                    project_pending_count = 0
 
                     for toolkit in toolkits:
                         settings = toolkit.settings or {}
@@ -1480,22 +1506,26 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                             continue
 
                         log.info(
-                            "%sproject %s, toolkit id=%s (%s) name='%s': backfilling %s",
+                            "%sproject %s, toolkit id=%s (%s) name='%s': backfilling keys %s",
                             prefix, project_id, toolkit.id, toolkit_type, toolkit.name,
-                            pending,
+                            sorted(pending.keys()),
                         )
 
                         if not dry_run:
-                            new_settings = deepcopy(settings)
+                            # Shallow copy is sufficient: only new top-level keys are
+                            # added, existing nested values are never mutated in place.
+                            new_settings = dict(settings)
                             new_settings.update(pending)
                             toolkit.settings = new_settings
                             flag_modified(toolkit, 'settings')
-                            any_changed = True
 
-                        total_migrated += 1
+                        project_pending_count += 1
 
-                    if any_changed and not dry_run:
+                    if dry_run:
+                        total_migrated += project_pending_count
+                    elif project_pending_count:
                         session.commit()
+                        total_migrated += project_pending_count
 
             except Exception:  # pylint: disable=W0703
                 log.exception(
