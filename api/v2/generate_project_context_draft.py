@@ -180,7 +180,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "generate_project_context_draft: draft did not parse: %s",
                 describe_parse_failure(raw_text, extracted, e, result),
             )
-            if answer_was_cut_short(result, raw_text):
+            if answer_was_cut_short(result, extracted):
                 return {
                     "error": "LLM response was truncated. Increase max_tokens in llm_settings "
                              "(recommended: 4096+)."

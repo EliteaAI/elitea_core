@@ -14,7 +14,13 @@ import pytest
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
-WANTED = ('_JSON_STRING_ESCAPES', '_escape_control_characters_in_strings', 'extract_json_from_text')
+WANTED = (
+    '_JSON_STRING_ESCAPES',
+    '_MAX_OBJECT_STARTS',
+    '_escape_control_characters_in_strings',
+    '_decode_object',
+    'extract_json_from_text',
+)
 
 
 @pytest.fixture(scope='module')
@@ -30,7 +36,7 @@ def utils():
 
     namespace = {}
     body = '\n\n'.join(ast.get_source_segment(source, node) for node in wanted)
-    exec(compile(f'import json, re\n\n{body}', 'utils.py', 'exec'), namespace)
+    exec(compile(f'import json, re\nfrom typing import Optional\n\n{body}', 'utils.py', 'exec'), namespace)
     return types.SimpleNamespace(**{name: namespace[name] for name in WANTED})
 
 
@@ -143,3 +149,63 @@ def test_valid_json_is_never_altered(utils, valid):
     change the meaning of a document that was already valid."""
     assert utils._escape_control_characters_in_strings(valid) == valid
     assert json.loads(utils.extract_json_from_text(valid)) == json.loads(valid)
+
+
+@pytest.mark.parametrize('raw', [
+    'Here is a template using {name}: {"name": "x", "instructions": "# T"}',
+    'Config was {"unrelated": 1 and then the draft: {"name": "x", "instructions": "# T"}',
+])
+def test_a_brace_in_the_preamble_does_not_cost_the_draft(extract_json_from_text, raw):
+    """The symmetric case to a sign-off containing a brace - the first { is not the object."""
+    assert json.loads(extract_json_from_text(raw))['name'] == 'x'
+
+
+def test_the_search_for_an_opening_brace_is_bounded(utils):
+    """A Markdown draft can carry many braces; scanning every one is not worth the failure path."""
+    raw = '{ ' * (utils._MAX_OBJECT_STARTS + 3) + '"name": "x"}'
+
+    candidate = utils.extract_json_from_text(raw)
+
+    assert candidate
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(candidate)
+
+
+TRUNCATED_WITH_NESTING = {
+    'a cut-off dimension list':
+        '{"version_id": 1, "dimensions": [{"name": "Politeness", "tier": "agent_adhoc", '
+        '"evidence_scope": {"input": true}}, {"name": "Cla',
+    'a cut-off draft with a nested object':
+        '{"name": "bot", "config": {"a": 1}, "instructions": "# Title\\n\\nDo the thing and then',
+    # both faults at once - the plain decode stops at the first raw newline, so only the repaired
+    # attempt reaches the truncation, and reporting the plain offset would let the nested object win
+    'a cut-off draft that also needs the repair':
+        '{"name": "bot", "instructions": "# Title\nStep one.\nStep two.", '
+        '"config": {"retries": 3}, "description": "Summarizes the release notes and then',
+}
+
+
+@pytest.mark.parametrize('label', sorted(TRUNCATED_WITH_NESTING))
+def test_a_truncated_draft_does_not_yield_one_of_its_own_nested_objects(extract_json_from_text, label):
+    """A later brace must explain more of the text than the first did, or a cut-off answer parses
+    as its own first dimension - the caller then gets a validation error instead of the truncation
+    message, and the parse diagnostic never fires for the case it was built for."""
+    candidate = extract_json_from_text(TRUNCATED_WITH_NESTING[label])
+
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(candidate)
+
+
+def test_a_nested_object_in_a_whole_draft_is_still_fine(extract_json_from_text):
+    """The guard must not cost a draft that simply contains an object."""
+    raw = '{"name": "bot", "config": {"a": 1}, "instructions": "# T"}'
+
+    assert json.loads(extract_json_from_text(raw))['name'] == 'bot'
+
+
+def test_a_preamble_brace_is_still_passed_when_the_draft_needs_the_repair(extract_json_from_text):
+    """The other direction of the same comparison: the first brace breaks immediately, so a later
+    one that needs repairing to decode must still be reached."""
+    raw = 'Use {name} as the placeholder: {"instructions": "# T\nline two"}'
+
+    assert json.loads(extract_json_from_text(raw))['instructions'] == '# T\nline two'
