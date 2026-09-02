@@ -397,7 +397,7 @@ class ToolForkDetails(ToolExportDetails):
 
 class ToolCopyModel(ToolBase):
     name: str = Field(..., min_length=1)
-    id: Optional[int] = None
+    id: Optional[int] = Field(default=None, exclude=True)
     project_id: int = Field(..., exclude=True)
     user_id: int = Field(..., exclude=True)
 
@@ -444,7 +444,7 @@ class ToolImportModel(ToolCreateModel):
 
 class ToolUpdateModel(ToolCreateModel):
     name: str = Field(..., min_length=1)
-    id: Optional[int] = None
+    id: Optional[int] = Field(default=None, exclude=True)
 
 
 class ToolChatModel(ToolBase):
