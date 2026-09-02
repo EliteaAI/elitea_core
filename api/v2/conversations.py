@@ -147,7 +147,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 user_personalization = social_user.get('personalization')
                 user_context_defaults = social_user.get('default_context_management')
                 user_summarization_defaults = social_user.get('default_summarization')
-        except Exception:
+                log.info(f"Fetched user {user_id} settings - context: {user_context_defaults}, summarization: {user_summarization_defaults}")
+        except Exception as e:
+            log.warning(f"Failed to fetch user settings: {e}")
             pass  # Continue with defaults if fetching user settings fails
 
         # Apply user's personalization defaults to conversation meta
