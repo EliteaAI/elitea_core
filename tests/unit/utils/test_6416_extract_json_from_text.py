@@ -7,23 +7,36 @@ the function is loaded on its own here — it depends on nothing but `json` and 
 import ast
 import json
 import pathlib
+import types
 
 import pytest
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
+WANTED = ('_JSON_STRING_ESCAPES', '_escape_control_characters_in_strings', 'extract_json_from_text')
+
+
 @pytest.fixture(scope='module')
-def extract_json_from_text():
+def utils():
+    """The extractor and its repair, lifted from a module whose imports reach the ORM."""
     source = (PLUGIN_ROOT / 'utils' / 'utils.py').read_text()
-    definition = next(
+    wanted = [
         node for node in ast.parse(source).body
-        if isinstance(node, ast.FunctionDef) and node.name == 'extract_json_from_text'
-    )
+        if getattr(node, 'name', None) in WANTED
+        or (isinstance(node, ast.Assign) and getattr(node.targets[0], 'id', None) in WANTED)
+    ]
+    assert len(wanted) == len(WANTED), 'extractor pieces moved or were renamed'
 
     namespace = {}
-    exec(compile(f'import json, re\n\n{ast.get_source_segment(source, definition)}', 'utils.py', 'exec'), namespace)
-    return namespace['extract_json_from_text']
+    body = '\n\n'.join(ast.get_source_segment(source, node) for node in wanted)
+    exec(compile(f'import json, re\n\n{body}', 'utils.py', 'exec'), namespace)
+    return types.SimpleNamespace(**{name: namespace[name] for name in WANTED})
+
+
+@pytest.fixture(scope='module')
+def extract_json_from_text(utils):
+    return utils.extract_json_from_text
 
 
 DRAFT = '{"name": "release-notes", "description": "d", "instructions": "# T\\n\\nDo it."}'
@@ -57,9 +70,8 @@ def test_only_the_first_object_is_taken(extract_json_from_text):
 
 
 @pytest.mark.parametrize('raw', [
-    '{"name": "x", "instructions": "line one\nline two"}',   # unescaped control character
-    '{"name": "x", "instructions": "Say "hi" loudly"}',      # unescaped quote
-    '{"name": "release-notes", "instructions": "# T',        # cut off
+    '{"name": "x", "instructions": "Say "hi" loudly"}',      # unescaped quote — ambiguous
+    '{"name": "release-notes", "instructions": "# T',        # cut off — nothing to repair
 ])
 def test_a_genuinely_malformed_answer_still_reaches_the_caller(extract_json_from_text, raw):
     """It must not raise: the caller reports the decode error, and needs a candidate to describe."""
@@ -73,3 +85,61 @@ def test_a_genuinely_malformed_answer_still_reaches_the_caller(extract_json_from
 @pytest.mark.parametrize('raw', ['', 'no json here at all', 'prose with a } but no opener'])
 def test_text_without_an_object_is_returned_unchanged(extract_json_from_text, raw):
     assert extract_json_from_text(raw) == raw
+
+
+MARKDOWN_INSTRUCTIONS = """# Release Notes
+
+1. Group changes by area.
+2. Call out breaking changes first.
+
+\tExample: `v2.1.0 - adds retries`
+"""
+
+
+def test_a_markdown_document_with_raw_newlines_is_repaired(extract_json_from_text):
+    """The likeliest way this fails: the model writes the Markdown but forgets to escape it."""
+    raw = '{"name": "release-notes", "instructions": "' + MARKDOWN_INSTRUCTIONS + '"}'
+
+    parsed = json.loads(extract_json_from_text(raw))
+
+    assert parsed['name'] == 'release-notes'
+    assert parsed['instructions'] == MARKDOWN_INSTRUCTIONS
+
+
+def test_the_repair_preserves_the_document_exactly(extract_json_from_text):
+    """A repair that silently dropped or mangled the newlines would be worse than the 422."""
+    raw = '{"instructions": "line one\nline two\r\nline three\ttabbed"}'
+
+    assert json.loads(extract_json_from_text(raw))['instructions'] == (
+        'line one\nline two\r\nline three\ttabbed'
+    )
+
+
+def test_a_repaired_object_still_stops_at_its_own_end(extract_json_from_text):
+    raw = '{"instructions": "a\nb"}\n\nHope that helps!'
+
+    assert json.loads(extract_json_from_text(raw)) == {'instructions': 'a\nb'}
+
+
+def test_an_answer_that_cannot_be_repaired_is_left_alone(extract_json_from_text):
+    """An unescaped quote desynchronises the string tracking, so the repair must not be trusted."""
+    raw = '{"name": "x", "instructions": "Say "hi"\nloudly"}'
+
+    candidate = extract_json_from_text(raw)
+
+    assert candidate
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(candidate)
+
+
+@pytest.mark.parametrize('valid', [
+    '{"a": "already \\n escaped"}',
+    '{"a": 1, "b": [2, 3], "c": {"d": null}}',
+    '{\n  "pretty": "printed",\n  "across": "lines"\n}',
+    '{"unicode": "caf\u00e9 \u2014 dash"}',
+])
+def test_valid_json_is_never_altered(utils, valid):
+    """Control characters below 0x20 are illegal inside a JSON string, so escaping one cannot
+    change the meaning of a document that was already valid."""
+    assert utils._escape_control_characters_in_strings(valid) == valid
+    assert json.loads(utils.extract_json_from_text(valid)) == json.loads(valid)

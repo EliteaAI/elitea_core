@@ -278,22 +278,60 @@ def parse_ids_filter(ids: str | list | None, max_ids: int = 100) -> list[int]:
     return ids[:max_ids]
 
 
+_JSON_STRING_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f"}
+
+
+def _escape_control_characters_in_strings(text: str) -> str:
+    """Escape the raw control characters a model leaves inside a JSON string value.
+
+    Asking for a Markdown document inside a JSON string asks the model to escape every newline it
+    writes, and the longer the document the likelier it forgets. A character below ``0x20`` is
+    illegal there by spec, so escaping one can never change the meaning of a valid document — but
+    the quote tracking this relies on can be thrown off by an unescaped quote elsewhere, which is
+    why the caller keeps the result only if it parses.
+    """
+    out = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            in_string = not in_string
+        elif in_string and ord(char) < 0x20:
+            out.append(_JSON_STRING_ESCAPES.get(char, f"\\u{ord(char):04x}"))
+            continue
+        out.append(char)
+    return "".join(out)
+
+
 def extract_json_from_text(text: str) -> str:
     """Extract a JSON object from text, stripping markdown fences if present.
 
     The object ends where the decoder says it ends, not at the last brace: a model signing off with
     "use {placeholders} as needed" would otherwise drag that sentence in and fail as ``Extra data``.
-    A slice that will not decode falls back to the widest span, so callers still have something to
-    report their own parse error against.
+
+    A body that will not decode is retried with its in-string control characters escaped, and that
+    repair is adopted only when it produces something the decoder accepts. Failing both, the widest
+    span is returned unrepaired so the caller's own parse error still describes what the model sent.
     """
     match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     if match:
-        return match.group(1)
-    start = text.find("{")
-    if start == -1:
-        return text
-    try:
-        _, end = json.JSONDecoder().raw_decode(text, start)
-    except ValueError:
-        end = text.rfind("}") + 1
-    return text[start:end] if end > start else text
+        body = match.group(1)
+    else:
+        start = text.find("{")
+        if start == -1:
+            return text
+        body = text[start:]
+
+    for candidate in (body, _escape_control_characters_in_strings(body)):
+        try:
+            _, end = json.JSONDecoder().raw_decode(candidate)
+        except ValueError:
+            continue
+        return candidate[:end]
+
+    end = body.rfind("}") + 1
+    return body[:end] if end > 0 else body
