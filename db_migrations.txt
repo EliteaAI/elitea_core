@@ -287,5 +287,9 @@ Run admin task migrate_eval_dimension_columns with param: project_id=all
 # 'space' key is left in place after the backfill for backward compatibility.
 # Uses the generic migrate_toolkit_settings_fields task (reusable for future
 # per-toolkit settings-key renames). Idempotent; run dry_run first.
+# Guardrails: rejects reserved settings keys (toolkit/provider/selected_tools/type)
+# and secret-like key names (password/token/secret/api_key/credential/auth) — use
+# migrate_provider_hub_secrets for those instead. Only migrated key names are
+# logged, never values.
 Run admin task migrate_toolkit_settings_fields with param: confluence;space>space_key;project_id=all;dry_run
 Run admin task migrate_toolkit_settings_fields with param: confluence;space>space_key;project_id=all
