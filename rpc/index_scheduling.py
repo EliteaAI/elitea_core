@@ -154,7 +154,7 @@ class RPC:
                                     updated_settings = deepcopy(toolkit.settings)
 
                                     # Apply user-provided credentials if present
-                                    should_trigger_by_credentials = resolve_credentials(
+                                    credentials_ok, credentials_issue = resolve_credentials(
                                         project_settings=updated_settings,
                                         toolkit_type=toolkit.type,
                                         user_config=user_config,
@@ -166,8 +166,12 @@ class RPC:
                                         user_id=user_id,
                                     )
 
-                                    if not init_issue and not should_trigger_by_credentials:
-                                        init_issue = "toolkit credentials resolving issue"
+                                    # The specific reason, not a generic label: init_issue is
+                                    # written to the index history and shown to whoever owns
+                                    # the schedule, and "missing" vs "not found" vs "lookup
+                                    # failed" need different actions from them.
+                                    if not init_issue and not credentials_ok:
+                                        init_issue = credentials_issue
 
                                     user_token = get_system_user_token(project_id)
                                     if not init_issue and not user_token:
@@ -185,7 +189,10 @@ class RPC:
                                     # Expand the updated settings. For team schedules (user_id=-1)
                                     # use the schedule creator to avoid get_personal_project_id(-1),
                                     # which raises when any nested config is private=True.
-                                    expand_user_id = creator_id if is_team_schedule else user_id
+                                    # int(): schedules are keyed by user id in JSON, so user_id
+                                    # is a string here, and configurations_expand feeds it to
+                                    # get_personal_project_id which needs a real int.
+                                    expand_user_id = creator_id if is_team_schedule else int(user_id)
                                     settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
                                         project_id=project_id,
                                         settings=updated_settings,
@@ -196,7 +203,10 @@ class RPC:
                                         'connection_string'
                                     )
                                 except Exception as e:
-                                    log.error(
+                                    # exception(), not error(): these come from vault reads and
+                                    # cross-project config expansion, where the repr alone does
+                                    # not say which nested call failed.
+                                    log.exception(
                                         f"{ctx} failed to resolve settings for scheduled indexing "
                                         f"of toolkit type '{toolkit.type}': {e!r}"
                                     )
@@ -348,7 +358,10 @@ class RPC:
                                                 f"(dispatched in {time.monotonic() - trigger_started:.3f}s)"
                                             )
                                 except Exception as e:
-                                    log.error(f"{ctx} error occurred while scheduled indexing: {e!r}")
+                                    # Catch-all around the pgvector connect, the staleness
+                                    # checks and the dispatch: the frame that raised is the
+                                    # only thing that distinguishes them, so keep the traceback.
+                                    log.exception(f"{ctx} error occurred while scheduled indexing: {e!r}")
                                     stats['failed'] += 1
             return None
         except Exception as e:

@@ -153,7 +153,7 @@ class TestResolutionUsesTheSlotType:
         ))
         settings = _ado_wiki_settings()
 
-        ok = index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=settings,
             toolkit_type="ado_wiki",
             user_config={"credentials": {"elitea_title": "ado_wiki_lfa_cloud_credentials"}},
@@ -194,7 +194,7 @@ class TestUnresolvableSlotFailsLoudly:
         # instead of reporting the misconfiguration on the index history.
         rpc = install_rpc(FakeRpc())
 
-        ok = index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings={"pgvector_configuration": {}},
             toolkit_type="ado_wiki",
             user_config={"credentials": {"elitea_title": "ado_wiki_lfa_cloud_credentials"}},
@@ -214,7 +214,7 @@ class TestLegacyTitleKey:
         ))
         settings = _ado_wiki_settings()
 
-        ok = index_scheduling.resolve_credentials(
+        ok, issue = index_scheduling.resolve_credentials(
             project_settings=settings,
             toolkit_type="ado_wiki",
             user_config={"credentials": {"alita_title": "ado_wiki_lfa_cloud_credentials"}},

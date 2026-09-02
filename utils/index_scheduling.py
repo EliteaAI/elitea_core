@@ -64,12 +64,17 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
                                 creator_id: int | None = None,
                                 toolkit_id: int | None = None,
                                 index_name: str | None = None,
-                                user_id=None) -> bool:
+                                user_id=None) -> tuple[bool, str | None]:
     """Apply user-provided credentials to project settings.
 
     Extracts credentials from user_config, validates them, and loads project-level configuration
-    to replace in project_settings dict (modifies in place). Returns True if no credentials
-    to apply or successfully applied, False if validation/loading failed.
+    to replace in project_settings dict (modifies in place).
+
+    Returns ``(ok, issue)``. ``issue`` is None on success and otherwise a short reason naming
+    the distinct failure: the schedule carrying no credentials, a malformed credentials block,
+    no slot to put them in, a credential that does not exist, and a lookup that itself failed
+    all need different actions from the schedule's owner, and the caller writes this string to
+    the index history where they will read it.
 
     Args:
         project_settings (dict): Project settings dict to modify (updated in place)
@@ -85,7 +90,8 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
             call belongs to. Without them a failure here cannot be attributed to a toolkit.
 
     Returns:
-        bool: True if no credentials or successfully applied, False if validation/loading failed
+        tuple[bool, str | None]: (True, None) if no credentials or successfully applied,
+            (False, reason) if validation/loading failed
     """
     ctx = index_log_context(project_id, toolkit_id, index_name, user_id)
     log.debug(f"{ctx} resolve_credentials started for toolkit_type='{toolkit_type}'")
@@ -100,7 +106,7 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
                 f"{ctx} no credential slot in settings for toolkit_type='{toolkit_type}' and no "
                 f"credentials on the schedule, nothing to replace"
             )
-            return True
+            return True, None
         # The schedule names a credential but there is nowhere to put it: running anyway
         # would silently index with whatever credential the toolkit was last saved with.
         log.warning(
@@ -108,7 +114,10 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
             f"settings for toolkit_type='{toolkit_type}'; "
             f"settings keys={sorted(project_settings.keys())}"
         )
-        return False
+        return False, (
+            f"toolkit settings have no credential field for toolkit type '{toolkit_type}' "
+            f"to apply the schedule's credentials to"
+        )
 
     # The credential row's own type follows the settings slot, not the toolkit type:
     # an `ado_wiki` toolkit references a credential of type `ado`.
@@ -121,9 +130,9 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
                 f"{ctx} team schedule with no per-user credentials override for "
                 f"toolkit_type='{toolkit_type}'; using project-level configuration as-is"
             )
-            return True
+            return True, None
         log.warning(f"{ctx} no credentials provided in schedule for toolkit_type='{toolkit_type}'")
-        return False
+        return False, "schedule has no credentials selected"
 
     # Validate credentials is a dict
     if not isinstance(user_credentials, dict):
@@ -131,7 +140,7 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
             f"{ctx} credentials is not a dict (type={type(user_credentials).__name__}), "
             f"cannot apply credentials"
         )
-        return False
+        return False, "schedule credentials are malformed"
 
     # Config key exists - validate elitea_title
     config_title = user_credentials.get('elitea_title') or user_credentials.get('alita_title')
@@ -139,7 +148,7 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
         log.warning(
             f"{ctx} credentials missing 'elitea_title', cannot apply for type '{toolkit_type}'"
         )
-        return False
+        return False, "schedule credentials do not name a credential"
 
     # A credential the author marked private lives in their personal project, not in
     # project_id, so the project-scoped lookup can never find it. This mirrors the
@@ -151,7 +160,10 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
             f"{ctx} credential '{config_title}' for toolkit_type='{toolkit_type}' is private but "
             f"the schedule carries no creator; cannot resolve a personal configuration"
         )
-        return False
+        return False, (
+            f"credential '{config_title}' is private but the schedule has no author to "
+            f"resolve it for"
+        )
 
     try:
         if is_private:
@@ -178,7 +190,10 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
                 f"{ctx} configuration not found: type='{config_type}', title='{config_title}', "
                 f"private={is_private}, creator_id={creator_id}"
             )
-            return False
+            return False, (
+                f"credential '{config_title}' of type '{config_type}' no longer exists"
+                + (" in the author's personal configurations" if is_private else "")
+            )
 
         # ConfigurationDetails carries no `private` flag, so the substituted payload would
         # read as project-level and send the downstream configurations_expand back to
@@ -193,14 +208,16 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
             f"{ctx} configuration '{config_title}' (id={user_configuration.get('id')}, "
             f"private={is_private}) is being used to run the toolkit index"
         )
-        return True
+        return True, None
 
     except Exception as e:
-        log.warning(
+        # Distinct from "no longer exists": the credential may be fine and the
+        # configurations RPC simply timed out, which is retried on the next scan.
+        log.exception(
             f"{ctx} error loading configuration '{config_title}' of type '{config_type}' "
             f"(private={is_private}, creator_id={creator_id}): {e!r}"
         )
-        return False
+        return False, f"could not look up credential '{config_title}': {e.__class__.__name__}"
 
 
 def handle_failed_index_schedule(
