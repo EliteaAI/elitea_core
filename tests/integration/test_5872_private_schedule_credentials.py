@@ -292,13 +292,16 @@ class TestTeamSchedulePassthroughUnchanged:
             is_team_schedule=False,
         ) is False
 
-    def test_a_toolkit_without_the_config_key_needs_no_resolution(self, index_scheduling, install_rpc):
+    def test_a_toolkit_without_any_credential_slot_and_no_credentials_needs_no_resolution(
+        self, index_scheduling, install_rpc
+    ):
         rpc = install_rpc(FakeRpc())
 
         assert index_scheduling.resolve_credentials(
             project_settings={},
             toolkit_type=TOOLKIT_TYPE,
-            user_config={"credentials": {"elitea_title": "Ado_wiki", "private": True}},
+            user_config={},
             project_id=TEAM_PROJECT,
+            is_team_schedule=True,
         ) is True
         assert rpc.calls == []
