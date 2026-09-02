@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import re
 from functools import wraps
 from typing import Callable, List, Set, Generator, Optional
@@ -277,13 +278,101 @@ def parse_ids_filter(ids: str | list | None, max_ids: int = 100) -> list[int]:
     return ids[:max_ids]
 
 
+_JSON_STRING_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f"}
+# a model may introduce its answer with prose that itself contains a brace; the object is found by
+# trying each in turn, bounded because a Markdown draft can contain a great many
+_MAX_OBJECT_STARTS = 5
+
+
+def _escape_control_characters_in_strings(text: str) -> str:
+    """Escape the raw control characters a model leaves inside a JSON string value.
+
+    Asking for a Markdown document inside a JSON string asks the model to escape every newline it
+    writes, and the longer the document the likelier it forgets. A character below ``0x20`` is
+    illegal there by spec, so escaping one can never change the meaning of a valid document — but
+    the quote tracking this relies on can be thrown off by an unescaped quote elsewhere, which is
+    why the caller keeps the result only if it parses.
+    """
+    out = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if escaped:
+            escaped = False
+        elif char == "\\" and in_string:
+            escaped = True
+        elif char == '"':
+            in_string = not in_string
+        elif in_string and ord(char) < 0x20:
+            out.append(_JSON_STRING_ESCAPES.get(char, f"\\u{ord(char):04x}"))
+            continue
+        out.append(char)
+    return "".join(out)
+
+
+def _decode_object(body: str) -> tuple[Optional[str], int]:
+    """The JSON object at the head of ``body``, with how far the decoder got.
+
+    Returns ``(span, offset it ended at)`` on success and ``(None, furthest offset reached)`` on
+    failure. The repair is attempted only after a plain decode fails, and is adopted only when it
+    yields something the decoder accepts.
+
+    The reported reach is the furthest of the two attempts. A body that needs the repair *and* was
+    truncated breaks early on the plain decode — at its first raw newline — and only the repaired
+    attempt reaches the truncation; reporting the plain offset would understate how much of the
+    body is real. Over-stating is the safe direction: it only makes the caller's guard stricter.
+    """
+    try:
+        _, end = json.JSONDecoder().raw_decode(body)
+        return body[:end], end
+    except ValueError as exc:
+        broke_at = getattr(exc, "pos", 0)
+
+    repaired = _escape_control_characters_in_strings(body)
+    try:
+        _, end = json.JSONDecoder().raw_decode(repaired)
+        return repaired[:end], end
+    except ValueError as exc:
+        return None, max(broke_at, getattr(exc, "pos", 0))
+
+
 def extract_json_from_text(text: str) -> str:
-    """Extract a JSON object from text, stripping markdown fences if present."""
+    """Extract a JSON object from text, stripping markdown fences if present.
+
+    The object ends where the decoder says it ends, not at the last brace: a model signing off with
+    "use {placeholders} as needed" would otherwise drag that sentence in and fail as ``Extra data``.
+
+    A later brace is tried only when it explains *more* of the text than the first one managed.
+    Without that test a truncated draft quietly yields one of its own nested objects — the first
+    dimension out of a cut-off list, say — which parses, so the caller never learns the answer was
+    truncated and the parse diagnostic never fires.
+
+    Failing everything, the widest span is returned unrepaired so the caller's own parse error still
+    describes what the model sent.
+    """
     match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     if match:
-        return match.group(1)
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start != -1 and end > start:
-        return text[start:end]
-    return text
+        span, _ = _decode_object(match.group(1))
+        return span if span is not None else match.group(1)
+
+    starts = []
+    index = text.find("{")
+    while index != -1 and len(starts) < _MAX_OBJECT_STARTS:
+        starts.append(index)
+        index = text.find("{", index + 1)
+    if not starts:
+        return text
+
+    span, reach = _decode_object(text[starts[0]:])
+    if span is not None:
+        return span
+
+    unexplained_from = starts[0] + reach
+    for start in starts[1:]:
+        span, end = _decode_object(text[start:])
+        if span is not None and start + end >= unexplained_from:
+            return span
+
+    body = text[starts[0]:]
+    end = body.rfind("}") + 1
+    return body[:end] if end > 0 else body
