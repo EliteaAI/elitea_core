@@ -14,6 +14,7 @@ from tools import api_tools, auth, config as c, db, VaultClient, register_openap
 from ...models.all import Application, ApplicationVersion
 from ...models.pd.version import (
     ApplicationVersionDetailModel,
+    ApplicationVersionMcpUpdateModel,
     ApplicationVersionUpdateModel
 )
 from ...utils.application_utils import (
@@ -23,8 +24,10 @@ from ...utils.application_utils import (
 from ...utils.create_utils import clone_persisted_application_version
 from ...utils.mcp_versioning import (
     INTERNAL_MCP_ENVIRON_KEY,
+    InstructionsPatchConflictError,
     build_mcp_backup_version_name,
     instructions_sha256,
+    sanitize_mcp_settings_update,
 )
 from ...utils.skill_utils import apply_runtime_skills
 from ...utils.utils import mask_secret
@@ -176,6 +179,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Update non-instruction settings of an existing draft agent or pipeline version — internal MCP prompt and YAML edits use the safe patch tool",
         description="Updates the configuration of an existing agent or pipeline version. Only versions that are not published state can be updated.",
         request_body=ApplicationVersionUpdateModel,
+        mcp_request_body=ApplicationVersionMcpUpdateModel,
         mcp_description="""
         USE to modify non-instruction fields of an existing draft agent or pipeline version.
         DO NOT USE when:
@@ -185,18 +189,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
         - Creating a new version → use create_version
 
         REQUIRED path params: project_id, application_id, version_id (the numeric version ID).
-        REQUIRED body fields: `id` (must equal version_id), `application_id`, `name`, `author_id`.
-        Only pass fields you want to change — unset fields are NOT overwritten.
+        Only pass fields you want to change — unset fields are NOT overwritten. Identity,
+        author, and the current version name are resolved by the server.
 
-        IMPORTANT: Do not pass `instructions` from internal MCP. First read the version,
-        then use the safe instructions patch tool with the returned instructions_sha256.
+        IMPORTANT: This tool cannot change `instructions`. For an instruction change only,
+        first read the version, then use the safe instructions patch tool with the returned
+        instructions_sha256.
         This tool automatically creates a backup version before other internal-MCP edits.
 
         Agent settings example:
-        { 'id': 101, 'application_id': 7, 'name': 'base', 'llm_settings': { 'model_name': 'gpt-5-mini', 'temperature': 0.1 } }
+        { 'llm_settings': { 'model_name': 'gpt-5-mini', 'temperature': 0.1 } }
 
         Pipeline metadata example:
-        { 'id': 202, 'application_id': 15, 'name': 'base', 'welcome_message': 'Pipeline ready.' }
+        { 'welcome_message': 'Pipeline ready.' }
         → Omit instructions and pipeline_settings to preserve the graph and trigger.
 
         Error: HTTP 400 'Version is published' → unpublish first, then update.""",
@@ -212,24 +217,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def put(self, project_id: int, application_id: int, version_id: int = None, **kwargs):
-        raw_version_data = dict(request.json)
+        version_data = dict(request.json)
         internal_mcp_request = bool(request.environ.get(INTERNAL_MCP_ENVIRON_KEY))
-        if internal_mcp_request and 'instructions' in raw_version_data:
-            return {
-                'error': (
-                    'Internal MCP instruction changes must use the safe instructions '
-                    'patch tool. Read the version again, then patch it using '
-                    'instructions_sha256.'
-                )
-            }, 409
-
-        version_data = dict(raw_version_data)
         version_data['author_id'] = auth.current_user().get("id")
         version_data['application_id'] = application_id
         version_data['id'] = version_id
         version_data['project_id'] = project_id
         try:
-            version_data = ApplicationVersionUpdateModel.model_validate(version_data)
             with db.with_project_schema_session(project_id) as session:
                 backup_version = None
                 if internal_mcp_request:
@@ -242,6 +236,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     ).one_or_none()
                     if not source_version or not application:
                         return {'error': 'Application version not found'}, 404
+                    # The schema no longer exposes instructions, but cached and older MCP
+                    # clients can keep sending its former empty-string default after deploy.
+                    version_data = sanitize_mcp_settings_update(
+                        version_data, source_version.instructions
+                    )
+                    version_data.setdefault('name', source_version.name)
+
+                version_data = ApplicationVersionUpdateModel.model_validate(version_data)
+                if internal_mcp_request:
                     backup_version = clone_persisted_application_version(
                         source_version=source_version,
                         application=application,
@@ -262,6 +265,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     }
         except VersionNotUpdatableError as e:
             return {'error': str(e)}, 400
+        except InstructionsPatchConflictError as e:
+            return {'error': str(e)}, 409
         except ValidationError as e:
             return e.errors(
                 include_url=False,
