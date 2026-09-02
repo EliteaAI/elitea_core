@@ -91,21 +91,28 @@ def _configured_in(project_id: Optional[int], model_name: str) -> Optional[bool]
     return bool(configuration)
 
 
-def check_model_availability(
+def resolve_model(
     project_id: int, model_name: str, model_project_id: Optional[int] = None
-) -> Optional[str]:
-    """Return a user-facing reason when the model cannot be used, or None when it can.
+) -> tuple[Optional[str], Optional[int]]:
+    """Return a user-facing reason the model cannot be used, and the project that owns it.
 
     Answers the question the LLM proxy will ask: the caller's own models, the public project's, and
     — when the request names one — a third project's. Only a definitive absence is reported; if the
     availability set cannot be read at all, generation proceeds.
+
+    An owning project is reported only when the caller left ``model_project_id`` unset, and only
+    when the lookup was conclusive. ``generate_predict_payload`` otherwise reads the model
+    configuration out of the *caller's* project (``predict_utils.py``: ``model_project_id or
+    parsed.project_id``), so a model shared from elsewhere resolves to ``{}`` and every capability
+    silently takes its default — ``openai_compatible`` to False, which on a Bedrock-backed
+    credential routes the name down a path that cannot resolve it.
 
     The one place an unanswerable lookup still yields a message is an unreadable ``model_project_id``
     (see below), because passing that project on is fatal further down.
     """
     available = _available_llm_models(project_id)
     if available is None:
-        return None
+        return None, None
 
     unavailable = (
         f"Model {model_name!r} is not available in project {project_id}. "
@@ -113,27 +120,36 @@ def check_model_availability(
     )
 
     if model_project_id is None:
-        if any(name == model_name for (_, name) in available):
-            return None
-        # the public project's non-shared rows are invisible here, so only a definitive "no" counts
-        return unavailable if _configured_in(_public_project_id(), model_name) is False else None
+        # private before public: fetch_private_configurations inserts its keys first, so the
+        # caller's own model wins a name collision - the ordering validate_and_resolve_llm_settings
+        # relies on too
+        owning_project_id = next((pid for (pid, name) in available if name == model_name), None)
+        if owning_project_id is not None:
+            return None, owning_project_id
+        # the public project's non-shared rows are invisible here, so only a definitive "no" counts.
+        # A hit is deliberately not stamped: `_configured_in` filters on name alone, so it also
+        # answers for rows the public project chose not to share, and naming that project would
+        # resolve capabilities and secrets against a configuration the caller was never given.
+        if _configured_in(_public_project_id(), model_name) is False:
+            return unavailable, None
+        return None, None
 
     if (model_project_id, model_name) in available:
-        return None
+        return None, None
     # Anything short of a confirmed hit is treated as a miss. A general configurations outage would
     # already have emptied `available` and returned above, so a lookup that fails only for this
     # project points at the project id - and a wrong one costs a clear 400 here versus a generic 500
     # further down, where capabilities and secrets resolve against it.
     if _configured_in(model_project_id, model_name):
-        return None
+        return None, None
 
     owning_projects = [pid for (pid, name) in available if name == model_name]
     if owning_projects:
         return (
             f"Model {model_name!r} is not configured in project {model_project_id}. "
             f"It is available in project {owning_projects[0]} - pass that as model_project_id."
-        )
-    return unavailable
+        ), None
+    return unavailable, None
 
 
 def _last_exception_line(error_text) -> str:
