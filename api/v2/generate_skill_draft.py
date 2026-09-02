@@ -30,11 +30,11 @@ from ...models.pd.generate_skill_draft import (
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.draft_llm_utils import (
     caller_chose,
-    check_model_availability,
     describe_predict_failure,
     extract_draft_text,
     hit_token_limit,
     is_truncated_json,
+    resolve_model,
     timeout_response,
 )
 from ...utils.predict_utils import PredictPayloadError
@@ -87,11 +87,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         if req.llm_settings and req.llm_settings.model_name:
             llm_settings = req.llm_settings.model_dump(exclude_none=True)
-            unavailable = check_model_availability(
+            unavailable, owning_project_id = resolve_model(
                 project_id, llm_settings["model_name"], llm_settings.get("model_project_id")
             )
             if unavailable:
                 return {"error": unavailable}, 400
+            if owning_project_id is not None:
+                llm_settings["model_project_id"] = owning_project_id
         else:
             try:
                 llm_settings = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_default_model(

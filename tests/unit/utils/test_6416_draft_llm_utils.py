@@ -74,39 +74,52 @@ PRIVATE_AND_SHARED = {
 }
 
 
-def test_model_in_own_project_passes(draft_llm_utils, available_models):
+def test_model_in_own_project_resolves_to_it(draft_llm_utils, available_models):
     available_models(PRIVATE_AND_SHARED)
 
-    assert draft_llm_utils.check_model_availability(PROJECT, 'gpt-5-mini') is None
+    assert draft_llm_utils.resolve_model(PROJECT, 'gpt-5-mini') == (None, PROJECT)
 
 
-def test_public_shared_model_passes_without_model_project_id(draft_llm_utils, available_models):
-    """The LLM proxy falls back to the public project, so this call succeeds today."""
+def test_public_shared_model_resolves_to_the_public_project(draft_llm_utils, available_models):
+    """#6416 Issue B: unstamped, generate_predict_payload looks this up in the caller's own
+    project, finds nothing, and defaults every capability - openai_compatible included."""
     available_models(PRIVATE_AND_SHARED)
 
-    assert draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5') is None
+    assert draft_llm_utils.resolve_model(PROJECT, 'claude-sonnet-5') == (None, PUBLIC_PROJECT)
 
 
-def test_exact_project_and_model_pair_passes(draft_llm_utils, available_models):
+def test_a_name_both_projects_have_resolves_to_the_caller(draft_llm_utils, available_models):
+    """Private before public, the order fetch_private_configurations establishes."""
+    available_models({
+        (PROJECT, 'shared-name'): {},
+        (PUBLIC_PROJECT, 'shared-name'): {'shared': True},
+    })
+
+    assert draft_llm_utils.resolve_model(PROJECT, 'shared-name') == (None, PROJECT)
+
+
+def test_a_supplied_model_project_id_is_left_alone(draft_llm_utils, available_models):
+    """Nothing to resolve - the caller already said where the model lives."""
     available_models(PRIVATE_AND_SHARED)
 
-    assert draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5', PUBLIC_PROJECT) is None
+    assert draft_llm_utils.resolve_model(PROJECT, 'claude-sonnet-5', PUBLIC_PROJECT) == (None, None)
 
 
 def test_unknown_model_names_itself_and_the_alternatives(draft_llm_utils, available_models):
     available_models(PRIVATE_AND_SHARED)
 
-    reason = draft_llm_utils.check_model_availability(PROJECT, 'nonexistent-model-xyz-999')
+    reason, _owner = draft_llm_utils.resolve_model(PROJECT, 'nonexistent-model-xyz-999')
 
     assert 'nonexistent-model-xyz-999' in reason
     assert 'not available' in reason
     assert 'gpt-5-mini' in reason
+    assert _owner is None
 
 
 def test_wrong_model_project_id_points_at_the_owning_project(draft_llm_utils, available_models):
     available_models(PRIVATE_AND_SHARED)
 
-    reason = draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5', PROJECT)
+    reason, _owner = draft_llm_utils.resolve_model(PROJECT, 'claude-sonnet-5', PROJECT)
 
     assert f'available in project {PUBLIC_PROJECT}' in reason
     assert 'model_project_id' in reason
@@ -116,20 +129,20 @@ def test_a_third_project_that_really_has_the_model_is_accepted(draft_llm_utils, 
     """The available set says nothing about a project that is neither the caller's nor public."""
     available_models(PRIVATE_AND_SHARED, resolvable={(7, 'partner-model')})
 
-    assert draft_llm_utils.check_model_availability(PROJECT, 'partner-model', 7) is None
+    assert draft_llm_utils.resolve_model(PROJECT, 'partner-model', 7) == (None, None)
 
 
 def test_model_project_id_is_verified_before_being_blamed(draft_llm_utils, available_models):
     """A name the caller's project also has must not make a valid model_project_id look wrong."""
     available_models(PRIVATE_AND_SHARED, resolvable={(7, DEFAULT_MODEL_NAME)})
 
-    assert draft_llm_utils.check_model_availability(PROJECT, DEFAULT_MODEL_NAME, 7) is None
+    assert draft_llm_utils.resolve_model(PROJECT, DEFAULT_MODEL_NAME, 7) == (None, None)
 
 
 def test_a_model_owned_by_another_project_names_that_project(draft_llm_utils, available_models):
     available_models(PRIVATE_AND_SHARED, resolvable=())
 
-    reason = draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5', 999)
+    reason, _owner = draft_llm_utils.resolve_model(PROJECT, 'claude-sonnet-5', 999)
 
     assert f'available in project {PUBLIC_PROJECT}' in reason
 
@@ -138,7 +151,7 @@ def test_an_unopenable_model_project_id_is_named_not_waved_through(draft_llm_uti
     """A project with no schema throws; that is a bad argument, and it is fatal further down."""
     available_models(PRIVATE_AND_SHARED, unreadable={999})
 
-    reason = draft_llm_utils.check_model_availability(PROJECT, 'claude-sonnet-5', 999)
+    reason, _owner = draft_llm_utils.resolve_model(PROJECT, 'claude-sonnet-5', 999)
 
     assert 'not configured in project 999' in reason
 
@@ -146,7 +159,7 @@ def test_an_unopenable_model_project_id_is_named_not_waved_through(draft_llm_uti
 def test_an_unreadable_public_project_does_not_cost_a_working_model(draft_llm_utils, available_models):
     available_models(PRIVATE_AND_SHARED, unreadable={PUBLIC_PROJECT})
 
-    assert draft_llm_utils.check_model_availability(PROJECT, 'externally-managed') is None
+    assert draft_llm_utils.resolve_model(PROJECT, 'externally-managed') == (None, None)
 
 
 def test_an_unresolvable_public_project_id_does_not_cost_a_working_model(draft_llm_utils,
@@ -156,27 +169,27 @@ def test_an_unresolvable_public_project_id_does_not_cost_a_working_model(draft_l
     available_models(PRIVATE_AND_SHARED, resolvable=())
     monkeypatch.setattr(draft_llm_utils, '_public_project_id', lambda: None)
 
-    assert draft_llm_utils.check_model_availability(PROJECT, 'externally-managed') is None
+    assert draft_llm_utils.resolve_model(PROJECT, 'externally-managed') == (None, None)
 
 
-def test_unshared_public_model_is_not_rejected(draft_llm_utils, available_models):
-    """_map_model_name falls back to the public project, and that project's non-shared rows are
-    absent from the available set."""
+def test_unshared_public_model_is_allowed_but_not_stamped(draft_llm_utils, available_models):
+    """_map_model_name falls back to the public project, so this must not be rejected - but the
+    per-project lookup ignores `shared`, so a hit does not prove the caller may name that project."""
     available_models(PRIVATE_AND_SHARED, resolvable={(PUBLIC_PROJECT, 'unshared-public-model')})
 
-    assert draft_llm_utils.check_model_availability(PROJECT, 'unshared-public-model') is None
+    assert draft_llm_utils.resolve_model(PROJECT, 'unshared-public-model') == (None, None)
 
 
 def test_lookup_failure_does_not_block_generation(draft_llm_utils, available_models):
     available_models(fails=True)
 
-    assert draft_llm_utils.check_model_availability(PROJECT, 'anything') is None
+    assert draft_llm_utils.resolve_model(PROJECT, 'anything') == (None, None)
 
 
 def test_model_list_is_capped(draft_llm_utils, available_models):
     available_models({(PROJECT, f'model-{i:02d}'): {} for i in range(25)})
 
-    reason = draft_llm_utils.check_model_availability(PROJECT, 'missing')
+    reason, _owner = draft_llm_utils.resolve_model(PROJECT, 'missing')
 
     assert '+5 more' in reason
 
@@ -184,7 +197,7 @@ def test_model_list_is_capped(draft_llm_utils, available_models):
 def test_project_without_models_says_so(draft_llm_utils, available_models):
     available_models({})
 
-    reason = draft_llm_utils.check_model_availability(PROJECT, 'gpt-5-mini')
+    reason, _owner = draft_llm_utils.resolve_model(PROJECT, 'gpt-5-mini')
 
     assert 'No LLM models are configured' in reason
 

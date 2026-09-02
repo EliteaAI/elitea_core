@@ -116,6 +116,7 @@ def _install_package(rpc_state):
     # The real models.pd.skill drags the ORM vocabulary in; only the name rule is needed here.
     pd_skill = types.ModuleType(f'{PKG}.models.pd.skill')
     pd_skill.validate_skill_name = lambda value: value
+    pd_skill.RESERVED_NAME_WORDS = ('claude', 'anthropic')
 
     orm_skill = types.ModuleType(f'{PKG}.models.skill')
     orm_skill.SkillVersion = type('SkillVersion', (), {})
@@ -165,7 +166,7 @@ def _install_package(rpc_state):
             return dict(rpc_state['available'])
 
         def configurations_get_configuration_model(self, project_id, model_name):
-            return {'name': model_name} if model_name in rpc_state['resolvable'] else {}
+            return {'name': model_name} if (project_id, model_name) in rpc_state['resolvable'] else {}
 
     class _RpcMixin:
         rpc = _RpcCaller()
@@ -450,6 +451,60 @@ def test_a_model_project_id_without_a_model_name_is_dropped(endpoints):
 
         assert status == 200
         assert handler.sent_llm_settings['model_project_id'] == PUBLIC_PROJECT
+
+
+def test_a_model_shared_from_public_carries_its_owning_project(endpoints):
+    """#6416 Issue B: unstamped, generate_predict_payload resolves capabilities against the
+    caller's project, misses, and defaults openai_compatible to False."""
+    for module, draft in _generators(endpoints):
+        _payload, status, handler = _call(
+            module,
+            {'user_description': 'x', 'llm_settings': {'model_name': 'claude-sonnet-5'}},
+            _thinking_result(json.dumps(draft)),
+        )
+
+        assert status == 200
+        assert handler.sent_llm_settings['model_project_id'] == PUBLIC_PROJECT
+
+
+def test_a_model_the_caller_owns_carries_the_callers_project(endpoints):
+    for module, draft in _generators(endpoints):
+        _payload, status, handler = _call(
+            module,
+            {'user_description': 'x', 'llm_settings': {'model_name': DEFAULT_MODEL}},
+            _thinking_result(json.dumps(draft)),
+        )
+
+        assert status == 200
+        assert handler.sent_llm_settings['model_project_id'] == PROJECT
+
+
+def test_an_explicit_model_project_id_is_not_overwritten(endpoints):
+    for module, draft in _generators(endpoints):
+        endpoints.rpc_state['resolvable'] = {(7, 'partner-model')}
+        _payload, status, handler = _call(
+            module,
+            {'user_description': 'x',
+             'llm_settings': {'model_name': 'partner-model', 'model_project_id': 7}},
+            _thinking_result(json.dumps(draft)),
+        )
+
+        assert status == 200
+        assert handler.sent_llm_settings['model_project_id'] == 7
+
+
+def test_an_unplaceable_model_is_sent_unstamped(endpoints):
+    """The availability lookup failing must not invent a project id for the proxy to resolve."""
+    for module, draft in _generators(endpoints):
+        endpoints.rpc_state['available'] = None
+        _payload, status, handler = _call(
+            module,
+            {'user_description': 'x', 'llm_settings': {'model_name': 'externally-managed'}},
+            _thinking_result(json.dumps(draft)),
+        )
+
+        assert status == 200
+        assert 'model_project_id' not in handler.sent_llm_settings
 
 
 def test_explicit_null_max_tokens_falls_back_to_the_default(endpoints):
