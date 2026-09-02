@@ -168,6 +168,15 @@ class AgentVersionNotUpdatableError(SkillError):
         self.status = status
 
 
+class AgentVersionNotFoundError(SkillError):
+    """Raised when a skill mapping references an agent version that does not exist."""
+    http_status = 404
+
+    def __init__(self, entity_version_id: int):
+        super().__init__(f'Agent version {entity_version_id} not found')
+        self.entity_version_id = entity_version_id
+
+
 @contextmanager
 def _skill_session(session, project_id):
     """Yield a usable session. Own commit/rollback/close ONLY when we created it.
@@ -752,6 +761,12 @@ def attach_public_skill_to_agents(
             except SkillAlreadyAttachedError:
                 results.append({'agent_version_id': vid, 'ok': False,
                                 'http_status': 409, 'error': 'already attached'})
+            except AgentVersionNotUpdatableError:
+                # 400, not this error's own 409: the dialog reads 409 alone as
+                # "already attached" and reports it as a benign no-op, which would
+                # tell the user the skill was added when it was refused.
+                results.append({'agent_version_id': vid, 'ok': False,
+                                'http_status': 400, 'error': 'published'})
         return results
 
 
@@ -1052,13 +1067,12 @@ def delete_skill_version(
         if not version:
             raise SkillVersionNotFoundError(skill_id, version_id=version_id)
 
-        # Prevent deleting 'base' version if it's the only one
-        other_versions = s.query(SkillVersion).filter(
+        remaining_versions = s.query(SkillVersion).filter(
             SkillVersion.skill_id == skill_id,
             SkillVersion.id != version_id,
-        ).count()
+        ).all()
 
-        if version.name == 'base' and other_versions == 0:
+        if not remaining_versions:
             raise SkillVersionNotUpdatableError(
                 'Cannot delete the only version of a skill. Delete the skill instead.',
                 version_id=version_id,
@@ -1077,7 +1091,25 @@ def delete_skill_version(
             raise SkillVersionInUseError(version_id, usage_count)
 
         s.delete(version)
+        _repoint_default_version(s, skill_id, version_id, remaining_versions)
         return None
+
+
+def _repoint_default_version(session, skill_id: int, deleted_version_id: int, remaining_versions):
+    """Move ``meta['default_version_id']`` off a version that has just been deleted.
+
+    Chooses the same successor GET would compute (models/pd/skill.py set_version_ids),
+    so the stored pointer and the reported one agree.
+    """
+    skill = session.query(Skill).filter(Skill.id == skill_id).first()
+    if skill is None or (skill.meta or {}).get('default_version_id') != deleted_version_id:
+        return
+
+    successor = (
+        next((v for v in remaining_versions if v.name == 'base'), None)
+        or min(remaining_versions, key=lambda version: version.created_at)
+    )
+    skill.meta = {**(skill.meta or {}), 'default_version_id': successor.id}
 
 
 def get_skill_version_by_id(
@@ -1228,6 +1260,21 @@ def attach_skill_to_public_copy(
         )
 
 
+def _require_updatable_agent_version(session, entity_version_id: int) -> None:
+    """Reject a mapping change against a missing, published or embedded agent version.
+
+    EntitySkillMapping.entity_version_id carries no foreign key, so a missing row
+    would otherwise be written as a mapping onto an agent version that never existed.
+    """
+    agent_version = session.query(ApplicationVersion).filter(
+        ApplicationVersion.id == entity_version_id
+    ).first()
+    if not agent_version:
+        raise AgentVersionNotFoundError(entity_version_id)
+    if agent_version.status in (PublishStatus.published, PublishStatus.embedded):
+        raise AgentVersionNotUpdatableError(entity_version_id, agent_version.status)
+
+
 def attach_skill_to_agent(
     project_id: int,
     entity_version_id: int,
@@ -1239,11 +1286,7 @@ def attach_skill_to_agent(
     """Attach a skill to an agent version."""
 
     with _skill_session(session, project_id) as s:
-        agent_version = s.query(ApplicationVersion).filter(
-            ApplicationVersion.id == entity_version_id
-        ).first()
-        if agent_version and agent_version.status in (PublishStatus.published, PublishStatus.embedded):
-            raise AgentVersionNotUpdatableError(entity_version_id, agent_version.status)
+        _require_updatable_agent_version(s, entity_version_id)
 
         return _create_skill_mapping(
             s, entity_version_id, skill_id, skill_version_id, entity_type,
@@ -1305,11 +1348,7 @@ def detach_skill_from_agent(
 ) -> dict:
     """Detach a skill from an agent version."""
     with _skill_session(session, project_id) as s:
-        agent_version = s.query(ApplicationVersion).filter(
-            ApplicationVersion.id == entity_version_id
-        ).first()
-        if agent_version and agent_version.status in (PublishStatus.published, PublishStatus.embedded):
-            raise AgentVersionNotUpdatableError(entity_version_id, agent_version.status)
+        _require_updatable_agent_version(s, entity_version_id)
 
         mapping = s.query(EntitySkillMapping).filter(
             EntitySkillMapping.entity_version_id == entity_version_id,
@@ -1433,6 +1472,12 @@ def get_available_skills_for_agent(
     session=None,
 ) -> List[dict]:
     with _skill_session(session, project_id) as s:
+        agent_version = s.query(ApplicationVersion).filter(
+            ApplicationVersion.id == entity_version_id
+        ).first()
+        if not agent_version:
+            raise AgentVersionNotFoundError(entity_version_id)
+
         mappings = s.query(EntitySkillMapping).filter(
             EntitySkillMapping.entity_version_id == entity_version_id,
             EntitySkillMapping.entity_type == entity_type,

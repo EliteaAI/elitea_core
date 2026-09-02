@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, constr, field_validator
 
 from .predict_llm import LLMSettingsRequest
 from .project_context import (
@@ -28,7 +28,7 @@ class GenerateProjectContextDraftRequest(BaseModel):
         }
     )
 
-    user_description: str = Field(
+    user_description: constr(strip_whitespace=True, min_length=1) = Field(
         description="Natural-language description of the project (architecture, processes, constraints, etc.)"
     )
     current_project_background: Optional[str] = Field(

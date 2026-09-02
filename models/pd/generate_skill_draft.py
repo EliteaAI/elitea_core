@@ -1,7 +1,7 @@
 import re
 from typing import Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, constr, field_validator, model_validator
 
 from .predict_llm import LLMSettingsRequest
 from .skill import RESERVED_NAME_WORDS, validate_skill_name
@@ -83,7 +83,7 @@ class GenerateSkillDraftRequest(BaseModel):
         }
     )
 
-    user_description: str = Field(
+    user_description: constr(strip_whitespace=True, min_length=1) = Field(
         description="Natural-language description of the desired skill"
     )
     llm_settings: Optional[LLMSettingsRequest] = Field(

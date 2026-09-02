@@ -187,6 +187,10 @@ def application_tools_module():
     exceptions.PoolSaturationError = type("PoolSaturationError", (Exception,), {})
     _register("plugins.elitea_core.utils.exceptions", exceptions)
 
+    tool_utils_mod = types.ModuleType("plugins.elitea_core.utils.utils")
+    tool_utils_mod.parse_ids_filter = lambda *a, **k: []
+    _register("plugins.elitea_core.utils.utils", tool_utils_mod)
+
     # Lightweight stand-in for ToolUpdateRelationModel - avoids pulling in
     # the real model's heavy toolkit-schema/author dependencies.
     from pydantic import BaseModel
@@ -322,12 +326,20 @@ def skill_utils_module():
     tools_pkg.this = types.SimpleNamespace()
     tools_pkg.serialize = types.SimpleNamespace()
     tools_pkg.rpc_tools = types.SimpleNamespace()
+    tools_pkg.context = types.SimpleNamespace(
+        event_manager=types.SimpleNamespace(fire_event=lambda *a, **k: None),
+    )
     sys.modules["tools"] = tools_pkg
 
     utils_mod = types.ModuleType("plugins.elitea_core.utils.utils")
     utils_mod.set_columns_as_attrs = lambda *a, **k: None
     utils_mod.get_public_project_id = lambda: 1
+    utils_mod.parse_ids_filter = lambda *a, **k: []
     _register("plugins.elitea_core.utils.utils", utils_mod)
+
+    authors_mod = types.ModuleType("plugins.elitea_core.utils.authors")
+    authors_mod.get_authors_data = lambda *a, **k: []
+    _register("plugins.elitea_core.utils.authors", authors_mod)
 
     like_utils = types.ModuleType("plugins.elitea_core.utils.like_utils")
     like_utils.add_likes = lambda *a, **k: None
@@ -375,6 +387,14 @@ def skill_utils_module():
     enums.PublishStatus = _PublishStatus
     enums.AgentTypes = type("AgentTypes", (), {})
     _register("plugins.elitea_core.models.enums.all", enums)
+
+    enum_events = types.ModuleType("plugins.elitea_core.models.enums.events")
+    enum_events.ApplicationEvents = type(
+        "ApplicationEvents",
+        (),
+        {"skill_deleted": types.SimpleNamespace(value="skill_deleted")},
+    )
+    _register("plugins.elitea_core.models.enums.events", enum_events)
 
     from pydantic import BaseModel, ConfigDict
 
