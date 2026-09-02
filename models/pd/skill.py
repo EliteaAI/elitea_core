@@ -76,9 +76,11 @@ class SkillArgsForwardingModel(BaseModel):
         project_id = values.get('project_id')
         user_id = values.get('user_id')
 
-        if version := values.get('version'):
-            version['project_id'] = project_id
-            version['user_id'] = user_id
+        # #6410: SkillUpdateModel.version validates against SkillVersionNestedUpdateModel,
+        # which declares (and has never used) no project_id/user_id fields - forwarding them
+        # in only worked because that model's Optional/extra="ignore" fields silently dropped
+        # them. Now that it has extra="forbid" (to catch a real shape mismatch), forwarding
+        # unused keys would 400 every legitimate nested-body update. Dropped as dead code.
 
         if versions := values.get('versions'):
             for version in versions:
@@ -341,6 +343,11 @@ class SkillUpdateModel(SkillArgsForwardingModel):
     description: Optional[str] = Field(None, min_length=1, max_length=2304)
     version: Optional[SkillVersionNestedUpdateModel] = None
     meta: Optional[dict] = None
+
+    # #6410: reject any top-level key that isn't part of this (nested) shape - e.g. a
+    # stray flat "instructions"/"tags" body, or a leftover "version_id" - instead of
+    # silently ignoring it the way the previous all-Optional/extra="ignore" model did.
+    model_config = ConfigDict(extra="forbid")
 
 
 class SkillExportModel(SkillArgsForwardingModel):

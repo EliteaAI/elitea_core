@@ -70,7 +70,10 @@ class SkillVersionUpdateModel(BaseModel):
     tags: Optional[List[PromptTagUpdateModel]] = None
     meta: Optional[dict] = None
 
-    model_config = ConfigDict(from_attributes=True)
+    # #6410: every field here defaults to None, so a body shaped for the nested
+    # SkillUpdateModel (e.g. {"version": {...}}) used to validate cleanly into an
+    # all-None no-op instead of failing. forbid makes a shape mismatch a 400.
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
 
 
 class SkillVersionNestedUpdateModel(SkillVersionUpdateModel):

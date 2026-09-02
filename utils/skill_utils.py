@@ -156,6 +156,19 @@ class SkillVersionNotUpdatableError(SkillError):
         self.version_id = version_id
 
 
+class SkillTagMismatchError(SkillError):
+    """Raised when a caller-supplied tag id doesn't resolve to the given tag name (#6410)."""
+    http_status = 400
+
+    def __init__(self, tag_id: int, tag_name: str):
+        super().__init__(
+            f"Tag id {tag_id} does not match name '{tag_name}': "
+            "either the id doesn't exist or it belongs to a different tag"
+        )
+        self.tag_id = tag_id
+        self.tag_name = tag_name
+
+
 class AgentVersionNotUpdatableError(SkillError):
     """Raised when attaching/detaching a skill on a published or embedded agent version."""
     http_status = 409
@@ -1669,9 +1682,22 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
 
 
 def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
-    """Apply tags to a skill version."""
+    """Apply tags to a skill version.
+
+    Tags without an ``id`` are matched/created by name, as before. A tag that *does*
+    supply an ``id`` (#6410) is resolved by that id and its ``name`` must match the
+    existing row - a stale/mismatched id is a caller error, not a silent name-based
+    fallback.
+    """
     if not tags:
         return
+
+    requested_ids = {t.id for t in tags if t.id is not None}
+    tags_by_id = {}
+    if requested_ids:
+        tags_by_id = {
+            t.id: t for t in session.query(Tag).filter(Tag.id.in_(requested_ids)).all()
+        }
 
     existing_tags = session.query(Tag).filter(
         Tag.name.in_({t.name for t in tags})
@@ -1679,6 +1705,13 @@ def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
     existing_tags_map = {t.name: t for t in existing_tags}
 
     for tag in tags:
+        if tag.id is not None:
+            tag_obj = tags_by_id.get(tag.id)
+            if tag_obj is None or tag_obj.name != tag.name:
+                raise SkillTagMismatchError(tag.id, tag.name)
+            version.tags.append(tag_obj)
+            continue
+
         tag_obj = existing_tags_map.get(tag.name)
         if not tag_obj:
             tag_obj = Tag(name=tag.name)
