@@ -499,6 +499,32 @@ class ApplicationVersionUpdateModel(ApplicationVersionBaseModel):
         return self
 
 
+class ApplicationVersionMcpUpdateModel(BaseModel):
+    """Default-neutral fields a model may change without reading the system prompt.
+
+    Keep this separate from ApplicationVersionUpdateModel: its inherited defaults and
+    server-owned identity fields are valid for the HTTP API but become authored values when
+    the SDK reconstructs an MCP schema as a Pydantic model.
+    """
+
+    name: Optional[str] = Field(default=None, min_length=1)
+    tags: Optional[List[PromptTagUpdateModel]] = None
+    llm_settings: Optional[LLMSettingsWriteModel] = None
+    variables: Optional[List[ApplicationVariableModel]] = None
+    tools: Optional[List[ToolBase]] = None
+    conversation_starters: Optional[List[str]] = None
+    agent_type: Optional[AgentTypes] = None
+    welcome_message: Optional[str] = None
+    pipeline_settings: Optional[dict] = None
+    meta: Optional[dict] = None
+    notes: Optional[str] = Field(default=None, max_length=1000)
+
+    @field_validator('conversation_starters', mode='before')
+    @classmethod
+    def validate_conversation_starters(cls, value):
+        return conversation_starters_validator(value)
+
+
 class ApplicationVersionInstructionsPatchModel(BaseModel):
     """Small, optimistic-concurrency payload for internal-MCP prompt edits."""
 

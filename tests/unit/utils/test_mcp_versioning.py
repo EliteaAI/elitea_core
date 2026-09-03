@@ -76,6 +76,30 @@ def test_replace_all_is_hash_guarded(versioning):
     assert updated == 'complete new prompt'
 
 
+@pytest.mark.parametrize('legacy_value', [None, '', 'current prompt'])
+def test_settings_update_strips_non_changes_to_instructions(versioning, legacy_value):
+    payload = {'welcome_message': 'Hello!', 'instructions': legacy_value}
+
+    sanitized = versioning.sanitize_mcp_settings_update(payload, 'current prompt')
+
+    assert sanitized == {'welcome_message': 'Hello!'}
+    assert payload['instructions'] == legacy_value
+
+
+def test_settings_update_without_instructions_is_unchanged(versioning):
+    payload = {'conversation_starters': ['Start here']}
+
+    assert versioning.sanitize_mcp_settings_update(payload, 'current prompt') == payload
+
+
+def test_settings_update_rejects_a_real_instruction_change(versioning):
+    with pytest.raises(versioning.InstructionsPatchConflictError, match='safe instructions'):
+        versioning.sanitize_mcp_settings_update(
+            {'welcome_message': 'Hello!', 'instructions': 'different prompt'},
+            'current prompt',
+        )
+
+
 def test_backup_name_is_compact_and_stable(versioning):
     now = datetime(2026, 8, 28, 12, 34, 56, 123456, tzinfo=timezone.utc)
 
