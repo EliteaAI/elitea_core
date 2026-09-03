@@ -200,6 +200,10 @@ def skill_utils_module():
         setattr(pd_skill_version, n, type(n, (_Permissive,), {}))
     _register(f'{PKG_ROOT}.elitea_core.models.pd.skill_version', pd_skill_version)
 
+    folder_access = types.ModuleType(f'{PKG_ROOT}.elitea_core.utils.folder_access')
+    folder_access.folder_exclusion_clause = lambda *a, **k: None
+    _register(f'{PKG_ROOT}.elitea_core.utils.folder_access', folder_access)
+
     module = _load_real('utils/skill_utils.py', f'{PKG_ROOT}.elitea_core.utils.skill_utils')
 
     yield module

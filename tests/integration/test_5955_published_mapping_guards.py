@@ -421,6 +421,10 @@ def skill_utils_module():
         setattr(models_pd_skill_version, cls_name, type(cls_name, (_PdBase,), {}))
     _register("plugins.elitea_core.models.pd.skill_version", models_pd_skill_version)
 
+    folder_access = types.ModuleType("plugins.elitea_core.utils.folder_access")
+    folder_access.folder_exclusion_clause = lambda *a, **k: None
+    _register("plugins.elitea_core.utils.folder_access", folder_access)
+
     _heal_sqlalchemy_stubs()
 
     spec = importlib.util.spec_from_file_location(
