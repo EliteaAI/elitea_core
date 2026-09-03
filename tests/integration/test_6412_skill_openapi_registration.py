@@ -255,8 +255,11 @@ def test_skill_details_takes_an_optional_version_id(mcp_tools):
 
 
 def test_metadata_update_no_longer_demands_a_version(mcp_tools):
+    """#6411 gave PUT a documented `version_id` *query* selector, matching get/delete and the
+    skill_export siblings, so the property exists again - but the point of #6412 stands: it must
+    never be required, and it must never be a path parameter (pinned separately above)."""
     schema = mcp_tools['put_elitea_core_skill']['args_schema']
-    assert 'version_id' not in schema['properties']
+    assert schema['properties']['version_id']['type'] == 'integer'
     assert 'version_id' not in schema['required']
 
 

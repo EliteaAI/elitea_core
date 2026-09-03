@@ -39,6 +39,10 @@ class _Request:
 
 LOGGED = {'warning': []}
 
+# Which skill_utils writer ran, and with what - a status code alone cannot tell the version
+# branch from the metadata branch, since both return 200.
+CALLS = {'update_skill': [], 'update_skill_version': []}
+
 
 class _Payload:
     """Stand-in for the pydantic request models; detaches on PATCH, no version on PUT."""
@@ -52,6 +56,20 @@ class _Payload:
     @classmethod
     def model_validate(cls, _payload):
         return cls()
+
+
+def _with_modes(url_params):
+    """Order-preserving twin of `api_tools.with_modes`, which returns `list(set(...))`.
+
+    Faithful expansion matters: an identity stub would hide whether a pinned
+    `path_suffix_override` corresponds to a route that is actually registered.
+    """
+    params = []
+    for i in url_params:
+        if not i.startswith('<string:mode>'):
+            params.append('<string:mode>' if i == '' else f'<string:mode>/{i}')
+        params.append(i)
+    return params
 
 
 def _install_package():
@@ -86,10 +104,7 @@ def _install_package():
         class APIBase:
             pass
 
-        @staticmethod
-        def with_modes(params):
-            return params
-
+        with_modes = staticmethod(_with_modes)
         endpoint_metrics = staticmethod(_endpoint_metrics)
 
     tools = types.ModuleType('tools')
@@ -127,10 +142,23 @@ def _install_package():
     pd_skill_version.SkillVersionUpdateModel = type('SkillVersionUpdateModel', (_Payload,), {})
 
     skill_utils = types.ModuleType(f'{PKG}.utils.skill_utils')
-    for name in ('update_skill', 'delete_skill', 'create_skill_version',
-                 'update_skill_version', 'delete_skill_version', 'get_skill_version_by_id',
+    for name in ('delete_skill', 'create_skill_version', 'delete_skill_version',
                  'attach_skill_to_agent', 'detach_skill_from_agent'):
         setattr(skill_utils, name, lambda *a, **k: {'id': 1})
+
+    def _record(name):
+        def call(*args, **kwargs):
+            CALLS[name].append(kwargs)
+            return {'id': 1}
+        return call
+
+    skill_utils.update_skill = _record('update_skill')
+    skill_utils.update_skill_version = _record('update_skill_version')
+    # Returns a SkillVersion row, and callers read `.id` off it - not a dict. Echoes the id it was
+    # asked for so a test can prove which version the handler targeted. Deliberately a minimal
+    # class rather than SimpleNamespace, which would answer to any attribute typo.
+    skill_utils.get_skill_version_by_id = (
+        lambda *a, **k: type('SkillVersion', (), {'id': k.get('version_id')})())
     skill_utils.get_skill_details = lambda *a, **k: {'data': {'id': 1}}
     skill_utils.SkillError = type('SkillError', (Exception,), {'http_status': 400})
 
@@ -167,7 +195,10 @@ def skill_api(monkeypatch):
              if k == 'tools' or k == 'flask' or k.startswith(PKG)}
     module = _install_package()
     _Request.args = _Args()
+    _Request.json = {}
     LOGGED['warning'].clear()
+    for calls in CALLS.values():
+        calls.clear()
     yield module
     for key in [k for k in sys.modules if k.startswith(PKG)]:
         del sys.modules[key]
@@ -186,7 +217,11 @@ def _params(skill_api, method_name, name):
 
 def test_every_method_is_pinned_to_the_versionless_path(skill_api):
     for method_name in METHODS:
-        assert _meta(skill_api, method_name)['path_suffix_override'] == skill_api.SKILL_PATH
+        # .get, not [...]: an unpinned method is the very thing under test, and the fake
+        # register_openapi in this harness omits kwargs the decorator did not pass.
+        assert _meta(skill_api, method_name).get('path_suffix_override') == skill_api.SKILL_PATH, (
+            f'{method_name} is not pinned to SKILL_PATH'
+        )
 
 
 def test_no_method_declares_an_optional_path_parameter(skill_api):
@@ -202,7 +237,12 @@ def test_relation_patch_does_not_take_a_version_id(skill_api):
 
 
 def test_metadata_put_selects_the_version_through_the_body(skill_api):
-    assert _params(skill_api, 'put', 'version_id') == []
+    """The nested body remains PUT's documented request shape; #6411 added the query selector as
+    a second, documented way in, so `version_id` is no longer absent from the parameters - but it
+    must never come back as a *path* parameter, which is what #6412 was about."""
+    param, = _params(skill_api, 'put', 'version_id')
+    assert param['in'] == 'query'
+    assert param['required'] is False
     assert _meta(skill_api, 'put')['request_body'] is sys.modules[
         f'{PKG}.models.pd.skill'].SkillUpdateModel
 
@@ -212,6 +252,28 @@ def test_version_id_is_an_optional_query_parameter(skill_api, method_name):
     param, = _params(skill_api, method_name, 'version_id')
     assert param['in'] == 'query'
     assert param['required'] is False
+
+
+def test_every_pinned_path_is_actually_routable(skill_api):
+    """SKILL_PATH decides the path the spec publishes; `url_params` decides what Flask serves.
+    They are independent literals in this file (and skill_export/skill_export_fork import
+    SKILL_PATH while declaring their own), so they can drift and send every spec-driven caller to
+    a 404. The registry assertions cannot see it - the registry is built from the override.
+
+    Pinning is not assumed here - a method that legitimately does not pin is skipped, and
+    `test_every_method_is_pinned_to_the_versionless_path` is what requires skill.py to pin at all.
+    """
+    routes = skill_api.API.url_params
+    checked = 0
+    for method_name in METHODS:
+        override = _meta(skill_api, method_name).get('path_suffix_override')
+        if override is None:
+            continue
+        checked += 1
+        assert override in routes, (
+            f'{method_name} publishes {override!r}, which no url_params entry registers'
+        )
+    assert checked, 'no method pinned a path, so the assertion above never ran'
 
 
 def test_versioned_route_is_still_registered_for_the_ui(skill_api):
@@ -259,17 +321,77 @@ def test_delete_refuses_a_mistyped_version_selector(skill_api):
     ('get', 'versionId'),
     ('put', 'versionId'),
     ('patch', 'versionId'),
-    ('put', 'version_id'),
     ('patch', 'version_id'),
 ])
 def test_reversible_methods_ignore_an_unsupported_query_param_and_log_it(
         skill_api, method_name, query):
-    """PUT and PATCH select the version through the body, so a query `version_id` is as
-    unsupported there as a typo - logged and ignored, never a new 400."""
+    """PATCH selects the version through the body, so a query `version_id` is as unsupported
+    there as a typo - logged and ignored, never a new 400. It writes no version content, so
+    ignoring the key cannot corrupt one.
+
+    `('put', 'version_id')` was dropped from this list reviewing #6411: PUT *does* write version
+    content, and ignoring the key rewrote the default version while the caller believed they had
+    targeted another. PUT now *honours* it, like get/delete and the skill_export siblings - see
+    `test_put_honours_a_query_version_selector`. A typo'd key on PUT is still ignored, which is
+    what the `versionId` case above pins."""
     _Request.args = _Args({query: '7'})
     _, status = getattr(skill_api.PromptLibAPI, method_name)(None, project_id=1, skill_id=2)
     assert status == 200
     assert any(query in str(call) for call in LOGGED['warning'])
+
+
+def test_put_honours_a_query_version_selector(skill_api):
+    """Changed reviewing #6411. `version_id` is a live query selector on get/delete and on
+    skill_export/skill_export_fork, so a caller reaching for it on PUT is making a reasonable
+    assumption - and used to silently get the default version rewritten instead.
+
+    Asserting the status is not enough: the unfixed path fell through to the metadata branch,
+    which also returns 200. What distinguishes them is *which writer ran and on which version*."""
+    _Request.args = _Args(version_id='8')
+    _, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2)
+    assert status == 200
+    assert LOGGED['warning'] == [], 'a recognised selector must not be logged as unsupported'
+    assert [c['version_id'] for c in CALLS['update_skill_version']] == [8]
+    assert CALLS['update_skill'] == [], 'the default version must not have been rewritten'
+
+
+def test_put_still_writes_when_no_version_selector_is_sent(skill_api):
+    _Request.args = _Args()
+    _, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2)
+    assert status == 200
+    assert len(CALLS['update_skill']) == 1
+    assert CALLS['update_skill_version'] == []
+
+
+def test_put_honours_a_path_version_selector(skill_api):
+    """The shape EliteaUI's Compare-versions dialog sends - the path form must keep targeting the
+    version it names, independently of the query selector added for #6411."""
+    _, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2, version_id=8)
+    assert status == 200
+    assert [c['version_id'] for c in CALLS['update_skill_version']] == [8]
+    assert CALLS['update_skill'] == []
+
+
+def test_put_accepts_the_compare_dialog_body_verbatim(skill_api):
+    """The exact body the Compare-versions dialog sends, captured off the wire in a Playwright
+    sweep. `status`, `author_id`, `author` and `created_at` are not fields of
+    SkillVersionUpdateModel - they survive today only because the model ignores extras. Pinned
+    because tightening that model to extra="forbid" would 400 every Compare-dialog save."""
+    _Request.json = {
+        'id': 209, 'name': 'base', 'instructions': 'text', 'status': 'draft', 'author_id': 3,
+        'author': {'id': 3, 'email': 'admin@centry.user', 'name': 'admin@centry.user',
+                   'avatar': None},
+        'tags': [], 'created_at': '2026-09-03T06:14:58.695546', 'meta': {},
+    }
+    _, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2, version_id=209)
+    assert status == 200
+
+
+def test_put_rejects_a_non_integer_query_version_selector(skill_api):
+    _Request.args = _Args(version_id='abc')
+    body, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2)
+    assert status == 400
+    assert 'version_id' in body['error']
 
 
 def test_an_ignored_query_key_cannot_forge_a_log_line(skill_api):
