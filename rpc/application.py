@@ -906,8 +906,8 @@ class RPC:
                         }
 
                 versions = list(application.versions)
-                latest_version = versions[-1] if versions else None
-                agent_type = latest_version.agent_type if latest_version else None
+                default_version = application.get_default_version()
+                agent_type = default_version.agent_type if default_version else None
 
                 detach_skills_for_entity_versions(
                     session, [ver.id for ver in versions]
