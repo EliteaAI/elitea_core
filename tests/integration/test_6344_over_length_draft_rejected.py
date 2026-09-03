@@ -59,9 +59,26 @@ def test_an_over_length_draft_is_rejected_rather_than_truncated(endpoints, mode)
     payload, status, _ = _generate(endpoints, MODES[mode], 3142)
 
     assert status == 422
-    assert 'project_background' in payload['error']
+    assert 'Project background' in payload['error']
     assert str(MAX_LENGTH) in payload['error']
     assert '3142' in payload['error']
+
+
+@pytest.mark.parametrize('mode', sorted(MODES))
+def test_the_error_tells_the_reader_what_to_do_next(endpoints, mode):
+    payload, _status, _ = _generate(endpoints, MODES[mode], 3142)
+
+    assert payload['error'].endswith('Try generating again, or ask for a narrower scope.')
+
+
+@pytest.mark.parametrize('mode', sorted(MODES))
+def test_the_schema_key_never_reaches_the_reader(endpoints, mode):
+    """The modal renders this string verbatim, and `project_background` names nothing the reader
+    of that form has ever seen."""
+    payload, _status, _ = _generate(endpoints, MODES[mode], 3142)
+
+    assert 'project_background' not in payload['error']
+    assert payload['details'][0]['loc'] == ('project_background',)
 
 
 @pytest.mark.parametrize('mode', sorted(MODES))
@@ -96,7 +113,7 @@ def test_a_bare_string_answer_does_not_put_the_model_class_in_the_error(endpoint
 
     assert status == 422
     assert 'GenerateProjectContextDraftResponse' not in payload['error']
-    assert payload['error'] == 'Generated draft failed validation'
+    assert payload['error'].startswith('Generated draft failed validation')
 
 
 @pytest.mark.parametrize('mode', sorted(MODES))

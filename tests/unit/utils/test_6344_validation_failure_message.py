@@ -73,7 +73,7 @@ class TestDescribeValidationFailure:
     def test_it_names_the_field(self, draft_llm_utils):
         sentence = draft_llm_utils.describe_validation_failure(_over_length_errors(2501))
 
-        assert sentence.startswith('project_background ')
+        assert sentence.startswith('Project background ')
 
     def test_it_names_the_cap_that_was_broken(self, draft_llm_utils):
         sentence = draft_llm_utils.describe_validation_failure(_over_length_errors(2501))
@@ -103,8 +103,8 @@ class TestDescribeValidationFailure:
 
         sentence = draft_llm_utils.describe_validation_failure(errors)
 
-        assert 'project_background' in sentence
-        assert 'activation_description' in sentence
+        assert 'Project background' in sentence
+        assert 'Activation description' in sentence
         assert '2501' in sentence
         assert '400' in sentence
 
@@ -116,8 +116,8 @@ class TestDescribeValidationFailure:
         sentence = draft_llm_utils.describe_validation_failure(errors)
 
         assert sentence.split('; ') == [
-            f'project_background is 2501 characters, the maximum is {MAX_LENGTH}',
-            'activation_description is 400 characters, the maximum is 300',
+            f'Project background is 2501 characters, the maximum is {MAX_LENGTH}',
+            'Activation description is 400 characters, the maximum is 300',
         ]
 
     def test_a_missing_field_is_reported_without_a_length(self, draft_llm_utils):
@@ -125,7 +125,7 @@ class TestDescribeValidationFailure:
             _errors_for({'activation_description': 'stack questions'})
         )
 
-        assert sentence.startswith('project_background: ')
+        assert sentence.startswith('Project background: ')
         assert 'characters' not in sentence
 
     def test_a_non_string_value_is_reported_without_a_length(self, draft_llm_utils):
@@ -133,7 +133,7 @@ class TestDescribeValidationFailure:
             _errors_for({'project_background': 17, 'activation_description': 'stack questions'})
         )
 
-        assert sentence.startswith('project_background: ')
+        assert sentence.startswith('Project background: ')
         assert 'characters' not in sentence
 
     def test_an_empty_error_list_still_yields_a_sentence(self, draft_llm_utils):
@@ -164,13 +164,13 @@ class TestNonFieldAndNonLengthRules:
 
         sentence = draft_llm_utils.describe_validation_failure(exc.value.errors())
 
-        assert sentence.startswith('slug: ')
+        assert sentence.startswith('Slug: ')
         assert 'characters' not in sentence
 
     def test_a_length_rule_is_still_measured_alongside(self, draft_llm_utils):
         sentence = draft_llm_utils.describe_validation_failure(_over_length_errors(2501))
 
-        assert sentence == f'project_background is 2501 characters, the maximum is {MAX_LENGTH}'
+        assert sentence == f'Project background is 2501 characters, the maximum is {MAX_LENGTH}'
 
     def test_errors_stripped_of_their_input_cannot_be_measured(self, draft_llm_utils):
         """The endpoint sends `include_input=False` errors to the client; passing those here instead
@@ -189,4 +189,4 @@ class TestNonFieldAndNonLengthRules:
             _errors_for({'project_background': '', 'activation_description': 'stack questions'})
         )
 
-        assert sentence == 'project_background is 0 characters, the minimum is 1'
+        assert sentence == 'Project background is 0 characters, the minimum is 1'

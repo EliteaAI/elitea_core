@@ -349,17 +349,22 @@ def _describe_validation_error(error: dict) -> str:
     characters" describes the constraint where what both a person and a regenerating model need is
     how far over the draft actually went. Every other rule keeps pydantic's wording, and no length
     is quoted against it — beside a pattern or a type it would read as the thing that failed.
+
+    The field is named as a form labels it rather than as the schema spells it, because the person
+    reading the banner never sees the schema. A model regenerating the draft is given the tool
+    definition alongside this sentence and maps the two without the underscore.
     """
     location = ".".join(str(part) for part in error.get("loc") or ())
     if not location:
         return ""
+    field = location.replace("_", " ").capitalize()
     value = error.get("input")
     context = error.get("ctx") or {}
     if isinstance(value, str):
         for key, label in LENGTH_RULES:
             if key in context:
-                return f"{location} is {len(value)} characters, the {label} is {context[key]}"
-    return f"{location}: {_last_exception_line(error.get('msg') or error.get('type') or 'is invalid')}"
+                return f"{field} is {len(value)} characters, the {label} is {context[key]}"
+    return f"{field}: {_last_exception_line(error.get('msg') or error.get('type') or 'is invalid')}"
 
 
 def describe_validation_failure(errors) -> str:

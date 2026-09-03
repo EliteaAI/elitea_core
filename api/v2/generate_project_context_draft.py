@@ -201,7 +201,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             # the draft itself is already in `raw`; `details` repeating it would triple the payload
             return {
-                "error": failure,
+                "error": f"{failure}. Try generating again, or ask for a narrower scope.",
                 "details": details,
                 "raw": parsed,
             }, 422
