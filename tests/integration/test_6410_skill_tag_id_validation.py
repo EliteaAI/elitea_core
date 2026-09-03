@@ -15,6 +15,12 @@ SQLAlchemy-ish session/`Tag` model to pin:
      brand-new same-named-or-different tag by name).
   4. A tag `id` that exists but whose `name` doesn't match raises ``SkillTagMismatchError``
      (was: silently fell back to a name-based lookup/create, keeping the wrong tag attached).
+  5. Both tag models callers actually pass work: `PromptTagUpdateModel` (update paths) *and*
+     `TagBaseModel` (create/import/publish paths), which declares no `id` field at all - so
+     `id` has to be read defensively rather than as a plain attribute.
+
+The tags are the real Pydantic models, not stand-ins: a `SimpleNamespace` always has `.id`,
+so it would hide the `AttributeError` -> 500 that `TagBaseModel` triggers.
 
 Run via:
     python tests/run_tests.py integration/test_6410_skill_tag_id_validation.py -v
@@ -204,27 +210,72 @@ def skill_utils_module():
     sys.modules.update(saved)
 
 
-def _tag(id=None, name=None):
-    return types.SimpleNamespace(id=id, name=name)
+@pytest.fixture(scope='module')
+def tag_models():
+    """The real `TagBaseModel` / `PromptTagUpdateModel` - `collection_base.py` imports only
+    typing and pydantic, so it loads standalone.
+
+    `TagBaseModel` is what `create_skill`, `create_skill_version`, import and publish all pass
+    (see `skill_publish_utils.py`), and it declares no `id` field - `t.id` on one is an
+    `AttributeError`, which is not a `SkillError` and so escapes as a 500.
+    """
+    spec = importlib.util.spec_from_file_location(
+        '_6410_collection_base', PLUGIN_ROOT / 'models' / 'pd' / 'collection_base.py'
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # --- Regression guard: id-less tags behave exactly as before ------------------------------
 
-def test_idless_tag_reuses_an_existing_row_by_name(skill_utils_module):
+def test_idless_update_tag_reuses_an_existing_row_by_name(skill_utils_module, tag_models):
     session = FakeSession(existing_tags=[FakeTag(id=1, name='aqa')])
     version = FakeVersion()
 
-    skill_utils_module._apply_tags_to_version(session, version, [_tag(name='aqa')])
+    skill_utils_module._apply_tags_to_version(
+        session, version, [tag_models.PromptTagUpdateModel(name='aqa')]
+    )
 
     assert [t.id for t in version.tags] == [1]
     assert session.added == []
 
 
-def test_idless_tag_creates_a_new_row_when_no_name_match(skill_utils_module):
+def test_idless_update_tag_creates_a_new_row_when_no_name_match(skill_utils_module, tag_models):
     session = FakeSession(existing_tags=[])
     version = FakeVersion()
 
-    skill_utils_module._apply_tags_to_version(session, version, [_tag(name='brand-new')])
+    skill_utils_module._apply_tags_to_version(
+        session, version, [tag_models.PromptTagUpdateModel(name='brand-new')]
+    )
+
+    assert len(session.added) == 1
+    assert version.tags[0].name == 'brand-new'
+
+
+# --- The create/import/publish paths pass TagBaseModel, which has no `id` field -----------
+
+def test_base_tag_model_without_an_id_field_reuses_an_existing_row(skill_utils_module, tag_models):
+    """`create_skill` with a single tag: `TagBaseModel` has no `id`, so reading it must not
+    raise `AttributeError` (which would surface as a 500, not a `SkillError`)."""
+    session = FakeSession(existing_tags=[FakeTag(id=1, name='aqa')])
+    version = FakeVersion()
+
+    skill_utils_module._apply_tags_to_version(
+        session, version, [tag_models.TagBaseModel(name='aqa')]
+    )
+
+    assert [t.id for t in version.tags] == [1]
+    assert session.added == []
+
+
+def test_base_tag_model_without_an_id_field_creates_a_new_row(skill_utils_module, tag_models):
+    session = FakeSession(existing_tags=[])
+    version = FakeVersion()
+
+    skill_utils_module._apply_tags_to_version(
+        session, version, [tag_models.TagBaseModel(name='brand-new')]
+    )
 
     assert len(session.added) == 1
     assert version.tags[0].name == 'brand-new'
@@ -232,47 +283,57 @@ def test_idless_tag_creates_a_new_row_when_no_name_match(skill_utils_module):
 
 # --- New behavior: a supplied id is validated against the matched tag's name --------------
 
-def test_matching_id_and_name_is_accepted(skill_utils_module):
+def test_matching_id_and_name_is_accepted(skill_utils_module, tag_models):
     session = FakeSession(existing_tags=[FakeTag(id=22, name='aqa')])
     version = FakeVersion()
 
-    skill_utils_module._apply_tags_to_version(session, version, [_tag(id=22, name='aqa')])
+    skill_utils_module._apply_tags_to_version(
+        session, version, [tag_models.PromptTagUpdateModel(id=22, name='aqa')]
+    )
 
     assert [t.id for t in version.tags] == [22]
     assert session.added == []  # never falls back to create
 
 
-def test_nonexistent_id_is_rejected_not_silently_created(skill_utils_module):
+def test_nonexistent_id_is_rejected_not_silently_created(skill_utils_module, tag_models):
     session = FakeSession(existing_tags=[])
     version = FakeVersion()
 
     with pytest.raises(skill_utils_module.SkillTagMismatchError) as exc_info:
-        skill_utils_module._apply_tags_to_version(session, version, [_tag(id=999, name='aqa')])
+        skill_utils_module._apply_tags_to_version(
+            session, version, [tag_models.PromptTagUpdateModel(id=999, name='aqa')]
+        )
 
     assert exc_info.value.http_status == 400
     assert session.added == []
     assert version.tags == []
 
 
-def test_id_belonging_to_a_different_name_is_rejected_not_silently_reused(skill_utils_module):
+def test_id_belonging_to_a_different_name_is_rejected_not_silently_reused(skill_utils_module, tag_models):
     """The ticket's own payload: tag id 22 is really named 'aqa', but the caller pairs it
     with a different name here - this must not silently resolve to either tag."""
     session = FakeSession(existing_tags=[FakeTag(id=22, name='aqa')])
     version = FakeVersion()
 
     with pytest.raises(skill_utils_module.SkillTagMismatchError):
-        skill_utils_module._apply_tags_to_version(session, version, [_tag(id=22, name='attach')])
+        skill_utils_module._apply_tags_to_version(
+            session, version, [tag_models.PromptTagUpdateModel(id=22, name='attach')]
+        )
 
     assert version.tags == []
 
 
-def test_mixed_id_and_idless_tags_in_one_call(skill_utils_module):
+def test_mixed_tag_models_in_one_call(skill_utils_module, tag_models):
+    """An id-carrying update tag, an id-less update tag, and an id-less `TagBaseModel`
+    together - the mix `_apply_tags_to_version` has to tolerate across its callers."""
     session = FakeSession(existing_tags=[FakeTag(id=22, name='aqa')])
     version = FakeVersion()
 
-    skill_utils_module._apply_tags_to_version(
-        session, version, [_tag(id=22, name='aqa'), _tag(name='attach')]
-    )
+    skill_utils_module._apply_tags_to_version(session, version, [
+        tag_models.PromptTagUpdateModel(id=22, name='aqa'),
+        tag_models.PromptTagUpdateModel(name='attach'),
+        tag_models.TagBaseModel(name='publish'),
+    ])
 
     names = {t.name for t in version.tags}
-    assert names == {'aqa', 'attach'}
+    assert names == {'aqa', 'attach', 'publish'}

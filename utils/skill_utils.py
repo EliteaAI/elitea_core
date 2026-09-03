@@ -1688,11 +1688,14 @@ def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
     supply an ``id`` (#6410) is resolved by that id and its ``name`` must match the
     existing row - a stale/mismatched id is a caller error, not a silent name-based
     fallback.
+
+    ``id`` is read via ``getattr``: only ``PromptTagUpdateModel`` declares it, while
+    creation/import/publish paths pass ``TagBaseModel``, which has no such field.
     """
     if not tags:
         return
 
-    requested_ids = {t.id for t in tags if t.id is not None}
+    requested_ids = {tid for t in tags if (tid := getattr(t, 'id', None)) is not None}
     tags_by_id = {}
     if requested_ids:
         tags_by_id = {
@@ -1705,10 +1708,11 @@ def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
     existing_tags_map = {t.name: t for t in existing_tags}
 
     for tag in tags:
-        if tag.id is not None:
-            tag_obj = tags_by_id.get(tag.id)
+        tag_id = getattr(tag, 'id', None)
+        if tag_id is not None:
+            tag_obj = tags_by_id.get(tag_id)
             if tag_obj is None or tag_obj.name != tag.name:
-                raise SkillTagMismatchError(tag.id, tag.name)
+                raise SkillTagMismatchError(tag_id, tag.name)
             version.tags.append(tag_obj)
             continue
 

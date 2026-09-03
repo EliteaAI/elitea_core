@@ -17,6 +17,11 @@ This test loads the real `models/pd/skill.py` and `models/pd/skill_version.py` (
      one caller - EliteaUI - that already sends the flat shape correctly).
   4. A stray top-level `version_id` alongside a correct nested body no longer 400s, matching
      the `put()` handler popping it before validation.
+  5. The flat model still accepts a whole fetched `version_details` spread back into the body -
+     EliteaUI's compare-versions save (`useCompareSkillVersions.hooks.js`) does exactly that,
+     so the server-owned keys it echoes (`id`, `status`, `author_id`, `author`, `created_at`)
+     are dropped rather than rejected. The nested model keeps its `id`, which selects the
+     version to update.
 
 Run via:
     python tests/run_tests.py unit/models/test_6410_skill_update_shape_validation.py -v
@@ -133,3 +138,56 @@ def test_nested_model_still_tolerates_a_stray_version_id_key(pd_module):
     payload.pop('version_id', None)
     model = pd_module.skill.SkillUpdateModel.model_validate(payload)
     assert model.version.id == 18
+
+
+# --- Round-tripped version_details bodies (the compare-versions save) --------------------
+
+# What GET /skill/prompt_lib/<pid>/<sid>/<vid> returns, which the compare-versions save
+# spreads wholesale into its PUT body: `...w.version_details ?? {}` in the deployed bundle.
+FETCHED_VERSION_DETAILS = {
+    'id': 203,
+    'name': 'base',
+    'instructions': 'edited instructions',
+    'status': 'draft',
+    'author_id': 25,
+    'author': {'id': 25, 'email': 'a@b.c', 'name': 'A B'},
+    'tags': [{'id': 22, 'name': 'aqa'}],
+    'created_at': '2026-09-02T12:00:00',
+    'meta': {'icon_meta': {}},
+}
+
+
+def test_flat_model_accepts_a_round_tripped_version_details_body(pd_module):
+    """`useCompareSkillVersions` spreads the fetched version_details into the versioned PUT,
+    so the body carries server-owned keys. Those are dropped, not 400'd."""
+    model = pd_module.skill_version.SkillVersionUpdateModel.model_validate(
+        dict(FETCHED_VERSION_DETAILS)
+    )
+    assert model.instructions == 'edited instructions'
+    assert model.name == 'base'
+    assert [(t.id, t.name) for t in model.tags] == [(22, 'aqa')]
+    # Server-owned keys were dropped, not absorbed as extras.
+    assert not hasattr(model, 'status')
+    assert model.model_extra in (None, {})
+
+
+def test_flat_model_still_rejects_the_nested_body_after_dropping_server_owned_keys(pd_module):
+    """Dropping read-only keys must not weaken the shape-mismatch guard: `version` isn't one
+    of them, so a nested body sent to the versioned URL still 400s."""
+    with pytest.raises(ValidationError) as exc_info:
+        pd_module.skill_version.SkillVersionUpdateModel.model_validate({
+            'id': 203, 'status': 'draft',
+            'version': {'id': 18, 'instructions': '7896541'},
+        })
+    assert any(e['type'] == 'extra_forbidden' for e in exc_info.value.errors())
+
+
+def test_nested_version_id_survives_the_drop(pd_module):
+    """`SkillVersionNestedUpdateModel` declares `id` and `update_skill()` uses it to pick the
+    version to update, so the drop must not strip it - `useSaveSkill` relies on it."""
+    model = pd_module.skill.SkillUpdateModel.model_validate({
+        'project_id': 13, 'user_id': 25,
+        'version': {'id': 18, 'instructions': '7896541', 'status': 'draft', 'created_at': 'x'},
+    })
+    assert model.version.id == 18
+    assert model.version.instructions == '7896541'

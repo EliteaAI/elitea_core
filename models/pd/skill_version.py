@@ -64,6 +64,13 @@ class SkillVersionDetailModel(BaseModel):
         return self
 
 
+# #6410: fields the server owns that a caller echoes back when it round-trips a
+# fetched version_details into an update body (EliteaUI's compare-versions save
+# spreads the whole object). They are dropped rather than rejected by extra="forbid"
+# below - unless the model actually declares one, as the nested model does with `id`.
+SERVER_OWNED_VERSION_FIELDS = frozenset({'id', 'status', 'author_id', 'author', 'created_at'})
+
+
 class SkillVersionUpdateModel(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=128)
     instructions: Optional[str] = Field(None, min_length=1, max_length=5000)
@@ -75,8 +82,20 @@ class SkillVersionUpdateModel(BaseModel):
     # all-None no-op instead of failing. forbid makes a shape mismatch a 400.
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 
+    @model_validator(mode='before')
+    @classmethod
+    def drop_server_owned_fields(cls, values):
+        if not isinstance(values, dict):
+            return values
+        return {
+            k: v for k, v in values.items()
+            if k in cls.model_fields or k not in SERVER_OWNED_VERSION_FIELDS
+        }
+
 
 class SkillVersionNestedUpdateModel(SkillVersionUpdateModel):
+    # Declared, so drop_server_owned_fields keeps it: it selects which existing
+    # version the nested body targets (utils.skill_utils.update_skill).
     id: Optional[int] = None
 
 
