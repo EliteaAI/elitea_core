@@ -15,6 +15,7 @@ from ...models.all import Application, ApplicationVersion
 from ...utils.authors import get_authors_data
 from ...utils.create_utils import create_version
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
 class ProjectAPI(api_tools.APIModeHandler):
@@ -47,6 +48,7 @@ class ProjectAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id')
     def get(self, project_id: int, application_id: int, **kwargs):
         with db.with_project_schema_session(project_id) as session:
             application = session.query(Application).options(
@@ -107,6 +109,7 @@ class ProjectAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id', write=True)
     def post(self, project_id: int, application_id: int, **kwargs):
         payload = request.get_json()
         with db.get_session(project_id) as session:

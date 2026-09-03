@@ -11,6 +11,7 @@ from ..models.enums.all import PublishStatus, SkillEntityTypes
 from ..models.pd.skill import SkillCreateModel
 from ..models.pd.search import MultipleApplicationSearchModel
 from ..utils.searches import get_search_options
+from ..utils.folder_access import folder_exclusion_clause
 from ..utils.skill_utils import (
     get_skill_details,
     create_skill,
@@ -34,13 +35,14 @@ class RPC:
 
     @web.rpc("skills_get_search_options", "skills_get_search_options")
     def skills_get_search_options(self, project_id: int, **kwargs) -> dict:
+        folder_clause = folder_exclusion_clause(project_id, 'skill', Skill.id)
         return get_search_options(
             project_id,
             Model=Skill,
             PDModel=MultipleApplicationSearchModel,
             joinedload_=None,
             args_prefix='skill',
-            filters=[],
+            filters=[] if folder_clause is None else [folder_clause],
             search_fields=('name', 'description'),
         )
 

@@ -568,6 +568,7 @@ def toolkits_listing(
     from ..models.all import EliteATool
     from ..models.pd.tool import ToolDetails, sanitization_pattern
     from ..utils.authors import get_authors_data
+    from .folder_access import folder_exclusion_clause
     from tools import rpc_tools
 
     with db.get_session(project_id) as session:
@@ -646,6 +647,19 @@ def toolkits_listing(
                 (EliteATool.meta['application'].astext.is_(None))
             )
         # else: filter_application is None, don't filter by application status
+
+        # Folder-level permissions (#6524): applied before count/pagination so the
+        # total and the page slice both exclude no-access folders.
+        folder_entity_types = ['toolkit', 'mcp']
+        if filter_mcp is True:
+            folder_entity_types = ['mcp']
+        elif filter_mcp is False:
+            folder_entity_types = ['toolkit']
+        folder_filter = folder_exclusion_clause(
+            project_id, folder_entity_types, EliteATool.id
+        )
+        if folder_filter is not None:
+            q = q.filter(folder_filter)
 
         # Add pin status (project-wide) - always included
         q, new_columns = add_pins_with_priority(

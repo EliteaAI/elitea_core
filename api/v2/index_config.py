@@ -13,6 +13,7 @@ from ...utils.application_tools import (
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import get_toolkit_config
+from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -32,6 +33,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def put(self, project_id: int, toolkit_id: int, index_name: str):
         try:
             # A body that is valid JSON but not an object (a list, a bare string) has to reach the

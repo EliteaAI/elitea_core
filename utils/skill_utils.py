@@ -12,6 +12,7 @@ from tools import db, auth, serialize, rpc_tools, this, context
 from .authors import get_authors_data
 from .utils import set_columns_as_attrs, get_public_project_id, parse_ids_filter
 from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
+from .folder_access import folder_exclusion_clause
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag, ApplicationVersion, Application
 from ..models.enums.all import SkillEntityTypes, PublishStatus, AgentTypes
@@ -369,6 +370,11 @@ def list_skills_api(
             filters.append(
                 Skill.versions.any(SkillVersion.status.in_(statuses))
             )
+
+    # Folder-level permissions (#6524): filter before count/pagination
+    folder_filter = folder_exclusion_clause(project_id, 'skill', Skill.id)
+    if folder_filter is not None:
+        filters.append(folder_filter)
 
     total, skills = list_skills(
         project_id=project_id,

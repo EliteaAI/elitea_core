@@ -7,6 +7,7 @@ from tools import db, rpc_tools
 from ..models.all import Application, ApplicationVersion
 from ..models.pd.authors import TrendingAuthorModel
 from ..utils.authors import get_authors_data
+from .folder_access import folder_exclusion_clause, APPLICATION_ENTITY_TYPES
 
 
 def get_trending_authors(project_id: int, limit: int = 5, entity_name: str = 'application') -> List[dict]:
@@ -25,12 +26,16 @@ def get_trending_authors(project_id: int, limit: int = 5, entity_name: str = 'ap
         ).subquery()
 
         # Subquery
-        application_likes_subq = (
+        application_likes_q = (
             session.query(Application.id, func.count(likes_subquery.c.user_id).label('likes'))
             .outerjoin(likes_subquery, likes_subquery.c.entity_id == Application.id)
-            .group_by(Application.id)
-            .subquery()
         )
+        folder_filter = folder_exclusion_clause(
+            project_id, APPLICATION_ENTITY_TYPES, Application.id
+        )
+        if folder_filter is not None:
+            application_likes_q = application_likes_q.filter(folder_filter)
+        application_likes_subq = application_likes_q.group_by(Application.id).subquery()
 
         # Main query
         sq_result = (

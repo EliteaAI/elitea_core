@@ -34,6 +34,7 @@ from ...utils.utils import mask_secret
 from ....configurations.utils import expand_configuration
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.secrets import check_secret_header
+from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
 def extract_user_id(received_auth_session: Optional[str]) -> int:
@@ -81,6 +82,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id')
     def get(self, project_id: int, application_id: int, version_id: int, **kwargs):
         with db.with_project_schema_session(project_id) as session:
             application_version = session.query(ApplicationVersion).filter(
@@ -116,6 +118,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id', write=True)
     def patch(self, project_id: int, application_id: int, version_id: int, **kwargs):
         received_secret = request.headers.get('X-SECRET')
         received_auth_session = request.headers.get('X-USERSESSION')
@@ -216,6 +219,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id', write=True)
     def put(self, project_id: int, application_id: int, version_id: int = None, **kwargs):
         version_data = dict(request.json)
         internal_mcp_request = bool(request.environ.get(INTERNAL_MCP_ENVIRON_KEY))
@@ -302,6 +306,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id', write=True)
     def delete(self, project_id: int, application_id: int, version_id: int = None):
         # Get optional replacement_version_id from query params
         replacement_version_id = request.args.get('replacement_version_id')

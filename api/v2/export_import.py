@@ -14,6 +14,7 @@ from ...utils.export_import import (
     create_zip_archive
 )
 from ...utils.export_import_utils import slugify, content_disposition_attachment
+from ...utils.folder_access import entities_access_error, APPLICATION_ENTITY_TYPES
 
 
 def _generate_export_filename(result, file_extension="zip"):
@@ -114,6 +115,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, application_ids: str, **kwargs):
         application_ids = [int(id_str) for id_str in application_ids.split(",")]
         forked = 'fork' in request.args
+
+        error = entities_access_error(project_id, APPLICATION_ENTITY_TYPES, application_ids)
+        if error is not None:
+            return error
         follow_version_ids = request.args.get('follow_version_ids', type=str)
         if follow_version_ids:
             follow_version_ids = [int(id_str) for id_str in follow_version_ids.split(",")]

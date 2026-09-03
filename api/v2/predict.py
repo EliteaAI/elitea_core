@@ -30,6 +30,7 @@ from ...models.pd.predict import ApplicationPredictRequest  # pylint: disable=E0
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.predict_utils import PredictPayloadError
 from ...utils.exceptions import PoolSaturationError
+from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
@@ -67,6 +68,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', via_version=True)
     def post(self, project_id: int, version_id: int):
         """ Get task result """
         try:

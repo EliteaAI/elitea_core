@@ -8,6 +8,7 @@ from tools import api_tools, auth, config as c
 
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.export_import import export_toolkits
+from ...utils.folder_access import entities_access_error, TOOLKIT_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -21,6 +22,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, toolkit_ids: str, **kwargs):
         toolkit_ids = [int(id_str) for id_str in toolkit_ids.split(",")]
         forked = 'fork' in request.args
+
+        error = entities_access_error(project_id, TOOLKIT_ENTITY_TYPES, toolkit_ids)
+        if error is not None:
+            return error
 
         try:
             result = export_toolkits(

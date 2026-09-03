@@ -10,6 +10,7 @@ from ...utils.skill_export_import import export_skill_md
 from ...utils.skill_utils import SkillError
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.export_import_utils import content_disposition_attachment
+from ...utils.folder_access import require_folder_access
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -39,6 +40,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id')
     def get(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         version_id, error = resolve_version_id(version_id)
         if error:
