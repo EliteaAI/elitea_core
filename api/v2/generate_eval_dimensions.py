@@ -30,6 +30,7 @@ from pydantic import ValidationError
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
+from ...models.evaluation import EvalTier
 from ...models.pd.generate_eval_dimensions import (
     GenerateEvalDimensionsRequest,
     GenerateEvalDimensionsResponse,
@@ -215,16 +216,24 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 }, 422
             return {"error": "LLM returned unparseable output", "parse_error": str(e)}, 422
 
-        # The server owns version_id — overwrite anything the model invented before validating,
-        # so the pin the caller gets is the version the instructions were actually read from.
+        # The server owns version_id and each draft's agent_id — overwrite anything the model
+        # invented before validating, so the pin the caller gets is the version the instructions
+        # were actually read from, and agent_adhoc drafts are scoped to the agent they came from.
         if isinstance(parsed, dict):
             parsed["version_id"] = agent["version_id"]
+            for item in parsed.get("dimensions") or []:
+                if isinstance(item, dict):
+                    if item.get("tier", EvalTier.agent_adhoc) == EvalTier.agent_adhoc:
+                        item["agent_id"] = req.application_id
+                    else:
+                        item.pop("agent_id", None)
 
         try:
             draft = GenerateEvalDimensionsResponse.model_validate(parsed)
         except ValidationError as e:
-            log.warning("generate_eval_dimensions: validation failed: %s", e.errors())
-            return {"error": "Generated draft failed validation", "details": e.errors(), "raw": parsed}, 422
+            errors = e.errors(include_url=False, include_context=False, include_input=False)
+            log.warning("generate_eval_dimensions: validation failed: %s", errors)
+            return {"error": "Generated draft failed validation", "details": errors, "raw": parsed}, 422
 
         return draft.model_dump(), 200
 

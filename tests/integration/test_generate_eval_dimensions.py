@@ -534,6 +534,66 @@ def test_default_tier_is_agent_adhoc(api):
     assert payload['dimensions'][0]['tier'] == 'agent_adhoc'
 
 
+def test_agent_adhoc_drafts_are_stamped_with_the_requested_agent(api):
+    """agent_id is server-owned, like version_id.
+
+    Drafts default to tier=agent_adhoc, which *requires* agent_id — but the LLM is never told
+    the agent's ID and must not be trusted with it. Without the server stamping it, every single
+    generation fails validation. A model-invented value is overwritten, not merged.
+    """
+    module, *_rest = api
+    module.request.json = {'application_id': 42}
+    handler = module.PromptLibAPI()
+    draft = {'dimensions': [dict(_VALID_DRAFT['dimensions'][0], agent_id=999)]}
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(draft)))
+
+    payload, status = handler.post(1)
+
+    assert status == 200
+    assert payload['dimensions'][0]['agent_id'] == 42
+
+
+def test_project_tier_draft_carries_no_agent_id(api):
+    """The mirror constraint: agent_id must *not* be set unless tier is agent_adhoc, so an item
+    the model promoted to the shared project library cannot keep a stale agent scope."""
+    module, *_rest = api
+    module.request.json = {'application_id': 42}
+    handler = module.PromptLibAPI()
+    draft = {'dimensions': [
+        dict(_VALID_DRAFT['dimensions'][0], tier='project', agent_id=999),
+    ]}
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(draft)))
+
+    payload, status = handler.post(1)
+
+    assert status == 200
+    assert payload['dimensions'][0]['tier'] == 'project'
+    assert payload['dimensions'][0]['agent_id'] is None
+
+
+def test_validation_failure_payload_is_json_serializable(api):
+    """A 422 must survive flask's JSON encoder.
+
+    ``ValidationError.errors()`` defaults to embedding the raised exception object under
+    ``ctx``, which json.dumps cannot encode — so the intended 422 died in the serializer and the
+    caller saw an opaque 500. Only validators that raise ValueError (i.e. model_validator, not
+    field constraints) populate ctx, so this uses the duplicate-name check to reproduce it.
+    """
+    module, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    dupe_draft = {'dimensions': [
+        {'name': 'Politeness', 'description': 'x', 'evidence_scope': {'output': True}, 'weight': 1.0},
+        {'name': 'politeness', 'description': 'y', 'evidence_scope': {'output': True}, 'weight': 1.0},
+    ]}
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(dupe_draft)))
+
+    payload, status = handler.post(1)
+
+    assert status == 422
+    json.dumps(payload)
+
+
 def test_existing_names_span_both_writable_tiers(api):
     """Regression guard: drafts default to agent_adhoc, and (tier, name) is unique per tier,
     so filtering the do-not-repropose list down to the project tier would exclude exactly the
