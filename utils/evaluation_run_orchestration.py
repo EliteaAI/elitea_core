@@ -904,7 +904,8 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
                     'error': f"agent_type '{agent_type}' is not supported for live batch execution "
                              '(P1 scope: single-turn agents only, pipelines deferred)',
                     'structure': structure}
-        outcome = run_agent(project_id, version_details, case, timeout=timeout)
+        outcome = run_agent(project_id, version_details, case,
+                            user_id=user_id, timeout=timeout)
         return {**outcome, 'structure': structure}
 
     return _run
