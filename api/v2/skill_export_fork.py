@@ -3,6 +3,7 @@ from traceback import format_exc
 from tools import api_tools, config as c, auth, register_openapi
 from pylon.core.tools import log
 
+from .skill import SKILL_PATH, resolve_version_id
 from ...utils.skill_export_import import build_skill_fork_payload
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -13,16 +14,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description=(
             "Returns the JSON fork payload for a skill (a copy of a single "
             "version, with icon and tags), suitable for the fork endpoint. When "
-            "a version_id path segment is supplied that version is copied (404 if "
-            "it does not exist); otherwise the skill's default/base version is "
+            "the version_id query parameter is supplied that version is copied "
+            "(404 if it does not exist); otherwise the skill's default/base version is "
             "used. The copied version is always emitted as the target's single "
             "'base' version."
         ),
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}},
+            {"name": "version_id", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to copy (defaults to the skill's default/base version)."},
         ],
+        path_suffix_override=SKILL_PATH,
         tags=["elitea_core/skills"],
         mcp_tool=False,
         available_to_users=False,
@@ -35,6 +37,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def get(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
+        version_id, error = resolve_version_id(version_id)
+        if error:
+            return error
+
         try:
             payload = build_skill_fork_payload(
                 project_id=project_id,
