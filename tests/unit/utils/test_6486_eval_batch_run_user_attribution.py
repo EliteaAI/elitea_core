@@ -100,3 +100,55 @@ def test_orchestrator_passes_the_run_owner_down(orch, agent_calls):
     orch._make_agent_runner(1, snapshot, user_id=42)({'input': 'q'})
 
     assert agent_calls[0]['user_id'] == 42
+
+
+# --- the judge rides the same rails -----------------------------------------
+# Scoring a case is a second predict_sio call from the same pool worker, so it needs the acting
+# user for the same reason the agent call does — otherwise the agent answers but every dimension
+# comes back status='error' with "User token not found".
+
+@pytest.fixture(scope='module')
+def ai_judge(utils_path):
+    return load_utils_module(utils_path, 'evaluation_ai_judge')
+
+
+def test_evaluate_case_forwards_the_acting_user(ai_judge):
+    calls = []
+
+    def judge(*args, **kwargs):
+        calls.append(kwargs)
+        return {'status': 'ok', 'data': {}}
+
+    ai_judge.evaluate_case(1, {}, {'output': 'a'}, [{'id': 1, 'name': 'd'}],
+                           judge=judge, user_id=42)
+
+    assert calls[0]['user_id'] == 42
+
+
+def test_orchestrator_passes_the_run_owner_to_the_judge(orch):
+    calls = []
+
+    def judge(*args, **kwargs):
+        calls.append(kwargs)
+        return {'status': 'ok', 'data': {}}
+
+    orch._make_ai_scorer(1, {}, judge=judge, user_id=42)({'output': 'a'}, [{'id': 1, 'name': 'd'}])
+
+    assert calls[0]['user_id'] == 42
+
+
+def test_run_llm_judge_names_user_id_on_the_predict_call(utils_path, monkeypatch):
+    """``run_llm_judge`` calls ``this.module.predict_sio`` directly (no injection seam), so pin the
+    kwarg at that boundary."""
+    judge_mod = load_utils_module(utils_path, 'llm_judge')
+    calls = []
+
+    predict = types.SimpleNamespace(
+        predict_sio=lambda **kwargs: calls.append(kwargs) or {
+            'result': {'chat_history': [{'role': 'assistant', 'content': '{}'}]}},
+    )
+    monkeypatch.setattr(judge_mod.this, 'module', predict, raising=False)
+
+    judge_mod.run_llm_judge(1, {}, 'sys', '{}', 30, user_id=42)
+
+    assert calls[0]['user_id'] == 42
