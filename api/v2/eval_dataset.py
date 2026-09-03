@@ -15,6 +15,7 @@ from ...models.pd.evaluation import (
     EvalDatasetCaseDetailModel,
 )
 from ...utils.evaluation_dataset_utils import (
+    can_edit_dataset,
     get_dataset,
     update_dataset,
     delete_dataset,
@@ -71,6 +72,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ]
             payload['case_count'] = page['total']
             payload['cases_truncated'] = page['offset'] + len(page['cases']) < page['total']
+            payload['can_edit'] = can_edit_dataset(payload.get('agent_id'), agent_id)
             return payload, 200
 
     @register_openapi(

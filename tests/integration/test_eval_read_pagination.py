@@ -127,6 +127,10 @@ def _install_package(calls):
             'cases': [{'id': i} for i in range(min(window, max(500 - offset, 0)))],
         }
     dataset_utils.list_cases = _list_cases
+    dataset_utils.can_edit_dataset = lambda dataset_agent_id, agent_id: True
+
+    suite_utils = types.ModuleType(f'{PKG}.utils.evaluation_suite_utils')
+    suite_utils.excluded_case_ids = lambda session, suite_id: set()
 
     library_utils = types.ModuleType(f'{PKG}.utils.evaluation_library_utils')
     library_utils.EvalLibraryError = _EvalLibraryError
@@ -176,6 +180,7 @@ def _install_package(calls):
         f'{PKG}.utils.evaluation_run_utils': run_utils,
         f'{PKG}.utils.evaluation_result_utils': result_utils,
         f'{PKG}.utils.evaluation_dataset_utils': dataset_utils,
+        f'{PKG}.utils.evaluation_suite_utils': suite_utils,
         f'{PKG}.utils.evaluation_library_utils': library_utils,
         f'{PKG}.utils.constants': constants,
         'flask': flask,

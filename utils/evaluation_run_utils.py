@@ -19,7 +19,11 @@ from typing import List, Optional
 from pylon.core.tools import log
 
 from .evaluation_library_utils import EvalLibraryError, _session
-from .evaluation_suite_utils import EvalSuiteNotFoundError
+from .evaluation_suite_utils import (
+    EvalSuiteNotFoundError,
+    effective_cases,
+    excluded_case_ids,
+)
 from .evaluation_human_score_utils import EvalRunNotFoundError
 from .evaluation_run_orchestration import (
     build_run_snapshot,
@@ -188,7 +192,15 @@ def create_batch_run(
             dataset = s.query(EvalDataset).filter(EvalDataset.id == ds_id).first()
             if not dataset:
                 raise EvalRunConfigError(f'dataset {ds_id} not found')
-            cases = [_case_dict(c) for c in dataset.cases]
+            # Exclusions (#6350) are authored against the suite's *own* dataset, so an explicit
+            # dataset_id override runs that other dataset whole rather than applying a filter
+            # written for a different case set.
+            excluded = excluded_case_ids(s, suite_id) if ds_id == suite.dataset_id else set()
+            selected = effective_cases(dataset.cases, excluded)
+            if not selected and dataset.cases:
+                raise EvalRunConfigError(
+                    'every case of this suite\'s dataset is excluded; nothing to run')
+            cases = [_case_dict(c) for c in selected]
 
         version_id = _resolve_version(bindings, application_version_id)
         _assert_version_in_application(s, version_id, suite.application_id)

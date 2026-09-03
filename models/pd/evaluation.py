@@ -305,6 +305,12 @@ class EvalBindingReorderModel(BaseModel):
     binding_ids: List[int] = Field(..., min_length=1)
 
 
+class EvalSuiteCaseExclusionsModel(BaseModel):
+    """The suite's full set of excluded dataset case ids (#6350). Replaces the current set, so
+    an empty list clears it. Lets a suite drop cases from a dataset it may not edit."""
+    case_ids: List[int] = Field(default_factory=list)
+
+
 # ----------------------------------------------------------------------------
 # Suites — a named binding set on an agent + version (§13, §16.2)
 # ----------------------------------------------------------------------------
@@ -434,6 +440,9 @@ class EvalDatasetCaseDetailModel(BaseModel):
     meta: dict = Field(default_factory=dict)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # Server-computed, and only meaningful when the caller named a suite_id (#6350): whether
+    # that suite drops this case from its runs. False in the plain dataset view.
+    excluded: bool = False
 
 
 class EvalDatasetBaseModel(BaseModel):
@@ -465,6 +474,8 @@ class EvalDatasetSummaryModel(BaseModel):
     is_shared: bool = False
     owner_id: int
     meta: dict = Field(default_factory=dict)
+    # Server-computed for the requesting agent_id; sharing grants read, never write (#6350).
+    can_edit: bool = True
     case_count: int = 0
     with_expected_count: int = 0
     created_at: Optional[datetime] = None
@@ -494,6 +505,8 @@ class EvalDatasetDetailModel(BaseModel):
     meta: dict = Field(default_factory=dict)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # Server-computed for the requesting agent_id; sharing grants read, never write (#6350).
+    can_edit: bool = True
     cases: List[EvalDatasetCaseDetailModel] = Field(default_factory=list)
     case_count: int = 0
     cases_truncated: bool = False
