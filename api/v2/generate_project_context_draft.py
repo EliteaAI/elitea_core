@@ -33,6 +33,7 @@ from ...utils.draft_llm_utils import (
     caller_chose,
     describe_parse_failure,
     describe_predict_failure,
+    describe_validation_failure,
     extract_answer,
     resolve_model,
     timeout_response,
@@ -190,8 +191,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
         try:
             draft = GenerateProjectContextDraftResponse.model_validate(parsed)
         except ValidationError as e:
-            log.warning("generate_project_context_draft: validation failed: %s", e.errors())
-            return {"error": "Generated draft failed validation", "details": e.errors(), "raw": parsed}, 422
+            # the description measures the offending value, so it needs the errors that still carry it
+            failure = describe_validation_failure(e.errors())
+            details = e.errors(include_input=False)
+            # a payload-shaped failure describes as the bare fallback, so the log carries the
+            # errors too or an operator is left with a sentence that names nothing
+            log.warning(
+                "generate_project_context_draft: validation failed: %s; errors=%s", failure, details,
+            )
+            # the draft itself is already in `raw`; `details` repeating it would triple the payload
+            return {
+                "error": failure,
+                "details": details,
+                "raw": parsed,
+            }, 422
 
         return draft.model_dump(), 200
 
