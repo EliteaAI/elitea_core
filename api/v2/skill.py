@@ -203,6 +203,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         # Update skill metadata (and optionally the default version).
         payload = dict(request.json)
+        # #6410: version_id is meaningless once we're in the nested branch (there was
+        # none in the path); drop it so a caller that includes it alongside a nested
+        # "version" body doesn't trip the extra="forbid" guard below.
+        payload.pop('version_id', None)
         payload['project_id'] = project_id
         payload['user_id'] = auth.current_user().get("id")
 
