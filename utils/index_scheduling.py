@@ -229,6 +229,11 @@ def handle_failed_index_schedule(
     ``expand_user_id`` is the user_id used when expanding configurations. For team schedules
     (``user_id == -1``) callers must pass the schedule's creator so ``get_personal_project_id``
     is never invoked with ``-1``. Defaults to ``user_id`` when not provided.
+
+    ``user_id`` itself can be ``None``: since #6526 relaxed ``created_by`` to optional, a
+    legacy schedule with no recorded author reaches this function via ``creator_id=None``.
+    ``notify_index_data_status`` already treats a falsy ``user_id`` as "cannot notify, log
+    and return" — this function must not crash before that guard gets a chance to run.
     """
     ctx = index_log_context(project_id, toolkit.id, index_meta_id, user_id)
     log.info(
@@ -271,7 +276,9 @@ def handle_failed_index_schedule(
         'indexed_chunks': outcome.get('indexed_chunks', 0),
         'toolkit_id': toolkit.id,
         'project_id': project_id,
-        'user_id': int(user_id),
+        # int(None) raises; a missing author must fall through to notify's own
+        # "cannot notify without a user_id" guard, not crash here.
+        'user_id': int(user_id) if user_id is not None else None,
         'initiator': InitiatorType.schedule
     })
     # Debug, not info: a permanently broken schedule reaches this every minute forever, and
