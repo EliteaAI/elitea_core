@@ -33,6 +33,11 @@ TRACEBACK = (
     'litellm.exceptions.BadRequestError: LLM Provider NOT provided\n'
 )
 
+DEFAULT_PROMPT = 'Generate something useful.'
+# only the project-context edit template is rendered by real code, so it is the only one that has
+# to carry the placeholder that code substitutes
+SERVICE_PROMPTS = {'edit_project_context_draft': 'Refine this Project Context:\n{current_config}'}
+
 SKILL_DRAFT = {'name': 'github-review', 'description': 'Reviews PRs.', 'instructions': '# Review\nBe strict.'}
 PROJECT_CONTEXT_DRAFT = {'project_background': '# Stack\nReact + FastAPI.', 'activation_description': 'stack questions'}
 APPLICATION_DRAFT = {'name': 'PR Reviewer', 'description': 'Reviews PRs.', 'instructions': 'Review pull requests.'}
@@ -153,7 +158,7 @@ def _install_package(rpc_state):
     constants.PROMPT_LIB_MODE = 'prompt_lib'
 
     service_prompt_utils = types.ModuleType(f'{PKG}.utils.service_prompt_utils')
-    service_prompt_utils.get_service_prompt = lambda key: 'Generate something useful.'
+    service_prompt_utils.get_service_prompt = lambda key: SERVICE_PROMPTS.get(key, DEFAULT_PROMPT)
 
     generate_application_utils = types.ModuleType(f'{PKG}.utils.generate_application_utils')
     generate_application_utils.fetch_project_resources = lambda *a, **k: ([], [], [], [], [])

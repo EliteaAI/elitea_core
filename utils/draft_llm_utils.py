@@ -17,6 +17,8 @@ ERROR_LINE_MAX_LENGTH = 300
 MAX_LISTED_MODEL_NAMES = 20
 PARSE_FAILURE_WINDOW = 120
 PARSE_FAILURE_TAIL = 80
+LENGTH_RULES = (("max_length", "maximum"), ("min_length", "minimum"))
+VALIDATION_FAILURE_FALLBACK = "Generated draft failed validation"
 # mirrors llm_judge and evaluation_agent_runner, which keep their own copies to stay ORM-free
 ASSISTANT_ROLES = ("assistant", "ai")
 
@@ -332,6 +334,54 @@ def describe_parse_failure(raw_text: str, candidate: str, error, result) -> str:
         f"window={candidate[window_start:error.pos + PARSE_FAILURE_WINDOW]!r}; "
         f"tail={candidate[-PARSE_FAILURE_TAIL:]!r}"
     )
+
+
+def _describe_validation_error(error: dict) -> str:
+    """One field's failure, or "" when the error is about the payload rather than a field.
+
+    A model answering with a bare JSON string parses, so the payload reaching the response model is
+    a ``str`` and pydantic reports one ``loc``-less error whose wording names the model class. That
+    class name says nothing to whoever has to produce a valid draft and the modals render this
+    sentence to end users verbatim, so those fall back to the generic label.
+
+    A broken length rule is stated as the measurement rather than in pydantic's own wording: the
+    Settings modal renders this sentence to a person, and "String should have at most 2500
+    characters" describes the constraint where what both a person and a regenerating model need is
+    how far over the draft actually went. Every other rule keeps pydantic's wording, and no length
+    is quoted against it — beside a pattern or a type it would read as the thing that failed.
+
+    The field is named as a form labels it rather than as the schema spells it, because the person
+    reading the banner never sees the schema. A model regenerating the draft is given the tool
+    definition alongside this sentence and maps the two without the underscore.
+    """
+    location = ".".join(str(part) for part in error.get("loc") or ())
+    if not location:
+        return ""
+    field = location.replace("_", " ").capitalize()
+    value = error.get("input")
+    context = error.get("ctx") or {}
+    if isinstance(value, str):
+        for key, label in LENGTH_RULES:
+            if key in context:
+                return f"{field} is {len(value)} characters, the {label} is {context[key]}"
+    return f"{field}: {_last_exception_line(error.get('msg') or error.get('type') or 'is invalid')}"
+
+
+def describe_validation_failure(errors) -> str:
+    """Why a parsed draft failed its response model, in the terms needed to produce a valid one.
+
+    A caller that has to regenerate needs the field, the rule it broke and how far past it the
+    draft went; a cap stated without the actual length gives no sense of how much to cut. The
+    offending value itself is reported only by its length — the draft is user content, it already
+    travels back whole under ``raw``, and neither this message nor the log line it feeds is a
+    place for it, the same bound :func:`describe_parse_failure` keeps on its windows.
+
+    The semicolon separates one field's failure from the next, so no clause may spend one itself:
+    two broken fields would otherwise arrive as four peer clauses with nothing saying where the
+    first field's failure ends.
+    """
+    described = [_describe_validation_error(error) for error in errors if isinstance(error, dict)]
+    return "; ".join(part for part in described if part) or VALIDATION_FAILURE_FALLBACK
 
 
 def timeout_response(result, timeout_seconds: int) -> Optional[tuple]:

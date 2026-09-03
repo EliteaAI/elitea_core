@@ -1,13 +1,21 @@
 import json
 
+from ..models.pd.project_context import (
+    PROJECT_CONTEXT_ACTIVATION_DESCRIPTION_MAX_LEN,
+    PROJECT_CONTEXT_MAX_LEN,
+)
 
-PROJECT_CONTEXT_OUTPUT_CONTRACT = """Required output contract (this overrides any earlier output-shape wording):
+
+# the model is told the same number enforcement rejects against, so the prompt cannot drift from it
+PROJECT_CONTEXT_OUTPUT_CONTRACT = f"""Required output contract (this overrides any earlier output-shape wording):
 Return only a valid JSON object with exactly these keys:
-{
-  "activation_description": "A concise description of the user requests that should load this context, max 300 characters",
-  "project_background": "The complete Project Background in Markdown, max 2500 characters"
-}
+{{
+  "activation_description": "A concise description of the user requests that should load this context, max {PROJECT_CONTEXT_ACTIVATION_DESCRIPTION_MAX_LEN} characters",
+  "project_background": "The complete Project Background in Markdown, max {PROJECT_CONTEXT_MAX_LEN} characters"
+}}
 
+{PROJECT_CONTEXT_MAX_LEN} is a hard limit, not a target: a project_background longer than that is rejected outright and
+the whole response is discarded, so plan the sections to fit and finish inside the budget.
 The activation description must classify intent without revealing or repeating the full context.
 Do not include explanations, markdown fences, or extra keys."""
 
