@@ -143,6 +143,10 @@ def _base_package():
 
     tools = types.ModuleType('tools')
     tools.db = types.SimpleNamespace(get_session=lambda project_id: _RecordingSession())
+    tools.auth = types.SimpleNamespace(current_user=lambda: {'id': 1})
+    tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(
+        rpc=types.SimpleNamespace(timeout=lambda *_a, **_k: types.SimpleNamespace(
+            admin_check_user_is_admin=lambda *_a, **_k: True))))
 
     for name, mod in {
         PKG: pkg,

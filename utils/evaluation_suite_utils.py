@@ -167,9 +167,23 @@ def _require_suite(s, suite_id: int) -> EvalSuite:
     return suite
 
 
-def _validate_source(s, suite: EvalSuite, data: EvalBindingCreateModel) -> None:
+def _lock_dimension(s, dimension_id: Optional[int]) -> Optional[EvalDimension]:
+    """Row-locks and returns the dimension a binding is targeting, *before* any check reads its
+    tier/agent_id/allowed_engines. update_dimension()'s demote path takes this same lock before
+    running its other-agents-bound check, so the two calls serialize on this row rather than
+    racing (PR #416 review). Locking must happen first: if the visibility/engine checks below ran
+    on an earlier, unlocked read and only locked afterwards, a demote that commits while this
+    call is waiting on the lock would leave those checks validating state that's already stale
+    by the time the insert actually happens."""
+    if dimension_id is None:
+        return None
+    return s.query(EvalDimension).filter(EvalDimension.id == dimension_id).with_for_update().first()
+
+
+def _validate_source(
+    suite: EvalSuite, data: EvalBindingCreateModel, dimension: Optional[EvalDimension],
+) -> None:
     if data.dimension_id is not None:
-        dimension = s.query(EvalDimension).filter(EvalDimension.id == data.dimension_id).first()
         if not dimension:
             raise EvalBindingSourceError(f'dimension {data.dimension_id} not found')
         # agent_adhoc dimensions are only visible/usable from their owning agent's suites; a NULL
@@ -201,15 +215,12 @@ def _validate_version_pin(s, suite: EvalSuite, application_version_id: Optional[
         )
 
 
-def _validate_dimension_engine(s, dimension_id: Optional[int], engine: str) -> None:
+def _validate_dimension_engine(dimension: Optional[EvalDimension], engine: str) -> None:
     """A dimension binding may only run on an engine its definition permits (§16.2).
 
     A definition with no ``allowed_engines`` recorded is left alone: those predate the field and
     would otherwise start failing on edit.
     """
-    if dimension_id is None:
-        return
-    dimension = s.query(EvalDimension).filter(EvalDimension.id == dimension_id).first()
     allowed = (dimension.allowed_engines or []) if dimension is not None else []
     if allowed and engine not in allowed:
         raise EvalBindingEngineError(engine, allowed)
@@ -254,7 +265,8 @@ def get_binding(project_id: int, suite_id: int, binding_id: int, session=None) -
 def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, session=None) -> EvalBinding:
     with _session(session, project_id) as s:
         suite = _require_suite(s, suite_id)
-        _validate_source(s, suite, data)
+        dimension = _lock_dimension(s, data.dimension_id)
+        _validate_source(suite, data, dimension)
         _validate_version_pin(s, suite, data.application_version_id)
         # Platform bindings always run on the code engine (§12); dimension bindings (any
         # engine, including a code-engine dimension) honor the editable engine column. Normalize
@@ -262,7 +274,7 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
         engine = data.engine
         if data.platform_key is not None:
             engine = EvalEngine.code
-        _validate_dimension_engine(s, data.dimension_id, engine)
+        _validate_dimension_engine(dimension, engine)
         _require_not_already_bound(s, suite_id, data)
         binding = EvalBinding(
             suite_id=suite_id,
@@ -300,7 +312,11 @@ def update_binding(
         if 'application_version_id' in fields:
             _validate_version_pin(s, suite, fields['application_version_id'])
         if 'engine' in fields:
-            _validate_dimension_engine(s, binding.dimension_id, fields['engine'])
+            dimension = (
+                s.query(EvalDimension).filter(EvalDimension.id == binding.dimension_id).first()
+                if binding.dimension_id is not None else None
+            )
+            _validate_dimension_engine(dimension, fields['engine'])
         for key, value in fields.items():
             setattr(binding, key, value)
         s.flush()

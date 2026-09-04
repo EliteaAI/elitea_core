@@ -158,8 +158,22 @@ class EvalDimensionCreateModel(EvalDimensionBaseModel):
 
 
 class EvalDimensionUpdateModel(EvalDimensionBaseModel):
-    # name optional on update; everything else may be edited. tier is immutable post-create.
+    # name optional on update; everything else may be edited. tier is immutable for most callers,
+    # but a project-admin may move a dimension between agent_adhoc and project (§2.1) by sending
+    # tier explicitly — update_dimension() gates that on project-admin permission itself.
     name: Optional[str] = Field(None, min_length=1, max_length=128)
+    tier: Optional[str] = None
+    agent_id: Optional[int] = None
+
+    @field_validator('tier')
+    @classmethod
+    def _validate_tier(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _PROJECT_WRITABLE_TIERS:
+            raise ValueError(
+                f'tier must be one of {sorted(_PROJECT_WRITABLE_TIERS)} '
+                '(platform-tier definitions are managed via the admin console)'
+            )
+        return v
 
     @model_validator(mode='after')
     def _validate_code_fields(self):
