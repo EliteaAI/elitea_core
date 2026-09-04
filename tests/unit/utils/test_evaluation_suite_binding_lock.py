@@ -51,7 +51,10 @@ class EvalDimension:
     id = _Col('id')
 
     def __init__(self, **kwargs):
-        defaults = dict(id=1, tier=EvalTier.project, agent_id=None, allowed_engines=['ai'])
+        defaults = dict(
+            id=1, tier=EvalTier.project, agent_id=None, allowed_engines=['ai'],
+            default_weight=None, default_target=None, default_target_operator=None,
+        )
         defaults.update(kwargs)
         self.__dict__.update(defaults)
 
@@ -109,6 +112,7 @@ class _CreateData:
         )
         defaults.update(kwargs)
         self.__dict__.update(defaults)
+        self.model_fields_set = set(kwargs)
 
 
 class _FakeQuery:

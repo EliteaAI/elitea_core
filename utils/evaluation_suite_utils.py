@@ -180,6 +180,41 @@ def _lock_dimension(s, dimension_id: Optional[int]) -> Optional[EvalDimension]:
     return s.query(EvalDimension).filter(EvalDimension.id == dimension_id).with_for_update().first()
 
 
+def inherit_binding_defaults(
+    provided: Set[str],
+    default_weight: Optional[float],
+    default_target: Optional[float],
+    default_target_operator: Optional[str],
+) -> dict:
+    """The dimension defaults a create request should fall back to, keyed by binding column.
+
+    ``target`` on the *binding* is the only value the run snapshot freezes and the results screen
+    reads; ``default_target`` on the dimension is a template that nothing downstream consults. A
+    client that omits ``target`` therefore used to get a silent ``NULL`` and a permanently empty
+    Target column, even with the default set — so the fallback is applied here rather than left to
+    each caller to remember (#EL-6518: the current suite screen renders the dimension default as a
+    placeholder, which made the omission look like it had worked).
+
+    ``provided`` is the request's ``model_fields_set``, so an explicit ``target: null`` ("no target
+    for this suite") is preserved and only a genuinely absent key inherits.
+
+    Target and operator are inherited as a pair: a target without a comparison operator can never
+    be evaluated (``evaluateTargetMet`` treats a half-pair as "not applicable"), so a dimension
+    carrying only one of the two contributes neither.
+    """
+    inherited = {}
+
+    if 'weight' not in provided and default_weight is not None:
+        inherited['weight'] = default_weight
+
+    pair_untouched = 'target' not in provided and 'target_operator' not in provided
+    if pair_untouched and default_target is not None and default_target_operator is not None:
+        inherited['target'] = default_target
+        inherited['target_operator'] = default_target_operator
+
+    return inherited
+
+
 def _validate_source(
     suite: EvalSuite, data: EvalBindingCreateModel, dimension: Optional[EvalDimension],
 ) -> None:
@@ -276,6 +311,14 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
             engine = EvalEngine.code
         _validate_dimension_engine(dimension, engine)
         _require_not_already_bound(s, suite_id, data)
+        # Fall back to the dimension's authored defaults for any knob the request left out.
+        # Platform bindings have no local dimension row, so they inherit nothing.
+        inherited = inherit_binding_defaults(
+            data.model_fields_set,
+            dimension.default_weight if dimension else None,
+            dimension.default_target if dimension else None,
+            dimension.default_target_operator if dimension else None,
+        )
         binding = EvalBinding(
             suite_id=suite_id,
             application_version_id=data.application_version_id,
@@ -283,9 +326,9 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
             platform_key=data.platform_key,
             engine=engine,
             evidence_scope=data.evidence_scope,
-            weight=data.weight,
-            target=data.target,
-            target_operator=data.target_operator,
+            weight=inherited.get('weight', data.weight),
+            target=inherited.get('target', data.target),
+            target_operator=inherited.get('target_operator', data.target_operator),
             order_index=data.order_index,
             meta=data.meta,
         )
