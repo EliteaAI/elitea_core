@@ -1,3 +1,5 @@
+import json
+
 from tools import rpc_tools
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -226,3 +228,62 @@ def update_message_group_meta(
                 new_meta.pop('chat_history_group_ids', None)
 
     return msg_group
+
+
+# The key each content-chunk type must carry. A type with no entry (tool_use and
+# friends) is structural enough to stand on its own.
+CHUNK_KEYS_BY_TYPE = {
+    'text': ('text',),
+    'image': ('image_url', 'source', 'data'),
+    'image_url': ('image_url', 'url'),
+    'document': ('source', 'data'),
+}
+CONTENT_CHUNK_TYPES = frozenset({
+    'text', 'image', 'image_url', 'document', 'tool_use', 'tool_result', 'thinking', 'reasoning',
+})
+TEXT_ONLY_CHUNK_KEYS = frozenset({'text', 'type', 'index'})
+
+
+def _is_content_chunk(chunk) -> bool:
+    """A chunk is its `type` VALUE plus the key that value implies.
+
+    Records carry a `type` of their own -- an ADO work item, a Jira issue -- so
+    keying off the key alone blanked the answer entirely. But the values collide
+    too: a SharePoint page reader emits `{'type': 'text', 'content': ...}` and
+    `{'type': 'image', 'description': ..., 'src': ...}`, which are records, not
+    chunks. Requiring the type's own key separates them.
+    """
+    if not isinstance(chunk, dict) or chunk.get('type') not in CONTENT_CHUNK_TYPES:
+        return False
+    required = CHUNK_KEYS_BY_TYPE.get(chunk['type'])
+    return required is None or any(key in chunk for key in required)
+
+
+def _is_chunk_list(parsed, accept_text_only_chunks: bool) -> bool:
+    if not isinstance(parsed, list) or not parsed:
+        return False
+    if all(_is_content_chunk(chunk) for chunk in parsed):
+        return True
+    # A child message may send bare {'text': ...} chunks. Anything carrying extra
+    # fields is a record -- a search hit with a score, say -- not a chunk.
+    return accept_text_only_chunks and all(
+        isinstance(chunk, dict) and 'text' in chunk and set(chunk) <= TEXT_ONLY_CHUNK_KEYS
+        for chunk in parsed
+    )
+
+
+def parse_content_chunks(content, accept_text_only_chunks: bool = False):
+    """Parse a JSON string into content chunks, or leave it exactly as it is.
+
+    Only a list of content chunks may replace the original text. An answer that
+    merely starts with "[" -- a JSON tool result the model echoed, say -- must stay
+    the string the model wrote, because the callers below fall back to str() and
+    would otherwise hand the user a Python repr of the parsed list.
+    """
+    if not isinstance(content, str) or not content.strip().startswith('['):
+        return content
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return content
+    return parsed if _is_chunk_list(parsed, accept_text_only_chunks) else content
