@@ -235,6 +235,16 @@ def _check_dataset_access(dataset: EvalDataset, agent_id: Optional[int], require
     raise EvalDatasetNotFoundError(dataset.id)
 
 
+def can_edit_dataset(dataset_agent_id: Optional[int], agent_id: Optional[int]) -> bool:
+    """Whether the calling agent may mutate this dataset or its cases (#6350).
+
+    The same rule ``_check_dataset_access(require_owner=True)`` enforces, exposed so read
+    responses can advertise it instead of leaving callers to rediscover it by getting a 404.
+    ``is_shared`` deliberately plays no part: sharing grants read, never write.
+    """
+    return agent_id is None or dataset_agent_id is None or dataset_agent_id == agent_id
+
+
 def _require_dataset(
     s, dataset_id: int, agent_id: Optional[int] = None, require_owner: bool = False,
     lock: bool = False,

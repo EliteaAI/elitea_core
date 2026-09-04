@@ -8,7 +8,7 @@ Definitions live in the library (B1); this module owns the *binding* side. Error
 ``EvalLibraryError`` so the v2 API boundary returns ``exc.http_status`` uniformly.
 """
 
-from typing import List, Optional
+from typing import Iterable, List, Optional, Set
 
 from sqlalchemy.exc import IntegrityError
 
@@ -17,8 +17,10 @@ from tools import db
 from ..models.evaluation import (
     EvalSuite,
     EvalBinding,
+    EvalDatasetCase,
     EvalDimension,
     EvalEngine,
+    EvalSuiteCaseExclusion,
     EvalTier,
 )
 from ..models.all import ApplicationVersion
@@ -342,3 +344,79 @@ def reorder_bindings(project_id: int, suite_id: int, binding_ids: List[int], ses
             .order_by(EvalBinding.order_index.asc(), EvalBinding.id.asc())
             .all()
         )
+
+
+# ----------------------------------------------------------------------------
+# Per-suite case exclusions (#6350)
+# ----------------------------------------------------------------------------
+
+class EvalCaseExclusionError(EvalLibraryError):
+    """The requested exclusion set does not match the suite's dataset."""
+    http_status = 400
+
+
+def effective_cases(cases: Iterable, excluded_ids: Set[int]) -> List:
+    """Drop the suite-excluded cases, preserving the dataset's order.
+
+    Pure on purpose: the run path needs the filter, and the filter is the part worth testing.
+    """
+    return [case for case in cases if case.id not in excluded_ids]
+
+
+def all_cases_excluded(cases: Iterable, excluded_ids: Set[int]) -> bool:
+    """Whether exclusions leave a non-empty dataset with nothing to run.
+
+    An already-empty dataset is *not* this case: it produces an empty run for reasons that have
+    nothing to do with the overlay, so the run path must not blame exclusions for it.
+    """
+    cases = list(cases)
+    return bool(cases) and not effective_cases(cases, excluded_ids)
+
+
+def excluded_case_ids(s, suite_id: int) -> Set[int]:
+    rows = (
+        s.query(EvalSuiteCaseExclusion.case_id)
+        .filter(EvalSuiteCaseExclusion.suite_id == suite_id)
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
+def list_case_exclusions(project_id: int, suite_id: int, session=None) -> List[int]:
+    with _session(session, project_id) as s:
+        _require_suite(s, suite_id)
+        return sorted(excluded_case_ids(s, suite_id))
+
+
+def set_case_exclusions(
+    project_id: int, suite_id: int, case_ids: List[int], session=None,
+) -> List[int]:
+    """Replace the suite's exclusion set. Every id must be a case of the suite's own dataset —
+    excluding a case the suite never runs would be a silent no-op that looks like it worked."""
+    with _session(session, project_id) as s:
+        suite = _require_suite(s, suite_id)
+        requested = set(case_ids)
+        if requested:
+            if suite.dataset_id is None:
+                raise EvalCaseExclusionError('suite has no dataset; there are no cases to exclude')
+            owned = {
+                row[0] for row in s.query(EvalDatasetCase.id)
+                .filter(EvalDatasetCase.dataset_id == suite.dataset_id)
+                .all()
+            }
+            unknown = requested - owned
+            if unknown:
+                raise EvalCaseExclusionError(
+                    f'case ids do not belong to this suite\'s dataset: {sorted(unknown)}'
+                )
+
+        current = excluded_case_ids(s, suite_id)
+        for case_id in current - requested:
+            s.query(EvalSuiteCaseExclusion).filter(
+                EvalSuiteCaseExclusion.suite_id == suite_id,
+                EvalSuiteCaseExclusion.case_id == case_id,
+            ).delete()
+        for case_id in requested - current:
+            s.add(EvalSuiteCaseExclusion(suite_id=suite_id, case_id=case_id))
+        s.flush()
+        return sorted(requested)
