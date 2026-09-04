@@ -9,11 +9,12 @@ already provisioned by H6. Errors follow the ``SkillError`` convention: each car
 from contextlib import contextmanager
 from typing import List, Optional
 
+from pylon.core.tools import log
 from sqlalchemy.exc import IntegrityError
 
-from tools import db
+from tools import auth, db, rpc_tools
 
-from ..models.evaluation import EvalDimension, EvalTier
+from ..models.evaluation import Application, EvalBinding, EvalDimension, EvalSuite, EvalTier
 from ..models.pd.evaluation import EvalDimensionCreateModel, EvalDimensionUpdateModel
 from .evaluation_code_screen import screen_validation_code
 
@@ -65,6 +66,39 @@ class EvalDimensionEngineFieldsError(EvalLibraryError):
     still be caught here even though :class:`EvalDimensionUpdateModel` only validates the pairing
     when the caller explicitly sends ``allowed_engines``."""
     http_status = 400
+
+
+class EvalDimensionDemoteMissingAgentError(EvalLibraryError):
+    """Demoting project -> agent_adhoc needs a target owner; there is no sensible default."""
+    http_status = 400
+
+    def __init__(self):
+        super().__init__('agent_id is required when demoting a dimension to agent_adhoc')
+
+
+class EvalDimensionTierPermissionError(EvalLibraryError):
+    """Promoting/demoting a dimension's tier requires project-admin, distinct from the
+    editor-level permission that authorizes a routine field edit."""
+    http_status = 403
+
+    def __init__(self):
+        super().__init__('changing a dimension\'s tier requires project-admin permission')
+
+
+class EvalDimensionDemoteConflictError(EvalLibraryError):
+    """Demoting project -> agent_adhoc would strand other agents that already have a live
+    binding to this dimension: they would lose visibility into it going forward even though
+    their binding keeps scoring. Blocked outright rather than silently orphaning them."""
+    http_status = 409
+
+    def __init__(self, dimension_id: int, other_agents: List[tuple]):
+        names = ', '.join(f'{name} (id={aid})' for aid, name in other_agents)
+        super().__init__(
+            f'cannot demote dimension {dimension_id} to agent_adhoc: other agent(s) already '
+            f'bound to it: {names}; unbind them first'
+        )
+        self.dimension_id = dimension_id
+        self.other_agents = other_agents
 
 
 class EvalDimensionEngineBindingConflictError(EvalLibraryError):
@@ -200,6 +234,33 @@ def create_dimension(
         return dimension
 
 
+def _is_project_admin(project_id: int, user_id: int) -> bool:
+    """Fail closed: an RPC error means we cannot confirm admin, so treat the caller as
+    not-admin rather than silently letting a tier change through."""
+    try:
+        return bool(rpc_tools.RpcMixin().rpc.timeout(5).admin_check_user_is_admin(
+            project_id, user_id))
+    except Exception:  # pylint: disable=W0703
+        log.warning('eval dimension tier change: admin_check_user_is_admin failed', exc_info=True)
+        return False
+
+
+def _other_agents_bound_to(s, dimension_id: int, exclude_agent_id: Optional[int]) -> List[tuple]:
+    """Agents (id, name) other than ``exclude_agent_id`` with a live binding to this
+    dimension, via the only FK path available: EvalBinding.suite_id -> EvalSuite ->
+    application_id -> Application. EvalBinding itself carries no agent/tier information."""
+    query = (
+        s.query(Application.id, Application.name)
+        .join(EvalSuite, EvalSuite.application_id == Application.id)
+        .join(EvalBinding, EvalBinding.suite_id == EvalSuite.id)
+        .filter(EvalBinding.dimension_id == dimension_id)
+        .distinct()
+    )
+    if exclude_agent_id is not None:
+        query = query.filter(Application.id != exclude_agent_id)
+    return query.all()
+
+
 def update_dimension(
     project_id: int,
     dimension_id: int,
@@ -215,8 +276,26 @@ def update_dimension(
             raise EvalTierImmutableError(dimension.tier)
 
         fields = data.model_dump(exclude_unset=True)
-        fields.pop('tier', None)  # tier is immutable post-create
-        fields.pop('agent_id', None)  # ownership is coupled to tier; immutable post-create
+        new_tier = fields.pop('tier', None)
+        new_owner_agent_id = fields.pop('agent_id', None)
+        if new_tier is not None and new_tier != dimension.tier:
+            # Promote (agent_adhoc -> project) or demote (project -> agent_adhoc). Platform
+            # is unreachable here: EvalDimensionUpdateModel only accepts project/agent_adhoc,
+            # and the current-tier == platform case already raised above.
+            caller_id = auth.current_user().get('id')
+            if not _is_project_admin(project_id, caller_id):
+                raise EvalDimensionTierPermissionError()
+
+            if new_tier == EvalTier.project:
+                fields['agent_id'] = None
+            else:  # demoting to agent_adhoc
+                if new_owner_agent_id is None:
+                    raise EvalDimensionDemoteMissingAgentError()
+                others = _other_agents_bound_to(s, dimension.id, exclude_agent_id=new_owner_agent_id)
+                if others:
+                    raise EvalDimensionDemoteConflictError(dimension.id, others)
+                fields['agent_id'] = new_owner_agent_id
+            fields['tier'] = new_tier
         if fields.get('code'):
             violations = screen_validation_code(fields['code'])
             if violations:
@@ -239,8 +318,6 @@ def update_dimension(
             fields['return_contract'] = 'bool'
 
         if 'allowed_engines' in fields and final_engines != dimension.allowed_engines:
-            from ..models.evaluation import EvalBinding
-
             stale = (
                 s.query(EvalBinding.id, EvalBinding.engine)
                 .filter(EvalBinding.dimension_id == dimension.id,
