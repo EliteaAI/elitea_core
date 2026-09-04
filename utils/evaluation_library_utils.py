@@ -101,6 +101,18 @@ class EvalDimensionDemoteConflictError(EvalLibraryError):
         self.other_agents = other_agents
 
 
+class EvalDimensionDemoteAgentNotFoundError(EvalLibraryError):
+    """The demote target must be a real agent in this project. Left unvalidated, an invalid
+    ``agent_id`` would only surface as the FK violation's ``IntegrityError`` at flush time, which
+    ``update_dimension`` maps to the (misleading) 409 name-conflict error — sending the caller
+    chasing a duplicate-name problem that doesn't exist (PR #416 review)."""
+    http_status = 404
+
+    def __init__(self, agent_id: int):
+        super().__init__(f'agent_id {agent_id} does not refer to an existing agent in this project')
+        self.agent_id = agent_id
+
+
 class EvalDimensionEngineBindingConflictError(EvalLibraryError):
     """Changing ``allowed_engines`` would strand an existing binding whose stored ``engine`` (fixed
     at bind time) would no longer be one of the dimension's allowed engines — the binding would
@@ -245,6 +257,10 @@ def _is_project_admin(project_id: int, user_id: int) -> bool:
         return False
 
 
+def _agent_exists(s, agent_id: int) -> bool:
+    return s.query(Application.id).filter(Application.id == agent_id).first() is not None
+
+
 def _other_agents_bound_to(s, dimension_id: int, exclude_agent_id: Optional[int]) -> List[tuple]:
     """Agents (id, name) other than ``exclude_agent_id`` with a live binding to this
     dimension, via the only FK path available: EvalBinding.suite_id -> EvalSuite ->
@@ -291,6 +307,15 @@ def update_dimension(
             else:  # demoting to agent_adhoc
                 if new_owner_agent_id is None:
                     raise EvalDimensionDemoteMissingAgentError()
+                if not _agent_exists(s, new_owner_agent_id):
+                    raise EvalDimensionDemoteAgentNotFoundError(new_owner_agent_id)
+                # Row-lock the dimension for the rest of this transaction: add_binding() takes
+                # the same lock before inserting a binding for this dimension_id (see
+                # evaluation_suite_utils.py), so a concurrent bind-to-a-new-agent can't slip in
+                # between the other-agents check below and this transaction's commit and get
+                # silently stranded off the visibility this demote is about to grant (PR #416
+                # review).
+                s.query(EvalDimension).filter(EvalDimension.id == dimension.id).with_for_update().first()
                 others = _other_agents_bound_to(s, dimension.id, exclude_agent_id=new_owner_agent_id)
                 if others:
                     raise EvalDimensionDemoteConflictError(dimension.id, others)

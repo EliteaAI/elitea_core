@@ -100,13 +100,14 @@ class _UpdateModel:
 
 
 class _FakeQuery:
-    def __init__(self, rows, columns=None):
+    def __init__(self, rows, columns=None, lock_sink=None):
         self._rows = rows
         self._columns = columns
+        self._lock_sink = lock_sink
 
     def filter(self, *criteria):
         rows = [r for r in self._rows if all(c.holds(r) for c in criteria)]
-        return _FakeQuery(rows, self._columns)
+        return _FakeQuery(rows, self._columns, self._lock_sink)
 
     def join(self, *args, **kwargs):  # noqa: ARG002 - joins are pre-baked into the fixture rows
         return self
@@ -117,7 +118,15 @@ class _FakeQuery:
             key = tuple(getattr(r, name) for name in self._columns) if self._columns else id(r)
             if key not in [s[0] for s in seen]:
                 seen.append((key, r))
-        return _FakeQuery([r for _, r in seen], self._columns)
+        return _FakeQuery([r for _, r in seen], self._columns, self._lock_sink)
+
+    def with_for_update(self):
+        """No real locking in this fake ORM; records that a lock was requested so tests can
+        assert the demote path (and, in evaluation_suite_utils.py, add_binding) actually take
+        the row lock rather than just documenting it (PR #416 review)."""
+        if self._lock_sink is not None:
+            self._lock_sink.append(True)
+        return self
 
     def first(self):
         return self._rows[0] if self._rows else None
@@ -129,21 +138,30 @@ class _FakeQuery:
 
 
 class _FakeSession:
-    def __init__(self, dimension, bindings, other_agent_bindings=None):
+    def __init__(self, dimension, bindings, other_agent_bindings=None, known_agent_ids=None):
         self._dimension_rows = [dimension] if dimension is not None else []
         self._binding_rows = bindings
         # Pre-joined rows standing in for EvalBinding.suite_id -> EvalSuite.application_id ->
         # Application: each is an object exposing both Application.{id,name} and
         # EvalBinding.dimension_id, since the fake join is pre-baked rather than relational.
         self._other_agent_rows = other_agent_bindings or []
+        # Agents considered to exist in this project, for the demote-target existence check
+        # (`_agent_exists`, PR #416 review). Any agent already present in other_agent_bindings
+        # is implicitly known too, since those rows came from a real Application join.
+        known = set(known_agent_ids or [])
+        known.update(row.id for row in self._other_agent_rows)
+        self._known_agent_rows = [types.SimpleNamespace(id=aid) for aid in known]
         self.flush_count = 0
         self.rolled_back = False
         self.refreshed = None
+        self.dimension_locks = []
 
     def query(self, *args):
         first = args[0]
         if first is EvalDimension:
-            return _FakeQuery(self._dimension_rows)
+            return _FakeQuery(self._dimension_rows, lock_sink=self.dimension_locks)
+        if first is Application.id and len(args) == 1:
+            return _FakeQuery(self._known_agent_rows, columns=['id'])
         if first is Application.id:
             return _FakeQuery(self._other_agent_rows, columns=[a.name for a in args])
         if isinstance(first, _Col):
@@ -273,8 +291,8 @@ def code_dimension():
                           code='return True', return_contract='bool')
 
 
-def _update(dimension, bindings=None, other_agent_bindings=None, **fields):
-    session = _FakeSession(dimension, bindings or [], other_agent_bindings)
+def _update(dimension, bindings=None, other_agent_bindings=None, known_agent_ids=None, **fields):
+    session = _FakeSession(dimension, bindings or [], other_agent_bindings, known_agent_ids)
     return library.update_dimension(
         project_id=1, dimension_id=dimension.id, data=_UpdateModel(**fields), session=session,
     ), session
@@ -423,7 +441,7 @@ def test_promote_rejected_for_non_admin(agent_adhoc_dimension):
 
 
 def test_demote_project_to_agent_adhoc_with_no_other_bindings_succeeds(dimension):
-    result, _ = _update(dimension, tier=EvalTier.agent_adhoc, agent_id=7)
+    result, _ = _update(dimension, known_agent_ids=[7], tier=EvalTier.agent_adhoc, agent_id=7)
     assert result.tier == EvalTier.agent_adhoc
     assert result.agent_id == 7
 
@@ -433,10 +451,35 @@ def test_demote_requires_an_agent_id(dimension):
         _update(dimension, tier=EvalTier.agent_adhoc)
 
 
+def test_demote_rejects_an_agent_id_that_does_not_exist_in_this_project(dimension):
+    """PR #416 review: an invalid target agent_id must not fall through to the flush()'s broad
+    IntegrityError -> EvalNameConflictError catch, which would misreport it as a duplicate-name
+    409 instead of the actual problem."""
+    with pytest.raises(library.EvalDimensionDemoteAgentNotFoundError) as excinfo:
+        _update(dimension, tier=EvalTier.agent_adhoc, agent_id=999)
+    assert excinfo.value.agent_id == 999
+
+
+def test_demote_locks_the_dimension_row_before_the_other_agents_check(dimension):
+    """PR #416 review: the demote path must row-lock the dimension (matching the lock
+    add_binding() takes in evaluation_suite_utils.py) so a concurrent bind can't land between
+    the other-agents check and this transaction's commit and get silently stranded."""
+    _, session = _update(dimension, known_agent_ids=[7], tier=EvalTier.agent_adhoc, agent_id=7)
+    assert session.dimension_locks == [True]
+
+
+def test_promote_does_not_take_the_demote_row_lock(agent_adhoc_dimension):
+    """Only demote needs the lock (it's the direction that can strand a binding); promoting
+    doesn't add or interpret any binding-visibility state, so it shouldn't pay for one."""
+    _, session = _update(agent_adhoc_dimension, tier=EvalTier.project)
+    assert session.dimension_locks == []
+
+
 def test_demote_blocked_when_another_agent_is_bound(dimension):
     others = [_JoinedAgentRow(id=8, name='Other Agent', dimension_id=1)]
     with pytest.raises(library.EvalDimensionDemoteConflictError) as excinfo:
-        _update(dimension, other_agent_bindings=others, tier=EvalTier.agent_adhoc, agent_id=7)
+        _update(dimension, other_agent_bindings=others, known_agent_ids=[7],
+                tier=EvalTier.agent_adhoc, agent_id=7)
     assert excinfo.value.other_agents == [(8, 'Other Agent')]
     assert 'Other Agent' in str(excinfo.value)
 

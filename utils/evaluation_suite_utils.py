@@ -263,6 +263,12 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
         if data.platform_key is not None:
             engine = EvalEngine.code
         _validate_dimension_engine(s, data.dimension_id, engine)
+        if data.dimension_id is not None:
+            # Row-lock the dimension for the rest of this transaction: update_dimension()'s
+            # demote path takes the same lock before running its other-agents-bound check, so
+            # this insert can't land between that check and its commit and get silently
+            # stranded off the visibility the demote is about to grant (PR #416 review).
+            s.query(EvalDimension).filter(EvalDimension.id == data.dimension_id).with_for_update().first()
         _require_not_already_bound(s, suite_id, data)
         binding = EvalBinding(
             suite_id=suite_id,
