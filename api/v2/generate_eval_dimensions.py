@@ -157,6 +157,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 instructions=agent["instructions"],
                 count_hint=req.count_hint,
                 existing_dimension_names=existing_names,
+                custom_instructions=req.custom_instructions,
             )
         except ServicePromptTemplateError as exc:
             log.exception("generate_eval_dimensions: %s", exc)
