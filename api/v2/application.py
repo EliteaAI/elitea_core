@@ -14,6 +14,7 @@ from ...utils.constants import PROMPT_LIB_MODE
 from tools import api_tools, auth, config as c, db, register_openapi
 
 from pylon.core.tools import log
+from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -56,6 +57,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id')
     def get(self, project_id: int, application_id: int, version_name: str | None = None, **kwargs):
         try:
             result = get_application_details(project_id, application_id, version_name)
@@ -93,6 +95,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id', write=True)
     def delete(self, project_id, application_id, version_name: str = None):
         if version_name:
             with db.get_session(project_id) as session:
@@ -153,6 +156,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     )
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id', write=True)
     def put(self, project_id: int, application_id: int):
         payload = dict(request.json)
 

@@ -22,6 +22,7 @@ from ...utils.skill_utils import (
     SkillError,
 )
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.folder_access import require_folder_access
 
 
 SKILL_PATH = '<string:mode>/<int:project_id>/<int:skill_id>'
@@ -67,6 +68,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id')
     def get(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         if ignored := sorted(set(request.args) - {'version_id'}):
             log.warning("Ignoring unsupported query parameter(s): %s", ignored)
@@ -114,6 +116,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id', write=True)
     def post(self, project_id: int, skill_id: int, **kwargs):
         raw = dict(request.json)
         raw['author_id'] = auth.current_user().get("id")
@@ -162,6 +165,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id', write=True)
     def put(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         if ignored := sorted(set(request.args) - {'version_id'}):
             log.warning("Ignoring unsupported query parameter(s): %s", ignored)
@@ -250,6 +254,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id', write=True)
     def patch(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         if ignored := sorted(request.args):
             log.warning("Ignoring unsupported query parameter(s): %s", ignored)
@@ -309,6 +314,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id', write=True)
     def delete(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         if unsupported := sorted(set(request.args) - {'version_id'}):
             return {"error": f"unsupported query parameter(s): {unsupported}"}, 400

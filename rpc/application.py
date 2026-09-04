@@ -605,7 +605,8 @@ class RPC:
             ApplicationVersion,
             MultipleApplicationSearchModel,
             ApplicationVersionTagAssociation,
-            "pipeline" if pipeline else None
+            "pipeline" if pipeline else None,
+            folder_entity_types=['pipeline'] if pipeline else ['agent'],
         )
 
     @web.rpc('applications_get_toolkit_search_options', 'applications_get_toolkit_search_options')

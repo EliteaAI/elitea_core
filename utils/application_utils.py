@@ -29,6 +29,7 @@ from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_
 from ..models.pd.tool import ToolValidatedDetails
 from .category_utils import get_active_categories, resolve_category
 from .constants import DEFAULT_FALLBACK_CATEGORY
+from .folder_access import folder_exclusion_clause
 
 
 class _AuthorSortRow(NamedTuple):
@@ -1316,6 +1317,19 @@ def list_applications_api(
             filters.append(pipeline_only_query)
         else:
             pass
+
+    # Folder-level permissions (#6524): drop entities inside the caller's no-access
+    # folders here, before count/offset/limit, so totals and pages stay consistent.
+    folder_entity_types = ['agent', 'pipeline']
+    if agents_type == 'classic':
+        folder_entity_types = ['agent']
+    elif agents_type == 'pipeline':
+        folder_entity_types = ['pipeline']
+    folder_filter = folder_exclusion_clause(
+        project_id, folder_entity_types, Application.id
+    )
+    if folder_filter is not None:
+        filters.append(folder_filter)
 
     trend_period = None
     if trend_start_period:

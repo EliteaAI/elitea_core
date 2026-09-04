@@ -194,6 +194,10 @@ def _install_package(openapi_tools, reverse_url_params=False):
     constants.PROMPT_LIB_MODE = 'prompt_lib'
     modules[f'{PKG}.utils.constants'] = constants
 
+    folder_access = types.ModuleType(f'{PKG}.utils.folder_access')
+    folder_access.require_folder_access = lambda *a, **k: (lambda f: f)
+    modules[f'{PKG}.utils.folder_access'] = folder_access
+
     sys.modules.update(modules)
 
     loaded = {}

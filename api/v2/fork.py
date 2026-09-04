@@ -5,6 +5,7 @@ from tools import api_tools, auth, config as c
 from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
+from ...utils.folder_access import fork_payload_access_error
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -22,6 +23,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         applications = fork_data.get('applications') or []
         entities = applications + (fork_data.get('skills') or [])
+
+        error = fork_payload_access_error(entities)
+        if error is not None:
+            return error
 
         # Set fork parent metadata on each version (this makes is_forked = true)
         for entity in entities:

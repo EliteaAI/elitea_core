@@ -6,6 +6,7 @@ from pylon.core.tools import log
 from .skill import SKILL_PATH, resolve_version_id
 from ...utils.skill_export_import import build_skill_fork_payload
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.folder_access import require_folder_access
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -36,6 +37,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id')
     def get(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         version_id, error = resolve_version_id(version_id)
         if error:

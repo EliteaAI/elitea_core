@@ -8,6 +8,7 @@ from sqlalchemy import and_, not_, or_
 from ..models.all import Tag
 from ..utils.utils import get_entities_by_tags
 from ..models.pd.misc import MultipleTagListModel
+from .folder_access import folder_exclusion_clause
 
 from tools import db, api_tools
 from pylon.core.tools import log
@@ -46,7 +47,8 @@ def get_search_options_one_entity(
     ModelVersion,
     MultipleSearchModel,
     ModelVersionTagAssociation,
-    args_prefix=None
+    args_prefix=None,
+    folder_entity_types=None
 ):
     result = {}
     entities = set(request.args.getlist('entities[]'))
@@ -101,6 +103,14 @@ def get_search_options_one_entity(
             (Model.versions.any(ModelVersion.status.in_(statuses)))
         )
 
+    # Entities inside the caller's no-access folders must not surface as search
+    # options, nor contribute the tags that only they carry.
+    folder_clause = None
+    if folder_entity_types:
+        folder_clause = folder_exclusion_clause(project_id, folder_entity_types, Model.id)
+        if folder_clause is not None:
+            meta_data[entity_name]['filters'].append(folder_clause)
+
     meta_data['tag']['filters'].append(
         get_tag_filter(
             project_id=project_id,
@@ -111,6 +121,7 @@ def get_search_options_one_entity(
             author_id=author_id,
             statuses=statuses,
             tags=tags,
+            folder_clause=folder_clause,
         )
     )
 
@@ -132,7 +143,8 @@ def get_tag_filter(
         author_id: int = None,
         statuses: List[str] = None,
         tags: List[int] = None,
-        session=None
+        session=None,
+        folder_clause=None
 ):
     if session is None:
         session = db.get_project_schema_session(project_id)
@@ -154,6 +166,9 @@ def get_tag_filter(
         filters.append(
             Model.id.in_(entities_subq)
         )
+
+    if folder_clause is not None:
+        filters.append(folder_clause)
 
     entity_query = entity_query.filter(*filters)
     entity_query = entity_query.with_entities(Model.id)

@@ -24,6 +24,7 @@ from ...utils.application_tools import (
     ConfigurationExpandError,
     wrap_provider_hub_secret_fields,
 )
+from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -34,6 +35,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'tool_id')
     def get(self, project_id: int, tool_id: int, **kwargs):
         # Check for expand parameter to return expanded credentials
         expand = request.args.get('expand', '').lower() == 'true'
@@ -80,6 +82,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'tool_id', write=True)
     def delete(self, project_id, tool_id):
         with db.with_project_schema_session(project_id) as session:
             if tool := session.query(EliteATool).get(tool_id):
@@ -117,6 +120,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'tool_id', write=True)
     def patch(self, project_id: int, tool_id: int):
         relation_payload = request.get_json(silent=True)
         if relation_payload is None:
@@ -170,6 +174,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     )
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'tool_id', write=True)
     def put(self, project_id: int, tool_id: int):
         json_payload = request.get_json(silent=True)
         if json_payload is None:

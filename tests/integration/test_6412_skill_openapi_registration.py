@@ -168,6 +168,9 @@ def _install_package(openapi_tools, url_params):
     constants = types.ModuleType(f'{PKG}.utils.constants')
     constants.PROMPT_LIB_MODE = 'prompt_lib'
 
+    folder_access = types.ModuleType(f'{PKG}.utils.folder_access')
+    folder_access.require_folder_access = lambda *a, **k: (lambda f: f)
+
     for name, mod in {
         PKG: pkg,
         f'{PKG}.api': api_pkg,
@@ -179,6 +182,7 @@ def _install_package(openapi_tools, url_params):
         f'{PKG}.utils': utils_pkg,
         f'{PKG}.utils.skill_utils': skill_utils,
         f'{PKG}.utils.constants': constants,
+        f'{PKG}.utils.folder_access': folder_access,
         'flask': flask,
         'tools': tools,
     }.items():

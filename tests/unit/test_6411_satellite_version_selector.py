@@ -172,6 +172,9 @@ def _install_package():
     constants = types.ModuleType(f'{PKG}.utils.constants')
     constants.PROMPT_LIB_MODE = 'prompt_lib'
 
+    folder_access = types.ModuleType(f'{PKG}.utils.folder_access')
+    folder_access.require_folder_access = lambda *a, **k: (lambda f: f)
+
     for name, mod in {
         PKG: _package(PKG),
         f'{PKG}.api': _package(f'{PKG}.api'),
@@ -187,6 +190,7 @@ def _install_package():
         f'{PKG}.utils.skill_export_import': export_import,
         f'{PKG}.utils.export_import_utils': export_import_utils,
         f'{PKG}.utils.constants': constants,
+        f'{PKG}.utils.folder_access': folder_access,
         'flask': flask,
         'tools': tools,
     }.items():

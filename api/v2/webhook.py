@@ -39,6 +39,7 @@ from ...utils.pipeline_trigger import (
     get_webhook_creator_id,
 )
 from ...rpc.pipeline_webhook import execute_pipeline_webhook
+from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
 class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
@@ -134,6 +135,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         available_to_users=True,
     )
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', via_version=True)
     def post(self, project_id: int, version_id: int, webhook_type: str):  # pylint: disable=R0911
         """ POST """
         raw_data = request.data
