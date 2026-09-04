@@ -296,6 +296,18 @@
       "default": true,
       "requires_restart": false
     },
+    "catalog_new_item_days": {
+      "type": "integer",
+      "title": "Catalog New Item Days",
+      "description": "Number of days after publishing within which an agent or skill is shown as 'New' in the catalog. Allowed range: 7–60.",
+      "path": "catalog.new_item_days",
+      "section": "catalog",
+      "default": 14,
+      "minimum": 7,
+      "maximum": 60,
+      "requires_restart": false,
+      "value_schema": { "type": "integer", "minimum": 7, "maximum": 60 }
+    },
     "pipeline_scheduling_enabled": {
       "type": "boolean",
       "title": "Pipeline Scheduling Enabled",

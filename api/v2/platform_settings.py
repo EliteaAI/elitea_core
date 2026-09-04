@@ -16,6 +16,20 @@ from ...utils.midturn_injection_utils import (
 from ...utils.skill_publish_utils import get_skill_publish_blocked, get_skill_publish_whitelist
 
 
+_DEFAULT_NEW_ITEM_DAYS = 14
+_MIN_NEW_ITEM_DAYS = 7
+_MAX_NEW_ITEM_DAYS = 60
+
+
+def _get_catalog_new_item_days() -> int:
+    try:
+        raw = this.module.descriptor.config.get('catalog', {}).get('new_item_days', _DEFAULT_NEW_ITEM_DAYS)
+        return max(_MIN_NEW_ITEM_DAYS, min(_MAX_NEW_ITEM_DAYS, int(raw)))
+    except Exception:
+        pass
+    return _DEFAULT_NEW_ITEM_DAYS
+
+
 def _is_analytics_enabled():
     """Check if Analytics tab is enabled via elitea_core config."""
     try:
@@ -66,6 +80,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "midturn_injection_whitelist_project_ids": list(
                 get_midturn_injection_whitelist()
             ),
+            "catalog_new_item_days": _get_catalog_new_item_days(),
         }, 200
 
 
