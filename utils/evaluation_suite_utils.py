@@ -363,6 +363,16 @@ def effective_cases(cases: Iterable, excluded_ids: Set[int]) -> List:
     return [case for case in cases if case.id not in excluded_ids]
 
 
+def all_cases_excluded(cases: Iterable, excluded_ids: Set[int]) -> bool:
+    """Whether exclusions leave a non-empty dataset with nothing to run.
+
+    An already-empty dataset is *not* this case: it produces an empty run for reasons that have
+    nothing to do with the overlay, so the run path must not blame exclusions for it.
+    """
+    cases = list(cases)
+    return bool(cases) and not effective_cases(cases, excluded_ids)
+
+
 def excluded_case_ids(s, suite_id: int) -> Set[int]:
     rows = (
         s.query(EvalSuiteCaseExclusion.case_id)

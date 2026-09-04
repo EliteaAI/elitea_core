@@ -270,6 +270,34 @@ def test_a_stale_exclusion_id_cannot_drop_a_real_case(utils):
 
 
 # ---------------------------------------------------------------------------
+# all_cases_excluded — the guard create_batch_run turns into a 400
+# ---------------------------------------------------------------------------
+
+def test_excluding_every_case_leaves_nothing_to_run(utils):
+    """create_batch_run raises EvalRunConfigError on this, rather than freezing a caseless run
+    whose headline score would be an unexplained null."""
+    suite_utils = utils['evaluation_suite_utils']
+    cases = [EvalDatasetCase(id=i) for i in (10, 11, 12)]
+
+    assert suite_utils.all_cases_excluded(cases, {10, 11, 12}) is True
+
+
+def test_a_partly_excluded_dataset_still_runs(utils):
+    suite_utils = utils['evaluation_suite_utils']
+    cases = [EvalDatasetCase(id=i) for i in (10, 11, 12)]
+
+    assert suite_utils.all_cases_excluded(cases, {10, 11}) is False
+
+
+def test_an_empty_dataset_is_not_blamed_on_exclusions(utils):
+    """An already-empty dataset predates the overlay, so it must not surface as "every case is
+    excluded" — that error would send the caller looking for exclusions that do not exist."""
+    suite_utils = utils['evaluation_suite_utils']
+
+    assert suite_utils.all_cases_excluded([], set()) is False
+
+
+# ---------------------------------------------------------------------------
 # set_case_exclusions — set semantics, scoped to the suite's own dataset
 # ---------------------------------------------------------------------------
 

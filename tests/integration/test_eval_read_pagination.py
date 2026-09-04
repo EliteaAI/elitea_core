@@ -130,7 +130,7 @@ def _install_package(calls):
     dataset_utils.can_edit_dataset = lambda dataset_agent_id, agent_id: True
 
     suite_utils = types.ModuleType(f'{PKG}.utils.evaluation_suite_utils')
-    suite_utils.excluded_case_ids = lambda session, suite_id: set()
+    suite_utils.list_case_exclusions = lambda project_id, suite_id, session=None: []
 
     library_utils = types.ModuleType(f'{PKG}.utils.evaluation_library_utils')
     library_utils.EvalLibraryError = _EvalLibraryError

@@ -306,3 +306,19 @@ def test_case_list_without_a_suite_id_marks_nothing_excluded(api):
 
     # The plain dataset view is suite-agnostic; a borrower's opt-out must not leak into it.
     assert all(c['excluded'] is False for c in payload['cases'])
+
+
+def test_case_list_rejects_an_unknown_suite_the_same_way(api):
+    """A typo'd suite_id must 404 here as it does on the exclusions endpoint. Answering 200 with
+    every case marked included is worse than an error: the caller cannot tell it from a suite that
+    genuinely excludes nothing."""
+    modules, _, state, request = api
+    request.args = _Args(suite_id='999')
+    boom = _EvalLibraryError('Eval suite with id 999 not found')
+    boom.http_status = 404
+    state['error'] = boom
+
+    payload, status = modules['eval_dataset_cases'].PromptLibAPI().get(1, 5)
+
+    assert status == 404
+    assert 'not found' in payload['error']

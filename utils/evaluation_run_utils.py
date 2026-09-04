@@ -21,6 +21,7 @@ from pylon.core.tools import log
 from .evaluation_library_utils import EvalLibraryError, _session
 from .evaluation_suite_utils import (
     EvalSuiteNotFoundError,
+    all_cases_excluded,
     effective_cases,
     excluded_case_ids,
 )
@@ -196,11 +197,10 @@ def create_batch_run(
             # dataset_id override runs that other dataset whole rather than applying a filter
             # written for a different case set.
             excluded = excluded_case_ids(s, suite_id) if ds_id == suite.dataset_id else set()
-            selected = effective_cases(dataset.cases, excluded)
-            if not selected and dataset.cases:
+            if all_cases_excluded(dataset.cases, excluded):
                 raise EvalRunConfigError(
                     'every case of this suite\'s dataset is excluded; nothing to run')
-            cases = [_case_dict(c) for c in selected]
+            cases = [_case_dict(c) for c in effective_cases(dataset.cases, excluded)]
 
         version_id = _resolve_version(bindings, application_version_id)
         _assert_version_in_application(s, version_id, suite.application_id)

@@ -20,7 +20,7 @@ from ...utils.evaluation_dataset_utils import (
     DEFAULT_CASE_LIMIT,
     MAX_CASE_LIMIT,
 )
-from ...utils.evaluation_suite_utils import excluded_case_ids
+from ...utils.evaluation_suite_utils import list_case_exclusions
 from ...utils.evaluation_library_utils import EvalLibraryError
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -38,7 +38,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Cases to skip."},
             {"name": "suite_id", "in": "query", "schema": {"type": "integer"}, "required": False,
              "description": "Annotates each case with excluded (#6350) — whether that suite "
-                             "drops the case from its runs. Omit for the plain dataset view."},
+                             "drops the case from its runs. Omit for the plain dataset view. "
+                             "An unknown suite_id is a 404."},
         ],
         tags=["elitea_core/evaluation"],
     )
@@ -63,8 +64,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     project_id, dataset_id, agent_id=agent_id, session=session,
                     limit=limit, offset=offset,
                 )
+                # Goes through list_case_exclusions rather than reading the table directly so an
+                # unknown suite_id 404s here exactly as it does on the exclusions endpoint: an
+                # empty set is indistinguishable from "that suite excludes nothing", and a typo'd
+                # id would render every case as included.
                 excluded = (
-                    excluded_case_ids(session, suite_id) if suite_id is not None else set()
+                    set(list_case_exclusions(project_id, suite_id, session=session))
+                    if suite_id is not None else set()
                 )
             except EvalLibraryError as exc:
                 return {"error": str(exc)}, exc.http_status
