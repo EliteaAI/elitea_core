@@ -214,7 +214,8 @@ def _ai_snapshot(orch, case_count=1, dims=None, evidence=None):
 
 def _stub_judge(calls):
     """Records each call's dimension_ids and answers every dimension it was asked to score."""
-    def judge(project_id, settings, system_prompt, payload, timeout, *, stream_key=None):
+    def judge(project_id, settings, system_prompt, payload, timeout, *, stream_key=None,
+              user_id=None):
         import json
         dim_ids = json.loads(payload)['dimension_ids']
         calls.append(dim_ids)
@@ -287,7 +288,8 @@ def test_single_oversized_dimension_gets_evidence_truncated_but_still_scored(har
     seen_payloads = []
     from evalpkg_judge_budget_test.utils import evaluation_ai_judge as aij
 
-    def judge(project_id, settings, system_prompt, payload, timeout, *, stream_key=None):
+    def judge(project_id, settings, system_prompt, payload, timeout, *, stream_key=None,
+              user_id=None):
         import json
         seen_payloads.append(payload)
         dim_ids = json.loads(payload)['dimension_ids']

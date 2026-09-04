@@ -851,13 +851,14 @@ def orchestrate_run(
 # Everything below touches the ORM / SDK and is exercised live, not in this unit suite. Imports
 # stay lazy so the pure core above loads by source with no `tools` / SDK present.
 
-def _make_ai_scorer(project_id: int, judge_settings: dict, *, timeout: int = 60, judge=None):
+def _make_ai_scorer(project_id: int, judge_settings: dict, *, user_id: Optional[int] = None,
+                    timeout: int = 60, judge=None):
     """Bind :func:`evaluation_ai_judge.evaluate_case` into the ``ai_scorer`` contract."""
     from .evaluation_ai_judge import evaluate_case
 
     def _score(evidence: dict, dimensions: List[dict]) -> List[dict]:
         return evaluate_case(project_id, judge_settings, evidence, dimensions,
-                             timeout=timeout, judge=judge)
+                             timeout=timeout, judge=judge, user_id=user_id)
 
     return _score
 
@@ -904,7 +905,8 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
                     'error': f"agent_type '{agent_type}' is not supported for live batch execution "
                              '(P1 scope: single-turn agents only, pipelines deferred)',
                     'structure': structure}
-        outcome = run_agent(project_id, version_details, case, timeout=timeout)
+        outcome = run_agent(project_id, version_details, case,
+                            user_id=user_id, timeout=timeout)
         return {**outcome, 'structure': structure}
 
     return _run
@@ -1117,7 +1119,7 @@ def execute_run(
                 )
         judge_budget_tokens = context_window - max_output_tokens - JUDGE_TOKEN_SAFETY_MARGIN
 
-        ai_scorer = _make_ai_scorer(project_id, settings, judge=judge)
+        ai_scorer = _make_ai_scorer(project_id, settings, judge=judge, user_id=owner_id)
         code_scorer = _make_code_scorer(snapshot, executor)
 
         # Live agent execution (H4) only for offline-batch: on-demand cases already carry the
