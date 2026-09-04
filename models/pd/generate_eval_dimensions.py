@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..evaluation import EvalTier
 from .predict_llm import LLMSettingsRequest
@@ -39,6 +39,21 @@ class GenerateEvalDimensionsRequest(BaseModel):
         le=20,
         description="Soft cap on how many dimensions to propose.",
     )
+    custom_instructions: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Optional free-text guidance to steer generation (e.g. focus areas, "
+        "domain-specific concerns). Never overrides the output schema, count_hint, or the "
+        "duplicate-name constraint.",
+    )
+
+    @field_validator("custom_instructions")
+    @classmethod
+    def _blank_to_none(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
 
 class GeneratedDimensionDraft(EvalDimensionCreateModel, EvalBindingBaseModel):
