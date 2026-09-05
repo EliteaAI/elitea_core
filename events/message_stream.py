@@ -1,4 +1,3 @@
-import json
 
 from pylon.core.tools import web, log
 from tools import db, serialize, rpc_tools
@@ -10,7 +9,11 @@ from ..models.message_items.text import TextMessageItem
 from ..models.pd.message import MessageGroupDetail
 
 from ..utils.sio_utils import get_chat_room
-from ..utils.message_stream import update_message_group_meta, safe_decode_bytes_in_dict
+from ..utils.message_stream import (
+    update_message_group_meta,
+    safe_decode_bytes_in_dict,
+    parse_content_chunks,
+)
 from ..utils.parallel_hitl import (
     complete_supervisor_decisions, is_current_execution, merge_interrupts,
     merge_supervisor_roster,
@@ -114,14 +117,7 @@ class Event:
                         payload['message_id'],
                     )
                     return
-                content = safe_decode_bytes_in_dict(payload['content'])
-
-                # Try to parse string content as JSON (may be stringified list from SDK)
-                if isinstance(content, str) and content.strip().startswith('['):
-                    try:
-                        content = json.loads(content)
-                    except (json.JSONDecodeError, TypeError):
-                        pass  # Keep original string if parsing fails
+                content = parse_content_chunks(safe_decode_bytes_in_dict(payload['content']))
 
                 # Check if content is multimodal (list of content chunks)
                 if is_multimodal_content(content):
@@ -352,13 +348,8 @@ class Event:
             log.warning(f'chat_child_message_save: Missing required fields chat_project_id={chat_project_id}, parent_message_id={parent_message_id}')
             return
 
-        # Process content: parse JSON and extract text from multimodal content
         # Child agent responses from SDK may come as JSON array with text/tool_use blocks
-        if isinstance(content, str) and content.strip().startswith('['):
-            try:
-                content = json.loads(content)
-            except (json.JSONDecodeError, TypeError):
-                pass  # Keep original string if parsing fails
+        content = parse_content_chunks(content, accept_text_only_chunks=True)
 
         # If content is a list (multimodal), extract text blocks and filter out tool_use
         extracted_text = None
