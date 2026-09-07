@@ -97,7 +97,7 @@ class AgentFixItem(BaseModel):
     def _reject_patches_the_apply_path_would_refuse(self):
         """Reject here what ``apply_instructions_patch`` would reject later.
 
-        Every rule below is one that function already enforces (``mcp_versioning.py:19``). Letting
+        Every rule below is one that function already enforces in ``mcp_versioning``. Letting
         such an item reach the review UI means the user accepts a patch that then fails with a
         conflict error, which reads as a platform bug rather than a bad proposal.
         """

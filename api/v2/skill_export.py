@@ -5,10 +5,12 @@ from flask import Response
 from tools import api_tools, config as c, auth, register_openapi
 from pylon.core.tools import log
 
+from .skill import SKILL_PATH, resolve_version_id
 from ...utils.skill_export_import import export_skill_md
 from ...utils.skill_utils import SkillError
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.export_import_utils import content_disposition_attachment
+from ...utils.folder_access import require_folder_access
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -17,15 +19,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description=(
             "Exports the specified skill as a downloadable Markdown (.md) file "
             "with YAML frontmatter (type, name, description, optional version and "
-            "tags) and the skill instructions as the body. When a version_id "
-            "path segment is supplied that version is exported (404 if it does not "
-            "exist); otherwise the default ('base') version is used."
+            "tags) and the skill instructions as the body. When the version_id "
+            "query parameter is supplied that version is exported (404 if it "
+            "does not exist); otherwise the default ('base') version is used."
         ),
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "version_id", "in": "path", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to export (defaults to the 'base' version)."},
+            {"name": "version_id", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to export (defaults to the 'base' version)."},
         ],
+        path_suffix_override=SKILL_PATH,
         tags=["elitea_core/skills"],
         mcp_tool=False,
         available_to_users=True,
@@ -37,7 +40,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id')
     def get(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
+        version_id, error = resolve_version_id(version_id)
+        if error:
+            return error
+
         try:
             result = export_skill_md(
                 project_id=project_id,

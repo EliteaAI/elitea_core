@@ -11,6 +11,7 @@ from tools import api_tools, rpc_tools, db, auth, config as c
 from ...models.pd.fork import ForkToolInput
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.permissions import ProjectPermissionChecker
+from ...utils.folder_access import fork_payload_access_error
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -32,6 +33,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             errors['toolkits'].append(f'Validation error on item: {e}')
             return {'result': results, 'errors': errors}, 400
+
+        error = fork_payload_access_error(fork_input.toolkits, default_kind='toolkits')
+        if error is not None:
+            return error
 
         new_idxs = []
 

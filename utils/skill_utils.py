@@ -12,6 +12,7 @@ from tools import db, auth, serialize, rpc_tools, this, context
 from .authors import get_authors_data
 from .utils import set_columns_as_attrs, get_public_project_id, parse_ids_filter
 from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
+from .folder_access import folder_exclusion_clause
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag, ApplicationVersion, Application
 from ..models.enums.all import SkillEntityTypes, PublishStatus, AgentTypes
@@ -156,6 +157,19 @@ class SkillVersionNotUpdatableError(SkillError):
         self.version_id = version_id
 
 
+class SkillTagMismatchError(SkillError):
+    """Raised when a caller-supplied tag id doesn't resolve to the given tag name (#6410)."""
+    http_status = 400
+
+    def __init__(self, tag_id: int, tag_name: str):
+        super().__init__(
+            f"Tag id {tag_id} does not match name '{tag_name}': "
+            "either the id doesn't exist or it belongs to a different tag"
+        )
+        self.tag_id = tag_id
+        self.tag_name = tag_name
+
+
 class AgentVersionNotUpdatableError(SkillError):
     """Raised when attaching/detaching a skill on a published or embedded agent version."""
     http_status = 409
@@ -166,6 +180,15 @@ class AgentVersionNotUpdatableError(SkillError):
         )
         self.entity_version_id = entity_version_id
         self.status = status
+
+
+class AgentVersionNotFoundError(SkillError):
+    """Raised when a skill mapping references an agent version that does not exist."""
+    http_status = 404
+
+    def __init__(self, entity_version_id: int):
+        super().__init__(f'Agent version {entity_version_id} not found')
+        self.entity_version_id = entity_version_id
 
 
 @contextmanager
@@ -347,6 +370,11 @@ def list_skills_api(
             filters.append(
                 Skill.versions.any(SkillVersion.status.in_(statuses))
             )
+
+    # Folder-level permissions (#6524): filter before count/pagination
+    folder_filter = folder_exclusion_clause(project_id, 'skill', Skill.id)
+    if folder_filter is not None:
+        filters.append(folder_filter)
 
     total, skills = list_skills(
         project_id=project_id,
@@ -752,6 +780,12 @@ def attach_public_skill_to_agents(
             except SkillAlreadyAttachedError:
                 results.append({'agent_version_id': vid, 'ok': False,
                                 'http_status': 409, 'error': 'already attached'})
+            except AgentVersionNotUpdatableError:
+                # 400, not this error's own 409: the dialog reads 409 alone as
+                # "already attached" and reports it as a benign no-op, which would
+                # tell the user the skill was added when it was refused.
+                results.append({'agent_version_id': vid, 'ok': False,
+                                'http_status': 400, 'error': 'published'})
         return results
 
 
@@ -1052,13 +1086,12 @@ def delete_skill_version(
         if not version:
             raise SkillVersionNotFoundError(skill_id, version_id=version_id)
 
-        # Prevent deleting 'base' version if it's the only one
-        other_versions = s.query(SkillVersion).filter(
+        remaining_versions = s.query(SkillVersion).filter(
             SkillVersion.skill_id == skill_id,
             SkillVersion.id != version_id,
-        ).count()
+        ).all()
 
-        if version.name == 'base' and other_versions == 0:
+        if not remaining_versions:
             raise SkillVersionNotUpdatableError(
                 'Cannot delete the only version of a skill. Delete the skill instead.',
                 version_id=version_id,
@@ -1077,7 +1110,25 @@ def delete_skill_version(
             raise SkillVersionInUseError(version_id, usage_count)
 
         s.delete(version)
+        _repoint_default_version(s, skill_id, version_id, remaining_versions)
         return None
+
+
+def _repoint_default_version(session, skill_id: int, deleted_version_id: int, remaining_versions):
+    """Move ``meta['default_version_id']`` off a version that has just been deleted.
+
+    Chooses the same successor GET would compute (models/pd/skill.py set_version_ids),
+    so the stored pointer and the reported one agree.
+    """
+    skill = session.query(Skill).filter(Skill.id == skill_id).first()
+    if skill is None or (skill.meta or {}).get('default_version_id') != deleted_version_id:
+        return
+
+    successor = (
+        next((v for v in remaining_versions if v.name == 'base'), None)
+        or min(remaining_versions, key=lambda version: version.created_at)
+    )
+    skill.meta = {**(skill.meta or {}), 'default_version_id': successor.id}
 
 
 def get_skill_version_by_id(
@@ -1228,6 +1279,21 @@ def attach_skill_to_public_copy(
         )
 
 
+def _require_updatable_agent_version(session, entity_version_id: int) -> None:
+    """Reject a mapping change against a missing, published or embedded agent version.
+
+    EntitySkillMapping.entity_version_id carries no foreign key, so a missing row
+    would otherwise be written as a mapping onto an agent version that never existed.
+    """
+    agent_version = session.query(ApplicationVersion).filter(
+        ApplicationVersion.id == entity_version_id
+    ).first()
+    if not agent_version:
+        raise AgentVersionNotFoundError(entity_version_id)
+    if agent_version.status in (PublishStatus.published, PublishStatus.embedded):
+        raise AgentVersionNotUpdatableError(entity_version_id, agent_version.status)
+
+
 def attach_skill_to_agent(
     project_id: int,
     entity_version_id: int,
@@ -1239,11 +1305,7 @@ def attach_skill_to_agent(
     """Attach a skill to an agent version."""
 
     with _skill_session(session, project_id) as s:
-        agent_version = s.query(ApplicationVersion).filter(
-            ApplicationVersion.id == entity_version_id
-        ).first()
-        if agent_version and agent_version.status in (PublishStatus.published, PublishStatus.embedded):
-            raise AgentVersionNotUpdatableError(entity_version_id, agent_version.status)
+        _require_updatable_agent_version(s, entity_version_id)
 
         return _create_skill_mapping(
             s, entity_version_id, skill_id, skill_version_id, entity_type,
@@ -1305,11 +1367,7 @@ def detach_skill_from_agent(
 ) -> dict:
     """Detach a skill from an agent version."""
     with _skill_session(session, project_id) as s:
-        agent_version = s.query(ApplicationVersion).filter(
-            ApplicationVersion.id == entity_version_id
-        ).first()
-        if agent_version and agent_version.status in (PublishStatus.published, PublishStatus.embedded):
-            raise AgentVersionNotUpdatableError(entity_version_id, agent_version.status)
+        _require_updatable_agent_version(s, entity_version_id)
 
         mapping = s.query(EntitySkillMapping).filter(
             EntitySkillMapping.entity_version_id == entity_version_id,
@@ -1433,6 +1491,12 @@ def get_available_skills_for_agent(
     session=None,
 ) -> List[dict]:
     with _skill_session(session, project_id) as s:
+        agent_version = s.query(ApplicationVersion).filter(
+            ApplicationVersion.id == entity_version_id
+        ).first()
+        if not agent_version:
+            raise AgentVersionNotFoundError(entity_version_id)
+
         mappings = s.query(EntitySkillMapping).filter(
             EntitySkillMapping.entity_version_id == entity_version_id,
             EntitySkillMapping.entity_type == entity_type,
@@ -1669,9 +1733,25 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
 
 
 def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
-    """Apply tags to a skill version."""
+    """Apply tags to a skill version.
+
+    Tags without an ``id`` are matched/created by name, as before. A tag that *does*
+    supply an ``id`` (#6410) is resolved by that id and its ``name`` must match the
+    existing row - a stale/mismatched id is a caller error, not a silent name-based
+    fallback.
+
+    ``id`` is read via ``getattr``: only ``PromptTagUpdateModel`` declares it, while
+    creation/import/publish paths pass ``TagBaseModel``, which has no such field.
+    """
     if not tags:
         return
+
+    requested_ids = {tid for t in tags if (tid := getattr(t, 'id', None)) is not None}
+    tags_by_id = {}
+    if requested_ids:
+        tags_by_id = {
+            t.id: t for t in session.query(Tag).filter(Tag.id.in_(requested_ids)).all()
+        }
 
     existing_tags = session.query(Tag).filter(
         Tag.name.in_({t.name for t in tags})
@@ -1679,6 +1759,14 @@ def _apply_tags_to_version(session, version: SkillVersion, tags: List) -> None:
     existing_tags_map = {t.name: t for t in existing_tags}
 
     for tag in tags:
+        tag_id = getattr(tag, 'id', None)
+        if tag_id is not None:
+            tag_obj = tags_by_id.get(tag_id)
+            if tag_obj is None or tag_obj.name != tag.name:
+                raise SkillTagMismatchError(tag_id, tag.name)
+            version.tags.append(tag_obj)
+            continue
+
         tag_obj = existing_tags_map.get(tag.name)
         if not tag_obj:
             tag_obj = Tag(name=tag.name)

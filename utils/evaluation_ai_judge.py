@@ -282,6 +282,7 @@ def evaluate_case(
     *,
     timeout: int = DEFAULT_JUDGE_TIMEOUT,
     judge: Optional[Callable[..., dict]] = None,
+    user_id: Optional[int] = None,
 ) -> List[dict]:
     """Score ``case`` against ``dimensions`` with one batched judge call.
 
@@ -298,7 +299,7 @@ def evaluate_case(
     system_prompt = build_judge_system_prompt(dimensions)
     payload = build_case_payload(case, dimensions)
     outcome = judge(project_id, judge_llm_settings, system_prompt, payload, timeout,
-                    stream_key='eval_judge')
+                    stream_key='eval_judge', user_id=user_id)
 
     if outcome.get('status') != 'ok':
         return _error_results(

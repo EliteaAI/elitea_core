@@ -10,6 +10,7 @@ from ...utils.application_tools import (
     ValidatorNotSupportedError,
     ConfigurationExpandError,
 )
+from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -36,6 +37,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id')
     def get(self, project_id: int, toolkit_id: int, **kwargs):
         _ = kwargs
 

@@ -6,6 +6,7 @@ from flask import request
 from pydantic import ValidationError
 
 from tools import config as c, api_tools, auth, db, register_openapi
+from .skill import resolve_version_id
 from ...models.skill import SkillVersion
 from ...models.pd.icon_meta import UpdateIcon
 
@@ -16,6 +17,10 @@ from ...utils.constants import PROMPT_LIB_MODE
 FLASK_ROUTE_URL: str = 'elitea_core.skill_icon'
 MAX_FILE_SIZE_KB: int = 512
 MAX_ICON_DIMENSION: int = 64
+
+ICONS_PATH = '<string:mode>/<int:project_id>'
+ICON_VERSION_PATH = '<string:mode>/<int:project_id>/<int:skill_version_id>'
+ICON_NAME_PATH = '<string:mode>/<int:project_id>/<string:icon_name>'
 
 
 def _safe_int(value, default: int) -> int:
@@ -40,6 +45,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "skip", "in": "query", "required": False, "schema": {"type": "integer", "default": 0}},
             {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 200}},
         ],
+        path_suffix_override=ICONS_PATH,
         tags=["elitea_core/skills"],
         mcp_tool=False,
         available_to_users=False,
@@ -64,14 +70,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Upload a skill icon",
         description=(
             "Uploads an image (multipart 'file', max 512 KB) as a skill icon; the "
-            "image is resized to at most 64x64 and stored as PNG. When a "
-            "skill_version_id path segment is supplied, the icon is immediately "
+            "image is resized to at most 64x64 and stored as PNG. When the "
+            "skill_version_id query parameter is supplied, the icon is immediately "
             "bound to that skill version (stored in its meta.icon_meta)."
         ),
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
-            {"name": "skill_version_id", "in": "path", "required": False, "schema": {"type": "integer"}},
+            {"name": "skill_version_id", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric skill version id to bind the uploaded icon to."},
         ],
+        path_suffix_override=ICONS_PATH,
         tags=["elitea_core/skills"],
         mcp_tool=False,
         available_to_users=False,
@@ -83,6 +90,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def post(self, project_id: int, skill_version_id: Optional[int] = None, **kwargs):
+        skill_version_id, error = resolve_version_id(skill_version_id, 'skill_version_id')
+        if error:
+            return error
+
         if 'file' not in request.files:
             return {'error': 'No file in request.files'}, 400
 
@@ -132,6 +143,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_version_id", "in": "path", "schema": {"type": "integer"}},
         ],
+        path_suffix_override=ICON_VERSION_PATH,
         response_model=UpdateIcon,
         tags=["elitea_core/skills"],
         mcp_tool=False,
@@ -176,6 +188,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "icon_name", "in": "path", "schema": {"type": "string"}},
         ],
+        path_suffix_override=ICON_NAME_PATH,
         tags=["elitea_core/skills"],
         mcp_tool=False,
         available_to_users=False,
@@ -198,9 +211,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
 class API(api_tools.APIBase):
     url_params = api_tools.with_modes([
         '',
-        '<string:mode>/<int:project_id>',
-        '<string:mode>/<int:project_id>/<int:skill_version_id>',
-        '<string:mode>/<int:project_id>/<string:icon_name>',
+        ICONS_PATH,
+        ICON_VERSION_PATH,
+        ICON_NAME_PATH,
     ])
 
     mode_handlers = {

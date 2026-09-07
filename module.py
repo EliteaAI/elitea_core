@@ -389,6 +389,9 @@ class Module(module.ModuleModel):
                 "migrate_confluence_api_version", self.migrate_confluence_api_version
             )
             this.for_module("admin").module.register_admin_task(
+                "migrate_toolkit_settings_fields", self.migrate_toolkit_settings_fields
+            )
+            this.for_module("admin").module.register_admin_task(
                 "migrate_mcp_client_secrets", self.migrate_mcp_client_secrets
             )
             this.for_module("admin").module.register_admin_task(
@@ -972,6 +975,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_confluence_api_version", self.migrate_confluence_api_version
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_toolkit_settings_fields", self.migrate_toolkit_settings_fields
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_mcp_client_secrets", self.migrate_mcp_client_secrets

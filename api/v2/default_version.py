@@ -9,6 +9,7 @@ from ...models.pd.application import ApplicationDetailModel
 from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
+from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
 class DefaultVersionUpdateModel(BaseModel):
@@ -27,6 +28,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     )
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id', write=True)
     def patch(self, project_id: int, application_id: int, **kwargs):
         """Set the default version for an application.
         

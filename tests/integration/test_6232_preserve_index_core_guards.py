@@ -839,6 +839,26 @@ class TestHandleFailedIndexSchedule:
         )
         assert sent == []
 
+    def test_a_schedule_with_no_recorded_creator_notifies_with_a_null_user_id_instead_of_crashing(
+        self, index_scheduling, monkeypatch
+    ):
+        # Regression: since #6526 relaxed created_by to optional, creator_id=None reaches
+        # here for any legacy schedule that then fails for an unrelated reason (missing
+        # token, credential lookup, etc). int(None) raised a TypeError that masked the
+        # real init_issue; notify_index_data_status already logs and returns cleanly on a
+        # falsy user_id, so this must reach that guard rather than crash first.
+        sent = self._capture_notify(index_scheduling, monkeypatch)
+        monkeypatch.setattr(
+            index_scheduling, "update_toolkit_index_meta_history_with_failed_state",
+            lambda *a, **kw: {"flipped": True, "skipped_live_run": False,
+                              "reindex": True, "indexed": 0, "updated": 0},
+        )
+        index_scheduling.handle_failed_index_schedule(
+            1, {}, None, self._toolkit(), "docs", "no user token",
+        )
+        assert len(sent) == 1
+        assert sent[0]["user_id"] is None
+
 
 class TestCancelLegacyCollectionClean:
     """The run-unaware fallback is the only cancel path that empties a collection outright,

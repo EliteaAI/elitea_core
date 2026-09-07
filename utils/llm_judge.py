@@ -23,6 +23,7 @@ Outcome dict shape::
 """
 import json
 import re
+from typing import Optional
 from uuid import uuid4
 
 from pylon.core.tools import log
@@ -112,12 +113,17 @@ def run_llm_judge(
     temperature: float = DEFAULT_JUDGE_TEMPERATURE,
     step_limit: int = DEFAULT_JUDGE_STEP_LIMIT,
     stream_key: str = 'llm_judge',
+    user_id: Optional[int] = None,
 ) -> dict:
     """Run one tool-less LLM judge call and return a structured outcome (never raises).
 
     ``judge_llm_settings`` is resolved by the caller (publish uses
     ``get_validation_llm_settings``; eval uses the suite judge model). ``reasoning_effort`` and
     ``max_tokens`` are stripped and ``temperature`` pinned so JSON output is deterministic.
+
+    ``user_id`` names the acting user for token resolution. Callers running inside a request or SIO
+    session may omit it, but a background task pool has neither, so an eval run must pass the run's
+    owner or every judge call fails with 'User token not found'.
     """
     resolved = dict(judge_llm_settings or {})
     resolved.pop('reasoning_effort', None)
@@ -149,6 +155,7 @@ def run_llm_judge(
             sid=None,
             data=data,
             await_task_timeout=timeout,
+            user_id=user_id,
             skip_expansion=True,
             return_chat_history=True,
         )

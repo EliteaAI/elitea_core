@@ -315,6 +315,31 @@ class EvalDatasetCase(db_tools.AbstractBaseMixin, db.Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())
 
 
+class EvalSuiteCaseExclusion(db_tools.AbstractBaseMixin, db.Base):
+    """Per-suite opt-out of one dataset case.
+
+    A shared dataset is owned by the agent that authored it, so a borrowing suite may not edit
+    its cases. This table lets a borrower drop cases from its own runs without touching the
+    origin. The case_id FK cascades so an exclusion can never outlive the case it names.
+    """
+    __tablename__ = 'eval_suite_case_exclusion'
+    __table_args__ = (
+        UniqueConstraint('suite_id', 'case_id', name='_eval_suite_case_exclusion_uc'),
+        {'schema': c.POSTGRES_TENANT_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    suite_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.eval_suite.id', ondelete='CASCADE'),
+        nullable=False, index=True,
+    )
+    case_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.eval_dataset_case.id', ondelete='CASCADE'),
+        nullable=False, index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
 # ----------------------------------------------------------------------------
 # Run (immutable snapshot) + results (§3.4, §20.10)
 # ----------------------------------------------------------------------------

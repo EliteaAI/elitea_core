@@ -8,7 +8,7 @@ Definitions live in the library (B1); this module owns the *binding* side. Error
 ``EvalLibraryError`` so the v2 API boundary returns ``exc.http_status`` uniformly.
 """
 
-from typing import List, Optional
+from typing import Iterable, List, Optional, Set
 
 from sqlalchemy.exc import IntegrityError
 
@@ -17,8 +17,10 @@ from tools import db
 from ..models.evaluation import (
     EvalSuite,
     EvalBinding,
+    EvalDatasetCase,
     EvalDimension,
     EvalEngine,
+    EvalSuiteCaseExclusion,
     EvalTier,
 )
 from ..models.all import ApplicationVersion
@@ -165,9 +167,58 @@ def _require_suite(s, suite_id: int) -> EvalSuite:
     return suite
 
 
-def _validate_source(s, suite: EvalSuite, data: EvalBindingCreateModel) -> None:
+def _lock_dimension(s, dimension_id: Optional[int]) -> Optional[EvalDimension]:
+    """Row-locks and returns the dimension a binding is targeting, *before* any check reads its
+    tier/agent_id/allowed_engines. update_dimension()'s demote path takes this same lock before
+    running its other-agents-bound check, so the two calls serialize on this row rather than
+    racing (PR #416 review). Locking must happen first: if the visibility/engine checks below ran
+    on an earlier, unlocked read and only locked afterwards, a demote that commits while this
+    call is waiting on the lock would leave those checks validating state that's already stale
+    by the time the insert actually happens."""
+    if dimension_id is None:
+        return None
+    return s.query(EvalDimension).filter(EvalDimension.id == dimension_id).with_for_update().first()
+
+
+def inherit_binding_defaults(
+    provided: Set[str],
+    default_weight: Optional[float],
+    default_target: Optional[float],
+    default_target_operator: Optional[str],
+) -> dict:
+    """The dimension defaults a create request should fall back to, keyed by binding column.
+
+    ``target`` on the *binding* is the only value the run snapshot freezes and the results screen
+    reads; ``default_target`` on the dimension is a template that nothing downstream consults. A
+    client that omits ``target`` therefore used to get a silent ``NULL`` and a permanently empty
+    Target column, even with the default set — so the fallback is applied here rather than left to
+    each caller to remember (#EL-6518: the current suite screen renders the dimension default as a
+    placeholder, which made the omission look like it had worked).
+
+    ``provided`` is the request's ``model_fields_set``, so an explicit ``target: null`` ("no target
+    for this suite") is preserved and only a genuinely absent key inherits.
+
+    Target and operator are inherited as a pair: a target without a comparison operator can never
+    be evaluated (``evaluateTargetMet`` treats a half-pair as "not applicable"), so a dimension
+    carrying only one of the two contributes neither.
+    """
+    inherited = {}
+
+    if 'weight' not in provided and default_weight is not None:
+        inherited['weight'] = default_weight
+
+    pair_untouched = 'target' not in provided and 'target_operator' not in provided
+    if pair_untouched and default_target is not None and default_target_operator is not None:
+        inherited['target'] = default_target
+        inherited['target_operator'] = default_target_operator
+
+    return inherited
+
+
+def _validate_source(
+    suite: EvalSuite, data: EvalBindingCreateModel, dimension: Optional[EvalDimension],
+) -> None:
     if data.dimension_id is not None:
-        dimension = s.query(EvalDimension).filter(EvalDimension.id == data.dimension_id).first()
         if not dimension:
             raise EvalBindingSourceError(f'dimension {data.dimension_id} not found')
         # agent_adhoc dimensions are only visible/usable from their owning agent's suites; a NULL
@@ -199,15 +250,12 @@ def _validate_version_pin(s, suite: EvalSuite, application_version_id: Optional[
         )
 
 
-def _validate_dimension_engine(s, dimension_id: Optional[int], engine: str) -> None:
+def _validate_dimension_engine(dimension: Optional[EvalDimension], engine: str) -> None:
     """A dimension binding may only run on an engine its definition permits (§16.2).
 
     A definition with no ``allowed_engines`` recorded is left alone: those predate the field and
     would otherwise start failing on edit.
     """
-    if dimension_id is None:
-        return
-    dimension = s.query(EvalDimension).filter(EvalDimension.id == dimension_id).first()
     allowed = (dimension.allowed_engines or []) if dimension is not None else []
     if allowed and engine not in allowed:
         raise EvalBindingEngineError(engine, allowed)
@@ -252,7 +300,8 @@ def get_binding(project_id: int, suite_id: int, binding_id: int, session=None) -
 def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, session=None) -> EvalBinding:
     with _session(session, project_id) as s:
         suite = _require_suite(s, suite_id)
-        _validate_source(s, suite, data)
+        dimension = _lock_dimension(s, data.dimension_id)
+        _validate_source(suite, data, dimension)
         _validate_version_pin(s, suite, data.application_version_id)
         # Platform bindings always run on the code engine (§12); dimension bindings (any
         # engine, including a code-engine dimension) honor the editable engine column. Normalize
@@ -260,8 +309,16 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
         engine = data.engine
         if data.platform_key is not None:
             engine = EvalEngine.code
-        _validate_dimension_engine(s, data.dimension_id, engine)
+        _validate_dimension_engine(dimension, engine)
         _require_not_already_bound(s, suite_id, data)
+        # Fall back to the dimension's authored defaults for any knob the request left out.
+        # Platform bindings have no local dimension row, so they inherit nothing.
+        inherited = inherit_binding_defaults(
+            data.model_fields_set,
+            dimension.default_weight if dimension else None,
+            dimension.default_target if dimension else None,
+            dimension.default_target_operator if dimension else None,
+        )
         binding = EvalBinding(
             suite_id=suite_id,
             application_version_id=data.application_version_id,
@@ -269,9 +326,9 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
             platform_key=data.platform_key,
             engine=engine,
             evidence_scope=data.evidence_scope,
-            weight=data.weight,
-            target=data.target,
-            target_operator=data.target_operator,
+            weight=inherited.get('weight', data.weight),
+            target=inherited.get('target', data.target),
+            target_operator=inherited.get('target_operator', data.target_operator),
             order_index=data.order_index,
             meta=data.meta,
         )
@@ -298,7 +355,11 @@ def update_binding(
         if 'application_version_id' in fields:
             _validate_version_pin(s, suite, fields['application_version_id'])
         if 'engine' in fields:
-            _validate_dimension_engine(s, binding.dimension_id, fields['engine'])
+            dimension = (
+                s.query(EvalDimension).filter(EvalDimension.id == binding.dimension_id).first()
+                if binding.dimension_id is not None else None
+            )
+            _validate_dimension_engine(dimension, fields['engine'])
         for key, value in fields.items():
             setattr(binding, key, value)
         s.flush()
@@ -342,3 +403,79 @@ def reorder_bindings(project_id: int, suite_id: int, binding_ids: List[int], ses
             .order_by(EvalBinding.order_index.asc(), EvalBinding.id.asc())
             .all()
         )
+
+
+# ----------------------------------------------------------------------------
+# Per-suite case exclusions (#6350)
+# ----------------------------------------------------------------------------
+
+class EvalCaseExclusionError(EvalLibraryError):
+    """The requested exclusion set does not match the suite's dataset."""
+    http_status = 400
+
+
+def effective_cases(cases: Iterable, excluded_ids: Set[int]) -> List:
+    """Drop the suite-excluded cases, preserving the dataset's order.
+
+    Pure on purpose: the run path needs the filter, and the filter is the part worth testing.
+    """
+    return [case for case in cases if case.id not in excluded_ids]
+
+
+def all_cases_excluded(cases: Iterable, excluded_ids: Set[int]) -> bool:
+    """Whether exclusions leave a non-empty dataset with nothing to run.
+
+    An already-empty dataset is *not* this case: it produces an empty run for reasons that have
+    nothing to do with the overlay, so the run path must not blame exclusions for it.
+    """
+    cases = list(cases)
+    return bool(cases) and not effective_cases(cases, excluded_ids)
+
+
+def excluded_case_ids(s, suite_id: int) -> Set[int]:
+    rows = (
+        s.query(EvalSuiteCaseExclusion.case_id)
+        .filter(EvalSuiteCaseExclusion.suite_id == suite_id)
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
+def list_case_exclusions(project_id: int, suite_id: int, session=None) -> List[int]:
+    with _session(session, project_id) as s:
+        _require_suite(s, suite_id)
+        return sorted(excluded_case_ids(s, suite_id))
+
+
+def set_case_exclusions(
+    project_id: int, suite_id: int, case_ids: List[int], session=None,
+) -> List[int]:
+    """Replace the suite's exclusion set. Every id must be a case of the suite's own dataset —
+    excluding a case the suite never runs would be a silent no-op that looks like it worked."""
+    with _session(session, project_id) as s:
+        suite = _require_suite(s, suite_id)
+        requested = set(case_ids)
+        if requested:
+            if suite.dataset_id is None:
+                raise EvalCaseExclusionError('suite has no dataset; there are no cases to exclude')
+            owned = {
+                row[0] for row in s.query(EvalDatasetCase.id)
+                .filter(EvalDatasetCase.dataset_id == suite.dataset_id)
+                .all()
+            }
+            unknown = requested - owned
+            if unknown:
+                raise EvalCaseExclusionError(
+                    f'case ids do not belong to this suite\'s dataset: {sorted(unknown)}'
+                )
+
+        current = excluded_case_ids(s, suite_id)
+        for case_id in current - requested:
+            s.query(EvalSuiteCaseExclusion).filter(
+                EvalSuiteCaseExclusion.suite_id == suite_id,
+                EvalSuiteCaseExclusion.case_id == case_id,
+            ).delete()
+        for case_id in requested - current:
+            s.add(EvalSuiteCaseExclusion(suite_id=suite_id, case_id=case_id))
+        s.flush()
+        return sorted(requested)

@@ -1,7 +1,7 @@
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field, validator, ValidationError
+from pydantic import BaseModel, Field, root_validator, validator, ValidationError
 from datetime import datetime, timedelta, timezone
 
 from croniter import croniter
@@ -12,6 +12,9 @@ _DAILY_FLOOR = timedelta(hours=24)
 # 32 covers monthly patterns (28-31 day gaps) and weekly multi-day patterns
 # without making validation expensive.
 _GAP_PROBE_FIRINGS = 32
+
+_DEFAULT_TIMEZONE = 'UTC'
+_EPOCH_ISO = datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat()
 
 
 def _validate_cron_expression(v: str) -> str:
@@ -56,6 +59,15 @@ class Credentials(BaseModel):
     private: Optional[bool] = False
     elitea_title: str
 
+    @root_validator(pre=True)
+    def accept_legacy_title(cls, values):
+        # Schedules stored before the alita->elitea rename still carry `alita_title`.
+        # configurations.expand_configuration reads either key, so rejecting them here
+        # would strand rows that the rest of the pipeline can still resolve.
+        if isinstance(values, dict) and not values.get('elitea_title') and values.get('alita_title'):
+            values = {**values, 'elitea_title': values['alita_title']}
+        return values
+
 
 class UpdateIndexingSchedule(BaseModel):
     cron: str
@@ -84,13 +96,18 @@ class ToolkitIndexingSchedule(BaseModel):
     cron: str
     enabled: bool
     credentials: Optional[Credentials] = None
-    created_by: int = Field(gt=0)
-    timezone: str
+    # Schedules written before these fields existed have no author, timezone or last_run.
+    # They stay parseable so the scheduler can still run them; a missing author only
+    # blocks resolving a *private* credential, which resolve_credentials rejects on its own.
+    created_by: Optional[int] = Field(default=None, gt=0)
+    timezone: str = _DEFAULT_TIMEZONE
     # store last_run as ISO 8601 string (always UTC)
-    last_run: str
+    last_run: str = _EPOCH_ISO
 
-    @validator('timezone')
+    @validator('timezone', pre=True)
     def validate_timezone(cls, v):
+        if v is None:
+            return _DEFAULT_TIMEZONE
         try:
             ZoneInfo(v)
         except ZoneInfoNotFoundError:
@@ -100,6 +117,10 @@ class ToolkitIndexingSchedule(BaseModel):
     @validator('last_run', pre=True)
     def normalize_last_run(cls, v):
         """Accept datetime or string, ensure tz is present, normalize to UTC, and store as ISO string."""
+        if v is None:
+            # An absent last_run makes the schedule immediately due, which is the
+            # intended recovery for a legacy row that has never run.
+            return _EPOCH_ISO
         # Convert input to datetime first
         if isinstance(v, datetime):
             dt = v

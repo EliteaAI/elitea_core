@@ -8,6 +8,7 @@ from ...utils.publish_utils import admin_unpublish, user_unpublish
 
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi
+from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -31,6 +32,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', write=True, via_version=True)
     def post(self, project_id: int, version_id: int, **kwargs):
         body = request.get_json(silent=True) or {}
         try:

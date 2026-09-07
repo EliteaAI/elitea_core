@@ -1,8 +1,8 @@
 """Shared failure reporting for the "generate draft with AI" endpoints.
 
-The draft generators dispatch one blocking ``predict_sio_llm`` call and read the answer out of
-``thinking_steps``. A worker exception, a join timeout, an exhausted token budget and a genuinely
-empty completion all leave that text empty, so without these helpers they collapse into one
+The draft generators dispatch one blocking ``predict_sio_llm`` call and read the answer out of the
+result it returns. A worker exception, a join timeout, an exhausted token budget and a genuinely
+empty completion all leave that answer empty, so without these helpers they collapse into one
 indistinguishable "empty response" string.
 """
 
@@ -15,6 +15,12 @@ from .utils import get_public_project_id
 
 ERROR_LINE_MAX_LENGTH = 300
 MAX_LISTED_MODEL_NAMES = 20
+PARSE_FAILURE_WINDOW = 120
+PARSE_FAILURE_TAIL = 80
+LENGTH_RULES = (("max_length", "maximum"), ("min_length", "minimum"))
+VALIDATION_FAILURE_FALLBACK = "Generated draft failed validation"
+# mirrors llm_judge and evaluation_agent_runner, which keep their own copies to stay ORM-free
+ASSISTANT_ROLES = ("assistant", "ai")
 
 
 def _available_llm_models(project_id: int) -> Optional[dict]:
@@ -160,24 +166,52 @@ def _last_exception_line(error_text) -> str:
     return line
 
 
+def _thinking_steps(result) -> list:
+    inner = result.get("result") if isinstance(result, dict) else None
+    steps = inner.get("thinking_steps") if isinstance(inner, dict) else None
+    return [step for step in steps if isinstance(step, dict)] if isinstance(steps, list) else []
+
+
+def finish_reasons(result) -> list:
+    """One entry per step, None where the worker reported no usable ``generation_info``.
+
+    Read from inside the parse-failure handler, where raising would turn a described 422 into a
+    bare 500 - so a step whose ``generation_info`` is not a mapping counts as unknown, not fatal.
+    """
+    reasons = []
+    for step in _thinking_steps(result):
+        generation_info = step.get("generation_info")
+        reasons.append(
+            generation_info.get("finish_reason") if isinstance(generation_info, dict) else None
+        )
+    return reasons
+
+
 def hit_token_limit(result) -> bool:
     """Whether any part of the generation ran out of budget.
 
-    Authoritative where brace-counting is not: a truncated draft often ends mid-prose with its
-    braces balanced. *Any* step counts, not the last one — the worker continues after a cut-off,
-    so a run that lost its JSON to the budget still ends ``stop`` (observed: ``length, length,
-    stop`` for one skill draft at ``max_tokens=400``). Only consulted once the draft is missing or
-    unparseable, so a run that recovered and produced valid JSON never reaches it.
+    *Any* step counts, because this is only asked when the run produced no readable text at all:
+    with nothing to show for it, a step that stopped on ``length`` is the explanation. A run that
+    produced an answer must be judged by :func:`answer_was_cut_short` instead, where a ``length``
+    step means something quite different.
     """
-    inner = result.get("result") if isinstance(result, dict) else None
-    steps = inner.get("thinking_steps") if isinstance(inner, dict) else None
-    if not isinstance(steps, list):
-        return False
-    return any(
-        isinstance(step, dict)
-        and (step.get("generation_info") or {}).get("finish_reason") == "length"
-        for step in steps
-    )
+    return "length" in finish_reasons(result)
+
+
+def answer_was_cut_short(result, answer: str) -> bool:
+    """Whether output was lost, as opposed to merely assembled from several calls.
+
+    ``length, length, stop`` is the ordinary signature of a *complete* answer: the SDK continues a
+    completion that hit the output limit and merges the rounds. Only the final round matters, and
+    when the model reported one, it settles the question — ``is_truncated_json`` counts braces
+    without regard for strings, so a draft whose Markdown contains a ``{`` reads as unbalanced and
+    would send a caller after ``max_tokens`` when the real fault was in the content.
+    """
+    reasons = finish_reasons(result)
+    last_reason = reasons[-1] if reasons else None
+    if last_reason is not None:
+        return last_reason == "length"
+    return is_truncated_json(answer)
 
 
 def _already_states(curated: str, detail: str) -> bool:
@@ -234,16 +268,120 @@ def describe_predict_failure(result) -> Optional[str]:
 
 
 def extract_draft_text(result) -> str:
-    """Return the last non-empty assistant text from a blocking predict result."""
-    task_result = result.get("result") if isinstance(result, dict) else None
-    thinking_steps = task_result.get("thinking_steps", []) if isinstance(task_result, dict) else []
+    """Return the last non-empty assistant text from the run's *trace*.
+
+    Kept only as :func:`extract_answer`'s fallback — see there for why a trace step is not the
+    answer.
+    """
     return next(
-        (
-            step["text"] for step in reversed(thinking_steps)
-            if isinstance(step, dict) and step.get("text")
-        ),
+        (step["text"] for step in reversed(_thinking_steps(result)) if step.get("text")),
         "",
     )
+
+
+def extract_answer(result) -> str:
+    """Return the model's answer, preferring the result channel over the trace channel.
+
+    ``thinking_steps`` holds one entry per LLM call. When a completion stops on ``length`` the SDK
+    asks for the rest and merges the rounds outside any callback, so the merged answer is never
+    traced and the last step is a fragment starting mid-sentence. ``chat_history`` is where that
+    merged text reaches a blocking caller; the trace is the fallback for a worker that omits it.
+    """
+    task_result = result.get("result") if isinstance(result, dict) else None
+    history = task_result.get("chat_history") if isinstance(task_result, dict) else None
+    if isinstance(history, list):
+        answer = next(
+            (
+                entry["content"] for entry in reversed(history)
+                if isinstance(entry, dict)
+                and (entry.get("role") in ASSISTANT_ROLES or entry.get("type") == "ai")
+                and isinstance(entry.get("content"), str)
+                and entry["content"].strip()
+            ),
+            None,
+        )
+        if answer:
+            return answer
+    return extract_draft_text(result)
+
+
+def describe_parse_failure(raw_text: str, candidate: str, error, result) -> str:
+    """Why a draft would not parse, in the detail needed to tell the causes apart.
+
+    A completion cut off mid-string and a control character the model emitted inside one produce
+    the same 422 and the same truncated prefix in the log. The **message class** separates them —
+    ``Unterminated string starting at`` against ``Invalid control character at`` — and the rest of
+    the line is what makes that classification checkable rather than taken on faith.
+
+    ``pos`` is labelled per class because it means something different in each: for an unterminated
+    string it marks the opening quote, which for a long value sits hundreds of characters from the
+    cut, so a distance "from the end" there would read as a mid-draft failure for exactly the
+    truncation it identifies. That offset is reported only where ``pos`` marks the failure itself.
+
+    The window is ``repr``'d because the log formatter would otherwise render the offending
+    character as ordinary whitespace; the tail shows a cut draft ending mid-prose with nothing
+    closing it; the finish reasons say whether the model thought it had finished. All are bounded
+    slices rather than the whole draft — they carry the evidence, and the draft is user content.
+    """
+    if error.msg.startswith("Unterminated string"):
+        location = f"pos {error.pos}, never closed"
+    else:
+        location = f"pos {error.pos}, {len(candidate) - error.pos} chars from the end"
+    window_start = max(0, error.pos - PARSE_FAILURE_WINDOW)
+    return (
+        f"{error.msg} ({location}; {len(candidate)} extracted chars, {len(raw_text)} raw); "
+        f"finish_reasons={finish_reasons(result)}; "
+        f"window={candidate[window_start:error.pos + PARSE_FAILURE_WINDOW]!r}; "
+        f"tail={candidate[-PARSE_FAILURE_TAIL:]!r}"
+    )
+
+
+def _describe_validation_error(error: dict) -> str:
+    """One field's failure, or "" when the error is about the payload rather than a field.
+
+    A model answering with a bare JSON string parses, so the payload reaching the response model is
+    a ``str`` and pydantic reports one ``loc``-less error whose wording names the model class. That
+    class name says nothing to whoever has to produce a valid draft and the modals render this
+    sentence to end users verbatim, so those fall back to the generic label.
+
+    A broken length rule is stated as the measurement rather than in pydantic's own wording: the
+    Settings modal renders this sentence to a person, and "String should have at most 2500
+    characters" describes the constraint where what both a person and a regenerating model need is
+    how far over the draft actually went. Every other rule keeps pydantic's wording, and no length
+    is quoted against it — beside a pattern or a type it would read as the thing that failed.
+
+    The field is named as a form labels it rather than as the schema spells it, because the person
+    reading the banner never sees the schema. A model regenerating the draft is given the tool
+    definition alongside this sentence and maps the two without the underscore.
+    """
+    location = ".".join(str(part) for part in error.get("loc") or ())
+    if not location:
+        return ""
+    field = location.replace("_", " ").capitalize()
+    value = error.get("input")
+    context = error.get("ctx") or {}
+    if isinstance(value, str):
+        for key, label in LENGTH_RULES:
+            if key in context:
+                return f"{field} is {len(value)} characters, the {label} is {context[key]}"
+    return f"{field}: {_last_exception_line(error.get('msg') or error.get('type') or 'is invalid')}"
+
+
+def describe_validation_failure(errors) -> str:
+    """Why a parsed draft failed its response model, in the terms needed to produce a valid one.
+
+    A caller that has to regenerate needs the field, the rule it broke and how far past it the
+    draft went; a cap stated without the actual length gives no sense of how much to cut. The
+    offending value itself is reported only by its length — the draft is user content, it already
+    travels back whole under ``raw``, and neither this message nor the log line it feeds is a
+    place for it, the same bound :func:`describe_parse_failure` keeps on its windows.
+
+    The semicolon separates one field's failure from the next, so no clause may spend one itself:
+    two broken fields would otherwise arrive as four peer clauses with nothing saying where the
+    first field's failure ends.
+    """
+    described = [_describe_validation_error(error) for error in errors if isinstance(error, dict)]
+    return "; ".join(part for part in described if part) or VALIDATION_FAILURE_FALLBACK
 
 
 def timeout_response(result, timeout_seconds: int) -> Optional[tuple]:

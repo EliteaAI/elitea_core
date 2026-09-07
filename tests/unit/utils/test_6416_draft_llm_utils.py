@@ -4,6 +4,7 @@ Re-broken by rejecting a model that only exists in the public project, by blocki
 when the availability lookup itself fails, or by flattening a worker failure back into a single
 generic string.
 """
+import json
 import pathlib
 import sys
 import types
@@ -364,6 +365,213 @@ def test_caller_chose(draft_llm_utils, settings, field, chosen):
 
 def test_non_dict_result_is_reported(draft_llm_utils):
     assert draft_llm_utils.describe_predict_failure(None)
+
+
+def _merged(answer, *reasons):
+    """A worker result carrying both channels: a merged answer and the trace of the calls."""
+    return {'result': {
+        'chat_history': [
+            {'role': 'user', 'content': 'make me a skill'},
+            {'role': 'assistant', 'content': answer},
+        ],
+        'thinking_steps': [
+            {'text': f'fragment {i}', 'generation_info': {'finish_reason': reason}}
+            for i, reason in enumerate(reasons)
+        ],
+    }}
+
+
+DRAFT = '{"name": "release-notes", "description": "d", "instructions": "# T"}'
+
+
+def test_the_answer_is_read_from_the_result_channel(draft_llm_utils):
+    """The trace holds continuation fragments; only chat_history holds the merged answer."""
+    assert draft_llm_utils.extract_answer(_merged(DRAFT, 'length', 'length', 'stop')) == DRAFT
+
+
+@pytest.mark.parametrize('entry', [
+    {'role': 'assistant', 'content': DRAFT},
+    {'role': 'ai', 'content': DRAFT},
+    {'type': 'ai', 'content': DRAFT},
+])
+def test_every_shape_the_sibling_readers_accept_is_accepted_here(draft_llm_utils, entry):
+    """llm_judge and evaluation_agent_runner read this channel too; a narrower predicate here
+    would silently fall back to the trace, which is the bug this function exists to avoid."""
+    assert draft_llm_utils.extract_answer({'result': {'chat_history': [entry]}}) == DRAFT
+
+
+def test_a_worker_that_omits_chat_history_falls_back_to_the_trace(draft_llm_utils):
+    result = {'result': {'thinking_steps': [{'text': DRAFT, 'generation_info': {'finish_reason': 'stop'}}]}}
+
+    assert draft_llm_utils.extract_answer(result) == DRAFT
+
+
+@pytest.mark.parametrize('history', [
+    [],
+    [{'role': 'user', 'content': 'make me a skill'}],
+    [{'role': 'assistant', 'content': ''}],
+    [{'role': 'assistant', 'content': '   '}],
+    [{'role': 'assistant', 'content': {'not': 'a string'}}],
+    ['not a dict'],
+])
+def test_an_unusable_result_channel_falls_back_to_the_trace(draft_llm_utils, history):
+    result = {'result': {'chat_history': history, 'thinking_steps': [{'text': DRAFT}]}}
+
+    assert draft_llm_utils.extract_answer(result) == DRAFT
+
+
+@pytest.mark.parametrize('result', [{'task_id': 'abc'}, {'result': None}, None])
+def test_extract_answer_survives_a_resultless_envelope(draft_llm_utils, result):
+    assert draft_llm_utils.extract_answer(result) == ''
+
+
+def test_a_continued_run_is_not_reported_as_truncated(draft_llm_utils):
+    """The whole point: length,length,stop is a complete answer, not a lost one."""
+    result = _merged(DRAFT, 'length', 'length', 'stop')
+
+    assert draft_llm_utils.answer_was_cut_short(result, DRAFT) is False
+    # the old predicate is still right for its own question - nothing was produced at all
+    assert draft_llm_utils.hit_token_limit(result) is True
+
+
+def test_a_run_whose_last_round_stopped_short_is_truncated(draft_llm_utils):
+    assert draft_llm_utils.answer_was_cut_short(_merged(DRAFT, 'length', 'length'), DRAFT) is True
+
+
+def test_a_model_that_reported_stop_is_believed_over_brace_counting(draft_llm_utils):
+    """Markdown instructions legitimately contain braces, so an unbalanced count is not evidence
+    of truncation once the model has said it finished."""
+    braces_in_markdown = '{"name": "x", "instructions": "Use {placeholder} in your template"}'
+
+    assert draft_llm_utils.answer_was_cut_short(
+        _merged(braces_in_markdown, 'length', 'stop'), braces_in_markdown
+    ) is False
+
+
+def test_a_clean_run_is_not_truncated(draft_llm_utils):
+    assert draft_llm_utils.answer_was_cut_short(_merged(DRAFT, 'stop'), DRAFT) is False
+
+
+@pytest.mark.parametrize('result', [
+    {'task_id': 'abc'},
+    {'result': {'thinking_steps': []}},
+    # a step the worker gave no generation_info for reports None, which is not a verdict
+    {'result': {'thinking_steps': [{'text': 'x'}]}},
+])
+def test_an_unknown_finish_reason_falls_back_to_the_answer_s_shape(draft_llm_utils, result):
+    assert draft_llm_utils.answer_was_cut_short(result, DRAFT) is False
+    assert draft_llm_utils.answer_was_cut_short(result, '{"a": [1') is True
+
+
+def _decode_error(candidate):
+    try:
+        json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        return exc
+    raise AssertionError(f'{candidate!r} parsed cleanly')
+
+
+def _stopped(*reasons):
+    return {'result': {'thinking_steps': [
+        {'text': '', 'generation_info': {'finish_reason': reason}} for reason in reasons
+    ]}}
+
+
+# a real cut-off loses a *long* value, so the opening quote `pos` reports sits nowhere near the
+# cut - the shape that makes a naive "chars from the end" figure read as a mid-draft failure
+CUT_OFF = (
+    '{"name": "release-notes", "description": "Summarizes release notes.", '
+    '"instructions": "' + 'Summarize each change and its impact. ' * 20
+)
+STRAY_CONTROL = '{"name": "release-notes", "instructions": "Line one\nLine two", "description": "ok"}'
+
+
+def test_a_cut_off_draft_is_named_by_its_message_and_unclosed_tail(draft_llm_utils):
+    """`pos` points at the opening quote, not the cut, so the tail is what shows the draft simply
+    stopping - it ends mid-prose with nothing closing it."""
+    error = _decode_error(CUT_OFF)
+    reason = draft_llm_utils.describe_parse_failure(CUT_OFF, CUT_OFF, error, _stopped('stop'))
+
+    assert 'Unterminated string' in reason
+    assert f'pos {error.pos}, never closed' in reason
+    assert f'{len(CUT_OFF)} extracted chars' in reason
+    assert reason.endswith("its impact. '")
+
+
+def test_an_unterminated_string_is_not_reported_as_a_distance_from_the_end(draft_llm_utils):
+    """That offset would claim a mid-draft failure for a draft that stopped at the very end."""
+    error = _decode_error(CUT_OFF)
+    assert len(CUT_OFF) - error.pos > 2 * draft_llm_utils.PARSE_FAILURE_WINDOW
+
+    reason = draft_llm_utils.describe_parse_failure(CUT_OFF, CUT_OFF, error, _stopped('stop'))
+
+    assert 'from the end' not in reason
+
+
+def test_a_stray_control_character_is_described_as_failing_mid_draft(draft_llm_utils):
+    """The decisive difference from a cut-off: the rest of the draft is still behind the failure."""
+    error = _decode_error(STRAY_CONTROL)
+    reason = draft_llm_utils.describe_parse_failure(
+        STRAY_CONTROL, STRAY_CONTROL, error, _stopped('stop'),
+    )
+
+    assert 'Invalid control character' in reason
+    assert f'pos {error.pos}, {len(STRAY_CONTROL) - error.pos} chars from the end' in reason
+    # repr'd, or the log formatter renders the newline as ordinary whitespace and hides the cause
+    assert '\\n' in reason
+
+
+def test_the_window_is_bounded_and_centred_on_the_failure(draft_llm_utils):
+    """Bounded before repr, so nothing is claimed about the rendered length - an escape expands."""
+    filler = 'x' * (3 * draft_llm_utils.PARSE_FAILURE_WINDOW)
+    candidate = f'{{"a": "FARLEFT{filler}NEARLEFT\nNEARRIGHT{filler}FARRIGHT"}}'
+
+    reason = draft_llm_utils.describe_parse_failure(
+        candidate, candidate, _decode_error(candidate), _stopped('stop'),
+    )
+    window = reason.split('window=')[1].split('; tail=')[0]
+
+    assert 'NEARLEFT' in window and 'NEARRIGHT' in window
+    assert 'FARLEFT' not in window and 'FARRIGHT' not in window
+
+
+def test_the_diagnostic_carries_what_the_model_thought_it_did(draft_llm_utils):
+    reason = draft_llm_utils.describe_parse_failure(
+        CUT_OFF, CUT_OFF, _decode_error(CUT_OFF), _stopped('length', 'stop'),
+    )
+
+    assert "finish_reasons=['length', 'stop']" in reason
+
+
+def test_extraction_that_trimmed_the_output_reports_both_lengths(draft_llm_utils):
+    raw = 'Here is your draft:\n```json\n' + CUT_OFF + '\n```'
+
+    reason = draft_llm_utils.describe_parse_failure(
+        raw, CUT_OFF, _decode_error(CUT_OFF), _stopped('stop'),
+    )
+
+    assert f'{len(CUT_OFF)} extracted chars' in reason
+    assert f'{len(raw)} raw' in reason
+
+
+@pytest.mark.parametrize('result, expected', [
+    ({'result': {'thinking_steps': [{'generation_info': {'finish_reason': 'stop'}}]}}, ['stop']),
+    ({'result': {'thinking_steps': [{'text': 'x'}]}}, [None]),
+    ({'result': {'thinking_steps': []}}, []),
+    ({'task_id': 'abc'}, []),
+    (None, []),
+    # a diagnostic that raises inside the failure handler costs the caller its described 422
+    ({'result': {'thinking_steps': [{'generation_info': 'stop'}]}}, [None]),
+    ({'result': {'thinking_steps': [{'generation_info': []}]}}, [None]),
+])
+def test_finish_reasons(draft_llm_utils, result, expected):
+    assert draft_llm_utils.finish_reasons(result) == expected
+
+
+def test_a_malformed_generation_info_does_not_break_the_token_limit_check(draft_llm_utils):
+    assert draft_llm_utils.hit_token_limit(
+        {'result': {'thinking_steps': [{'generation_info': 'length'}]}}
+    ) is False
 
 
 @pytest.mark.parametrize('raw_text, truncated', [

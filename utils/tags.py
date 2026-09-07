@@ -8,6 +8,7 @@ from tools import db
 from pylon.core.tools import log
 
 from .like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
+from .folder_access import folder_exclusion_clause
 from ..models.all import Tag
 from ..models.all import Application, ApplicationVersion, ApplicationVersionTagAssociation
 from ..models.skill import Skill, SkillVersion, SkillVersionTagAssociation
@@ -25,6 +26,9 @@ class TagListABC(ABCMeta):
 
 
 class TagList(metaclass=TagListABC):
+    # Folder item types this tag list counts over; None disables folder filtering.
+    folder_entity_types = None
+
     def __init__(self, project_id, args):
         self.project_id = project_id
         self.args = args
@@ -69,6 +73,12 @@ class TagList(metaclass=TagListABC):
         return filters
 
     def add_related_entity_extra_filters(self, filters):
+        if self.folder_entity_types:
+            clause = folder_exclusion_clause(
+                self.project_id, self.folder_entity_types, self.Entity.id
+            )
+            if clause is not None:
+                filters = list(filters) + [clause]
         return filters
 
     def get_related_entity_query(self, filters):
@@ -180,6 +190,8 @@ class TagList(metaclass=TagListABC):
 
 
 class ApplicationTagList(TagList):
+    folder_entity_types = ['agent']
+
     def __init__(self, project_id, args):
         super().__init__(project_id, args)
 
@@ -199,6 +211,8 @@ class ApplicationTagList(TagList):
 
 
 class PipelineTagList(TagList):
+    folder_entity_types = ['pipeline']
+
     def __init__(self, project_id, args):
         super().__init__(project_id, args)
 
@@ -218,6 +232,8 @@ class PipelineTagList(TagList):
 
 
 class SkillTagList(TagList):
+    folder_entity_types = ['skill']
+
     def set_related_entity_info(self):
         self.Entity = Skill
         self.Version = SkillVersion

@@ -30,17 +30,18 @@ from pydantic import ValidationError
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
+from ...models.evaluation import EvalTier
 from ...models.pd.generate_eval_dimensions import (
     GenerateEvalDimensionsRequest,
     GenerateEvalDimensionsResponse,
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.draft_llm_utils import (
+    answer_was_cut_short,
     caller_chose,
+    describe_parse_failure,
     describe_predict_failure,
-    extract_draft_text,
-    hit_token_limit,
-    is_truncated_json,
+    extract_answer,
     resolve_model,
     timeout_response,
 )
@@ -156,6 +157,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 instructions=agent["instructions"],
                 count_hint=req.count_hint,
                 existing_dimension_names=existing_names,
+                custom_instructions=req.custom_instructions,
             )
         except ServicePromptTemplateError as exc:
             log.exception("generate_eval_dimensions: %s", exc)
@@ -174,6 +176,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 await_task_timeout=_AWAIT_TASK_TIMEOUT,
                 user_id=user_id,
                 skip_expansion=True,
+                return_chat_history=True,
             )
         except PredictPayloadError as exc:
             return {"error": str(exc)}, 400
@@ -191,7 +194,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if timed_out:
             return timed_out
 
-        raw_text = extract_draft_text(result)
+        raw_text = extract_answer(result)
         if not raw_text:
             failure = describe_predict_failure(result)
             log.warning(
@@ -200,27 +203,38 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             return {"error": failure or "LLM returned an empty response"}, 500
 
+        extracted = extract_json_from_text(raw_text)
         try:
-            extracted = extract_json_from_text(raw_text)
             parsed = json.loads(extracted)
         except json.JSONDecodeError as e:
-            log.debug("generate_eval_dimensions: LLM output is not valid JSON: %s", raw_text[:500])
-            if hit_token_limit(result) or is_truncated_json(raw_text):
+            log.warning(
+                "generate_eval_dimensions: draft did not parse: %s",
+                describe_parse_failure(raw_text, extracted, e, result),
+            )
+            if answer_was_cut_short(result, extracted):
                 return {
                     "error": "LLM response was truncated. Increase max_tokens in llm_settings (recommended: 4096+)."
                 }, 422
             return {"error": "LLM returned unparseable output", "parse_error": str(e)}, 422
 
-        # The server owns version_id — overwrite anything the model invented before validating,
-        # so the pin the caller gets is the version the instructions were actually read from.
+        # The server owns version_id and each draft's agent_id — overwrite anything the model
+        # invented before validating, so the pin the caller gets is the version the instructions
+        # were actually read from, and agent_adhoc drafts are scoped to the agent they came from.
         if isinstance(parsed, dict):
             parsed["version_id"] = agent["version_id"]
+            for item in parsed.get("dimensions") or []:
+                if isinstance(item, dict):
+                    if item.get("tier", EvalTier.agent_adhoc) == EvalTier.agent_adhoc:
+                        item["agent_id"] = req.application_id
+                    else:
+                        item.pop("agent_id", None)
 
         try:
             draft = GenerateEvalDimensionsResponse.model_validate(parsed)
         except ValidationError as e:
-            log.warning("generate_eval_dimensions: validation failed: %s", e.errors())
-            return {"error": "Generated draft failed validation", "details": e.errors(), "raw": parsed}, 422
+            errors = e.errors(include_url=False, include_context=False, include_input=False)
+            log.warning("generate_eval_dimensions: validation failed: %s", errors)
+            return {"error": "Generated draft failed validation", "details": errors, "raw": parsed}, 422
 
         return draft.model_dump(), 200
 

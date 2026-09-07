@@ -16,6 +16,26 @@ def instructions_sha256(instructions: str | None) -> str:
     return sha256((instructions or '').encode('utf-8')).hexdigest()
 
 
+def sanitize_mcp_settings_update(payload: dict, current_instructions: str | None) -> dict:
+    """Remove a legacy schema default while refusing real instruction edits.
+
+    Older MCP schemas published instructions with default="", which the SDK materializes even
+    when the model omitted the field. Exact current content is also a harmless round-trip. Any
+    other value is authored content and must retain the hash-guarded patch workflow.
+    """
+    sanitized = dict(payload)
+    if 'instructions' not in sanitized:
+        return sanitized
+
+    requested = sanitized.pop('instructions')
+    if requested not in (None, '', current_instructions or ''):
+        raise InstructionsPatchConflictError(
+            'Internal MCP instruction changes must use the safe instructions patch tool. '
+            'Read the version again, then patch it using instructions_sha256.'
+        )
+    return sanitized
+
+
 def apply_instructions_patch(
     current: str | None,
     *,

@@ -168,6 +168,9 @@ def _install_package(openapi_tools, url_params):
     constants = types.ModuleType(f'{PKG}.utils.constants')
     constants.PROMPT_LIB_MODE = 'prompt_lib'
 
+    folder_access = types.ModuleType(f'{PKG}.utils.folder_access')
+    folder_access.require_folder_access = lambda *a, **k: (lambda f: f)
+
     for name, mod in {
         PKG: pkg,
         f'{PKG}.api': api_pkg,
@@ -179,6 +182,7 @@ def _install_package(openapi_tools, url_params):
         f'{PKG}.utils': utils_pkg,
         f'{PKG}.utils.skill_utils': skill_utils,
         f'{PKG}.utils.constants': constants,
+        f'{PKG}.utils.folder_access': folder_access,
         'flask': flask,
         'tools': tools,
     }.items():
@@ -255,8 +259,11 @@ def test_skill_details_takes_an_optional_version_id(mcp_tools):
 
 
 def test_metadata_update_no_longer_demands_a_version(mcp_tools):
+    """#6411 gave PUT a documented `version_id` *query* selector, matching get/delete and the
+    skill_export siblings, so the property exists again - but the point of #6412 stands: it must
+    never be required, and it must never be a path parameter (pinned separately above)."""
     schema = mcp_tools['put_elitea_core_skill']['args_schema']
-    assert 'version_id' not in schema['properties']
+    assert schema['properties']['version_id']['type'] == 'integer'
     assert 'version_id' not in schema['required']
 
 

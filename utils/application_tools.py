@@ -455,6 +455,12 @@ def _get_pgvector_engine(conn_str: str):
             pool_pre_ping=True,
             pool_size=_pgvector_cache_cfg('pool_size', 5),
             max_overflow=_pgvector_cache_cfg('max_overflow', 10, minimum=0),
+            # These point at per-project, sometimes external, pgvector hosts. A host that
+            # accepts the TCP connection but never completes the handshake would otherwise
+            # block forever: that stalls the caller, and in the scheduler it strands the
+            # tick's re-entrancy lock so every later tick skips and no project is ever
+            # scanned again. libpq applies this per connection attempt (psycopg2/psycopg3).
+            connect_args={'connect_timeout': _pgvector_cache_cfg('connect_timeout_sec', 10)},
         )
         _PGVECTOR_ENGINE_CACHE[conn_str] = [engine, time.monotonic()]
         overflowed = _evict_pgvector_overflow()
@@ -562,6 +568,7 @@ def toolkits_listing(
     from ..models.all import EliteATool
     from ..models.pd.tool import ToolDetails, sanitization_pattern
     from ..utils.authors import get_authors_data
+    from .folder_access import folder_exclusion_clause
     from tools import rpc_tools
 
     with db.get_session(project_id) as session:
@@ -640,6 +647,19 @@ def toolkits_listing(
                 (EliteATool.meta['application'].astext.is_(None))
             )
         # else: filter_application is None, don't filter by application status
+
+        # Folder-level permissions (#6524): applied before count/pagination so the
+        # total and the page slice both exclude no-access folders.
+        folder_entity_types = ['toolkit', 'mcp']
+        if filter_mcp is True:
+            folder_entity_types = ['mcp']
+        elif filter_mcp is False:
+            folder_entity_types = ['toolkit']
+        folder_filter = folder_exclusion_clause(
+            project_id, folder_entity_types, EliteATool.id
+        )
+        if folder_filter is not None:
+            q = q.filter(folder_filter)
 
         # Add pin status (project-wide) - always included
         q, new_columns = add_pins_with_priority(

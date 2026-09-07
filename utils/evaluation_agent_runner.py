@@ -162,6 +162,7 @@ def run_agent(
     version_details: dict,
     case: dict,
     *,
+    user_id: Optional[int] = None,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
     predict: Optional[Callable[..., dict]] = None,
 ) -> dict:
@@ -169,7 +170,11 @@ def run_agent(
 
     ``predict`` defaults to ``this.module.predict_sio`` (the same RPC the judge uses) and is
     injectable so tests exercise extraction/error-mapping against a stub. An unsupported
-    ``agent_type`` short-circuits to ``status='unsupported'`` without dispatching."""
+    ``agent_type`` short-circuits to ``status='unsupported'`` without dispatching.
+
+    ``user_id`` must be passed explicitly: a batch run executes on the ``eval_runs`` pool, so
+    ``predict_sio`` has neither a sid nor a live request to recover the acting user from, and
+    without it every case fails with 'User token not found'."""
     if not agent_type_supported(version_details):
         agent_type = (version_details or {}).get('agent_type')
         return {'status': 'unsupported', 'output': None,
@@ -184,7 +189,7 @@ def run_agent(
                                     case.get('variables'))
     try:
         result = predict(sid=None, data=data, await_task_timeout=timeout,
-                         skip_expansion=True, return_chat_history=True)
+                         user_id=user_id, skip_expansion=True, return_chat_history=True)
     except Exception as exc:  # noqa: BLE001 - execution-level failure is a value, not a raise
         return {'status': 'predict_exception', 'output': None, 'error': str(exc)}
 

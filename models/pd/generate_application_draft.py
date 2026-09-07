@@ -1,5 +1,5 @@
 from typing import Optional, List
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, constr, field_validator, model_validator
 
 from .predict_llm import LLMSettingsRequest
 
@@ -32,7 +32,7 @@ class GenerateApplicationDraftRequest(BaseModel):
         }
     )
 
-    user_description: str = Field(
+    user_description: constr(strip_whitespace=True, min_length=1) = Field(
         description="Natural-language description of the desired agent or changes (edit mode)"
     )
     llm_settings: Optional[LLMSettingsRequest] = Field(

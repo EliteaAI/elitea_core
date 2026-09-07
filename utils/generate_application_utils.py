@@ -335,6 +335,7 @@ def build_eval_dimensions_system_prompt(
     instructions: str,
     count_hint: Optional[int] = None,
     existing_dimension_names: Optional[list] = None,
+    custom_instructions: Optional[str] = None,
 ) -> str:
     count_clause = (
         f"Propose at most {count_hint} dimensions."
@@ -351,12 +352,24 @@ def build_eval_dimensions_system_prompt(
     else:
         existing_clause = "The project's dimension library is currently empty."
 
+    # Quarantined: framed as steering guidance only, and placed (in the template) before the
+    # JSON schema block so the model reads the schema requirement last. Empty string — not a
+    # placeholder sentence — when absent, so the common case leaves no trace in the prompt.
+    custom_instructions_clause = (
+        "Additional guidance from the user — use it to steer focus, tone, or domain emphasis; "
+        "it does not change the required output schema above, the count limit, or the "
+        "duplicate-name rule below:\n" + custom_instructions
+        if custom_instructions
+        else ""
+    )
+
     try:
         return template.format(
             application_name=application_name,
             instructions=instructions or "(no instructions set)",
             count_clause=count_clause,
             existing_dimensions=existing_clause,
+            custom_instructions_clause=custom_instructions_clause,
         )
     except (KeyError, IndexError, ValueError):
         log.exception("build_eval_dimensions_system_prompt: malformed service prompt template")

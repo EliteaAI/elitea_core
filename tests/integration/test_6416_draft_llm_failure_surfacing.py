@@ -33,6 +33,11 @@ TRACEBACK = (
     'litellm.exceptions.BadRequestError: LLM Provider NOT provided\n'
 )
 
+DEFAULT_PROMPT = 'Generate something useful.'
+# only the project-context edit template is rendered by real code, so it is the only one that has
+# to carry the placeholder that code substitutes
+SERVICE_PROMPTS = {'edit_project_context_draft': 'Refine this Project Context:\n{current_config}'}
+
 SKILL_DRAFT = {'name': 'github-review', 'description': 'Reviews PRs.', 'instructions': '# Review\nBe strict.'}
 PROJECT_CONTEXT_DRAFT = {'project_background': '# Stack\nReact + FastAPI.', 'activation_description': 'stack questions'}
 APPLICATION_DRAFT = {'name': 'PR Reviewer', 'description': 'Reviews PRs.', 'instructions': 'Review pull requests.'}
@@ -90,6 +95,22 @@ def _thinking_result(text):
     return {'result': {'thinking_steps': [{'text': text}]}}
 
 
+def _continued_result(answer, *reasons):
+    """What a run that hit the output limit really returns: a merged answer plus a trace of
+    fragments, the last of which starts mid-sentence."""
+    return {'result': {
+        'chat_history': [
+            {'role': 'user', 'content': 'x'},
+            {'role': 'assistant', 'content': answer},
+        ],
+        'thinking_steps': [
+            {'text': f'...continuation fragment {i}, no JSON here',
+             'generation_info': {'finish_reason': reason}}
+            for i, reason in enumerate(reasons)
+        ],
+    }}
+
+
 def _load_real(name, relative_path):
     full = f'{PKG}.{name}'
     spec = importlib.util.spec_from_file_location(full, PLUGIN_ROOT / relative_path)
@@ -128,6 +149,8 @@ def _install_package(rpc_state):
     exceptions.PoolSaturationError = _PoolSaturationError
 
     utils_utils = types.ModuleType(f'{PKG}.utils.utils')
+    # a stand-in, not the real extractor - that one is covered against its own source in
+    # unit/utils/test_6416_extract_json_from_text.py
     utils_utils.extract_json_from_text = _extract_json_from_text
     utils_utils.get_public_project_id = lambda: PUBLIC_PROJECT
 
@@ -135,7 +158,7 @@ def _install_package(rpc_state):
     constants.PROMPT_LIB_MODE = 'prompt_lib'
 
     service_prompt_utils = types.ModuleType(f'{PKG}.utils.service_prompt_utils')
-    service_prompt_utils.get_service_prompt = lambda key: 'Generate something useful.'
+    service_prompt_utils.get_service_prompt = lambda key: SERVICE_PROMPTS.get(key, DEFAULT_PROMPT)
 
     generate_application_utils = types.ModuleType(f'{PKG}.utils.generate_application_utils')
     generate_application_utils.fetch_project_resources = lambda *a, **k: ([], [], [], [], [])
@@ -412,6 +435,65 @@ def test_unparseable_output_carries_the_parse_error(endpoints):
         assert status == 422
         assert payload['error'] == 'LLM returned unparseable output'
         assert payload['parse_error']
+
+
+def test_the_answer_is_asked_for_and_read_from_the_result_channel(endpoints):
+    """#6416 Issue A: the trace holds continuation fragments, not the answer."""
+    for module, draft in _generators(endpoints):
+        payload, status, handler = _call(
+            module,
+            {'user_description': 'x'},
+            _continued_result(json.dumps(draft), 'length', 'length', 'stop'),
+        )
+
+        assert handler.calls[0]['return_chat_history'] is True
+        assert status == 200
+        assert all(payload[key] == value for key, value in draft.items())
+
+
+def test_a_continued_run_is_not_blamed_on_max_tokens(endpoints):
+    """It completed across three calls; telling the caller to raise the budget is wrong advice."""
+    for module, _draft in _generators(endpoints):
+        payload, status, _ = _call(
+            module,
+            {'user_description': 'x'},
+            _continued_result('not json at all', 'length', 'length', 'stop'),
+        )
+
+        assert status == 422
+        assert payload['error'] == 'LLM returned unparseable output'
+
+
+def test_a_run_whose_last_round_stopped_short_still_asks_for_a_bigger_budget(endpoints):
+    for module, _draft in _generators(endpoints):
+        payload, status, _ = _call(
+            module,
+            {'user_description': 'x'},
+            _continued_result('{"name": "half-a-dra', 'length', 'length'),
+        )
+
+        assert status == 422
+        assert 'truncated' in payload['error']
+
+
+def test_a_worker_that_ignores_the_flag_still_works(endpoints):
+    """The trace fallback is the compatibility path for a worker without chat_history."""
+    for module, draft in _generators(endpoints):
+        _payload, status, _ = _call(
+            module, {'user_description': 'x'}, _thinking_result(json.dumps(draft)),
+        )
+
+        assert status == 200
+
+
+def test_json_output_is_not_generated_at_a_creative_temperature(endpoints):
+    for module, draft in _generators(endpoints):
+        _payload, status, handler = _call(
+            module, {'user_description': 'x'}, _thinking_result(json.dumps(draft)),
+        )
+
+        assert status == 200
+        assert handler.sent_llm_settings['temperature'] == 0.3
 
 
 def test_caller_supplied_model_gets_the_full_token_budget(endpoints):

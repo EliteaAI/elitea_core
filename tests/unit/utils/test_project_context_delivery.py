@@ -2,19 +2,33 @@
 
 import importlib.util
 import pathlib
+import sys
 
-from utils.generate_project_context_utils import (
-    build_create_project_context_system_prompt,
-    build_edit_project_context_system_prompt,
-)
-from utils.project_context_utils import prepare_project_context_delivery
+TESTS_DIR = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(TESTS_DIR))
+
+from fixtures.helpers import load_utils_module
 
 
-PROJECT_CONTEXT_MODEL_PATH = pathlib.Path(__file__).resolve().parents[3] / "models/pd/project_context.py"
+PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
+prepare_project_context_delivery = load_utils_module(
+    PLUGIN_ROOT / "utils", "project_context_utils"
+).prepare_project_context_delivery
+PROJECT_CONTEXT_MODEL_PATH = PLUGIN_ROOT / "models/pd/project_context.py"
 _model_spec = importlib.util.spec_from_file_location("project_context_model_5326", PROJECT_CONTEXT_MODEL_PATH)
 _model_module = importlib.util.module_from_spec(_model_spec)
 _model_spec.loader.exec_module(_model_module)
 ProjectContextUpdate = _model_module.ProjectContextUpdate
+
+# the contract interpolates the caps from the model module, so it has to answer to the name that
+# module's relative import resolves to
+_context_utils = load_utils_module(
+    PLUGIN_ROOT / "utils",
+    "generate_project_context_utils",
+    extra_stubs={"plugins.elitea_core.models.pd.project_context": _model_module},
+)
+build_create_project_context_system_prompt = _context_utils.build_create_project_context_system_prompt
+build_edit_project_context_system_prompt = _context_utils.build_edit_project_context_system_prompt
 
 
 def test_activation_description_uses_progressive_disclosure():

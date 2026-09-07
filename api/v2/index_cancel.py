@@ -8,6 +8,7 @@ from ...utils.application_tools import (
 )
 from ...utils.predict_utils import get_toolkit_config
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -18,6 +19,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def delete(self, project_id: int, toolkit_id: int, index_name: str, task_id: str, **kwargs):
         # Convert JS 'null' string to Python None
         if task_id == 'null':

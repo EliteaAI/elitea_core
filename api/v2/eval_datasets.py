@@ -15,7 +15,7 @@ from ...models.pd.evaluation import (
     EvalDatasetSummaryModel,
     EvalDatasetDetailModel,
 )
-from ...utils.evaluation_dataset_utils import list_datasets, create_dataset
+from ...utils.evaluation_dataset_utils import list_datasets, create_dataset, can_edit_dataset
 from ...utils.evaluation_library_utils import EvalLibraryError
 from ...utils.constants import PROMPT_LIB_MODE
 
@@ -45,10 +45,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         agent_id = request.args.get('agent_id', type=int)
         with db.get_session(project_id) as session:
             rows = list_datasets(project_id, agent_id=agent_id, session=session)
-            return [
-                EvalDatasetSummaryModel.model_validate(r).model_dump(mode='json')
-                for r in rows
-            ], 200
+            payload = []
+            for r in rows:
+                item = EvalDatasetSummaryModel.model_validate(r).model_dump(mode='json')
+                item['can_edit'] = can_edit_dataset(item.get('agent_id'), agent_id)
+                payload.append(item)
+            return payload, 200
 
     @register_openapi(
         name="Create an eval dataset",

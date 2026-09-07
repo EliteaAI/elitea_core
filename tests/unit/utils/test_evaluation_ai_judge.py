@@ -39,7 +39,8 @@ CASE = {'input': 'q', 'output': 'a', 'expected_output': 'a!'}
 
 
 def _judge_returning(data, status='ok', error=None):
-    def judge(project_id, settings, system_prompt, payload, timeout, *, stream_key=None):
+    def judge(project_id, settings, system_prompt, payload, timeout, *, stream_key=None,
+              user_id=None):
         judge.seen = {'system_prompt': system_prompt, 'payload': payload, 'timeout': timeout}
         return {'status': status, 'data': data, 'error': error, 'raw': None}
     return judge

@@ -17,6 +17,7 @@ from ...utils.publish_utils import (
 
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, db, this, register_openapi
+from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -40,6 +41,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', write=True, via_version=True)
     def post(self, project_id: int, version_id: int, **kwargs):
         # --- Parse & validate request body ---
         body = request.get_json(silent=True) or {}

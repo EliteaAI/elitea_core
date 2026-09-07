@@ -27,6 +27,7 @@ from ...utils.pipeline_trigger import (
     get_trigger_from_pipeline_settings,
     build_trigger_for_storage,
 )
+from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -46,6 +47,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     })
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', via_version=True)
     def get(self, project_id: int, version_id: int, **kwargs):
         """
         Get the current trigger configuration for a pipeline version.
@@ -123,6 +125,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     })
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', write=True, via_version=True)
     def put(self, project_id: int, version_id: int, **kwargs):
         """
         Update the trigger configuration for a pipeline version.
@@ -245,6 +248,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }
     })
     @api_tools.endpoint_metrics
+    @require_folder_access(APPLICATION_ENTITY_TYPES, 'version_id', via_version=True)
     def post(self, project_id: int, version_id: int, **kwargs):
         """
         Regenerate the webhook secret for a pipeline version.

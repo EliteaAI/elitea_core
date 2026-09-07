@@ -28,6 +28,7 @@ from ...models.all import Application
 from ...models.pd.application import ApplicationListModel, PublishedApplicationListModel
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.utils import get_public_project_id
+from ...utils.folder_access import folder_exclusion_clause, APPLICATION_ENTITY_TYPES
 
 
 def _query_audit_recommendations(project_id, user_id=None, limit=5, days=30):
@@ -154,14 +155,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return None
 
         with db.get_session(project_id) as session:
-            applications = (
+            query = (
                 session.query(Application)
                 .filter(
                     Application.id.in_(application_ids),
                     Application.owner_id == project_id
                 )
-                .all()
             )
+            clause = folder_exclusion_clause(
+                project_id, APPLICATION_ENTITY_TYPES, Application.id
+            )
+            if clause is not None:
+                query = query.filter(clause)
+            applications = query.all()
 
             if not applications:
                 return None
@@ -202,12 +208,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def _get_applications_alphabetically(self, project_id: int, limit: int):
         """Fallback: Get applications sorted alphabetically"""
         with db.get_session(project_id) as session:
+            query = session.query(Application).filter(Application.owner_id == project_id)
+            clause = folder_exclusion_clause(
+                project_id, APPLICATION_ENTITY_TYPES, Application.id
+            )
+            if clause is not None:
+                query = query.filter(clause)
             applications = (
-                session.query(Application)
-                .filter(Application.owner_id == project_id)
-                .order_by(func.lower(Application.name))
-                .limit(limit)
-                .all()
+                query.order_by(func.lower(Application.name)).limit(limit).all()
             )
 
             if not applications:

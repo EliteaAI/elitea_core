@@ -8,6 +8,7 @@ from ...utils.utils import get_public_project_id
 
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi
+from ...utils.folder_access import require_folder_access
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -32,6 +33,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id', write=True)
     def post(self, project_id: int, skill_id: int, version_id: int, **kwargs):
         body = request.get_json(silent=True) or {}
         try:

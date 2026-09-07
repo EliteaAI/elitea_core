@@ -29,11 +29,11 @@ from ...models.pd.generate_skill_draft import (
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.draft_llm_utils import (
+    answer_was_cut_short,
     caller_chose,
+    describe_parse_failure,
     describe_predict_failure,
-    extract_draft_text,
-    hit_token_limit,
-    is_truncated_json,
+    extract_answer,
     resolve_model,
     timeout_response,
 )
@@ -51,6 +51,7 @@ _SERVICE_PROMPT_KEY_CREATE = "skill_generator"
 _SERVICE_PROMPT_KEY_EDIT = "edit_skill_draft"
 _AWAIT_TASK_TIMEOUT = 60
 _DEFAULT_MAX_TOKENS = 4096
+_DEFAULT_TEMPERATURE = 0.3
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -84,6 +85,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_id = auth.current_user().get("id")
 
         caller_set_max_tokens = caller_chose(req.llm_settings, "max_tokens")
+        caller_set_temperature = caller_chose(req.llm_settings, "temperature")
 
         if req.llm_settings and req.llm_settings.model_name:
             llm_settings = req.llm_settings.model_dump(exclude_none=True)
@@ -101,7 +103,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 )
                 if not llm_settings or not llm_settings.get("model_name"):
                     return {"error": "No default LLM model configured for this project"}, 400
-                llm_settings.setdefault("temperature", 0.7)
                 if req.llm_settings:
                     # model_project_id only qualifies a model_name; with none supplied there is
                     # nothing for it to qualify, and the default model brings its own
@@ -113,6 +114,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 log.exception("generate_skill_draft: failed to get default model")
                 return {"error": "Failed to resolve project default LLM model"}, 400
 
+        if not caller_set_temperature:
+            llm_settings["temperature"] = _DEFAULT_TEMPERATURE
         if not caller_set_max_tokens:
             llm_settings["max_tokens"] = _DEFAULT_MAX_TOKENS
 
@@ -145,6 +148,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 await_task_timeout=_AWAIT_TASK_TIMEOUT,
                 user_id=user_id,
                 skip_expansion=True,
+                return_chat_history=True,
             )
         except PredictPayloadError as exc:
             return {"error": str(exc)}, 400
@@ -162,7 +166,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if timed_out:
             return timed_out
 
-        raw_text = extract_draft_text(result)
+        raw_text = extract_answer(result)
         if not raw_text:
             failure = describe_predict_failure(result)
             log.warning(
@@ -171,11 +175,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             return {"error": failure or "LLM returned an empty response"}, 500
 
+        extracted = extract_json_from_text(raw_text)
         try:
-            parsed = json.loads(extract_json_from_text(raw_text))
+            parsed = json.loads(extracted)
         except json.JSONDecodeError as e:
-            log.debug("generate_skill_draft: LLM output is not valid JSON: %s", raw_text[:300])
-            if hit_token_limit(result) or is_truncated_json(raw_text):
+            log.warning(
+                "generate_skill_draft: draft did not parse: %s",
+                describe_parse_failure(raw_text, extracted, e, result),
+            )
+            if answer_was_cut_short(result, extracted):
                 return {
                     "error": "LLM response was truncated. Increase max_tokens in llm_settings "
                              "(recommended: 4096+)."

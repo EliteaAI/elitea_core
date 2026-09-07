@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, constr, field_validator
 
 from .predict_llm import LLMSettingsRequest
 from .project_context import (
@@ -28,7 +28,7 @@ class GenerateProjectContextDraftRequest(BaseModel):
         }
     )
 
-    user_description: str = Field(
+    user_description: constr(strip_whitespace=True, min_length=1) = Field(
         description="Natural-language description of the project (architecture, processes, constraints, etc.)"
     )
     current_project_background: Optional[str] = Field(
@@ -55,26 +55,23 @@ class GenerateProjectContextDraftRequest(BaseModel):
 class GenerateProjectContextDraftResponse(BaseModel):
     """AI-generated Project Context draft.
 
-    Text fields are truncated to their caps rather than rejected when slightly
-    over, so a usable draft always reaches the review form.
+    An over-long Project Background is rejected rather than trimmed: a silent cut
+    reaches the caller as a draft that ends mid-sentence with nothing to say content
+    was lost, and the same content is refused again by the save endpoint.
     There are deliberately NO suggested tools/agents/pipelines/MCPs/resources.
     """
 
     project_background: str = Field(
         min_length=1,
         max_length=PROJECT_BACKGROUND_MAX_LENGTH,
-        description=f"Project Background in Markdown (truncated to {PROJECT_BACKGROUND_MAX_LENGTH} characters)",
+        description=f"Project Background in Markdown "
+                    f"(rejected when longer than {PROJECT_BACKGROUND_MAX_LENGTH} characters)",
     )
     activation_description: str = Field(
         min_length=1,
         max_length=PROJECT_CONTEXT_ACTIVATION_DESCRIPTION_MAX_LEN,
         description="Concise description of the user intents that should activate this Project Context.",
     )
-
-    @field_validator("project_background", mode="before")
-    @classmethod
-    def _truncate_project_background(cls, v):
-        return v[:PROJECT_BACKGROUND_MAX_LENGTH].rstrip() if isinstance(v, str) else v
 
     @field_validator("activation_description", mode="before")
     @classmethod

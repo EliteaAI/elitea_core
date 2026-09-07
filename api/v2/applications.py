@@ -176,25 +176,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         'user_id': user_id
                     }
 
-                    # Determine which entity types to query based on agents_type filter
+                    # Determine which entity types to query based on agents_type filter.
+                    # A mixed list asks for both types in a single call.
                     agents_type_normalized = (agents_type or '').strip().lower()
                     if agents_type_normalized == 'classic':
-                        folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
-                            entity_type='agent', **folder_params
-                        )
+                        entity_types = 'agent'
                     elif agents_type_normalized == 'pipeline':
-                        folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
-                            entity_type='pipeline', **folder_params
-                        )
+                        entity_types = 'pipeline'
                     else:
-                        # Mixed list (all) - need to query both types
-                        agent_folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
-                            entity_type='agent', **folder_params
-                        )
-                        pipeline_folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
-                            entity_type='pipeline', **folder_params
-                        )
-                        folder_map = {**agent_folder_map, **pipeline_folder_map}
+                        entity_types = ['agent', 'pipeline']
+
+                    folder_map = rpc_tools.RpcMixin().rpc.timeout(3).social_get_entities_folder_info_bulk(
+                        entity_type=entity_types, **folder_params
+                    )
 
                     # Enrich applications with folder info
                     for app in parsed.applications:

@@ -605,7 +605,8 @@ class RPC:
             ApplicationVersion,
             MultipleApplicationSearchModel,
             ApplicationVersionTagAssociation,
-            "pipeline" if pipeline else None
+            "pipeline" if pipeline else None,
+            folder_entity_types=['pipeline'] if pipeline else ['agent'],
         )
 
     @web.rpc('applications_get_toolkit_search_options', 'applications_get_toolkit_search_options')
@@ -905,16 +906,23 @@ class RPC:
                             'blocked_status': ver.status,
                         }
 
-                detach_skills_for_entity_versions(
-                    session, [ver.id for ver in application.versions]
-                )
+                versions = list(application.versions)
+                default_version = application.get_default_version()
+                agent_type = default_version.agent_type if default_version else None
 
-                session.delete(application)
-                session.commit()
+                detach_skills_for_entity_versions(
+                    session, [ver.id for ver in versions]
+                )
 
                 application_data = ApplicationDetailModel.from_orm(application)
                 application_data = application_data.model_dump()
                 application_data['project_id'] = project_id
+                if application_data.get('version_details') is None and agent_type:
+                    application_data['version_details'] = {'agent_type': agent_type}
+
+                session.delete(application)
+                session.commit()
+
                 self.context.event_manager.fire_event(
                     ApplicationEvents.application_deleted, application_data
                 )

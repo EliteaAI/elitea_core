@@ -6,6 +6,7 @@ from tools import api_tools, auth, config as c, serialize, db
 
 from ...models.elitea_tools import EliteATool
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
 _ADMIN_ROLES = {
     c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
@@ -19,6 +20,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         "recommended_roles": _ADMIN_ROLES,
     })
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def delete(self, project_id: int, toolkit_id: int, index_name: str):
         current_user_id = str(auth.current_user().get("id"))
 

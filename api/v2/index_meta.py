@@ -25,6 +25,7 @@ from ...utils.application_tools import (
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.predict_utils import get_toolkit_config
+from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -35,6 +36,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id')
     def get(self, project_id: int, toolkit_id: int, **kwargs):
         toolkit_config = get_toolkit_config(project_id, auth.current_user()['id'], toolkit_id)
         toolkit_name_id, connection_string, validation_error = load_and_validate_toolkit_for_index(toolkit_config)
@@ -114,6 +116,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def delete(self, project_id: int, toolkit_id: int, index_meta_id: str):
         toolkit_config = get_toolkit_config(project_id, auth.current_user()['id'], toolkit_id)
         toolkit_name_id, connection_string, validation_error = load_and_validate_toolkit_for_index(toolkit_config)
@@ -177,6 +180,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access(TOOLKIT_ENTITY_TYPES, 'toolkit_id', write=True)
     def patch(self, project_id: int, toolkit_id: int, index_meta_id: str):
         payload = dict(request.json)
 

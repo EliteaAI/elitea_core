@@ -343,33 +343,43 @@ def get_conversation_details(
                 except Exception as e:
                     log.warning(f"Failed to fetch toolkit details for toolkit {participant['entity_meta']['id']}: {e}")
         if participant['entity_name'] == ParticipantTypes.application.value:
-            application_version_details = this.module.get_application_by_version_id(
-                project_id=participant['entity_meta']['project_id'],
-                application_id=participant['entity_meta']['id'],
-                version_id=participant['entity_settings']['version_id'],
-            )
-            if not application_version_details:
+            try:
+                application_version_details = this.module.get_application_by_version_id(
+                    project_id=participant['entity_meta']['project_id'],
+                    application_id=participant['entity_meta']['id'],
+                    version_id=participant['entity_settings']['version_id'],
+                )
+                if not application_version_details:
+                    log.warning(
+                        f"Application with ID {participant['entity_meta']['id']} not found"
+                    )
+                    continue
+                version_details = application_version_details['version_details']
+                participant['meta']['tools'] = version_details['tools']
+                # "Container" flag: a non-pipeline agent that itself uses other agents (has an
+                # application-type tool). NOTE (issue #5778): a container is NO LONGER unconditionally
+                # skipped as an adhoc chat tool — a tier-2 container is now legal. The adhoc skip is
+                # depth-aware (rpc/chat_all.generate_toolkit_payload skips only when the bound subtree
+                # exceeds the tier budget). This flag is retained as a factual "uses other agents"
+                # signal for the participant chip; consumers deciding whether it can be nested should
+                # use the version_details.agent_subtree_tiers contribution field, not this boolean.
+                # Pipelines are the sanctioned deep-composition primitive and are never flagged.
+                participant['meta']['is_container'] = (
+                    version_details.get('agent_type') != AgentTypes.pipeline.value
+                    and any(
+                        (t or {}).get('type') == 'application'
+                        for t in (version_details.get('tools') or [])
+                    )
+                )
+            except Exception as settings_err:
+                # Advisory (issue #6523): a participant with malformed/incomplete entity_settings
+                # (e.g. missing version_id) must degrade, not abort the whole conversation load.
                 log.warning(
-                    f"Application with ID {participant['entity_meta']['id']} not found"
+                    f"Could not enrich application participant {participant.get('id')} "
+                    f"(entity_id={participant['entity_meta'].get('id')}) in conversation "
+                    f"{conversation_id}: {settings_err}"
                 )
                 continue
-            version_details = application_version_details['version_details']
-            participant['meta']['tools'] = version_details['tools']
-            # "Container" flag: a non-pipeline agent that itself uses other agents (has an
-            # application-type tool). NOTE (issue #5778): a container is NO LONGER unconditionally
-            # skipped as an adhoc chat tool — a tier-2 container is now legal. The adhoc skip is
-            # depth-aware (rpc/chat_all.generate_toolkit_payload skips only when the bound subtree
-            # exceeds the tier budget). This flag is retained as a factual "uses other agents"
-            # signal for the participant chip; consumers deciding whether it can be nested should
-            # use the version_details.agent_subtree_tiers contribution field, not this boolean.
-            # Pipelines are the sanctioned deep-composition primitive and are never flagged.
-            participant['meta']['is_container'] = (
-                version_details.get('agent_type') != AgentTypes.pipeline.value
-                and any(
-                    (t or {}).get('type') == 'application'
-                    for t in (version_details.get('tools') or [])
-                )
-            )
             # Agent-only subtree contribution (issue #5778); a pipeline participant contributes
             # zero for itself. The chat UI participant gate uses it to decide whether a
             # container can still be nested (host current tier + candidate contribution within

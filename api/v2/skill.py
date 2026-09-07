@@ -22,24 +22,25 @@ from ...utils.skill_utils import (
     SkillError,
 )
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.folder_access import require_folder_access
 
 
 SKILL_PATH = '<string:mode>/<int:project_id>/<int:skill_id>'
 
 
-def resolve_version_id(path_version_id: int | None):
+def resolve_version_id(path_version_id: int | None, name: str = 'version_id'):
     """Return ``(version_id, error_response)`` for the version addressed by path or query."""
     if path_version_id is not None:
         return path_version_id, None
 
-    raw = request.args.get('version_id')
+    raw = request.args.get(name)
     if not raw:
         return None, None
 
     try:
         return int(raw), None
     except ValueError:
-        return None, ({"error": "version_id must be an integer"}, 400)
+        return None, ({"error": f"{name} must be an integer"}, 400)
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -67,6 +68,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id')
     def get(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         if ignored := sorted(set(request.args) - {'version_id'}):
             log.warning("Ignoring unsupported query parameter(s): %s", ignored)
@@ -114,6 +116,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id', write=True)
     def post(self, project_id: int, skill_id: int, **kwargs):
         raw = dict(request.json)
         raw['author_id'] = auth.current_user().get("id")
@@ -143,11 +146,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Update a skill's metadata or a specific skill version",
-        description="Updates the skill metadata (name, description, meta) and optionally version content in the same transaction — the nested version.id selects the target version (default version when omitted). Published or embedded versions cannot be updated.",
+        description="Updates the skill metadata (name, description, meta) and optionally version content in the same transaction — the nested version.id selects the target version (default version when omitted). Alternatively supply the version_id query parameter to update that version directly, in which case the body is the flat version shape (name, instructions, tags, meta) rather than the nested one. Published or embedded versions cannot be updated.",
         request_body=SkillUpdateModel,
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "skill_id", "in": "path", "schema": {"type": "integer"}},
+            {"name": "version_id", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Optional numeric version id to update directly; the body is then the flat version shape."},
         ],
         path_suffix_override=SKILL_PATH,
         tags=["elitea_core/skills"],
@@ -161,9 +165,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id', write=True)
     def put(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
-        if ignored := sorted(request.args):
+        if ignored := sorted(set(request.args) - {'version_id'}):
             log.warning("Ignoring unsupported query parameter(s): %s", ignored)
+
+        version_id, error = resolve_version_id(version_id)
+        if error:
+            return error
 
         # Update a specific version addressed by id.
         if version_id is not None:
@@ -198,6 +207,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         # Update skill metadata (and optionally the default version).
         payload = dict(request.json)
+        # #6410: version_id is meaningless once we're in the nested branch (there was
+        # none in the path); drop it so a caller that includes it alongside a nested
+        # "version" body doesn't trip the extra="forbid" guard below.
+        payload.pop('version_id', None)
         payload['project_id'] = project_id
         payload['user_id'] = auth.current_user().get("id")
 
@@ -241,6 +254,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id', write=True)
     def patch(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         if ignored := sorted(request.args):
             log.warning("Ignoring unsupported query parameter(s): %s", ignored)
@@ -300,6 +314,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }})
     @api_tools.endpoint_metrics
+    @require_folder_access('skill', 'skill_id', write=True)
     def delete(self, project_id: int, skill_id: int, version_id: int | None = None, **kwargs):
         if unsupported := sorted(set(request.args) - {'version_id'}):
             return {"error": f"unsupported query parameter(s): {unsupported}"}, 400
