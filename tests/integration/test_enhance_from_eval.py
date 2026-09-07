@@ -46,6 +46,10 @@ class _EvalRunNotFinishedError(Exception):
     pass
 
 
+class _EvalRunTooLargeError(Exception):
+    pass
+
+
 class _EnhancePromptTemplateError(Exception):
     pass
 
@@ -149,10 +153,26 @@ def _install_package():
     predict_llm.LLMSettingsRequest = LLMSettingsRequest
 
     state = types.SimpleNamespace(run=dict(RUN), version=dict(VERSION), gaps=list(GAPS),
-                                  build_kwargs=None)
+                                  build_kwargs=None, select_kwargs=None)
 
     gap_selection = types.ModuleType(f'{PKG}.utils.enhancement_gap_selection')
-    gap_selection.select_gaps = lambda *a, **k: {'gaps': list(state.gaps), 'coverage': dict(COVERAGE)}
+
+    def _select_gaps(*_a, dimension_ids=None, **_k):
+        """Honours ``dimension_ids`` because the real one does, and the endpoint no longer filters.
+
+        Selection moved into ``select_gaps`` so the cap is spent on the requested dimensions; a
+        stub that ignored the argument would let the endpoint stop forwarding it and still pass.
+        """
+        state.select_kwargs = {'dimension_ids': dimension_ids}
+        selected = [
+            gap for gap in state.gaps
+            if not dimension_ids or gap.get('dimension_id') in set(dimension_ids)
+        ]
+        coverage = dict(COVERAGE)
+        coverage['gap_dimensions_returned'] = len(selected)
+        return {'gaps': selected, 'coverage': coverage}
+
+    gap_selection.select_gaps = _select_gaps
 
     enhancement_prompt = types.ModuleType(f'{PKG}.utils.enhancement_prompt')
     enhancement_prompt.EnhancePromptTemplateError = _EnhancePromptTemplateError
@@ -166,6 +186,7 @@ def _install_package():
 
     enhancement_utils = types.ModuleType(f'{PKG}.utils.enhancement_utils')
     enhancement_utils.EvalRunNotFinishedError = _EvalRunNotFinishedError
+    enhancement_utils.EvalRunTooLargeError = _EvalRunTooLargeError
     enhancement_utils.fetch_run_for_enhancement = lambda *a, **k: dict(state.run)
     enhancement_utils.fetch_evaluated_version = lambda *a, **k: (
         dict(state.version) if state.version is not None else None
@@ -480,6 +501,24 @@ def test_unfinished_run_returns_409(api):
 
     assert status == 409
     assert 'only a finished run' in payload['error']
+
+
+def test_oversized_run_returns_413_instead_of_a_partial_analysis(api):
+    """Reading a prefix of the results would let a run whose only misses sit past the cutoff come
+    back "no dimension missed its target" — the most damaging thing this endpoint could say."""
+    module, _state, _default_model = api
+
+    def _too_large(*a, **k):
+        raise _EvalRunTooLargeError(
+            'Run 42 has 30000 result rows, more than the 20000 that can be analysed at once.'
+        )
+
+    module.fetch_run_for_enhancement = _too_large
+    handler, (payload, status) = _post(module, _Handler())
+
+    assert status == 413
+    assert 'more than the 20000' in payload['error']
+    assert handler.module.calls == []
 
 
 def test_deleted_pinned_version_returns_409(api):

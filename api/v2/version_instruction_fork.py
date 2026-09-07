@@ -11,7 +11,9 @@ still litters the version list is worse than one that changes nothing.
 
 from flask import request
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 
+from pylon.core.tools import log
 from tools import api_tools, auth, config as c, db, register_openapi
 
 from ...models.all import Application, ApplicationVersion
@@ -114,6 +116,21 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 response['forked_from_version_id'] = version_id
                 response['instructions_sha256'] = instructions_sha256(updated_instructions)
                 return response, 201
+        except IntegrityError:
+            # _resolve_fork_name reads the taken names, so a fork racing another one on the same
+            # agent can pass that check and still hit the unique (application_id, name) constraint
+            # on insert. Reported as a conflict the caller can retry rather than a 500: nothing was
+            # written, and the accepted patches are still valid against the same instructions hash.
+            log.warning(
+                'version_instruction_fork: name collision racing another fork of version %s',
+                version_id,
+            )
+            return {
+                'error': (
+                    'Another version of this agent was created at the same time and took the '
+                    'chosen name. Nothing was saved — retry the fork.'
+                )
+            }, 409
         except InstructionsPatchConflictError as exc:
             return {'error': str(exc)}, 409
         except ValidationError as exc:

@@ -482,3 +482,20 @@ def test_failed_version_update_rolls_back(fork):
     assert status == 400
     assert payload == {'error': 'nope'}
     assert session.rolled_back is True and session.committed is False
+
+
+def test_a_name_race_returns_a_retryable_409_not_a_500(fork):
+    """_resolve_fork_name reads the taken names, so two forks of the same agent can both pass that
+    check and one still hits the unique (application_id, name) constraint on insert. Nothing was
+    written and the patches are still valid against the same hash, so this is a conflict the caller
+    can retry — not a server error."""
+    from sqlalchemy.exc import IntegrityError
+
+    module, state, session, _source = fork()
+    state.clone_exc = IntegrityError('INSERT ...', {}, Exception('duplicate key'))
+
+    payload, status = _post(module, _body())
+
+    assert status == 409
+    assert 'retry the fork' in payload['error']
+    assert session.committed is False

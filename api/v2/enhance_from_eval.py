@@ -53,6 +53,7 @@ from ...utils.enhancement_prompt import (
 from ...utils.enhancement_validation import ground_proposal
 from ...utils.enhancement_utils import (
     EvalRunNotFinishedError,
+    EvalRunTooLargeError,
     fetch_evaluated_version,
     fetch_run_for_enhancement,
 )
@@ -105,6 +106,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"error": f"Evaluation run {req.run_id} not found"}, 404
         except EvalRunNotFinishedError as exc:
             return {"error": str(exc)}, 409
+        except EvalRunTooLargeError as exc:
+            return {"error": str(exc)}, 413
 
         agent = fetch_evaluated_version(project_id, run["application_id"], run["version_id"])
         if agent is None:
@@ -119,9 +122,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             run["snapshot"],
             run["results"],
             run["human_scores"],
+            dimension_ids=req.dimension_ids,
         )
-        gaps = self._filter_gaps(selection["gaps"], req.dimension_ids)
-        coverage = self._coverage_for(selection["coverage"], gaps)
+        gaps = selection["gaps"]
+        coverage = selection["coverage"]
         if not gaps:
             # A clean run is a valid answer, not an error — and asking the model to find fault
             # in a run with no misses is how an ungrounded proposal gets generated.
@@ -207,34 +211,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         return proposal.model_dump(), 200
 
     # -- helpers ------------------------------------------------------------
-
-    @staticmethod
-    def _filter_gaps(gaps: list, dimension_ids) -> list:
-        """Narrow the brief to the dimensions the caller asked about.
-
-        Applied after ranking, so an explicit selection is honoured exactly rather than competing
-        with the impact ordering.
-        """
-        if not dimension_ids:
-            return gaps
-        wanted = set(dimension_ids)
-        return [gap for gap in gaps if gap.get('dimension_id') in wanted]
-
-    @staticmethod
-    def _coverage_for(coverage: dict, gaps: list) -> dict:
-        """Re-derive the "returned" counts after ``_filter_gaps`` narrowed the brief.
-
-        ``select_gaps`` computes them from the ranked list, so an explicit ``dimension_ids``
-        selection would otherwise leave them describing gaps the model was never shown — reporting
-        a filtered analysis as a complete one. Run-level totals describe the run, not the brief,
-        and stay as they are.
-        """
-        narrowed = dict(coverage)
-        narrowed.update({
-            'gap_dimensions_returned': len(gaps),
-            'missed_cases_returned': sum(len(gap.get('cases') or []) for gap in gaps),
-        })
-        return narrowed
 
     @staticmethod
     def _resolve_llm_settings(project_id: int, req):

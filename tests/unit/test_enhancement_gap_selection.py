@@ -316,3 +316,72 @@ def test_empty_snapshot_is_handled(gaps):
     out = gaps.select_gaps({}, [])
     assert out['gaps'] == []
     assert out['coverage']['total_cases'] == 0
+
+
+# ---------------------------------------------------------------------------
+# dimension filtering — must happen before the cap
+# ---------------------------------------------------------------------------
+
+def _many_dimension_snapshot(count=6):
+    """``count`` failing dimensions, ranked by descending weight so id ``count`` ranks last."""
+    return {
+        'dimensions': {
+            str(i): {'name': f'Dim {i}', 'description': f'rubric {i}',
+                     'scale_type': 'continuous', 'scale_min': 0, 'scale_max': 100,
+                     'polarity': 'higher_better'}
+            for i in range(1, count + 1)
+        },
+        'bindings': [
+            {'engine': 'ai', 'dimension_id': i, 'platform_key': None,
+             'weight': float(count + 1 - i), 'target': 70, 'target_operator': '>=',
+             'order_index': i}
+            for i in range(1, count + 1)
+        ],
+        'cases': [{'id': 10, 'input': 'q', 'output': 'a', 'order_index': 0}],
+    }
+
+
+def _many_dimension_results(count=6):
+    return [_result(10, 10, dimension_id=i) for i in range(1, count + 1)]
+
+
+def test_requested_dimension_ranked_below_the_cap_is_still_analysed(gaps):
+    """Filtering must precede ranking. Dimension 6 has the lowest impact of six, so filtering
+    after the top-five cap would drop it and answer "nothing to diagnose" about a dimension that
+    did in fact miss its target."""
+    out = gaps.select_gaps(
+        _many_dimension_snapshot(), _many_dimension_results(), dimension_ids=[6],
+    )
+    assert [gap['dimension_id'] for gap in out['gaps']] == [6]
+
+
+def test_filtering_spends_the_cap_on_the_requested_dimensions(gaps):
+    out = gaps.select_gaps(
+        _many_dimension_snapshot(8), _many_dimension_results(8),
+        max_dimensions=2, dimension_ids=[5, 6, 7],
+    )
+    assert [gap['dimension_id'] for gap in out['gaps']] == [5, 6]
+
+
+def test_filtered_coverage_keeps_run_wide_totals(gaps):
+    """The totals are what tell the user their selection covered one of six missed dimensions."""
+    out = gaps.select_gaps(
+        _many_dimension_snapshot(), _many_dimension_results(), dimension_ids=[6],
+    )
+    coverage = out['coverage']
+    assert coverage['gap_dimensions_total'] == 6
+    assert coverage['gap_dimensions_returned'] == 1
+    assert coverage['missed_cases_total'] == 6
+    assert coverage['missed_cases_returned'] == 1
+
+
+def test_filtering_to_a_dimension_with_no_gap_returns_nothing(gaps):
+    out = gaps.select_gaps(_snapshot(), [_result(10, 40)], dimension_ids=[99])
+    assert out['gaps'] == []
+    assert out['coverage']['gap_dimensions_total'] == 1
+
+
+def test_filter_helper_passes_everything_through_when_unfiltered(gaps):
+    source = [_gap('a', 1.0, 0.5, 1.0), _gap('b', 1.0, 0.5, 1.0)]
+    assert gaps.filter_gaps_by_dimension(source, None) == source
+    assert gaps.filter_gaps_by_dimension(source, []) == source

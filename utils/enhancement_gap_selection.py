@@ -324,6 +324,14 @@ def gap_impact(gap: dict) -> float:
     return weight * shortfall * miss_rate
 
 
+def filter_gaps_by_dimension(gaps: List[dict], dimension_ids=None) -> List[dict]:
+    """Narrow gaps to the dimensions the caller named, or return them all when it named none."""
+    if not dimension_ids:
+        return list(gaps)
+    wanted = set(dimension_ids)
+    return [gap for gap in gaps if gap.get('dimension_id') in wanted]
+
+
 def rank_gaps(
     gaps: List[dict],
     max_dimensions: int = MAX_GAP_DIMENSIONS,
@@ -358,16 +366,25 @@ def select_gaps(
     human_scores=None,
     max_dimensions: int = MAX_GAP_DIMENSIONS,
     max_cases: int = MAX_CASES_PER_DIMENSION,
+    dimension_ids=None,
 ) -> dict:
     """Collect + rank in one call — the shape the prompt builder and the endpoint consume.
 
+    ``dimension_ids`` narrows the analysis to specific dimensions and is applied *before* ranking,
+    so the ``max_dimensions`` cap is spent on the dimensions the caller asked about. Filtering
+    afterwards would drop a requested dimension that happened to rank sixth and answer "nothing to
+    diagnose" about a dimension that did in fact miss its target.
+
     ``coverage`` reports what was left out (capped dimensions, capped cases, excluded rows) so the
     dialog can tell the user the proposal is based on a sample. A truncated analysis presented as
-    a complete one is the failure mode this field exists to prevent.
+    a complete one is the failure mode this field exists to prevent. The ``*_total`` counts stay
+    run-wide even when a filter is applied: they are what tells the user their selection covered
+    one of four missed dimensions.
     """
     collected = collect_binding_gaps(snapshot, results, human_scores)
     all_gaps = collected['gaps']
-    ranked = rank_gaps(all_gaps, max_dimensions, max_cases)
+    selected = filter_gaps_by_dimension(all_gaps, dimension_ids)
+    ranked = rank_gaps(selected, max_dimensions, max_cases)
 
     coverage = dict(collected['coverage'])
     coverage.update({

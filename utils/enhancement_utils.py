@@ -7,6 +7,8 @@ pure modules; keeping this file free of it is what makes the ranking and the bri
 
 from typing import Optional
 
+from sqlalchemy import func
+
 from .evaluation_library_utils import _session
 from .evaluation_human_score_utils import EvalRunNotFoundError
 from .mcp_versioning import instructions_sha256
@@ -22,6 +24,17 @@ class EvalRunNotFinishedError(Exception):
 
     Analysing a partial run produces a diagnosis about cases that had not been scored yet — the
     conclusions read as authoritative but describe a subset that changes minute to minute.
+    """
+
+
+class EvalRunTooLargeError(Exception):
+    """The run has more result rows than can be read without truncating them.
+
+    Refusing is the point. Reading the first ``MAX_RESULT_ROWS`` and folding over those would put
+    every failure past the cutoff outside the analysis while ``coverage`` still counted the whole
+    snapshot — so a run whose only misses sit in the tail would come back "no dimension missed its
+    target", which is the most damaging thing this endpoint could say. Narrow the analysis with
+    ``dimension_ids``, or split the suite.
     """
 
 
@@ -67,11 +80,23 @@ def fetch_run_for_enhancement(project_id: int, run_id: int, session=None) -> dic
                 f'Run {run_id} is {run.status}; only a finished run can be analysed'
             )
 
+        # Counted before reading rather than capped while reading: a finished run is immutable, so
+        # this is an exact figure, and it is the only way the caller learns the analysis was
+        # refused instead of quietly built from a prefix of the results.
+        result_rows = (
+            s.query(func.count(EvalResult.id)).filter(EvalResult.run_id == run_id).scalar() or 0
+        )
+        if result_rows > MAX_RESULT_ROWS:
+            raise EvalRunTooLargeError(
+                f'Run {run_id} has {result_rows} result rows, more than the {MAX_RESULT_ROWS} '
+                'that can be analysed at once. Narrow the analysis to specific dimensions, or '
+                'split the suite into smaller ones.'
+            )
+
         results = (
             s.query(EvalResult)
             .filter(EvalResult.run_id == run_id)
             .order_by(EvalResult.dataset_case_id.asc(), EvalResult.id.asc())
-            .limit(MAX_RESULT_ROWS)
             .all()
         )
         # Every row, not just is_latest: index_latest_human_scores() picks the current annotation,
