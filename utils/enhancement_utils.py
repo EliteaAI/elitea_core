@@ -60,11 +60,22 @@ def _human_score_dict(row) -> dict:
     }
 
 
-def fetch_run_for_enhancement(project_id: int, run_id: int, session=None) -> dict:
+def fetch_run_for_enhancement(
+    project_id: int,
+    run_id: int,
+    session=None,
+    dimension_ids=None,
+) -> dict:
     """Everything the analysis needs from one run, as plain dicts.
 
     Returns ``{run_id, application_id, version_id, status, headline_score, snapshot, results,
-    human_scores}``.
+    human_scores, scoped_dimension_ids}``.
+
+    ``dimension_ids`` narrows the read *and* the size check to those dimensions, which is what
+    makes the advice in :class:`EvalRunTooLargeError` actionable: a suite too large as a whole is
+    still analysable one dimension at a time. Rows for other dimensions — and platform-key
+    bindings, which have no ``dimension_id`` — are excluded, so the counts the caller derives are
+    scoped to the selection rather than run-wide.
 
     Raises :class:`EvalRunNotFoundError` when the run is absent and
     :class:`EvalRunNotFinishedError` when it is still in flight.
@@ -83,19 +94,28 @@ def fetch_run_for_enhancement(project_id: int, run_id: int, session=None) -> dic
         # Counted before reading rather than capped while reading: a finished run is immutable, so
         # this is an exact figure, and it is the only way the caller learns the analysis was
         # refused instead of quietly built from a prefix of the results.
-        result_rows = (
-            s.query(func.count(EvalResult.id)).filter(EvalResult.run_id == run_id).scalar() or 0
-        )
+        wanted = sorted({int(dim) for dim in dimension_ids}) if dimension_ids else None
+        result_filters = [EvalResult.run_id == run_id]
+        human_filters = [EvalHumanScore.run_id == run_id]
+        if wanted:
+            result_filters.append(EvalResult.dimension_id.in_(wanted))
+            human_filters.append(EvalHumanScore.dimension_id.in_(wanted))
+
+        result_rows = s.query(func.count(EvalResult.id)).filter(*result_filters).scalar() or 0
         if result_rows > MAX_RESULT_ROWS:
+            scope = f' for dimensions {wanted}' if wanted else ''
+            advice = (
+                'Analyse fewer dimensions at a time.' if wanted else
+                'Narrow the analysis to specific dimensions, or split the suite into smaller ones.'
+            )
             raise EvalRunTooLargeError(
-                f'Run {run_id} has {result_rows} result rows, more than the {MAX_RESULT_ROWS} '
-                'that can be analysed at once. Narrow the analysis to specific dimensions, or '
-                'split the suite into smaller ones.'
+                f'Run {run_id} has {result_rows} result rows{scope}, more than the '
+                f'{MAX_RESULT_ROWS} that can be analysed at once. {advice}'
             )
 
         results = (
             s.query(EvalResult)
-            .filter(EvalResult.run_id == run_id)
+            .filter(*result_filters)
             .order_by(EvalResult.dataset_case_id.asc(), EvalResult.id.asc())
             .all()
         )
@@ -103,7 +123,7 @@ def fetch_run_for_enhancement(project_id: int, run_id: int, session=None) -> dic
         # and it must be the one place that rule is applied so the scorecard and the analysis agree.
         human_scores = (
             s.query(EvalHumanScore)
-            .filter(EvalHumanScore.run_id == run_id)
+            .filter(*human_filters)
             .order_by(EvalHumanScore.created_at.asc(), EvalHumanScore.id.asc())
             .all()
         )
@@ -117,6 +137,7 @@ def fetch_run_for_enhancement(project_id: int, run_id: int, session=None) -> dic
             'snapshot': run.snapshot or {},
             'results': [_result_dict(row) for row in results],
             'human_scores': [_human_score_dict(row) for row in human_scores],
+            'scoped_dimension_ids': wanted,
         }
 
 

@@ -153,7 +153,7 @@ def _install_package():
     predict_llm.LLMSettingsRequest = LLMSettingsRequest
 
     state = types.SimpleNamespace(run=dict(RUN), version=dict(VERSION), gaps=list(GAPS),
-                                  build_kwargs=None, select_kwargs=None)
+                                  build_kwargs=None, select_kwargs=None, fetch_kwargs=None)
 
     gap_selection = types.ModuleType(f'{PKG}.utils.enhancement_gap_selection')
 
@@ -187,7 +187,18 @@ def _install_package():
     enhancement_utils = types.ModuleType(f'{PKG}.utils.enhancement_utils')
     enhancement_utils.EvalRunNotFinishedError = _EvalRunNotFinishedError
     enhancement_utils.EvalRunTooLargeError = _EvalRunTooLargeError
-    enhancement_utils.fetch_run_for_enhancement = lambda *a, **k: dict(state.run)
+    def _fetch_run(*_a, dimension_ids=None, **_k):
+        """Records the scope and echoes it back, because the real one reads scoped to it.
+
+        A stub that dropped ``dimension_ids`` would let the endpoint stop forwarding it and still
+        pass, which is the whole reason an oversized run can be analysed one dimension at a time.
+        """
+        state.fetch_kwargs = {'dimension_ids': dimension_ids}
+        run = dict(state.run)
+        run['scoped_dimension_ids'] = sorted(dimension_ids) if dimension_ids else None
+        return run
+
+    enhancement_utils.fetch_run_for_enhancement = _fetch_run
     enhancement_utils.fetch_evaluated_version = lambda *a, **k: (
         dict(state.version) if state.version is not None else None
     )
@@ -436,6 +447,32 @@ def test_requested_dimensions_narrow_the_brief(api):
 
     assert status == 200
     assert [gap['dimension_id'] for gap in state.build_kwargs['gaps']] == [12]
+
+
+def test_requested_dimensions_scope_the_run_read_and_are_reported(api):
+    """The scope has to reach the fetch layer, not just the ranking: the 413 tells the caller to
+    narrow to specific dimensions, which is only actionable if doing so shrinks what is read. And
+    because the counts are then scoped, the response has to say so or "1 of 1 missed dimensions"
+    reads as a run with one problem."""
+    module, state, _default_model = api
+
+    _handler, (payload, status) = _post(
+        module, _Handler(predict_result=_thinking_result(json.dumps(_VALID_PROPOSAL))),
+        body={'run_id': 42, 'dimension_ids': [12]})
+
+    assert status == 200
+    assert state.fetch_kwargs == {'dimension_ids': [12]}
+    assert payload['coverage']['scoped_to_dimension_ids'] == [12]
+
+
+def test_an_unscoped_analysis_reports_no_scope(api):
+    module, _state, _default_model = api
+
+    _handler, (payload, status) = _post(
+        module, _Handler(predict_result=_thinking_result(json.dumps(_VALID_PROPOSAL))))
+
+    assert status == 200
+    assert payload['coverage']['scoped_to_dimension_ids'] is None
 
 
 def test_clean_run_returns_a_diagnosis_without_calling_the_llm(api):

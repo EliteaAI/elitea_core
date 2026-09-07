@@ -230,6 +230,10 @@ class EnhanceCoverage(BaseModel):
     excluded_pending_human: int = 0
     max_gap_dimensions: Optional[int] = None
     max_cases_per_dimension: Optional[int] = None
+    # Set when the caller passed dimension_ids: the run is then read scoped to those dimensions, so
+    # every count above describes the selection, not the whole run. Without this the client cannot
+    # tell "1 of 1 missed dimensions" from "1 of 4".
+    scoped_to_dimension_ids: Optional[List[int]] = None
     # Filled by ENH-5. Reported rather than silently applied: a nonzero count here is how a prompt
     # regression that produces unusable items becomes visible instead of looking like a quiet run.
     discarded_agent_fixes: int = 0

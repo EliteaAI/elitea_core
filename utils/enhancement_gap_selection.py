@@ -377,9 +377,10 @@ def select_gaps(
 
     ``coverage`` reports what was left out (capped dimensions, capped cases, excluded rows) so the
     dialog can tell the user the proposal is based on a sample. A truncated analysis presented as
-    a complete one is the failure mode this field exists to prevent. The ``*_total`` counts stay
-    run-wide even when a filter is applied: they are what tells the user their selection covered
-    one of four missed dimensions.
+    a complete one is the failure mode this field exists to prevent. The ``*_total`` counts describe
+    every row handed in, not just the ranked subset — so with the full run they say the selection
+    covered one of four missed dimensions. The endpoint may read scoped to ``dimension_ids``, in
+    which case it flags that on ``coverage`` so the narrower totals cannot be misread as run-wide.
     """
     collected = collect_binding_gaps(snapshot, results, human_scores)
     all_gaps = collected['gaps']

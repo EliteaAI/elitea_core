@@ -101,7 +101,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_id = auth.current_user().get("id")
 
         try:
-            run = fetch_run_for_enhancement(project_id, req.run_id)
+            # dimension_ids scopes the read, not just the ranking: a suite too large to analyse as
+            # a whole is still analysable one dimension at a time, which is the advice the 413
+            # below gives. select_gaps filters again on the rows it receives — cheap, and it is
+            # what keeps the selection correct if this read ever stops being scoped.
+            run = fetch_run_for_enhancement(
+                project_id, req.run_id, dimension_ids=req.dimension_ids,
+            )
         except EvalRunNotFoundError:
             return {"error": f"Evaluation run {req.run_id} not found"}, 404
         except EvalRunNotFinishedError as exc:
@@ -126,6 +132,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         )
         gaps = selection["gaps"]
         coverage = selection["coverage"]
+        # The read was scoped, so the totals in coverage describe the selection. Saying so is what
+        # keeps "1 of 1 missed dimensions" from being read as "this run has one problem".
+        coverage["scoped_to_dimension_ids"] = run["scoped_dimension_ids"]
         if not gaps:
             # A clean run is a valid answer, not an error — and asking the model to find fault
             # in a run with no misses is how an ungrounded proposal gets generated.
