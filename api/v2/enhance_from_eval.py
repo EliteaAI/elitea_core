@@ -121,6 +121,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             run["human_scores"],
         )
         gaps = self._filter_gaps(selection["gaps"], req.dimension_ids)
+        coverage = self._coverage_for(selection["coverage"], gaps)
         if not gaps:
             # A clean run is a valid answer, not an error — and asking the model to find fault
             # in a run with no misses is how an ungrounded proposal gets generated.
@@ -131,7 +132,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 diagnosis=(
                     "No dimension missed its target in this run, so there is nothing to diagnose."
                 ),
-                coverage=selection["coverage"],
+                coverage=coverage,
             ).model_dump(), 200
 
         llm_settings, error = self._resolve_llm_settings(project_id, req)
@@ -148,7 +149,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 application_name=agent["application_name"],
                 instructions=agent["instructions"],
                 gaps=gaps,
-                coverage=selection["coverage"],
+                coverage=coverage,
                 agent_context=agent["agent_context"],
             )
         except EnhancePromptTemplateError as exc:
@@ -168,7 +169,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         parsed["run_id"] = run["run_id"]
         parsed["version_id"] = agent["version_id"]
         parsed["instructions_sha256"] = agent["instructions_sha256"]
-        parsed["coverage"] = selection["coverage"]
+        parsed["coverage"] = coverage
 
         try:
             proposal = EnhanceFromEvalResponse.model_validate(parsed)
@@ -218,6 +219,22 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return gaps
         wanted = set(dimension_ids)
         return [gap for gap in gaps if gap.get('dimension_id') in wanted]
+
+    @staticmethod
+    def _coverage_for(coverage: dict, gaps: list) -> dict:
+        """Re-derive the "returned" counts after ``_filter_gaps`` narrowed the brief.
+
+        ``select_gaps`` computes them from the ranked list, so an explicit ``dimension_ids``
+        selection would otherwise leave them describing gaps the model was never shown — reporting
+        a filtered analysis as a complete one. Run-level totals describe the run, not the brief,
+        and stay as they are.
+        """
+        narrowed = dict(coverage)
+        narrowed.update({
+            'gap_dimensions_returned': len(gaps),
+            'missed_cases_returned': sum(len(gap.get('cases') or []) for gap in gaps),
+        })
+        return narrowed
 
     @staticmethod
     def _resolve_llm_settings(project_id: int, req):
