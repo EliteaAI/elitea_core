@@ -12,6 +12,7 @@ from ...models.pd.fork import ForkToolInput
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.permissions import ProjectPermissionChecker
 from ...utils.folder_access import fork_payload_access_error
+from ...utils.toolkit_meta import drop_index_schedules
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -70,9 +71,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 new_toolkit['entity'] = 'toolkits'
                 hash_ = hash((new_toolkit['id'], new_toolkit['owner_id'], new_toolkit['name']))
                 new_toolkit['import_uuid'] = str(uuid.UUID(int=abs(hash_)))
-                meta = new_toolkit.get('meta', {}) or {}
+                meta = drop_index_schedules(new_toolkit.get('meta', {}) or {})
                 if meta.get('icon_meta'):
                     meta['icon_meta'] = {}
+                new_toolkit['meta'] = meta
 
                 if 'parent_entity_id' not in meta:
                     shared_id = new_toolkit.get('shared_id')
@@ -90,7 +92,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         'parent_project_id': parent_project_id,
                         'parent_author_id': fork_input_toolkit['author_id'],
                     })
-                    new_toolkit['meta'] = meta
                 new_toolkit.pop('id')
                 new_toolkit['index'] = idx
                 new_idxs.append(idx)

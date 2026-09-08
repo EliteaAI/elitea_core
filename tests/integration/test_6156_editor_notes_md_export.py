@@ -97,6 +97,10 @@ def export_import():
         'plugins.elitea_core.utils.export_import_utils',
         'utils/export_import_utils.py',
     )
+    _load(
+        'plugins.elitea_core.utils.toolkit_meta',
+        'utils/toolkit_meta.py',
+    )
     module = _load(
         'plugins.elitea_core.utils.export_import', 'utils/export_import.py',
     )

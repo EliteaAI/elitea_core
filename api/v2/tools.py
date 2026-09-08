@@ -11,6 +11,7 @@ from ...models.pd.tool import ToolDetails, ToolCreateModel
 from ...utils.toolkits_utils import get_mcp_schemas
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.application_tools import toolkits_listing, wrap_provider_hub_secret_fields
+from ...utils.toolkit_meta import drop_index_schedules
 from ...utils.toolkit_security import is_toolkit_blocked
 
 
@@ -151,6 +152,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         data = dict(payload or {})
         data['user_id'] = data['author_id'] = auth.current_user()['id']
         data['project_id'] = project_id
+        data['meta'] = drop_index_schedules(data.get('meta'))
 
         try:
             tool_data = ToolCreateModel.model_validate(data)
