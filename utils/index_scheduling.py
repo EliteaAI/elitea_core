@@ -265,6 +265,17 @@ def handle_failed_index_schedule(
         # must not flip the shared row or alarm over the run in flight.
         log.info(f"{ctx} live run registered; skipping failure notification")
         return
+    if not outcome.get('flipped'):
+        # The writer found no index_meta row, so this schedule names an index that does not
+        # exist in this project — the signature of a schedule that arrived with a copied
+        # toolkit, or outlived its index. There is nothing to report a failure ON, and the
+        # author cannot act on it: no screen lists these, and the project may not even be
+        # theirs. Leave the log line as the only trace.
+        log.warning(
+            f"{ctx} schedule names an index with no metadata in this project; "
+            f"skipping failure notification"
+        )
+        return
     this.module.notify_index_data_status({
         'id': None,
         'index_name': index_meta_id,

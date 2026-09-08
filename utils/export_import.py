@@ -16,6 +16,7 @@ from tools import db, rpc_tools, serialize
 from pylon.core.tools import log
 
 from .export_import_utils import slugify
+from .toolkit_meta import drop_index_schedules
 
 from ..models.pd.application import (
     ApplicationExportModel,
@@ -463,6 +464,8 @@ def _export_toolkits_main(project_id: int, user_id: int, toolkit_ids: List[int],
                         _sanitize_pgvector_configuration(toolkit_dict['settings'])
                     )
                 )
+            if 'meta' in toolkit_dict:
+                toolkit_dict['meta'] = drop_index_schedules(toolkit_dict['meta'])
             result.append(toolkit_dict)
 
     try:

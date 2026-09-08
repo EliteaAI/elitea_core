@@ -55,6 +55,7 @@ from ..utils.internal_tools import (
     resolve_internal_mcp_tools,
     redact_internal_mcp_secrets,
 )
+from ..utils.toolkit_meta import drop_index_schedules
 from ..utils.tracing_utils import add_trace_context_to_meta
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.vectorstore import get_pgvector_connection_string
@@ -680,6 +681,7 @@ class RPC:
     def applications_import_toolkit(self, payload: dict, project_id: int, author_id: int) -> str:
         payload['user_id'] = payload['author_id'] = author_id
         payload['project_id'] = project_id
+        payload['meta'] = drop_index_schedules(payload.get('meta'))
         try:
             toolkit_data = ToolImportModel.model_validate(payload)
             with db.get_session(project_id) as session:

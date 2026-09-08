@@ -814,7 +814,11 @@ class TestHandleFailedIndexSchedule:
         assert sent[0]["state"] == "failed"
         assert sent[0]["initiator"] == "schedule"
 
-    def test_a_missing_row_still_notifies(self, index_scheduling, monkeypatch):
+    def test_a_missing_row_is_not_notified(self, index_scheduling, monkeypatch):
+        """#6544 inverted this: a schedule naming an index with no metadata in this project
+        has nothing to report a failure ON. It is the signature of a schedule that arrived
+        with a copied toolkit or outlived its index, and it repeats on every scheduler pass
+        forever, addressed to an author who may not be a member of the project."""
         sent = self._capture_notify(index_scheduling, monkeypatch)
         monkeypatch.setattr(
             index_scheduling, "update_toolkit_index_meta_history_with_failed_state",
@@ -823,8 +827,7 @@ class TestHandleFailedIndexSchedule:
         index_scheduling.handle_failed_index_schedule(
             1, {}, 7, self._toolkit(), "docs", "creds broke",
         )
-        assert len(sent) == 1
-        assert sent[0]["reindex"] is False
+        assert sent == []
 
     def test_a_lock_timeout_neither_notifies_nor_raises(self, index_scheduling, application_tools, monkeypatch):
         sent = self._capture_notify(index_scheduling, monkeypatch)
