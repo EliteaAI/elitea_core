@@ -2240,32 +2240,38 @@ def resolve_toolkit_index_connection(project_id: int, toolkit_id: int, user_id: 
 
 
 def clean_up_schedule_in_toolkit(project_id: int, toolkit_id: int, index_name: str):
+    if not index_name:
+        # `remove_index` with no argument drops every collection at once and emits an empty
+        # index_name. Whether that should clear every schedule on the toolkit is a separate
+        # decision, so refuse instead of guessing — and every caller unpacks the result, so
+        # returning nothing here raised TypeError out of the event handler.
+        log.warning(f"Index schedule clean-up skipped: no index_name ({project_id=}, {toolkit_id=})")
+        return {"ok": False, "error": f"No index_name supplied ({project_id=}, {toolkit_id=})"}, 400
     try:
         log.debug(f"Starting clean_up_schedule_in_toolkit: project_id={project_id}, toolkit_id={toolkit_id}, index_name={index_name}")
-        if index_name:
-            with db.get_session(project_id) as project_session:
-                toolkit = project_session.query(EliteATool).filter(
-                    EliteATool.id == toolkit_id
-                ).first()
-                if not toolkit:
-                    log.error(f"Toolkit {toolkit_id} not found")
-                    return {"ok": False, "error": f"Toolkit {toolkit_id} not found ({project_id=}, {index_name=})"}, 404
+        with db.get_session(project_id) as project_session:
+            toolkit = project_session.query(EliteATool).filter(
+                EliteATool.id == toolkit_id
+            ).first()
+            if not toolkit:
+                log.error(f"Toolkit {toolkit_id} not found")
+                return {"ok": False, "error": f"Toolkit {toolkit_id} not found ({project_id=}, {index_name=})"}, 404
 
-                meta = toolkit.meta or {}
-                indexes_meta = meta.get("indexes_meta", {})
+            meta = toolkit.meta or {}
+            indexes_meta = meta.get("indexes_meta", {})
 
-                # Remove the entire index_meta_id entry (all users)
-                if index_name in indexes_meta:
-                    from sqlalchemy.orm.attributes import flag_modified
-                    log.debug(f"Removing index '{index_name}' from toolkit {toolkit_id} (project_id={project_id})")
-                    indexes_meta.pop(index_name)
-                    toolkit.meta["indexes_meta"] = indexes_meta
-                    flag_modified(toolkit, "meta")
-                    project_session.commit()
-                    log.debug(f"Index '{index_name}' successfully removed and committed for toolkit {toolkit_id} (project_id={project_id})")
-                else:
-                    log.debug(f"Index '{index_name}' not found in toolkit {toolkit_id} (project_id={project_id})")
-                return {"ok": True}, 200
+            # Remove the entire index_meta_id entry (all users)
+            if index_name in indexes_meta:
+                from sqlalchemy.orm.attributes import flag_modified
+                log.debug(f"Removing index '{index_name}' from toolkit {toolkit_id} (project_id={project_id})")
+                indexes_meta.pop(index_name)
+                toolkit.meta["indexes_meta"] = indexes_meta
+                flag_modified(toolkit, "meta")
+                project_session.commit()
+                log.debug(f"Index '{index_name}' successfully removed and committed for toolkit {toolkit_id} (project_id={project_id})")
+            else:
+                log.debug(f"Index '{index_name}' not found in toolkit {toolkit_id} (project_id={project_id})")
+            return {"ok": True}, 200
     except Exception as e:
         log.error(f"Error during index deletion {e}")
         return {"ok": False, "error": f"Error during index deletion (Toolkit {toolkit_id}{project_id=}, {index_name=}) {e}"}, 400
