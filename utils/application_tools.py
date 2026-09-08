@@ -2241,12 +2241,16 @@ def resolve_toolkit_index_connection(project_id: int, toolkit_id: int, user_id: 
 
 def clean_up_schedule_in_toolkit(project_id: int, toolkit_id: int, index_name: str):
     if not index_name:
-        # `remove_index` with no argument drops every collection at once and emits an empty
-        # index_name. Whether that should clear every schedule on the toolkit is a separate
-        # decision, so refuse instead of guessing — and every caller unpacks the result, so
-        # returning nothing here raised TypeError out of the event handler.
-        log.warning(f"Index schedule clean-up skipped: no index_name ({project_id=}, {toolkit_id=})")
-        return {"ok": False, "error": f"No index_name supplied ({project_id=}, {toolkit_id=})"}, 400
+        # Only the index-removal event reaches this: `remove_index()` with no argument drops every
+        # collection at once and emits an empty index_name. `index_data` rejects an empty name, so
+        # no stored index_meta row can carry one and the REST caller cannot get here. Which
+        # schedules this should clear is a separate decision, so nothing is removed — and the
+        # error is what tells an operator a toolkit's schedules now outlive every index they
+        # pointed at. Returning nothing here raised TypeError out of the event handler.
+        return {
+            "ok": False,
+            "error": f"No index_name supplied; index schedules left in place ({project_id=}, {toolkit_id=})",
+        }, 400
     try:
         log.debug(f"Starting clean_up_schedule_in_toolkit: project_id={project_id}, toolkit_id={toolkit_id}, index_name={index_name}")
         with db.get_session(project_id) as project_session:

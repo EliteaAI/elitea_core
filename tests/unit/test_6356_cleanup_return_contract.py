@@ -1,13 +1,16 @@
 """#6356 - `clean_up_schedule_in_toolkit` must always return an unpackable (body, code).
 
-`remove_index()` takes `index_name` by default, so the no-argument "remove every index"
-call reaches the platform with an empty index_name. The model that validates the event
-puts no length constraint on it, so the handler runs and unpacks the result — and the
-old guard `if index_name:` fell off the end of the function returning None, raising
-TypeError out of the event_node subscriber.
+`remove_index()` takes `index_name` by default, so the no-argument "remove every index" call
+reaches the platform with an empty index_name. The model validating the event puts no length
+constraint on that field, so the handler runs and unpacks the result — and the old guard
+`if index_name:` fell off the end of the function returning None, raising TypeError out of the
+event_node subscriber. Artifact toolkits were shielded from that only because their toolkit_id
+was 0 and failed validation first.
 
-Artifact toolkits were shielded from this only because their `toolkit_id` was 0 and
-failed validation first; fixing that injection makes this path reachable for them too.
+Only the event caller reaches the empty-name branch. `index_data` rejects an empty index_name
+(`base_indexer_toolkit.py`), so no stored index_meta row can carry one and the REST caller's
+`cmetadata["collection"]` is never falsy. The branch reports a failure so the event handler logs
+it: every schedule on the toolkit has just outlived the collections it pointed at.
 """
 import importlib.util
 import pathlib
@@ -19,33 +22,39 @@ import pytest
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture
+def opened_sessions():
+    return []
+
+
 def _drop_stubbed_modules(prefix):
-    """Earlier tests in a full-suite run replace real packages with stand-ins that have no
-    ``__file__``. ``application_tools`` imports the real sqlalchemy at module scope, so those
-    stand-ins have to go before it is loaded or the import fails with "unknown location"."""
+    """Drop stand-in modules an earlier test left behind under ``prefix``.
+
+    ``isolated_sys_modules`` stops this module leaking its own stubs, but it does not undo what
+    ran before it. ``application_tools`` imports the real sqlalchemy at module scope, and a
+    stand-in installed earlier in the session makes that import fail with "unknown location".
+    Stand-ins have no ``__file__``; real modules do. Whatever is removed here is put back by
+    ``isolated_sys_modules`` on teardown, so later tests see what they expect.
+    """
     for name in [n for n in list(sys.modules) if n == prefix or n.startswith(f'{prefix}.')]:
         if getattr(sys.modules[name], '__file__', None) is None:
             del sys.modules[name]
 
 
-@pytest.fixture(scope='module')
-def application_tools():
+@pytest.fixture
+def application_tools(isolated_sys_modules, opened_sessions):
+    """Load application_tools behind `isolated_sys_modules`, which restores sys.modules after
+    the test. Without it a standalone module load leaks its stubs and later modules in the same
+    session fail to import the real sqlalchemy. The shared `pylon_stubs`/`tools_stubs` fixtures
+    are not used: both raise ModuleNotFoundError on `tests.stubs` under this runner.
+    """
     _drop_stubbed_modules('sqlalchemy')
     _drop_stubbed_modules('pydantic')
-    for name in (
-        'plugins',
-        'plugins.elitea_core',
-        'plugins.elitea_core.models',
-        'plugins.elitea_core.utils',
-    ):
-        module = sys.modules.setdefault(name, types.ModuleType(name))
-        module.__path__ = []
 
     pylon_tools = types.ModuleType('pylon.core.tools')
     pylon_tools.log = types.SimpleNamespace(
-        info=lambda *a, **k: None, warning=lambda *a, **k: None,
-        error=lambda *a, **k: None, debug=lambda *a, **k: None,
-        exception=lambda *a, **k: None,
+        info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None,
+        debug=lambda *a, **k: None, exception=lambda *a, **k: None,
     )
     pylon_tools.web = types.SimpleNamespace(
         method=lambda *a, **k: (lambda f: f), rpc=lambda *a, **k: (lambda f: f),
@@ -56,13 +65,20 @@ def application_tools():
 
     tools_pkg = types.ModuleType('tools')
     tools_pkg.auth = types.SimpleNamespace(decorators=types.SimpleNamespace())
-    tools_pkg.db = types.SimpleNamespace(get_session=_unreachable_session)
+    tools_pkg.db = types.SimpleNamespace(
+        get_session=lambda project_id: opened_sessions.append(project_id)
+    )
     tools_pkg.this = types.SimpleNamespace(descriptor=types.SimpleNamespace(config={}))
     tools_pkg.serialize = types.SimpleNamespace()
     tools_pkg.context = types.SimpleNamespace()
     tools_pkg.VaultClient = type('VaultClient', (), {'get_secrets': lambda self: {}})
     tools_pkg.rpc_tools = types.SimpleNamespace()
     sys.modules['tools'] = tools_pkg
+
+    for name in ('plugins', 'plugins.elitea_core', 'plugins.elitea_core.models',
+                 'plugins.elitea_core.utils'):
+        module = sys.modules.setdefault(name, types.ModuleType(name))
+        module.__path__ = []
 
     models_all = types.ModuleType('plugins.elitea_core.models.all')
     for name in ('EliteATool', 'EntityToolMapping', 'ApplicationVersion'):
@@ -100,7 +116,8 @@ def application_tools():
     sys.modules['plugins.elitea_core.utils.utils'] = utils_utils
 
     spec = importlib.util.spec_from_file_location(
-        'plugins.elitea_core.utils.application_tools', PLUGIN_ROOT / 'utils' / 'application_tools.py'
+        'plugins.elitea_core.utils.application_tools',
+        PLUGIN_ROOT / 'utils' / 'application_tools.py',
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -108,18 +125,29 @@ def application_tools():
     return module
 
 
-def _unreachable_session(project_id):
-    raise AssertionError(f"clean-up opened a session for project {project_id} with no index_name")
-
-
 class TestEmptyIndexName:
     @pytest.mark.parametrize('index_name', ['', None])
     def test_it_returns_an_unpackable_pair(self, application_tools, index_name):
         result, code = application_tools.clean_up_schedule_in_toolkit(1, 44, index_name)
 
+        # Asserted on the guard's own message: the generic `except Exception` tail returns a
+        # 400 with ok False too, so a status-only assertion would pass with the guard removed.
         assert code == 400
         assert result['ok'] is False
+        assert 'No index_name supplied' in result['error']
 
-    def test_it_never_opens_a_session(self, application_tools):
-        # The stubbed session factory raises, so reaching the DB fails the test outright.
+    def test_it_short_circuits_before_touching_the_database(self, application_tools, opened_sessions):
+        # Asserted on a recorded call, not on an exception raised from the stub: the function
+        # body is wrapped in `except Exception`, which would swallow a raising stub and let this
+        # test pass with the guard removed.
         application_tools.clean_up_schedule_in_toolkit(1, 44, '')
+
+        assert opened_sessions == []
+
+    def test_the_event_handler_logs_it(self, application_tools):
+        # methods/stream.py logs `result['error']` whenever `ok` is falsy, so the message has to
+        # carry enough to identify the toolkit whose schedules were left behind.
+        result, _ = application_tools.clean_up_schedule_in_toolkit(1, 44, '')
+
+        assert 'schedules left in place' in result['error']
+        assert 'toolkit_id=44' in result['error']
