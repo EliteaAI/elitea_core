@@ -81,7 +81,7 @@ def _budget_state(project_id: int):
     budget = rpc.timeout(5).elitea_core_get_project_budget(project_id=project_id) or {}
     #
     try:
-        spend = rpc.timeout(15).litellm_get_project_spend(project_id=project_id) or {}
+        spend = rpc.timeout(15).usage_get_project_spend(project_id=project_id) or {}
     except Exception:  # pylint: disable=W0703
         spend = {}
     #
