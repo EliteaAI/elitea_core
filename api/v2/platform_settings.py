@@ -21,9 +21,11 @@ _MIN_NEW_ITEM_DAYS = 7
 _MAX_NEW_ITEM_DAYS = 60
 
 
-def _get_catalog_new_item_days() -> int:
+def _get_catalog_new_item_days(guardrail_key: str) -> int:
     try:
-        raw = this.module.descriptor.config.get('catalog', {}).get('new_item_days', _DEFAULT_NEW_ITEM_DAYS)
+        raw = this.module.descriptor.config.get(guardrail_key, {}).get(
+            'catalog_new_item_days', _DEFAULT_NEW_ITEM_DAYS
+        )
         return max(_MIN_NEW_ITEM_DAYS, min(_MAX_NEW_ITEM_DAYS, int(raw)))
     except Exception:
         pass
@@ -80,7 +82,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "midturn_injection_whitelist_project_ids": list(
                 get_midturn_injection_whitelist()
             ),
-            "catalog_new_item_days": _get_catalog_new_item_days(),
+            "agent_catalog_new_item_days": _get_catalog_new_item_days(
+                'publishing_guardrail'
+            ),
+            "skill_catalog_new_item_days": _get_catalog_new_item_days(
+                'skill_publishing_guardrail'
+            ),
         }, 200
 
 

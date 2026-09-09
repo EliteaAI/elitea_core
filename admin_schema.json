@@ -187,6 +187,18 @@
       "default": [],
       "requires_restart": false
     },
+    "agent_catalog_new_item_days": {
+      "type": "integer",
+      "title": "Agent Catalog New Item Days",
+      "description": "Number of days after publishing within which an agent is shown as 'New' in the catalog. Allowed range: 7–60.",
+      "path": "publishing_guardrail.catalog_new_item_days",
+      "section": "guardrails",
+      "default": 14,
+      "minimum": 7,
+      "maximum": 60,
+      "requires_restart": false,
+      "value_schema": { "type": "integer", "minimum": 7, "maximum": 60 }
+    },
     "is_skill_publish_blocked": {
       "type": "boolean",
       "title": "Block Skill Publishing",
@@ -228,6 +240,18 @@
       "section": "guardrails",
       "default": [],
       "requires_restart": false
+    },
+    "skill_catalog_new_item_days": {
+      "type": "integer",
+      "title": "Skill Catalog New Item Days",
+      "description": "Number of days after publishing within which a skill is shown as 'New' in the catalog. Managed independently from Agent Catalog New Item Days. Allowed range: 7–60.",
+      "path": "skill_publishing_guardrail.catalog_new_item_days",
+      "section": "guardrails",
+      "default": 14,
+      "minimum": 7,
+      "maximum": 60,
+      "requires_restart": false,
+      "value_schema": { "type": "integer", "minimum": 7, "maximum": 60 }
     },
     "is_next_input_suggestion_enabled": {
       "type": "boolean",
@@ -295,18 +319,6 @@
       "section": "runtime",
       "default": true,
       "requires_restart": false
-    },
-    "catalog_new_item_days": {
-      "type": "integer",
-      "title": "Catalog New Item Days",
-      "description": "Number of days after publishing within which an agent or skill is shown as 'New' in the catalog. Allowed range: 7–60.",
-      "path": "catalog.new_item_days",
-      "section": "catalog",
-      "default": 14,
-      "minimum": 7,
-      "maximum": 60,
-      "requires_restart": false,
-      "value_schema": { "type": "integer", "minimum": 7, "maximum": 60 }
     },
     "pipeline_scheduling_enabled": {
       "type": "boolean",
