@@ -101,7 +101,9 @@ class ToolkitIndexingSchedule(BaseModel):
     # blocks resolving a *private* credential, which resolve_credentials rejects on its own.
     created_by: Optional[int] = Field(default=None, gt=0)
     timezone: str = _DEFAULT_TIMEZONE
-    # store last_run as ISO 8601 string (always UTC)
+    # The scheduler's cron cursor (ISO 8601, UTC), not a record that an index ran: any
+    # concluded attempt advances it, and saving or disabling the schedule resets it. The
+    # run record is the pgvector index_meta history.
     last_run: str = _EPOCH_ISO
 
     @validator('timezone', pre=True)
