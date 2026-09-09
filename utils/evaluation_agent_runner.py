@@ -165,6 +165,7 @@ def run_agent(
     user_id: Optional[int] = None,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
     predict: Optional[Callable[..., dict]] = None,
+    platform_run_id: Optional[str] = None,
 ) -> dict:
     """Run the pinned agent over one case's input and return a structured outcome (never raises).
 
@@ -189,7 +190,8 @@ def run_agent(
                                     case.get('variables'))
     try:
         result = predict(sid=None, data=data, await_task_timeout=timeout,
-                         user_id=user_id, skip_expansion=True, return_chat_history=True)
+                         user_id=user_id, skip_expansion=True, return_chat_history=True,
+                         platform_run_id=platform_run_id)
     except Exception as exc:  # noqa: BLE001 - execution-level failure is a value, not a raise
         return {'status': 'predict_exception', 'output': None, 'error': str(exc)}
 

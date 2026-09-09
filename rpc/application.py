@@ -59,6 +59,7 @@ from ..utils.toolkit_meta import drop_index_schedules
 from ..utils.tracing_utils import add_trace_context_to_meta
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.vectorstore import get_pgvector_connection_string
+from ..utils.run_id import PREDICT_RUN_ID_KWARGS_KEY
 
 
 def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
@@ -134,6 +135,7 @@ class RPC:
                     return_chat_history: bool = False,
                     non_interactive: Optional[bool] = None,
                     eligible_for_autoapproval: bool = False,
+                    platform_run_id: Optional[str] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -298,6 +300,12 @@ class RPC:
                 "Failed to prefetch pgvector_connstr for project_id=%s: %s",
                 parsed.project_id, e
             )
+
+        # A caller that already owns a platform run id (an eval run scoring N cases, #6569)
+        # passes it in so every case's LLM/tool usage correlates to the one run. Set before
+        # dispatch so the start_task seam honours it instead of minting a per-case id.
+        if platform_run_id:
+            payload[PREDICT_RUN_ID_KWARGS_KEY] = platform_run_id
 
         try:
             task_id = self.task_node.start_task(

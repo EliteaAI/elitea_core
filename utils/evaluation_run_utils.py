@@ -26,6 +26,7 @@ from .evaluation_suite_utils import (
     excluded_case_ids,
 )
 from .evaluation_human_score_utils import EvalRunNotFoundError
+from .run_id import PREDICT_RUN_ID_KWARGS_KEY
 from .evaluation_run_orchestration import (
     build_run_snapshot,
     execute_run,
@@ -381,8 +382,13 @@ EVAL_RUN_POOL = 'eval_runs'
 
 
 def execute_run_task(module, project_id: int, run_id: int,
-                     judge_llm_settings: Optional[dict] = None) -> dict:
+                     judge_llm_settings: Optional[dict] = None, **task_kwargs) -> dict:
     """Task body: run H5's :func:`execute_run` to completion.
+
+    ``**task_kwargs`` absorbs keys the shared dispatch seam stamps onto every payload
+    (currently the platform run id) — arbiter hands the task payload over as keyword
+    arguments, so a strict signature here turns any seam-level addition into a TypeError
+    that fails the whole run before it starts.
 
     Bound to the module with ``functools.partial`` at registration so the task's own arguments stay
     plain JSON — arbiter ships them through the event node, so a live session or ORM row could not
@@ -411,11 +417,15 @@ def execute_run_task(module, project_id: int, run_id: int,
         def _publish(payload: dict) -> None:
             module.event_node.emit('elitea_core_eval_run_progress', payload)
 
+        # One platform run id for the whole eval run (#6569): the id the eval seam minted
+        # for this task, threaded down to every case predict and judge call so all of the
+        # run's LLM/tool usage correlates to the run rather than to N unrelated ids.
         execute_run(project_id, run_id, task_node=module.task_node,
                     judge_llm_settings=judge_llm_settings,
                     case_concurrency=concurrency,
                     time_budget_seconds=budget,
-                    progress_publisher=_publish)
+                    progress_publisher=_publish,
+                    platform_run_id=task_kwargs.get(PREDICT_RUN_ID_KWARGS_KEY))
         return {'ok': True, 'run_id': run_id}
     except Exception as exc:  # noqa: BLE001 - outcome already persisted by execute_run
         log.exception('Eval run %s (project %s) failed', run_id, project_id)
