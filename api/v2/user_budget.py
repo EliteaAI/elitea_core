@@ -52,7 +52,7 @@ def _user_budget_state(project_id: int, user_id: int):
     ) or {}
     #
     try:
-        spend = rpc.timeout(15).litellm_get_user_spend(
+        spend = rpc.timeout(15).usage_get_user_spend(
             project_id=project_id, user_id=user_id,
         ) or {}
     except Exception:  # pylint: disable=W0703

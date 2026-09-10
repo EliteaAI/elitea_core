@@ -196,7 +196,7 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
             limit = stored if stored is not None else _member_default(rpc, project_id)
         #
         try:
-            detail = rpc.timeout(30).litellm_get_user_usage_detail(
+            detail = rpc.timeout(30).usage_get_user_usage_detail(
                 project_id=project_id, user_id=user_id,
             ) or {}
         except Exception:  # pylint: disable=W0703
@@ -210,7 +210,7 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
             limit = budget.get("monthly_limit") if budget.get("enabled", True) else None
         #
         try:
-            detail = rpc.timeout(30).litellm_get_project_usage_detail(project_id=project_id) or {}
+            detail = rpc.timeout(30).usage_get_project_usage_detail(project_id=project_id) or {}
         except Exception:  # pylint: disable=W0703
             detail = {}
     #

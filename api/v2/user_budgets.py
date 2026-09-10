@@ -160,7 +160,7 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
         int(user_id): roles for user_id, roles in user_roles.items() if user_id is not None
     }
     #
-    spend_data = _safe_rpc(rpc, "litellm_list_member_spend", 30, None, project_id=project_id)
+    spend_data = _safe_rpc(rpc, "usage_list_member_spend", 30, None, project_id=project_id)
     degraded = spend_data is None
     #
     if degraded:
@@ -209,7 +209,7 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
         usage_by_id = {
             int(user_id): {"spend": float(spend or 0)}
             for user_id, spend in (_safe_rpc(
-                rpc, "litellm_get_users_spend", 30, {},
+                rpc, "usage_get_users_spend", 30, {},
                 project_id=project_id, user_ids=member_ids,
             ) or {}).items()
         }

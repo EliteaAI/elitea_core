@@ -187,7 +187,7 @@ class AdminAPI(api_tools.APIModeHandler):
         #
         # One LiteLLM call for the whole page rather than one per row
         try:
-            spend_map = rpc.timeout(30).litellm_get_projects_spend(
+            spend_map = rpc.timeout(30).usage_get_projects_spend(
                 project_ids=project_ids,
             ) or {}
         except Exception:  # pylint: disable=W0703
