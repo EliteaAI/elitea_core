@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, UTC
+
 from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, VaultClient, rpc_tools, this
@@ -25,6 +27,142 @@ def index_log_context(project_id=None, toolkit_id=None, index_name=None, user_id
     if user_id is not None:
         parts.append(f"user={user_id}")
     return f"[idx {' '.join(parts)}]"
+
+
+# How long a retryable credential-lookup failure stays log-only before it is reported as
+# an ordinary failure. Longer than any restart or hot reload, so those cannot be mistaken
+# for an outage; shorter than the 24h floor the API enforces on schedules, so a daily
+# schedule that breaks in the morning is still reported the same day.
+RETRYABLE_REPORT_GRACE = timedelta(hours=1)
+
+
+def describe_grace(delta: timedelta = RETRYABLE_REPORT_GRACE) -> str:
+    """Render the grace as a duration for the schedule's owner, who reads it in a
+    notification and in the index history.
+
+    ``str(timedelta(hours=1))`` is ``'1:00:00'``, which reads as a clock time.
+    """
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return "a second" if seconds == 1 else f"{seconds} seconds"
+    minutes = seconds // 60
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return "an hour" if hours == 1 else f"{hours} hours"
+    return "a minute" if minutes == 1 else f"{minutes} minutes"
+
+
+def retry_escalation_due(retry_since_iso: str | None, now: datetime | None = None) -> bool:
+    """True once a run of retryable failures has outlived a blip.
+
+    False for None — no run in progress — and for anything unreadable or in the future.
+    False is the safe answer to all three: the caller stays silent, which is today's
+    behaviour, rather than reporting on every tick, which is #6583.
+    """
+    if not retry_since_iso:
+        return False
+    try:
+        started = datetime.fromisoformat(retry_since_iso)
+    except Exception:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return (now or datetime.now(UTC)) - started >= RETRYABLE_REPORT_GRACE
+
+
+def stamp_schedule_retry_since(project_session, toolkit, index_meta_id, user_id, ctx,
+                               when: str | None = None) -> str | None:
+    """Record when the current run of retryable failures began. Does NOT move the cursor.
+
+    Written once per outage, not per tick: its age has to measure the outage, and
+    re-stamping would pin it at one tick interval so it never outlives any grace.
+    """
+    current_time = when or datetime.now(UTC).isoformat()
+    if _write_schedule_fields(
+        project_session, toolkit, index_meta_id, user_id, ctx,
+        {'retry_since': current_time},
+        "this outage will not be reported until a later tick manages to record it",
+    ):
+        return current_time
+    return None
+
+
+def clear_schedule_retry_since(project_session, toolkit, index_meta_id, user_id, ctx) -> None:
+    """End the retry run without concluding anything about the schedule.
+
+    The lookup recovering is not itself a conclusion — the tick may still hit contention
+    and never reach a cursor write — so a stale stamp would survive and escalate the next
+    unrelated blip with no grace at all.
+    """
+    _write_schedule_fields(
+        project_session, toolkit, index_meta_id, user_id, ctx,
+        {'retry_since': None},
+        "the stale stamp may escalate the next unrelated failure with no grace",
+    )
+
+
+def stamp_schedule_last_run(project_session, toolkit, index_meta_id, user_id, ctx,
+                            when: str | None = None) -> str | None:
+    """Advance a schedule's ``last_run`` cron cursor. Returns the stamp written, or None.
+
+    Only call this once the tick has concluded something about the schedule. A lock, a live
+    run or an exception concluded nothing, and those paths need the cursor to stay put so
+    the next scan retries within a minute rather than a cron period.
+
+    Concluding always ends any retry run, so the clear rides along on this write rather
+    than costing a second one. Nothing keeps a stamp across a conclusion: the only clear
+    that runs on a healthy tick sits below the due check, so a preserved stamp can outlive
+    its outage by a whole cron period and escalate the next unrelated blip on its first tick.
+    """
+    current_time = when or datetime.now(UTC).isoformat()
+    if _write_schedule_fields(
+        project_session, toolkit, index_meta_id, user_id, ctx,
+        {'last_run': current_time, 'retry_since': None},
+        "the schedule stays due and will be retried on every tick until this write succeeds",
+    ):
+        return current_time
+    return None
+
+
+def _write_schedule_fields(project_session, toolkit, index_meta_id, user_id, ctx,
+                           fields: dict, consequence: str) -> bool:
+    """Write keys into the live schedule entry, delete-wins. True when the write landed.
+
+    ``consequence`` is what a failed write means for this particular caller, and it differs
+    enough between them that a shared sentence would be wrong for at least one: a dropped
+    cursor write leaves the schedule due every tick, a dropped outage stamp means the
+    outage is never reported, and a dropped clear can escalate the next unrelated failure
+    with no grace.
+
+    Mutates through ``toolkit.meta`` after ``refresh()``: refresh rebinds it to a new dict,
+    so writing into the dicts the tick loop captured earlier is silently dropped.
+    """
+    try:
+        # Re-read the row to avoid clobbering a concurrent deletion (delete wins:
+        # if the schedule was removed mid-tick, skip).
+        project_session.refresh(toolkit)
+        live_schedules = (
+            toolkit.meta
+            .get('indexes_meta', {})
+            .get(index_meta_id, {})
+            .get('schedules', {})
+        )
+        if user_id not in live_schedules:
+            log.info(f"{ctx} schedule was deleted mid-tick, skipping {sorted(fields)} update")
+            return False
+        live_schedules[user_id].update(fields)
+        flag_modified(toolkit, 'meta')
+        project_session.commit()
+        return True
+    except Exception as exc:  # pylint: disable=W0703
+        # A session left in a failed transaction would take every later schedule in this
+        # tick down with it, so absorb the failure here rather than in the caller.
+        try:
+            project_session.rollback()
+        except Exception:  # pylint: disable=W0703
+            pass
+        log.exception(f"{ctx} failed to write {sorted(fields)}: {exc!r}; {consequence}")
+        return False
 
 
 # Settings slots that never hold toolkit credentials, so they must not be mistaken
@@ -64,13 +202,17 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
                                 creator_id: int | None = None,
                                 toolkit_id: int | None = None,
                                 index_name: str | None = None,
-                                user_id=None) -> tuple[bool, str | None]:
+                                user_id=None) -> tuple[bool, str | None, bool]:
     """Apply user-provided credentials to project settings.
 
     Extracts credentials from user_config, validates them, and loads project-level configuration
     to replace in project_settings dict (modifies in place).
 
-    Returns ``(ok, issue)``. ``issue`` is None on success and otherwise a short reason naming
+    Returns ``(ok, issue, retryable)``. ``retryable`` is True only when the *lookup* raised,
+    where the credential itself may be fine; every other failure is a property of the stored
+    schedule or the credential catalogue and cannot resolve itself.
+
+    ``issue`` is None on success and otherwise a short reason naming
     the distinct failure: the schedule carrying no credentials, a malformed credentials block,
     no slot to put them in, a credential that does not exist, and a lookup that itself failed
     all need different actions from the schedule's owner, and the caller writes this string to
@@ -106,7 +248,7 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
                 f"{ctx} no credential slot in settings for toolkit_type='{toolkit_type}' and no "
                 f"credentials on the schedule, nothing to replace"
             )
-            return True, None
+            return True, None, False
         # The schedule names a credential but there is nowhere to put it: running anyway
         # would silently index with whatever credential the toolkit was last saved with.
         log.warning(
@@ -117,7 +259,7 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
         return False, (
             f"toolkit settings have no credential field for toolkit type '{toolkit_type}' "
             f"to apply the schedule's credentials to"
-        )
+        ), False
 
     # The credential row's own type follows the settings slot, not the toolkit type:
     # an `ado_wiki` toolkit references a credential of type `ado`.
@@ -130,9 +272,9 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
                 f"{ctx} team schedule with no per-user credentials override for "
                 f"toolkit_type='{toolkit_type}'; using project-level configuration as-is"
             )
-            return True, None
+            return True, None, False
         log.warning(f"{ctx} no credentials provided in schedule for toolkit_type='{toolkit_type}'")
-        return False, "schedule has no credentials selected"
+        return False, "schedule has no credentials selected", False
 
     # Validate credentials is a dict
     if not isinstance(user_credentials, dict):
@@ -140,7 +282,7 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
             f"{ctx} credentials is not a dict (type={type(user_credentials).__name__}), "
             f"cannot apply credentials"
         )
-        return False, "schedule credentials are malformed"
+        return False, "schedule credentials are malformed", False
 
     # Config key exists - validate elitea_title
     config_title = user_credentials.get('elitea_title') or user_credentials.get('alita_title')
@@ -148,7 +290,7 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
         log.warning(
             f"{ctx} credentials missing 'elitea_title', cannot apply for type '{toolkit_type}'"
         )
-        return False, "schedule credentials do not name a credential"
+        return False, "schedule credentials do not name a credential", False
 
     # A credential the author marked private lives in their personal project, not in
     # project_id, so the project-scoped lookup can never find it. This mirrors the
@@ -163,7 +305,7 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
         return False, (
             f"credential '{config_title}' is private but the schedule has no author to "
             f"resolve it for"
-        )
+        ), False
 
     try:
         if is_private:
@@ -193,7 +335,7 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
             return False, (
                 f"credential '{config_title}' of type '{config_type}' no longer exists"
                 + (" in the author's personal configurations" if is_private else "")
-            )
+            ), False
 
         # ConfigurationDetails carries no `private` flag, so the substituted payload would
         # read as project-level and send the downstream configurations_expand back to
@@ -208,16 +350,22 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
             f"{ctx} configuration '{config_title}' (id={user_configuration.get('id')}, "
             f"private={is_private}) is being used to run the toolkit index"
         )
-        return True, None
+        return True, None, False
 
     except Exception as e:
-        # Distinct from "no longer exists": the credential may be fine and the
-        # configurations RPC simply timed out, which is retried on the next scan.
+        # Distinct from "no longer exists": the credential may be fine and the RPC simply
+        # timed out, so a 3s blip must not cost a daily schedule its whole day.
         log.exception(
             f"{ctx} error loading configuration '{config_title}' of type '{config_type}' "
             f"(private={is_private}, creator_id={creator_id}): {e!r}"
         )
-        return False, f"could not look up credential '{config_title}': {e.__class__.__name__}"
+        return False, f"could not look up credential '{config_title}': {e.__class__.__name__}", True
+
+
+# handle_failed_index_schedule's two outcomes: whether this tick concluded something about
+# the schedule itself, which is what the caller gates its cursor write on.
+CONCLUDED = True
+NOT_CONCLUDED = False
 
 
 def handle_failed_index_schedule(
@@ -225,6 +373,10 @@ def handle_failed_index_schedule(
     expand_user_id=None
 ):
     """Handle failed index scheduling: update history and notify status.
+
+    Returns ``CONCLUDED`` when the tick concluded something about the schedule itself and
+    the caller should advance ``last_run``, or ``NOT_CONCLUDED`` when a lock or a live run
+    concluded nothing and the schedule must be retried on the next scan.
 
     ``expand_user_id`` is the user_id used when expanding configurations. For team schedules
     (``user_id == -1``) callers must pass the schedule's creator so ``get_personal_project_id``
@@ -239,12 +391,26 @@ def handle_failed_index_schedule(
     log.info(
         f"{ctx} skipping scheduled run of toolkit type '{toolkit.type}' due to: {init_issue}"
     )
-    pgv_settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
-        project_id=project_id,
-        settings=updated_settings.get('pgvector_configuration', {}),
-        user_id=expand_user_id if expand_user_id is not None else user_id,
-        unsecret=True
-    )
+    try:
+        pgv_settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
+            project_id=project_id,
+            settings=updated_settings.get('pgvector_configuration', {}),
+            user_id=expand_user_id if expand_user_id is not None else user_id,
+            unsecret=True
+        )
+    except Exception as e:  # pylint: disable=W0703
+        # This reports failures that are often the configurations plugin being down, and it
+        # reaches pgvector through that same plugin. Escaping here lands in the tick's
+        # settings catch-all, which does not advance the cursor, so every broken schedule
+        # would re-enter this 2s RPC on every tick — enough of them push the tick past 60s
+        # and the re-entrancy guard then starves every schedule on the platform.
+        # Concluded, though nothing was reported: consume the slot so the tick does not
+        # re-enter this call every minute, and let the next period try the report again.
+        # Deliberately not carried further than that — an earlier attempt to keep the outage
+        # clock alive across this path let a stamp outlive its outage, and it bought only a
+        # grace period of latency in a case that needs an in-process call to fail.
+        log.exception(f"{ctx} could not expand pgvector settings to record the failure: {e!r}")
+        return CONCLUDED
     try:
         outcome = update_toolkit_index_meta_history_with_failed_state(
             pgv_settings_expanded.get('connection_string'),
@@ -255,16 +421,15 @@ def handle_failed_index_schedule(
         )
     except IndexMetaLockTimeoutError as e:
         # The row is locked by a live run's promote/registration — do not notify from an
-        # unknown state and do not abort the rest of the tick; last_run never advances on
-        # this path, so the next scheduler scan retries within a minute.
+        # unknown state and do not abort the rest of the tick.
         log.warning(f"{ctx} {e}; retrying next scan")
-        return
+        return NOT_CONCLUDED
     if outcome.get('skipped_live_run'):
         # The notification is gated on the writer's locked-read outcome, never on a
         # separate unlocked pre-check: a live registered run means this start failure
         # must not flip the shared row or alarm over the run in flight.
         log.info(f"{ctx} live run registered; skipping failure notification")
-        return
+        return NOT_CONCLUDED
     if not outcome.get('flipped'):
         # The writer found no index_meta row, so this schedule names an index that does not
         # exist in this project — the signature of a schedule that arrived with a copied
@@ -275,24 +440,37 @@ def handle_failed_index_schedule(
             f"{ctx} schedule names an index with no metadata in this project; "
             f"skipping failure notification"
         )
-        return
-    this.module.notify_index_data_status({
-        'id': None,
-        'index_name': index_meta_id,
-        'state': 'failed',
-        'error': init_issue,
-        'reindex': outcome.get('reindex', False),
-        'indexed': outcome.get('indexed', 0),
-        'updated': outcome.get('updated', 0),
-        'indexed_chunks': outcome.get('indexed_chunks', 0),
-        'toolkit_id': toolkit.id,
-        'project_id': project_id,
-        # int(None) raises; a missing author must fall through to notify's own
-        # "cannot notify without a user_id" guard, not crash here.
-        'user_id': int(user_id) if user_id is not None else None,
-        'initiator': InitiatorType.schedule
-    })
-    # Debug, not info: a permanently broken schedule reaches this every minute forever, and
-    # the info line at the top of this function already carries the reason. The two early
-    # returns above log their own outcome, so nothing is left unexplained at info level.
+        # Absent, not busy. A manual run would create the row, but paying a vault read and
+        # a pgvector round trip every 60s to notice that is not worth it.
+        return CONCLUDED
+    # The row is flipped and committed by now, so the conclusion is already reached and a
+    # failed notification does not un-reach it. Escaping here would leave the caller unable
+    # to advance the cursor, and the schedule would re-flip and re-append history on every
+    # tick — #6583 again, conditional on the notify path breaking.
+    try:
+        this.module.notify_index_data_status({
+            'id': None,
+            'index_name': index_meta_id,
+            'state': 'failed',
+            'error': init_issue,
+            'reindex': outcome.get('reindex', False),
+            'indexed': outcome.get('indexed', 0),
+            'updated': outcome.get('updated', 0),
+            'indexed_chunks': outcome.get('indexed_chunks', 0),
+            'toolkit_id': toolkit.id,
+            'project_id': project_id,
+            # int(None) raises; a missing author must fall through to notify's own
+            # "cannot notify without a user_id" guard, not crash here.
+            'user_id': int(user_id) if user_id is not None else None,
+            'initiator': InitiatorType.schedule
+        })
+    except Exception as e:  # pylint: disable=W0703
+        # The history entry is committed by now and Index History renders it with the raw
+        # error, so the failure is on a durable surface and only the push was lost.
+        log.exception(f"{ctx} failure recorded but could not be notified: {e!r}")
+    # Debug, not info: a permanently broken schedule reaches this once per cron period for
+    # as long as it stays broken, and the info line at the top of this function already
+    # carries the reason. The two early returns above log their own outcome, so nothing is
+    # left unexplained at info level.
     log.debug(f"{ctx} failure notified on index history")
+    return CONCLUDED
