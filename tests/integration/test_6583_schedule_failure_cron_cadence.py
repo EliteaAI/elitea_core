@@ -425,79 +425,10 @@ class TestTickWiring:
                 return
         pytest.fail("could not find the `if not index:` block")
 
-    def test_the_contention_paths_never_consume_the_cron_slot(self, tick_tree):
-        """The property, not a headcount: the handlers that catch a busy pool or a live run
-        must not stamp. A global `count(...) == 3` also fails on a legitimate fourth write
-        — the missing-connection-string path this branch defers — for no correctness reason.
-        """
-        handlers = [n for n in ast.walk(tick_tree) if isinstance(n, ast.ExceptHandler)]
-        assert handlers, "no exception handlers found in the tick"
-        for handler in handlers:
-            body = ast.dump(ast.Module(body=handler.body, type_ignores=[]))
-            assert "stamp_schedule_last_run" not in body, (
-                "an exception handler must not consume the cron slot: these are the "
-                "contention and transient paths that keep the 60s retry"
-            )
-
-
-    def _init_issue_block(self, tick_tree):
-        for node in ast.walk(tick_tree):
-            if isinstance(node, ast.If) and isinstance(node.test, ast.Name) \
-                    and node.test.id == "init_issue":
-                return node
-        pytest.fail("could not find the `if init_issue:` block")
-
-    def _retryable_branch(self, tick_tree):
-        block = self._init_issue_block(tick_tree)
-        branches = [n for n in ast.walk(block) if isinstance(n, ast.If)
-                    and "init_issue_retryable" in ast.dump(n.test)]
-        assert branches, "no branch keys on init_issue_retryable"
-        return branches[0]
-
-    def test_a_transient_lookup_failure_reports_nothing_at_all(self, tick_tree):
-        """The retryable branch must REPORT nothing, not merely skip the stamp.
-
-        It is no longer inert: it records when the outage began so a later tick can tell an
-        outage from a blip. Recording is not reporting, and the assertions below name the
-        two calls that would be.
-
-        Skipping only the stamp is the #6583 runaway through a narrower door: the failure
-        would still be flipped onto the index row, appended to its unbounded history and
-        notified to the owner on every 60s tick for as long as the configurations RPC is
-        down — while the un-advanced cursor guarantees the tick repeats. The lock and
-        live-run exits avoid this by returning *before* notifying, and this branch has to
-        do the same by not calling the handler at all.
-        """
-        block = self._init_issue_block(tick_tree)
-        branch = self._retryable_branch(tick_tree)
-
-        # Not enough to check the branch body: hoisting the handler ABOVE the branch leaves
-        # the branch itself clean while every retryable tick still notifies. So require that
-        # nothing reporting a failure runs before the retryable test is made.
-        for stmt in block.body:
-            if stmt is branch:
-                break
-            assert "handle_failed_index_schedule" not in ast.dump(stmt), \
-                "the retryable test must come BEFORE anything that reports the failure"
-            assert "stamp_schedule_last_run" not in ast.dump(stmt), \
-                "the retryable test must come BEFORE anything that moves the cursor"
-        else:
-            pytest.fail("the retryable branch is not a statement of the init_issue block")
-
-        body = ast.dump(ast.Module(body=branch.body, type_ignores=[]))
-        assert "handle_failed_index_schedule" not in body, \
-            "a retryable failure must not notify or append history"
-        assert "stamp_schedule_last_run" not in body, \
-            "a retryable failure must not consume the cron slot"
-
-    def test_a_terminal_failure_still_reports_and_stamps(self, tick_tree):
-        """The other half of the same branch: everything not retryable must still be
-        recorded and must still consume the slot, or #6583 is simply un-fixed."""
-        branch = self._retryable_branch(tick_tree)
-        orelse = ast.dump(ast.Module(body=branch.orelse, type_ignores=[]))
-        assert "handle_failed_index_schedule" in orelse
-        assert "stamp_schedule_last_run" in orelse
-
+    # Which paths may consume the cron slot is asserted by running the tick, in
+    # test_6583c_tick_behaviour.py. Four AST shapes were tried here first and each permitted
+    # a different arm, so the question is answered by what the tick does, not by where the
+    # call sits.
 
     def test_the_dispatch_path_goes_through_the_same_helper(self, tick_source):
         """One writer for the cursor, so delete-wins and the refresh() rebinding cannot

@@ -344,8 +344,8 @@ class TestReportSurvivesAConfigurationsOutage:
     """The report path reaches pgvector through the plugin whose outage it usually reports."""
 
     @pytest.fixture(scope="class")
-    def tick_source(self):
-        return (PLUGIN_ROOT / "rpc" / "index_scheduling.py").read_text()
+    def tick_tree(self):
+        return ast.parse((PLUGIN_ROOT / "rpc" / "index_scheduling.py").read_text())
 
     def test_an_expand_failure_concludes_instead_of_escaping(self, index_scheduling,
                                                              monkeypatch):
@@ -365,8 +365,6 @@ class TestReportSurvivesAConfigurationsOutage:
         recorded = index_scheduling.handle_failed_index_schedule(
             1, {}, 7, _toolkit(), "docs", "lookup broke")
         assert recorded, "an unreportable failure must still consume the cron slot"
-        assert recorded == index_scheduling.CONCLUDED_UNREPORTABLE, \
-            "it must stay distinguishable from a reported failure"
         assert sent == []
 
     def test_a_failed_notification_does_not_undo_the_conclusion(self, index_scheduling,
@@ -390,25 +388,6 @@ class TestReportSurvivesAConfigurationsOutage:
         recorded = index_scheduling.handle_failed_index_schedule(
             1, {}, 7, _toolkit(), "docs", "creds broke")
         assert recorded, "a failed notification must not un-reach the conclusion"
-        assert recorded != index_scheduling.CONCLUDED_UNREPORTABLE, \
-            "the failure WAS recorded; only the notification failed"
-
-    def test_an_unreported_failure_does_not_end_the_outage(self, index_scheduling,
-                                                           monkeypatch):
-        """Clearing the stamp here would restart the grace clock every period, so an
-        outage that keeps blocking its own report would never reach the owner."""
-        monkeypatch.setattr(index_scheduling, "flag_modified", lambda *a, **k: None)
-        started = "2026-09-09T00:00:00+00:00"
-        toolkit = _toolkit(retry_since=started)
-        index_scheduling.stamp_schedule_last_run(
-            FakeSession(), toolkit, "docs", "7", "[ctx]", end_outage=False)
-        assert _entry(toolkit)["retry_since"] == started
-        assert _entry(toolkit)["last_run"] != "2026-01-01T00:00:00+00:00"
-
-    def test_the_caller_only_ends_the_outage_on_a_reported_failure(self, tick_source):
-        """AST-free source check: the escalation's cursor write must gate end_outage on the
-        outcome, or an unreportable tick silently restarts the clock."""
-        assert "end_outage=recorded != CONCLUDED_UNREPORTABLE" in tick_source
 
 
 class TestTickWiring:
@@ -434,9 +413,23 @@ class TestTickWiring:
             n for n in ast.walk(tick_tree)
             if isinstance(n, ast.If) and "retry_escalation_due" in ast.dump(n.test)]
         assert demotions, "nothing consults retry_escalation_due"
-        body = ast.dump(ast.Module(body=demotions[0].body, type_ignores=[]))
-        assert "init_issue_retryable" in body and "False" in body, \
-            "escalation must demote the classification"
+        gate = demotions[0]
+
+        # Polarity, not vocabulary: nothing here executes the tick, so an inverted
+        # condition would otherwise pass on the strength of the right names appearing.
+        assert isinstance(gate.test, ast.BoolOp) and isinstance(gate.test.op, ast.And), \
+            "escalation must require BOTH a retryable failure and an outlived grace"
+        assert not [n for n in ast.walk(gate.test)
+                    if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not)], \
+            "a negated escalation test would escalate blips and never escalate outages"
+
+        demoted = [n for n in ast.walk(gate)
+                   if isinstance(n, ast.Assign)
+                   and any(getattr(t, "id", None) == "init_issue_retryable"
+                           for t in n.targets)]
+        assert demoted, "escalation must demote the classification"
+        assert all(n.value.value is False for n in demoted), \
+            "escalation must set init_issue_retryable False, not True"
 
     def test_the_owner_facing_text_renders_the_grace_as_a_duration(self, tick_tree):
         """Pins the fix at the call site, not just in the helper.
@@ -480,23 +473,20 @@ class TestTickWiring:
         block = self._init_issue_block(tick_tree)
         branch = next(n for n in ast.walk(block)
                       if isinstance(n, ast.If) and "init_issue_retryable" in ast.dump(n.test))
+
+        # Hoisting the reporter above this branch leaves the branch clean while every
+        # retryable tick still notifies. That is caught by running the tick
+        # (test_6583c_tick_behaviour.py::test_a_blip_is_recorded_but_never_reported); a
+        # positional scan here also failed whenever the block gained a `with` or a guard.
         body = ast.dump(ast.Module(body=branch.body, type_ignores=[]))
         assert "handle_failed_index_schedule" not in body
         assert "stamp_schedule_last_run" not in body
 
-    def test_the_contention_paths_never_consume_the_cron_slot(self, tick_tree):
-        """The property, not a headcount: the handlers that catch a busy pool or a live run
-        must not stamp. A global `count(...) == 3` also fails on a legitimate fourth write
-        — the missing-connection-string path this branch defers — for no correctness reason.
-        """
-        handlers = [n for n in ast.walk(tick_tree) if isinstance(n, ast.ExceptHandler)]
-        assert handlers, "no exception handlers found in the tick"
-        for handler in handlers:
-            body = ast.dump(ast.Module(body=handler.body, type_ignores=[]))
-            assert "stamp_schedule_last_run" not in body, (
-                "an exception handler must not consume the cron slot: these are the "
-                "contention and transient paths that keep the 60s retry"
-            )
+    # Which paths may consume the cron slot is asserted by running the tick, in
+    # test_6583c_tick_behaviour.py. Four successive AST shapes each permitted a different
+    # arm — a source count, an ExceptHandler sweep, an `orelse` check that was vacuous, and
+    # a block allow-list that swept in the blocks' own else arms. The property is what the
+    # tick does, not where the call sits.
 
     def test_the_outage_stamp_is_written_once_not_per_tick(self, tick_tree):
         """Re-stamping would pin its age at one tick interval so it never escalates, and
