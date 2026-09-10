@@ -1094,6 +1094,30 @@ class RPC:
 
             room = get_chat_room(conversation.uuid)
 
+            # question_id is client-supplied and lands verbatim in the unique
+            # ConversationMessageGroup.uuid, so a resend of an already-stored turn
+            # used to surface as an IntegrityError at the next autoflush instead.
+            duplicate_question = session.query(ConversationMessageGroup.id).filter(
+                ConversationMessageGroup.uuid == parsed.question_id
+            ).first()
+            if duplicate_question is not None:
+                log.warning(
+                    "Rejecting resend of question_id %s in conversation %s",
+                    parsed.question_id, parsed.conversation_uuid,
+                )
+                self.context.sio.emit(
+                    event=SioEvents.socket_validation_error.value,
+                    data={
+                        'event': SioEvents.chat_predict.value,
+                        'content': 'This message has already been submitted',
+                        'type': 'error',
+                        'stream_id': parsed.conversation_uuid,
+                        'message_id': parsed.question_id,
+                    },
+                    room=room,
+                )
+                return {"error": "This message has already been submitted"}
+
             self.check_and_generate_conversation_name(
                 parsed.project_id, parsed.user_input, room, conversation
             )
