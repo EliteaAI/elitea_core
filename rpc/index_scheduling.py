@@ -24,6 +24,7 @@ from ..utils.index_scheduling import (
     clear_schedule_retry_since,
     retry_escalation_due,
     describe_grace,
+    CONCLUDED_UNREPORTABLE,
 )
 from ..utils.maintenance_gate import is_maintenance_active
 
@@ -236,6 +237,7 @@ class RPC:
                                                 stamp_schedule_last_run(
                                                     project_session, toolkit, index_meta_id,
                                                     user_id, ctx,
+                                                    end_outage=recorded != CONCLUDED_UNREPORTABLE,
                                                 )
                                         stats['failed'] += 1
                                         continue

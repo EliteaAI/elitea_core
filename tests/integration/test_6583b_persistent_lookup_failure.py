@@ -343,6 +343,10 @@ class TestRetrySinceWrites:
 class TestReportSurvivesAConfigurationsOutage:
     """The report path reaches pgvector through the plugin whose outage it usually reports."""
 
+    @pytest.fixture(scope="class")
+    def tick_source(self):
+        return (PLUGIN_ROOT / "rpc" / "index_scheduling.py").read_text()
+
     def test_an_expand_failure_concludes_instead_of_escaping(self, index_scheduling,
                                                              monkeypatch):
         """Escaping lands in the tick's settings catch-all, which does not move the cursor,
@@ -360,8 +364,51 @@ class TestReportSurvivesAConfigurationsOutage:
 
         recorded = index_scheduling.handle_failed_index_schedule(
             1, {}, 7, _toolkit(), "docs", "lookup broke")
-        assert recorded is True, "an unreportable failure must still consume the cron slot"
+        assert recorded, "an unreportable failure must still consume the cron slot"
+        assert recorded == index_scheduling.CONCLUDED_UNREPORTABLE, \
+            "it must stay distinguishable from a reported failure"
         assert sent == []
+
+    def test_a_failed_notification_does_not_undo_the_conclusion(self, index_scheduling,
+                                                                monkeypatch):
+        """By this point the row is flipped and the history entry committed.
+
+        An escape here leaves the caller unable to advance the cursor, so the next tick
+        re-flips and re-appends — the #6583 flood again, conditional on the notify path.
+        The payload is built in this frame (the message renderer runs here), so a raise
+        propagates whether or not the event bus is queued.
+        """
+        monkeypatch.setattr(index_scheduling, "update_toolkit_index_meta_history_with_failed_state",
+                            lambda *a, **kw: {"flipped": True, "skipped_live_run": False,
+                                              "reindex": True, "indexed": 5, "updated": 0})
+
+        def _boom(payload):
+            raise RuntimeError("notifications plugin exploded")
+        monkeypatch.setattr(index_scheduling, "this", types.SimpleNamespace(
+            module=types.SimpleNamespace(notify_index_data_status=_boom)))
+
+        recorded = index_scheduling.handle_failed_index_schedule(
+            1, {}, 7, _toolkit(), "docs", "creds broke")
+        assert recorded, "a failed notification must not un-reach the conclusion"
+        assert recorded != index_scheduling.CONCLUDED_UNREPORTABLE, \
+            "the failure WAS recorded; only the notification failed"
+
+    def test_an_unreported_failure_does_not_end_the_outage(self, index_scheduling,
+                                                           monkeypatch):
+        """Clearing the stamp here would restart the grace clock every period, so an
+        outage that keeps blocking its own report would never reach the owner."""
+        monkeypatch.setattr(index_scheduling, "flag_modified", lambda *a, **k: None)
+        started = "2026-09-09T00:00:00+00:00"
+        toolkit = _toolkit(retry_since=started)
+        index_scheduling.stamp_schedule_last_run(
+            FakeSession(), toolkit, "docs", "7", "[ctx]", end_outage=False)
+        assert _entry(toolkit)["retry_since"] == started
+        assert _entry(toolkit)["last_run"] != "2026-01-01T00:00:00+00:00"
+
+    def test_the_caller_only_ends_the_outage_on_a_reported_failure(self, tick_source):
+        """AST-free source check: the escalation's cursor write must gate end_outage on the
+        outcome, or an unreportable tick silently restarts the clock."""
+        assert "end_outage=recorded != CONCLUDED_UNREPORTABLE" in tick_source
 
 
 class TestTickWiring:
@@ -437,10 +484,19 @@ class TestTickWiring:
         assert "handle_failed_index_schedule" not in body
         assert "stamp_schedule_last_run" not in body
 
-    def test_the_retryable_branch_never_consumes_the_cron_slot(self, tick_source):
-        """Exactly three cursor writes, unchanged by this commit: credential failure,
-        missing index row, successful dispatch."""
-        assert tick_source.count("stamp_schedule_last_run(") == 3
+    def test_the_contention_paths_never_consume_the_cron_slot(self, tick_tree):
+        """The property, not a headcount: the handlers that catch a busy pool or a live run
+        must not stamp. A global `count(...) == 3` also fails on a legitimate fourth write
+        — the missing-connection-string path this branch defers — for no correctness reason.
+        """
+        handlers = [n for n in ast.walk(tick_tree) if isinstance(n, ast.ExceptHandler)]
+        assert handlers, "no exception handlers found in the tick"
+        for handler in handlers:
+            body = ast.dump(ast.Module(body=handler.body, type_ignores=[]))
+            assert "stamp_schedule_last_run" not in body, (
+                "an exception handler must not consume the cron slot: these are the "
+                "contention and transient paths that keep the 60s retry"
+            )
 
     def test_the_outage_stamp_is_written_once_not_per_tick(self, tick_tree):
         """Re-stamping would pin its age at one tick interval so it never escalates, and

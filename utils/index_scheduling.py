@@ -102,20 +102,24 @@ def clear_schedule_retry_since(project_session, toolkit, index_meta_id, user_id,
 
 
 def stamp_schedule_last_run(project_session, toolkit, index_meta_id, user_id, ctx,
-                            when: str | None = None) -> str | None:
+                            when: str | None = None,
+                            end_outage: bool = True) -> str | None:
     """Advance a schedule's ``last_run`` cron cursor. Returns the stamp written, or None.
 
     Only call this once the tick has concluded something about the schedule. A lock, a live
     run or an exception concluded nothing, and those paths need the cursor to stay put so
     the next scan retries within a minute rather than a cron period.
 
-    Concluding also ends any retry run, so the clear rides along on this write rather than
-    costing a second one.
+    Concluding usually ends any retry run, so the clear rides along on this write rather
+    than costing a second one. ``end_outage=False`` keeps the stamp: a failure that was
+    concluded but could not be reported has not ended the outage, and clearing it would
+    restart the grace clock every period so the owner would never be told.
     """
     current_time = when or datetime.now(UTC).isoformat()
     if _write_schedule_fields(
         project_session, toolkit, index_meta_id, user_id, ctx,
-        {'last_run': current_time, 'retry_since': None},
+        {'last_run': current_time, 'retry_since': None} if end_outage
+        else {'last_run': current_time},
         "the schedule stays due and will be retried on every tick until this write succeeds",
     ):
         return current_time
@@ -360,14 +364,23 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
         return False, f"could not look up credential '{config_title}': {e.__class__.__name__}", True
 
 
+# handle_failed_index_schedule's three outcomes. Truthiness is the "did the tick conclude
+# something" test the caller gates its cursor write on; CONCLUDED_UNREPORTABLE is additionally
+# distinguishable because a failure that was never reported must not end the outage.
+CONCLUDED_REPORTED = True
+CONCLUDED_UNREPORTABLE = "unreportable"
+NOT_CONCLUDED = False
+
+
 def handle_failed_index_schedule(
     project_id, updated_settings, user_id, toolkit, index_meta_id, init_issue,
     expand_user_id=None
-) -> bool:
+):
     """Handle failed index scheduling: update history and notify status.
 
-    Returns True when this tick concluded something about the schedule itself, so the caller
-    should advance ``last_run``; False when a lock or a live run concluded nothing and the
+    Returns one of the three ``CONCLUDED_*`` / ``NOT_CONCLUDED`` values above. Truthy means
+    the tick concluded something about the schedule itself and the caller should advance
+    ``last_run``; ``NOT_CONCLUDED`` means a lock or a live run concluded nothing and the
     schedule must be retried on the next scan.
 
     ``expand_user_id`` is the user_id used when expanding configurations. For team schedules
@@ -396,9 +409,11 @@ def handle_failed_index_schedule(
         # settings catch-all, which does not advance the cursor, so every broken schedule
         # would re-enter this 2s RPC on every tick — enough of them push the tick past 60s
         # and the re-entrancy guard then starves every schedule on the platform.
-        # Concluded but unreportable: consume the slot and try again next period.
+        # Concluded but unreportable. The caller consumes the slot so the tick does not
+        # re-enter this call, but must NOT end the outage: clearing it here would restart
+        # the grace clock every period and the owner would never be told.
         log.exception(f"{ctx} could not expand pgvector settings to record the failure: {e!r}")
-        return True
+        return CONCLUDED_UNREPORTABLE
     try:
         outcome = update_toolkit_index_meta_history_with_failed_state(
             pgv_settings_expanded.get('connection_string'),
@@ -431,22 +446,29 @@ def handle_failed_index_schedule(
         # Absent, not busy. A manual run would create the row, but paying a vault read and
         # a pgvector round trip every 60s to notice that is not worth it.
         return True
-    this.module.notify_index_data_status({
-        'id': None,
-        'index_name': index_meta_id,
-        'state': 'failed',
-        'error': init_issue,
-        'reindex': outcome.get('reindex', False),
-        'indexed': outcome.get('indexed', 0),
-        'updated': outcome.get('updated', 0),
-        'indexed_chunks': outcome.get('indexed_chunks', 0),
-        'toolkit_id': toolkit.id,
-        'project_id': project_id,
-        # int(None) raises; a missing author must fall through to notify's own
-        # "cannot notify without a user_id" guard, not crash here.
-        'user_id': int(user_id) if user_id is not None else None,
-        'initiator': InitiatorType.schedule
-    })
+    # The row is flipped and committed by now, so the conclusion is already reached and a
+    # failed notification does not un-reach it. Escaping here would leave the caller unable
+    # to advance the cursor, and the schedule would re-flip and re-append history on every
+    # tick — #6583 again, conditional on the notify path breaking.
+    try:
+        this.module.notify_index_data_status({
+            'id': None,
+            'index_name': index_meta_id,
+            'state': 'failed',
+            'error': init_issue,
+            'reindex': outcome.get('reindex', False),
+            'indexed': outcome.get('indexed', 0),
+            'updated': outcome.get('updated', 0),
+            'indexed_chunks': outcome.get('indexed_chunks', 0),
+            'toolkit_id': toolkit.id,
+            'project_id': project_id,
+            # int(None) raises; a missing author must fall through to notify's own
+            # "cannot notify without a user_id" guard, not crash here.
+            'user_id': int(user_id) if user_id is not None else None,
+            'initiator': InitiatorType.schedule
+        })
+    except Exception as e:  # pylint: disable=W0703
+        log.exception(f"{ctx} failure recorded but could not be notified: {e!r}")
     # Debug, not info: a permanently broken schedule reaches this once per cron period for
     # as long as it stays broken, and the info line at the top of this function already
     # carries the reason. The two early returns above log their own outcome, so nothing is

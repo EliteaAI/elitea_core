@@ -425,12 +425,19 @@ class TestTickWiring:
                 return
         pytest.fail("could not find the `if not index:` block")
 
-    def test_contention_and_transient_paths_do_not_stamp(self, tick_source):
-        """The paths that must keep the 60s retry: a live-but-fresh run, the settings
-        resolution exception, the missing connection string, and the dispatch catch-all
-        (which swallows PoolSaturationError and IndexRunInProgressError). Exactly three
-        call sites: credential failure, missing index row, successful dispatch."""
-        assert tick_source.count("stamp_schedule_last_run(") == 3
+    def test_the_contention_paths_never_consume_the_cron_slot(self, tick_tree):
+        """The property, not a headcount: the handlers that catch a busy pool or a live run
+        must not stamp. A global `count(...) == 3` also fails on a legitimate fourth write
+        — the missing-connection-string path this branch defers — for no correctness reason.
+        """
+        handlers = [n for n in ast.walk(tick_tree) if isinstance(n, ast.ExceptHandler)]
+        assert handlers, "no exception handlers found in the tick"
+        for handler in handlers:
+            body = ast.dump(ast.Module(body=handler.body, type_ignores=[]))
+            assert "stamp_schedule_last_run" not in body, (
+                "an exception handler must not consume the cron slot: these are the "
+                "contention and transient paths that keep the 60s retry"
+            )
 
 
     def _init_issue_block(self, tick_tree):
