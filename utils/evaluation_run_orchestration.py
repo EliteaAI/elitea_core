@@ -852,18 +852,20 @@ def orchestrate_run(
 # stay lazy so the pure core above loads by source with no `tools` / SDK present.
 
 def _make_ai_scorer(project_id: int, judge_settings: dict, *, user_id: Optional[int] = None,
-                    timeout: int = 60, judge=None):
+                    timeout: int = 60, judge=None, platform_run_id: Optional[str] = None):
     """Bind :func:`evaluation_ai_judge.evaluate_case` into the ``ai_scorer`` contract."""
     from .evaluation_ai_judge import evaluate_case
 
     def _score(evidence: dict, dimensions: List[dict]) -> List[dict]:
         return evaluate_case(project_id, judge_settings, evidence, dimensions,
-                             timeout=timeout, judge=judge, user_id=user_id)
+                             timeout=timeout, judge=judge, user_id=user_id,
+                             platform_run_id=platform_run_id)
 
     return _score
 
 
-def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: int = 120):
+def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: int = 120,
+                       platform_run_id: Optional[str] = None):
     """Bind live agent execution (H4) into the ``agent_runner`` contract for an offline-batch run.
 
     Loads the run's frozen ``application_version_id`` expanded ``version_details`` **once**, checks
@@ -906,7 +908,8 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
                              '(P1 scope: single-turn agents only, pipelines deferred)',
                     'structure': structure}
         outcome = run_agent(project_id, version_details, case,
-                            user_id=user_id, timeout=timeout)
+                            user_id=user_id, timeout=timeout,
+                            platform_run_id=platform_run_id)
         return {**outcome, 'structure': structure}
 
     return _run
@@ -950,6 +953,7 @@ def execute_run(
     judge=None,
     executor=None,
     progress_publisher: Optional[Callable[[dict], None]] = None,
+    platform_run_id: Optional[str] = None,
 ) -> dict:
     """Execute a persisted ``created`` run to completion and persist its results + headline.
 
@@ -1119,14 +1123,19 @@ def execute_run(
                 )
         judge_budget_tokens = context_window - max_output_tokens - JUDGE_TOKEN_SAFETY_MARGIN
 
-        ai_scorer = _make_ai_scorer(project_id, settings, judge=judge, user_id=owner_id)
+        # The run's platform run id rides along into every judge / agent LLM call so the whole
+        # eval run's usage correlates to one id (#6569). Threaded explicitly rather than via a
+        # contextvar: cases are scored concurrently on pool threads, which contextvars don't reach.
+        ai_scorer = _make_ai_scorer(project_id, settings, judge=judge, user_id=owner_id,
+                                    platform_run_id=platform_run_id)
         code_scorer = _make_code_scorer(snapshot, executor)
 
         # Live agent execution (H4) only for offline-batch: on-demand cases already carry the
         # stored conversation's output. ``owner_id`` is the acting user for detail resolution.
         agent_runner = None
         if snapshot.get('trigger_type') == TRIGGER_OFFLINE_BATCH:
-            agent_runner = _make_agent_runner(project_id, snapshot, user_id=owner_id)
+            agent_runner = _make_agent_runner(project_id, snapshot, user_id=owner_id,
+                                              platform_run_id=platform_run_id)
 
         outcome = orchestrate_run(snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
                                   agent_runner=agent_runner,

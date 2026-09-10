@@ -14,6 +14,7 @@ from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
+from .utils.run_id import stamp_predict_run_id
 from pydantic import ValidationError
 
 from .models.pd.sio import NextInputSuggestionPayload
@@ -659,7 +660,9 @@ class Module(module.ModuleModel):
         # being missed. Callers that want entry-point-specific error shapes
         # catch MaintenanceInProgressError and translate; unhandled propagation
         # is intentional and preferable to silently returning None (which is
-        # indistinguishable from pool saturation).
+        # indistinguishable from pool saturation). Same seam also mints/stamps
+        # the platform run id (stamp_predict_run_id) for the same reason: a
+        # new dispatch path can't forget to correlate its LLM/tool usage.
         _original_start_task = self.task_node.start_task
 
         def _maintenance_gated_start_task(*args, **kwargs):
@@ -672,6 +675,7 @@ class Module(module.ModuleModel):
                     task_name,
                 )
                 raise MaintenanceInProgressError(task_name=task_name)
+            stamp_predict_run_id(kwargs)
             return _original_start_task(*args, **kwargs)
 
         self.task_node.start_task = _maintenance_gated_start_task
@@ -691,6 +695,7 @@ class Module(module.ModuleModel):
             from .utils.exceptions import MaintenanceInProgressError
             if is_maintenance_active():
                 raise MaintenanceInProgressError(task_name=EVAL_RUN_TASK_NAME)
+            stamp_predict_run_id(kwargs)
             return _original_eval_start_task(*args, **kwargs)
 
         self.eval_task_node.start_task = _maintenance_gated_eval_start_task
