@@ -448,7 +448,11 @@ class TestTickWiring:
         return branches[0]
 
     def test_a_transient_lookup_failure_reports_nothing_at_all(self, tick_tree):
-        """The retryable branch must be inert, not merely stamp-free.
+        """The retryable branch must REPORT nothing, not merely skip the stamp.
+
+        It is no longer inert: it records when the outage began so a later tick can tell an
+        outage from a blip. Recording is not reporting, and the assertions below name the
+        two calls that would be.
 
         Skipping only the stamp is the #6583 runaway through a narrower door: the failure
         would still be flipped onto the index row, appended to its unbounded history and

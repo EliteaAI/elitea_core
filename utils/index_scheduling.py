@@ -1,4 +1,4 @@
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
@@ -29,6 +29,78 @@ def index_log_context(project_id=None, toolkit_id=None, index_name=None, user_id
     return f"[idx {' '.join(parts)}]"
 
 
+# How long a retryable credential-lookup failure stays log-only before it is reported as
+# an ordinary failure. Longer than any restart or hot reload, so those cannot be mistaken
+# for an outage; shorter than the 24h floor the API enforces on schedules, so a daily
+# schedule that breaks in the morning is still reported the same day.
+RETRYABLE_REPORT_GRACE = timedelta(hours=1)
+
+
+def describe_grace(delta: timedelta = RETRYABLE_REPORT_GRACE) -> str:
+    """Render the grace as a duration for the schedule's owner, who reads it in a
+    notification and in the index history.
+
+    ``str(timedelta(hours=1))`` is ``'1:00:00'``, which reads as a clock time.
+    """
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return "a second" if seconds == 1 else f"{seconds} seconds"
+    minutes = seconds // 60
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return "an hour" if hours == 1 else f"{hours} hours"
+    return "a minute" if minutes == 1 else f"{minutes} minutes"
+
+
+def retry_escalation_due(retry_since_iso: str | None, now: datetime | None = None) -> bool:
+    """True once a run of retryable failures has outlived a blip.
+
+    False for None — no run in progress — and for anything unreadable or in the future.
+    False is the safe answer to all three: the caller stays silent, which is today's
+    behaviour, rather than reporting on every tick, which is #6583.
+    """
+    if not retry_since_iso:
+        return False
+    try:
+        started = datetime.fromisoformat(retry_since_iso)
+    except Exception:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return (now or datetime.now(UTC)) - started >= RETRYABLE_REPORT_GRACE
+
+
+def stamp_schedule_retry_since(project_session, toolkit, index_meta_id, user_id, ctx,
+                               when: str | None = None) -> str | None:
+    """Record when the current run of retryable failures began. Does NOT move the cursor.
+
+    Written once per outage, not per tick: its age has to measure the outage, and
+    re-stamping would pin it at one tick interval so it never outlives any grace.
+    """
+    current_time = when or datetime.now(UTC).isoformat()
+    if _write_schedule_fields(
+        project_session, toolkit, index_meta_id, user_id, ctx,
+        {'retry_since': current_time},
+        "this outage will not be reported until a later tick manages to record it",
+    ):
+        return current_time
+    return None
+
+
+def clear_schedule_retry_since(project_session, toolkit, index_meta_id, user_id, ctx) -> None:
+    """End the retry run without concluding anything about the schedule.
+
+    The lookup recovering is not itself a conclusion — the tick may still hit contention
+    and never reach a cursor write — so a stale stamp would survive and escalate the next
+    unrelated blip with no grace at all.
+    """
+    _write_schedule_fields(
+        project_session, toolkit, index_meta_id, user_id, ctx,
+        {'retry_since': None},
+        "the stale stamp may escalate the next unrelated failure with no grace",
+    )
+
+
 def stamp_schedule_last_run(project_session, toolkit, index_meta_id, user_id, ctx,
                             when: str | None = None) -> str | None:
     """Advance a schedule's ``last_run`` cron cursor. Returns the stamp written, or None.
@@ -37,10 +109,32 @@ def stamp_schedule_last_run(project_session, toolkit, index_meta_id, user_id, ct
     run or an exception concluded nothing, and those paths need the cursor to stay put so
     the next scan retries within a minute rather than a cron period.
 
+    Concluding also ends any retry run, so the clear rides along on this write rather than
+    costing a second one.
+    """
+    current_time = when or datetime.now(UTC).isoformat()
+    if _write_schedule_fields(
+        project_session, toolkit, index_meta_id, user_id, ctx,
+        {'last_run': current_time, 'retry_since': None},
+        "the schedule stays due and will be retried on every tick until this write succeeds",
+    ):
+        return current_time
+    return None
+
+
+def _write_schedule_fields(project_session, toolkit, index_meta_id, user_id, ctx,
+                           fields: dict, consequence: str) -> bool:
+    """Write keys into the live schedule entry, delete-wins. True when the write landed.
+
+    ``consequence`` is what a failed write means for this particular caller, and it differs
+    enough between them that a shared sentence would be wrong for at least one: a dropped
+    cursor write leaves the schedule due every tick, a dropped outage stamp means the
+    outage is never reported, and a dropped clear can escalate the next unrelated failure
+    with no grace.
+
     Mutates through ``toolkit.meta`` after ``refresh()``: refresh rebinds it to a new dict,
     so writing into the dicts the tick loop captured earlier is silently dropped.
     """
-    current_time = when or datetime.now(UTC).isoformat()
     try:
         # Re-read the row to avoid clobbering a concurrent deletion (delete wins:
         # if the schedule was removed mid-tick, skip).
@@ -52,12 +146,12 @@ def stamp_schedule_last_run(project_session, toolkit, index_meta_id, user_id, ct
             .get('schedules', {})
         )
         if user_id not in live_schedules:
-            log.info(f"{ctx} schedule was deleted mid-tick, skipping last_run update")
-            return None
-        live_schedules[user_id]['last_run'] = current_time
+            log.info(f"{ctx} schedule was deleted mid-tick, skipping {sorted(fields)} update")
+            return False
+        live_schedules[user_id].update(fields)
         flag_modified(toolkit, 'meta')
         project_session.commit()
-        return current_time
+        return True
     except Exception as exc:  # pylint: disable=W0703
         # A session left in a failed transaction would take every later schedule in this
         # tick down with it, so absorb the failure here rather than in the caller.
@@ -65,11 +159,8 @@ def stamp_schedule_last_run(project_session, toolkit, index_meta_id, user_id, ct
             project_session.rollback()
         except Exception:  # pylint: disable=W0703
             pass
-        log.exception(
-            f"{ctx} failed to advance last_run: {exc!r}; the schedule stays due and will "
-            f"be retried on every tick until this write succeeds"
-        )
-        return None
+        log.exception(f"{ctx} failed to write {sorted(fields)}: {exc!r}; {consequence}")
+        return False
 
 
 # Settings slots that never hold toolkit credentials, so they must not be mistaken
@@ -292,12 +383,22 @@ def handle_failed_index_schedule(
     log.info(
         f"{ctx} skipping scheduled run of toolkit type '{toolkit.type}' due to: {init_issue}"
     )
-    pgv_settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
-        project_id=project_id,
-        settings=updated_settings.get('pgvector_configuration', {}),
-        user_id=expand_user_id if expand_user_id is not None else user_id,
-        unsecret=True
-    )
+    try:
+        pgv_settings_expanded = rpc_tools.RpcMixin().rpc.timeout(2).configurations_expand(
+            project_id=project_id,
+            settings=updated_settings.get('pgvector_configuration', {}),
+            user_id=expand_user_id if expand_user_id is not None else user_id,
+            unsecret=True
+        )
+    except Exception as e:  # pylint: disable=W0703
+        # This reports failures that are often the configurations plugin being down, and it
+        # reaches pgvector through that same plugin. Escaping here lands in the tick's
+        # settings catch-all, which does not advance the cursor, so every broken schedule
+        # would re-enter this 2s RPC on every tick — enough of them push the tick past 60s
+        # and the re-entrancy guard then starves every schedule on the platform.
+        # Concluded but unreportable: consume the slot and try again next period.
+        log.exception(f"{ctx} could not expand pgvector settings to record the failure: {e!r}")
+        return True
     try:
         outcome = update_toolkit_index_meta_history_with_failed_state(
             pgv_settings_expanded.get('connection_string'),

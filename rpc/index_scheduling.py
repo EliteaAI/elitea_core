@@ -20,6 +20,10 @@ from ..utils.index_scheduling import (
     handle_failed_index_schedule,
     index_log_context,
     stamp_schedule_last_run,
+    stamp_schedule_retry_since,
+    clear_schedule_retry_since,
+    retry_escalation_due,
+    describe_grace,
 )
 from ..utils.maintenance_gate import is_maintenance_active
 
@@ -178,6 +182,28 @@ class RPC:
                                     if not init_issue and not credentials_ok:
                                         init_issue = credentials_issue
                                         init_issue_retryable = credentials_retryable
+                                        if init_issue_retryable and retry_escalation_due(
+                                            schedule_model.retry_since
+                                        ):
+                                            # Outlived a blip, so it is an outage. Demote it
+                                            # rather than reporting here, so the terminal path
+                                            # reports and stamps exactly as it always does.
+                                            # The owner reads this in a notification, and a
+                                            # raw timedelta renders as a clock time.
+                                            init_issue = (
+                                                f"{init_issue}; still failing for over "
+                                                f"{describe_grace()}"
+                                            )
+                                            init_issue_retryable = False
+                                    elif credentials_ok and schedule_model.retry_since:
+                                        # The lookup recovered. Clear here rather than on a
+                                        # cursor write: this tick may still hit contention and
+                                        # never reach one, leaving a stale stamp to escalate
+                                        # the next unrelated blip with no grace.
+                                        clear_schedule_retry_since(
+                                            project_session, toolkit, index_meta_id,
+                                            user_id, ctx,
+                                        )
 
                                     user_token = get_system_user_token(project_id)
                                     if not init_issue and not user_token:
@@ -185,15 +211,20 @@ class RPC:
 
                                     if init_issue:
                                         if init_issue_retryable:
-                                            # Must not report: flipping the row and notifying
-                                            # here would repeat on every tick for as long as the
-                                            # RPC is down, since the cursor deliberately stays
-                                            # put. Log-only, as the settings-resolution path
-                                            # below does for the same class of failure.
+                                            # Record the outage without reporting it: the
+                                            # cursor stays put here, so notifying would repeat
+                                            # every tick. The stamp is what lets a later tick
+                                            # tell an outage from a blip.
+                                            if not schedule_model.retry_since:
+                                                stamp_schedule_retry_since(
+                                                    project_session, toolkit, index_meta_id,
+                                                    user_id, ctx,
+                                                )
                                             log.warning(
                                                 f"{ctx} {init_issue}; retrying on the next scan. "
                                                 f"This index is not being updated while the "
-                                                f"credential lookup keeps failing"
+                                                f"credential lookup keeps failing; reporting it "
+                                                f"if it outlives {describe_grace()}"
                                             )
                                         else:
                                             recorded = handle_failed_index_schedule(

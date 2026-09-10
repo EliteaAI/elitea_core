@@ -105,6 +105,10 @@ class ToolkitIndexingSchedule(BaseModel):
     # concluded attempt advances it, and saving or disabling the schedule resets it. The
     # run record is the pgvector index_meta history.
     last_run: str = _EPOCH_ISO
+    # When the current run of retryable credential-lookup failures began, or None when no
+    # such run is in progress. Set on the first failure and left alone until something
+    # concludes, so its age measures the outage rather than the tick interval.
+    retry_since: Optional[str] = None
 
     @validator('timezone', pre=True)
     def validate_timezone(cls, v):
@@ -140,6 +144,28 @@ class ToolkitIndexingSchedule(BaseModel):
             dt = dt.astimezone(timezone.utc)
 
         return dt.isoformat()
+
+    @validator('retry_since', pre=True)
+    def normalize_retry_since(cls, v):
+        """Degrade to None on anything unreadable — deliberately unlike normalize_last_run
+        above, which raises.
+
+        A raise here strands the schedule permanently: parse_obj fails, and the tick logs
+        "invalid schedule configuration" and skips it on every scan (#6526). This value only
+        decides when to escalate a report, so an unreadable one is worth another grace
+        window of silence, never a schedule that can no longer run at all. None must keep
+        meaning "no retry run in progress" — an epoch fallback would read as "failing since
+        1970" and escalate on the first tick.
+        """
+        if v is None:
+            return None
+        try:
+            dt = v if isinstance(v, datetime) else datetime.fromisoformat(v)
+        except Exception:  # TypeError for a dict/int, ValueError for a malformed string
+            return None
+        if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
 
     @validator('cron')
     def validate_cron(cls, v: str) -> str:
