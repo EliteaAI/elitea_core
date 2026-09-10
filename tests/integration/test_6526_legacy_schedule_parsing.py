@@ -90,6 +90,44 @@ class TestLegacyMissingFields:
         model = index_pd.ToolkitIndexingSchedule.parse_obj(_schedule(last_run=None))
         assert model.last_run.startswith("1970-01-01")
 
+    def test_a_schedule_without_retry_since_parses(self, index_pd):
+        """#6583 added the field; every stored row predates it."""
+        model = index_pd.ToolkitIndexingSchedule.parse_obj(_schedule())
+        assert model.retry_since is None
+
+    def test_an_explicit_null_retry_since_parses(self, index_pd):
+        assert index_pd.ToolkitIndexingSchedule.parse_obj(
+            _schedule(retry_since=None)).retry_since is None
+
+    def test_a_garbled_retry_since_does_not_strand_the_schedule(self, index_pd):
+        """It must DEGRADE where last_run RAISES.
+
+        A raise fails parse_obj, and the tick then logs "invalid schedule configuration"
+        and skips the schedule on every scan forever — the #6526 failure itself. An
+        unreadable escalation stamp is worth one more grace window of silence, never a
+        schedule that can no longer run.
+        """
+        model = index_pd.ToolkitIndexingSchedule.parse_obj(_schedule(retry_since="not a date"))
+        assert model.retry_since is None
+
+    def test_a_non_string_retry_since_does_not_strand_the_schedule(self, index_pd):
+        """A hand-edited row yields TypeError, not ValueError — a narrow except misses it."""
+        for bad in ({"x": 1}, 12345, [], True):
+            assert index_pd.ToolkitIndexingSchedule.parse_obj(
+                _schedule(retry_since=bad)).retry_since is None
+
+    def test_retry_since_is_normalised_to_utc(self, index_pd):
+        model = index_pd.ToolkitIndexingSchedule.parse_obj(
+            _schedule(retry_since="2026-09-09T12:00:00+04:00"))
+        assert model.retry_since == "2026-09-09T08:00:00+00:00"
+
+    def test_every_post_v1_field_can_be_absent_at_once(self, index_pd):
+        """The strongest anti-#6526 assertion: a v1 row carries none of them."""
+        model = index_pd.ToolkitIndexingSchedule.parse_obj(
+            {"cron": "56 15 * * *", "enabled": True})
+        assert (model.created_by, model.timezone, model.retry_since) == (None, "UTC", None)
+        assert model.last_run.startswith("1970-01-01")
+
     def test_an_explicit_null_timezone_is_treated_as_utc(self, index_pd):
         assert index_pd.ToolkitIndexingSchedule.parse_obj(_schedule(timezone=None)).timezone == "UTC"
 

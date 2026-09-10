@@ -4,7 +4,6 @@ from copy import deepcopy
 from datetime import datetime, UTC
 
 from pylon.core.tools import web, log
-from sqlalchemy.orm.attributes import flag_modified
 from tools import VaultClient, db, rpc_tools, this
 
 from ..models.elitea_tools import EliteATool
@@ -16,7 +15,16 @@ from ..utils.application_tools import get_pending_index_run_heartbeat, get_sessi
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
 from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
-from ..utils.index_scheduling import resolve_credentials, handle_failed_index_schedule, index_log_context
+from ..utils.index_scheduling import (
+    resolve_credentials,
+    handle_failed_index_schedule,
+    index_log_context,
+    stamp_schedule_last_run,
+    stamp_schedule_retry_since,
+    clear_schedule_retry_since,
+    retry_escalation_due,
+    describe_grace,
+)
 from ..utils.maintenance_gate import is_maintenance_active
 
 
@@ -154,7 +162,7 @@ class RPC:
                                     updated_settings = deepcopy(toolkit.settings)
 
                                     # Apply user-provided credentials if present
-                                    credentials_ok, credentials_issue = resolve_credentials(
+                                    credentials_ok, credentials_issue, credentials_retryable = resolve_credentials(
                                         project_settings=updated_settings,
                                         toolkit_type=toolkit.type,
                                         user_config=user_config,
@@ -170,19 +178,65 @@ class RPC:
                                     # written to the index history and shown to whoever owns
                                     # the schedule, and "missing" vs "not found" vs "lookup
                                     # failed" need different actions from them.
+                                    init_issue_retryable = False
                                     if not init_issue and not credentials_ok:
                                         init_issue = credentials_issue
+                                        init_issue_retryable = credentials_retryable
+                                        if init_issue_retryable and retry_escalation_due(
+                                            schedule_model.retry_since
+                                        ):
+                                            # Outlived a blip, so it is an outage. Demote it
+                                            # rather than reporting here, so the terminal path
+                                            # reports and stamps exactly as it always does.
+                                            # The owner reads this in a notification, and a
+                                            # raw timedelta renders as a clock time.
+                                            init_issue = (
+                                                f"{init_issue}; still failing for over "
+                                                f"{describe_grace()}"
+                                            )
+                                            init_issue_retryable = False
+                                    elif credentials_ok and schedule_model.retry_since:
+                                        # The lookup recovered. Clear here rather than on a
+                                        # cursor write: this tick may still hit contention and
+                                        # never reach one, leaving a stale stamp to escalate
+                                        # the next unrelated blip with no grace.
+                                        clear_schedule_retry_since(
+                                            project_session, toolkit, index_meta_id,
+                                            user_id, ctx,
+                                        )
 
                                     user_token = get_system_user_token(project_id)
                                     if not init_issue and not user_token:
                                         init_issue = "missing valid user token"
 
                                     if init_issue:
-                                        handle_failed_index_schedule(
-                                            project_id, updated_settings, creator_id, toolkit,
-                                            index_meta_id, init_issue,
-                                            expand_user_id=creator_id,
-                                        )
+                                        if init_issue_retryable:
+                                            # Record the outage without reporting it: the
+                                            # cursor stays put here, so notifying would repeat
+                                            # every tick. The stamp is what lets a later tick
+                                            # tell an outage from a blip.
+                                            if not schedule_model.retry_since:
+                                                stamp_schedule_retry_since(
+                                                    project_session, toolkit, index_meta_id,
+                                                    user_id, ctx,
+                                                )
+                                            log.warning(
+                                                f"{ctx} {init_issue}; retrying on the next scan. "
+                                                f"This index is not being updated while the "
+                                                f"credential lookup keeps failing; reporting it "
+                                                f"if it outlives {describe_grace()}"
+                                            )
+                                        else:
+                                            recorded = handle_failed_index_schedule(
+                                                project_id, updated_settings, creator_id, toolkit,
+                                                index_meta_id, init_issue,
+                                                expand_user_id=creator_id,
+                                            )
+                                            if recorded:
+                                                stamp_schedule_last_run(
+                                                    project_session, toolkit, index_meta_id,
+                                                    user_id, ctx,
+                                                )
                                         stats['failed'] += 1
                                         continue
 
@@ -234,6 +288,13 @@ class RPC:
 
                                         if not index:
                                             log.warning(f"{ctx} index not found in database")
+                                            # A manual run would create this row, but re-running
+                                            # the vault read and this query every 60s to notice
+                                            # that is not worth it.
+                                            stamp_schedule_last_run(
+                                                project_session, toolkit, index_meta_id,
+                                                user_id, ctx,
+                                            )
                                             stats['failed'] += 1
                                             continue
 
@@ -332,26 +393,11 @@ class RPC:
                                             )
                                             stats['dispatched'] += 1
 
-                                            # Update last_run timestamp in toolkit meta.
-                                            # Re-read the row to avoid clobbering a concurrent deletion
-                                            # (delete wins: if the schedule was removed mid-tick, skip).
                                             current_time = datetime.now(UTC).isoformat()
-                                            project_session.refresh(toolkit)
-                                            live_schedules = (
-                                                toolkit.meta
-                                                .get('indexes_meta', {})
-                                                .get(index_meta_id, {})
-                                                .get('schedules', {})
+                                            stamp_schedule_last_run(
+                                                project_session, toolkit, index_meta_id,
+                                                user_id, ctx, when=current_time,
                                             )
-                                            if user_id not in live_schedules:
-                                                log.info(
-                                                    f"{ctx} schedule was deleted mid-tick, "
-                                                    f"skipping last_run update"
-                                                )
-                                            else:
-                                                toolkit.meta['indexes_meta'][index_meta_id]['schedules'][user_id]['last_run'] = current_time
-                                                flag_modified(toolkit, 'meta')
-                                                project_session.commit()
 
                                             log.info(
                                                 f"{ctx} index trigger finished at {current_time} "
