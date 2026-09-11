@@ -565,6 +565,21 @@ def test_a_genuinely_different_id_is_still_a_mismatch(skill_api):
     assert CALLS['update_skill_version'] == []
 
 
+@pytest.mark.parametrize('spelling,url_version', [(True, '1'), (False, '0')])
+def test_a_boolean_id_never_addresses_the_numerically_equal_version(skill_api, spelling, url_version):
+    """`bool` subclasses `int`, so `float(True) == float(1)`. Without the explicit guard in
+    `is_same_id`, `{"id": true}` silently addresses version 1 and the write lands on the wrong
+    record - and a guard that nothing pins is exactly the line a later tidy-up removes."""
+    body, status = _put(
+        skill_api,
+        {'version': {'id': spelling, 'instructions': 'x'}},
+        query={'version_id': url_version},
+    )
+
+    assert status == 400, f'{spelling!r} addressed version {url_version}: {body}'
+    assert _version_writes() == []
+
+
 def test_the_metadata_branch_tolerates_echoed_transport_keys(skill_api):
     """The version branch drops these; the metadata branch used to 400 on `skill_id`, so the same
     direct HTTP client was accepted on one branch and rejected on the other."""
@@ -586,6 +601,23 @@ def test_the_metadata_branch_still_rejects_a_disagreeing_transport_key(skill_api
     assert status == 400
     assert 'does not match' in body['error']
     assert CALLS['update_skill'] == []
+
+
+@pytest.mark.parametrize('key', ['project_id', 'skill_id'])
+def test_both_branches_reject_a_disagreeing_transport_key_identically(skill_api, key):
+    """The two branches read the same key off the same URL, so a caller must not have to learn
+    two error texts for one mistake. They diverged once already - the metadata branch grew its
+    own copy of the cross-check with its own wording - and only `pop_url_owned_keys` being the
+    single implementation keeps them together. Comparing the texts fails if it is re-inlined."""
+    metadata_body, metadata_status = _put(skill_api, {key: 999, 'name': 'x'})
+    version_body, version_status = _put(
+        skill_api, {key: 999, 'instructions': 'x'}, query={'version_id': '8'},
+    )
+
+    assert metadata_status == version_status == 400
+    assert metadata_body['error'] == version_body['error']
+    assert repr(999) in metadata_body['error']
+    assert CALLS['update_skill'] == [] and _version_writes() == []
 
 
 # --- the null-tolerance must not reach the destructive call site -------------------------

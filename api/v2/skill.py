@@ -32,24 +32,13 @@ from ...utils.mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 
 SKILL_PATH = '<string:mode>/<int:project_id>/<int:skill_id>'
 
-# #6410: keys that name *where* the request goes rather than *what* it writes. The MCP executor
-# routes every tool argument that is not a declared path/query parameter into the request body,
-# and a direct HTTP client may echo its own URL params back, so they arrive in bodies that
-# SkillVersionUpdateModel (extra="forbid") would otherwise reject.
-TRANSPORT_OWNED_BODY_FIELDS = frozenset({'project_id', 'user_id', 'skill_id', 'version_id'})
-
-# Fields of the nested skill shape that have no meaning once a single version is addressed.
-SKILL_ONLY_BODY_FIELDS = frozenset({'description'})
-
 MALFORMED_BODY_ERROR = 'request body must be present, sent as application/json, and a JSON object'
 
 
-def _same_id(a, b) -> bool:
-    """Compare an id supplied in a body with one taken from the URL ('8' == 8 == 8.0).
-
-    JSON gives no integer type hint, so a model may spell the same id as a string, an int or a
-    float. Only a genuinely different id should be treated as a mismatch.
-    """
+def is_same_id(a, b) -> bool:
+    """JSON carries no integer type hint, so 8, '8' and 8.0 all address the same record."""
+    # bool subclasses int, so without this float(True) == float(1) lets {"id": true} match
+    # version 1.
     if isinstance(a, bool) or isinstance(b, bool):
         return a is b
     try:
@@ -58,19 +47,33 @@ def _same_id(a, b) -> bool:
         return str(a) == str(b)
 
 
-def _render_keys(keys) -> str:
-    return ', '.join(repr(key) for key in keys)
+def pop_url_owned_keys(body: dict, url_values: dict) -> tuple[list, str | None]:
+    """Remove the keys the URL already fixes, rejecting a body that addresses a different record.
+
+    The MCP executor routes every tool argument that is not a declared path or query parameter
+    into the request body, and a direct HTTP client may echo its own URL params back, so these
+    keys arrive in bodies that ``extra="forbid"`` would otherwise reject. A ``None`` value was
+    materialized from a published schema default by the SDK rather than authored by the caller,
+    so it is dropped without being compared.
+    """
+    dropped = []
+    for key, url_value in url_values.items():
+        if key not in body:
+            continue
+        supplied = body.pop(key)
+        dropped.append(key)
+        if supplied is not None and not is_same_id(supplied, url_value):
+            return dropped, f'body {key} {supplied!r} does not match {key} {url_value!r} in the URL'
+    return dropped, None
 
 
 def normalize_version_update_body(raw, *, project_id: int, skill_id: int, version_id: int):
     """Reduce a version-targeted PUT body to the flat shape ``SkillVersionUpdateModel`` accepts.
 
-    Returns ``(body, error, trace)``. Transport keys are dropped after being cross-checked
-    against the URL - a *disagreeing* value is an explicit error rather than a silent write to
-    the addressed version. A ``{"version": {...}}`` envelope is unwrapped onto the flat shape,
-    which is the only body a schema-conforming MCP client can build for a content edit. Keys
-    whose value is ``None`` were materialized from a published schema default by the SDK, not
-    authored by the caller, so they never count as content.
+    Returns ``(body, error, trace)``. A ``{"version": {...}}`` envelope is unwrapped onto the
+    flat shape, which is the only body a schema-conforming MCP client can build for a content
+    edit. ``user_id`` is dropped without being compared, because the server resolves the author
+    from the session rather than trusting whatever a caller echoes.
     """
     if not isinstance(raw, dict):
         return None, MALFORMED_BODY_ERROR, {}
@@ -78,34 +81,25 @@ def normalize_version_update_body(raw, *, project_id: int, skill_id: int, versio
     body = dict(raw)
     trace = {'dropped': [], 'unwrapped': False, 'stray_id': None}
 
-    url_owned = {'project_id': project_id, 'skill_id': skill_id, 'version_id': version_id}
-    for key, url_value in url_owned.items():
-        if key not in body:
-            continue
-        supplied = body.pop(key)
-        trace['dropped'].append(key)
-        if supplied is not None and not _same_id(supplied, url_value):
-            return None, (
-                f'body {key} {supplied!r} does not match {key} {url_value!r} in the URL'
-            ), trace
+    trace['dropped'], error = pop_url_owned_keys(
+        body, {'project_id': project_id, 'skill_id': skill_id, 'version_id': version_id}
+    )
+    if error:
+        return None, error, trace
 
-    # The remaining transport keys are never compared: the server resolves the author from the
-    # session, so whatever a caller echoes is ignored rather than trusted.
-    for key in sorted(TRANSPORT_OWNED_BODY_FIELDS - url_owned.keys()):
-        if key in body:
-            body.pop(key)
-            trace['dropped'].append(key)
+    if 'user_id' in body:
+        del body['user_id']
+        trace['dropped'].append('user_id')
 
-    for key in SKILL_ONLY_BODY_FIELDS:
-        if body.get(key) is None:
-            body.pop(key, None)
-    if skill_only := sorted(SKILL_ONLY_BODY_FIELDS & set(body)):
+    if body.get('description') is None:
+        body.pop('description', None)
+    if 'description' in body:
         return None, (
-            f'{_render_keys(skill_only)} updates the skill, not a version; '
+            "'description' updates the skill, not a version; "
             'omit the version selector to edit skill metadata'
         ), trace
 
-    if (stray_id := body.get('id')) is not None and not _same_id(stray_id, version_id):
+    if (stray_id := body.get('id')) is not None and not is_same_id(stray_id, version_id):
         trace['stray_id'] = stray_id
 
     if 'version' in body:
@@ -115,14 +109,16 @@ def normalize_version_update_body(raw, *, project_id: int, skill_id: int, versio
                 return None, (
                     'version must be a JSON object holding the version fields to write'
                 ), trace
-            if leftovers := sorted(key for key, value in body.items() if value is not None):
+            leftovers = sorted(key for key, value in body.items() if value is not None)
+            if leftovers:
+                names = ', '.join(repr(key) for key in leftovers)
                 return None, (
-                    f'cannot combine top-level field(s) {_render_keys(leftovers)} with a '
-                    f'version envelope - both would write the same version. Put them inside '
-                    f'version: {{...}}, or omit them'
+                    f'cannot combine top-level field(s) {names} with a version envelope - '
+                    'both would write the same version. Put them inside version: {...}, '
+                    'or omit them'
                 ), trace
             nested_id = nested.get('id')
-            if nested_id is not None and not _same_id(nested_id, version_id):
+            if nested_id is not None and not is_same_id(nested_id, version_id):
                 return None, (
                     f'version.id {nested_id!r} does not match version_id {version_id!r} in the URL'
                 ), trace
@@ -268,12 +264,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Update a skill's metadata or a specific skill version",
         description=(
-            "Without a version selector the body edits the skill metadata (name, description, meta) "
+            "Without a version selector, updates the skill metadata (name, description, meta) "
             "and optionally version content in the same transaction — the nested version.id selects "
             "the target version (default version when omitted). "
-            "With a version selector (the version_id query parameter or the /{version_id} path form) "
-            "the request updates ONLY that version: send {\"version\": {...}} with every field "
-            "you are writing inside it, or the flat version shape (name, instructions, tags, meta). "
+            "With a version selector (the version_id query parameter or the /{version_id} path "
+            "form), updates ONLY that version: send {\"version\": {...}} with every field you "
+            "are writing inside it, or the flat version shape (name, instructions, tags, meta). "
             "A top-level name/meta is an ALTERNATIVE spelling that applies to that VERSION rather "
             "than to the skill — do not send both — and description is not accepted. "
             "Identity fields (project_id, user_id) are resolved by the server. "
@@ -400,15 +396,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         # none in the path); drop it so a caller that includes it alongside a nested
         # "version" body doesn't trip the extra="forbid" guard below.
         payload.pop('version_id', None)
-        # #6410: the version branch cross-checks and drops the transport keys; do the same here
-        # so a direct HTTP client echoing its own URL params is not rejected on one branch and
-        # accepted on the other. A *disagreeing* value stays an explicit error.
-        for key, url_value in (('project_id', project_id), ('skill_id', skill_id)):
-            body_value = payload.pop(key, None)
-            if body_value is not None and not _same_id(body_value, url_value):
-                return {"error": (
-                    f'{key} {body_value!r} in the body does not match {url_value!r} in the URL'
-                )}, 400
+        _, error = pop_url_owned_keys(payload, {'project_id': project_id, 'skill_id': skill_id})
+        if error:
+            return {"error": error}, 400
         payload['project_id'] = project_id
         payload['user_id'] = auth.current_user().get("id")
 
