@@ -51,10 +51,22 @@ class SkillArgsForwardingModel(BaseModel):
     user_id: int = Field(..., exclude=True)
 
 
-class SkillUpdateModel(SkillArgsForwardingModel):
+class SkillVersionNestedUpdateModel(BaseModel):
+    id: Optional[int] = None
+    instructions: Optional[str] = None
+
+
+class SkillMcpUpdateModel(BaseModel):
+    """Mirrors `models/pd/skill.py` - the caller-authored half, with no transport fields."""
+
     name: Optional[str] = None
     description: Optional[str] = None
+    version: Optional[SkillVersionNestedUpdateModel] = None
     meta: Optional[dict] = None
+
+
+class SkillUpdateModel(SkillMcpUpdateModel, SkillArgsForwardingModel):
+    pass
 
 
 class SkillVersionCreateModel(BaseModel):
@@ -69,6 +81,11 @@ class SkillVersionUpdateModel(BaseModel):
 class _Request:
     args = {}
     json = {}
+    environ = {}
+
+    @classmethod
+    def get_json(cls, silent=False):
+        return cls.json
 
 
 def _with_modes(url_params):
@@ -152,6 +169,7 @@ def _install_package(openapi_tools, url_params):
 
     pd_skill = types.ModuleType(f'{PKG}.models.pd.skill')
     pd_skill.SkillUpdateModel = SkillUpdateModel
+    pd_skill.SkillMcpUpdateModel = SkillMcpUpdateModel
     pd_skill.SkillUpdateRelationModel = SkillUpdateRelationModel
 
     pd_skill_version = types.ModuleType(f'{PKG}.models.pd.skill_version')
@@ -171,6 +189,9 @@ def _install_package(openapi_tools, url_params):
     folder_access = types.ModuleType(f'{PKG}.utils.folder_access')
     folder_access.require_folder_access = lambda *a, **k: (lambda f: f)
 
+    mcp_versioning = types.ModuleType(f'{PKG}.utils.mcp_versioning')
+    mcp_versioning.INTERNAL_MCP_ENVIRON_KEY = 'elitea.internal_mcp_request'
+
     for name, mod in {
         PKG: pkg,
         f'{PKG}.api': api_pkg,
@@ -183,6 +204,7 @@ def _install_package(openapi_tools, url_params):
         f'{PKG}.utils.skill_utils': skill_utils,
         f'{PKG}.utils.constants': constants,
         f'{PKG}.utils.folder_access': folder_access,
+        f'{PKG}.utils.mcp_versioning': mcp_versioning,
         'flask': flask,
         'tools': tools,
     }.items():
@@ -267,12 +289,17 @@ def test_metadata_update_no_longer_demands_a_version(mcp_tools):
     assert 'version_id' not in schema['required']
 
 
-def test_metadata_update_still_demands_the_server_injected_user_id(mcp_tools):
-    """Pre-existing wart, newly reachable: `SkillUpdateModel` inherits `user_id` as a required
-    body field even though `put` overwrites it from `auth.current_user()`. Pinned so the follow-up
-    that removes it has to update this test deliberately."""
+def test_metadata_update_no_longer_demands_a_server_derived_user_id(mcp_tools):
+    """The follow-up the previous pin anticipated (#6410 round two). `user_id` was a *required*
+    body field the handler overwrites, and the MCP executor routes any non-path/query argument
+    into the body - so a version-targeted call had to send the one key
+    `SkillVersionUpdateModel(extra="forbid")` rejects. Publishing `SkillMcpUpdateModel` as
+    `mcp_request_body` removes it from the model-facing schema entirely, leaving only path
+    parameters required."""
     schema = mcp_tools['put_elitea_core_skill']['args_schema']
-    assert schema['required'] == ['project_id', 'skill_id', 'user_id']
+    assert schema['required'] == ['project_id', 'skill_id']
+    assert 'user_id' not in schema['properties']
+    assert 'version' in schema['properties']
 
 
 MCP_STUBS = (

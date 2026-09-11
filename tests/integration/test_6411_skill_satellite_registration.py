@@ -157,6 +157,7 @@ def _install_package(openapi_tools, reverse_url_params=False):
 
     pd_skill = types.ModuleType(f'{PKG}.models.pd.skill')
     pd_skill.SkillUpdateModel = type('SkillUpdateModel', (BaseModel,), {})
+    pd_skill.SkillMcpUpdateModel = type('SkillMcpUpdateModel', (BaseModel,), {})
     pd_skill.SkillUpdateRelationModel = type('SkillUpdateRelationModel', (BaseModel,), {})
     modules[f'{PKG}.models.pd.skill'] = pd_skill
 
@@ -197,6 +198,10 @@ def _install_package(openapi_tools, reverse_url_params=False):
     folder_access = types.ModuleType(f'{PKG}.utils.folder_access')
     folder_access.require_folder_access = lambda *a, **k: (lambda f: f)
     modules[f'{PKG}.utils.folder_access'] = folder_access
+
+    mcp_versioning = types.ModuleType(f'{PKG}.utils.mcp_versioning')
+    mcp_versioning.INTERNAL_MCP_ENVIRON_KEY = 'elitea.internal_mcp_request'
+    modules[f'{PKG}.utils.mcp_versioning'] = mcp_versioning
 
     sys.modules.update(modules)
 
