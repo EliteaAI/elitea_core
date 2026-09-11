@@ -142,6 +142,7 @@ def _install_package():
 
     pd_skill = types.ModuleType(f'{PKG}.models.pd.skill')
     pd_skill.SkillUpdateModel = type('SkillUpdateModel', (), {})
+    pd_skill.SkillMcpUpdateModel = type('SkillMcpUpdateModel', (), {})
     pd_skill.SkillUpdateRelationModel = type('SkillUpdateRelationModel', (), {})
 
     pd_skill_version = types.ModuleType(f'{PKG}.models.pd.skill_version')
@@ -175,6 +176,9 @@ def _install_package():
     folder_access = types.ModuleType(f'{PKG}.utils.folder_access')
     folder_access.require_folder_access = lambda *a, **k: (lambda f: f)
 
+    mcp_versioning = types.ModuleType(f'{PKG}.utils.mcp_versioning')
+    mcp_versioning.INTERNAL_MCP_ENVIRON_KEY = 'elitea.internal_mcp_request'
+
     for name, mod in {
         PKG: _package(PKG),
         f'{PKG}.api': _package(f'{PKG}.api'),
@@ -191,6 +195,7 @@ def _install_package():
         f'{PKG}.utils.export_import_utils': export_import_utils,
         f'{PKG}.utils.constants': constants,
         f'{PKG}.utils.folder_access': folder_access,
+        f'{PKG}.utils.mcp_versioning': mcp_versioning,
         'flask': flask,
         'tools': tools,
     }.items():

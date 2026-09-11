@@ -124,7 +124,12 @@ class McpApiToolExecutor:
                     path_params[param_name] = arguments[arg_name]
                     consumed.add(arg_name)
                 elif param_in == "query":
-                    query_params[param_name] = arguments[arg_name]
+                    # #6410: a model that fills every published property emits `null` for an
+                    # optional query param. urlencode would render that as the literal string
+                    # "None", which the receiving endpoint then rejects as a bad value. A null
+                    # optional query argument means "not supplied", so drop it.
+                    if arguments[arg_name] is not None:
+                        query_params[param_name] = arguments[arg_name]
                     consumed.add(arg_name)
             elif param_in == "path" and "default" in param_schema:
                 path_params[param_name] = param_schema["default"]
