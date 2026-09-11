@@ -35,6 +35,11 @@ class _Request:
     json = {}
     method = 'GET'
     path = '/api/v2/elitea_core/skill/prompt_lib/1/2'
+    environ = {}
+
+    @classmethod
+    def get_json(cls, silent=False):
+        return cls.json
 
 
 LOGGED = {'warning': []}
@@ -135,6 +140,7 @@ def _install_package():
 
     pd_skill = types.ModuleType(f'{PKG}.models.pd.skill')
     pd_skill.SkillUpdateModel = type('SkillUpdateModel', (_Payload,), {})
+    pd_skill.SkillMcpUpdateModel = type('SkillMcpUpdateModel', (_Payload,), {})
     pd_skill.SkillUpdateRelationModel = type('SkillUpdateRelationModel', (_Payload,), {})
 
     pd_skill_version = types.ModuleType(f'{PKG}.models.pd.skill_version')
@@ -168,6 +174,9 @@ def _install_package():
     folder_access = types.ModuleType(f'{PKG}.utils.folder_access')
     folder_access.require_folder_access = lambda *a, **k: (lambda f: f)
 
+    mcp_versioning = types.ModuleType(f'{PKG}.utils.mcp_versioning')
+    mcp_versioning.INTERNAL_MCP_ENVIRON_KEY = 'elitea.internal_mcp_request'
+
     for name, mod in {
         PKG: pkg,
         f'{PKG}.api': api_pkg,
@@ -180,6 +189,7 @@ def _install_package():
         f'{PKG}.utils.skill_utils': skill_utils,
         f'{PKG}.utils.constants': constants,
         f'{PKG}.utils.folder_access': folder_access,
+        f'{PKG}.utils.mcp_versioning': mcp_versioning,
         'flask': flask,
         'tools': tools,
     }.items():
@@ -389,6 +399,69 @@ def test_put_accepts_the_compare_dialog_body_verbatim(skill_api):
     }
     _, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2, version_id=209)
     assert status == 200
+
+
+def test_put_unwraps_a_version_envelope_on_a_version_addressed_url(skill_api):
+    """#6410 follow-up: once `user_id` leaves the published tool schema, the only body an MCP
+    client can build for a version content edit is `{"version": {...}}` - there is no top-level
+    `instructions` property. The handler unwraps it rather than 400'ing on `version`."""
+    _Request.args = _Args(version_id='8')
+    _Request.json = {'version': {'id': 8, 'instructions': 'x'}}
+    _, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2)
+    assert status == 200
+    assert [c['version_id'] for c in CALLS['update_skill_version']] == [8]
+    assert CALLS['update_skill'] == []
+
+
+def test_put_rejects_an_envelope_that_addresses_another_version(skill_api):
+    """`id` is not a field of SkillVersionUpdateModel and *is* server-owned, so an unwrapped
+    `version.id` would be silently stripped and the URL's version written instead."""
+    _Request.args = _Args(version_id='8')
+    _Request.json = {'version': {'id': 999, 'instructions': 'x'}}
+    body, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2)
+    assert status == 400
+    assert '999' in body['error'] and '8' in body['error']
+    assert CALLS['update_skill_version'] == []
+    assert CALLS['update_skill'] == []
+
+
+def test_put_rejects_an_envelope_mixed_with_a_flat_sibling(skill_api):
+    """Top-level `name` means the SKILL in the enveloped shape and the VERSION in the flat one,
+    so the two intents are rejected rather than silently merged."""
+    _Request.args = _Args(version_id='8')
+    _Request.json = {'name': 'renamed', 'version': {'instructions': 'x'}}
+    body, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2)
+    assert status == 400
+    assert 'name' in body['error']
+    assert CALLS['update_skill_version'] == []
+    assert CALLS['update_skill'] == []
+
+
+def test_put_with_a_query_selector_and_a_top_level_name_targets_the_version(skill_api):
+    """Documented in the mcp_description, the version_id parameter description and the `name`
+    property description: with a version selector a top-level name renames THAT VERSION."""
+    _Request.args = _Args(version_id='8')
+    _Request.json = {'name': 'renamed'}
+    _, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2)
+    assert status == 200
+    assert [c['version_id'] for c in CALLS['update_skill_version']] == [8]
+    assert CALLS['update_skill'] == []
+
+
+def test_put_rejects_a_non_object_body(skill_api):
+    _Request.json = None
+    body, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2, version_id=8)
+    assert status == 400
+    assert 'JSON object' in body['error']
+    assert CALLS['update_skill_version'] == []
+
+
+def test_put_metadata_branch_rejects_a_non_object_body(skill_api):
+    _Request.json = [1, 2]
+    body, status = skill_api.PromptLibAPI.put(None, project_id=1, skill_id=2)
+    assert status == 400
+    assert 'JSON object' in body['error']
+    assert CALLS['update_skill'] == []
 
 
 def test_put_rejects_a_non_integer_query_version_selector(skill_api):

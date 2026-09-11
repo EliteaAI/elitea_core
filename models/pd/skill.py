@@ -347,12 +347,54 @@ class SkillDetailModel(BaseModel):
         return self
 
 
-class SkillUpdateModel(SkillArgsForwardingModel):
-    name: Optional[SkillName] = Field(None, min_length=1, max_length=64)
-    description: Optional[str] = Field(None, min_length=1, max_length=2304)
-    version: Optional[SkillVersionNestedUpdateModel] = None
-    meta: Optional[dict] = None
+class SkillMcpUpdateModel(BaseModel):
+    """The caller-authored half of ``SkillUpdateModel`` - what a model may actually send.
 
+    ``project_id``/``user_id`` are server-derived: ``put`` overwrites them from the URL and
+    ``auth.current_user()``. ``Field(..., exclude=True)`` on them (``SkillArgsForwardingModel``)
+    hides them from *dumps*, not from ``model_json_schema()``, and ``build_mcp_input_schema``
+    copies the body model's ``required`` into the published tool's ``required``. Publishing this
+    DTO as ``mcp_request_body`` is what keeps a body field out of that list: every field here is
+    Optional with a default, so the schema emits no ``required`` key at all and the tool's
+    required set is exactly the path parameters.
+    """
+    name: Optional[SkillName] = Field(
+        None, min_length=1, max_length=64,
+        description=(
+            "Skill name. When the request targets a single version (version_id query parameter, "
+            "or the /{version_id} path form), a top-level name applies to THAT VERSION, not the "
+            "skill - omit the version selector to rename the skill."
+        ),
+    )
+    description: Optional[str] = Field(
+        None, min_length=1, max_length=2304,
+        description=(
+            "Skill description. Not accepted when the request targets a single version."
+        ),
+    )
+    version: Optional[SkillVersionNestedUpdateModel] = Field(
+        None,
+        description=(
+            "Version content to write (instructions, tags, name, meta). version.id selects which "
+            "version; it must match version_id when that is supplied. This is the recommended "
+            "shape whenever a version is targeted."
+        ),
+    )
+    meta: Optional[dict] = Field(
+        None,
+        description=(
+            "Skill meta. When the request targets a single version, a top-level meta is merged "
+            "into THAT VERSION's meta."
+        ),
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+# Base order is load-bearing: pydantic collects fields in reverse-MRO order, so
+# SkillMcpUpdateModel FIRST reproduces the historical property order
+# ['project_id', 'user_id', 'name', 'description', 'version', 'meta'] in the public schema.
+class SkillUpdateModel(SkillMcpUpdateModel, SkillArgsForwardingModel):
     # #6410: reject any top-level key that isn't part of this (nested) shape - e.g. a
     # stray flat "instructions"/"tags" body, or a leftover "version_id" - instead of
     # silently ignoring it the way the previous all-Optional/extra="ignore" model did.

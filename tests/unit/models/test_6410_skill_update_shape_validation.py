@@ -191,3 +191,30 @@ def test_nested_version_id_survives_the_drop(pd_module):
     })
     assert model.version.id == 18
     assert model.version.instructions == '7896541'
+
+
+# --- #6410 round two: the model-facing DTO vs the HTTP contract -------------------------
+
+def test_the_mcp_body_is_the_http_body_minus_server_derived_identity(pd_module):
+    """`build_mcp_input_schema` copies the body model's `required` into the tool's `required`,
+    and the MCP executor routes any non-path/query argument into the body - so a required body
+    field the handler rejects is an uncallable tool. `SkillMcpUpdateModel` is `SkillUpdateModel`
+    minus exactly the two server-derived identity fields, and nothing else may drift out of it."""
+    http_fields = set(pd_module.skill.SkillUpdateModel.model_fields)
+    mcp_fields = set(pd_module.skill.SkillMcpUpdateModel.model_fields)
+
+    assert http_fields - mcp_fields == {'project_id', 'user_id'}
+    assert mcp_fields - http_fields == set()
+    assert 'required' not in pd_module.skill.SkillMcpUpdateModel.model_json_schema()
+
+
+def test_the_public_skill_update_schema_is_unchanged_by_the_rebase(pd_module):
+    """`SkillUpdateModel` is now assembled from two bases, and pydantic collects fields in
+    reverse-MRO order - the wrong base order silently reorders the published OpenAPI properties.
+    Names, order and `required` are pinned; the per-field `description` text is not, since the
+    DTO documents the version-selector semantics on purpose."""
+    schema = pd_module.skill.SkillUpdateModel.model_json_schema()
+
+    assert list(schema['properties']) == [
+        'project_id', 'user_id', 'name', 'description', 'version', 'meta']
+    assert schema['required'] == ['project_id', 'user_id']
