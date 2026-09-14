@@ -3,7 +3,7 @@ import threading
 import time
 from collections import OrderedDict
 from copy import deepcopy
-from typing import Optional, List
+from typing import Dict, Optional, List
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -1265,6 +1265,16 @@ def get_toolkit_index_meta(session: Session, index_name: str, for_update: bool =
 
 DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC = 7200
 
+# Twin contract: the SDK ticks the run row and the meta row's `updated_on` on this
+# cadence (elitea_sdk/tools/base_indexer_toolkit.py INDEX_RUN_HEARTBEAT_INTERVAL).
+# Bump both together.
+INDEX_RUN_HEARTBEAT_INTERVAL_SEC = 60
+# A run with a live heartbeat is judged on missed ticks, not on the disconnect
+# timeout: applying a 2h horizon to a 60s signal is what made a dead run read as
+# "indexing" for two hours. The multiple absorbs a worker briefly starved of its
+# heartbeat thread without waiting out a timeout sized for a different question.
+HEARTBEAT_STALE_INTERVALS = 5
+
 # The promote/discard path in the SDK holds the meta row's FOR UPDATE across batched chunk
 # deletes — seconds to minutes on large corpora — so every core-side FOR UPDATE bounds its
 # wait and surfaces a retryable error instead of hanging a request or the scheduler tick.
@@ -1350,6 +1360,47 @@ def get_pending_index_run_heartbeat(session: Session, index_name: str) -> Option
     if not rows:
         return None
     return max(row.heartbeat for row in rows)
+
+
+def get_pending_index_run_heartbeats(session: Session) -> Dict[str, float]:
+    """Latest pending heartbeat per collection, in one query.
+
+    The index list GET resolves staleness for every meta row it returns; asking
+    per row would issue one query per index.
+    """
+    savepoint = session.begin_nested()
+    try:
+        rows = (
+            session.query(IndexRun.collection, func.max(IndexRun.heartbeat))
+            .filter(IndexRun.status == INDEX_RUN_PENDING)
+            .group_by(IndexRun.collection)
+            .all()
+        )
+        savepoint.commit()
+        return {collection: heartbeat for collection, heartbeat in rows}
+    except ProgrammingError as error:
+        savepoint.rollback()
+        if not _is_undefined_table_error(error):
+            raise
+        return {}
+
+
+def resolve_index_staleness(index_data_state: str, updated_on: float,
+                            task_disconnected_timeout: int,
+                            pending_heartbeat: Optional[float] = None) -> bool:
+    """The one staleness rule, shared by the index list GET and the scheduler gate.
+
+    A registered run's heartbeat is the better signal when there is one, so it is
+    judged against the heartbeat horizon. Rows with no pending run (crashed
+    pre-heartbeat runs, the dispatch window) keep the disconnect-timeout rule so
+    their schedules are never starved.
+    """
+    if not index_data_state or index_data_state != IndexDataStatus.in_progress.value:
+        return False
+    if pending_heartbeat is not None:
+        horizon = INDEX_RUN_HEARTBEAT_INTERVAL_SEC * HEARTBEAT_STALE_INTERVALS
+        return time.time() - pending_heartbeat > horizon
+    return is_index_stale(updated_on, index_data_state, task_disconnected_timeout)
 
 
 def reject_index_dispatch_when_run_live(connection_string: str, toolkit_name_id: str,
@@ -1910,6 +1961,11 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         "type": "index_meta",
         "indexed": 0,
         "updated": 0,
+        # Seeded here, not left to the worker's first heartbeat: the row goes
+        # in_progress at dispatch but the worker takes tens of seconds to boot,
+        # and until this key exists the index list has nothing to show but the
+        # PREVIOUS run's counts sitting beside a live spinner.
+        "run_chunks": 0,
         "state": "in_progress",
         "index_configuration": build_index_configuration(tool_params, index_name),
         "created_on": created_on,
@@ -1983,6 +2039,38 @@ def handle_index_data_failure(ctx, event_data: dict):
         log.exception(f"Failed to handle index_data failure event: {e}")
 
 
+def _stamp_index_task_id(connection_string: str, toolkit_name_id: str, index_name: str,
+                         task_id: str, created_at, lock_timeout: str = INDEX_META_LOCK_TIMEOUT) -> bool:
+    """Claim the meta row's empty task_id under the row lock.
+
+    The read has to be the LOCKED read: this is a read-modify-write of the whole
+    cmetadata column, and on a pre-lock snapshot it silently reverts whatever
+    committed in between — including a cancel, whose embeddings are already gone
+    by then, leaving a row that reports chunks it no longer has.
+    """
+    with get_session_for_schema(connection_string, toolkit_name_id) as session:
+        meta = lock_toolkit_index_meta(session, index_name, lock_timeout=lock_timeout)
+        if not meta:
+            log.warning(f"No metadata found for index_name={index_name}")
+            return False
+
+        current_metadata = meta.cmetadata.copy()
+        # `updated_on` is deliberately NOT written here: the run heartbeat owns it
+        # and advances it every interval, and the event carries the run-START
+        # timestamp, which would drag it backwards.
+        if current_metadata.get('task_id') is None and current_metadata.get('created_on') == created_at:
+            current_metadata['task_id'] = task_id
+            meta.cmetadata = current_metadata
+            session.commit()
+            log.debug(f"Set task_id={task_id} for index_name={index_name}")
+            return True
+
+        log.debug(f"Skipping task_id update for index_name={index_name}: "
+                  f"task_id={current_metadata.get('task_id')}, "
+                  f"created_on={current_metadata.get('created_on')}, event_created_at={created_at}")
+        return False
+
+
 def ensure_index_data_has_task_id(ctx, event_data: dict):
     """
     Ensure task_id is set in cmetadata for an index.
@@ -2006,27 +2094,16 @@ def ensure_index_data_has_task_id(ctx, event_data: dict):
         # Get connection details
         toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
 
-        # Get session and update if needed
-        with get_session_for_schema(connection_string, toolkit_name_id) as session:
-            meta = get_toolkit_index_meta(session, index_name)
-            if not meta:
-                log.warning(f"No metadata found for index_name={index_name}")
-                return
-
-            # Read current metadata
-            current_metadata = meta.cmetadata.copy()
-
-            # Only update if task_id is None AND created_at matches (stronger condition)
-            if current_metadata.get('task_id') is None and current_metadata.get('created_on') == created_at:
-                current_metadata['task_id'] = task_id
-                current_metadata['updated_on'] = event_data.get('updated_on')
-                meta.cmetadata = current_metadata
-                session.commit()
-                log.debug(f"Set task_id={task_id} for index_name={index_name}")
-            else:
-                log.debug(f"Skipping task_id update for index_name={index_name}: "
-                          f"task_id={current_metadata.get('task_id')}, "
-                          f"created_on={current_metadata.get('created_on')}, event_created_at={created_at}")
+        try:
+            _stamp_index_task_id(connection_string, toolkit_name_id, index_name, task_id, created_at)
+        except IndexMetaLockTimeoutError:
+            # A row left without a task_id cannot be stopped from the UI, and Stop
+            # then deletes the embeddings while the worker keeps indexing — worth a
+            # second, longer wait the way the dispatch write takes one.
+            log.warning(f"task_id stamp for index_name={index_name} timed out on the lock; "
+                        f"retrying with lock_timeout={INDEX_META_RETRY_LOCK_TIMEOUT}")
+            _stamp_index_task_id(connection_string, toolkit_name_id, index_name, task_id, created_at,
+                                 lock_timeout=INDEX_META_RETRY_LOCK_TIMEOUT)
 
     except Exception as e:
         log.exception(f"Failed to ensure task_id for index: {e}")
