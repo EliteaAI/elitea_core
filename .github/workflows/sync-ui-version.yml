@@ -13,12 +13,20 @@ on:
 permissions:
   contents: write
 
+# Serialize syncs per target branch so pushes don't race each other
+concurrency:
+  group: sync-ui-version-${{ github.event.client_payload.ref || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   sync-version:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # repository_dispatch always runs on the default branch, so write to the branch the UI build came from
+          ref: ${{ github.event.client_payload.ref || github.ref_name }}
 
       - name: Update metadata.json
         id: update
