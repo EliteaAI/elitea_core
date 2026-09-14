@@ -15,6 +15,10 @@ import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.run_id import stamp_predict_run_id
+from .utils.scheduler_bindings import (
+    advertised_bindings,
+    build_scheduler_sync_plan,
+)
 from pydantic import ValidationError
 
 from .models.pd.sio import NextInputSuggestionPayload
@@ -32,6 +36,7 @@ class Module(module.ModuleModel):
         self.context = context
         self.descriptor = descriptor
         self.thread = None
+        self._scheduler_bindings_active = True
         #
         self.bp = None
         #
@@ -352,6 +357,9 @@ class Module(module.ModuleModel):
             log.exception("Failed to preload UI bundle")
 
     def ready(self):
+        self._register_managed_schedules()
+        self._bootstrap_platform_schedules()
+
         # ORM create_all() creates missing tenant tables but never expands an
         # existing one. Apply the transactionally committed compatibility guard
         # before any chat callback can write the normalized step rows.
@@ -513,66 +521,6 @@ class Module(module.ModuleModel):
                 log.exception("skill publish schema: auto-migration failed")
 
         Thread(target=_run, daemon=True).start()
-
-        try:
-            scheduler_cfg = self.descriptor.config.get('scheduler', {}) or {}
-            idx_cfg = scheduler_cfg.get('index_scheduling', {}) or {}
-            pipe_cfg = scheduler_cfg.get('pipeline_scheduling', {}) or {}
-
-            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
-                'rpc_func': 'applications_empty_state',
-                'rpc_kwargs': {'days_to_retain': 1},
-                'name': 'empty_agent_state',
-                'cron': '0 0 * * *',
-                'active': True
-            })
-            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
-                'rpc_func': 'applications_check_index_scheduling',
-                'rpc_kwargs': {},
-                'name': 'index_scheduling',
-                'cron': idx_cfg.get('cron', '* * * * *'),
-                'active': bool(idx_cfg.get('enabled', True)),
-            })
-            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
-                'rpc_func': 'elitea_core_cleanup_stale_chunks',
-                'rpc_kwargs': {'max_age_seconds': 43200},
-                'name': 'cleanup_stale_chunks',
-                'cron': '0 */12 * * *',
-                'active': True
-            })
-            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
-                'rpc_func': 'elitea_core_reap_pgvector_engines',
-                'rpc_kwargs': {},
-                'name': 'pgvector_engine_reap',
-                'cron': '*/5 * * * *',
-                'active': True
-            })
-            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
-                'rpc_func': 'elitea_core_reap_orphaned_eval_runs',
-                'rpc_kwargs': {},
-                'name': 'eval_run_reap',
-                'cron': '*/10 * * * *',
-                'active': True
-            })
-            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
-                'rpc_func': 'elitea_core_check_pat_expiration',
-                'rpc_kwargs': {},
-                'name': 'pat_expiration_check',
-                'cron': '0 * * * *',
-                'active': True
-            })
-            self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists({
-                'rpc_func': 'pipelines_check_scheduling',
-                'rpc_kwargs': {},
-                'name': 'pipeline_scheduling',
-                'cron': pipe_cfg.get('cron', '* * * * *'),
-                'active': bool(pipe_cfg.get('enabled', True)),
-            })
-            # Reconcile existing rows with current config (handles the case
-            # where YAML was edited while pylon was down).
-            self._apply_scheduler_runtime_config()
-        except Empty:
-            log.warning('No scheduling plugin found')
 
         log.info("Starting chat thread")
         self.thread.start()
@@ -1031,11 +979,11 @@ class Module(module.ModuleModel):
 
     def reconfig(self):
         """Re-config"""
-        # Reconfigure elitea_ui settings
         self._configure_elitea_ui()
-        # Push admin-configured cron / enabled flag to the scheduling plugin
-        # so cadence and disable changes apply without a pylon restart.
-        self._apply_scheduler_runtime_config()
+        try:
+            self._apply_scheduler_runtime_config()
+        except Exception:  # pylint: disable=W0703
+            log.exception('Failed to apply scheduler runtime config')
         # Refresh cached MCP exposure settings so admin toggle changes take
         # effect immediately without requiring a container restart.
         mcp_config = self.descriptor.config.get('mcp_exposure', {})
@@ -1045,27 +993,139 @@ class Module(module.ModuleModel):
         log.info(f"MCP config reloaded: exposure={self.mcp_exposure_enabled}, in_menu={self.mcp_in_menu_enabled}")
         self._init_publishing_guardrail()
 
-    def _apply_scheduler_runtime_config(self):
-        """Push admin-configured scheduler cron/enabled flags into DB rows.
+    def _bootstrap_platform_schedules(self):
+        """Create the platform schedule rows and reconcile them with config."""
+        payloads = []
+        try:
+            scheduler_cfg = self.descriptor.config.get('scheduler')
+            managed = {
+                target['name']: target
+                for target in build_scheduler_sync_plan(scheduler_cfg)
+            }
+            payloads = [
+                {
+                    'rpc_func': 'applications_empty_state',
+                    'rpc_kwargs': {'days_to_retain': 1},
+                    'name': 'empty_agent_state',
+                    'cron': '0 0 * * *',
+                    'active': True,
+                },
+                {
+                    'rpc_func': managed['index_scheduling']['rpc_func'],
+                    'rpc_kwargs': {},
+                    'name': 'index_scheduling',
+                    'cron': managed['index_scheduling']['cron'],
+                    'active': managed['index_scheduling']['active'],
+                    'match_handler': True,
+                },
+                {
+                    'rpc_func': 'elitea_core_cleanup_stale_chunks',
+                    'rpc_kwargs': {'max_age_seconds': 43200},
+                    'name': 'cleanup_stale_chunks',
+                    'cron': '0 */12 * * *',
+                    'active': True,
+                },
+                {
+                    'rpc_func': 'elitea_core_reap_pgvector_engines',
+                    'rpc_kwargs': {},
+                    'name': 'pgvector_engine_reap',
+                    'cron': '*/5 * * * *',
+                    'active': True,
+                },
+                {
+                    'rpc_func': 'elitea_core_reap_orphaned_eval_runs',
+                    'rpc_kwargs': {},
+                    'name': 'eval_run_reap',
+                    'cron': '*/10 * * * *',
+                    'active': True,
+                },
+                {
+                    'rpc_func': 'elitea_core_check_pat_expiration',
+                    'rpc_kwargs': {},
+                    'name': 'pat_expiration_check',
+                    'cron': '0 * * * *',
+                    'active': True,
+                },
+                {
+                    'rpc_func': managed['pipeline_scheduling']['rpc_func'],
+                    'rpc_kwargs': {},
+                    'name': 'pipeline_scheduling',
+                    'cron': managed['pipeline_scheduling']['cron'],
+                    'active': managed['pipeline_scheduling']['active'],
+                    'match_handler': True,
+                },
+            ]
+        except Exception:  # pylint: disable=W0703
+            log.exception('Failed to plan platform schedules')
+            self._release_managed_schedules()
+            return
 
-        Scheduler reads cron/active live from the schedule table on each
-        poll.
-        """
-        scheduler_cfg = self.descriptor.config.get('scheduler', {}) or {}
-        targets = (
-            ('index_scheduling', scheduler_cfg.get('index_scheduling', {}) or {}),
-            ('pipeline_scheduling', scheduler_cfg.get('pipeline_scheduling', {}) or {}),
-        )
-        for name, sub in targets:
-            cron = sub.get('cron')
-            enabled = sub.get('enabled')
-            if cron is None and enabled is None:
-                continue
+        for payload in payloads:
+            try:
+                self.context.rpc_manager.timeout(5).scheduling_create_if_not_exists(payload)
+            except Empty:
+                log.warning(
+                    'No scheduling plugin responded: name=%s (skipping the rest)',
+                    payload['name'],
+                )
+                break
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    'Failed to create schedule: name=%s', payload['name'],
+                )
+
+        try:
+            self._apply_scheduler_runtime_config(plan=list(managed.values()))
+        except Exception:  # pylint: disable=W0703
+            log.exception('Failed to reconcile platform schedules')
+
+    def get_managed_schedules(self):
+        """Bindings the scheduling plugin pulls when it rebuilds its registry."""
+        return advertised_bindings(self._scheduler_bindings_active)
+
+    def _release_managed_schedules(self):
+        """Give the rows back when this plugin cannot drive them."""
+        self._scheduler_bindings_active = False
+        try:
+            scheduling = this.for_module("scheduling").module
+            register = getattr(scheduling, "register_managed_schedules", None)
+            if register is not None:
+                register("elitea_core", {})
+                log.warning(
+                    "Released managed schedules: nothing here can push their "
+                    "cadence, so they must not be left read-only"
+                )
+        except Exception as e:
+            log.error("Failed to release managed schedules: %r", e)
+
+    def _register_managed_schedules(self):
+        """Tell the scheduling plugin these rows are edited in admin config."""
+        try:
+            scheduling = this.for_module("scheduling").module
+            register = getattr(scheduling, "register_managed_schedules", None)
+            if register is None:
+                log.warning(
+                    "scheduling plugin has no managed-schedule support; "
+                    "index/pipeline scheduling rows stay editable in Admin Portal"
+                )
+                return
+            self._scheduler_bindings_active = True
+            register("elitea_core", self.get_managed_schedules())
+        except Exception as e:
+            log.error("Failed to register managed schedules: %r", e)
+
+    def _apply_scheduler_runtime_config(self, plan=None):
+        """Push admin-configured scheduler cron/enabled flags into DB rows."""
+        self._register_managed_schedules()
+        if plan is None:
+            plan = build_scheduler_sync_plan(self.descriptor.config.get('scheduler'))
+        for target in plan:
+            name = target['name']
             try:
                 self.context.rpc_manager.timeout(5).scheduling_update_schedule(
                     name=name,
-                    cron=cron,
-                    active=bool(enabled) if enabled is not None else None,
+                    cron=target['cron'],
+                    active=target['active'],
                 )
             except Exception as e:
                 log.error(
