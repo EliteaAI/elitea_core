@@ -1274,6 +1274,9 @@ INDEX_RUN_HEARTBEAT_INTERVAL_SEC = 60
 # "indexing" for two hours. The multiple absorbs a worker briefly starved of its
 # heartbeat thread without waiting out a timeout sized for a different question.
 HEARTBEAT_STALE_INTERVALS = 5
+# Display-only horizon. Never use it to authorize superseding, stopping or deleting
+# a run — see resolve_index_staleness.
+HEARTBEAT_STALE_HORIZON_SEC = INDEX_RUN_HEARTBEAT_INTERVAL_SEC * HEARTBEAT_STALE_INTERVALS
 
 # The promote/discard path in the SDK holds the meta row's FOR UPDATE across batched chunk
 # deletes — seconds to minutes on large corpora — so every core-side FOR UPDATE bounds its
@@ -1378,27 +1381,44 @@ def get_pending_index_run_heartbeats(session: Session) -> Dict[str, float]:
         )
         savepoint.commit()
         return {collection: heartbeat for collection, heartbeat in rows}
-    except ProgrammingError as error:
+    except Exception as error:
         savepoint.rollback()
-        if not _is_undefined_table_error(error):
-            raise
+        # Unlike query_index_runs, nothing destructive keys on this read — it only
+        # picks which horizon the display flag uses. Failing the whole index list
+        # over one unreadable table is the worse outcome, so degrade to the
+        # updated_on rule and say so loudly.
+        log.warning(f"Could not read index run heartbeats (sqlstate="
+                    f"{getattr(getattr(error, 'orig', None), 'pgcode', None)}); "
+                    f"falling back to the updated_on staleness rule: {error}")
         return {}
 
 
 def resolve_index_staleness(index_data_state: str, updated_on: float,
                             task_disconnected_timeout: int,
-                            pending_heartbeat: Optional[float] = None) -> bool:
-    """The one staleness rule, shared by the index list GET and the scheduler gate.
+                            pending_heartbeat: Optional[float] = None,
+                            heartbeat_horizon: Optional[int] = None) -> bool:
+    """One staleness rule; the caller picks the horizon for what it is deciding.
 
-    A registered run's heartbeat is the better signal when there is one, so it is
-    judged against the heartbeat horizon. Rows with no pending run (crashed
-    pre-heartbeat runs, the dispatch window) keep the disconnect-timeout rule so
-    their schedules are never starved.
+    A registered run's heartbeat is the better signal when there is one. What it is
+    judged against is NOT one number, because two different questions are asked of
+    this row:
+
+    * DISPLAY — "should the card still claim to be indexing?" Pass
+      `heartbeat_horizon=HEARTBEAT_STALE_HORIZON_SEC`. Being wrong costs a
+      misleading card for one poll.
+    * CONTROL — "may this run be superseded, stopped or deleted?" Omit it, and the
+      disconnect timeout applies. Being wrong here destroys a live run, and it must
+      stay in step with `has_live_index_run`, which the dispatch guard uses: a
+      shorter horizon here would let the scheduler kill a worker and then be refused
+      the dispatch it killed it for, leaving the schedule due and re-firing.
+
+    Rows with no pending run (crashed pre-heartbeat runs, the dispatch window) keep
+    the disconnect-timeout rule either way, so their schedules are never starved.
     """
     if not index_data_state or index_data_state != IndexDataStatus.in_progress.value:
         return False
     if pending_heartbeat is not None:
-        horizon = INDEX_RUN_HEARTBEAT_INTERVAL_SEC * HEARTBEAT_STALE_INTERVALS
+        horizon = heartbeat_horizon if heartbeat_horizon is not None else task_disconnected_timeout
         return time.time() - pending_heartbeat > horizon
     return is_index_stale(updated_on, index_data_state, task_disconnected_timeout)
 

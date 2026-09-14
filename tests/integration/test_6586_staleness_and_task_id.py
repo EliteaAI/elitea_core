@@ -106,35 +106,51 @@ HORIZON = HEARTBEAT * 5
 TIMEOUT = 7200
 
 
-class TestTheHeartbeatHorizonReplacesTheTwoHourOne:
+class TestTheDisplayHorizonReplacesTheTwoHourOne:
+    """Callers that only decide what the card SAYS pass the heartbeat horizon."""
+
+    def _display(self, application_tools, state, updated_on, heartbeat):
+        return application_tools.resolve_index_staleness(
+            state, updated_on, TIMEOUT, pending_heartbeat=heartbeat,
+            heartbeat_horizon=application_tools.HEARTBEAT_STALE_HORIZON_SEC,
+        )
 
     def test_a_run_with_a_stopped_heartbeat_is_stale_in_minutes(self, application_tools):
         dead = time.time() - HORIZON * 2
-        assert application_tools.resolve_index_staleness(
-            "in_progress", time.time(), TIMEOUT, pending_heartbeat=dead) is True
+        assert self._display(application_tools, "in_progress", time.time(), dead) is True
 
     def test_the_two_hour_timeout_no_longer_holds_such_a_row_alive(self, application_tools):
         # The whole defect: updated_on is 60s-fresh, judged against 7200s.
         dead = time.time() - HORIZON * 2
         assert application_tools.is_index_stale(time.time(), "in_progress", TIMEOUT) is False
-        assert application_tools.resolve_index_staleness(
-            "in_progress", time.time(), TIMEOUT, pending_heartbeat=dead) is True
+        assert self._display(application_tools, "in_progress", time.time(), dead) is True
 
     def test_a_ticking_run_is_never_stale(self, application_tools):
-        assert application_tools.resolve_index_staleness(
-            "in_progress", 0, TIMEOUT, pending_heartbeat=time.time()) is False
+        assert self._display(application_tools, "in_progress", 0, time.time()) is False
 
     def test_a_single_missed_tick_is_not_stale(self, application_tools):
-        assert application_tools.resolve_index_staleness(
-            "in_progress", 0, TIMEOUT,
-            pending_heartbeat=time.time() - HEARTBEAT * 1.5) is False
+        assert self._display(
+            application_tools, "in_progress", 0, time.time() - HEARTBEAT * 1.5) is False
 
     def test_the_horizon_is_a_small_multiple_of_the_interval(self, application_tools):
         assert application_tools.INDEX_RUN_HEARTBEAT_INTERVAL_SEC == HEARTBEAT
         assert application_tools.HEARTBEAT_STALE_INTERVALS == 5
+        assert application_tools.HEARTBEAT_STALE_HORIZON_SEC == HORIZON
 
 
 class TestRowsWithoutARunRowKeepTheOldRule:
+
+    def test_the_heartbeat_read_degrades_instead_of_failing_the_list(self, application_tools, monkeypatch):
+        # The list GET calls this unconditionally inside its single try; re-raising
+        # anything but UndefinedTable 400s the whole page over one unreadable table.
+        class _Boom(_NullSession):
+            def begin_nested(self):
+                return types.SimpleNamespace(commit=lambda: None, rollback=lambda: None)
+
+            def query(self, *a, **k):
+                raise RuntimeError("permission denied for table elitea_index_runs")
+
+        assert application_tools.get_pending_index_run_heartbeats(_Boom()) == {}
 
     def test_no_run_row_falls_back_to_the_disconnect_timeout(self, application_tools):
         assert application_tools.resolve_index_staleness(
@@ -156,17 +172,47 @@ class TestRowsWithoutARunRowKeepTheOldRule:
         assert application_tools.resolve_index_staleness("", 0, TIMEOUT) is False
 
 
-class TestBothSurfacesShareOneRule:
-    """The scheduler and the list GET disagreed about the same row before #6586:
-    the scheduler preferred the run heartbeat, the GET always used updated_on."""
+class TestControlDecisionsKeepTheDisconnectHorizon:
+    """Superseding, stopping or deleting a run is NOT a display decision.
 
-    def test_the_two_inputs_produce_one_verdict(self, application_tools):
-        dead = time.time() - HORIZON * 2
-        scheduler = application_tools.resolve_index_staleness(
-            "in_progress", time.time(), TIMEOUT, pending_heartbeat=dead)
-        list_get = application_tools.resolve_index_staleness(
-            "in_progress", time.time(), TIMEOUT, pending_heartbeat=dead)
-        assert scheduler == list_get is True
+    The horizon that authorizes them has to agree with `has_live_index_run`, which
+    the dispatch guard inside `start_index_task` uses. When it did not, the
+    scheduler read a run mid-promote as stale, killed the worker, and was then
+    refused the dispatch it killed it for — leaving the schedule due and re-firing
+    every tick. The default (no `heartbeat_horizon`) is the safe one on purpose."""
+
+    def test_a_run_inside_the_disconnect_window_is_not_reclaimable(self, application_tools):
+        # The band that caused the kill-then-refuse loop: past the display horizon,
+        # nowhere near the timeout the dispatch guard applies.
+        mid_promote = time.time() - HORIZON * 2
+        assert application_tools.resolve_index_staleness(
+            "in_progress", time.time(), TIMEOUT, pending_heartbeat=mid_promote) is False
+
+    def test_the_default_matches_what_has_live_index_run_would_say(self, application_tools):
+        mid_promote = time.time() - HORIZON * 2
+        row = types.SimpleNamespace(heartbeat=mid_promote)
+        still_live = (time.time() - row.heartbeat) <= TIMEOUT
+
+        reclaimable = application_tools.resolve_index_staleness(
+            "in_progress", time.time(), TIMEOUT, pending_heartbeat=mid_promote)
+
+        assert still_live is True
+        assert reclaimable is False, "control horizon must not outrun the dispatch guard"
+
+    def test_a_genuinely_dead_run_is_still_reclaimable(self, application_tools):
+        dead = time.time() - TIMEOUT * 1.5
+        assert application_tools.resolve_index_staleness(
+            "in_progress", time.time(), TIMEOUT, pending_heartbeat=dead) is True
+
+    def test_display_and_control_disagree_only_inside_the_band(self, application_tools):
+        mid_promote = time.time() - HORIZON * 2
+        display = application_tools.resolve_index_staleness(
+            "in_progress", time.time(), TIMEOUT, pending_heartbeat=mid_promote,
+            heartbeat_horizon=application_tools.HEARTBEAT_STALE_HORIZON_SEC)
+        control = application_tools.resolve_index_staleness(
+            "in_progress", time.time(), TIMEOUT, pending_heartbeat=mid_promote)
+
+        assert (display, control) == (True, False)
 
 
 class TestRunChunksIsSeededNotInherited:

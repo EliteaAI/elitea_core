@@ -22,6 +22,7 @@ from ...utils.application_tools import (
     IndexMetaLockTimeoutError,
     INDEX_META_LOCK_TIMEOUT,
     DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC,
+    HEARTBEAT_STALE_HORIZON_SEC,
     _get_pgvector_engine,
     _is_undefined_table_error,
 )
@@ -104,15 +105,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     # Determine if task is stale (in_progress but not updated recently)
                     updated_on = cmetadata.get('updated_on', 0)
                     index_data_state = cmetadata.get('state', '')
+                    pending_heartbeat = pending_heartbeats.get(cmetadata.get('collection'))
+                    # Two flags on purpose. `stale` is chrome — banner, spinner,
+                    # stopped-run copy — and may be wrong for one poll. `reclaimable`
+                    # authorizes destructive affordances (Delete, supersede) and so
+                    # stays on the disconnect rule the dispatch guard uses; a
+                    # five-minute heuristic must never unlock an irreversible delete
+                    # on a run that is merely mid-promote.
                     stale = resolve_index_staleness(
                         index_data_state, updated_on, task_disconnected_timeout,
-                        pending_heartbeats.get(cmetadata.get('collection')),
+                        pending_heartbeat, heartbeat_horizon=HEARTBEAT_STALE_HORIZON_SEC,
+                    )
+                    reclaimable = resolve_index_staleness(
+                        index_data_state, updated_on, task_disconnected_timeout,
+                        pending_heartbeat,
                     )
                     #
                     result.append({
                         "id": id,
                         "metadata": cmetadata,
                         "stale": stale,
+                        "reclaimable": reclaimable,
                         "last_successful_run": last_successful_run
                     })
                 return serialize(result), 200
