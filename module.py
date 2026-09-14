@@ -477,6 +477,10 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_eval_suite_columns", self.migrate_eval_suite_columns, group="R-2.0.6",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_audit_events_analytics_tuning",
+                self.migrate_audit_events_analytics_tuning, group="R-2.0.6",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 

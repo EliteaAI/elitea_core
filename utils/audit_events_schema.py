@@ -13,6 +13,7 @@ from tools import config as c
 
 
 _LOCK_NAME = 'elitea_core_audit_events_schema_v1'
+_STATS_LOCK_NAME = 'elitea_core_audit_events_statistics_v1'
 _TABLE_NAME = 'audit_events'
 
 _REQUIRED_COLUMNS = {
@@ -40,6 +41,19 @@ _REQUIRED_INDEXES = {
     'ix_audit_events_project_timestamp': '(project_id, timestamp)',
     'ix_audit_events_tool_name': '(tool_name) WHERE tool_name IS NOT NULL',
     'ix_audit_events_is_error': '(is_error) WHERE is_error IS TRUE',
+    # Every analytics aggregate scopes by (project_id, event_type, timestamp).
+    # Without this leading-column match the planner falls back to the
+    # timestamp-only index and discards most of the rows it scans.
+    'ix_audit_events_project_event_type_timestamp': '(project_id, event_type, timestamp)',
+}
+
+# audit_events is insert-only, so n_dead_tup stays at 0 and the default
+# dead-tuple autovacuum threshold never trips — planner statistics are never
+# refreshed and analytics queries get costed against a stale row estimate.
+# These reloptions make autovacuum analyze on insert volume instead.
+_REQUIRED_TABLE_OPTIONS = {
+    'autovacuum_analyze_scale_factor': '0.02',
+    'autovacuum_vacuum_insert_threshold': '5000',
 }
 
 
@@ -59,6 +73,110 @@ def _indexes(connection, schema):
         FROM pg_indexes
         WHERE schemaname = :schema AND tablename = :table_name
     """), {'schema': schema, 'table_name': _TABLE_NAME}).scalars())
+
+
+def _table_options(connection, schema):
+    """Return {reloption: value} currently set on the audit table."""
+    rows = connection.execute(text("""
+        SELECT c.reloptions
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = :schema AND c.relname = :table_name
+    """), {'schema': schema, 'table_name': _TABLE_NAME}).scalars().all()
+    options = {}
+    for reloptions in rows:
+        for entry in reloptions or []:
+            name, _, value = entry.partition('=')
+            options[name] = value
+    return options
+
+
+def _options_needing_set(existing_options):
+    """Return the required reloptions whose current value differs."""
+    return {
+        name: value
+        for name, value in _REQUIRED_TABLE_OPTIONS.items()
+        if existing_options.get(name) != value
+    }
+
+
+def _statistics_missing(connection, schema):
+    """True when planner statistics have never been gathered for the audit table."""
+    row = connection.execute(text("""
+        SELECT last_analyze, last_autoanalyze
+        FROM pg_stat_user_tables
+        WHERE schemaname = :schema AND relname = :table_name
+    """), {'schema': schema, 'table_name': _TABLE_NAME}).first()
+    if row is None:
+        return True
+    return row[0] is None and row[1] is None
+
+
+def ensure_audit_events_statistics(engine, dry_run=False):
+    """Keep planner statistics on the insert-only audit_events table current.
+
+    Applies the autovacuum reloptions that make analyze trigger on insert
+    volume, and runs a one-off ``ANALYZE`` when statistics have never been
+    gathered at all (which is what leaves analytics queries costed against a
+    stale row estimate and picking the wrong index).
+
+    Both steps take only SHARE UPDATE EXCLUSIVE, so concurrent audit writes are
+    not blocked. Idempotent: once the reloptions are in place and statistics
+    exist, a re-run is catalog reads only.
+
+    Returns ``{"table_present": bool, "set_options": {...}, "analyzed": bool}``.
+    """
+    schema = c.POSTGRES_SCHEMA
+
+    if dry_run:
+        with engine.connect() as connection:
+            if not _columns(connection, schema):
+                return {"table_present": False, "set_options": {}, "analyzed": False}
+            return {
+                "table_present": True,
+                "set_options": _options_needing_set(_table_options(connection, schema)),
+                "analyzed": _statistics_missing(connection, schema),
+            }
+
+    with engine.begin() as connection:
+        connection.execute(
+            text('SELECT pg_advisory_xact_lock(hashtext(:name))'),
+            {'name': _STATS_LOCK_NAME},
+        )
+        quote = connection.dialect.identifier_preparer.quote
+
+        if not _columns(connection, schema):
+            log.info('audit_events statistics: table not present yet, skipping')
+            return {"table_present": False, "set_options": {}, "analyzed": False}
+
+        qualified_name = f'{quote(schema)}.{quote(_TABLE_NAME)}'
+
+        set_options = _options_needing_set(_table_options(connection, schema))
+        if set_options:
+            assignments = ', '.join(
+                f'{name} = {value}' for name, value in set_options.items()
+            )
+            connection.execute(text(
+                f'ALTER TABLE {qualified_name} SET ({assignments})'
+            ))
+
+        analyzed = _statistics_missing(connection, schema)
+        if analyzed:
+            connection.execute(text(f'ANALYZE {qualified_name}'))
+
+        if set_options or analyzed:
+            log.info(
+                'audit_events statistics: set_options=%s analyzed=%s',
+                set_options, analyzed,
+            )
+        else:
+            log.info('audit_events statistics are current')
+
+        return {
+            "table_present": True,
+            "set_options": set_options,
+            "analyzed": analyzed,
+        }
 
 
 def _required_varchar_width(coltype):

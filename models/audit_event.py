@@ -28,6 +28,10 @@ class AuditEvent(db.Base):
         Index('ix_audit_events_project_timestamp', 'project_id', 'timestamp'),
         Index('ix_audit_events_tool_name', 'tool_name', postgresql_where=text('tool_name IS NOT NULL')),
         Index('ix_audit_events_is_error', 'is_error', postgresql_where=text('is_error IS TRUE')),
+        # Every analytics aggregate scopes by (project_id, event_type, timestamp);
+        # mirrored in tracing's model and in utils/audit_events_schema.py, which
+        # is what backfills it onto tables that already exist.
+        Index('ix_audit_events_project_event_type_timestamp', 'project_id', 'event_type', 'timestamp'),
         {'schema': c.POSTGRES_SCHEMA, 'extend_existing': True},
     )
 

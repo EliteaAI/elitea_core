@@ -169,6 +169,7 @@ if _API_AVAILABLE:
                 c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
             }
         })
+        @api_tools.endpoint_metrics
         def get(self, project_id: int, **kwargs):
             """
             GET /api/v2/elitea_core/analytics_users/prompt_lib/<project_id>
@@ -207,6 +208,19 @@ if _API_AVAILABLE:
                 sort_by = "total_events"
             sort_order = request.args.get("sort_order", "desc")
             search = request.args.get("search", "").strip()
+
+            # AuditEvent carries no LiteLLM spend data under elitea/WAM mode, so
+            # token/cost figures come from usage_event instead. usage_event has no
+            # per-token-type cost split, so those sub-fields are zeroed below.
+            # Fetched before the session opens so this 5s-timeout RPC never holds a
+            # pooled DB connection while it waits.
+            usage_by_user = {}
+            if elitea_mode:
+                usage_by_user = {
+                    u["user_id"]: u
+                    for u in (usage_get_user_breakdown(project_id, dt_from, dt_to) or [])
+                    if u["user_id"] is not None
+                }
 
             try:
                 with db.with_project_schema_session(None) as session:
@@ -363,17 +377,6 @@ if _API_AVAILABLE:
                     query = query.order_by(order_fn(col))
 
                     rows = query.offset(offset).limit(limit).all()
-
-                    # AuditEvent carries no LiteLLM spend data under elitea/WAM mode, so
-                    # token/cost figures come from usage_event instead. usage_event has no
-                    # per-token-type cost split, so those sub-fields are zeroed.
-                    usage_by_user = {}
-                    if elitea_mode:
-                        usage_by_user = {
-                            u["user_id"]: u
-                            for u in (usage_get_user_breakdown(project_id, dt_from, dt_to) or [])
-                            if u["user_id"] is not None
-                        }
 
                     def _row_dict(r):
                         if elitea_mode:

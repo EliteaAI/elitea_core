@@ -129,6 +129,7 @@ if _API_AVAILABLE:
                 c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
             }
         })
+        @api_tools.endpoint_metrics
         def get(self, project_id: int, **kwargs):
             """
             GET /api/v2/elitea_core/analytics_user_detail/prompt_lib/<project_id>
@@ -156,6 +157,30 @@ if _API_AVAILABLE:
 
             dt_from, dt_to = _parse_dates(request.args)
             elitea_mode = is_elitea_mode()
+
+            # Both RPC-backed lookups below are resolved before the session opens, so a
+            # 5s-timeout round-trip never holds a pooled DB connection open.
+
+            # Get display names for models via configurations RPC - build mapping once
+            model_display_names = {}
+            models_response = configurations_get_models_cached(
+                project_id=project_id, section='llm', include_shared=True,
+            )
+            items = models_response.get('items', []) if models_response else []
+            for item in items:
+                if isinstance(item, dict) and 'name' in item:
+                    display = item.get('display_name', item['name'])
+                    model_display_names[item['name']] = display
+
+            # AuditEvent carries no LiteLLM spend data under elitea/WAM mode; source
+            # token/cost totals from usage_event instead. usage_event has no
+            # per-token-type cost split, so those sub-fields are zeroed.
+            usage_kpi = {}
+            if elitea_mode:
+                usage_rows = usage_get_user_breakdown(
+                    project_id, dt_from, dt_to, user_id=user_id,
+                ) or []
+                usage_kpi = usage_rows[0] if usage_rows else {}
 
             try:
                 with db.with_project_schema_session(None) as session:
@@ -205,17 +230,6 @@ if _API_AVAILABLE:
                     ).group_by(
                         AuditEvent.model_name,
                     ).order_by(func.count().desc()).all()
-
-                    # Get display names for models via configurations RPC - build mapping once
-                    model_display_names = {}
-                    models_response = configurations_get_models_cached(
-                        project_id=project_id, section='llm', include_shared=True,
-                    )
-                    items = models_response.get('items', []) if models_response else []
-                    for item in items:
-                        if isinstance(item, dict) and 'name' in item:
-                            display = item.get('display_name', item['name'])
-                            model_display_names[item['name']] = display
 
                     # Tools used by this user
                     tool_rows = base.with_entities(
@@ -289,16 +303,6 @@ if _API_AVAILABLE:
                         AuditEvent.event_type == "llm",
                         AuditEvent.is_error.is_(False),
                     ).first()
-
-                    # AuditEvent carries no LiteLLM spend data under elitea/WAM mode; source
-                    # token/cost totals from usage_event instead. usage_event has no
-                    # per-token-type cost split, so those sub-fields are zeroed.
-                    usage_kpi = {}
-                    if elitea_mode:
-                        usage_rows = usage_get_user_breakdown(
-                            project_id, dt_from, dt_to, user_id=user_id,
-                        ) or []
-                        usage_kpi = usage_rows[0] if usage_rows else {}
 
                     # Daily activity by event type
                     daily_rows = base.with_entities(

@@ -179,6 +179,7 @@ if _API_AVAILABLE:
                 c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
             }
         })
+        @api_tools.endpoint_metrics
         def get(self, project_id: int, **kwargs):
             """
             GET /api/v2/elitea_core/analytics/prompt_lib/<project_id>
@@ -191,6 +192,24 @@ if _API_AVAILABLE:
             from ...models.audit_event import AuditEvent
 
             dt_from, dt_to = _parse_dates(request.args)
+
+            # Both RPC-backed lookups below are resolved before the session opens, so a
+            # 5s-timeout round-trip never holds a pooled DB connection open.
+
+            # Under elitea/WAM mode, AuditEvent carries no LiteLLM spend data, so
+            # token/cost KPIs are sourced from usage_event via the usage plugin instead.
+            usage_kpis = usage_get_cost_kpis(project_id, dt_from, dt_to) if is_elitea_mode() else None
+
+            # Get display names for models via configurations RPC - build mapping once
+            model_display_names = {}
+            models_response = configurations_get_models_cached(
+                project_id=project_id, section='llm', include_shared=True,
+            )
+            items = models_response.get('items', []) if models_response else []
+            for item in items:
+                if isinstance(item, dict) and 'name' in item:
+                    display = item.get('display_name', item['name'])
+                    model_display_names[item['name']] = display
 
             try:
                 with db.with_project_schema_session(None) as session:
@@ -294,10 +313,6 @@ if _API_AVAILABLE:
                     # Ensure denominator is never less than numerator
                     # (removed users still count in historical periods)
                     total_project_users = max(total_project_users, unique_users)
-
-                    # Under elitea/WAM mode, AuditEvent carries no LiteLLM spend data, so
-                    # token/cost KPIs are sourced from usage_event via the usage plugin instead.
-                    usage_kpis = usage_get_cost_kpis(project_id, dt_from, dt_to) if is_elitea_mode() else None
 
                     kpis = {
                         "total_events": total_events,
@@ -451,17 +466,6 @@ if _API_AVAILABLE:
                         AuditEvent.model_name,
                     ).order_by(func.count().desc()).limit(20).all()
 
-                    # Get display names for models via configurations RPC - build mapping once
-                    model_display_names = {}
-                    models_response = configurations_get_models_cached(
-                        project_id=project_id, section='llm', include_shared=True,
-                    )
-                    items = models_response.get('items', []) if models_response else []
-                    for item in items:
-                        if isinstance(item, dict) and 'name' in item:
-                            display = item.get('display_name', item['name'])
-                            model_display_names[item['name']] = display
-
                     models = [
                         {
                             "model_name": r.model_name,
@@ -573,6 +577,7 @@ if _API_AVAILABLE:
                 c.ADMINISTRATION_MODE: {"admin": True, "editor": False, "viewer": False},
             }
         })
+        @api_tools.endpoint_metrics
         def get(self, **kwargs):
             from tools import db
             from ...models.audit_event import AuditEvent

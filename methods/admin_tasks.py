@@ -833,6 +833,49 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"dry_run": dry_run, **result}
 
     @web.method()
+    def migrate_audit_events_analytics_tuning(self, *args, **kwargs):
+        """Admin task: make audit_events cheap to read for analytics.
+
+        Two independent steps, both idempotent:
+
+        * adds the ``ix_audit_events_project_event_type_timestamp`` index that
+          every analytics aggregate needs (via the same schema guard as
+          ``migrate_audit_events_columns``, so any other missing column/index is
+          reconciled too);
+        * applies the autovacuum reloptions that keep planner statistics current
+          on an insert-only table, plus a one-off ``ANALYZE`` if statistics have
+          never been gathered.
+
+        The index build can't use CONCURRENTLY inside the advisory-locked
+        transaction, so run this as part of the release's admin-task batch rather
+        than at boot — audit_events is shared and high-write.
+
+        Param format (optional):
+            "dry_run"
+        """
+        from ..utils.audit_events_schema import (
+            ensure_audit_events_schema,
+            ensure_audit_events_statistics,
+        )
+
+        param = kwargs.get("param", "") or ""
+        dry_run = any(seg.strip().lower() == "dry_run" for seg in param.split(";"))
+
+        try:
+            schema_result = ensure_audit_events_schema(db.engine, dry_run=dry_run)
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_audit_events_analytics_tuning: failed to apply schema")
+            return {"error": "failed to apply schema"}
+
+        try:
+            stats_result = ensure_audit_events_statistics(db.engine, dry_run=dry_run)
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_audit_events_analytics_tuning: failed to apply statistics")
+            return {"error": "failed to apply statistics", "schema": schema_result}
+
+        return {"dry_run": dry_run, "schema": schema_result, "statistics": stats_result}
+
+    @web.method()
     def migrate_toolkit_settings_alita_title(self, *args, **kwargs):
         """Admin task: rename 'alita_title' to 'elitea_title' inside toolkit settings JSON.
 
