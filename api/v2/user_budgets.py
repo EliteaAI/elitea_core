@@ -244,7 +244,7 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
     #
     # Limits are resolved for the page alone: this is the one call that costs per member
     limit_map = _safe_rpc(
-        rpc, "litellm_get_effective_user_limits", 20, {},
+        rpc, "elitea_core_get_effective_member_limits", 20, {},
         project_id=project_id, user_ids=[row["user_id"] for row in page],
     ) or {}
     #
@@ -265,7 +265,7 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
         })
     #
     warning_pct = _safe_rpc(
-        rpc, "litellm_get_warning_threshold", 5, DEFAULT_WARNING_PCT, scope="user",
+        rpc, "usage_get_warning_threshold", 5, DEFAULT_WARNING_PCT, scope="user",
     )
     #
     return {

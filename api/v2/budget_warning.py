@@ -21,11 +21,11 @@ def _warning_state(project_id: int, user_id: int):
     month of spend to produce the same number.
     """
     try:
-        return rpc_tools.RpcMixin().rpc.timeout(10).litellm_get_budget_warning_state(
+        return rpc_tools.RpcMixin().rpc.timeout(10).usage_get_budget_warning_state(
             project_id=project_id, user_id=user_id,
         ) or dict(NO_WARNING)
     except Exception:  # pylint: disable=W0703
-        # No cost-budgets plugin, or it is unreachable: show nothing rather than block the page
+        # usage plugin off or unreachable: show nothing rather than block the page
         return dict(NO_WARNING)
 
 

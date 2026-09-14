@@ -67,13 +67,6 @@ class RPC:
             session.commit()
             result = budget.to_json()
         #
-        try:
-            self.context.rpc_manager.timeout(15).litellm_push_project_budget(
-                project_id=project_id,
-            )
-        except Exception:  # pylint: disable=W0703
-            log.exception("Failed to push budget to LiteLLM for project %s", project_id)
-        #
         return result
 
     @web.rpc("elitea_core_list_project_budgets", "list_project_budgets")
@@ -124,16 +117,6 @@ class RPC:
             #
             session.commit()
             result = budget.to_json()
-        #
-        try:
-            self.context.rpc_manager.timeout(15).litellm_push_user_budget(
-                project_id=project_id, user_id=user_id,
-            )
-        except Exception:  # pylint: disable=W0703
-            log.exception(
-                "Failed to push user budget to LiteLLM for project %s user %s",
-                project_id, user_id,
-            )
         #
         return result
 
