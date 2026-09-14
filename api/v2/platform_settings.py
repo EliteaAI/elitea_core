@@ -51,7 +51,7 @@ def _cost_budgets_mode():
     """
     modes = []
     #
-    for rpc_name in ("litellm_budgets_mode", "usage_get_mode"):
+    for rpc_name in ("litellm_budgets_mode", "usage_mode"):
         try:
             modes.append(getattr(rpc_tools.RpcMixin().rpc.timeout(5), rpc_name)())
         except Exception:  # pylint: disable=W0703

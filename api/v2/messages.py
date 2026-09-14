@@ -26,7 +26,7 @@ from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.context_analytics import update_conversation_meta
 from ...utils.sio_utils import SioEvents, SioValidationError
-from ...utils.exceptions import PoolSaturationError
+from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -286,6 +286,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "detail": "SioValidationError",
                 "error": f"Wrong input data: {e.error}",
             }, 400
+        except BudgetDoorClosedError as e:
+            return e.body(), 429
         except PoolSaturationError as e:
             return {
                 "error": "temporarily_unavailable",
