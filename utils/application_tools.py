@@ -1300,10 +1300,19 @@ def lock_toolkit_index_meta(session: Session, index_name: str, lock_timeout: str
 UNDEFINED_TABLE_SQLSTATE = "42P01"
 
 
-def _is_undefined_table_error(error: ProgrammingError) -> bool:
+def error_sqlstate(error):
+    """The driver's SQLSTATE, whichever driver raised it.
+
+    psycopg2 exposes `.pgcode`; psycopg3 — which is what the PGVector path runs on —
+    exposes `.sqlstate` and has no `.pgcode` at all, so reading either one alone is
+    silently None for half the deployments.
+    """
     orig = getattr(error, 'orig', None)
-    sqlstate = getattr(orig, 'pgcode', None) or getattr(orig, 'sqlstate', None)
-    return sqlstate == UNDEFINED_TABLE_SQLSTATE
+    return getattr(orig, 'pgcode', None) or getattr(orig, 'sqlstate', None)
+
+
+def _is_undefined_table_error(error: ProgrammingError) -> bool:
+    return error_sqlstate(error) == UNDEFINED_TABLE_SQLSTATE
 
 
 def query_index_runs(session: Session, index_name: str, statuses=None, for_update: bool = False):
@@ -1387,8 +1396,8 @@ def get_pending_index_run_heartbeats(session: Session) -> Dict[str, float]:
         # picks which horizon the display flag uses. Failing the whole index list
         # over one unreadable table is the worse outcome, so degrade to the
         # updated_on rule and say so loudly.
-        log.warning(f"Could not read index run heartbeats (sqlstate="
-                    f"{getattr(getattr(error, 'orig', None), 'pgcode', None)}); "
+        log.warning(f"Could not read index run heartbeats "
+                    f"(sqlstate={error_sqlstate(error)}); "
                     f"falling back to the updated_on staleness rule: {error}")
         return {}
 
@@ -1418,7 +1427,14 @@ def resolve_index_staleness(index_data_state: str, updated_on: float,
     if not index_data_state or index_data_state != IndexDataStatus.in_progress.value:
         return False
     if pending_heartbeat is not None:
-        horizon = heartbeat_horizon if heartbeat_horizon is not None else task_disconnected_timeout
+        # Clamped, never bare: `task_disconnected_timeout` is an unclamped vault
+        # secret, and setting it below the display horizon inverts the invariant the
+        # split depends on — a row would become reclaimable (Delete enabled) while
+        # still rendering a live spinner with no error styling.
+        horizon = (
+            task_disconnected_timeout if heartbeat_horizon is None
+            else min(heartbeat_horizon, task_disconnected_timeout)
+        )
         return time.time() - pending_heartbeat > horizon
     return is_index_stale(updated_on, index_data_state, task_disconnected_timeout)
 

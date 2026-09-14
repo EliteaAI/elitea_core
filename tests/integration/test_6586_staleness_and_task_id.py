@@ -13,6 +13,7 @@ Run via:
     python tests/run_tests.py integration/test_6586_staleness_and_task_id.py -v
 """
 
+import ast
 import importlib.util
 import pathlib
 import sys
@@ -213,6 +214,145 @@ class TestControlDecisionsKeepTheDisconnectHorizon:
             "in_progress", time.time(), TIMEOUT, pending_heartbeat=mid_promote)
 
         assert (display, control) == (True, False)
+
+
+class TestTheHorizonWiringAtEachCallSite:
+    """resolve_index_staleness is safe by default and dangerous by keyword, so the
+    behaviour lives in how each call site spells it — which no behavioural test
+    reaches. Parsed, not grepped: a comment mentioning the keyword must not pass, and
+    a real keyword must not be missed.
+
+    The scheduler passing `heartbeat_horizon` reintroduces the kill-then-refuse loop:
+    it supersedes a run mid-promote, calls stop_task on a live worker, and is then
+    refused the dispatch by reject_index_dispatch_when_run_live on the disconnect
+    rule, leaving the schedule due and re-firing every tick."""
+
+    def _calls(self, relative_path):
+        source = (PLUGIN_ROOT / relative_path).read_text()
+        tree = ast.parse(source)
+        return [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "resolve_index_staleness"
+        ]
+
+    def test_the_scheduler_never_asks_for_the_display_horizon(self):
+        calls = self._calls("rpc/index_scheduling.py")
+
+        assert len(calls) == 1, "the scheduler should decide staleness in exactly one place"
+        assert [kw.arg for kw in calls[0].keywords if kw.arg == "heartbeat_horizon"] == []
+
+    def test_the_list_get_asks_for_it_exactly_once(self):
+        calls = self._calls("api/v2/index_meta.py")
+        with_horizon = [c for c in calls
+                        if any(kw.arg == "heartbeat_horizon" for kw in c.keywords)]
+
+        assert len(calls) == 2, "the GET computes both a display and a control flag"
+        assert len(with_horizon) == 1, "display asks for the horizon; control must not"
+
+    def test_the_get_still_returns_the_control_flag(self):
+        source = (PLUGIN_ROOT / "api/v2/index_meta.py").read_text()
+        keys = [
+            node.value
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Constant) and node.value in ("stale", "reclaimable")
+        ]
+
+        # Dropping `reclaimable` from the payload silently re-arms Delete on a live
+        # run, because the UI falls back to `stale` when the field is absent.
+        assert "reclaimable" in keys
+        assert "stale" in keys
+
+
+class TestTheSqlstateDiagnosticWorksOnThisDriver:
+    """The degrade path logs the SQLSTATE so a real permission/schema regression is
+    still visible. Reading `.pgcode` alone prints None on psycopg3, which is the
+    driver the PGVector path actually uses."""
+
+    def test_a_psycopg3_style_error_reports_its_code(self, application_tools):
+        error = types.SimpleNamespace(orig=types.SimpleNamespace(sqlstate="42501"))
+
+        assert application_tools.error_sqlstate(error) == "42501"
+
+    def test_a_psycopg2_style_error_still_reports_its_code(self, application_tools):
+        error = types.SimpleNamespace(orig=types.SimpleNamespace(pgcode="42501"))
+
+        assert application_tools.error_sqlstate(error) == "42501"
+
+    def test_the_undefined_table_probe_uses_the_same_read(self, application_tools):
+        error = types.SimpleNamespace(orig=types.SimpleNamespace(sqlstate="42P01"))
+
+        assert application_tools._is_undefined_table_error(error) is True
+
+
+class TestTheDisplayHorizonCanNeverOutrunControl:
+    """`task_disconnected_timeout_sec` is an unclamped vault secret. Set it below the
+    display horizon and the flags invert: a row becomes reclaimable — Delete enabled —
+    while still rendering a live spinner with no error styling, which is the one
+    combination the split exists to prevent. This stack ships that config: the local
+    project secret is 60."""
+
+    def test_a_short_disconnect_timeout_does_not_invert_the_flags(self, application_tools):
+        short = 60
+        age = time.time() - 200  # past `short`, inside the 300s display horizon
+
+        display = application_tools.resolve_index_staleness(
+            "in_progress", time.time(), short, pending_heartbeat=age,
+            heartbeat_horizon=application_tools.HEARTBEAT_STALE_HORIZON_SEC)
+        control = application_tools.resolve_index_staleness(
+            "in_progress", time.time(), short, pending_heartbeat=age)
+
+        assert control is True
+        assert display is True, "a reclaimable row must never still read as healthy"
+
+    def test_reclaimable_always_implies_stale(self, application_tools):
+        for timeout in (30, 60, 299, 300, 301, 7200):
+            for age in (10, 61, 200, 301, 8000):
+                heartbeat = time.time() - age
+                display = application_tools.resolve_index_staleness(
+                    "in_progress", time.time(), timeout, pending_heartbeat=heartbeat,
+                    heartbeat_horizon=application_tools.HEARTBEAT_STALE_HORIZON_SEC)
+                control = application_tools.resolve_index_staleness(
+                    "in_progress", time.time(), timeout, pending_heartbeat=heartbeat)
+                assert not (control and not display), (
+                    f"inverted at timeout={timeout} age={age}"
+                )
+
+
+class TestTheDispatchSeedsRunChunks:
+    """The list renders `run_chunks` while a run is in flight. Core flips the row to
+    in_progress at dispatch but the worker needs tens of seconds to boot, so without a
+    seed here the card falls back to the PREVIOUS run's counts in the meantime."""
+
+    @pytest.fixture
+    def dispatch(self, application_tools, monkeypatch):
+        state = types.SimpleNamespace(cmetadata=[])
+        monkeypatch.setattr(application_tools, "validate_toolkit_for_index",
+                            lambda config: ("42", "postgresql://"))
+        monkeypatch.setattr(application_tools, "reject_index_dispatch_when_run_live",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(application_tools, "reset_or_create_toolkit_index_meta",
+                            lambda cs, schema, name, meta, **kw: state.cmetadata.append(meta))
+        state.task_node = types.SimpleNamespace(
+            start_task=lambda *a, **kw: "task-9", stop_task=lambda task_id: None)
+        state.data = {
+            "toolkit_config": {"id": 42},
+            "project_id": 1,
+            "tool_name": "index_data",
+            "tool_params": {"index_name": "docs"},
+        }
+        return state
+
+    def test_the_dispatched_row_carries_a_zero_chunk_count(self, application_tools, dispatch):
+        application_tools.start_index_task(dispatch.task_node, dispatch.data, None)
+
+        assert dispatch.cmetadata[-1]["run_chunks"] == 0
+
+    def test_it_does_not_carry_a_previous_runs_count(self, application_tools, dispatch):
+        application_tools.start_index_task(dispatch.task_node, dispatch.data, None)
+
+        assert dispatch.cmetadata[-1]["state"] == "in_progress"
+        assert dispatch.cmetadata[-1]["indexed"] == 0
 
 
 class TestRunChunksIsSeededNotInherited:
