@@ -20,6 +20,11 @@ if _API_AVAILABLE:
 
     from ...utils.constants import SYSTEM_USER_EMAILS, SYSTEM_USER_EMAIL_PATTERN
     from ...utils.date_range import parse_date_range as _parse_dates
+    from ...utils.usage_rpc import (
+        configurations_get_models_cached,
+        is_elitea_mode,
+        usage_get_cost_kpis,
+    )
 
     def _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to):
         """Build base query with project + date filters, excluding system users."""
@@ -290,6 +295,10 @@ if _API_AVAILABLE:
                     # (removed users still count in historical periods)
                     total_project_users = max(total_project_users, unique_users)
 
+                    # Under elitea/WAM mode, AuditEvent carries no LiteLLM spend data, so
+                    # token/cost KPIs are sourced from usage_event via the usage plugin instead.
+                    usage_kpis = usage_get_cost_kpis(project_id, dt_from, dt_to) if is_elitea_mode() else None
+
                     kpis = {
                         "total_events": total_events,
                         "unique_users": unique_users,
@@ -305,8 +314,14 @@ if _API_AVAILABLE:
                         "tool_runs": kpi_row.tool_runs or 0,
                         "chat_msgs": kpi_row.chat_msgs or 0,
                         "agent_runs": kpi_row.agent_runs or 0,
-                        "total_tokens": kpi_row.total_tokens or 0,
-                        "total_llm_cost": float(kpi_row.total_llm_cost) if kpi_row.total_llm_cost else 0.0,
+                        "total_tokens": (
+                            usage_kpis["total_tokens"] if usage_kpis is not None
+                            else (kpi_row.total_tokens or 0)
+                        ),
+                        "total_llm_cost": (
+                            usage_kpis["total_cost_micro_usd"] / 1_000_000 if usage_kpis is not None
+                            else (float(kpi_row.total_llm_cost) if kpi_row.total_llm_cost else 0.0)
+                        ),
                     }
 
                     # 2. Event type breakdown
@@ -438,20 +453,14 @@ if _API_AVAILABLE:
 
                     # Get display names for models via configurations RPC - build mapping once
                     model_display_names = {}
-                    try:
-                        from tools import rpc_tools
-                        models_response = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_models(
-                            project_id=project_id, 
-                            section='llm', 
-                            include_shared=True
-                        )
-                        items = models_response.get('items', []) if models_response else []
-                        for item in items:
-                            if isinstance(item, dict) and 'name' in item:
-                                display = item.get('display_name', item['name'])
-                                model_display_names[item['name']] = display
-                    except Exception as e:
-                        log.warning(f"Failed to get model configurations: {e}")
+                    models_response = configurations_get_models_cached(
+                        project_id=project_id, section='llm', include_shared=True,
+                    )
+                    items = models_response.get('items', []) if models_response else []
+                    for item in items:
+                        if isinstance(item, dict) and 'name' in item:
+                            display = item.get('display_name', item['name'])
+                            model_display_names[item['name']] = display
 
                     models = [
                         {

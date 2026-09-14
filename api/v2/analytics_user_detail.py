@@ -18,6 +18,11 @@ if _API_AVAILABLE:
     from sqlalchemy import func, case, cast, Date, desc
 
     from ...utils.date_range import parse_date_range as _parse_dates
+    from ...utils.usage_rpc import (
+        configurations_get_models_cached,
+        is_elitea_mode,
+        usage_get_user_breakdown,
+    )
 
     class PromptLibAPI(api_tools.APIModeHandler):
         """Per-user detail analytics."""
@@ -150,6 +155,7 @@ if _API_AVAILABLE:
                 return {"error": "user_id must be an integer"}, 400
 
             dt_from, dt_to = _parse_dates(request.args)
+            elitea_mode = is_elitea_mode()
 
             try:
                 with db.with_project_schema_session(None) as session:
@@ -202,20 +208,14 @@ if _API_AVAILABLE:
 
                     # Get display names for models via configurations RPC - build mapping once
                     model_display_names = {}
-                    try:
-                        from tools import rpc_tools
-                        models_response = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_models(
-                            project_id=project_id, 
-                            section='llm', 
-                            include_shared=True
-                        )
-                        items = models_response.get('items', []) if models_response else []
-                        for item in items:
-                            if isinstance(item, dict) and 'name' in item:
-                                display = item.get('display_name', item['name'])
-                                model_display_names[item['name']] = display
-                    except Exception as e:
-                        log.warning(f"Failed to get model configurations: {e}")
+                    models_response = configurations_get_models_cached(
+                        project_id=project_id, section='llm', include_shared=True,
+                    )
+                    items = models_response.get('items', []) if models_response else []
+                    for item in items:
+                        if isinstance(item, dict) and 'name' in item:
+                            display = item.get('display_name', item['name'])
+                            model_display_names[item['name']] = display
 
                     # Tools used by this user
                     tool_rows = base.with_entities(
@@ -252,6 +252,22 @@ if _API_AVAILABLE:
                         func.count().label("llm_calls"),
                     )
                     if _model_price_available:
+                        input_cost_expr = func.sum(
+                            func.coalesce(AuditEvent.input_tokens, 0)
+                            * func.coalesce(ModelPrice.input_cost_per_token, 0)
+                        )
+                        output_cost_expr = func.sum(
+                            func.coalesce(AuditEvent.output_tokens, 0)
+                            * func.coalesce(ModelPrice.output_cost_per_token, 0)
+                        )
+                        cache_read_cost_expr = func.sum(
+                            func.coalesce(AuditEvent.cache_read_tokens, 0)
+                            * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
+                        )
+                        cache_creation_cost_expr = func.sum(
+                            func.coalesce(AuditEvent.cache_creation_tokens, 0)
+                            * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
+                        )
                         llm_kpi_query = base.outerjoin(
                             ModelPrice, AuditEvent.model_name == ModelPrice.model_name
                         ).with_entities(
@@ -259,29 +275,30 @@ if _API_AVAILABLE:
                             func.sum(func.coalesce(AuditEvent.output_tokens, 0)).label("output_tokens"),
                             func.sum(func.coalesce(AuditEvent.cache_read_tokens, 0)).label("cache_read_tokens"),
                             func.sum(func.coalesce(AuditEvent.cache_creation_tokens, 0)).label("cache_creation_tokens"),
-                            func.sum(AuditEvent.llm_cost).label("llm_cost"),
+                            (
+                                input_cost_expr + output_cost_expr
+                                + cache_read_cost_expr + cache_creation_cost_expr
+                            ).label("llm_cost"),
                             func.count().label("llm_calls"),
-                            func.sum(
-                                func.coalesce(AuditEvent.input_tokens, 0)
-                                * func.coalesce(ModelPrice.input_cost_per_token, 0)
-                            ).label("input_cost"),
-                            func.sum(
-                                func.coalesce(AuditEvent.output_tokens, 0)
-                                * func.coalesce(ModelPrice.output_cost_per_token, 0)
-                            ).label("output_cost"),
-                            func.sum(
-                                func.coalesce(AuditEvent.cache_read_tokens, 0)
-                                * func.coalesce(ModelPrice.cache_read_input_token_cost, 0)
-                            ).label("cache_read_cost"),
-                            func.sum(
-                                func.coalesce(AuditEvent.cache_creation_tokens, 0)
-                                * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0)
-                            ).label("cache_creation_cost"),
+                            input_cost_expr.label("input_cost"),
+                            output_cost_expr.label("output_cost"),
+                            cache_read_cost_expr.label("cache_read_cost"),
+                            cache_creation_cost_expr.label("cache_creation_cost"),
                         )
                     llm_kpi = llm_kpi_query.filter(
                         AuditEvent.event_type == "llm",
                         AuditEvent.is_error.is_(False),
                     ).first()
+
+                    # AuditEvent carries no LiteLLM spend data under elitea/WAM mode; source
+                    # token/cost totals from usage_event instead. usage_event has no
+                    # per-token-type cost split, so those sub-fields are zeroed.
+                    usage_kpi = {}
+                    if elitea_mode:
+                        usage_rows = usage_get_user_breakdown(
+                            project_id, dt_from, dt_to, user_id=user_id,
+                        ) or []
+                        usage_kpi = usage_rows[0] if usage_rows else {}
 
                     # Daily activity by event type
                     daily_rows = base.with_entities(
@@ -312,28 +329,56 @@ if _API_AVAILABLE:
                             "agent_events": kpi.agent_events or 0,
                             "chat_events": kpi.chat_events or 0,
                             "errors": kpi.errors or 0,
-                            "input_tokens": (llm_kpi.input_tokens if llm_kpi else 0) or 0,
-                            "output_tokens": (llm_kpi.output_tokens if llm_kpi else 0) or 0,
-                            "total_tokens": (
-                                (
-                                    (llm_kpi.input_tokens or 0)
-                                    + (llm_kpi.output_tokens or 0)
-                                    + (llm_kpi.cache_read_tokens or 0)
-                                    + (llm_kpi.cache_creation_tokens or 0)
-                                )
-                                if llm_kpi else 0
-                            ),
-                            "cache_read_tokens": (llm_kpi.cache_read_tokens if llm_kpi else 0) or 0,
-                            "cache_creation_tokens": (llm_kpi.cache_creation_tokens if llm_kpi else 0) or 0,
-                            "llm_cost": float(llm_kpi.llm_cost) if llm_kpi and llm_kpi.llm_cost else 0.0,
-                            "input_cost": round(float(llm_kpi.input_cost), 6) if _model_price_available and llm_kpi and llm_kpi.input_cost else 0.0,
-                            "output_cost": round(float(llm_kpi.output_cost), 6) if _model_price_available and llm_kpi and llm_kpi.output_cost else 0.0,
-                            "cache_read_cost": round(float(llm_kpi.cache_read_cost), 6) if _model_price_available and llm_kpi and llm_kpi.cache_read_cost else 0.0,
-                            "cache_creation_cost": round(float(llm_kpi.cache_creation_cost), 6) if _model_price_available and llm_kpi and llm_kpi.cache_creation_cost else 0.0,
-                            "avg_cost_per_call": (
-                                float(llm_kpi.llm_cost) / llm_kpi.llm_calls
-                                if llm_kpi and llm_kpi.llm_cost and llm_kpi.llm_calls
-                                else 0.0
+                            **(
+                                {
+                                    "input_tokens": usage_kpi.get("input_tokens", 0) or 0,
+                                    "output_tokens": usage_kpi.get("output_tokens", 0) or 0,
+                                    "total_tokens": (
+                                        (usage_kpi.get("input_tokens", 0) or 0)
+                                        + (usage_kpi.get("output_tokens", 0) or 0)
+                                    ),
+                                    "cache_read_tokens": 0,
+                                    "cache_creation_tokens": 0,
+                                    "llm_cost": round(
+                                        (usage_kpi.get("cost_micro_usd", 0) or 0) / 1_000_000, 6,
+                                    ),
+                                    "input_cost": 0.0,
+                                    "output_cost": 0.0,
+                                    "cache_read_cost": 0.0,
+                                    "cache_creation_cost": 0.0,
+                                    "avg_cost_per_call": (
+                                        (usage_kpi.get("cost_micro_usd", 0) or 0) / 1_000_000
+                                        / usage_kpi["llm_call_count"]
+                                        if usage_kpi.get("cost_micro_usd") and usage_kpi.get("llm_call_count")
+                                        else 0.0
+                                    ),
+                                }
+                                if elitea_mode else
+                                {
+                                    "input_tokens": (llm_kpi.input_tokens if llm_kpi else 0) or 0,
+                                    "output_tokens": (llm_kpi.output_tokens if llm_kpi else 0) or 0,
+                                    "total_tokens": (
+                                        (
+                                            (llm_kpi.input_tokens or 0)
+                                            + (llm_kpi.output_tokens or 0)
+                                            + (llm_kpi.cache_read_tokens or 0)
+                                            + (llm_kpi.cache_creation_tokens or 0)
+                                        )
+                                        if llm_kpi else 0
+                                    ),
+                                    "cache_read_tokens": (llm_kpi.cache_read_tokens if llm_kpi else 0) or 0,
+                                    "cache_creation_tokens": (llm_kpi.cache_creation_tokens if llm_kpi else 0) or 0,
+                                    "llm_cost": float(llm_kpi.llm_cost) if llm_kpi and llm_kpi.llm_cost else 0.0,
+                                    "input_cost": round(float(llm_kpi.input_cost), 6) if _model_price_available and llm_kpi and llm_kpi.input_cost else 0.0,
+                                    "output_cost": round(float(llm_kpi.output_cost), 6) if _model_price_available and llm_kpi and llm_kpi.output_cost else 0.0,
+                                    "cache_read_cost": round(float(llm_kpi.cache_read_cost), 6) if _model_price_available and llm_kpi and llm_kpi.cache_read_cost else 0.0,
+                                    "cache_creation_cost": round(float(llm_kpi.cache_creation_cost), 6) if _model_price_available and llm_kpi and llm_kpi.cache_creation_cost else 0.0,
+                                    "avg_cost_per_call": (
+                                        float(llm_kpi.llm_cost) / llm_kpi.llm_calls
+                                        if llm_kpi and llm_kpi.llm_cost and llm_kpi.llm_calls
+                                        else 0.0
+                                    ),
+                                }
                             ),
                         },
                         "models": [

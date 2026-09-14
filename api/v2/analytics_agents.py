@@ -20,6 +20,7 @@ if _API_AVAILABLE:
 
     from ...utils.constants import SYSTEM_USER_EMAILS, SYSTEM_USER_EMAIL_PATTERN
     from ...utils.date_range import parse_date_range as _parse_dates
+    from ...utils.usage_rpc import is_elitea_mode
 
     _SORT_WHITELIST = frozenset([
         "events", "users", "avg_duration_ms", "errors", "entity_name",
@@ -165,6 +166,7 @@ if _API_AVAILABLE:
                 _model_price_available = False
 
             dt_from, dt_to = _parse_dates(request.args)
+            elitea_mode = is_elitea_mode()
 
             try:
                 limit = min(int(request.args.get("limit", 20)), 100)
@@ -266,11 +268,33 @@ if _API_AVAILABLE:
                         ).label("total_tokens"),
                         func.count().label("llm_calls"),
                     )
-                    if _model_price_available:
+                    # AuditEvent carries no LiteLLM spend data under elitea/WAM mode (same
+                    # caveat as analytics_costs.py); the ModelPrice recompute is skipped
+                    # there and cost fields are zeroed below, while tokens/calls stay accurate.
+                    if not elitea_mode and _model_price_available:
                         mp_alias = aliased(ModelPrice)
+                        input_cost_expr = func.sum(
+                            func.coalesce(llm_ev.input_tokens, 0)
+                            * func.coalesce(mp_alias.input_cost_per_token, 0)
+                        )
+                        output_cost_expr = func.sum(
+                            func.coalesce(llm_ev.output_tokens, 0)
+                            * func.coalesce(mp_alias.output_cost_per_token, 0)
+                        )
+                        cache_read_cost_expr = func.sum(
+                            func.coalesce(llm_ev.cache_read_tokens, 0)
+                            * func.coalesce(mp_alias.cache_read_input_token_cost, 0)
+                        )
+                        cache_creation_cost_expr = func.sum(
+                            func.coalesce(llm_ev.cache_creation_tokens, 0)
+                            * func.coalesce(mp_alias.cache_creation_input_token_cost, 0)
+                        )
                         cost_map_query = session.query(
                             app_traces.c.entity_id.label("entity_id"),
-                            func.sum(llm_ev.llm_cost).label("llm_cost"),
+                            (
+                                input_cost_expr + output_cost_expr
+                                + cache_read_cost_expr + cache_creation_cost_expr
+                            ).label("llm_cost"),
                             func.sum(func.coalesce(llm_ev.input_tokens, 0)).label("input_tokens"),
                             func.sum(func.coalesce(llm_ev.output_tokens, 0)).label("output_tokens"),
                             func.sum(func.coalesce(llm_ev.cache_read_tokens, 0)).label("cache_read_tokens"),
@@ -282,22 +306,10 @@ if _API_AVAILABLE:
                                 + func.coalesce(llm_ev.cache_creation_tokens, 0)
                             ).label("total_tokens"),
                             func.count().label("llm_calls"),
-                            func.sum(
-                                func.coalesce(llm_ev.input_tokens, 0)
-                                * func.coalesce(mp_alias.input_cost_per_token, 0)
-                            ).label("input_cost"),
-                            func.sum(
-                                func.coalesce(llm_ev.output_tokens, 0)
-                                * func.coalesce(mp_alias.output_cost_per_token, 0)
-                            ).label("output_cost"),
-                            func.sum(
-                                func.coalesce(llm_ev.cache_read_tokens, 0)
-                                * func.coalesce(mp_alias.cache_read_input_token_cost, 0)
-                            ).label("cache_read_cost"),
-                            func.sum(
-                                func.coalesce(llm_ev.cache_creation_tokens, 0)
-                                * func.coalesce(mp_alias.cache_creation_input_token_cost, 0)
-                            ).label("cache_creation_cost"),
+                            input_cost_expr.label("input_cost"),
+                            output_cost_expr.label("output_cost"),
+                            cache_read_cost_expr.label("cache_read_cost"),
+                            cache_creation_cost_expr.label("cache_creation_cost"),
                         ).select_from(llm_ev).join(
                             app_traces, llm_ev.trace_id == app_traces.c.trace_id,
                         ).outerjoin(
@@ -357,7 +369,7 @@ if _API_AVAILABLE:
                     ).label("llm_calls")
 
                     extra_cost_cols = []
-                    if _model_price_available:
+                    if not elitea_mode and _model_price_available:
                         input_cost_col = func.coalesce(
                             func.max(cost_map.c.input_cost), 0
                         ).label("input_cost")
@@ -449,11 +461,11 @@ if _API_AVAILABLE:
                                 "cache_read_tokens": r.cache_read_tokens or 0,
                                 "cache_creation_tokens": r.cache_creation_tokens or 0,
                                 "total_tokens": r.total_tokens or 0,
-                                "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
-                                "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
-                                "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
-                                "cache_read_cost": round(float(r.cache_read_cost), 6) if _model_price_available and r.cache_read_cost else 0.0,
-                                "cache_creation_cost": round(float(r.cache_creation_cost), 6) if _model_price_available and r.cache_creation_cost else 0.0,
+                                "llm_cost": float(r.llm_cost) if not elitea_mode and r.llm_cost else 0.0,
+                                "input_cost": round(float(r.input_cost), 6) if not elitea_mode and _model_price_available and r.input_cost else 0.0,
+                                "output_cost": round(float(r.output_cost), 6) if not elitea_mode and _model_price_available and r.output_cost else 0.0,
+                                "cache_read_cost": round(float(r.cache_read_cost), 6) if not elitea_mode and _model_price_available and r.cache_read_cost else 0.0,
+                                "cache_creation_cost": round(float(r.cache_creation_cost), 6) if not elitea_mode and _model_price_available and r.cache_creation_cost else 0.0,
                                 "avg_tokens_per_call": (
                                     (r.total_tokens or 0) / r.llm_calls
                                     if r.llm_calls else 0

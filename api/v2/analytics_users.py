@@ -22,6 +22,7 @@ if _API_AVAILABLE:
         SYSTEM_USER_EMAILS,
         SYSTEM_USER_EMAIL_PATTERN,
     )
+    from ...utils.usage_rpc import is_elitea_mode, usage_get_user_breakdown
 
     def _parse_dates(args):
         date_from = args.get("date_from")
@@ -190,6 +191,7 @@ if _API_AVAILABLE:
                 _model_price_available = False
 
             dt_from, dt_to = _parse_dates(request.args)
+            elitea_mode = is_elitea_mode()
 
             try:
                 limit = min(int(request.args.get("limit", 20)), 100)
@@ -281,29 +283,35 @@ if _API_AVAILABLE:
 
                     extra_cost_cols = []
                     if _model_price_available:
-                        input_cost_col = func.sum(case(
+                        input_cost_expr = func.sum(case(
                             (AuditEvent.is_error.is_(True), 0),
                             else_=func.coalesce(AuditEvent.input_tokens, 0)
                             * func.coalesce(ModelPrice.input_cost_per_token, 0),
-                        )).label("input_cost")
-                        output_cost_col = func.sum(case(
+                        ))
+                        output_cost_expr = func.sum(case(
                             (AuditEvent.is_error.is_(True), 0),
                             else_=func.coalesce(AuditEvent.output_tokens, 0)
                             * func.coalesce(ModelPrice.output_cost_per_token, 0),
-                        )).label("output_cost")
-                        cache_read_cost_col = func.sum(case(
+                        ))
+                        cache_read_cost_expr = func.sum(case(
                             (AuditEvent.is_error.is_(True), 0),
                             else_=func.coalesce(AuditEvent.cache_read_tokens, 0)
                             * func.coalesce(ModelPrice.cache_read_input_token_cost, 0),
-                        )).label("cache_read_cost")
-                        cache_creation_cost_col = func.sum(case(
+                        ))
+                        cache_creation_cost_expr = func.sum(case(
                             (AuditEvent.is_error.is_(True), 0),
                             else_=func.coalesce(AuditEvent.cache_creation_tokens, 0)
                             * func.coalesce(ModelPrice.cache_creation_input_token_cost, 0),
-                        )).label("cache_creation_cost")
+                        ))
+                        llm_cost_col = (
+                            input_cost_expr + output_cost_expr
+                            + cache_read_cost_expr + cache_creation_cost_expr
+                        ).label("llm_cost")
                         extra_cost_cols = [
-                            input_cost_col, output_cost_col,
-                            cache_read_cost_col, cache_creation_cost_col,
+                            input_cost_expr.label("input_cost"),
+                            output_cost_expr.label("output_cost"),
+                            cache_read_cost_expr.label("cache_read_cost"),
+                            cache_creation_cost_expr.label("cache_creation_cost"),
                         ]
 
                     user_base = base.outerjoin(
@@ -356,32 +364,63 @@ if _API_AVAILABLE:
 
                     rows = query.offset(offset).limit(limit).all()
 
+                    # AuditEvent carries no LiteLLM spend data under elitea/WAM mode, so
+                    # token/cost figures come from usage_event instead. usage_event has no
+                    # per-token-type cost split, so those sub-fields are zeroed.
+                    usage_by_user = {}
+                    if elitea_mode:
+                        usage_by_user = {
+                            u["user_id"]: u
+                            for u in (usage_get_user_breakdown(project_id, dt_from, dt_to) or [])
+                            if u["user_id"] is not None
+                        }
+
+                    def _row_dict(r):
+                        if elitea_mode:
+                            u = usage_by_user.get(r.user_id, {})
+                            input_tokens = u.get("input_tokens", 0) or 0
+                            output_tokens = u.get("output_tokens", 0) or 0
+                            total_tokens = input_tokens + output_tokens
+                            llm_cost = round((u.get("cost_micro_usd", 0) or 0) / 1_000_000, 6)
+                            cache_read_tokens = 0
+                            cache_creation_tokens = 0
+                            input_cost = output_cost = cache_read_cost = cache_creation_cost = 0.0
+                        else:
+                            input_tokens = r.input_tokens or 0
+                            output_tokens = r.output_tokens or 0
+                            total_tokens = r.total_tokens or 0
+                            llm_cost = float(r.llm_cost) if r.llm_cost else 0.0
+                            cache_read_tokens = r.cache_read_tokens or 0
+                            cache_creation_tokens = r.cache_creation_tokens or 0
+                            input_cost = round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0
+                            output_cost = round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0
+                            cache_read_cost = round(float(r.cache_read_cost), 6) if _model_price_available and r.cache_read_cost else 0.0
+                            cache_creation_cost = round(float(r.cache_creation_cost), 6) if _model_price_available and r.cache_creation_cost else 0.0
+                        return {
+                            "user_id": r.user_id,
+                            "user_email": r.user_email,
+                            "total_events": r.total_events,
+                            "active_days": r.active_days,
+                            "llm_events": r.llm_events or 0,
+                            "tool_events": r.tool_events or 0,
+                            "agent_events": r.agent_events or 0,
+                            "chat_events": r.chat_events or 0,
+                            "errors": r.errors or 0,
+                            "total_tokens": total_tokens,
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "cache_read_tokens": cache_read_tokens,
+                            "cache_creation_tokens": cache_creation_tokens,
+                            "llm_cost": llm_cost,
+                            "input_cost": input_cost,
+                            "output_cost": output_cost,
+                            "cache_read_cost": cache_read_cost,
+                            "cache_creation_cost": cache_creation_cost,
+                        }
+
                     return {
                         "total": count_q,
-                        "rows": [
-                            {
-                                "user_id": r.user_id,
-                                "user_email": r.user_email,
-                                "total_events": r.total_events,
-                                "active_days": r.active_days,
-                                "llm_events": r.llm_events or 0,
-                                "tool_events": r.tool_events or 0,
-                                "agent_events": r.agent_events or 0,
-                                "chat_events": r.chat_events or 0,
-                                "errors": r.errors or 0,
-                                "total_tokens": r.total_tokens or 0,
-                                "input_tokens": r.input_tokens or 0,
-                                "output_tokens": r.output_tokens or 0,
-                                "cache_read_tokens": r.cache_read_tokens or 0,
-                                "cache_creation_tokens": r.cache_creation_tokens or 0,
-                                "llm_cost": float(r.llm_cost) if r.llm_cost else 0.0,
-                                "input_cost": round(float(r.input_cost), 6) if _model_price_available and r.input_cost else 0.0,
-                                "output_cost": round(float(r.output_cost), 6) if _model_price_available and r.output_cost else 0.0,
-                                "cache_read_cost": round(float(r.cache_read_cost), 6) if _model_price_available and r.cache_read_cost else 0.0,
-                                "cache_creation_cost": round(float(r.cache_creation_cost), 6) if _model_price_available and r.cache_creation_cost else 0.0,
-                            }
-                            for r in rows
-                        ],
+                        "rows": [_row_dict(r) for r in rows],
                     }, 200
 
             except Exception:
