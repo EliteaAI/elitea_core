@@ -34,3 +34,14 @@ pgvector_engine_cache:
 # publish_validation_timeout       - LLM call timeout in seconds (default: 60)
 # publish_validation_token_ttl     - HMAC token expiry in seconds (default: 300)
 # publish_validation_secret        - HMAC signing key (default: auto-generated on init)
+
+# Effective-limit ladder defaults. Canonical home for these since the ladder itself now
+# lives here (rpc/budget_limits.py) and both inference planes resolve through it.
+# Applied ONLY where nothing has been set explicitly on the Budgets page; null means
+# unlimited for that scope, so each default can be turned off independently.
+cost_budgets:
+  defaults:
+    enabled: false
+    project_monthly_limit: null              # team/shared projects
+    personal_project_monthly_limit: null     # each user's own project
+    user_monthly_limit: null                 # one member's slice inside a project

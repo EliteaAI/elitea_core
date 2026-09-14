@@ -37,7 +37,9 @@ from ..utils.application_utils import (
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
-from ..utils.exceptions import PoolSaturationError, MaintenanceInProgressError
+from ..utils.exceptions import (
+    PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError,
+)
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
@@ -330,6 +332,18 @@ class RPC:
                     'non_interactive': non_interactive,
                 }),
             )
+        except BudgetDoorClosedError as budget_error:
+            # REST callers need the budget wire body, so only the SIO shape is translated here
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=budget_error.message,
+                    stream_id=parsed.stream_id,
+                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
+                )
+            raise
         except MaintenanceInProgressError:
             error_payload = {
                 "error": "maintenance_in_progress",
@@ -547,6 +561,18 @@ class RPC:
                     'non_interactive': non_interactive,
                 }),
             )
+        except BudgetDoorClosedError as budget_error:
+            # REST callers need the budget wire body, so only the SIO shape is translated here
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error=budget_error.message,
+                    stream_id=parsed.stream_id,
+                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
+                )
+            raise
         except MaintenanceInProgressError:
             error_payload = {
                 "error": "maintenance_in_progress",

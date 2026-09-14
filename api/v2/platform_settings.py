@@ -43,11 +43,25 @@ def _is_analytics_enabled():
 
 
 def _cost_budgets_mode():
-    """Current cost-budgets mode, or None when the feature is not installed."""
-    try:
-        return rpc_tools.RpcMixin().rpc.timeout(5).litellm_budgets_mode()
-    except Exception:  # pylint: disable=W0703
-        return None
+    """Highest active spend-tracking mode across both enforcement systems.
+
+    Two can track and block: LiteLLM tag budgets and the elitea usage gate. The tab and the
+    warning must reflect whichever is doing it, or flipping enforcement from one to the other
+    would make the Usage tab disappear.
+    """
+    modes = []
+    #
+    for rpc_name in ("litellm_budgets_mode", "usage_get_mode"):
+        try:
+            modes.append(getattr(rpc_tools.RpcMixin().rpc.timeout(5), rpc_name)())
+        except Exception:  # pylint: disable=W0703
+            continue
+    #
+    for mode in ("enforce", "observe"):
+        if mode in modes:
+            return mode
+    #
+    return None
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
