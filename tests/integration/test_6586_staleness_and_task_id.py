@@ -222,13 +222,11 @@ class TestTheHorizonWiringAtEachCallSite:
     reaches. Parsed, not grepped: a comment mentioning the keyword must not pass, and
     a real keyword must not be missed.
 
-    Import aliases and module-level rebindings are resolved, so `import ... as ris`
-    no longer routes around this. What remains outside its reach is a call through a
-    value it cannot follow statically — an attribute lookup on a passed-in object,
-    say. That is the standing reason a name-matching guard is the weaker instrument:
-    prefer extracting the decision into a pure function and asserting its VALUES
-    wherever that is possible. These two call sites sit inside deep request/tick
-    bodies that resist it, which is why they are guarded this way at all.
+    Matching is by bare name, and a companion test refuses any indirection that would
+    route around it, so the pair is total rather than best-effort. That is still the
+    weaker instrument: prefer extracting the decision into a pure function and
+    asserting its VALUES wherever the call site allows it. These two sit inside deep
+    request/tick bodies that resist it, which is why they are guarded this way.
 
     The scheduler passing `heartbeat_horizon` reintroduces the kill-then-refuse loop:
     it supersedes a run mid-promote, calls stop_task on a live worker, and is then
@@ -237,36 +235,58 @@ class TestTheHorizonWiringAtEachCallSite:
 
     HORIZON_POSITION = 4  # state, updated_on, timeout, pending_heartbeat, heartbeat_horizon
 
-    @staticmethod
-    def _bound_names(tree, target):
-        """Every local name that refers to `target` in this module.
+    TARGET = "resolve_index_staleness"
 
-        Name-matching alone was bypassable by `import ... as ris` or a module-level
-        rebinding, which let a third dangerous call hide while the role counts stayed
-        satisfied by the two plain ones.
-        """
-        names = {target}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                names.update(
-                    alias.asname for alias in node.names
-                    if alias.name == target and alias.asname
-                )
-            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
-                if node.value.id in names:
-                    names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        return names
+    @staticmethod
+    def _tree(relative_path):
+        return ast.parse((PLUGIN_ROOT / relative_path).read_text())
 
     def _calls(self, relative_path):
-        tree = ast.parse((PLUGIN_ROOT / relative_path).read_text())
-        names = self._bound_names(tree, "resolve_index_staleness")
+        tree = self._tree(relative_path)
         return [
             node for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             # `.id` for a bare name, `.attr` for a module-qualified call — matching
             # only the first turns a qualified call into a silent zero-match.
-            and (getattr(node.func, "id", None) or getattr(node.func, "attr", None)) in names
+            and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+            == self.TARGET
         ]
+
+    def test_neither_file_reaches_the_rule_under_another_name(self):
+        """Refuse indirection instead of chasing it.
+
+        The previous version resolved aliases and rebindings, which made the checks
+        below best-effort in a way the docstring overstated: a single non-iterated
+        walk misses a chain whose first link is visited later, and it only understood
+        plain assignment — not AnnAssign, not walrus, not a try/except import
+        fallback. Worse, feeding a short alias into the `.attr` arm made any
+        same-named attribute call match.
+
+        Asserting that no indirection EXISTS makes the bare-name matching total
+        instead. It costs a legitimate rename in two files, and says so loudly."""
+        for path in ("rpc/index_scheduling.py", "api/v2/index_meta.py"):
+            tree = self._tree(path)
+            aliases = [
+                alias.asname for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom)
+                for alias in node.names
+                if alias.name == self.TARGET and alias.asname
+            ]
+            assert aliases == [], f"{path} imports {self.TARGET} as {aliases}"
+
+            # Any mention that is not the direct callee of a call — an assignment, an
+            # annotation, a walrus, passing it as an argument — is an indirection the
+            # matching below cannot follow.
+            callees = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+            indirect = [
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.Name) and node.id == self.TARGET
+                and id(node) not in callees
+            ]
+            assert indirect == [], (
+                f"{path} refers to {self.TARGET} without calling it directly "
+                f"(line {indirect[0].lineno if indirect else '?'})"
+            )
 
     def _asks_for_the_horizon(self, call):
         """Dangerous by keyword AND by position — and a **splat hides both."""
