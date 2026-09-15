@@ -117,14 +117,18 @@ class TestTheDisplayHorizonReplacesTheTwoHourOne:
         )
 
     def test_a_run_with_a_stopped_heartbeat_is_stale_in_minutes(self, application_tools):
+        # Both signals stop together when the worker dies: the heartbeat's own meta
+        # patch is what advances updated_on during a run, and it is gated on the run's
+        # own pending row. A fresh updated_on beside a dead heartbeat is NOT this
+        # scenario — it is the dispatch window, pinned separately below.
         dead = time.time() - HORIZON * 2
-        assert self._display(application_tools, "in_progress", time.time(), dead) is True
+        assert self._display(application_tools, "in_progress", dead, dead) is True
 
     def test_the_two_hour_timeout_no_longer_holds_such_a_row_alive(self, application_tools):
-        # The whole defect: updated_on is 60s-fresh, judged against 7200s.
+        # The whole defect: a row 10 minutes idle is not stale under a 7200s rule.
         dead = time.time() - HORIZON * 2
-        assert application_tools.is_index_stale(time.time(), "in_progress", TIMEOUT) is False
-        assert self._display(application_tools, "in_progress", time.time(), dead) is True
+        assert application_tools.is_index_stale(dead, "in_progress", TIMEOUT) is False
+        assert self._display(application_tools, "in_progress", dead, dead) is True
 
     def test_a_ticking_run_is_never_stale(self, application_tools):
         assert self._display(application_tools, "in_progress", 0, time.time()) is False
@@ -203,17 +207,60 @@ class TestControlDecisionsKeepTheDisconnectHorizon:
     def test_a_genuinely_dead_run_is_still_reclaimable(self, application_tools):
         dead = time.time() - TIMEOUT * 1.5
         assert application_tools.resolve_index_staleness(
-            "in_progress", time.time(), TIMEOUT, pending_heartbeat=dead) is True
+            "in_progress", dead, TIMEOUT, pending_heartbeat=dead) is True
 
     def test_display_and_control_disagree_only_inside_the_band(self, application_tools):
         mid_promote = time.time() - HORIZON * 2
         display = application_tools.resolve_index_staleness(
-            "in_progress", time.time(), TIMEOUT, pending_heartbeat=mid_promote,
+            "in_progress", mid_promote, TIMEOUT, pending_heartbeat=mid_promote,
             heartbeat_horizon=application_tools.HEARTBEAT_STALE_HORIZON_SEC)
         control = application_tools.resolve_index_staleness(
-            "in_progress", time.time(), TIMEOUT, pending_heartbeat=mid_promote)
+            "in_progress", mid_promote, TIMEOUT, pending_heartbeat=mid_promote)
 
         assert (display, control) == (True, False)
+
+
+class TestTheDispatchWindowIsNotSomeoneElsesHeartbeat:
+    """Nothing ties a pending run row to the meta row's generation.
+
+    The pending row of an abandoned run OUTLIVES its worker: the dispatch guard reports
+    it dead and lets a reindex through, and only the SDK's sweep clears it — inside
+    index_meta_init, after the new worker boots. For that whole window the only
+    heartbeat on hand belongs to the run that died, while `updated_on` was seeded fresh
+    at dispatch. Reading the heartbeat alone reports a just-dispatched reindex as
+    reclaimable, and `reclaimable` is the only gate on a DELETE that drops every
+    embedding row for the collection.
+    """
+
+    def test_a_just_dispatched_reindex_is_not_reclaimable(self, application_tools):
+        abandoned_predecessor = time.time() - TIMEOUT * 2
+
+        assert application_tools.resolve_index_staleness(
+            "in_progress", time.time(), TIMEOUT,
+            pending_heartbeat=abandoned_predecessor) is False
+
+    def test_it_is_not_even_display_stale(self, application_tools):
+        abandoned_predecessor = time.time() - TIMEOUT * 2
+
+        assert application_tools.resolve_index_staleness(
+            "in_progress", time.time(), TIMEOUT,
+            pending_heartbeat=abandoned_predecessor,
+            heartbeat_horizon=application_tools.HEARTBEAT_STALE_HORIZON_SEC) is False
+
+    def test_the_window_closes_on_its_own_when_the_new_worker_also_dies(self, application_tools):
+        # updated_on stops advancing too, because the heartbeat's patch is what moves it
+        # and that patch is gated on the run's own pending row.
+        both_stopped = time.time() - TIMEOUT * 2
+
+        assert application_tools.resolve_index_staleness(
+            "in_progress", both_stopped, TIMEOUT,
+            pending_heartbeat=both_stopped) is True
+
+    def test_a_fresher_heartbeat_still_wins_over_an_older_updated_on(self, application_tools):
+        # max() must not regress the normal case: a ticking run whose updated_on lags.
+        assert application_tools.resolve_index_staleness(
+            "in_progress", time.time() - TIMEOUT * 2, TIMEOUT,
+            pending_heartbeat=time.time()) is False
 
 
 class TestTheHorizonWiringAtEachCallSite:

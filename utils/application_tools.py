@@ -1423,6 +1423,16 @@ def resolve_index_staleness(index_data_state: str, updated_on: float,
     if not index_data_state or index_data_state != IndexDataStatus.in_progress.value:
         return False
     if pending_heartbeat is not None:
+        # max(), not the heartbeat alone: nothing ties a pending row to the meta row's
+        # generation, and the pending row of an abandoned run OUTLIVES its worker — the
+        # dispatch guard lets a reindex through, and only the SDK's sweep clears it,
+        # inside index_meta_init after the new worker boots. Between dispatch and boot
+        # the heartbeat on hand belongs to the DEAD run, so reading it alone reports a
+        # just-dispatched reindex as reclaimable and arms an unguarded Delete.
+        # `updated_on` is the signal that is certainly this generation's: dispatch seeds
+        # it fresh. Neither signal can be advanced by a dead worker — the heartbeat's own
+        # patch is gated on EXISTS(its own pending row) — so detection is unchanged, and
+        # max() is monotone: it can only ever disarm, never arm.
         # `task_disconnected_timeout` is an unclamped vault secret; below the display
         # horizon it inverts the invariant the split depends on, arming Delete on a row
         # still rendering a live spinner. The floor goes on CONTROL rather than a ceiling
@@ -1431,7 +1441,8 @@ def resolve_index_staleness(index_data_state: str, updated_on: float,
             max(task_disconnected_timeout, HEARTBEAT_STALE_HORIZON_SEC)
             if heartbeat_horizon is None else heartbeat_horizon
         )
-        return time.time() - pending_heartbeat > horizon
+        last_signal = max(pending_heartbeat, updated_on or 0)
+        return time.time() - last_signal > horizon
     return is_index_stale(updated_on, index_data_state, task_disconnected_timeout)
 
 
