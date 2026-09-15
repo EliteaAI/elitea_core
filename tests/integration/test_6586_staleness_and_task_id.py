@@ -222,6 +222,14 @@ class TestTheHorizonWiringAtEachCallSite:
     reaches. Parsed, not grepped: a comment mentioning the keyword must not pass, and
     a real keyword must not be missed.
 
+    KNOWN BOUNDARY: this matches the callee by NAME, so an import alias
+    (`from ... import resolve_index_staleness as ris`) is invisible to it. That is a
+    deliberate bypass rather than a trap someone falls into, but it is the reason a
+    name-matching guard is the weaker instrument: prefer extracting the decision into
+    a pure function and asserting its VALUES wherever that is possible. These two call
+    sites are inside deep request/tick bodies that resist that, which is why they are
+    guarded this way at all.
+
     The scheduler passing `heartbeat_horizon` reintroduces the kill-then-refuse loop:
     it supersedes a run mid-promote, calls stop_task on a live worker, and is then
     refused the dispatch by reject_index_dispatch_when_run_live on the disconnect
