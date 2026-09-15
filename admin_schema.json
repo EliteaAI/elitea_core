@@ -657,7 +657,7 @@
       "default": false,
       "requires_restart": false,
       "visible_when": {
-        "field": "cost_budgets_mode",
+        "field": "usage_mode",
         "value": "enforce"
       }
     },

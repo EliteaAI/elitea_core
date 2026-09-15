@@ -35,8 +35,8 @@ PERSONAL_PROJECTS_TTL = 300.0
 _personal_projects_cache = None
 
 
-def _personal_project_ids():
-    """Cached set of personal project ids; an empty set on failure means "treat as team"."""
+def _personal_project_ids(strict=False):
+    """Cached set of personal project ids. strict=True raises instead of guessing "team"."""
     global _personal_projects_cache  # pylint: disable=W0603
     #
     cache = _personal_projects_cache
@@ -46,6 +46,10 @@ def _personal_project_ids():
             ids = set(context.rpc_manager.timeout(10).projects_get_personal_project_ids())
         except:  # pylint: disable=W0702
             log.exception("Failed to list personal projects")
+            #
+            if strict:
+                raise
+            #
             return set()
         #
         cache = (time.monotonic(), ids)
@@ -66,9 +70,12 @@ class RPC:
     """ RPC """
 
     @web.rpc("elitea_core_is_personal_project", "is_personal_project")
-    def is_personal_project(self, project_id, **kwargs):
-        """True when the project is a user's auto-created personal project."""
-        return int(project_id) in _personal_project_ids()
+    def is_personal_project(self, project_id, strict=False, **kwargs):
+        """True when the project is a user's auto-created personal project.
+
+        strict=True raises instead of answering "team" from a failed lookup.
+        """
+        return int(project_id) in _personal_project_ids(strict=strict)
 
     @web.rpc("elitea_core_get_budget_default_limit", "get_budget_default_limit")
     def get_budget_default_limit(self, scope, project_id, **kwargs):
@@ -128,7 +135,7 @@ class RPC:
 
     @web.rpc("elitea_core_get_effective_member_limit", "get_effective_member_limit")
     def get_effective_member_limit(
-            self, project_id, user_id, project_budget=_UNSET, **kwargs
+            self, project_id, user_id, project_budget=_UNSET, member_budget=_UNSET, **kwargs
     ):
         """Effective monthly per-member limit within a project, or None if unlimited.
 
@@ -144,7 +151,8 @@ class RPC:
         if self.is_personal_project(project_id):
             return None
         #
-        member_budget = self._read_user_budget(project_id, user_id)
+        if member_budget is _UNSET:
+            member_budget = self._read_user_budget(project_id, user_id)
         #
         exempt = member_budget is not None and not member_budget.get("enabled", True)
         #
@@ -162,8 +170,15 @@ class RPC:
 
         One call, one project-row read: the gate needs both scopes per decision and must not
         pay two RPCs plus two duplicate reads of the same row for them.
+
+        Raises when a read fails: this is the enforcement path, where "no row" and "could not
+        read the row" must not resolve to the same limit. The caller reports the answer as
+        unknown, which fails closed in enforce mode.
         """
-        project_budget = self._read_project_budget(project_id)
+        personal = self.is_personal_project(project_id, strict=True)
+        #
+        project_budget = self.get_project_budget(project_id)
+        member_budget = _UNSET if user_id is None else self.get_user_budget(project_id, user_id)
         #
         project_limit = self.get_effective_project_limit(
             project_id, project_budget=project_budget,
@@ -173,7 +188,8 @@ class RPC:
         #
         if user_id is not None:
             member_limit = self.get_effective_member_limit(
-                project_id, user_id, project_budget=project_budget,
+                project_id, user_id,
+                project_budget=project_budget, member_budget=member_budget,
             )
         #
         return {
@@ -183,7 +199,7 @@ class RPC:
             "member_limit": member_limit,
             # False when nothing limits this caller, so the gate can skip Redis entirely
             "enabled": project_limit is not None or member_limit is not None,
-            "is_personal_project": self.is_personal_project(project_id),
+            "is_personal_project": personal,
         }
 
     @web.rpc("elitea_core_get_effective_project_limits", "get_effective_project_limits")
