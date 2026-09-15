@@ -121,15 +121,30 @@ class Method:
         # Create a copy to avoid modifying the original
         result = dict(raw_data)
 
-        # List of fields that can be filled from prebuilt config
-        fillable_fields = ['url', 'headers', 'timeout', 'ssl_verify', 'client_id', 'client_secret', 'base_url']
+        # Fields that can be filled from prebuilt config, mapped to the keys to read from the
+        # server definition in priority order. Admin YAML declares the singular `scope` while
+        # toolkit settings and consumers use the plural `scopes`, so both are accepted.
+        fillable_fields = {
+            'url': ('url',),
+            'headers': ('headers',),
+            'timeout': ('timeout',),
+            'ssl_verify': ('ssl_verify',),
+            'client_id': ('client_id',),
+            'client_secret': ('client_secret',),
+            'base_url': ('base_url',),
+            'scopes': ('scopes', 'scope'),
+        }
 
         injected_fields = []
-        for field in fillable_fields:
-            # Only inject if field is missing or empty in raw_data
-            if not result.get(field) and prebuilt_config.get(field):
-                result[field] = prebuilt_config[field]
-                injected_fields.append(field)
+        for field, source_keys in fillable_fields.items():
+            # Only inject if the field is missing or empty in raw_data under any accepted spelling
+            if any(result.get(key) for key in source_keys):
+                continue
+            for source_key in source_keys:
+                if prebuilt_config.get(source_key):
+                    result[field] = prebuilt_config[source_key]
+                    injected_fields.append(field)
+                    break
 
         if injected_fields:
             log.debug(f"Injected {len(injected_fields)} field(s) from prebuilt config for '{toolkit_type}': {', '.join(injected_fields)}")
