@@ -256,6 +256,18 @@ class TestTheDispatchWindowIsNotSomeoneElsesHeartbeat:
             "in_progress", both_stopped, TIMEOUT,
             pending_heartbeat=both_stopped) is True
 
+    def test_a_null_updated_on_does_not_take_out_the_whole_list(self, application_tools):
+        """Legacy rows carry a JSONB null here — the pre-fix ensure_index_data_has_task_id
+        wrote event_data.get('updated_on') straight through. max() on a None raises
+        TypeError, and the list GET's blanket except turns that into a 400 for EVERY
+        index on the toolkit, not one row."""
+        dead = time.time() - TIMEOUT * 2
+
+        assert application_tools.resolve_index_staleness(
+            "in_progress", None, TIMEOUT, pending_heartbeat=dead) is True
+        assert application_tools.resolve_index_staleness(
+            "in_progress", None, TIMEOUT, pending_heartbeat=time.time()) is False
+
     def test_a_fresher_heartbeat_still_wins_over_an_older_updated_on(self, application_tools):
         # max() must not regress the normal case: a ticking run whose updated_on lags.
         assert application_tools.resolve_index_staleness(
