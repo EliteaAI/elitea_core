@@ -222,13 +222,13 @@ class TestTheHorizonWiringAtEachCallSite:
     reaches. Parsed, not grepped: a comment mentioning the keyword must not pass, and
     a real keyword must not be missed.
 
-    KNOWN BOUNDARY: this matches the callee by NAME, so an import alias
-    (`from ... import resolve_index_staleness as ris`) is invisible to it. That is a
-    deliberate bypass rather than a trap someone falls into, but it is the reason a
-    name-matching guard is the weaker instrument: prefer extracting the decision into
-    a pure function and asserting its VALUES wherever that is possible. These two call
-    sites are inside deep request/tick bodies that resist that, which is why they are
-    guarded this way at all.
+    Import aliases and module-level rebindings are resolved, so `import ... as ris`
+    no longer routes around this. What remains outside its reach is a call through a
+    value it cannot follow statically — an attribute lookup on a passed-in object,
+    say. That is the standing reason a name-matching guard is the weaker instrument:
+    prefer extracting the decision into a pure function and asserting its VALUES
+    wherever that is possible. These two call sites sit inside deep request/tick
+    bodies that resist it, which is why they are guarded this way at all.
 
     The scheduler passing `heartbeat_horizon` reintroduces the kill-then-refuse loop:
     it supersedes a run mid-promote, calls stop_task on a live worker, and is then
@@ -237,15 +237,35 @@ class TestTheHorizonWiringAtEachCallSite:
 
     HORIZON_POSITION = 4  # state, updated_on, timeout, pending_heartbeat, heartbeat_horizon
 
+    @staticmethod
+    def _bound_names(tree, target):
+        """Every local name that refers to `target` in this module.
+
+        Name-matching alone was bypassable by `import ... as ris` or a module-level
+        rebinding, which let a third dangerous call hide while the role counts stayed
+        satisfied by the two plain ones.
+        """
+        names = {target}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                names.update(
+                    alias.asname for alias in node.names
+                    if alias.name == target and alias.asname
+                )
+            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+                if node.value.id in names:
+                    names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        return names
+
     def _calls(self, relative_path):
-        source = (PLUGIN_ROOT / relative_path).read_text()
+        tree = ast.parse((PLUGIN_ROOT / relative_path).read_text())
+        names = self._bound_names(tree, "resolve_index_staleness")
         return [
-            node for node in ast.walk(ast.parse(source))
+            node for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             # `.id` for a bare name, `.attr` for a module-qualified call — matching
             # only the first turns a qualified call into a silent zero-match.
-            and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
-            == "resolve_index_staleness"
+            and (getattr(node.func, "id", None) or getattr(node.func, "attr", None)) in names
         ]
 
     def _asks_for_the_horizon(self, call):
