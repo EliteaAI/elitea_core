@@ -157,7 +157,12 @@ class ProjectAPI(api_tools.APIModeHandler):
                         client_secret = settings.get('client_secret') or sp_config.get('client_secret') or openapi_config.get('client_secret')
                         log.debug(f"MCP OAuth proxy: extracted client_secret from DB: {bool(client_secret)}, preview: {client_secret[:8] if client_secret else 'None'}")
                     if not scope:
-                        scope = settings.get('scopes') or sp_config.get('scopes') or openapi_config.get('scope')
+                        # Both spellings are in use: admin MCP server definitions declare `scope`,
+                        # toolkit settings and configurations use `scopes`.
+                        for source in (settings, sp_config, openapi_config):
+                            scope = source.get('scopes') or source.get('scope')
+                            if scope:
+                                break
                         if isinstance(scope, list):
                             scope = ' '.join(scope)
 
