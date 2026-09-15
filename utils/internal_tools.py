@@ -525,14 +525,20 @@ def inject_internal_attachment_tool(
 def resolve_user_token_state(user_id: int) -> tuple[str, str | None]:
     """Return ('VALID', encoded_token) / ('EXPIRED', None) / ('MISSING', None). The token is
     returned only when VALID; a token without an `expires` never expires."""
-    all_tokens = auth.list_tokens(user_id) if user_id else []
-    if not all_tokens:
+    if not user_id:
         return 'MISSING', None
-    for token in all_tokens:
+    # list_tokens hides the platform-owned system token, so a real PAT still wins.
+    for token in auth.list_tokens(user_id):
         expires = token.get('expires')
         if not expires or expires > datetime.now():
             return 'VALID', auth.encode_token(token['id'])
-    return 'EXPIRED', None
+    # No usable PAT: fall back to the system token, creating it if it is missing.
+    # Degrade to MISSING (banner) rather than raising if auth_core predates this.
+    try:
+        return 'VALID', auth.ensure_system_token(user_id)
+    except Exception:  # pylint: disable=W0703
+        log.warning('Could not ensure system token for user %s', user_id, exc_info=True)
+        return 'MISSING', None
 
 
 def _get_user_token(user_id: int) -> str | None:
