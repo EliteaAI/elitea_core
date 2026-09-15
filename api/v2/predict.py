@@ -29,7 +29,7 @@ from tools import api_tools, auth, config as c, register_openapi  # pylint: disa
 from ...models.pd.predict import ApplicationPredictRequest  # pylint: disable=E0402
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.predict_utils import PredictPayloadError
-from ...utils.exceptions import PoolSaturationError
+from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError
 from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
 
@@ -111,6 +111,8 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
         except PredictPayloadError as e:
             return {"error": str(e)}, 400
+        except BudgetDoorClosedError as e:
+            return e.body(), 429
         except PoolSaturationError as e:
             return {
                 "error": "temporarily_unavailable",

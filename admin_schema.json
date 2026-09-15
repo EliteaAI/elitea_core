@@ -651,6 +651,58 @@
       "path": "extra_ui_config.vite_voice_features_temporarily_disabled",
       "section": "voice_features",
       "default": false
+    },
+    "cost_budgets_defaults_enabled": {
+      "type": "boolean",
+      "title": "Apply Default Limits",
+      "description": "Apply the default limits below to projects and users that have no limit set explicitly. When disabled, anything without an explicit limit stays unlimited. Only used in enforce mode.",
+      "path": "cost_budgets.defaults.enabled",
+      "section": "cost_budgets",
+      "default": false,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "usage_mode",
+        "value": "enforce"
+      }
+    },
+    "cost_budgets_project_monthly_limit": {
+      "type": "number",
+      "title": "Default Team Project Limit (USD / month)",
+      "description": "Monthly shared-model limit for team projects without an explicit limit. Leave empty for unlimited.",
+      "path": "cost_budgets.defaults.project_monthly_limit",
+      "section": "cost_budgets",
+      "default": null,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "cost_budgets_defaults_enabled",
+        "value": true
+      }
+    },
+    "cost_budgets_personal_project_monthly_limit": {
+      "type": "number",
+      "title": "Default User Limit (USD / month)",
+      "description": "Monthly shared-model limit for each user's own project, which is where API and token calls made without a project are billed. Leave empty for unlimited.",
+      "path": "cost_budgets.defaults.personal_project_monthly_limit",
+      "section": "cost_budgets",
+      "default": null,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "cost_budgets_defaults_enabled",
+        "value": true
+      }
+    },
+    "cost_budgets_user_monthly_limit": {
+      "type": "number",
+      "title": "Default Per-Member Limit Inside A Project (USD / month)",
+      "description": "Monthly limit for a single member's spend within a project, so one member cannot consume the whole project budget. Leave empty for unlimited.",
+      "path": "cost_budgets.defaults.user_monthly_limit",
+      "section": "cost_budgets",
+      "default": null,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "cost_budgets_defaults_enabled",
+        "value": true
+      }
     }
   }
 }

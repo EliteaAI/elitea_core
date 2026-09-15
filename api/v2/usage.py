@@ -162,7 +162,7 @@ def _warning_pct(scope: str, is_personal: bool):
     )
     #
     try:
-        return rpc_tools.RpcMixin().rpc.timeout(5).litellm_get_warning_threshold(
+        return rpc_tools.RpcMixin().rpc.timeout(5).usage_get_warning_threshold(
             scope=threshold_scope,
         )
     except Exception:  # pylint: disable=W0703
@@ -188,7 +188,7 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
         ) or {}
         #
         try:
-            limit = (rpc.timeout(10).litellm_get_effective_user_limits(
+            limit = (rpc.timeout(10).elitea_core_get_effective_member_limits(
                 project_id=project_id, user_ids=[user_id],
             ) or {}).get(user_id)
         except Exception:  # pylint: disable=W0703
@@ -205,7 +205,7 @@ def _usage_state(project_id: int, user_id: int, scope: str, is_personal: bool):
         budget = rpc.timeout(5).elitea_core_get_project_budget(project_id=project_id) or {}
         #
         try:
-            limit = rpc.timeout(5).litellm_get_effective_project_limit(project_id=project_id)
+            limit = rpc.timeout(5).elitea_core_get_effective_project_limit(project_id=project_id)
         except Exception:  # pylint: disable=W0703
             limit = budget.get("monthly_limit") if budget.get("enabled", True) else None
         #

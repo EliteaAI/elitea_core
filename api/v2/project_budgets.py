@@ -185,7 +185,7 @@ class AdminAPI(api_tools.APIModeHandler):
         #
         owner_map = {int(user["id"]): user for user in owners or []}
         #
-        # One LiteLLM call for the whole page rather than one per row
+        # One spend call for the whole page rather than one per row
         try:
             spend_map = rpc.timeout(30).usage_get_projects_spend(
                 project_ids=project_ids,
@@ -194,7 +194,7 @@ class AdminAPI(api_tools.APIModeHandler):
             spend_map = {}
         #
         try:
-            limit_map = rpc.timeout(20).litellm_get_effective_project_limits(
+            limit_map = rpc.timeout(20).elitea_core_get_effective_project_limits(
                 project_ids=project_ids,
             ) or {}
         except Exception:  # pylint: disable=W0703

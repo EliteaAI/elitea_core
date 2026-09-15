@@ -43,11 +43,13 @@ def _is_analytics_enabled():
 
 
 def _cost_budgets_mode():
-    """Current cost-budgets mode, or None when the feature is not installed."""
+    """Spend-tracking mode, or None when the usage plugin is unreachable."""
     try:
-        return rpc_tools.RpcMixin().rpc.timeout(5).litellm_budgets_mode()
+        mode = rpc_tools.RpcMixin().rpc.timeout(5).usage_mode()
     except Exception:  # pylint: disable=W0703
         return None
+    #
+    return mode if mode in ("enforce", "observe") else None
 
 
 class PromptLibAPI(api_tools.APIModeHandler):

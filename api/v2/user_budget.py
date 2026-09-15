@@ -68,7 +68,7 @@ def _user_budget_state(project_id: int, user_id: int):
     # The enforced limit may come from the project's member default or a platform default,
     # so it is resolved the same way enforcement does rather than read off the stored row
     try:
-        limits = rpc.timeout(10).litellm_get_effective_user_limits(
+        limits = rpc.timeout(10).elitea_core_get_effective_member_limits(
             project_id=project_id, user_ids=[user_id],
         ) or {}
         limit = limits.get(user_id, limits.get(str(user_id)))

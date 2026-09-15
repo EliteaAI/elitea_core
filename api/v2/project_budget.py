@@ -87,7 +87,7 @@ def _budget_state(project_id: int):
     #
     # The effective limit may come from a platform default when no row exists
     try:
-        limit = rpc.timeout(5).litellm_get_effective_project_limit(project_id=project_id)
+        limit = rpc.timeout(5).elitea_core_get_effective_project_limit(project_id=project_id)
     except Exception:  # pylint: disable=W0703
         limit = budget.get("monthly_limit") if budget.get("enabled", True) else None
     #

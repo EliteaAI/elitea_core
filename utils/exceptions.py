@@ -65,3 +65,36 @@ class MaintenanceInProgressError(Exception):
     def __init__(self, task_name: str = "?"):
         self.task_name = task_name
         super().__init__(f"Maintenance mode active - task '{task_name}' rejected")
+
+
+# Twinned with usage/hooks.py's BUDGET_ERROR_MESSAGE/BUDGET_ERROR_CODES — edit both together;
+# the SDK and the UI match on this body, never on the status code
+BUDGET_ERROR_MESSAGE = (
+    "The budget for shared models has been reached. Requests are unavailable "
+    "until the budget resets or an administrator raises the limit."
+)
+
+BUDGET_ERROR_CODES = {
+    "project": "project_budget_exceeded",
+    "member": "member_budget_exceeded",
+}
+
+
+class BudgetDoorClosedError(Exception):
+    """Raised by task_node.start_task when the project's budget is already exhausted.
+
+    Carries the same type/code/message triple the inference-plane refusal uses, so the SDK
+    and the UI recognise it as a budget refusal rather than a generic dispatch failure.
+    """
+
+    def __init__(self, scope: str = "project", project_id=None):
+        self.scope = scope
+        self.project_id = project_id
+        self.type = "budget_exceeded"
+        self.code = BUDGET_ERROR_CODES.get(scope, BUDGET_ERROR_CODES["project"])
+        self.message = BUDGET_ERROR_MESSAGE
+        super().__init__(BUDGET_ERROR_MESSAGE)
+
+    def body(self):
+        """The wire body the inference-plane refusal uses, byte-identical."""
+        return {"error": {"message": self.message, "type": self.type, "code": self.code}}
