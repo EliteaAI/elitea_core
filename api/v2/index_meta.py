@@ -77,10 +77,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 
                 for id, cmetadata in meta:
                     for key in ['index_configuration', 'history', 'report']:
-                        # 'report' is cleared to null when a reindex starts. The
-                        # isinstance guard matters now that the SDK patches keys
-                        # instead of routing them through a writer that stringified
-                        # every dict: an already-decoded object is not an error.
+                        # The isinstance guard matters now that the SDK patches keys
+                        # instead of routing them through a writer that stringified every
+                        # dict: an already-decoded object is not an error.
                         if cmetadata and isinstance(cmetadata.get(key), str) and cmetadata[key]:
                             try:
                                 cmetadata[key] = json.loads(cmetadata[key])
@@ -106,12 +105,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     updated_on = cmetadata.get('updated_on', 0)
                     index_data_state = cmetadata.get('state', '')
                     pending_heartbeat = pending_heartbeats.get(cmetadata.get('collection'))
-                    # Two flags on purpose. `stale` is chrome — banner, spinner,
-                    # stopped-run copy — and may be wrong for one poll. `reclaimable`
-                    # authorizes destructive affordances (Delete, supersede) and so
-                    # stays on the disconnect rule the dispatch guard uses; a
-                    # five-minute heuristic must never unlock an irreversible delete
-                    # on a run that is merely mid-promote.
+                    # Two flags on purpose: `stale` is chrome and may be wrong for one
+                    # poll, `reclaimable` authorizes destructive affordances and stays on
+                    # the disconnect rule the dispatch guard uses.
                     stale = resolve_index_staleness(
                         index_data_state, updated_on, task_disconnected_timeout,
                         pending_heartbeat, heartbeat_horizon=HEARTBEAT_STALE_HORIZON_SEC,

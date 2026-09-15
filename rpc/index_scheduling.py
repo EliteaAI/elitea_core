@@ -318,10 +318,9 @@ class RPC:
                                             )
                                             # No heartbeat_horizon: superseding is a
                                             # CONTROL decision and must agree with the
-                                            # dispatch guard inside start_index_task.
-                                            # A shorter horizon here kills the worker and
-                                            # is then refused the dispatch it killed it
-                                            # for, leaving the schedule due and re-firing.
+                                            # dispatch guard, or the scheduler kills a
+                                            # worker and is refused the dispatch it
+                                            # killed it for.
                                             stale_retry = resolve_index_staleness(
                                                 running_state.lower(),
                                                 index.cmetadata.get('updated_on', 0),

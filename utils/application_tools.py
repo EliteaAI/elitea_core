@@ -1269,10 +1269,8 @@ DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC = 7200
 # cadence (elitea_sdk/tools/base_indexer_toolkit.py INDEX_RUN_HEARTBEAT_INTERVAL).
 # Bump both together.
 INDEX_RUN_HEARTBEAT_INTERVAL_SEC = 60
-# A run with a live heartbeat is judged on missed ticks, not on the disconnect
-# timeout: applying a 2h horizon to a 60s signal is what made a dead run read as
-# "indexing" for two hours. The multiple absorbs a worker briefly starved of its
-# heartbeat thread without waiting out a timeout sized for a different question.
+# A run with a live heartbeat is judged on missed ticks, not on the disconnect timeout.
+# The multiple absorbs a worker briefly starved of its heartbeat thread.
 HEARTBEAT_STALE_INTERVALS = 5
 # Display-only horizon. Never use it to authorize superseding, stopping or deleting
 # a run — see resolve_index_staleness.
@@ -1392,10 +1390,8 @@ def get_pending_index_run_heartbeats(session: Session) -> Dict[str, float]:
         return {collection: heartbeat for collection, heartbeat in rows}
     except Exception as error:
         savepoint.rollback()
-        # Unlike query_index_runs, nothing destructive keys on this read — it only
-        # picks which horizon the display flag uses. Failing the whole index list
-        # over one unreadable table is the worse outcome, so degrade to the
-        # updated_on rule and say so loudly.
+        # Nothing destructive keys on this read; it only picks which horizon the display
+        # flag uses. Degrade to the updated_on rule rather than fail the whole list.
         log.warning(f"Could not read index run heartbeats "
                     f"(sqlstate={error_sqlstate(error)}); "
                     f"falling back to the updated_on staleness rule: {error}")
@@ -1427,17 +1423,10 @@ def resolve_index_staleness(index_data_state: str, updated_on: float,
     if not index_data_state or index_data_state != IndexDataStatus.in_progress.value:
         return False
     if pending_heartbeat is not None:
-        # `task_disconnected_timeout` is an unclamped vault secret, and below the
-        # display horizon it inverts the invariant the split depends on: a row would
-        # become reclaimable (Delete armed) while still rendering a live spinner.
-        #
-        # The floor goes on CONTROL, not a ceiling on display. Ceiling-ing display
-        # would drag it down to the operator's value — at the 60 that this stack
-        # sets, equal to the heartbeat interval itself, so a healthy run reads stale
-        # for the tail of every tick. Flooring control keeps display at its own
-        # horizon and only ever makes the destructive decision more patient, which is
-        # the safe direction: declaring a task dead sooner than five heartbeats is
-        # wrong however the operator configured it.
+        # `task_disconnected_timeout` is an unclamped vault secret; below the display
+        # horizon it inverts the invariant the split depends on, arming Delete on a row
+        # still rendering a live spinner. The floor goes on CONTROL rather than a ceiling
+        # on display, because it only ever makes the destructive decision more patient.
         horizon = (
             max(task_disconnected_timeout, HEARTBEAT_STALE_HORIZON_SEC)
             if heartbeat_horizon is None else heartbeat_horizon
@@ -2004,10 +1993,9 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         "type": "index_meta",
         "indexed": 0,
         "updated": 0,
-        # Seeded here, not left to the worker's first heartbeat: the row goes
-        # in_progress at dispatch but the worker takes tens of seconds to boot,
-        # and until this key exists the index list has nothing to show but the
-        # PREVIOUS run's counts sitting beside a live spinner.
+        # Seeded here, not left to the worker's first heartbeat: the row goes in_progress
+        # at dispatch but the worker takes tens of seconds to boot, and until this key
+        # exists the list shows the previous run's counts beside a live spinner.
         "run_chunks": 0,
         "state": "in_progress",
         "index_configuration": build_index_configuration(tool_params, index_name),
