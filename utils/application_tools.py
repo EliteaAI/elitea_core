@@ -1427,13 +1427,20 @@ def resolve_index_staleness(index_data_state: str, updated_on: float,
     if not index_data_state or index_data_state != IndexDataStatus.in_progress.value:
         return False
     if pending_heartbeat is not None:
-        # Clamped, never bare: `task_disconnected_timeout` is an unclamped vault
-        # secret, and setting it below the display horizon inverts the invariant the
-        # split depends on — a row would become reclaimable (Delete enabled) while
-        # still rendering a live spinner with no error styling.
+        # `task_disconnected_timeout` is an unclamped vault secret, and below the
+        # display horizon it inverts the invariant the split depends on: a row would
+        # become reclaimable (Delete armed) while still rendering a live spinner.
+        #
+        # The floor goes on CONTROL, not a ceiling on display. Ceiling-ing display
+        # would drag it down to the operator's value — at the 60 that this stack
+        # sets, equal to the heartbeat interval itself, so a healthy run reads stale
+        # for the tail of every tick. Flooring control keeps display at its own
+        # horizon and only ever makes the destructive decision more patient, which is
+        # the safe direction: declaring a task dead sooner than five heartbeats is
+        # wrong however the operator configured it.
         horizon = (
-            task_disconnected_timeout if heartbeat_horizon is None
-            else min(heartbeat_horizon, task_disconnected_timeout)
+            max(task_disconnected_timeout, HEARTBEAT_STALE_HORIZON_SEC)
+            if heartbeat_horizon is None else heartbeat_horizon
         )
         return time.time() - pending_heartbeat > horizon
     return is_index_stale(updated_on, index_data_state, task_disconnected_timeout)

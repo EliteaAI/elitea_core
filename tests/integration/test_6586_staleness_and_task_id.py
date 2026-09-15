@@ -227,36 +227,50 @@ class TestTheHorizonWiringAtEachCallSite:
     refused the dispatch by reject_index_dispatch_when_run_live on the disconnect
     rule, leaving the schedule due and re-firing every tick."""
 
+    HORIZON_POSITION = 4  # state, updated_on, timeout, pending_heartbeat, heartbeat_horizon
+
     def _calls(self, relative_path):
         source = (PLUGIN_ROOT / relative_path).read_text()
-        tree = ast.parse(source)
         return [
-            node for node in ast.walk(tree)
+            node for node in ast.walk(ast.parse(source))
             if isinstance(node, ast.Call)
-            and getattr(node.func, "id", None) == "resolve_index_staleness"
+            # `.id` for a bare name, `.attr` for a module-qualified call — matching
+            # only the first turns a qualified call into a silent zero-match.
+            and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+            == "resolve_index_staleness"
         ]
+
+    def _asks_for_the_horizon(self, call):
+        """Dangerous by keyword AND by position — and a **splat hides both."""
+        if len(call.args) > self.HORIZON_POSITION:
+            return True
+        return any(kw.arg in ("heartbeat_horizon", None) for kw in call.keywords)
 
     def test_the_scheduler_never_asks_for_the_display_horizon(self):
         calls = self._calls("rpc/index_scheduling.py")
 
-        assert len(calls) == 1, "the scheduler should decide staleness in exactly one place"
-        assert [kw.arg for kw in calls[0].keywords if kw.arg == "heartbeat_horizon"] == []
+        assert calls, "the scheduler must still decide staleness through the shared rule"
+        assert not any(self._asks_for_the_horizon(c) for c in calls)
 
-    def test_the_list_get_asks_for_it_exactly_once(self):
+    def test_the_list_get_asks_for_it_for_display_only(self):
         calls = self._calls("api/v2/index_meta.py")
-        with_horizon = [c for c in calls
-                        if any(kw.arg == "heartbeat_horizon" for kw in c.keywords)]
+        asking = [c for c in calls if self._asks_for_the_horizon(c)]
 
-        assert len(calls) == 2, "the GET computes both a display and a control flag"
-        assert len(with_horizon) == 1, "display asks for the horizon; control must not"
+        # Counted by role, not by total: a third legitimate call site should not turn
+        # this red, but losing either role must.
+        assert len(asking) >= 1, "display must ask for the heartbeat horizon"
+        assert len(calls) - len(asking) >= 1, "control must not ask for it"
 
     def test_the_get_still_returns_the_control_flag(self):
         source = (PLUGIN_ROOT / "api/v2/index_meta.py").read_text()
-        keys = [
-            node.value
-            for node in ast.walk(ast.parse(source))
-            if isinstance(node, ast.Constant) and node.value in ("stale", "reclaimable")
-        ]
+        # Walk to the response dict itself; scanning every Constant in the file passes
+        # as long as the word survives anywhere, including in a docstring.
+        keys = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "append":
+                for argument in node.args:
+                    if isinstance(argument, ast.Dict):
+                        keys.update(k.value for k in argument.keys if isinstance(k, ast.Constant))
 
         # Dropping `reclaimable` from the payload silently re-arms Delete on a live
         # run, because the UI falls back to `stale` when the field is absent.
@@ -292,18 +306,25 @@ class TestTheDisplayHorizonCanNeverOutrunControl:
     combination the split exists to prevent. This stack ships that config: the local
     project secret is 60."""
 
-    def test_a_short_disconnect_timeout_does_not_invert_the_flags(self, application_tools):
-        short = 60
+    def test_a_short_disconnect_timeout_does_not_arm_control_early(self, application_tools):
+        short = 60  # this stack's value, below the display horizon
         age = time.time() - 200  # past `short`, inside the 300s display horizon
 
-        display = application_tools.resolve_index_staleness(
-            "in_progress", time.time(), short, pending_heartbeat=age,
-            heartbeat_horizon=application_tools.HEARTBEAT_STALE_HORIZON_SEC)
         control = application_tools.resolve_index_staleness(
             "in_progress", time.time(), short, pending_heartbeat=age)
 
-        assert control is True
-        assert display is True, "a reclaimable row must never still read as healthy"
+        assert control is False, "Delete/supersede must not arm against a live run"
+
+    def test_a_short_disconnect_timeout_does_not_make_display_flicker(self, application_tools):
+        # Ceiling-ing display onto a 60s timeout would put the horizon at the heartbeat
+        # interval itself, so a healthy run reads stale for the tail of every cycle.
+        healthy = time.time() - 90  # one missed tick on a 60s interval
+
+        display = application_tools.resolve_index_staleness(
+            "in_progress", time.time(), 60, pending_heartbeat=healthy,
+            heartbeat_horizon=application_tools.HEARTBEAT_STALE_HORIZON_SEC)
+
+        assert display is False
 
     def test_reclaimable_always_implies_stale(self, application_tools):
         for timeout in (30, 60, 299, 300, 301, 7200):
