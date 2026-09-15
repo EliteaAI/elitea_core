@@ -263,25 +263,41 @@ class TestTheHorizonWiringAtEachCallSite:
         same-named attribute call match.
 
         Asserting that no indirection EXISTS makes the bare-name matching total
-        instead. It costs a legitimate rename in two files, and says so loudly."""
+        against every shape that can carry the name statically — as a Name, as an
+        attribute, or as a string handed to getattr. What stays beyond reach is a
+        fully computed reference (importlib plus a built attribute name); that is a
+        deliberate bypass, not a trap, and is not worth more machinery.
+
+        It costs a legitimate rename in these two files, and says so loudly."""
         for path in ("rpc/index_scheduling.py", "api/v2/index_meta.py"):
             tree = self._tree(path)
             aliases = [
                 alias.asname for node in ast.walk(tree)
-                if isinstance(node, ast.ImportFrom)
+                if isinstance(node, (ast.Import, ast.ImportFrom))
                 for alias in node.names
-                if alias.name == self.TARGET and alias.asname
+                if alias.name.rsplit(".", 1)[-1] == self.TARGET and alias.asname
             ]
             assert aliases == [], f"{path} imports {self.TARGET} as {aliases}"
 
             # Any mention that is not the direct callee of a call — an assignment, an
             # annotation, a walrus, passing it as an argument — is an indirection the
-            # matching below cannot follow.
+            # matching below cannot follow. All THREE node types that can carry the
+            # name have to be admitted, or the refusal is only as total as its
+            # narrowest arm:
+            #   Name      `_rule = resolve_index_staleness`
+            #   Attribute `_rule = application_tools.resolve_index_staleness`
+            #   Constant  `_rule = getattr(application_tools, "resolve_index_staleness")`
+            # A legitimate qualified call cannot false-positive on the Attribute arm:
+            # that node IS the call's func and is excluded below.
             callees = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
             indirect = [
                 node for node in ast.walk(tree)
-                if isinstance(node, ast.Name) and node.id == self.TARGET
-                and id(node) not in callees
+                if id(node) not in callees
+                and (
+                    (isinstance(node, ast.Name) and node.id == self.TARGET)
+                    or (isinstance(node, ast.Attribute) and node.attr == self.TARGET)
+                    or (isinstance(node, ast.Constant) and node.value == self.TARGET)
+                )
             ]
             assert indirect == [], (
                 f"{path} refers to {self.TARGET} without calling it directly "
