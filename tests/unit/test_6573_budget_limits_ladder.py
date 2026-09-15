@@ -94,6 +94,7 @@ class FakeLadder:
         self.get_project_calls = 0
         self.get_user_calls = 0
         self.list_calls = 0
+        self.list_user_calls = 0
         self.descriptor = types.SimpleNamespace(
             config={"cost_budgets": {"defaults": defaults or {}}},
         )
@@ -115,6 +116,14 @@ class FakeLadder:
         #
         return dict(self.all_projects)
 
+    def list_user_budgets(self, project_id=None):  # pylint: disable=W0613
+        self.list_user_calls += 1
+        #
+        if self.member_row is None:
+            return []
+        #
+        return [dict(self.member_row, user_id=2)]
+
     def is_personal_project(self, project_id, **kwargs):  # pylint: disable=W0613
         return self.personal
 
@@ -127,6 +136,7 @@ class FakeLadder:
     get_effective_member_limits = RPC.get_effective_member_limits
     _read_project_budget = RPC._read_project_budget  # pylint: disable=W0212
     _read_user_budget = RPC._read_user_budget  # pylint: disable=W0212
+    _read_user_budgets = RPC._read_user_budgets  # pylint: disable=W0212
 
 
 class TestDefaultLimits(unittest.TestCase):
@@ -339,6 +349,9 @@ class TestBulkMemberLimits(unittest.TestCase):
         ladder = FakeLadder({"member_default_limit": 20.0}, None, PLATFORM_DEFAULTS)
         self.assertEqual(ladder.get_effective_member_limits(1, [2, 3, 4]), {2: 20.0, 3: 20.0, 4: 20.0})
         self.assertEqual(ladder.get_project_calls, 1)
+        # One query for every member row, not one per member
+        self.assertEqual(ladder.list_user_calls, 1)
+        self.assertEqual(ladder.get_user_calls, 0)
 
     def test_bulk_agrees_with_the_single_member_resolver(self):
         rows = ({"monthly_limit": 7.0, "enabled": True}, {"member_default_limit": 20.0})

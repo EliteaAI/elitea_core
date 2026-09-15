@@ -67,6 +67,8 @@ class MaintenanceInProgressError(Exception):
         super().__init__(f"Maintenance mode active - task '{task_name}' rejected")
 
 
+# Twinned with usage/hooks.py's BUDGET_ERROR_MESSAGE/BUDGET_ERROR_CODES — edit both together;
+# the SDK and the UI match on this body, never on the status code
 BUDGET_ERROR_MESSAGE = (
     "The budget for shared models has been reached. Requests are unavailable "
     "until the budget resets or an administrator raises the limit."

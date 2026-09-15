@@ -234,13 +234,26 @@ class RPC:
         read once here rather than per member — the member list can be a whole project.
         """
         project_budget = self._read_project_budget(project_id)
+        rows = self._read_user_budgets(project_id)
         #
         return {
             user_id: self.get_effective_member_limit(
                 project_id, user_id, project_budget=project_budget,
+                member_budget=rows.get(int(user_id)),
             )
             for user_id in user_ids
         }
+
+    @web.rpc("elitea_core_read_user_budget_rows", "_read_user_budgets")
+    def _read_user_budgets(self, project_id, **kwargs):
+        """Every stored member row of a project, keyed by user id — one query, not one per member."""
+        try:
+            rows = self.list_user_budgets(project_id=project_id) or []
+            #
+            return {int(row["user_id"]): row for row in rows if row.get("user_id") is not None}
+        except:  # pylint: disable=W0702
+            log.exception("Failed to read the budget rows for project %s", project_id)
+            return {}
 
     @web.rpc("elitea_core_read_project_budget_row", "_read_project_budget")
     def _read_project_budget(self, project_id, **kwargs):
