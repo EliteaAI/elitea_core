@@ -2,9 +2,13 @@
 
 A worker killed without a terminal write leaves its index_meta row `in_progress`
 forever, and the scheduler's gate skipped such rows silently on every tick — the
-schedule starved with no log line. The gate now admits an in_progress row once it
-is stale by the same rule the index list GET applies (`is_index_stale`), so both
-surfaces agree on when a run stopped counting as alive.
+schedule starved with no log line. The gate admits an in_progress row once it is
+stale.
+
+Both surfaces really do share one rule as of #6586 — `resolve_index_staleness`,
+covered below. Before that they did not: the scheduler preferred the run-row
+heartbeat while the list GET always used `updated_on`, so the two could disagree
+about the same row even though the comment here claimed otherwise.
 
 Run via:
     python tests/run_tests.py integration/test_6389_schedule_stale_retry.py -v
