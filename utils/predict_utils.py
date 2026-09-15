@@ -76,13 +76,19 @@ def get_system_user_token(project_id: int, name: str = 'api', create_if_not_exis
 
 
 def get_user_token(user_id: int) -> Optional[str]:
-    token_list = auth.list_tokens(user_id)
     if user_id is None:
         return
-    for i in token_list:
+    # list_tokens hides the platform-owned system token, so a real PAT still wins.
+    for i in auth.list_tokens(user_id):
         expires = i.get('expires')
         if not expires or expires > datetime.now():
             return auth.encode_token(i['id'])
+    # No usable PAT: fall back to the system token, creating it if it is missing.
+    try:
+        return auth.ensure_system_token(user_id)
+    except Exception:  # pylint: disable=W0703
+        log.warning('Could not ensure system token for user %s', user_id, exc_info=True)
+        return None
 
 
 def get_system_token(project_id: int) -> Optional[str]:
