@@ -19,11 +19,14 @@ from ...models.pd.index import (
 from ...utils.application_tools import (
     load_and_validate_toolkit_for_index,
     get_session_for_schema,
-    is_index_stale,
+    get_pending_index_run_heartbeats,
+    resolve_index_staleness,
     clean_up_schedule_in_toolkit,
     find_last_successful_run,
     IndexMetaLockTimeoutError,
     INDEX_META_LOCK_TIMEOUT,
+    DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC,
+    HEARTBEAT_STALE_HORIZON_SEC,
     _get_pgvector_engine,
     _is_undefined_table_error,
 )
@@ -70,12 +73,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 # Get task disconnect timeout from vault secrets
                 vault_client = VaultClient(project_id)
                 secrets = vault_client.get_secrets()
-                task_disconnected_timeout = int(secrets.get('task_disconnected_timeout_sec', 7200))
+                task_disconnected_timeout = int(secrets.get(
+                    'task_disconnected_timeout_sec', DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC))
+                # One query for every row's run heartbeat; per-row would be one
+                # query per index on a list endpoint.
+                pending_heartbeats = get_pending_index_run_heartbeats(session)
                 
                 for id, cmetadata in meta:
                     for key in ['index_configuration', 'history', 'report']:
-                        # 'report' is cleared to null when a reindex starts.
-                        if cmetadata and cmetadata.get(key):
+                        # The isinstance guard matters now that the SDK patches keys
+                        # instead of routing them through a writer that stringified every
+                        # dict: an already-decoded object is not an error.
+                        if cmetadata and isinstance(cmetadata.get(key), str) and cmetadata[key]:
                             try:
                                 cmetadata[key] = json.loads(cmetadata[key])
                             except (TypeError, json.JSONDecodeError):
@@ -99,12 +108,24 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     # Determine if task is stale (in_progress but not updated recently)
                     updated_on = cmetadata.get('updated_on', 0)
                     index_data_state = cmetadata.get('state', '')
-                    stale = is_index_stale(updated_on, index_data_state, task_disconnected_timeout)
+                    pending_heartbeat = pending_heartbeats.get(cmetadata.get('collection'))
+                    # Two flags on purpose: `stale` is chrome and may be wrong for one
+                    # poll, `reclaimable` authorizes destructive affordances and stays on
+                    # the disconnect rule the dispatch guard uses.
+                    stale = resolve_index_staleness(
+                        index_data_state, updated_on, task_disconnected_timeout,
+                        pending_heartbeat, heartbeat_horizon=HEARTBEAT_STALE_HORIZON_SEC,
+                    )
+                    reclaimable = resolve_index_staleness(
+                        index_data_state, updated_on, task_disconnected_timeout,
+                        pending_heartbeat,
+                    )
                     #
                     result.append({
                         "id": id,
                         "metadata": cmetadata,
                         "stale": stale,
+                        "reclaimable": reclaimable,
                         "last_successful_run": last_successful_run
                     })
                 return serialize(result), 200

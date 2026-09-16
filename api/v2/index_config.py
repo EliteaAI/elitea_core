@@ -6,6 +6,7 @@ from tools import api_tools, auth, config as c, register_openapi, VaultClient
 
 from ...models.pd.index import SaveIndexConfiguration
 from ...utils.application_tools import (
+    DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC,
     IndexMetaLockTimeoutError,
     IndexRunInProgressError,
     load_and_validate_toolkit_for_index,
@@ -49,7 +50,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return validation_error
 
         task_disconnected_timeout = int(
-            VaultClient(project_id).get_secrets().get('task_disconnected_timeout_sec', 7200)
+            VaultClient(project_id).get_secrets().get(
+                'task_disconnected_timeout_sec', DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC)
         )
 
         try:

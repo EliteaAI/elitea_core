@@ -3,7 +3,7 @@ import threading
 import time
 from collections import OrderedDict
 from copy import deepcopy
-from typing import Optional, List
+from typing import Dict, Optional, List
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -1265,6 +1265,17 @@ def get_toolkit_index_meta(session: Session, index_name: str, for_update: bool =
 
 DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC = 7200
 
+# Twin contract: the SDK ticks the run row and the meta row's `updated_on` on this
+# cadence (elitea_sdk/tools/base_indexer_toolkit.py INDEX_RUN_HEARTBEAT_INTERVAL).
+# Bump both together.
+INDEX_RUN_HEARTBEAT_INTERVAL_SEC = 60
+# A run with a live heartbeat is judged on missed ticks, not on the disconnect timeout.
+# The multiple absorbs a worker briefly starved of its heartbeat thread.
+HEARTBEAT_STALE_INTERVALS = 5
+# Display-only horizon. Never use it to authorize superseding, stopping or deleting
+# a run — see resolve_index_staleness.
+HEARTBEAT_STALE_HORIZON_SEC = INDEX_RUN_HEARTBEAT_INTERVAL_SEC * HEARTBEAT_STALE_INTERVALS
+
 # The promote/discard path in the SDK holds the meta row's FOR UPDATE across batched chunk
 # deletes — seconds to minutes on large corpora — so every core-side FOR UPDATE bounds its
 # wait and surfaces a retryable error instead of hanging a request or the scheduler tick.
@@ -1287,10 +1298,19 @@ def lock_toolkit_index_meta(session: Session, index_name: str, lock_timeout: str
 UNDEFINED_TABLE_SQLSTATE = "42P01"
 
 
-def _is_undefined_table_error(error: ProgrammingError) -> bool:
+def error_sqlstate(error):
+    """The driver's SQLSTATE, whichever driver raised it.
+
+    psycopg2 exposes `.pgcode`; psycopg3 — which is what the PGVector path runs on —
+    exposes `.sqlstate` and has no `.pgcode` at all, so reading either one alone is
+    silently None for half the deployments.
+    """
     orig = getattr(error, 'orig', None)
-    sqlstate = getattr(orig, 'pgcode', None) or getattr(orig, 'sqlstate', None)
-    return sqlstate == UNDEFINED_TABLE_SQLSTATE
+    return getattr(orig, 'pgcode', None) or getattr(orig, 'sqlstate', None)
+
+
+def _is_undefined_table_error(error: ProgrammingError) -> bool:
+    return error_sqlstate(error) == UNDEFINED_TABLE_SQLSTATE
 
 
 def query_index_runs(session: Session, index_name: str, statuses=None, for_update: bool = False):
@@ -1350,6 +1370,80 @@ def get_pending_index_run_heartbeat(session: Session, index_name: str) -> Option
     if not rows:
         return None
     return max(row.heartbeat for row in rows)
+
+
+def get_pending_index_run_heartbeats(session: Session) -> Dict[str, float]:
+    """Latest pending heartbeat per collection, in one query.
+
+    The index list GET resolves staleness for every meta row it returns; asking
+    per row would issue one query per index.
+    """
+    savepoint = session.begin_nested()
+    try:
+        rows = (
+            session.query(IndexRun.collection, func.max(IndexRun.heartbeat))
+            .filter(IndexRun.status == INDEX_RUN_PENDING)
+            .group_by(IndexRun.collection)
+            .all()
+        )
+        savepoint.commit()
+        return {collection: heartbeat for collection, heartbeat in rows}
+    except Exception as error:
+        savepoint.rollback()
+        # Nothing destructive keys on this read; it only picks which horizon the display
+        # flag uses. Degrade to the updated_on rule rather than fail the whole list.
+        log.warning(f"Could not read index run heartbeats "
+                    f"(sqlstate={error_sqlstate(error)}); "
+                    f"falling back to the updated_on staleness rule: {error}")
+        return {}
+
+
+def resolve_index_staleness(index_data_state: str, updated_on: float,
+                            task_disconnected_timeout: int,
+                            pending_heartbeat: Optional[float] = None,
+                            heartbeat_horizon: Optional[int] = None) -> bool:
+    """One staleness rule; the caller picks the horizon for what it is deciding.
+
+    A registered run's heartbeat is the better signal when there is one. What it is
+    judged against is NOT one number, because two different questions are asked of
+    this row:
+
+    * DISPLAY — "should the card still claim to be indexing?" Pass
+      `heartbeat_horizon=HEARTBEAT_STALE_HORIZON_SEC`. Being wrong costs a
+      misleading card for one poll.
+    * CONTROL — "may this run be superseded, stopped or deleted?" Omit it, and the
+      disconnect timeout applies. Being wrong here destroys a live run, and it must
+      stay in step with `has_live_index_run`, which the dispatch guard uses: a
+      shorter horizon here would let the scheduler kill a worker and then be refused
+      the dispatch it killed it for, leaving the schedule due and re-firing.
+
+    Rows with no pending run (crashed pre-heartbeat runs, the dispatch window) keep
+    the disconnect-timeout rule either way, so their schedules are never starved.
+    """
+    if not index_data_state or index_data_state != IndexDataStatus.in_progress.value:
+        return False
+    if pending_heartbeat is not None:
+        # max(), not the heartbeat alone: nothing ties a pending row to the meta row's
+        # generation, and the pending row of an abandoned run OUTLIVES its worker — the
+        # dispatch guard lets a reindex through, and only the SDK's sweep clears it,
+        # inside index_meta_init after the new worker boots. Between dispatch and boot
+        # the heartbeat on hand belongs to the DEAD run, so reading it alone reports a
+        # just-dispatched reindex as reclaimable and arms an unguarded Delete.
+        # `updated_on` is the signal that is certainly this generation's: dispatch seeds
+        # it fresh. Neither signal can be advanced by a dead worker — the heartbeat's own
+        # patch is gated on EXISTS(its own pending row) — so detection is unchanged, and
+        # max() is monotone: it can only ever disarm, never arm.
+        # `task_disconnected_timeout` is an unclamped vault secret; below the display
+        # horizon it inverts the invariant the split depends on, arming Delete on a row
+        # still rendering a live spinner. The floor goes on CONTROL rather than a ceiling
+        # on display, because it only ever makes the destructive decision more patient.
+        horizon = (
+            max(task_disconnected_timeout, HEARTBEAT_STALE_HORIZON_SEC)
+            if heartbeat_horizon is None else heartbeat_horizon
+        )
+        last_signal = max(pending_heartbeat, updated_on or 0)
+        return time.time() - last_signal > horizon
+    return is_index_stale(updated_on, index_data_state, task_disconnected_timeout)
 
 
 def reject_index_dispatch_when_run_live(connection_string: str, toolkit_name_id: str,
@@ -1910,6 +2004,10 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         "type": "index_meta",
         "indexed": 0,
         "updated": 0,
+        # Seeded here, not left to the worker's first heartbeat: the row goes in_progress
+        # at dispatch but the worker takes tens of seconds to boot, and until this key
+        # exists the list shows the previous run's counts beside a live spinner.
+        "run_chunks": 0,
         "state": "in_progress",
         "index_configuration": build_index_configuration(tool_params, index_name),
         "created_on": created_on,
@@ -1983,6 +2081,38 @@ def handle_index_data_failure(ctx, event_data: dict):
         log.exception(f"Failed to handle index_data failure event: {e}")
 
 
+def _stamp_index_task_id(connection_string: str, toolkit_name_id: str, index_name: str,
+                         task_id: str, created_at, lock_timeout: str = INDEX_META_LOCK_TIMEOUT) -> bool:
+    """Claim the meta row's empty task_id under the row lock.
+
+    The read has to be the LOCKED read: this is a read-modify-write of the whole
+    cmetadata column, and on a pre-lock snapshot it silently reverts whatever
+    committed in between — including a cancel, whose embeddings are already gone
+    by then, leaving a row that reports chunks it no longer has.
+    """
+    with get_session_for_schema(connection_string, toolkit_name_id) as session:
+        meta = lock_toolkit_index_meta(session, index_name, lock_timeout=lock_timeout)
+        if not meta:
+            log.warning(f"No metadata found for index_name={index_name}")
+            return False
+
+        current_metadata = meta.cmetadata.copy()
+        # `updated_on` is deliberately NOT written here: the run heartbeat owns it
+        # and advances it every interval, and the event carries the run-START
+        # timestamp, which would drag it backwards.
+        if current_metadata.get('task_id') is None and current_metadata.get('created_on') == created_at:
+            current_metadata['task_id'] = task_id
+            meta.cmetadata = current_metadata
+            session.commit()
+            log.debug(f"Set task_id={task_id} for index_name={index_name}")
+            return True
+
+        log.debug(f"Skipping task_id update for index_name={index_name}: "
+                  f"task_id={current_metadata.get('task_id')}, "
+                  f"created_on={current_metadata.get('created_on')}, event_created_at={created_at}")
+        return False
+
+
 def ensure_index_data_has_task_id(ctx, event_data: dict):
     """
     Ensure task_id is set in cmetadata for an index.
@@ -2006,27 +2136,16 @@ def ensure_index_data_has_task_id(ctx, event_data: dict):
         # Get connection details
         toolkit_name_id, connection_string = validate_toolkit_for_index(toolkit_config)
 
-        # Get session and update if needed
-        with get_session_for_schema(connection_string, toolkit_name_id) as session:
-            meta = get_toolkit_index_meta(session, index_name)
-            if not meta:
-                log.warning(f"No metadata found for index_name={index_name}")
-                return
-
-            # Read current metadata
-            current_metadata = meta.cmetadata.copy()
-
-            # Only update if task_id is None AND created_at matches (stronger condition)
-            if current_metadata.get('task_id') is None and current_metadata.get('created_on') == created_at:
-                current_metadata['task_id'] = task_id
-                current_metadata['updated_on'] = event_data.get('updated_on')
-                meta.cmetadata = current_metadata
-                session.commit()
-                log.debug(f"Set task_id={task_id} for index_name={index_name}")
-            else:
-                log.debug(f"Skipping task_id update for index_name={index_name}: "
-                          f"task_id={current_metadata.get('task_id')}, "
-                          f"created_on={current_metadata.get('created_on')}, event_created_at={created_at}")
+        try:
+            _stamp_index_task_id(connection_string, toolkit_name_id, index_name, task_id, created_at)
+        except IndexMetaLockTimeoutError:
+            # A row left without a task_id cannot be stopped from the UI, and Stop
+            # then deletes the embeddings while the worker keeps indexing — worth a
+            # second, longer wait the way the dispatch write takes one.
+            log.warning(f"task_id stamp for index_name={index_name} timed out on the lock; "
+                        f"retrying with lock_timeout={INDEX_META_RETRY_LOCK_TIMEOUT}")
+            _stamp_index_task_id(connection_string, toolkit_name_id, index_name, task_id, created_at,
+                                 lock_timeout=INDEX_META_RETRY_LOCK_TIMEOUT)
 
     except Exception as e:
         log.exception(f"Failed to ensure task_id for index: {e}")
