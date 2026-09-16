@@ -25,7 +25,22 @@ if _API_AVAILABLE:
     from ...utils.constants import SYSTEM_USER_EMAILS, SYSTEM_USER_EMAIL_PATTERN
     from ...utils.date_range import parse_date_range as _parse_dates
 
-    def _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to):
+    def _project_member_ids(project_id):
+        """User ids holding a role in the project, or None when the lookup is unavailable.
+
+        None means "do not scope": an auth outage must not empty the Health tab, which is what
+        an operator reaches for during one.
+        """
+        try:
+            return sorted(set(auth.list_project_users(project_id) or []))
+        except Exception:  # pylint: disable=W0703
+            log.warning(
+                "Member lookup failed for project %s; analytics left unscoped", project_id,
+                exc_info=True,
+            )
+            return None
+
+    def _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to, member_ids=None):
         """Build base query with project + date filters, excluding system users."""
         base = session.query(AuditEvent).filter(
             AuditEvent.project_id == project_id,
@@ -38,6 +53,17 @@ if _API_AVAILABLE:
                 ~AuditEvent.user_email.like(SYSTEM_USER_EMAIL_PATTERN),
             ),
         )
+        if member_ids is not None:
+            # #6308: a row's project_id is the project id in the request URL and is never
+            # membership-checked when written, so a non-member touching this project's API —
+            # a Team-project fork run resolving its source entity, say — otherwise counts as
+            # activity here. A row with no actor is the project's own background work and stays.
+            base = base.filter(
+                or_(
+                    AuditEvent.user_id.is_(None),
+                    AuditEvent.user_id.in_(member_ids),
+                ),
+            )
         if dt_from:
             base = base.filter(AuditEvent.timestamp >= dt_from)
         if dt_to:
@@ -141,10 +167,13 @@ if _API_AVAILABLE:
             from ...models.audit_event import AuditEvent
 
             dt_from, dt_to = _parse_dates(request.args)
+            member_ids = _project_member_ids(project_id)
 
             try:
                 with db.with_project_schema_session(None) as session:
-                    base = _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to)
+                    base = _apply_base_filters(
+                        session, AuditEvent, project_id, dt_from, dt_to, member_ids,
+                    )
 
                     # 1. KPIs
                     kpi_row = base.with_entities(
