@@ -14,6 +14,7 @@ Run via:
 
 import importlib.util
 import pathlib
+import re
 import sys
 import types
 
@@ -22,6 +23,31 @@ from sqlalchemy import text
 
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+# The contract audit_events_schema declares, spelled out rather than imported so that
+# widening it stays a deliberate two-place edit instead of a tautology.
+REQUIRED_COLUMNS = [
+    "cache_creation_tokens", "cache_read_tokens", "cost_source",
+    "input_tokens", "llm_cost", "output_tokens", "token_source",
+]
+REQUIRED_INDEXES = [
+    "ix_audit_events_entity",
+    "ix_audit_events_is_error",
+    "ix_audit_events_model_name",
+    "ix_audit_events_project_id",
+    "ix_audit_events_project_timestamp",
+    "ix_audit_events_timestamp",
+    "ix_audit_events_tool_name",
+    "ix_audit_events_trace_id",
+    "ix_audit_events_user_id",
+]
+# A table that has already had every required column applied at its full width
+MIGRATED_COLUMNS = {
+    "id": None, "timestamp": None, "model_name": 256,
+    "input_tokens": None, "output_tokens": None,
+    "cache_read_tokens": None, "cache_creation_tokens": None,
+    "llm_cost": None, "token_source": 16, "cost_source": 64,
+}
 
 
 class _Log:
@@ -118,18 +144,17 @@ class FakeConnection:
         if "FROM pg_indexes" in sql:
             return FakeResult(self.indexes)
         if "ALTER TABLE" in sql and "ADD COLUMN" in sql:
-            for name in ("input_tokens", "output_tokens", "llm_cost",
-                         "token_source", "cost_source"):
-                if f'"{name}"' in sql:
-                    self.columns[name] = self._VARCHAR_DEFAULTS.get(name)
+            for name in re.findall(r'ADD COLUMN IF NOT EXISTS "([^"]+)"', sql):
+                self.columns[name] = self._VARCHAR_DEFAULTS.get(name)
         elif "ALTER TABLE" in sql and "ALTER COLUMN" in sql:
             # widen path
-            import re
             m = re.search(r'ALTER COLUMN "([^"]+)" TYPE VARCHAR\((\d+)\)', sql)
             if m:
                 self.columns[m.group(1)] = int(m.group(2))
         if "CREATE INDEX" in sql:
-            self.indexes.add("ix_audit_events_model_name")
+            m = re.search(r'CREATE INDEX "([^"]+)"', sql)
+            if m:
+                self.indexes.add(m.group(1))
         return FakeResult([])
 
 
@@ -173,18 +198,17 @@ class TestEnsureAuditEventsSchema:
 
         result = audit_events_schema_module.ensure_audit_events_schema(engine)
 
-        assert sorted(result["added_columns"]) == [
-            "cost_source", "input_tokens", "llm_cost",
-            "output_tokens", "token_source",
-        ]
+        assert sorted(result["added_columns"]) == REQUIRED_COLUMNS
         assert result["widened_columns"] == []
-        assert result["added_indexes"] == ["ix_audit_events_model_name"]
+        assert result["added_indexes"] == REQUIRED_INDEXES
 
         alter_statements = [sql for sql in connection.executed if "ALTER TABLE" in sql]
         add_stmts = [s for s in alter_statements if "ADD COLUMN" in s]
         assert len(add_stmts) == 1
         assert '"input_tokens" INTEGER' in add_stmts[0]
         assert '"output_tokens" INTEGER' in add_stmts[0]
+        assert '"cache_read_tokens" INTEGER' in add_stmts[0]
+        assert '"cache_creation_tokens" INTEGER' in add_stmts[0]
         assert '"llm_cost" NUMERIC(18, 8)' in add_stmts[0]
         assert '"token_source" VARCHAR(16)' in add_stmts[0]
         assert '"cost_source" VARCHAR(64)' in add_stmts[0]
@@ -196,12 +220,8 @@ class TestEnsureAuditEventsSchema:
     def test_is_idempotent_once_columns_present(self, audit_events_schema_module):
         """A second run against an already-migrated table issues no DDL."""
         connection = FakeConnection(
-            columns={
-                "id": None, "timestamp": None, "model_name": 256,
-                "input_tokens": None, "output_tokens": None, "llm_cost": None,
-                "token_source": 16, "cost_source": 64,
-            },
-            indexes=["ix_audit_events_model_name"],
+            columns=MIGRATED_COLUMNS,
+            indexes=REQUIRED_INDEXES,
         )
         engine = FakeEngine(connection)
 
@@ -223,12 +243,9 @@ class TestEnsureAuditEventsSchema:
 
         result = audit_events_schema_module.ensure_audit_events_schema(engine, dry_run=True)
 
-        assert sorted(result["added_columns"]) == [
-            "cost_source", "input_tokens", "llm_cost",
-            "output_tokens", "token_source",
-        ]
+        assert sorted(result["added_columns"]) == REQUIRED_COLUMNS
         assert result["widened_columns"] == []
-        assert result["added_indexes"] == ["ix_audit_events_model_name"]
+        assert result["added_indexes"] == REQUIRED_INDEXES
         assert not any("ALTER TABLE" in sql for sql in connection.executed)
         assert not any("CREATE INDEX" in sql for sql in connection.executed)
         assert not any("pg_advisory_xact_lock" in sql for sql in connection.executed)
@@ -243,14 +260,12 @@ class TestEnsureAuditEventsSchema:
         silently leaving the narrower column in place."""
         connection = FakeConnection(
             columns={
-                "id": None, "timestamp": None, "model_name": 256,
-                "input_tokens": None, "output_tokens": None, "llm_cost": None,
-                "token_source": 16,
+                **MIGRATED_COLUMNS,
                 # This is the round-2 defect: an env booted 7f1248d before
                 # the 6a10af3 widen; cost_source is present but 32 chars.
                 "cost_source": 32,
             },
-            indexes=["ix_audit_events_model_name"],
+            indexes=REQUIRED_INDEXES,
         )
         engine = FakeEngine(connection)
 
@@ -268,12 +283,10 @@ class TestEnsureAuditEventsSchema:
         """Column already at the required width or wider is untouched."""
         connection = FakeConnection(
             columns={
-                "id": None, "timestamp": None, "model_name": 256,
-                "input_tokens": None, "output_tokens": None, "llm_cost": None,
-                "token_source": 16,
+                **MIGRATED_COLUMNS,
                 "cost_source": 128,  # wider than required — leave alone
             },
-            indexes=["ix_audit_events_model_name"],
+            indexes=REQUIRED_INDEXES,
         )
         engine = FakeEngine(connection)
 
