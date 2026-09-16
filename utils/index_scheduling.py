@@ -4,6 +4,7 @@ from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, VaultClient, rpc_tools, this
 from ..models.enums import InitiatorType
+from ..models.pd.index import compute_schedule_expiration
 from ..utils.application_tools import (
     IndexMetaLockTimeoutError,
     update_toolkit_index_meta_history_with_failed_state,
@@ -124,8 +125,14 @@ def stamp_schedule_last_run(project_session, toolkit, index_meta_id, user_id, ct
     return None
 
 
+# Distinguishes "compare against no stored deadline" from "do not compare at all", since a
+# missing ``expires_at`` is itself a value the expiry writes need to match on.
+_NO_EXPECTATION = object()
+
+
 def _write_schedule_fields(project_session, toolkit, index_meta_id, user_id, ctx,
-                           fields: dict, consequence: str) -> bool:
+                           fields: dict, consequence: str,
+                           expect_expires_at=_NO_EXPECTATION) -> bool | None:
     """Write keys into the live schedule entry, delete-wins. True when the write landed.
 
     ``consequence`` is what a failed write means for this particular caller, and it differs
@@ -133,6 +140,15 @@ def _write_schedule_fields(project_session, toolkit, index_meta_id, user_id, ctx
     cursor write leaves the schedule due every tick, a dropped outage stamp means the
     outage is never reported, and a dropped clear can escalate the next unrelated failure
     with no grace.
+
+    ``expect_expires_at`` makes the write conditional on the deadline still being the one the
+    caller observed, and returns None when it is not. Only the expiry writes need it: they act
+    on a deadline read at the top of a tick that can take minutes, and a renewal landing in
+    that window must win — otherwise the tick disables a schedule its owner just renewed, or
+    burns the warnings belonging to the new deadline. The value compared is the *raw* stored
+    one, so callers must pass what they read from the row rather than a parsed model's field:
+    parsing rewrites naive timestamps into UTC-qualified ones, and a normalized baseline would
+    never match, abandoning every expiry write forever.
 
     Mutates through ``toolkit.meta`` after ``refresh()``: refresh rebinds it to a new dict,
     so writing into the dicts the tick loop captured earlier is silently dropped.
@@ -150,6 +166,13 @@ def _write_schedule_fields(project_session, toolkit, index_meta_id, user_id, ctx
         if user_id not in live_schedules:
             log.info(f"{ctx} schedule was deleted mid-tick, skipping {sorted(fields)} update")
             return False
+        if expect_expires_at is not _NO_EXPECTATION:
+            live_expires_at = live_schedules[user_id].get('expires_at')
+            if live_expires_at != expect_expires_at:
+                log.info(f"{ctx} schedule was rescheduled mid-tick "
+                         f"({expect_expires_at!r} -> {live_expires_at!r}), "
+                         f"abandoning {sorted(fields)} update")
+                return None
         live_schedules[user_id].update(fields)
         flag_modified(toolkit, 'meta')
         project_session.commit()
@@ -163,6 +186,151 @@ def _write_schedule_fields(project_session, toolkit, index_meta_id, user_id, ctx
             pass
         log.exception(f"{ctx} failed to write {sorted(fields)}: {exc!r}; {consequence}")
         return False
+
+
+# How much warning a schedule's author gets before it is switched off, tightest last.
+# Both are fired at most once per deadline; a renewal re-arms both.
+EXPIRY_WARNINGS = (
+    (timedelta(days=7), '7d', '7 days'),
+    (timedelta(hours=24), '24h', '24 hours'),
+)
+
+
+def _describe_deadline(expires_at: datetime) -> str:
+    return expires_at.strftime('%Y-%m-%d %H:%M UTC')
+
+
+def _notify_expiry(project_id, toolkit_id, index_meta_id, creator_id, expires_at, message, expired):
+    """Push an expiry notice, absorbing failures.
+
+    The schedule state is already committed by the time this runs, so a lost push must not
+    turn into an escaped exception that stops the tick from concluding.
+    """
+    try:
+        this.module.notify_index_schedule_expiry({
+            'project_id': project_id,
+            # A schedule written before created_by existed has no addressee; notify's own
+            # guard logs and drops it, so do not crash on int(None) before reaching it.
+            'user_id': int(creator_id) if creator_id is not None else None,
+            'index_name': index_meta_id,
+            'toolkit_id': toolkit_id,
+            'expires_at': expires_at.isoformat(),
+            'message': message,
+            'expired': expired,
+        })
+    except Exception as exc:  # pylint: disable=W0703
+        log.exception(f"could not notify about index schedule expiry: {exc!r}")
+
+
+def handle_schedule_expiry(project_session, toolkit, index_meta_id, user_id, ctx,
+                           schedule_model, project_id, observed_expires_at,
+                           now: datetime | None = None) -> bool:
+    """Retire a schedule that has outlived its window, warning its author first.
+
+    Returns True when the schedule is expired and the tick must skip it. Every other
+    outcome — including every failure to price or persist anything — returns False, because
+    the cost of a wrong True is a working schedule silently stopping.
+
+    ``observed_expires_at`` is the deadline exactly as it was stored when this tick read the
+    row; every write below is conditional on it, so a renewal that lands mid-tick wins instead
+    of being overwritten. It has to be the raw value rather than
+    ``schedule_model.expires_at``, which parsing has already normalized, and it has no default
+    on purpose: a caller that forgot it would compare every stored deadline against None and
+    quietly stop retiring anything.
+
+    Called before the cron-due check so a warning does not have to wait for a firing: a
+    monthly schedule would otherwise get its 7-day notice only if a firing happened to land
+    inside that week.
+    """
+    if not schedule_model.enabled:
+        # A disabled schedule is not consuming anything, so it is not on a clock. This also
+        # keeps the tick from re-notifying about the schedule it just switched off below.
+        return False
+
+    now = now or datetime.now(UTC)
+
+    if schedule_model.expires_at is None:
+        # Schedules that predate this field, and any whose stored deadline was unreadable,
+        # are priced from *now* rather than from their creation — backdating would retire
+        # most of the platform's schedules in a single tick. Written once; if the write is
+        # lost the schedule keeps running and the next tick prices it again.
+        try:
+            deadline = compute_schedule_expiration(schedule_model.cron, now)
+        except ValueError as exc:
+            # An expression croniter cannot walk cannot be priced. Leaving it unpriced means
+            # it runs forever, which is the pre-existing behaviour and strictly better than
+            # guessing a deadline for a schedule somebody is relying on.
+            log.warning(f"{ctx} cannot price schedule expiration, leaving it without a deadline: {exc}")
+            return False
+        if _write_schedule_fields(
+            project_session, toolkit, index_meta_id, user_id, ctx,
+            {'expires_at': deadline.isoformat(), 'notified_expiry_warnings': []},
+            "the schedule keeps running and will be priced again on the next tick",
+            expect_expires_at=observed_expires_at,
+        ):
+            log.info(f"{ctx} priced schedule expiration at {_describe_deadline(deadline)}")
+        return False
+
+    expires_at = datetime.fromisoformat(schedule_model.expires_at)
+    creator_id = schedule_model.created_by
+
+    if now >= expires_at:
+        # Disabled, never deleted: the author's schedule, cron and credentials survive so
+        # that renewing is one toggle rather than a rebuild. ``expired`` records *who* turned
+        # it off, which a past deadline alone cannot say — the owner's own disable keeps its
+        # deadline too.
+        retired = _write_schedule_fields(
+            project_session, toolkit, index_meta_id, user_id, ctx,
+            {'enabled': False, 'expired': True},
+            "the schedule stays enabled and will be retired again on the next tick",
+            expect_expires_at=observed_expires_at,
+        )
+        if retired is None:
+            # Renewed while this tick was working: the deadline we were about to enforce no
+            # longer exists, so nothing here is expired. Hand the schedule back to the tick.
+            return False
+        if not retired:
+            # Still skipped this tick. Notifying is deliberately tied to the write landing,
+            # or a permanently failing write would notify once a minute forever.
+            return True
+        log.info(f"{ctx} schedule expired at {_describe_deadline(expires_at)} and was switched off")
+        _notify_expiry(
+            project_id, toolkit.id, index_meta_id, creator_id, expires_at,
+            f"Scheduled indexing for '{index_meta_id}' reached its expiration date "
+            f"({_describe_deadline(expires_at)}) and has been switched off. "
+            f"Turn the schedule back on to run it for another period. "
+            f"[Manage index schedule]()",
+            expired=True,
+        )
+        return True
+
+    remaining = expires_at - now
+    already_sent = set(schedule_model.notified_expiry_warnings)
+    # Widest first, so `due` ends up holding the tightest threshold the remaining time has
+    # crossed. Every crossed threshold is then marked sent, which is what makes a schedule
+    # whose 7-day window the tick slept through get exactly one notice, not two at once.
+    crossed = [(key, phrase) for threshold, key, phrase in EXPIRY_WARNINGS if remaining <= threshold]
+    if not crossed or all(key in already_sent for key, _ in crossed):
+        return False
+    due_key, due_phrase = crossed[-1]
+    # A None here (renewed mid-tick) is as good a reason to stay quiet as a failed write: the
+    # warning would name a deadline that no longer applies.
+    if not _write_schedule_fields(
+        project_session, toolkit, index_meta_id, user_id, ctx,
+        {'notified_expiry_warnings': sorted(already_sent | {key for key, _ in crossed})},
+        "the warning is not sent this tick and will be reconsidered on the next one",
+        expect_expires_at=observed_expires_at,
+    ):
+        return False
+    _notify_expiry(
+        project_id, toolkit.id, index_meta_id, creator_id, expires_at,
+        f"Scheduled indexing for '{index_meta_id}' will be switched off in less than "
+        f"{due_phrase} ({_describe_deadline(expires_at)}). Reschedule it to keep it running. "
+        f"[Manage index schedule]()",
+        expired=False,
+    )
+    log.info(f"{ctx} sent '{due_key}' expiry warning for deadline {_describe_deadline(expires_at)}")
+    return False
 
 
 # Settings slots that never hold toolkit credentials, so they must not be mistaken

@@ -106,3 +106,36 @@ class Method:
                 'event_type': NotificationEventTypes.index_data_changed
             }
         )
+
+    @web.method()
+    def notify_index_schedule_expiry(self, payload: dict):
+        """Tell a schedule's author that it is about to be, or has been, switched off.
+
+        Routed to ``created_by`` rather than the schedule's ``user_id`` key, because a shared
+        schedule is stored under ``-1`` and nobody owns that number. A schedule written before
+        ``created_by`` existed therefore has no addressee — logged and dropped, since the
+        alternative is notifying every project member about a schedule they did not make.
+        """
+        user_id = payload.get('user_id')
+        project_id = payload.get('project_id')
+        if not user_id or not project_id:
+            log.warning(f"Cannot notify about index schedule expiry: missing user_id or project_id in {payload}")
+            return
+
+        self.context.event_manager.fire_event(
+            'notifications_stream', {
+                'project_id': project_id,
+                'user_id': user_id,
+                'meta': {
+                    'index_name': payload.get('index_name'),
+                    'toolkit_id': payload.get('toolkit_id'),
+                    'expires_at': payload.get('expires_at'),
+                    'message': payload.get('message'),
+                },
+                'event_type': (
+                    NotificationEventTypes.index_schedule_expired
+                    if payload.get('expired')
+                    else NotificationEventTypes.index_schedule_expiring
+                ),
+            }
+        )

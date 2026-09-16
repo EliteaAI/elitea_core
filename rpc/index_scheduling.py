@@ -24,6 +24,7 @@ from ..utils.index_scheduling import (
     clear_schedule_retry_since,
     retry_escalation_due,
     describe_grace,
+    handle_schedule_expiry,
 )
 from ..utils.maintenance_gate import is_maintenance_active
 
@@ -60,7 +61,7 @@ class RPC:
         # counters are reported once per tick at info level: 'projects' short of the total or a
         # 'last_project' well below the highest project id is the starvation signal.
         stats = {
-            'projects': 0, 'toolkits': 0, 'due': 0,
+            'projects': 0, 'toolkits': 0, 'due': 0, 'expired': 0,
             'dispatched': 0, 'failed': 0, 'last_project': None,
         }
         try:
@@ -134,6 +135,21 @@ class RPC:
                                         f"'{toolkit.type}': {e!r}"
                                     )
                                     stats['failed'] += 1
+                                    continue
+
+                                # Before the due check, so a warning does not depend on a
+                                # firing landing inside its window. Cheap for the common
+                                # case: no notification and no write until a threshold is
+                                # crossed for the first time.
+                                if handle_schedule_expiry(
+                                    project_session, toolkit, index_meta_id, user_id, ctx,
+                                    schedule_model, project_id,
+                                    # Raw, not schedule_model.expires_at: this is the baseline
+                                    # every expiry write is conditional on, and parsing has
+                                    # already normalized the model's copy.
+                                    observed_expires_at=user_config.get('expires_at'),
+                                ):
+                                    stats['expired'] += 1
                                     continue
 
                                 # Inline cron evaluation: avoid an RPC round-trip
@@ -421,6 +437,7 @@ class RPC:
                 f"(total {time.monotonic() - tick_started:.3f}s): "
                 f"projects={stats['projects']}/{stats.get('total_projects', '?')} "
                 f"last_project={stats['last_project']} toolkits={stats['toolkits']} "
-                f"due={stats['due']} dispatched={stats['dispatched']} failed={stats['failed']}"
+                f"due={stats['due']} dispatched={stats['dispatched']} failed={stats['failed']} "
+                f"expired={stats['expired']}"
             )
             _check_index_scheduling_lock.release()

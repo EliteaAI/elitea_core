@@ -23,6 +23,8 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 
+from fixtures.helpers import register_index_pd_module
+
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
@@ -747,6 +749,7 @@ class TestEnsureDdlTwin:
 @pytest.fixture(scope="module")
 def index_scheduling(application_tools):
     """Load utils/index_scheduling.py on top of the application_tools scaffold."""
+    register_index_pd_module(PLUGIN_ROOT)
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.index_scheduling",
         PLUGIN_ROOT / "utils" / "index_scheduling.py",

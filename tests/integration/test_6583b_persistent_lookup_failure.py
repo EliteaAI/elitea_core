@@ -26,6 +26,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 
+from fixtures.helpers import register_index_pd_module
+
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 UTC = timezone.utc
 
@@ -100,6 +102,7 @@ def application_tools():
 
 @pytest.fixture(scope="module")
 def index_scheduling(application_tools):
+    register_index_pd_module(PLUGIN_ROOT)
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.index_scheduling",
         PLUGIN_ROOT / "utils" / "index_scheduling.py")

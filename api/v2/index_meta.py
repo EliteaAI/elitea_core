@@ -11,7 +11,11 @@ from sqlalchemy.orm.attributes import flag_modified
 from tools import api_tools, auth, config as c, serialize, db, VaultClient
 from ...models.elitea_tools import EliteATool
 from ...models.indexer import EmbeddingStore, IndexRun
-from ...models.pd.index import UpdateIndexingSchedule, ToolkitIndexingSchedule
+from ...models.pd.index import (
+    UpdateIndexingSchedule,
+    ToolkitIndexingSchedule,
+    compute_schedule_expiration,
+)
 from ...utils.application_tools import (
     load_and_validate_toolkit_for_index,
     get_session_for_schema,
@@ -213,6 +217,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
                 current_user_id = auth.current_user().get("id")
 
+                saved_at = datetime.now(UTC)
+
                 # Build and validate toolkit schedule model separately so field errors (e.g. cron) surface as 400
                 schedule_model = ToolkitIndexingSchedule(
                     cron=update_data.cron,
@@ -220,7 +226,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     credentials=update_data.credentials,
                     created_by=current_user_id,
                     timezone=update_data.timezone,
-                    last_run=datetime.now(UTC),
+                    last_run=saved_at,
+                    # Every save is a renewal, so the deadline is recomputed here rather than
+                    # carried over, and the fresh model starts with no warnings sent. That is
+                    # the whole of "rescheduling resets the timer" — including the enable
+                    # toggle, which is the one click that revives an expired schedule.
+                    # Deliberately not read from the payload: the client round-trips the
+                    # stored schedule back on every edit, so an accepted expires_at would let
+                    # a caller grant itself an unlimited window.
+                    expires_at=compute_schedule_expiration(update_data.cron, saved_at),
                 )
 
                 # Update or add user-specific scheduling using validated data

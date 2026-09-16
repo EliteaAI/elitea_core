@@ -23,6 +23,8 @@ import types
 import pytest
 
 
+from fixtures.helpers import register_index_pd_module
+
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
@@ -88,6 +90,7 @@ def index_scheduling():
     app_tools.update_toolkit_index_meta_history_with_failed_state = lambda *a, **k: None
     sys.modules["plugins.elitea_core.utils.application_tools"] = app_tools
 
+    register_index_pd_module(PLUGIN_ROOT)
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.index_scheduling",
         PLUGIN_ROOT / "utils" / "index_scheduling.py",
