@@ -144,6 +144,10 @@ class RPC:
                                 if handle_schedule_expiry(
                                     project_session, toolkit, index_meta_id, user_id, ctx,
                                     schedule_model, project_id,
+                                    # Raw, not schedule_model.expires_at: this is the baseline
+                                    # every expiry write is conditional on, and parsing has
+                                    # already normalized the model's copy.
+                                    observed_expires_at=user_config.get('expires_at'),
                                 ):
                                     stats['expired'] += 1
                                     continue

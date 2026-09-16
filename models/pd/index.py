@@ -180,6 +180,11 @@ class ToolkitIndexingSchedule(BaseModel):
     # wide, so without it one deadline would notify thousands of times. Rebuilt empty on
     # every save, which is what makes a renewal re-arm both warnings.
     notified_expiry_warnings: list[str] = Field(default_factory=list)
+    # True only when the tick retired this schedule. A schedule its owner switched off by hand
+    # keeps its deadline, so a past deadline alone cannot tell the two apart, and once that date
+    # passes the UI would otherwise claim the platform retired a schedule nobody retired.
+    # Rebuilt False on every save, so renewing clears it.
+    expired: bool = False
 
     @validator('timezone', pre=True)
     def validate_timezone(cls, v):
@@ -246,6 +251,13 @@ class ToolkitIndexingSchedule(BaseModel):
         if not isinstance(v, list):
             return []
         return [str(item) for item in v]
+
+    @validator('expired', pre=True)
+    def normalize_expired(cls, v):
+        """Same degrade-don't-raise rule. False is the safe reading: a schedule the tick really
+        did retire is also disabled, so the worst case is a banner that says "turned off"
+        instead of "expired" — never a schedule that can no longer be parsed at all (#6526)."""
+        return bool(v) if isinstance(v, (bool, int)) else False
 
     @validator('cron')
     def validate_cron(cls, v: str) -> str:

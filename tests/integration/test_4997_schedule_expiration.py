@@ -145,13 +145,20 @@ def expiry(index_scheduling, monkeypatch):
         module=types.SimpleNamespace(
             notify_index_schedule_expiry=lambda payload: sent.append(payload))))
 
-    def call(toolkit, session=None, now=None, index="docs", user="7", model=None):
+    _UNSET = object()
+
+    def call(toolkit, session=None, now=None, index="docs", user="7", model=None,
+             observed=_UNSET):
         pd = sys.modules["plugins.elitea_core.models.pd.index"]
-        schedule_model = model or pd.ToolkitIndexingSchedule.parse_obj(
-            _entry(toolkit, index, user))
+        raw = _entry(toolkit, index, user)
+        schedule_model = model or pd.ToolkitIndexingSchedule.parse_obj(raw)
         return index_scheduling.handle_schedule_expiry(
             session if session is not None else FakeSession(),
-            toolkit, index, user, "[ctx]", schedule_model, 1, now=now)
+            toolkit, index, user, "[ctx]", schedule_model, 1,
+            # Mirrors the tick: the baseline is the raw stored deadline, never the model's
+            # normalized copy. Overridable so a test can hand over a stale one.
+            observed_expires_at=raw.get("expires_at") if observed is _UNSET else observed,
+            now=now)
 
     return call, sent
 
@@ -402,6 +409,23 @@ class TestExpiryDisablesRatherThanDeletes:
         assert call(self._expired(), session, now=datetime(2026, 5, 2, tzinfo=UTC)) is True
         assert (session.commits, sent) == (0, [])
 
+    def test_a_retired_schedule_says_the_platform_retired_it(self, expiry):
+        """`enabled: False` plus a past deadline is also what a hand-disabled schedule looks
+        like once its own deadline goes by, so retirement has to be recorded, not inferred."""
+        call, _ = expiry
+        toolkit = self._expired()
+        call(toolkit, now=datetime(2026, 5, 2, tzinfo=UTC))
+        assert _entry(toolkit)["expired"] is True
+
+    def test_a_hand_disabled_schedule_is_never_marked_expired(self, expiry):
+        """Its deadline stays stored and eventually goes by. Nothing about that is the
+        platform's doing, and claiming otherwise tells the owner a lie about their own act."""
+        call, sent = expiry
+        toolkit = _toolkit(enabled=False, expires_at="2026-05-01T00:00:00+00:00")
+        assert call(toolkit, now=datetime(2026, 8, 1, tzinfo=UTC)) is False
+        assert "expired" not in _entry(toolkit)
+        assert sent == []
+
     def test_a_team_schedule_notifies_its_creator(self, expiry):
         """Team schedules are stored under user_id -1. Nobody owns that number."""
         call, sent = expiry
@@ -434,6 +458,7 @@ class TestExpiryDisablesRatherThanDeletes:
         assert index_scheduling.handle_schedule_expiry(
             FakeSession(), toolkit, "docs", "7", "[ctx]",
             pd.ToolkitIndexingSchedule.parse_obj(_entry(toolkit)), 1,
+            _entry(toolkit)["expires_at"],
             now=datetime(2026, 5, 2, tzinfo=UTC)) is True
         assert _entry(toolkit)["enabled"] is False
 
@@ -522,6 +547,77 @@ class TestWarningsFireOnceEach:
         assert len(sent) == 1
 
 
+class TestARenewalLandingMidTickWins:
+    """A tick reads every schedule up front and then works through them, which can take
+    minutes; the renewal it races is one HTTP request. Both writes here would otherwise be
+    based on a deadline that no longer exists — retiring a schedule its owner just renewed, or
+    spending the new deadline's warnings on the old one.
+    """
+
+    def _renewed_to(self, new_deadline):
+        """A refresh that finds the row already re-priced, as PATCH would have left it."""
+        def _rewrite(toolkit):
+            _entry(toolkit)["expires_at"] = new_deadline
+        return FakeSession(on_refresh=_rewrite)
+
+    def test_a_renewed_schedule_is_not_retired(self, expiry):
+        call, sent = expiry
+        toolkit = _toolkit(expires_at="2026-05-01T00:00:00+00:00")
+        session = self._renewed_to("2026-09-01T00:00:00+00:00")
+        assert call(toolkit, session, now=datetime(2026, 5, 2, tzinfo=UTC)) is False, \
+            "returning True would skip a schedule that is live again"
+        assert _entry(toolkit)["enabled"] is True
+        assert (session.commits, sent) == (0, [])
+
+    def test_a_renewal_does_not_lose_the_new_deadlines_warnings(self, expiry):
+        """Marking the warnings sent against the new deadline is silent: the schedule then
+        runs to its new expiry and is retired with no notice at all."""
+        call, sent = expiry
+        toolkit = _toolkit(expires_at="2026-05-08T00:00:00+00:00")
+        session = self._renewed_to("2026-11-01T00:00:00+00:00")
+        assert call(toolkit, session, now=datetime(2026, 5, 3, tzinfo=UTC)) is False
+        assert _entry(toolkit).get("notified_expiry_warnings", []) == []
+        assert sent == []
+
+    def test_a_concurrently_priced_deadline_is_not_re_priced(self, expiry):
+        """Backfill and PATCH can both price an unpriced schedule. The saved one is the one
+        its owner chose the cron for, so the tick's guess must not replace it."""
+        call, _ = expiry
+        toolkit = _toolkit()
+        session = self._renewed_to("2026-12-25T00:00:00+00:00")
+        assert call(toolkit, session, now=datetime(2026, 5, 1, tzinfo=UTC)) is False
+        assert _entry(toolkit)["expires_at"] == "2026-12-25T00:00:00+00:00"
+
+    def test_an_untouched_schedule_is_still_retired(self, expiry):
+        """The guard has to let the ordinary case through — a precondition that never matches
+        stops the platform retiring anything, which is worse than the race it fixes."""
+        call, sent = expiry
+        toolkit = _toolkit(expires_at="2026-05-01T00:00:00+00:00")
+        assert call(toolkit, now=datetime(2026, 5, 2, tzinfo=UTC)) is True
+        assert len(sent) == 1
+
+    def test_a_deadline_stored_without_a_timezone_is_still_enforceable(self, expiry):
+        """The parsed model qualifies a naive deadline with +00:00, so comparing the model's
+        copy against the stored string would never match and every retirement would be
+        abandoned forever. The baseline must be the raw value.
+        """
+        call, sent = expiry
+        toolkit = _toolkit(expires_at="2026-05-01T00:00:00")
+        assert call(toolkit, now=datetime(2026, 5, 2, tzinfo=UTC)) is True
+        assert _entry(toolkit)["enabled"] is False
+        assert len(sent) == 1
+
+    def test_a_stale_baseline_abandons_the_write(self, expiry):
+        """Same row, no concurrent writer, but a baseline that does not match what is stored:
+        proof the guard reads the live value rather than trusting the caller."""
+        call, sent = expiry
+        toolkit = _toolkit(expires_at="2026-05-01T00:00:00+00:00")
+        assert call(toolkit, now=datetime(2026, 5, 2, tzinfo=UTC),
+                    observed="2026-04-01T00:00:00+00:00") is False
+        assert _entry(toolkit)["enabled"] is True
+        assert sent == []
+
+
 class TestSaveIsARenewal:
     """The PATCH endpoint is the only writer of schedules, so it is the only place a deadline
     can be granted. It is not importable under these stubs (Flask, auth, ORM), so the shape
@@ -560,6 +656,16 @@ class TestSaveIsARenewal:
         )
         assert saved.notified_expiry_warnings == []
 
+    def test_a_saved_schedule_is_no_longer_marked_expired(self, index_pd):
+        """Renewing is the toggle that revives a retired schedule, so the save has to clear
+        the flag the tick set, or the UI keeps reporting a running schedule as retired."""
+        saved = index_pd.ToolkitIndexingSchedule(
+            cron="0 3 * * *", enabled=True, created_by=7, last_run=datetime.now(UTC),
+            expires_at=index_pd.compute_schedule_expiration("0 3 * * *", datetime.now(UTC)),
+        )
+        assert saved.expired is False
+        assert saved.dict()["expired"] is False, "the stored row is what the UI reads"
+
     def test_a_cron_the_calculator_cannot_price_is_rejected_at_the_boundary(self, index_pd):
         """Why the endpoint needs no guard around pricing: the payload model walks the same
         expression for its daily-frequency floor, so an unwalkable cron is a 400 long before
@@ -595,6 +701,14 @@ class TestTickWiring:
         assert not [n for n in ast.walk(gates[0].test)
                     if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not)], \
             "a negated test skips every live schedule and runs every expired one"
+
+    def test_the_tick_hands_over_the_raw_stored_deadline(self, tick_tree):
+        """The expiry writes are conditional on this value. Handing over the parsed model's
+        copy instead would compare a UTC-qualified string against whatever is stored, and a
+        row written without a timezone would never match — no schedule ever retired."""
+        source = (PLUGIN_ROOT / "rpc" / "index_scheduling.py").read_text()
+        assert "observed_expires_at=user_config.get('expires_at')" in source
+        assert "observed_expires_at=schedule_model.expires_at" not in source
 
     def test_the_tick_reports_how_many_schedules_it_retired(self, tick_tree):
         """Every per-schedule diagnostic is debug-level, which is off in production. Without

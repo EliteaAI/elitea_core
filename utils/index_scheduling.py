@@ -125,8 +125,14 @@ def stamp_schedule_last_run(project_session, toolkit, index_meta_id, user_id, ct
     return None
 
 
+# Distinguishes "compare against no stored deadline" from "do not compare at all", since a
+# missing ``expires_at`` is itself a value the expiry writes need to match on.
+_NO_EXPECTATION = object()
+
+
 def _write_schedule_fields(project_session, toolkit, index_meta_id, user_id, ctx,
-                           fields: dict, consequence: str) -> bool:
+                           fields: dict, consequence: str,
+                           expect_expires_at=_NO_EXPECTATION) -> bool | None:
     """Write keys into the live schedule entry, delete-wins. True when the write landed.
 
     ``consequence`` is what a failed write means for this particular caller, and it differs
@@ -134,6 +140,15 @@ def _write_schedule_fields(project_session, toolkit, index_meta_id, user_id, ctx
     cursor write leaves the schedule due every tick, a dropped outage stamp means the
     outage is never reported, and a dropped clear can escalate the next unrelated failure
     with no grace.
+
+    ``expect_expires_at`` makes the write conditional on the deadline still being the one the
+    caller observed, and returns None when it is not. Only the expiry writes need it: they act
+    on a deadline read at the top of a tick that can take minutes, and a renewal landing in
+    that window must win — otherwise the tick disables a schedule its owner just renewed, or
+    burns the warnings belonging to the new deadline. The value compared is the *raw* stored
+    one, so callers must pass what they read from the row rather than a parsed model's field:
+    parsing rewrites naive timestamps into UTC-qualified ones, and a normalized baseline would
+    never match, abandoning every expiry write forever.
 
     Mutates through ``toolkit.meta`` after ``refresh()``: refresh rebinds it to a new dict,
     so writing into the dicts the tick loop captured earlier is silently dropped.
@@ -151,6 +166,13 @@ def _write_schedule_fields(project_session, toolkit, index_meta_id, user_id, ctx
         if user_id not in live_schedules:
             log.info(f"{ctx} schedule was deleted mid-tick, skipping {sorted(fields)} update")
             return False
+        if expect_expires_at is not _NO_EXPECTATION:
+            live_expires_at = live_schedules[user_id].get('expires_at')
+            if live_expires_at != expect_expires_at:
+                log.info(f"{ctx} schedule was rescheduled mid-tick "
+                         f"({expect_expires_at!r} -> {live_expires_at!r}), "
+                         f"abandoning {sorted(fields)} update")
+                return None
         live_schedules[user_id].update(fields)
         flag_modified(toolkit, 'meta')
         project_session.commit()
@@ -201,12 +223,20 @@ def _notify_expiry(project_id, toolkit_id, index_meta_id, creator_id, expires_at
 
 
 def handle_schedule_expiry(project_session, toolkit, index_meta_id, user_id, ctx,
-                           schedule_model, project_id, now: datetime | None = None) -> bool:
+                           schedule_model, project_id, observed_expires_at,
+                           now: datetime | None = None) -> bool:
     """Retire a schedule that has outlived its window, warning its author first.
 
     Returns True when the schedule is expired and the tick must skip it. Every other
     outcome — including every failure to price or persist anything — returns False, because
     the cost of a wrong True is a working schedule silently stopping.
+
+    ``observed_expires_at`` is the deadline exactly as it was stored when this tick read the
+    row; every write below is conditional on it, so a renewal that lands mid-tick wins instead
+    of being overwritten. It has to be the raw value rather than
+    ``schedule_model.expires_at``, which parsing has already normalized, and it has no default
+    on purpose: a caller that forgot it would compare every stored deadline against None and
+    quietly stop retiring anything.
 
     Called before the cron-due check so a warning does not have to wait for a firing: a
     monthly schedule would otherwise get its 7-day notice only if a firing happened to land
@@ -236,6 +266,7 @@ def handle_schedule_expiry(project_session, toolkit, index_meta_id, user_id, ctx
             project_session, toolkit, index_meta_id, user_id, ctx,
             {'expires_at': deadline.isoformat(), 'notified_expiry_warnings': []},
             "the schedule keeps running and will be priced again on the next tick",
+            expect_expires_at=observed_expires_at,
         ):
             log.info(f"{ctx} priced schedule expiration at {_describe_deadline(deadline)}")
         return False
@@ -245,12 +276,20 @@ def handle_schedule_expiry(project_session, toolkit, index_meta_id, user_id, ctx
 
     if now >= expires_at:
         # Disabled, never deleted: the author's schedule, cron and credentials survive so
-        # that renewing is one toggle rather than a rebuild.
-        if not _write_schedule_fields(
+        # that renewing is one toggle rather than a rebuild. ``expired`` records *who* turned
+        # it off, which a past deadline alone cannot say — the owner's own disable keeps its
+        # deadline too.
+        retired = _write_schedule_fields(
             project_session, toolkit, index_meta_id, user_id, ctx,
-            {'enabled': False},
+            {'enabled': False, 'expired': True},
             "the schedule stays enabled and will be retired again on the next tick",
-        ):
+            expect_expires_at=observed_expires_at,
+        )
+        if retired is None:
+            # Renewed while this tick was working: the deadline we were about to enforce no
+            # longer exists, so nothing here is expired. Hand the schedule back to the tick.
+            return False
+        if not retired:
             # Still skipped this tick. Notifying is deliberately tied to the write landing,
             # or a permanently failing write would notify once a minute forever.
             return True
@@ -274,10 +313,13 @@ def handle_schedule_expiry(project_session, toolkit, index_meta_id, user_id, ctx
     if not crossed or all(key in already_sent for key, _ in crossed):
         return False
     due_key, due_phrase = crossed[-1]
+    # A None here (renewed mid-tick) is as good a reason to stay quiet as a failed write: the
+    # warning would name a deadline that no longer applies.
     if not _write_schedule_fields(
         project_session, toolkit, index_meta_id, user_id, ctx,
         {'notified_expiry_warnings': sorted(already_sent | {key for key, _ in crossed})},
         "the warning is not sent this tick and will be reconsidered on the next one",
+        expect_expires_at=observed_expires_at,
     ):
         return False
     _notify_expiry(
