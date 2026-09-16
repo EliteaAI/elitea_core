@@ -1,8 +1,12 @@
 """
-Project-level analytics endpoint.
+Project-level tracing and health endpoint.
 
-Aggregates audit_events data to provide KPIs, breakdowns, and trends
-for the AI Adoption Analytics dashboard.
+Aggregates audit_events data to provide event/error KPIs, event type breakdown, daily
+activity, chat session stats and per-event-type health.
+
+The AI adoption, token and cost half of this payload moved to the usage plugin over the
+usage_event table (#6574); chat metrics stay here because they are socketio-derived and have
+no usage_event equivalent.
 """
 
 from pylon.core.tools import log
@@ -16,7 +20,7 @@ except ImportError:
 
 if _API_AVAILABLE:
     from flask import request
-    from sqlalchemy import func, case, cast, Float, Date, String, or_
+    from sqlalchemy import func, case, cast, Date, or_
 
     from ...utils.constants import SYSTEM_USER_EMAILS, SYSTEM_USER_EMAIL_PATTERN
     from ...utils.date_range import parse_date_range as _parse_dates
@@ -41,17 +45,17 @@ if _API_AVAILABLE:
         return base
 
     class PromptLibAPI(api_tools.APIModeHandler):
-        """Project-level analytics for AI adoption dashboard."""
+        """Project-level tracing and health metrics."""
 
         @register_openapi(
             name="Get Project Analytics Overview",
             description=(
-                "Returns project-level AI adoption KPIs, event type breakdown, "
-                "top active users, daily activity trend, tool usage, model usage, "
-                "agent activity, chat session stats, and per-event-type health metrics."
+                "Returns project-level event/error KPIs, event type breakdown, "
+                "daily activity trend, chat session stats, and per-event-type "
+                "health metrics."
             ),
             mcp_tool=True,
-            mcp_description="Use this tool when you need the overall analytics dashboard view for a project: adoption KPIs, activity trends, top users, top tools, model usage, and general health metrics in one call. Do not use this tool when you need paginated rankings or one entity's details — use the dedicated user/agent/tool list or detail endpoints instead. This is the best first-step endpoint for broad project analytics and dashboard summaries.",
+            mcp_description="Use this tool when you need the tracing/health view for a project: event and error KPIs, event type breakdown, daily activity trend, chat session stats, and per-event-type health metrics in one call. Do not use this tool when you need AI adoption, cost, or token metrics — use the usage analytics endpoint for those. This is the best first-step endpoint for project tracing and health summaries.",
             tags=["elitea_core/analytics"],
             parameters=[
                 {
@@ -79,68 +83,19 @@ if _API_AVAILABLE:
                             "example": {
                                 "kpis": {
                                     "total_events": 1250,
-                                    "unique_users": 18,
-                                    "total_project_users": 25,
-                                    "ai_active_users": 15,
-                                    "adoption_rate": 60.0,
                                     "avg_duration_ms": 432.5,
                                     "error_rate": 2.4,
                                     "error_count": 30,
-                                    "unique_tools": 12,
-                                    "unique_models": 4,
-                                    "llm_calls": 780,
-                                    "tool_runs": 340,
                                     "chat_msgs": 210,
-                                    "agent_runs": 95,
-                                    "total_tokens": 1250000,
-                                    "total_llm_cost": 1.25,
                                 },
                                 "event_type_breakdown": [
                                     {"event_type": "llm", "count": 780},
                                     {"event_type": "tool", "count": 340},
                                     {"event_type": "socketio", "count": 130},
                                 ],
-                                "top_ai_users": [
-                                    {
-                                        "user_id": 42,
-                                        "user_email": "alice@example.com",
-                                        "ai_events": 320,
-                                        "llm_calls": 200,
-                                        "tool_runs": 90,
-                                        "agent_runs": 30,
-                                    }
-                                ],
                                 "daily_activity": [
-                                    {"date": "2025-01-15", "events": 85, "users": 8, "errors": 2},
-                                    {"date": "2025-01-16", "events": 110, "users": 11, "errors": 1},
-                                ],
-                                "tools": [
-                                    {
-                                        "tool_name": "jira_create_issue",
-                                        "calls": 120,
-                                        "users": 6,
-                                        "avg_duration_ms": 310.0,
-                                        "errors": 3,
-                                    }
-                                ],
-                                "models": [
-                                    {
-                                        "model_name": "gpt-4o",
-                                        "display_name": "GPT-4o",
-                                        "calls": 450,
-                                        "users": 12,
-                                        "avg_duration_ms": 520.0,
-                                    }
-                                ],
-                                "agents": [
-                                    {
-                                        "entity_name": "Code Review Bot",
-                                        "entity_id": 7,
-                                        "events": 95,
-                                        "users": 5,
-                                        "avg_duration_ms": 1200.0,
-                                        "errors": 4,
-                                    }
+                                    {"date": "2025-01-15", "events": 85, "errors": 2},
+                                    {"date": "2025-01-16", "events": 110, "errors": 1},
                                 ],
                                 "chat_sessions": [
                                     {
@@ -194,119 +149,24 @@ if _API_AVAILABLE:
                     # 1. KPIs
                     kpi_row = base.with_entities(
                         func.count().label("total_events"),
-                        func.count(func.distinct(AuditEvent.user_id)).label("unique_users"),
                         func.avg(AuditEvent.duration_ms).label("avg_duration_ms"),
                         func.sum(case(
                             (AuditEvent.is_error.is_(True), 1), else_=0,
                         )).label("error_count"),
-                        func.count(func.distinct(AuditEvent.tool_name)).label("unique_tools"),
-                        func.count(func.distinct(AuditEvent.model_name)).label("unique_models"),
-                        func.sum(case(
-                            (AuditEvent.event_type == "llm", 1), else_=0,
-                        )).label("llm_calls"),
-                        func.sum(case(
-                            (AuditEvent.event_type == "tool", 1), else_=0,
-                        )).label("tool_runs"),
                         func.sum(case(
                             (AuditEvent.action == "SIO chat_predict", 1), else_=0,
                         )).label("chat_msgs"),
-                        func.sum(case(
-                            (AuditEvent.entity_type == "application", 1), else_=0,
-                        )).label("agent_runs"),
-                        func.sum(case(
-                            (AuditEvent.is_error.is_(True), 0),
-                            else_=func.coalesce(AuditEvent.input_tokens, 0)
-                            + func.coalesce(AuditEvent.output_tokens, 0)
-                            + func.coalesce(AuditEvent.cache_read_tokens, 0)
-                            + func.coalesce(AuditEvent.cache_creation_tokens, 0),
-                        )).label("total_tokens"),
-                        func.sum(case(
-                            (AuditEvent.is_error.is_(True), 0),
-                            else_=func.coalesce(AuditEvent.llm_cost, 0),
-                        )).label("total_llm_cost"),
                     ).first()
 
                     total_events = kpi_row.total_events or 0
                     error_count = kpi_row.error_count or 0
-                    unique_users = kpi_row.unique_users or 0
-
-                    # AI-active users: those with at least one llm/tool event or application interaction
-                    ai_active = base.filter(
-                        or_(
-                            AuditEvent.event_type.in_(["llm", "tool"]),
-                            AuditEvent.entity_type == "application",
-                        ),
-                    ).with_entities(
-                        func.count(func.distinct(AuditEvent.user_id)),
-                    ).scalar() or 0
-
-                    adoption_rate = round(ai_active / unique_users * 100, 1) if unique_users > 0 else 0
-
-                    # Total project members (from auth/role system, includes users who never logged in)
-                    # Filter out system users to match analytics filtering
-                    try:
-                        project_user_data = auth.list_project_users(project_id)
-                        if project_user_data:
-                            all_users = auth.get_users(project_user_data) if hasattr(auth, 'get_users') else None
-                            if all_users is None:
-                                all_users = []
-                                for uid in project_user_data:
-                                    try:
-                                        u = auth.get_user(uid)
-                                        if u:
-                                            all_users.append(u)
-                                    except Exception:
-                                        continue
-                            filtered_users = [
-                                u for u in all_users
-                                if u and u.get('email')
-                                and u['email'] not in SYSTEM_USER_EMAILS
-                                and not (u['email'].startswith('system_user_') and u['email'].endswith('@centry.user'))
-                            ]
-                            # Exclude global platform super-admins: they hold an
-                            # "admin" role on every project for oversight, not as
-                            # genuine team members. If a super-admin actually has
-                            # activity on the project, the unique_users floor
-                            # below still surfaces them.
-                            from tools import rpc_tools
-                            non_admin_users = []
-                            for u in filtered_users:
-                                try:
-                                    roles = rpc_tools.RpcMixin().rpc.timeout(5).auth_get_user_roles(
-                                        u['id'], 'administration'
-                                    )
-                                except Exception:
-                                    roles = []
-                                if 'super_admin' not in (roles or []):
-                                    non_admin_users.append(u)
-                            filtered_users = non_admin_users
-                            total_project_users = len(filtered_users)
-                        else:
-                            total_project_users = 0
-                    except Exception:
-                        total_project_users = 0
-
-                    # Ensure denominator is never less than numerator
-                    # (removed users still count in historical periods)
-                    total_project_users = max(total_project_users, unique_users)
 
                     kpis = {
                         "total_events": total_events,
-                        "unique_users": unique_users,
-                        "total_project_users": total_project_users,
-                        "ai_active_users": ai_active,
-                        "adoption_rate": adoption_rate,
                         "avg_duration_ms": round(kpi_row.avg_duration_ms, 1) if kpi_row.avg_duration_ms else 0,
                         "error_rate": round(error_count / total_events * 100, 2) if total_events > 0 else 0,
                         "error_count": error_count,
-                        "unique_tools": kpi_row.unique_tools or 0,
-                        "unique_models": kpi_row.unique_models or 0,
-                        "llm_calls": kpi_row.llm_calls or 0,
-                        "tool_runs": kpi_row.tool_runs or 0,
                         "chat_msgs": kpi_row.chat_msgs or 0,
-                        "agent_runs": kpi_row.agent_runs or 0,
-                        "total_tokens": kpi_row.total_tokens or 0,
-                        "total_llm_cost": float(kpi_row.total_llm_cost) if kpi_row.total_llm_cost else 0.0,
                     }
 
                     # 2. Event type breakdown
@@ -320,183 +180,25 @@ if _API_AVAILABLE:
                         for r in event_type_rows
                     ]
 
-                    # 2b. Top AI active users (leaderboard)
-                    ai_base = base.filter(
-                        or_(
-                            AuditEvent.event_type.in_(["llm", "tool"]),
-                            AuditEvent.entity_type == "application",
-                        ),
-                    )
-                    top_user_rows = ai_base.with_entities(
-                        AuditEvent.user_id,
-                        AuditEvent.user_email,
-                        func.count().label("ai_events"),
-                        func.sum(case(
-                            (AuditEvent.event_type == "llm", 1), else_=0,
-                        )).label("llm_calls"),
-                        func.sum(case(
-                            (AuditEvent.event_type == "tool", 1), else_=0,
-                        )).label("tool_runs"),
-                        func.sum(case(
-                            (AuditEvent.entity_type == "application", 1), else_=0,
-                        )).label("agent_runs"),
-                    ).group_by(
-                        AuditEvent.user_id,
-                        AuditEvent.user_email,
-                    ).order_by(func.count().desc()).limit(5).all()
-
-                    top_ai_users = [
-                        {
-                            "user_id": r.user_id,
-                            "user_email": r.user_email,
-                            "ai_events": r.ai_events,
-                            "llm_calls": r.llm_calls or 0,
-                            "tool_runs": r.tool_runs or 0,
-                            "agent_runs": r.agent_runs or 0,
-                        }
-                        for r in top_user_rows
-                    ]
-
                     # 3. Daily activity
                     daily_rows = base.with_entities(
                         cast(AuditEvent.timestamp, Date).label("day"),
                         func.count().label("events"),
-                        # AI active users: only count users who had AI-related events
-                        func.count(func.distinct(case(
-                            (or_(
-                                AuditEvent.event_type.in_(["llm", "tool"]),
-                                AuditEvent.entity_type == "application",
-                            ), AuditEvent.user_id),
-                            else_=None,
-                        ))).label("active_users"),
                         func.sum(case(
                             (AuditEvent.is_error.is_(True), 1), else_=0,
                         )).label("errors"),
-                        func.sum(case(
-                            (AuditEvent.event_type == "llm", 1), else_=0,
-                        )).label("llm_calls"),
-                        func.sum(case(
-                            (AuditEvent.event_type == "tool", 1), else_=0,
-                        )).label("tool_runs"),
-                        func.sum(case(
-                            (AuditEvent.entity_type == "application", 1), else_=0,
-                        )).label("agent_runs"),
                     ).group_by("day").order_by("day").all()
 
                     daily_activity = [
                         {
                             "date": r.day.isoformat() if r.day else None,
                             "events": r.events,
-                            "active_users": r.active_users,
                             "errors": r.errors or 0,
-                            "llm_calls": r.llm_calls or 0,
-                            "tool_runs": r.tool_runs or 0,
-                            "agent_runs": r.agent_runs or 0,
                         }
                         for r in daily_rows
                     ]
 
-                    # 4. Top tools
-                    tool_rows = base.with_entities(
-                        AuditEvent.tool_name,
-                        func.count().label("calls"),
-                        func.count(func.distinct(AuditEvent.user_id)).label("users"),
-                        func.avg(AuditEvent.duration_ms).label("avg_duration_ms"),
-                        func.sum(case(
-                            (AuditEvent.is_error.is_(True), 1), else_=0,
-                        )).label("errors"),
-                    ).filter(
-                        AuditEvent.tool_name.isnot(None),
-                        AuditEvent.tool_name != "",
-                    ).group_by(
-                        AuditEvent.tool_name,
-                    ).order_by(func.count().desc()).limit(30).all()
-
-                    tools = [
-                        {
-                            "tool_name": r.tool_name,
-                            "calls": r.calls,
-                            "users": r.users,
-                            "avg_duration_ms": round(r.avg_duration_ms, 1) if r.avg_duration_ms else 0,
-                            "errors": r.errors or 0,
-                        }
-                        for r in tool_rows
-                    ]
-
-                    # 5. Model usage
-                    model_rows = base.with_entities(
-                        AuditEvent.model_name,
-                        func.count().label("calls"),
-                        func.count(func.distinct(AuditEvent.user_id)).label("users"),
-                        func.avg(AuditEvent.duration_ms).label("avg_duration_ms"),
-                    ).filter(
-                        AuditEvent.model_name.isnot(None),
-                        AuditEvent.model_name != "",
-                    ).group_by(
-                        AuditEvent.model_name,
-                    ).order_by(func.count().desc()).limit(20).all()
-
-                    # Get display names for models via configurations RPC - build mapping once
-                    model_display_names = {}
-                    try:
-                        from tools import rpc_tools
-                        models_response = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_models(
-                            project_id=project_id, 
-                            section='llm', 
-                            include_shared=True
-                        )
-                        items = models_response.get('items', []) if models_response else []
-                        for item in items:
-                            if isinstance(item, dict) and 'name' in item:
-                                display = item.get('display_name', item['name'])
-                                model_display_names[item['name']] = display
-                    except Exception as e:
-                        log.warning(f"Failed to get model configurations: {e}")
-
-                    models = [
-                        {
-                            "model_name": r.model_name,
-                            "display_name": model_display_names.get(r.model_name, r.model_name),
-                            "calls": r.calls,
-                            "users": r.users,
-                            "avg_duration_ms": round(r.avg_duration_ms, 1) if r.avg_duration_ms else 0,
-                        }
-                        for r in model_rows
-                    ]
-
-                    # 6. Agents / Applications activity
-                    # Aggregate by entity_name for entity_type='application',
-                    # and also capture agent-like actions from socketio events
-                    agent_rows = base.with_entities(
-                        AuditEvent.entity_name,
-                        AuditEvent.entity_id,
-                        func.count().label("events"),
-                        func.count(func.distinct(AuditEvent.user_id)).label("users"),
-                        func.avg(AuditEvent.duration_ms).label("avg_duration_ms"),
-                        func.sum(case(
-                            (AuditEvent.is_error.is_(True), 1), else_=0,
-                        )).label("errors"),
-                    ).filter(
-                        AuditEvent.entity_type == "application",
-                        AuditEvent.entity_id.isnot(None),
-                    ).group_by(
-                        AuditEvent.entity_name,
-                        AuditEvent.entity_id,
-                    ).order_by(func.count().desc()).limit(30).all()
-
-                    agents = [
-                        {
-                            "entity_name": r.entity_name or f"Agent #{r.entity_id}",
-                            "entity_id": r.entity_id,
-                            "events": r.events,
-                            "users": r.users,
-                            "avg_duration_ms": round(r.avg_duration_ms, 1) if r.avg_duration_ms else 0,
-                            "errors": r.errors or 0,
-                        }
-                        for r in agent_rows
-                    ]
-
-                    # Also get chat session counts per application (from socketio predict events)
+                    # 4. Chat session counts (from socketio predict events)
                     chat_session_rows = base.with_entities(
                         AuditEvent.action,
                         func.count().label("sessions"),
@@ -517,7 +219,7 @@ if _API_AVAILABLE:
                         for r in chat_session_rows
                     ]
 
-                    # 7. Health
+                    # 5. Health
                     health_rows = base.with_entities(
                         AuditEvent.event_type,
                         func.count().label("total"),
@@ -541,11 +243,7 @@ if _API_AVAILABLE:
                     return {
                         "kpis": kpis,
                         "event_type_breakdown": event_type_breakdown,
-                        "top_ai_users": top_ai_users,
                         "daily_activity": daily_activity,
-                        "tools": tools,
-                        "models": models,
-                        "agents": agents,
                         "chat_sessions": chat_sessions,
                         "health": health,
                     }, 200
