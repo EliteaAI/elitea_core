@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
@@ -925,3 +927,70 @@ class RPC:
             rows = [MessageGroupDetail.from_orm(i).model_dump(mode='json') for i in message_groups]
 
         return {'success': True, 'data': {'message_groups': rows}, 'status_code': status_code}
+
+    @web.rpc("chat_get_activity_stats_rpc", "get_chat_activity_stats_rpc")
+    def get_chat_activity_stats_rpc(
+        self,
+        project_id: int,
+        date_from: datetime = None,
+        date_to: datetime = None,
+        member_ids: list = None,
+    ) -> dict:
+        """
+        Aggregate human chat activity for the analytics/tracing overview (#6574).
+
+        Counts message groups authored by a human ('user') participant, across every
+        entry point that persists real chat activity: UI Socket.IO chat, the "Send
+        Message" REST/PAT endpoint (same chat_predict_sio path), and the agent/toolkit
+        testing chat boxes. Scheduler/webhook-triggered pipeline runs are excluded.
+
+        Args:
+            project_id: The project ID (selects the project's own DB schema).
+            date_from: Inclusive lower bound on ConversationMessageGroup.created_at.
+            date_to: Inclusive upper bound on ConversationMessageGroup.created_at.
+            member_ids: Optional allowlist of user ids to scope to (mirrors the
+                project-membership scoping analytics.py applies to audit_events, #6308).
+                None means "do not scope" - same convention as that caller.
+
+        Returns:
+            Dict with:
+                - chat_msgs: count of human-authored message groups
+                - sessions: count of distinct conversations with human activity
+                - users: count of distinct human users
+        """
+        with db.get_session(project_id) as session:
+            query = session.query(ConversationMessageGroup).join(
+                Conversation, ConversationMessageGroup.conversation_id == Conversation.id,
+            ).join(
+                Participant, ConversationMessageGroup.author_participant_id == Participant.id,
+            ).filter(
+                Participant.entity_name == ParticipantTypes.user,
+                # Pipeline/webhook runs persist a user+reply message group pair under
+                # source='pipeline' purely for run-history/audit purposes (see
+                # utils/pipeline_execution.py); every other source value (elitea, agent,
+                # toolkit, support, ...) is a human-driven chat surface, so an exclusion
+                # list is the robust choice here rather than an allowlist of the above.
+                Conversation.source != 'pipeline',
+            )
+            if date_from:
+                query = query.filter(ConversationMessageGroup.created_at >= date_from)
+            if date_to:
+                query = query.filter(ConversationMessageGroup.created_at <= date_to)
+            if member_ids is not None:
+                query = query.filter(
+                    Participant.entity_meta['id'].astext.cast(Integer).in_(member_ids)
+                )
+
+            row = query.with_entities(
+                func.count().label("chat_msgs"),
+                func.count(func.distinct(ConversationMessageGroup.conversation_id)).label("sessions"),
+                func.count(func.distinct(
+                    Participant.entity_meta['id'].astext.cast(Integer)
+                )).label("users"),
+            ).first()
+
+            return {
+                "chat_msgs": row.chat_msgs or 0,
+                "sessions": row.sessions or 0,
+                "users": row.users or 0,
+            }

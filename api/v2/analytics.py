@@ -5,8 +5,11 @@ Aggregates audit_events data to provide event/error KPIs, event type breakdown, 
 activity, chat session stats and per-event-type health.
 
 The AI adoption, token and cost half of this payload moved to the usage plugin over the
-usage_event table (#6574); chat metrics stay here because they are socketio-derived and have
-no usage_event equivalent.
+usage_event table (#6574). Chat metrics stay here, but are sourced from the chat domain's
+own tables (Conversation / ConversationMessageGroup / Participant) rather than audit_events:
+the "SIO chat_predict" audit action only covers UI Socket.IO chat, missing API/PAT-driven
+chat, and it is also emitted by scheduler/webhook pipeline runs for metadata persistence,
+so it both under- and over-counts real chat activity (#6574).
 """
 
 from pylon.core.tools import log
@@ -125,10 +128,10 @@ if _API_AVAILABLE:
                                 ],
                                 "chat_sessions": [
                                     {
-                                        "action": "SIO chat_predict",
-                                        "sessions": 210,
+                                        "action": "chat",
+                                        "sessions": 92,
                                         "users": 14,
-                                        "avg_duration_ms": 850.0,
+                                        "messages": 210,
                                     }
                                 ],
                                 "health": [
@@ -182,20 +185,29 @@ if _API_AVAILABLE:
                         func.sum(case(
                             (AuditEvent.is_error.is_(True), 1), else_=0,
                         )).label("error_count"),
-                        func.sum(case(
-                            (AuditEvent.action == "SIO chat_predict", 1), else_=0,
-                        )).label("chat_msgs"),
                     ).first()
 
                     total_events = kpi_row.total_events or 0
                     error_count = kpi_row.error_count or 0
+
+                    # Chat activity comes from the chat domain's own tables, not
+                    # audit_events (#6574) - see module docstring. Chat is one of five
+                    # sections here, so a slow or failing chat aggregation degrades to
+                    # zero rather than taking the whole overview down with it.
+                    try:
+                        chat_stats = self.module.context.rpc_manager.timeout(5).get_chat_activity_stats_rpc(
+                            project_id=project_id, date_from=dt_from, date_to=dt_to, member_ids=member_ids,
+                        ) or {}
+                    except Exception as exc:  # pylint: disable=W0703
+                        log.warning("Chat activity stats unavailable for project %s: %s", project_id, exc)
+                        chat_stats = {}
 
                     kpis = {
                         "total_events": total_events,
                         "avg_duration_ms": round(kpi_row.avg_duration_ms, 1) if kpi_row.avg_duration_ms else 0,
                         "error_rate": round(error_count / total_events * 100, 2) if total_events > 0 else 0,
                         "error_count": error_count,
-                        "chat_msgs": kpi_row.chat_msgs or 0,
+                        "chat_msgs": chat_stats.get("chat_msgs", 0),
                     }
 
                     # 2. Event type breakdown
@@ -227,26 +239,15 @@ if _API_AVAILABLE:
                         for r in daily_rows
                     ]
 
-                    # 4. Chat session counts (from socketio predict events)
-                    chat_session_rows = base.with_entities(
-                        AuditEvent.action,
-                        func.count().label("sessions"),
-                        func.count(func.distinct(AuditEvent.user_id)).label("users"),
-                        func.avg(AuditEvent.duration_ms).label("avg_duration_ms"),
-                    ).filter(
-                        AuditEvent.event_type == "socketio",
-                        AuditEvent.action.in_(["SIO chat_predict", "SIO chat_continue_predict"]),
-                    ).group_by(AuditEvent.action).all()
-
+                    # 4. Chat session counts (chat_stats fetched above alongside chat_msgs)
                     chat_sessions = [
                         {
-                            "action": r.action,
-                            "sessions": r.sessions,
-                            "users": r.users,
-                            "avg_duration_ms": round(r.avg_duration_ms, 1) if r.avg_duration_ms else 0,
+                            "action": "chat",
+                            "sessions": chat_stats.get("sessions", 0),
+                            "users": chat_stats.get("users", 0),
+                            "messages": chat_stats.get("chat_msgs", 0),
                         }
-                        for r in chat_session_rows
-                    ]
+                    ] if chat_stats.get("chat_msgs") else []
 
                     # 5. Health
                     health_rows = base.with_entities(
