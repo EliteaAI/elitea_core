@@ -44,7 +44,7 @@ def _is_personal_project(project_id: int, user_id: int):
 
 
 def _user_budget_state(project_id: int, user_id: int):
-    """Merge the member's effective limit with LiteLLM's current-month spend."""
+    """Merge the member's effective limit with the metered current-month spend."""
     rpc = rpc_tools.RpcMixin().rpc
     #
     budget = rpc.timeout(5).elitea_core_get_user_budget(

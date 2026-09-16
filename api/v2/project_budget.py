@@ -75,7 +75,7 @@ PROJECT_BUDGET_WRITE_BODY = {
 
 
 def _budget_state(project_id: int):
-    """Merge the stored limit with LiteLLM's current-month spend."""
+    """Merge the stored limit with the metered current-month spend."""
     rpc = rpc_tools.RpcMixin().rpc
     #
     budget = rpc.timeout(5).elitea_core_get_project_budget(project_id=project_id) or {}
