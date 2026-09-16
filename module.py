@@ -158,6 +158,10 @@ class Module(module.ModuleModel):
             config.get("default_entity_icons_subpath", "elitea_static-main/default_entity_icons")
         )
         #
+        self.platform_logo_path = base_path.joinpath(
+            config.get("platform_logo_subpath", "platform_logo")
+        )
+        #
         # EliteA UI attributes (migrated from elitea_ui plugin)
         self.elitea_base_path = Path('ui', 'dist')
         self.build_meta = {
@@ -707,6 +711,7 @@ class Module(module.ModuleModel):
         self.skill_icon_path.mkdir(parents=True, exist_ok=True)
         self.application_tool_icon_path.mkdir(parents=True, exist_ok=True)
         self.default_entity_icons_path.mkdir(parents=True, exist_ok=True)
+        self.platform_logo_path.mkdir(parents=True, exist_ok=True)
         #
         if not os.listdir(self.application_tool_icon_path) or \
                 not os.listdir(self.default_entity_icons_path):
