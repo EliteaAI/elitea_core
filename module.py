@@ -463,9 +463,6 @@ class Module(module.ModuleModel):
                 "reassign_skill_category", self.reassign_skill_category,
             )
             this.for_module("admin").module.register_admin_task(
-                "migrate_audit_events_columns", self.migrate_audit_events_columns, group="R-2.0.5",
-            )
-            this.for_module("admin").module.register_admin_task(
                 "migrate_share_token_columns", self.migrate_share_token_columns, group="R-2.0.6",
             )
             this.for_module("admin").module.register_admin_task(

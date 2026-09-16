@@ -7,10 +7,8 @@ safely coexist when both plugins are loaded in the same process.
 """
 
 from datetime import datetime
-from decimal import Decimal
-from typing import Optional
 
-from sqlalchemy import Integer, String, DateTime, SmallInteger, Float, Boolean, Numeric, func, Index, text
+from sqlalchemy import Integer, String, DateTime, SmallInteger, Float, Boolean, func, Index, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tools import db, config as c
@@ -63,21 +61,10 @@ class AuditEvent(db.Base):
     tool_name: Mapped[str] = mapped_column(String(256), nullable=True)
     model_name: Mapped[str] = mapped_column(String(256), nullable=True)
 
-    # Token usage and cost (ADR-0008). Numeric(18, 8) matches the tracing
-    # write-side model so a large upstream response_cost never overflows.
-    input_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
-    output_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
-    cache_read_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
-    cache_creation_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
-    llm_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 8), nullable=True)
-    # Provenance stamps written by tracing/utils/audit_processor.py.
-    # token_source ∈ {'langfuse', 'audit'}; cost_source ∈ {'observed',
-    # 'estimated:litellm-<version>'}. NULL when unknown / not applicable.
-    # cost_source(64) mirrors the schema-guard width — the tag itself is
-    # 33-ish today ('estimated:litellm-v1.83.14-stable') and needs room for
-    # future '-stable.patch.N' variants.
-    token_source: Mapped[str] = mapped_column(String(16), nullable=True)
-    cost_source: Mapped[str] = mapped_column(String(64), nullable=True)
+    # Token usage and cost were dropped from this table by #6575; the usage
+    # plugin owns them on usage_event. extend_existing=True MERGES columns into
+    # the tracing declaration rather than replacing it, so a column re-added
+    # here would reappear on the shared table — keep both models in step.
 
     # Trace linkage
     trace_id: Mapped[str] = mapped_column(String(32), nullable=True)
