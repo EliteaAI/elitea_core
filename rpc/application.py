@@ -140,6 +140,7 @@ class RPC:
                     eligible_for_autoapproval: bool = False,
                     platform_run_id: Optional[str] = None,
                     usage_entity: Optional[dict] = None,
+                    routing_projection: Optional[dict] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -270,6 +271,8 @@ class RPC:
 
         try:
             payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
+            if routing_projection is not None:
+                payload['routing_projection'] = routing_projection
         except PredictPayloadError as e:
             raise SioValidationError(
                 sio=self.context.sio,
@@ -418,6 +421,7 @@ class RPC:
                         return_chat_history: bool = False,
                         non_interactive: Optional[bool] = None,
                         eligible_for_autoapproval: bool = False,
+                        routing_projection: Optional[dict] = None,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
@@ -519,6 +523,8 @@ class RPC:
 
         try:
             payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history)
+            if routing_projection is not None:
+                payload['routing_projection'] = routing_projection
         except PredictPayloadError as e:
             if sid:
                 raise SioValidationError(

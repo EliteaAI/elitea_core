@@ -117,6 +117,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             regenerate_payload['chat_history'] = generate_chat_history(
                 message_groups=chat_history_groups, summaries=summaries,
                 include_context=not regenerates_pipeline,
+                routing_projection=regenerate_payload.get('_routing_projection'),
             )
             if not preserve_instructions:
                 regenerate_payload['instructions'] = None
@@ -177,6 +178,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 regenerate_payload[EXECUTION_GENERATION_KEY] = execution_generation
                 getattr(self.module.context.rpc_manager.call, rpc_func)(
                     parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
+                    routing_projection=regenerate_payload.pop('_routing_projection', None),
                     start_event_content={
                         'participant_id': msg_group.author_participant_id,
                         'question_id': parsed.question_id,

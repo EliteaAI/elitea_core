@@ -230,11 +230,24 @@ def generate_predict_payload(
 
     # Get model configuration
     llm_project_id = getattr(parsed.llm_settings, 'model_project_id', None) or parsed.project_id
-    if parsed.llm_settings is None or not parsed.llm_settings.model_name:
-        raise PredictPayloadError("llm_settings with model_name is required")
-    llm_model_configuration = rpc_tools.RpcMixin().rpc.call.configurations_get_configuration_model(
-        llm_project_id, parsed.llm_settings.model_name
-    )
+    if parsed.llm_settings is None:
+        raise PredictPayloadError("llm_settings is required")
+    selection = getattr(parsed.llm_settings, 'selection', None)
+    is_auto = getattr(selection, 'mode', None) == 'auto'
+    if is_auto:
+        from ..models.pd.llm import validate_model_selection_surface
+        validate_model_selection_surface(parsed.llm_settings,
+            agent_type=(getattr(parsed, 'version_details', None) or {}).get('agent_type'))
+        availability = rpc_tools.RpcMixin().rpc.call.configurations_get_auto_routing_settings(parsed.project_id)
+        if not availability['enabled']:
+            raise PredictPayloadError('Auto model selection is disabled for this project')
+        llm_model_configuration = {}
+    else:
+        if not parsed.llm_settings.model_name:
+            raise PredictPayloadError("llm_settings with model_name is required")
+        llm_model_configuration = rpc_tools.RpcMixin().rpc.call.configurations_get_configuration_model(
+            llm_project_id, parsed.llm_settings.model_name
+        )
 
     # Build model parameters, excluding incompatible ones based on model capabilities
     supports_reasoning = llm_model_configuration.get('supports_reasoning', False)
@@ -256,6 +269,9 @@ def generate_predict_payload(
     if model_max_output_tokens is not None:
         model_parameters['max_output_tokens'] = model_max_output_tokens
 
+    if is_auto:
+        model_parameters['selection'] = selection.model_dump()
+        model_parameters['routing_surface'] = 'agent' if isinstance(parsed, ApplicationChatRequest) else 'chat'
     chat_history = [i.dict() for i in parsed.chat_history]
     user_input = parsed.user_input or 'continue'
 
@@ -279,6 +295,7 @@ def generate_predict_payload(
 
     #
     payload = {
+        "routing_principal": {"project_id": parsed.project_id, "user_id": user_id},
         "llm": {
             "kwargs": {
                 "base_url": base_url,
@@ -463,7 +480,8 @@ def generate_predict_payload(
             request_tools = payload.get('tools') or []
             payload['tools'] = version_tools + request_tools
         if parsed.version_details:
-            llm_settings = payload['application']['version_details']['llm_settings']
+            llm_settings = dict(payload['application']['version_details']['llm_settings'])
+            payload['application']['version_details']['llm_settings'] = llm_settings
             llm_settings['model_name'] = parsed.llm_settings.model_name
             llm_settings['model_project_id'] =  parsed.llm_settings.model_project_id
             llm_settings['max_tokens'] = normalize_runtime_max_tokens(parsed.llm_settings.max_tokens)
@@ -477,7 +495,11 @@ def generate_predict_payload(
             # stale reasoning_effort for a non-reasoning model, which the previous inline
             # check never handled.
             from ..models.pd.llm import _normalize_llm_settings_family  # pylint: disable=C0415
-            llm_settings.update(_normalize_llm_settings_family(llm_settings, supports_reasoning))
+            if is_auto:
+                llm_settings['selection'] = selection.model_dump()
+            else:
+                llm_settings.pop('selection', None)
+                llm_settings.update(_normalize_llm_settings_family(llm_settings, supports_reasoning))
 
     # Serialize first so request-level tools (Pydantic ToolChatModel) become plain dicts before
     # dedupe/resolve run — otherwise those tools are skipped and never get {project_id}/PAT filled.

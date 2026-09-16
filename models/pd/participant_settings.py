@@ -2,16 +2,14 @@ from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional, Literal, List, Dict
 
 from ..enums.all import ChatHistoryTemplates
-from .llm import llm_settings_family_conflict
+from .llm import LLMSettingsBase, llm_settings_family_conflict
 
 
-class EntitySettingsLlmBase(BaseModel):
+class EntitySettingsLlmBase(LLMSettingsBase):
     """Shared fields for per-conversation/participant LLM overrides."""
     temperature: Optional[float] = None
-    reasoning_effort: Optional[Literal['low', 'medium', 'high']] = None
-    max_tokens: Optional[int] = None
-    model_name: Optional[str] = None
-    model_project_id: Optional[int] = None
+    # Exact presets are validated against the selected provider at admission;
+    # the shared intent DTO also carries presets beyond low/medium/high.
     chat_history_template: Literal['all', 'context_managed'] | int = ChatHistoryTemplates.all.value
 
 
