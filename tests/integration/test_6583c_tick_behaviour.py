@@ -28,6 +28,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 
+from fixtures.helpers import register_index_pd_module
+
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 UTC = timezone.utc
 
@@ -112,6 +114,7 @@ def tick():
         rpc=types.SimpleNamespace(timeout=lambda t: types.SimpleNamespace(
             configurations_expand=lambda **kw: {"connection_string": "postgresql://x"},
             project_list=lambda **kw: [{"id": 2}]))))
+    register_index_pd_module(PLUGIN_ROOT)
     sched_utils = _load("plugins.elitea_core.utils.index_scheduling", "utils/index_scheduling.py")
     _load("plugins.elitea_core.models.pd.index", "models/pd/index.py")
     _load("plugins.elitea_core.utils.cron_utils", "utils/cron_utils.py")

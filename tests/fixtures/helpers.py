@@ -6,7 +6,29 @@ Usage:
 import importlib.util
 import pathlib
 import sys
+import types
 from typing import Any, Dict, Optional
+
+
+def register_index_pd_module(plugin_root: pathlib.Path):
+    """Make ``models/pd/index.py`` importable as ``..models.pd.index``, for real.
+
+    ``utils/index_scheduling.py`` imports the schedule-expiration calculator from it, and a
+    stub would let the tick's expiry behaviour be tested against a fake window that the
+    scheduler and the API never agree on. The file itself only needs pydantic and croniter,
+    so loading the genuine module is cheap. Idempotent: several suites load index_scheduling
+    in the same interpreter.
+    """
+    name = 'plugins.elitea_core.models.pd.index'
+    if name in sys.modules:
+        return sys.modules[name]
+    for pkg_name in ('plugins', 'plugins.elitea_core',
+                     'plugins.elitea_core.models', 'plugins.elitea_core.models.pd'):
+        if pkg_name not in sys.modules:
+            pkg = types.ModuleType(pkg_name)
+            pkg.__path__ = []
+            sys.modules[pkg_name] = pkg
+    return load_module_with_stubs(plugin_root / 'models' / 'pd' / 'index.py', name)
 
 
 def load_module_with_stubs(
