@@ -58,7 +58,12 @@ def stamp_predict_run_id(call_kwargs: dict) -> str:
     payload = call_kwargs.setdefault("kwargs", {})
     run_id = payload.get(PREDICT_RUN_ID_KWARGS_KEY)
     if not run_id:
-        run_id = derived_run_id(payload) or str(uuid.uuid4())
+        # Chat dispatch passes stream/message IDs positionally, with the
+        # persisted message/generation also in server-owned task metadata.
+        # Resumes rebuild kwargs, so deriving only there minted a fresh run.
+        run_id = (derived_run_id(payload)
+                  or derived_run_id(call_kwargs.get("meta") or {})
+                  or str(uuid.uuid4()))
         payload[PREDICT_RUN_ID_KWARGS_KEY] = run_id
     call_kwargs.setdefault("meta", {}).setdefault(PLATFORM_RUN_ID_META_KEY, run_id)
     return run_id

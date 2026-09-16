@@ -1,5 +1,5 @@
 import json
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 
 from pylon.core.tools import log
 
@@ -134,13 +134,16 @@ def generate_chat_history(
         message_groups: List[ConversationMessageGroup],
         summaries: List['dict'] = None,
         include_context: bool = True,
+        routing_projection: Optional[dict] = None,
 ) -> List[dict]:
     chat_history = []
+    routing_history = []
 
     if summaries:
         chat_history.append(
             generate_chat_history_from_summaries(summaries)
         )
+        routing_history.append(chat_history[-1])
 
     for msg_group in message_groups:
         role = get_role(msg_group)
@@ -151,13 +154,22 @@ def generate_chat_history(
             chat_history.append(
                 chat_history_item
             )
+            # Keep one routing row per emitted generation row, including an
+            # empty projection of a context-only group. Never zip independently
+            # filtered histories: that would associate another turn's task.
+            if routing_projection is not None:
+                routing_history.append(generate_chat_history_from_message_items(
+                    role, msg_group.message_items, include_context=False)
+                    if role == ChatHistoryRole.user.value else {'role': role})
+    if routing_projection is not None:
+        routing_projection['history'] = routing_history
     return chat_history
 
 
-def generate_user_input(message_group: ConversationMessageGroup) -> list:
+def generate_user_input(message_group: ConversationMessageGroup, include_context: bool = True) -> list:
     role = get_role(message_group)
     user_input = generate_chat_history_from_message_items(
-            role=role, message_items=message_group.message_items
+            role=role, message_items=message_group.message_items, include_context=include_context
     ).get('content', [])
     return user_input
 

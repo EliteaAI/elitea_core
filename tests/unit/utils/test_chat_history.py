@@ -319,3 +319,48 @@ class TestContextExclusion:
     def test_user_input_still_carries_context(self, chat_history_module):
         group = FakeMessageGroup(_text_and_context_items())
         assert '<runtime_context>' in str(chat_history_module.generate_user_input(group))
+
+
+def test_routing_task_projection_omits_only_typed_context_items(chat_history_module):
+    group=FakeMessageGroup(_text_and_context_items())
+    projected=chat_history_module.generate_user_input(group,include_context=False)
+    assert '<runtime_context>' not in str(projected)
+    # A user's own text is not interpreted as platform metadata.
+    text_item=next(i for i in group.message_items if hasattr(i,'content') and isinstance(i.content,str))
+    text_item.content='<runtime_context>authored task</runtime_context>. Hi'
+    assert text_item.content in str(chat_history_module.generate_user_input(group,include_context=False))
+    assert '<user_id>' in str(chat_history_module.generate_user_input(group))
+
+
+def test_parallel_routing_history_has_exact_generation_row_alignment(chat_history_module):
+    text = '<runtime_context>authored source</runtime_context>'
+    groups = [FakeMessageGroup([FakeMessageItem('context', context_data={'user_id': 7})]),
+              FakeMessageGroup([FakeMessageItem('text', content='')]),
+              FakeMessageGroup([FakeMessageItem('text', content=text),
+                                FakeMessageItem('attachment', content=[{'type':'text','text':'attached evidence'}])])]
+    summaries = [{'summary_content':'Earlier substantive summary.'}]
+    expected = chat_history_module.generate_chat_history(groups, summaries=summaries)
+    projection = {'task': [{'type':'text','text':'new task'}]}
+    result = chat_history_module.generate_chat_history(groups, summaries=summaries, routing_projection=projection)
+    assert result == expected  # Native history is not pruned or rewritten.
+    assert len(result) == len(projection['history']) == 3
+    assert projection['history'][0] == result[0]
+    assert projection['history'][1]['content'] == []
+    assert projection['history'][2]['content'] == result[2]['content']
+    assert text in str(projection['history']) and 'attached evidence' in str(projection['history'])
+    assert projection['task'] == [{'type':'text','text':'new task'}]
+
+
+def test_empty_parallel_routing_history_is_explicit(chat_history_module):
+    projection = {}
+    assert chat_history_module.generate_chat_history([], routing_projection=projection) == []
+    assert projection == {'history': []}
+
+
+def test_parallel_history_does_not_duplicate_large_assistant_artifact(chat_history_module):
+    group=FakeMessageGroup([FakeMessageItem('text',content='generated artifact '*10000)])
+    group.author_participant.entity_name='agent'
+    projection={}
+    result=chat_history_module.generate_chat_history([group],routing_projection=projection)
+    assert len(result[0]['content'][0]['text'])>100000
+    assert projection['history']==[{'role':'assistant'}]
