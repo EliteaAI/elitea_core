@@ -204,13 +204,10 @@ Run admin task migrate_skill_publish_columns with param: project_id=all
 # block writes platform-wide. Instead it's registered as a release admin
 # task under group "R-2.0.5"; run it as part of that release's rollout, or
 # manually via the admin task below (supports dry-run/verification).
-# Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
-ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS input_tokens INTEGER;
-ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS output_tokens INTEGER;
-ALTER TABLE centry.audit_events ADD COLUMN IF NOT EXISTS llm_cost NUMERIC(18, 8);
+# OBSOLETE as of issue #6575 — do not run. The columns are dropped again further
+# down and the migrate_audit_events_columns admin task no longer exists, so these
+# lines now fail. Only the index survives, and it is recreated by the #6575 entry.
 CREATE INDEX IF NOT EXISTS ix_audit_events_model_name ON centry.audit_events (model_name);
-Run admin task migrate_audit_events_columns with param: dry_run
-Run admin task migrate_audit_events_columns
 
 # Issue #6011: budget-alert tracking columns on centry.user_budgets
 # Budget notifications record the highest threshold already alerted for a period so a
@@ -293,3 +290,33 @@ Run admin task migrate_eval_dimension_columns with param: project_id=all
 # logged, never values.
 Run admin task migrate_toolkit_settings_fields with param: confluence;space>space_key;project_id=all;dry_run
 Run admin task migrate_toolkit_settings_fields with param: confluence;space>space_key;project_id=all
+
+# Issue #6575: drop the token/cost columns from centry.audit_events
+# usage_event owns tokens and cost since #6574; audit_events keeps only the audit-trail
+# shape. This reverses the ADR-0008 entry above and the tracing 003/004 migrations, and
+# retires the elitea_core schema guard that maintained these columns.
+# ORDER: deploy the elitea_core and tracing changes for #6575 FIRST, then run this. The
+# guard re-adds the columns on every boot until it is gone, and tracing keeps writing
+# them until its side ships.
+# The same SQL ships as tracing/migrations/005_drop_audit_events_usage_columns.sql —
+# tracing owns the table; it is repeated here because this is the file release rollout
+# reads. Shared-schema table, so no per-project loop. Idempotent (DROP COLUMN IF EXISTS).
+ALTER TABLE centry.audit_events DROP COLUMN IF EXISTS input_tokens;
+ALTER TABLE centry.audit_events DROP COLUMN IF EXISTS output_tokens;
+ALTER TABLE centry.audit_events DROP COLUMN IF EXISTS cache_read_tokens;
+ALTER TABLE centry.audit_events DROP COLUMN IF EXISTS cache_creation_tokens;
+ALTER TABLE centry.audit_events DROP COLUMN IF EXISTS llm_cost;
+ALTER TABLE centry.audit_events DROP COLUMN IF EXISTS token_source;
+ALTER TABLE centry.audit_events DROP COLUMN IF EXISTS cost_source;
+# The nine audit_events indexes were maintained by the deleted schema guard. All are on
+# retained columns and unaffected by the drops above; recreated here for environments
+# that never ran the guard. create_all covers fresh deployments.
+CREATE INDEX IF NOT EXISTS ix_audit_events_timestamp ON centry.audit_events (timestamp);
+CREATE INDEX IF NOT EXISTS ix_audit_events_user_id ON centry.audit_events (user_id);
+CREATE INDEX IF NOT EXISTS ix_audit_events_project_id ON centry.audit_events (project_id);
+CREATE INDEX IF NOT EXISTS ix_audit_events_trace_id ON centry.audit_events (trace_id);
+CREATE INDEX IF NOT EXISTS ix_audit_events_entity ON centry.audit_events (entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS ix_audit_events_model_name ON centry.audit_events (model_name);
+CREATE INDEX IF NOT EXISTS ix_audit_events_project_timestamp ON centry.audit_events (project_id, timestamp);
+CREATE INDEX IF NOT EXISTS ix_audit_events_tool_name ON centry.audit_events (tool_name) WHERE tool_name IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_audit_events_is_error ON centry.audit_events (is_error) WHERE is_error IS TRUE;
