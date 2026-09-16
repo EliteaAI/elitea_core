@@ -162,6 +162,7 @@ class RPC:
         attachment_participant_id: int = None,
         folder_id: int = None,
         update_folder: bool = False,
+        caller_id: int = None,
     ) -> dict:
         """
         Update conversation fields.
@@ -183,13 +184,16 @@ class RPC:
                     return {'success': False, 'error': 'Conversation not found'}
 
                 if is_private is not None:
-                    if is_private and not conversation.is_private:
-                        return {'success': False, 'error': 'Public conversation cannot be changed to private'}
-
                     from ..utils.utils import get_public_project_id
                     public_project_id = get_public_project_id()
+
                     if not is_private and conversation.is_private and public_project_id == project_id:
                         return {'success': False, 'error': 'Public conversation cannot exist in public project'}
+
+                    if is_private and not conversation.is_private:
+                        if caller_id is None or conversation.author_id != caller_id:
+                            return {'success': False, 'error': 'Only the conversation creator can restrict access'}
+
                     conversation.is_private = is_private
 
                 if attachment_participant_id is not None:

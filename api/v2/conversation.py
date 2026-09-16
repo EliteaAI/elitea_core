@@ -122,6 +122,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             'is_hidden': data.get('is_hidden'),
             'meta': data.get('meta'),
             'attachment_participant_id': data.get('attachment_participant_id'),
+            'caller_id': auth.current_user().get('id'),
         }
 
         if 'folder_id' in data:
