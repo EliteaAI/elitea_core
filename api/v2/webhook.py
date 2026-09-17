@@ -37,6 +37,8 @@ from ...utils.pipeline_trigger import (
     normalize_secret_value,
     validate_webhook_secret,
     get_webhook_creator_id,
+    get_webhook_signature_header,
+    is_gitlab_signing_mode,
 )
 from ...rpc.pipeline_webhook import execute_pipeline_webhook
 from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
@@ -69,12 +71,6 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         if not webhook_config:
             return False, ({"error": "Bad signature type"}, 400)
 
-        # Get signature from headers based on webhook type
-        signature_header = webhook_config["signature_header"]
-        webhook_signature = request.headers.get(signature_header)
-        if webhook_signature is None:
-            return False, ({"error": f"Missing request header {signature_header}"}, 400)
-
         # Get secret and validate
         with db.get_session(project_id) as session:
             from sqlalchemy.orm import joinedload
@@ -86,10 +82,21 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             if not version:
                 return False, ({"error": f"Version {version_id} not found"}, 404)
 
-            # Get secret from version-specific trigger config
+            # Get secret from version-specific trigger config. Which header and which
+            # secret are authoritative depends on the configured GitLab auth method,
+            # so the trigger has to be loaded before the request can be inspected.
             pipeline_settings = version.pipeline_settings or {}
             trigger = pipeline_settings.get("trigger", {})
-            webhook_secret_ref = trigger.get("webhook_secret")
+            auth_method = trigger.get("gitlab_auth_method")
+            signing_mode = is_gitlab_signing_mode(webhook_type, auth_method)
+
+            signature_header = get_webhook_signature_header(webhook_type, auth_method)
+            webhook_signature = request.headers.get(signature_header)
+            if webhook_signature is None:
+                return False, ({"error": f"Missing request header {signature_header}"}, 400)
+
+            secret_ref_key = "webhook_signing_secret" if signing_mode else "webhook_secret"
+            webhook_secret_ref = trigger.get(secret_ref_key)
 
             if not webhook_secret_ref:
                 return False, ({"error": "Webhook secret not configured"}, 400)
@@ -98,13 +105,16 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             if not secret:
                 return False, ({"error": "Webhook secret not configured"}, 400)
 
-            # Normalize secret and validate using shared helper
-            secret_value = normalize_secret_value(secret)
+            # Signing tokens are stored verbatim; legacy secrets may carry a header prefix
+            secret_value = secret if signing_mode else normalize_secret_value(secret)
             is_valid, error_msg = validate_webhook_secret(
                 webhook_type=webhook_type,
                 secret_value=secret_value,
                 signature=webhook_signature,
                 raw_data=raw_data,
+                auth_method=auth_method,
+                webhook_id=request.headers.get(webhook_config["signing_id_header"]) if signing_mode else None,
+                timestamp=request.headers.get(webhook_config["signing_timestamp_header"]) if signing_mode else None,
             )
 
             if not is_valid:

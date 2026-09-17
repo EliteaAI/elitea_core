@@ -20,12 +20,16 @@ from ...models.pd.pipeline_trigger import (
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.pipeline_trigger import (
+    GITLAB_AUTH_SIGNING_TOKEN,
     generate_webhook_secret,
     store_webhook_secret,
+    store_webhook_signing_secret,
     get_webhook_secret_for_display,
     build_webhook_url,
     get_trigger_from_pipeline_settings,
     build_trigger_for_storage,
+    validate_webhook_secret_strength,
+    validate_gitlab_signing_token_format,
 )
 from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
 
@@ -85,10 +89,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 secret_info = {}
                 trigger_type = trigger_data.get("type", TriggerType.chat_message.value)
                 webhook_type = trigger_data.get("webhook_type")
+                gitlab_auth_method = trigger_data.get("gitlab_auth_method")
                 if trigger_type == TriggerType.webhook.value and webhook_type:
                     webhook_url = build_webhook_url(project_id, version_id, webhook_type)
                     secret_info = get_webhook_secret_for_display(
-                        project_id, trigger_data, webhook_type, should_mask=should_mask
+                        project_id, trigger_data, webhook_type,
+                        should_mask=should_mask, auth_method=gitlab_auth_method,
                     )
 
                 # Build response model
@@ -100,6 +106,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     created_by=trigger_data.get("created_by"),
                     webhook_type=webhook_type,
                     webhook_url=webhook_url,
+                    gitlab_auth_method=gitlab_auth_method,
                     **secret_info,
                 )
 
@@ -160,6 +167,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             valid_webhook_types = ["github", "gitlab", "custom"]
             if update_data.webhook_type not in valid_webhook_types:
                 return {"ok": False, "error": f"webhook_type must be one of: {valid_webhook_types}"}, 400
+            if update_data.gitlab_auth_method and update_data.webhook_type != "gitlab":
+                return {
+                    "ok": False,
+                    "error": "gitlab_auth_method is only valid for gitlab webhooks"
+                }, 400
 
         try:
             with db.get_session(project_id) as session:
@@ -182,18 +194,50 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 secret_info = {}
                 webhook_type = trigger_config.get("webhook_type")
                 if trigger_config.get("type") == TriggerType.webhook.value and webhook_type:
-                    new_secret_from_ui = payload.get("webhook_secret_value")
                     current_trigger = get_trigger_from_pipeline_settings(version.pipeline_settings or {})
                     existing_secret_ref = current_trigger.get("webhook_secret")
+                    existing_signing_ref = current_trigger.get("webhook_signing_secret")
 
-                    # Generate new secret if UI provided one or none exists yet
-                    if new_secret_from_ui or not existing_secret_ref:
-                        secret_value = new_secret_from_ui or generate_webhook_secret()
-                        trigger_config["webhook_secret"] = store_webhook_secret(
-                            project_id, version_id, secret_value
-                        )
+                    if trigger_config.get("gitlab_auth_method") == GITLAB_AUTH_SIGNING_TOKEN:
+                        # GitLab issues the signing token and shows it once, so it can only
+                        # ever be pasted in — there is nothing for Elitea to generate.
+                        new_signing_token = payload.get("webhook_signing_secret_value")
+                        if new_signing_token:
+                            format_error = validate_gitlab_signing_token_format(new_signing_token)
+                            if format_error:
+                                return {"ok": False, "error": format_error}, 400
+                            trigger_config["webhook_signing_secret"] = store_webhook_signing_secret(
+                                project_id, version_id, new_signing_token
+                            )
+                        elif existing_signing_ref:
+                            trigger_config["webhook_signing_secret"] = existing_signing_ref
+                        else:
+                            return {
+                                "ok": False,
+                                "error": "webhook_signing_secret_value is required to enable GitLab signing tokens"
+                            }, 400
                     else:
+                        new_secret_from_ui = payload.get("webhook_secret_value")
+                        if new_secret_from_ui:
+                            strength_error = validate_webhook_secret_strength(new_secret_from_ui)
+                            if strength_error:
+                                return {"ok": False, "error": strength_error}, 400
+
+                        # Generate new secret if UI provided one or none exists yet
+                        if new_secret_from_ui or not existing_secret_ref:
+                            secret_value = new_secret_from_ui or generate_webhook_secret()
+                            trigger_config["webhook_secret"] = store_webhook_secret(
+                                project_id, version_id, secret_value
+                            )
+                        else:
+                            trigger_config["webhook_secret"] = existing_secret_ref
+
+                    # Carry the inactive secret across so switching auth methods back and
+                    # forth does not silently invalidate what is configured in GitLab.
+                    if "webhook_secret" not in trigger_config and existing_secret_ref:
                         trigger_config["webhook_secret"] = existing_secret_ref
+                    if "webhook_signing_secret" not in trigger_config and existing_signing_ref:
+                        trigger_config["webhook_signing_secret"] = existing_signing_ref
 
                 # Update pipeline_settings
                 pipeline_settings = version.pipeline_settings or {}
@@ -213,7 +257,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 if trigger_config.get("type") == TriggerType.webhook.value and webhook_type:
                     webhook_url = build_webhook_url(project_id, version_id, webhook_type)
                     secret_info = get_webhook_secret_for_display(
-                        project_id, trigger_config, webhook_type
+                        project_id, trigger_config, webhook_type,
+                        auth_method=trigger_config.get("gitlab_auth_method"),
                     )
 
                 # Return the updated trigger
@@ -225,6 +270,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     created_by=trigger_config.get("created_by"),
                     webhook_type=webhook_type,
                     webhook_url=webhook_url,
+                    gitlab_auth_method=trigger_config.get("gitlab_auth_method"),
                     **secret_info,
                 )
 
@@ -272,6 +318,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 trigger_data = get_trigger_from_pipeline_settings(pipeline_settings)
                 trigger_type = trigger_data.get("type", TriggerType.chat_message.value)
                 webhook_type = trigger_data.get("webhook_type")
+                gitlab_auth_method = trigger_data.get("gitlab_auth_method")
 
                 if trigger_type != TriggerType.webhook.value:
                     return {
@@ -283,6 +330,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     return {
                         "ok": False,
                         "error": "Cannot regenerate secret: webhook_type not configured"
+                    }, 400
+
+                if gitlab_auth_method == GITLAB_AUTH_SIGNING_TOKEN:
+                    return {
+                        "ok": False,
+                        "error": "Cannot regenerate a GitLab signing token: rotate it in GitLab, "
+                                 "then save the new token here"
                     }, 400
 
                 # Generate and store new secret using shared helper
@@ -301,7 +355,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
                 # Get updated secret info
                 secret_info = get_webhook_secret_for_display(
-                    project_id, trigger_data, webhook_type
+                    project_id, trigger_data, webhook_type, auth_method=gitlab_auth_method
                 )
                 webhook_url = build_webhook_url(project_id, version_id, webhook_type)
 
@@ -314,6 +368,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     created_by=trigger_data.get("created_by"),
                     webhook_type=webhook_type,
                     webhook_url=webhook_url,
+                    gitlab_auth_method=gitlab_auth_method,
                     **secret_info,
                 )
 
