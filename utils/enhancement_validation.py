@@ -131,6 +131,28 @@ def validate_eval_fixes(fixes, *, known: dict) -> tuple:
     return kept, dropped
 
 
+def _dimension_tier_map(snapshot: dict) -> dict:
+    tiers = {}
+    for key, spec in (snapshot or {}).get('dimensions', {}).items():
+        try:
+            tiers[int(key)] = (spec or {}).get('tier')
+        except (TypeError, ValueError):
+            continue
+    return tiers
+
+
+def annotate_dimension_tiers(eval_fixes, snapshot: dict) -> None:
+    """Overwrite ``dimension_tier`` on each eval fix from the run's own dimension data.
+
+    Never trusted from the model, same reasoning as the ``run_id``/``version_id``/``coverage``
+    server-owned overwrites in the endpoint: the LLM has no reliable way to know a dimension's
+    EvalTier, but the server does, from the frozen snapshot it already has.
+    """
+    tiers = _dimension_tier_map(snapshot)
+    for item in eval_fixes or ():
+        item.dimension_tier = tiers.get(item.target_id) if item.kind in _DIMENSION_TARGET_KINDS else None
+
+
 def ground_proposal(proposal, *, instructions: str, snapshot: dict, results=()) -> dict:
     """Filter a validated proposal in place and report what was removed.
 

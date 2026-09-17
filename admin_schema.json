@@ -294,6 +294,51 @@
       "requires_restart": false,
       "visible_when": { "field": "is_next_input_suggestion_enabled", "value": true }
     },
+    "enhance_agent_fixes_enabled": {
+      "type": "boolean",
+      "title": "Allow Agent Instruction Fixes",
+      "description": "When disabled, \"Enhance with AI\" never proposes agent instruction edits (agent_fixes) — only evaluation fixes remain available.",
+      "path": "enhance_guardrail.agent_fixes_enabled",
+      "section": "guardrails",
+      "default": true,
+      "requires_restart": false
+    },
+    "enhance_eval_fix_dimension_rubric_enabled": {
+      "type": "boolean",
+      "title": "Allow Rubric Fixes",
+      "description": "When disabled, \"Enhance with AI\" never proposes rewording an evaluation dimension's rubric.",
+      "path": "enhance_guardrail.eval_fix_kinds.dimension_rubric",
+      "section": "guardrails",
+      "default": true,
+      "requires_restart": false
+    },
+    "enhance_eval_fix_dimension_target_enabled": {
+      "type": "boolean",
+      "title": "Allow Target Threshold Fixes",
+      "description": "When disabled, \"Enhance with AI\" never proposes changing a dimension's pass/fail target.",
+      "path": "enhance_guardrail.eval_fix_kinds.dimension_target",
+      "section": "guardrails",
+      "default": true,
+      "requires_restart": false
+    },
+    "enhance_eval_fix_dataset_case_expected_enabled": {
+      "type": "boolean",
+      "title": "Allow Expected-Output Fixes",
+      "description": "When disabled, \"Enhance with AI\" never proposes editing a dataset case's expected output.",
+      "path": "enhance_guardrail.eval_fix_kinds.dataset_case_expected",
+      "section": "guardrails",
+      "default": true,
+      "requires_restart": false
+    },
+    "enhance_eval_fix_dataset_coverage_gap_enabled": {
+      "type": "boolean",
+      "title": "Allow New Dataset Case Suggestions",
+      "description": "When disabled, \"Enhance with AI\" never proposes new dataset cases to cover a testing gap.",
+      "path": "enhance_guardrail.eval_fix_kinds.dataset_coverage_gap",
+      "section": "guardrails",
+      "default": true,
+      "requires_restart": false
+    },
     "ai_project_id": {
       "type": "integer",
       "title": "Public Project ID",

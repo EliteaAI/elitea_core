@@ -134,6 +134,14 @@ class EvalFixItem(BaseModel):
     rationale: str = Field(description="Why the measurement, not the agent, is the problem here.")
     cited_dimension_ids: List[int] = Field(default_factory=list)
     cited_case_ids: List[int] = Field(default_factory=list)
+    # Server-overwritten from the run snapshot (never trusted from the model, same as run_id/
+    # version_id/coverage) — the LLM has no reliable way to know a dimension's EvalTier. Null for
+    # dataset_case_expected/dataset_coverage_gap, which are not anchored to a single dimension.
+    dimension_tier: Optional[str] = Field(
+        default=None,
+        description="Tier of the dimension this fix targets: platform, project, or agent_adhoc. "
+        "Null for kinds not anchored to a single dimension.",
+    )
 
     @field_validator('kind')
     @classmethod
@@ -238,6 +246,10 @@ class EnhanceCoverage(BaseModel):
     # regression that produces unusable items becomes visible instead of looking like a quiet run.
     discarded_agent_fixes: int = 0
     discarded_eval_fixes: int = 0
+    # Filled by the admin fix-type guardrail. Distinct from discarded_*: a nonzero count here
+    # reflects a deliberate admin policy (a fix kind turned off), not a grounding problem.
+    blocked_agent_fixes: int = 0
+    blocked_eval_fixes: int = 0
 
 
 class EnhanceFromEvalResponse(BaseModel):

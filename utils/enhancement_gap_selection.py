@@ -276,6 +276,10 @@ def collect_binding_gaps(snapshot: dict, results, human_scores=None) -> dict:
             'platform_key': binding.get('platform_key'),
             'name': _binding_name(binding, spec),
             'engine': engine,
+            # platform/project/agent_adhoc (EvalTier) — None for platform_key-only bindings, which
+            # have no library dimension behind them. Told to the LLM (render_gap) since editing a
+            # platform-tier dimension's rubric affects every agent that binds it, not just this one.
+            'dimension_tier': (spec or {}).get('tier'),
             # Verbatim from the run snapshot, never from the live dimension row: the rubric may
             # have been edited since, and the AI must judge the rubric that produced these scores.
             'rubric': (spec or {}).get('description'),

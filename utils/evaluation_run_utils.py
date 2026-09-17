@@ -79,6 +79,7 @@ def _dimension_dict(d) -> dict:
         'id': d.id, 'name': d.name, 'description': d.description,
         'scale_type': d.scale_type, 'scale_min': d.scale_min, 'scale_max': d.scale_max,
         'polarity': d.polarity, 'code': d.code, 'return_contract': d.return_contract,
+        'tier': d.tier,
     }
 
 

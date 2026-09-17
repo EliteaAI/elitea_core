@@ -50,7 +50,12 @@ from ...utils.enhancement_prompt import (
     EnhancePromptTemplateError,
     build_enhance_system_prompt,
 )
-from ...utils.enhancement_validation import ground_proposal
+from ...utils.enhancement_guardrail import apply_kind_guardrail
+from ...utils.enhancement_guardrail_utils import (
+    get_allowed_eval_fix_kinds,
+    is_agent_fixes_enabled,
+)
+from ...utils.enhancement_validation import annotate_dimension_tiers, ground_proposal
 from ...utils.enhancement_utils import (
     EvalRunNotFinishedError,
     EvalRunTooLargeError,
@@ -156,6 +161,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not template:
             return {"error": f"Service prompt '{_SERVICE_PROMPT_KEY}' is not configured"}, 500
 
+        # Read once so the prompt (advisory) and the post-hoc filter (authoritative) agree on the
+        # same policy for this call.
+        agent_fixes_enabled = is_agent_fixes_enabled()
+        allowed_eval_fix_kinds = get_allowed_eval_fix_kinds()
+
         try:
             system_prompt = build_enhance_system_prompt(
                 template,
@@ -164,6 +174,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 gaps=gaps,
                 coverage=coverage,
                 agent_context=agent["agent_context"],
+                agent_fixes_enabled=agent_fixes_enabled,
+                allowed_eval_fix_kinds=allowed_eval_fix_kinds,
             )
         except EnhancePromptTemplateError as exc:
             log.exception("enhance_from_eval: %s", exc)
@@ -216,6 +228,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     for fix in (parsed.get("agent_fixes") or [])
                 ],
             )
+
+        # Admin policy (authoritative, distinct from grounding): strips any kind the platform admin
+        # has turned off regardless of what the model proposed, and is reported separately
+        # (coverage.blocked_*) so it is never mistaken for a grounding regression.
+        apply_kind_guardrail(
+            proposal,
+            agent_fixes_enabled=agent_fixes_enabled,
+            allowed_eval_fix_kinds=allowed_eval_fix_kinds,
+        )
+        # dimension_tier is never trusted from the model, same as run_id/version_id/coverage above:
+        # only the server's frozen snapshot knows a dimension's EvalTier.
+        annotate_dimension_tiers(proposal.eval_fixes, run["snapshot"])
 
         return proposal.model_dump(), 200
 

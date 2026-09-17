@@ -37,11 +37,13 @@ class _AgentFix:
 
 
 class _EvalFix:
-    def __init__(self, kind, target_id=None, cited_dimension_ids=(), cited_case_ids=()):
+    def __init__(self, kind, target_id=None, cited_dimension_ids=(), cited_case_ids=(),
+                 dimension_tier='should-be-overwritten'):
         self.kind = kind
         self.target_id = target_id
         self.cited_dimension_ids = list(cited_dimension_ids)
         self.cited_case_ids = list(cited_case_ids)
+        self.dimension_tier = dimension_tier
 
 
 SNAPSHOT = {
@@ -241,6 +243,69 @@ def test_an_eval_fix_with_invented_citations_is_dropped(validation, known):
     kept, dropped = validation.validate_eval_fixes([fix], known=known)
 
     assert kept == [] and dropped == 1
+
+
+# ---------------------------------------------------------------------------
+# dimension tier — never trusted from the model, same reasoning as run_id/version_id/coverage
+# ---------------------------------------------------------------------------
+
+TIERED_SNAPSHOT = {
+    'dimensions': {'11': {'tier': 'agent_adhoc'}, '12': {'tier': 'project'}},
+}
+
+
+def test_tier_map_keys_by_int_dimension_id(validation):
+    assert validation._dimension_tier_map(TIERED_SNAPSHOT) == {11: 'agent_adhoc', 12: 'project'}
+
+
+def test_tier_map_ignores_non_numeric_keys(validation):
+    assert validation._dimension_tier_map({'dimensions': {'not-an-id': {'tier': 'platform'}}}) == {}
+
+
+def test_tier_map_tolerates_an_empty_snapshot(validation):
+    assert validation._dimension_tier_map({}) == {}
+    assert validation._dimension_tier_map(None) == {}
+
+
+def test_annotate_fills_tier_for_dimension_kinds(validation):
+    fixes = [_EvalFix('dimension_rubric', target_id=11), _EvalFix('dimension_target', target_id=12)]
+
+    validation.annotate_dimension_tiers(fixes, TIERED_SNAPSHOT)
+
+    assert fixes[0].dimension_tier == 'agent_adhoc'
+    assert fixes[1].dimension_tier == 'project'
+
+
+def test_annotate_leaves_non_dimension_kinds_untiered(validation):
+    fixes = [_EvalFix('dataset_case_expected', target_id=11), _EvalFix('dataset_coverage_gap')]
+
+    validation.annotate_dimension_tiers(fixes, TIERED_SNAPSHOT)
+
+    assert fixes[0].dimension_tier is None
+    assert fixes[1].dimension_tier is None
+
+
+def test_annotate_overwrites_a_model_supplied_tier(validation):
+    """A plausible-looking model-supplied tier is not evidence it is correct — only the run's own
+    snapshot is trusted, so a mismatched guess must be silently corrected, not merely validated."""
+    fix = _EvalFix('dimension_rubric', target_id=11, dimension_tier='platform')
+
+    validation.annotate_dimension_tiers([fix], TIERED_SNAPSHOT)
+
+    assert fix.dimension_tier == 'agent_adhoc'
+
+
+def test_annotate_maps_unknown_dimension_to_none(validation):
+    fix = _EvalFix('dimension_rubric', target_id=999)
+
+    validation.annotate_dimension_tiers([fix], TIERED_SNAPSHOT)
+
+    assert fix.dimension_tier is None
+
+
+def test_annotate_tolerates_no_fixes(validation):
+    validation.annotate_dimension_tiers([], TIERED_SNAPSHOT)
+    validation.annotate_dimension_tiers(None, TIERED_SNAPSHOT)
 
 
 # ---------------------------------------------------------------------------

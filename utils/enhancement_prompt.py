@@ -16,7 +16,7 @@ Two things the brief must get right, because both cause wrong proposals rather t
   will invent a ground truth and diagnose against it.
 """
 
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 # Long instruction bodies are the usual reason the prompt blows the model's context. The gap
 # payload is already capped by enhancement_gap_selection; this is the one unbounded field left.
@@ -102,6 +102,7 @@ def render_gap(gap: dict) -> str:
     # that is not in this run is dropped, so a brief that shows only names asks for a guess.
     header = (
         f"dimension #{gap.get('dimension_id')}: {gap.get('name')} · engine {gap.get('engine')} · "
+        f"tier {gap.get('dimension_tier') or 'n/a'} · "
         f"{_scale_clause(gap)} · target {gap.get('target_operator')} {_format_number(gap.get('target'))} · "
         f"weight {_format_number(gap.get('weight'))}"
     )
@@ -115,6 +116,12 @@ def render_gap(gap: dict) -> str:
         else '  rubric: (none recorded in the run snapshot)'
     )
     parts = [header, stats, rubric_block]
+    if gap.get('dimension_tier') in ('platform', 'project'):
+        parts.append(
+            f"  note: this dimension is shared {gap.get('dimension_tier')}-wide — a "
+            "dimension_rubric or dimension_target fix here affects every agent bound to it, "
+            "not just this one."
+        )
     parts.extend(render_case(case) for case in gap.get('cases') or [])
     return '\n'.join(parts)
 
@@ -178,6 +185,28 @@ def render_agent_context(agent_context: Optional[dict]) -> str:
     return '\n'.join(lines)
 
 
+def render_allowed_kinds(
+    agent_fixes_enabled: bool,
+    allowed_eval_fix_kinds: Optional[Iterable[str]],
+) -> str:
+    """Admin policy on which fix kinds may be proposed this call.
+
+    Advisory only: ``enhancement_guardrail.apply_kind_guardrail`` strips anything outside this
+    policy from the response regardless of what the model does, so this exists purely to avoid
+    spending generation on a kind that would be discarded anyway.
+    """
+    lines = []
+    if not agent_fixes_enabled:
+        lines.append('agent_fixes are disabled by the platform admin — propose none.')
+    if allowed_eval_fix_kinds is not None:
+        allowed = sorted(allowed_eval_fix_kinds)
+        if allowed:
+            lines.append(f"Only propose these eval_fix kinds: {', '.join(allowed)}.")
+        else:
+            lines.append('eval_fixes are disabled by the platform admin — propose none.')
+    return '\n'.join(lines) if lines else '(no additional restrictions)'
+
+
 def build_enhance_system_prompt(
     template: str,
     application_name: str,
@@ -185,6 +214,8 @@ def build_enhance_system_prompt(
     gaps: List[dict],
     coverage: Optional[dict] = None,
     agent_context: Optional[dict] = None,
+    agent_fixes_enabled: bool = True,
+    allowed_eval_fix_kinds: Optional[Iterable[str]] = None,
 ) -> str:
     """Fill the ``enhance_agent_from_eval`` service prompt template.
 
@@ -199,6 +230,7 @@ def build_enhance_system_prompt(
             agent_context=render_agent_context(agent_context),
             coverage=render_coverage(coverage),
             gaps=render_gaps(gaps or []),
+            allowed_kinds=render_allowed_kinds(agent_fixes_enabled, allowed_eval_fix_kinds),
         )
     except (KeyError, IndexError, ValueError) as exc:
         raise EnhancePromptTemplateError(
