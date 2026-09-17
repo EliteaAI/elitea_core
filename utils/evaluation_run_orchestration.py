@@ -167,8 +167,9 @@ def build_run_snapshot(
     """Freeze suite config + definitions + bindings + case set + scale specs into one snapshot
     (§3.4 — later edits must never mutate history). Shape is consumed both here and by the B5/B6
     re-aggregation path: ``dimensions`` is keyed by ``str(id)`` (scale lookups; carries ``code``/
-    ``return_contract`` for code-engine dimensions), ``bindings`` is a flat list (weight map +
-    engine split). ``application_version_id`` is mandatory (D3, §21.6)."""
+    ``return_contract`` for code-engine dimensions, ``tier`` for Enhance-with-AI's dimension-tier
+    guardrail), ``bindings`` is a flat list (weight map + engine split). ``application_version_id``
+    is mandatory (D3, §21.6)."""
     if application_version_id is None:
         raise ValueError('application_version_id is required (D3, §21.6 version pin)')
 
@@ -192,6 +193,7 @@ def build_run_snapshot(
                 'polarity': d.get('polarity', 'higher_better'),
                 'code': d.get('code'),
                 'return_contract': d.get('return_contract', 'bool'),
+                'tier': d.get('tier'),
             }
             for d in dimensions
         },

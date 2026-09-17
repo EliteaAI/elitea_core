@@ -77,6 +77,18 @@ def test_snapshot_freezes_dimensions_bindings_cases(orch):
     assert snap['cases'][0]['id'] == 7
 
 
+def test_snapshot_carries_dimension_tier(orch):
+    """Enhance-with-AI's dimension-tier guardrail reads ``tier`` off the frozen snapshot, not the
+    live dimension row (§3.4) — so it must be projected through here."""
+    snap = _snapshot(orch, dimensions=[{'id': 5, 'name': 'acc', 'tier': 'critical'}])
+    assert snap['dimensions']['5']['tier'] == 'critical'
+
+
+def test_snapshot_defaults_dimension_tier_to_none(orch):
+    snap = _snapshot(orch, dimensions=[{'id': 5, 'name': 'acc'}])
+    assert snap['dimensions']['5']['tier'] is None
+
+
 def test_snapshot_clips_oversized_case_text_and_marks_the_case(orch):
     """The snapshot is one JSONB value read back whole — by the run, the results API and the
     scorecard — so a dataset of large cells must not be frozen verbatim."""
