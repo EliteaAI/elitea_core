@@ -73,6 +73,10 @@ GITLAB_SIGNATURE_VERSION = "v1"
 # Rejection window for webhook-timestamp, in seconds (replay protection)
 GITLAB_SIGNING_REPLAY_TOLERANCE_SECONDS = 300
 
+# Floor for the decoded HMAC key, not GitLab's exact key size — which is unconfirmed. Set well
+# below any plausible real key so a truncated paste is caught without rejecting a valid token.
+GITLAB_SIGNING_KEY_MIN_BYTES = 16
+
 # Minimum length for a user-supplied secret token
 MIN_WEBHOOK_SECRET_LENGTH = 16
 
@@ -224,7 +228,7 @@ def derive_gitlab_signing_key(signing_token: str) -> bytes:
         Raw HMAC key bytes
 
     Raises:
-        ValueError: If the token is empty or not valid base64
+        ValueError: If the token is empty, not valid base64, or too short to be a real key
     """
     if not signing_token:
         raise ValueError("GitLab signing token is empty")
@@ -240,6 +244,11 @@ def derive_gitlab_signing_key(signing_token: str) -> bytes:
 
     if not key:
         raise ValueError("GitLab signing token decodes to an empty key")
+
+    # A short-but-decodable key is what a truncated paste looks like: it stores cleanly and then
+    # fails every signature check, which is far harder to diagnose than a rejected save.
+    if len(key) < GITLAB_SIGNING_KEY_MIN_BYTES:
+        raise ValueError("GitLab signing token is too short — check that the whole value was pasted")
     return key
 
 

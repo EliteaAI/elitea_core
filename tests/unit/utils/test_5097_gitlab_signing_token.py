@@ -97,6 +97,20 @@ class TestKeyDerivation:
         with pytest.raises(ValueError):
             pt.derive_gitlab_signing_key("whsec_not!valid!base64")
 
+    # A partial paste can still be valid base64, so length is the only thing separating it from a
+    # real key. Accepting one stores a key that decodes fine and then fails every signature check.
+    def test_decodable_but_truncated_token_is_rejected(self, pt):
+        with pytest.raises(ValueError):
+            pt.derive_gitlab_signing_key("whsec_AA")
+        short = base64.b64encode(os.urandom(pt.GITLAB_SIGNING_KEY_MIN_BYTES - 1)).decode()
+        with pytest.raises(ValueError):
+            pt.derive_gitlab_signing_key(f"whsec_{short}")
+
+    def test_key_at_the_minimum_length_is_accepted(self, pt):
+        key = os.urandom(pt.GITLAB_SIGNING_KEY_MIN_BYTES)
+        token = "whsec_" + base64.b64encode(key).decode()
+        assert pt.derive_gitlab_signing_key(token) == key
+
 
 class TestSignatureCoversTheWholeTriple:
     """Every component GitLab signs must be covered, or the replay guard is decorative."""
@@ -255,6 +269,16 @@ class TestSecretAcceptance:
         assert pt.validate_gitlab_signing_token_format(signing.token) is None
         assert pt.validate_gitlab_signing_token_format(
             base64.b64encode(signing.key).decode()) is not None
+
+    def test_truncated_signing_token_is_refused_on_save(self, pt):
+        assert pt.validate_gitlab_signing_token_format("whsec_AA") is not None
+
+    # Verification must surface a truncated stored token as an error string, not a raised ValueError,
+    # or a bad token turns every delivery into a 500 instead of a rejection.
+    def test_truncated_stored_token_fails_verification_without_raising(self, pt):
+        ts = str(int(time.time()))
+        result = pt.verify_gitlab_signature("whsec_AA", WEBHOOK_ID, ts, "v1,AAAA", BODY)
+        assert isinstance(result, str)
 
     def test_short_secret_tokens_are_refused(self, pt):
         assert pt.validate_webhook_secret_strength("short") is not None
