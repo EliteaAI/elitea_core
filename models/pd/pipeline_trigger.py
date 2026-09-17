@@ -31,6 +31,17 @@ class WebhookType(str, Enum):
     custom = "custom"
 
 
+class GitlabAuthMethod(str, Enum):
+    """
+    GitLab webhook authentication method.
+
+    secret_token: legacy plain-text comparison of the X-Gitlab-Token header.
+    signing_token: HMAC signature over the webhook-id/webhook-timestamp/body triple.
+    """
+    secret_token = "secret_token"
+    signing_token = "signing_token"
+
+
 class PipelineTriggerSchedule(BaseModel):
     """
     Schedule configuration for a pipeline trigger.
@@ -96,17 +107,29 @@ class PipelineTriggerWebhook(BaseModel):
     Allows external systems (GitHub, GitLab, custom) to trigger pipeline execution
     via HTTP POST requests with signature-based authentication.
 
-    The webhook secret is stored in Application.webhook_secret (not in this model).
+    The secret itself is never stored here: pipeline_settings['trigger'] holds a vault
+    reference under 'webhook_secret' (and 'webhook_signing_secret' for GitLab signing
+    tokens). Application.webhook_secret is a separate, agent-only mechanism.
     """
     type: TriggerType = Field(default=TriggerType.webhook)
     webhook_type: WebhookType = Field(..., description="Type of webhook authentication")
     created_by: int = Field(..., gt=0, description="User ID who created the webhook trigger")
+    gitlab_auth_method: Optional[GitlabAuthMethod] = Field(
+        None, description="GitLab authentication method (gitlab webhooks only)"
+    )
 
     @validator('webhook_type', pre=True)
     def normalize_webhook_type(cls, v):
         """Allow string input and normalize to WebhookType enum."""
         if isinstance(v, str):
             return WebhookType(v)
+        return v
+
+    @validator('gitlab_auth_method', pre=True)
+    def normalize_gitlab_auth_method(cls, v):
+        """Allow string input and normalize to GitlabAuthMethod enum."""
+        if isinstance(v, str):
+            return GitlabAuthMethod(v)
         return v
 
     class Config:
@@ -127,6 +150,9 @@ class UpdatePipelineTrigger(BaseModel):
 
     # Webhook-specific fields (required when type='webhook')
     webhook_type: Optional[str] = Field(None, description="Webhook type: 'github', 'gitlab', or 'custom'")
+    gitlab_auth_method: Optional[GitlabAuthMethod] = Field(
+        None, description="GitLab authentication method: 'secret_token' (default) or 'signing_token'"
+    )
 
     @validator('timezone')
     def validate_timezone(cls, v):
@@ -168,6 +194,7 @@ class PipelineTriggerResponse(BaseModel):
     created_by: Optional[int] = None
     webhook_type: Optional[str] = None
     webhook_url: Optional[str] = None
+    gitlab_auth_method: Optional[str] = None
     # Webhook secret info (only present when type=webhook)
     secret_configured: Optional[bool] = None
     secret_header: Optional[str] = None
