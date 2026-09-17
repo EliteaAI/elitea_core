@@ -19,3 +19,8 @@ class Route:
     @web.route("/project_icon/<path:sub_path>")
     def project_icon(self, sub_path):
         return flask.send_from_directory(self.project_icon_path, sub_path)
+
+    @web.route("/platform_logo/<path:sub_path>")
+    def platform_logo(self, sub_path):
+        """Serve custom platform logo (for branding)"""
+        return flask.send_from_directory(self.platform_logo_path, sub_path)
