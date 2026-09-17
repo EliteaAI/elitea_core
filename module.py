@@ -1298,6 +1298,7 @@ class Module(module.ModuleModel):
         auth.add_public_rule({"uri": "/app/shared/chat/[^/]+/?"})
         auth.add_public_rule({"uri": r"/app/assets/[^/]+\.(js|css|png|svg|woff2?)(\?.*)?"})
         auth.add_public_rule({"uri": r"/app/favicon\.svg"})
+        auth.add_public_rule({"uri": r"/app/platform_logo/.*"})  # Custom branding logo
         #
         # Set auth denied URL to styled access denied page
         #
