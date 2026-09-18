@@ -183,6 +183,12 @@ def create_application(application_data: ApplicationCreateModel | ApplicationImp
     )
 
     for ver in application_data.versions:
+        if isinstance(application_data, ApplicationCreateModel):
+            from .model_defaults import creation_llm_settings
+            from ..models.pd.llm import LLMSettingsWriteModel
+            ver.llm_settings = LLMSettingsWriteModel.model_validate(creation_llm_settings(
+                project_id, ver.llm_settings.model_dump(exclude_none=True) if ver.llm_settings else None,
+                surface='agent', agent_type=ver.agent_type))
         create_version(ver, application=application, session=session)
     session.add(application)
     session.flush()  # Flush to get version IDs

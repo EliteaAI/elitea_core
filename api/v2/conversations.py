@@ -13,6 +13,7 @@ from ...utils.participant_utils import add_participant_to_conversation
 from ...utils.chat_feature_flags import get_context_manager_feature_flag
 from ...utils.context_analytics import set_context_strategy
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.model_defaults import creation_llm_settings
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -168,7 +169,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         user_participant_data = ParticipantCreate(
             entity_name=ParticipantTypes.user,
-            entity_meta=ParticipantEntityUser(id=user_id)
+            entity_meta=ParticipantEntityUser(id=user_id),
+            entity_settings={'llm_settings': creation_llm_settings(project_id, surface='chat')},
         )
         dummy_participant_data = ParticipantCreate(
             entity_name=ParticipantTypes.dummy,
@@ -230,4 +232,3 @@ class API(api_tools.APIBase):
     mode_handlers = {
         PROMPT_LIB_MODE: PromptLibAPI
     }
-
