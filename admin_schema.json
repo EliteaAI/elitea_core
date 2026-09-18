@@ -697,6 +697,46 @@
       "section": "voice_features",
       "default": false
     },
+    "chat_mentions_slash_trigger": {
+      "type": "string",
+      "title": "Toolkit/Tool Trigger",
+      "description": "Character that opens the toolkit/tool mention dropdown in chat and instructions. Must be a single non-alphanumeric character.",
+      "path": "extra_ui_config.chat_mentions.slash_trigger",
+      "section": "chat_mentions",
+      "default": "/"
+    },
+    "chat_mentions_skill_trigger": {
+      "type": "string",
+      "title": "Skill Trigger",
+      "description": "Character that opens the skill mention dropdown in chat and instructions. Must be a single non-alphanumeric character.",
+      "path": "extra_ui_config.chat_mentions.skill_trigger",
+      "section": "chat_mentions",
+      "default": "~"
+    },
+    "chat_mentions_participant_trigger": {
+      "type": "string",
+      "title": "Participant Trigger",
+      "description": "Character that opens the participant (agents/pipelines) dropdown in chat. Must be a single non-alphanumeric character.",
+      "path": "extra_ui_config.chat_mentions.participant_trigger",
+      "section": "chat_mentions",
+      "default": "#"
+    },
+    "chat_mentions_private_participant_trigger": {
+      "type": "string",
+      "title": "Private Participant Trigger",
+      "description": "Character that opens the participant dropdown excluding public agents. Must be a single non-alphanumeric character different from Participant Trigger.",
+      "path": "extra_ui_config.chat_mentions.private_participant_trigger",
+      "section": "chat_mentions",
+      "default": "&"
+    },
+    "chat_mentions_user_trigger": {
+      "type": "string",
+      "title": "User Mention Trigger",
+      "description": "Character that opens the user mention dropdown in chat. Must be a single non-alphanumeric character.",
+      "path": "extra_ui_config.chat_mentions.user_trigger",
+      "section": "chat_mentions",
+      "default": "@"
+    },
     "cost_budgets_defaults_enabled": {
       "type": "boolean",
       "title": "Apply Default Limits",
