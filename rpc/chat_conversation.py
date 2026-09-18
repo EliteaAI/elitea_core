@@ -22,6 +22,7 @@ from ..utils.participant_utils import add_participant_to_conversation
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import set_context_strategy
 from ..utils.exceptions import PoolSaturationError
+from ..utils.model_defaults import creation_llm_settings, chat_request_default
 
 # Hard cap on page size: defence-in-depth against unbounded IN(...) lists in
 # the per-page aggregation queries below. UI default is 10; support_assistant
@@ -317,7 +318,8 @@ class RPC:
 
             user_participant_data = ParticipantCreate(
                 entity_name=ParticipantTypes.user,
-                entity_meta=ParticipantEntityUser(id=user_id)
+                entity_meta=ParticipantEntityUser(id=user_id),
+                entity_settings={'llm_settings': creation_llm_settings(project_id, surface='chat')},
             )
             add_participant_to_conversation(
                 project_id=project_id,
@@ -843,15 +845,11 @@ class RPC:
                     Conversation.uuid == conversation_uuid,
                 ).first()
                 if not mapping:
-                    models_data = rpc_tools.RpcMixin().rpc.timeout(2).configurations_get_default_model(
-                        project_id=project_id, section="llm", include_shared=True
-                    )
+                    models_data = chat_request_default(project_id, conversation_uuid, auth.current_user()['id'])
                     raw['llm_settings'] = models_data
 
         if llm_settings is None and not participant_id:
-            models_data = rpc_tools.RpcMixin().rpc.timeout(2).configurations_get_default_model(
-                project_id=project_id, section="llm", include_shared=True
-            )
+            models_data = chat_request_default(project_id, conversation_uuid, auth.current_user()['id'])
             raw['llm_settings'] = models_data
 
         try:
