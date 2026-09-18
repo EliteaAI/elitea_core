@@ -40,8 +40,9 @@ CASE = {'input': 'q', 'output': 'a', 'expected_output': 'a!'}
 
 def _judge_returning(data, status='ok', error=None):
     def judge(project_id, settings, system_prompt, payload, timeout, *, stream_key=None,
-              user_id=None, platform_run_id=None):
-        judge.seen = {'system_prompt': system_prompt, 'payload': payload, 'timeout': timeout}
+              user_id=None, platform_run_id=None, usage_entity=None):
+        judge.seen = {'system_prompt': system_prompt, 'payload': payload, 'timeout': timeout,
+                      'usage_entity': usage_entity}
         return {'status': status, 'data': data, 'error': error, 'raw': None}
     return judge
 
@@ -163,6 +164,20 @@ def test_judge_failure_yields_error_results(aij):
 
 def test_empty_dimensions_returns_empty(aij):
     assert aij.evaluate_case(2, {}, CASE, [], judge=_judge_returning({})) == []
+
+
+def test_usage_entity_forwarded_to_judge(aij):
+    # #6677: eval attribution rides through evaluate_case unchanged.
+    judge = _judge_returning({'scores': [{'dimension_id': 1, 'score': 50, 'rationale': 'x'}]})
+    entity = {'entity': {'type': 'evaluation', 'id': 9}, 'root': {'type': 'application', 'id': 5}}
+    aij.evaluate_case(2, {}, CASE, [DIMS[0]], judge=judge, usage_entity=entity)
+    assert judge.seen['usage_entity'] is entity
+
+
+def test_usage_entity_omitted_defaults_to_none(aij):
+    judge = _judge_returning({'scores': [{'dimension_id': 1, 'score': 50, 'rationale': 'x'}]})
+    aij.evaluate_case(2, {}, CASE, [DIMS[0]], judge=judge)
+    assert judge.seen['usage_entity'] is None
 
 
 # --- token-budget splitting ----------------------------------------------------

@@ -210,3 +210,29 @@ def test_run_agent_empty_output_maps_empty(runner):
     out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=predict)
     assert out['status'] == 'empty'
     assert out['output'] is None
+
+
+# --- usage_entity forwarding (#6677) ------------------------------------------
+
+def test_usage_entity_forwarded_to_predict(runner):
+    calls = []
+
+    def predict(**kwargs):
+        calls.append(kwargs)
+        return {'result': {'chat_history': [{'role': 'assistant', 'content': 'ok'}]}}
+
+    entity = {'entity': {'type': 'evaluation', 'id': 9}, 'root': {'type': 'application', 'id': 5}}
+    runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=predict,
+                     usage_entity=entity)
+    assert calls[0]['usage_entity'] is entity
+
+
+def test_usage_entity_omitted_defaults_to_none(runner):
+    calls = []
+
+    def predict(**kwargs):
+        calls.append(kwargs)
+        return {'result': {'chat_history': [{'role': 'assistant', 'content': 'ok'}]}}
+
+    runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=predict)
+    assert calls[0]['usage_entity'] is None

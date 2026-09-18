@@ -854,20 +854,21 @@ def orchestrate_run(
 # stay lazy so the pure core above loads by source with no `tools` / SDK present.
 
 def _make_ai_scorer(project_id: int, judge_settings: dict, *, user_id: Optional[int] = None,
-                    timeout: int = 60, judge=None, platform_run_id: Optional[str] = None):
+                    timeout: int = 60, judge=None, platform_run_id: Optional[str] = None,
+                    usage_entity: Optional[dict] = None):
     """Bind :func:`evaluation_ai_judge.evaluate_case` into the ``ai_scorer`` contract."""
     from .evaluation_ai_judge import evaluate_case
 
     def _score(evidence: dict, dimensions: List[dict]) -> List[dict]:
         return evaluate_case(project_id, judge_settings, evidence, dimensions,
                              timeout=timeout, judge=judge, user_id=user_id,
-                             platform_run_id=platform_run_id)
+                             platform_run_id=platform_run_id, usage_entity=usage_entity)
 
     return _score
 
 
 def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: int = 120,
-                       platform_run_id: Optional[str] = None):
+                       platform_run_id: Optional[str] = None, usage_entity: Optional[dict] = None):
     """Bind live agent execution (H4) into the ``agent_runner`` contract for an offline-batch run.
 
     Loads the run's frozen ``application_version_id`` expanded ``version_details`` **once**, checks
@@ -911,7 +912,7 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
                     'structure': structure}
         outcome = run_agent(project_id, version_details, case,
                             user_id=user_id, timeout=timeout,
-                            platform_run_id=platform_run_id)
+                            platform_run_id=platform_run_id, usage_entity=usage_entity)
         return {**outcome, 'structure': structure}
 
     return _run
@@ -1128,8 +1129,12 @@ def execute_run(
         # The run's platform run id rides along into every judge / agent LLM call so the whole
         # eval run's usage correlates to one id (#6569). Threaded explicitly rather than via a
         # contextvar: cases are scored concurrently on pool threads, which contextvars don't reach.
+        from .usage_attribution import evaluation_attribution
+        usage_entity = evaluation_attribution(
+            run_id, snapshot.get('application_id'), snapshot.get('application_version_id'))
+
         ai_scorer = _make_ai_scorer(project_id, settings, judge=judge, user_id=owner_id,
-                                    platform_run_id=platform_run_id)
+                                    platform_run_id=platform_run_id, usage_entity=usage_entity)
         code_scorer = _make_code_scorer(snapshot, executor)
 
         # Live agent execution (H4) only for offline-batch: on-demand cases already carry the
@@ -1137,7 +1142,8 @@ def execute_run(
         agent_runner = None
         if snapshot.get('trigger_type') == TRIGGER_OFFLINE_BATCH:
             agent_runner = _make_agent_runner(project_id, snapshot, user_id=owner_id,
-                                              platform_run_id=platform_run_id)
+                                              platform_run_id=platform_run_id,
+                                              usage_entity=usage_entity)
 
         outcome = orchestrate_run(snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
                                   agent_runner=agent_runner,
