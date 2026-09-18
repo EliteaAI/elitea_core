@@ -22,7 +22,10 @@ from ..models.pd.application import (
     ApplicationUpdateModel
 )
 from ..models.pd.version import ApplicationVersionDetailToolValidatedModel
-from ..models.pd.llm import llm_settings_family_conflict, _normalize_llm_settings_family
+from ..models.pd.llm import (
+    LLMSettingsModel, llm_settings_family_conflict, _normalize_llm_settings_family,
+    validate_model_selection_surface,
+)
 from ..models.all import Tag
 from ..models.enums.all import ToolEntityTypes
 from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_like_model
@@ -149,6 +152,16 @@ def applications_update_version(version_data, session, *, commit: bool = True) -
 
     if not version:
         return {'updated': False, 'msg': f'Application version with id {version_data.id} not found'}
+
+    # Partial updates may omit agent_type. Enforce against the persisted type,
+    # not the Pydantic default or a missing client field, before any row mutation.
+    fields = version_data.model_fields_set
+    target_type = version_data.agent_type if 'agent_type' in fields else version.agent_type
+    target_llm = version_data.llm_settings if 'llm_settings' in fields else version.llm_settings
+    try:
+        validate_model_selection_surface(target_llm, agent_type=target_type)
+    except ValueError as exc:
+        raise VersionNotUpdatableError(str(exc)) from exc
 
     if version.name == 'base' and version_data.name and version_data.name != 'base':
         raise VersionNotUpdatableError(
@@ -1384,10 +1397,25 @@ def validate_and_resolve_llm_settings(
     ApplicationVersion.llm_settings do not store a value that goes stale when the model
     configuration changes later.
     """
+    if llm_settings and llm_settings.get('selection') is not None:
+        selected = LLMSettingsModel.model_validate(llm_settings)
+        llm_settings = {**llm_settings, **selected.model_dump()}
+        if selected.selection.mode == 'auto':
+            # No concrete provider exists yet. Preserve intent through export,
+            # version lookup and nested-agent preparation; runtime admission
+            # resolves the enabled profile after the actual task is assembled.
+            return llm_settings
     try:
         available = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_available_models(
             project_id=project_id, section='llm', include_shared=True
         )
+
+        if llm_settings and (llm_settings.get('selection') or {}).get('mode') == 'fixed':
+            binding = (llm_settings['model_project_id'], llm_settings['model_name'])
+            if binding not in available:
+                # A versioned explicit binding cannot be rewritten to a different
+                # model. Preserve it for unavailable-model validation at dispatch.
+                return llm_settings
 
         if llm_settings and llm_settings.get('model_name'):
             model_name = llm_settings['model_name']
@@ -1545,14 +1573,14 @@ def get_application_version_details_expanded(
         except Exception as depth_err:  # never fail detail fetch over an advisory field
             log.warning(f"Could not compute agent_subtree_tiers for version {version_id}: {depth_err}")
 
-        if result.get('llm_settings'):
-            # Response-only path (never persisted): include openai_compatible so the SDK
-            # building sub-agents routes Claude models through the correct client.
-            result['llm_settings'] = validate_and_resolve_llm_settings(
-                project_id, result['llm_settings'],
-                application_id=application_id, version_id=version_id,
-                include_openai_compatible=True,
-            )
+        # Resolve the effective project default even for a legacy null field.
+        # Nested agents receive this response before the SDK's malformed-model
+        # guard; a missing stored field is not a missing effective selection.
+        result['llm_settings'] = validate_and_resolve_llm_settings(
+            project_id, result.get('llm_settings'),
+            application_id=application_id, version_id=version_id,
+            include_openai_compatible=True,
+        )
 
         log.debug(f"{result=}")
         return result

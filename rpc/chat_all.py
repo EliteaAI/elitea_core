@@ -25,6 +25,7 @@ from ..models.participants import ParticipantMapping, Participant
 from ..models.pd.message import MessageGroupDetail
 from ..models.pd.participant import ParticipantEntityUser, ParticipantEntityDummy, ParticipantBase, entity_meta_mapping, ParticipantCreate
 from ..models.pd.participant_settings import EntitySettingsApplication, EntitySettingsUser
+from ..models.pd.llm import merge_llm_selection_override
 from ..models.pd.predict import SioPredictModel, SioContinuePredictModel, ToolkitToolCallPayload
 from ..utils.chat_history import (
     generate_chat_history,
@@ -706,9 +707,12 @@ def _resolve_application_llm_settings(
         if override:
             llm_settings = override
 
-    # One-shot transient override from predict request (merge, not replace)
-    if predict_payload.llm_settings and predict_payload.llm_settings.model_name:
-        llm_settings.update(predict_payload.llm_settings.dict(exclude_unset=True))
+    # Selection is atomic; omitted non-selection settings retain their baseline.
+    requested = predict_payload.llm_settings
+    if requested and (requested.model_name or requested.selection is not None):
+        llm_settings = merge_llm_selection_override(
+            llm_settings, requested.dict(exclude_unset=True)
+        )
 
     return llm_settings
 
@@ -783,6 +787,7 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             _vd = result.get('version_details') or {}
             _is_pipeline = _vd.get('agent_type') == AgentTypes.pipeline.value
             if not _is_pipeline:
+                result['_routing_projection'] = {'instructions': _vd.get('instructions') or ''}
                 _ignore = (_vd.get('meta') or {}).get('ignore_project_context', False)
                 if not _ignore:
                     _vd['instructions'], _runtime_ctx = prepare_project_context_delivery(
@@ -791,6 +796,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                     )
                     if _runtime_ctx:
                         result['project_context'] = _runtime_ctx
+                    else:
+                        result['_routing_projection']['instructions'] = _vd['instructions']
                 result['version_details'] = _vd
 
             # IMPORTANT: Use offset(1) to retrieve the previous agent message, skipping the newly created response
@@ -870,6 +877,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             else:
                 result['instructions'] = base_instructions
 
+            # Typed authored requirements, before disclosure/tool scaffolding.
+            result['_routing_projection'] = {'instructions': result['instructions']}
             # Inject project context into LLM chat instructions
             result['instructions'], _runtime_ctx = prepare_project_context_delivery(
                 result.get('instructions') or '',
@@ -877,6 +886,8 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             )
             if _runtime_ctx:
                 result['project_context'] = _runtime_ctx
+            else:
+                result['_routing_projection']['instructions'] = result['instructions']
 
             # Append MCP entity-link instruction when Elitea MCP Tools are enabled
             mcp_link_addon = get_mcp_entity_link_instructions(llm_chat_internal_tools)
@@ -884,7 +895,9 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
                 result['instructions'] = (result.get('instructions') or '') + mcp_link_addon
 
             if predict_payload.llm_settings:
-                result['llm_settings'].update(predict_payload.llm_settings.dict(exclude_none=True))
+                result['llm_settings'] = merge_llm_selection_override(
+                    result['llm_settings'], predict_payload.llm_settings.dict(exclude_none=True)
+                )
             result['internal_tools'] = llm_chat_internal_tools
             # Get persona from conversation settings (user's saved preference), default to 'generic'
             result['persona'] = msg_group.conversation.meta.get('persona', 'generic')
@@ -906,6 +919,12 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
         result['user_input'] = predict_payload.user_input
     else:
         result['user_input'] = generate_user_input(msg_group)
+
+    # Internal RPC argument only; never parsed from the public request DTO.
+    result.setdefault('_routing_projection', {})['task'] = (
+        predict_payload.user_input if getattr(predict_payload, 'should_continue', False) and predict_payload.user_input is not None
+        else generate_user_input(msg_group, include_context=False)
+    )
 
     # Add steps limit parameter if any
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
@@ -1398,6 +1417,7 @@ class RPC:
                     payload['chat_history'] = generate_chat_history(
                         message_groups=chat_history_groups, summaries=summaries,
                         include_context=not is_pipeline,
+                        routing_projection=payload.get('_routing_projection'),
                     )
                     log.debug('chat payload["chat_history"]=%s', payload["chat_history"])
 
@@ -1436,6 +1456,7 @@ class RPC:
                             user_id=current_user['id'],
                             return_chat_history=return_chat_history,
                             eligible_for_autoapproval=eligible_for_autoapproval,
+                            routing_projection=payload.pop('_routing_projection', None),
                         )
                     except (PoolSaturationError, SioValidationError):
                         # Mark the response placeholder as not streaming to avoid stuck chat entry
@@ -2241,6 +2262,7 @@ class RPC:
                 payload['chat_history'] = generate_chat_history(
                     message_groups=chat_history_groups, summaries=summaries,
                     include_context=not continues_pipeline,
+                    routing_projection=payload.get('_routing_projection'),
                 )
                 if is_token_limit_continuation_request:
                     prepare_token_limit_payload(payload, truncated_content)
@@ -2262,7 +2284,8 @@ class RPC:
                     },
                     chat_project_id=parsed.project_id,
                     await_task_timeout=await_task_timeout,
-                    user_id=current_user['id']
+                    user_id=current_user['id'],
+                    routing_projection=payload.pop('_routing_projection', None),
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout

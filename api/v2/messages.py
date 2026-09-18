@@ -27,6 +27,7 @@ from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.context_analytics import update_conversation_meta
 from ...utils.sio_utils import SioEvents, SioValidationError
 from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError
+from ...utils.model_defaults import chat_request_default
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -251,9 +252,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 except Exception as e:
                     log.warning(f"Failed to resolve participant llm_settings: {e}")
             if not llm_settings_resolved:
-                models_data = self.module.context.rpc_manager.timeout(2).configurations_get_default_model(
-                    project_id=project_id, section="llm", include_shared=True
-                )
+                models_data = chat_request_default(project_id, conversation_uuid, auth.current_user()['id'])
                 raw['llm_settings'] = {
                     **models_data
                 }
