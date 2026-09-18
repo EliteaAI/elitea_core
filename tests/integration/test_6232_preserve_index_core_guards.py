@@ -707,6 +707,84 @@ class TestCancelRunScoped:
         assert meta.cmetadata["state"] == "cancelled"
 
 
+class TestStopRetainsStagedChunksForAdoption:
+    """#5261: a manual Stop keeps the stopped run's staged rows so the next run can adopt
+    them. Retention is opt-in, and it must not reach the legacy collection-wide clean."""
+
+    def _row(self):
+        return {
+            "collection": "docs", "type": "index_meta", "state": "in_progress",
+            "task_id": "task-1", "created_on": 100.0, "updated_on": 100.0,
+            "history": json.dumps([{"state": "in_progress", "created_on": 100.0}]),
+        }
+
+    def _cancel(self, application_tools, session, delete_embeddings=True, retain_run_chunks=False):
+        return application_tools._cancel_index_meta_in_session(
+            session, "docs", None, delete_embeddings, False, None, retain_run_chunks,
+        )
+
+    def test_retention_keeps_the_stopped_runs_chunks_and_still_tombstones_the_run(
+            self, application_tools, monkeypatch):
+        """Mutation: drop `and not retain_run_chunks` from discard_staged_generation."""
+        pending = _run_row("r1", "pending")
+        meta, session = _arrange(application_tools, monkeypatch, self._row(), run_rows=[pending])
+        assert self._cancel(application_tools, session, retain_run_chunks=True) is True
+        assert session.deletes == []
+        assert pending.status == "cancelled"
+        assert meta.cmetadata["state"] == "cancelled"
+        assert meta.cmetadata["task_id"] is None
+
+    def test_retention_defaults_off_so_every_existing_caller_still_deletes(
+            self, application_tools, monkeypatch):
+        pending = _run_row("r1", "pending")
+        _, session = _arrange(application_tools, monkeypatch, self._row(), run_rows=[pending])
+        assert self._cancel(application_tools, session) is True
+        assert len(session.deletes) == 1
+        assert {"_elitea_run_id": "r1"} in _bind_values(session.deletes[0][2])
+
+    def test_retention_does_not_disarm_the_legacy_collection_clean(
+            self, application_tools, monkeypatch):
+        """Mutation: gate the legacy branch on retain_run_chunks too."""
+        _, session = _arrange(application_tools, monkeypatch, self._row(), run_rows=[])
+        assert self._cancel(application_tools, session, retain_run_chunks=True) is True
+        assert len(session.deletes) == 1
+        values = _bind_values(session.deletes[0][2])
+        assert "collection" in values
+        assert "docs" in values
+
+    def test_retention_does_not_disarm_the_legacy_clean_when_the_runs_table_is_missing(
+            self, application_tools, monkeypatch):
+        _, session = _arrange(application_tools, monkeypatch, self._row(), run_rows=None)
+        assert self._cancel(application_tools, session, retain_run_chunks=True) is True
+        assert len(session.deletes) == 1
+        assert "collection" in _bind_values(session.deletes[0][2])
+
+    def test_retention_is_inert_when_nothing_would_have_been_deleted(
+            self, application_tools, monkeypatch):
+        pending = _run_row("r1", "pending")
+        _, session = _arrange(application_tools, monkeypatch, self._row(), run_rows=[pending])
+        assert self._cancel(application_tools, session, delete_embeddings=False,
+                            retain_run_chunks=True) is True
+        assert session.deletes == []
+        assert pending.status == "cancelled"
+
+    def test_cancel_toolkit_index_meta_threads_retention_to_the_session_helper(
+            self, application_tools, monkeypatch):
+        seen = {}
+
+        def _capture(*args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+            return True
+
+        monkeypatch.setattr(application_tools, "_cancel_index_meta_in_session", _capture)
+        application_tools.cancel_toolkit_index_meta(
+            "postgresql://ignored", "toolkit", "docs",
+            delete_embeddings=True, retain_run_chunks=True, session=object(),
+        )
+        assert seen["args"][-1] is True
+
+
 class TestEnsureDdlTwin:
     """The elitea_index_runs DDL twin must build (its classes only execute inside the
     ensure call) and compile to the arbitration shape the SDK's ON CONFLICT names."""

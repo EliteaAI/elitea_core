@@ -2193,7 +2193,8 @@ def is_index_stale(updated_on: float, index_data_state: str, task_disconnected_t
 
 def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Optional[str],
                                   delete_embeddings: bool, require_in_progress: bool,
-                                  expected_created_on: Optional[float]) -> bool:
+                                  expected_created_on: Optional[float],
+                                  retain_run_chunks: bool = False) -> bool:
     """Core cancel write against an already-open session. See cancel_toolkit_index_meta."""
     meta = lock_toolkit_index_meta(session, index_name)
     if not meta:
@@ -2278,29 +2279,27 @@ def _cancel_index_meta_in_session(session, index_name: str, expected_task_id: Op
         if row.status == INDEX_RUN_PENDING:
             row.status = INDEX_RUN_CANCELLED
     #
-    if delete_embeddings:
-        if run_rows:
-            # Run-scoped delete, no collection conjunct: multi-index chunks carry
-            # appended collections ("a;b"), so a collection anchor would leak them as
-            # permanently visible garbage once the run is tombstoned. The type conjunct
-            # protects the meta row and must not spare untyped stamped rows.
-            for run_id in pending_run_ids:
-                session.query(EmbeddingStore).filter(
-                    EmbeddingStore.cmetadata.contains({"_elitea_run_id": run_id}),
-                    or_(
-                        EmbeddingStore.cmetadata['type'].astext.is_(None),
-                        EmbeddingStore.cmetadata['type'].astext != "index_meta",
-                    ),
-                ).delete(synchronize_session=False)
-        else:
-            # No run row of any status (or no runs table): this collection was never
-            # indexed by a run-aware SDK, so fall back to today's collection-wide clean.
-            # Rows-exist-but-none-pending means a run-aware SDK owns the index — its
-            # previous generation must survive a Stop, so nothing is deleted above.
+    discard_staged_generation = delete_embeddings and bool(run_rows) and not retain_run_chunks
+    if discard_staged_generation:
+        # No collection conjunct: multi-index chunks carry appended collections ("a;b"),
+        # so a collection anchor would leak them as permanently visible garbage once the
+        # run is tombstoned. The type conjunct protects the meta row and must not spare
+        # untyped stamped rows.
+        for run_id in pending_run_ids:
             session.query(EmbeddingStore).filter(
-                EmbeddingStore.cmetadata["collection"].astext == index_name,
-                EmbeddingStore.cmetadata['type'].astext != "index_meta",
+                EmbeddingStore.cmetadata.contains({"_elitea_run_id": run_id}),
+                or_(
+                    EmbeddingStore.cmetadata['type'].astext.is_(None),
+                    EmbeddingStore.cmetadata['type'].astext != "index_meta",
+                ),
             ).delete(synchronize_session=False)
+    elif legacy_collection_clean:
+        # A collection with no run row of any status was never indexed by a run-aware
+        # SDK, so nothing here is adoptable and today's collection-wide clean stands.
+        session.query(EmbeddingStore).filter(
+            EmbeddingStore.cmetadata["collection"].astext == index_name,
+            EmbeddingStore.cmetadata['type'].astext != "index_meta",
+        ).delete(synchronize_session=False)
     #
     session.commit()
     log.debug(f"Cancelled index_meta for index_name={index_name} (delete_embeddings={delete_embeddings}, "
@@ -2313,6 +2312,7 @@ def cancel_toolkit_index_meta(connection_string: str, toolkit_name_id: str, inde
                               delete_embeddings: bool = False,
                               require_in_progress: bool = True,
                               expected_created_on: Optional[float] = None,
+                              retain_run_chunks: bool = False,
                               session=None) -> bool:
     """Transition a toolkit's index_meta row to 'cancelled'. Single write site, shared by
     the manual index_cancel endpoint and the system reconcile-on-stop path. Returns True
@@ -2323,17 +2323,20 @@ def cancel_toolkit_index_meta(connection_string: str, toolkit_name_id: str, inde
     expected_created_on: when the row's task_id is None, only cancel if created_on matches
         (tolerance-based) - guards a reindex race on the same index_name.
     delete_embeddings: also delete the collection's non-meta rows (manual cancel).
+    retain_run_chunks: keep the stopped run's staged rows instead of deleting them, so the
+        next run can adopt them (#5261). Only affects a run-scoped delete; the legacy
+        collection-wide clean is unconditional on delete_embeddings.
     session: reuse an open session instead of opening a second engine.
     """
     if session is not None:
         return _cancel_index_meta_in_session(
             session, index_name, expected_task_id, delete_embeddings,
-            require_in_progress, expected_created_on,
+            require_in_progress, expected_created_on, retain_run_chunks,
         )
     with get_session_for_schema(connection_string, toolkit_name_id) as session:
         return _cancel_index_meta_in_session(
             session, index_name, expected_task_id, delete_embeddings,
-            require_in_progress, expected_created_on,
+            require_in_progress, expected_created_on, retain_run_chunks,
         )
 
 
