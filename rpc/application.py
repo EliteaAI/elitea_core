@@ -62,6 +62,7 @@ from ..utils.tracing_utils import add_trace_context_to_meta
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.vectorstore import get_pgvector_connection_string
 from ..utils.run_id import PREDICT_RUN_ID_KWARGS_KEY
+from ..utils.usage_attribution import ENTITY_KWARGS_KEY, ROOT_ENTITY_KWARGS_KEY
 
 
 def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
@@ -138,6 +139,7 @@ class RPC:
                     non_interactive: Optional[bool] = None,
                     eligible_for_autoapproval: bool = False,
                     platform_run_id: Optional[str] = None,
+                    usage_entity: Optional[dict] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -308,6 +310,14 @@ class RPC:
         # dispatch so the start_task seam honours it instead of minting a per-case id.
         if platform_run_id:
             payload[PREDICT_RUN_ID_KWARGS_KEY] = platform_run_id
+
+        # An eval/judge caller (#6677) that wants its usage rows attributed to the
+        # application being evaluated, but marked as evaluation spend on the leaf.
+        if usage_entity:
+            if usage_entity.get("entity"):
+                payload[ENTITY_KWARGS_KEY] = usage_entity["entity"]
+            if usage_entity.get("root"):
+                payload[ROOT_ENTITY_KWARGS_KEY] = usage_entity["root"]
 
         try:
             task_id = self.task_node.start_task(

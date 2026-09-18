@@ -115,6 +115,7 @@ def run_llm_judge(
     stream_key: str = 'llm_judge',
     user_id: Optional[int] = None,
     platform_run_id: Optional[str] = None,
+    usage_entity: Optional[dict] = None,
 ) -> dict:
     """Run one tool-less LLM judge call and return a structured outcome (never raises).
 
@@ -160,6 +161,7 @@ def run_llm_judge(
             skip_expansion=True,
             return_chat_history=True,
             platform_run_id=platform_run_id,
+            usage_entity=usage_entity,
         )
     except Exception as exc:
         return {'status': 'predict_exception', 'data': None, 'error': str(exc), 'raw': None}

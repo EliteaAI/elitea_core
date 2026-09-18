@@ -93,6 +93,22 @@ def test_invocation_is_toolless_and_temp_pinned(judge_env):
     assert calls['predict'][0]['await_task_timeout'] == 45
 
 
+def test_usage_entity_forwarded_to_predict(judge_env):
+    # #6677: eval attribution rides through untouched to predict_sio.
+    mod, this = judge_env
+    calls = _set_predict(this, result=_assistant('{"ok": 1}'))
+    entity = {'entity': {'type': 'evaluation', 'id': 9}, 'root': {'type': 'application', 'id': 5}}
+    mod.run_llm_judge(1, {}, 's', '{}', 10, usage_entity=entity)
+    assert calls['predict'][0]['usage_entity'] is entity
+
+
+def test_usage_entity_omitted_defaults_to_none(judge_env):
+    mod, this = judge_env
+    calls = _set_predict(this, result=_assistant('{"ok": 1}'))
+    mod.run_llm_judge(1, {}, 's', '{}', 10)
+    assert calls['predict'][0]['usage_entity'] is None
+
+
 def test_custom_temperature_respected(judge_env):
     mod, this = judge_env
     calls = _set_predict(this, result=_assistant('{"ok": 1}'))

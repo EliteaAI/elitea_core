@@ -284,6 +284,7 @@ def evaluate_case(
     judge: Optional[Callable[..., dict]] = None,
     user_id: Optional[int] = None,
     platform_run_id: Optional[str] = None,
+    usage_entity: Optional[dict] = None,
 ) -> List[dict]:
     """Score ``case`` against ``dimensions`` with one batched judge call.
 
@@ -301,7 +302,7 @@ def evaluate_case(
     payload = build_case_payload(case, dimensions)
     outcome = judge(project_id, judge_llm_settings, system_prompt, payload, timeout,
                     stream_key='eval_judge', user_id=user_id,
-                    platform_run_id=platform_run_id)
+                    platform_run_id=platform_run_id, usage_entity=usage_entity)
 
     if outcome.get('status') != 'ok':
         return _error_results(
