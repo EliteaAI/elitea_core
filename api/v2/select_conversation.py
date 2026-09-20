@@ -1,6 +1,3 @@
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm.exc import StaleDataError
-
 from pylon.core.tools import log
 from tools import api_tools, auth, db, config as c
 from tools import serialize
@@ -28,26 +25,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if not conversation_exists:
                 return serialize({"error": f"No such conversation with id {conversation_id}"}), 400
 
-            stmt = (
-                pg_insert(SelectedConversations)
-                .values(user_id=user_id, conversation_id=conversation_id)
-                .on_conflict_do_update(
-                    index_elements=['user_id'],
-                    set_={'conversation_id': conversation_id},
-                )
-                .returning(SelectedConversations)
+            selection = (
+                session.query(SelectedConversations)
+                .filter(SelectedConversations.user_id == user_id)
+                .with_for_update()
+                .first()
             )
-            try:
-                result = session.execute(stmt).scalar_one()
-                session.commit()
-            except StaleDataError:
-                log.warning("StaleDataError on select_conversation upsert, retrying insert")
-                session.rollback()
+            if selection is None:
                 selection = SelectedConversations(user_id=user_id, conversation_id=conversation_id)
                 session.add(selection)
-                session.commit()
-                result = selection
-            return serialize(result), 200
+            else:
+                selection.conversation_id = conversation_id
+            session.commit()
+            return serialize(selection), 200
 
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.details"],
