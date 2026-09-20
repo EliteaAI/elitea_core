@@ -1,3 +1,7 @@
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm.exc import StaleDataError
+
+from pylon.core.tools import log
 from tools import api_tools, auth, db, config as c
 from tools import serialize
 
@@ -18,23 +22,32 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_id = auth.current_user()['id']
 
         with db.get_session(project_id) as session:
-            selection = session.query(SelectedConversations).filter(
-                SelectedConversations.user_id == user_id
-            ).first()
-            conversation = session.query(Conversation).filter(
+            conversation_exists = session.query(Conversation.id).filter(
                 Conversation.id == conversation_id
-            ).first()
-            if not conversation:
+            ).scalar()
+            if not conversation_exists:
                 return serialize({"error": f"No such conversation with id {conversation_id}"}), 400
 
-            if selection:
-                selection.conversation_id = conversation_id
-            else:
+            stmt = (
+                pg_insert(SelectedConversations)
+                .values(user_id=user_id, conversation_id=conversation_id)
+                .on_conflict_do_update(
+                    index_elements=['user_id'],
+                    set_={'conversation_id': conversation_id},
+                )
+                .returning(SelectedConversations)
+            )
+            try:
+                result = session.execute(stmt).scalar_one()
+                session.commit()
+            except StaleDataError:
+                log.warning("StaleDataError on select_conversation upsert, retrying insert")
+                session.rollback()
                 selection = SelectedConversations(user_id=user_id, conversation_id=conversation_id)
                 session.add(selection)
-
-            session.commit()
-            return serialize(selection), 200
+                session.commit()
+                result = selection
+            return serialize(result), 200
 
     @auth.decorators.check_api({
         "permissions": ["models.chat.conversation.details"],
