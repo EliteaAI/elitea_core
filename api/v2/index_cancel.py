@@ -69,6 +69,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         expected_task_id=task_id,
                         delete_embeddings=True,
                         require_in_progress=False,
+                        retain_run_chunks=True,
                         session=session,
                     )
                     if not cancelled:
