@@ -59,12 +59,17 @@ def prepare_token_limit_payload(payload: dict, truncated_content: str) -> None:
     """
     visible_content = truncated_content.rstrip('\n\r')
     original_user_input = payload.get('user_input', '')
+    routing_projection = payload.get('_routing_projection')
 
     if original_user_input:
         payload['chat_history'].append({
             'role': 'user',
             'content': original_user_input,
         })
+        if routing_projection is not None and 'history' in routing_projection:
+            routing_projection['history'].append({
+                'role': 'user', 'content': routing_projection['task'],
+            })
 
     if visible_content:
         tail_chars = 600
@@ -73,6 +78,10 @@ def prepare_token_limit_payload(payload: dict, truncated_content: str) -> None:
             'role': 'assistant',
             'content': prefill_content,
         })
+        if routing_projection is not None and 'history' in routing_projection:
+            # Worker needs only role alignment for assistant rows; the full
+            # actual prefill already travels in generation history.
+            routing_projection['history'].append({'role': 'assistant'})
         word_count = len(visible_content.split())
         original_q_clause = (
             f' The original request was: "{original_user_input}".'
@@ -104,10 +113,10 @@ def prepare_token_limit_payload(payload: dict, truncated_content: str) -> None:
 
     if isinstance(payload.get('llm'), dict):
         llm_kwargs = payload['llm'].get('kwargs', {})
-        if 'reasoning_effort' in llm_kwargs:
+        if 'reasoning_effort' in llm_kwargs and (llm_kwargs.get('selection') or {}).get('mode') != 'auto':
             llm_kwargs['reasoning_effort'] = 'low'
 
     app_version = (payload.get('application') or {}).get('version_details') or {}
     app_llm_settings = app_version.get('llm_settings') or {}
-    if 'reasoning_effort' in app_llm_settings:
+    if 'reasoning_effort' in app_llm_settings and (app_llm_settings.get('selection') or {}).get('mode') != 'auto':
         app_llm_settings['reasoning_effort'] = 'low'

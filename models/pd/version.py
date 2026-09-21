@@ -13,7 +13,7 @@ from .tool import (
 )
 from ..enums.all import AgentTypes
 from ...models.enums.all import PublishStatus
-from ...models.pd.llm import LLMSettingsModel, LLMSettingsWriteModel
+from ...models.pd.llm import LLMSettingsModel, LLMSettingsWriteModel, validate_model_selection_surface
 from ...models.pd.collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel, VersionAuthorMixin
 from ...models.pd.tag import TagDetailModel
 from ...utils.pipeline_utils import validate_yaml_from_str
@@ -117,6 +117,11 @@ class ApplicationVersionBaseModel(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=1000)
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='after')
+    def validate_model_selection_scope(self):
+        validate_model_selection_surface(self.llm_settings, agent_type=self.agent_type)
+        return self
 
     @field_validator('instructions', mode='after')
     @classmethod

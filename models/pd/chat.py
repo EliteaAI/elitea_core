@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator, ConfigDict
 # from .tool import ToolUpdateModel
 from .tool import ToolChatModel
 from .utils import MergeUpdateBase
+from .llm import merge_llm_selection_override
 
 from .version import ApplicationVariableModel, LLMSettingsModel
 
@@ -106,6 +107,19 @@ class ApplicationChatRequest(MergeUpdateBase):
     )
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    def merge_update(self, other):
+        if other.llm_settings is None:
+            return super().merge_update(other)
+        settings = merge_llm_selection_override(
+            self.llm_settings.model_dump() if self.llm_settings else None,
+            other.llm_settings.model_dump(exclude_unset=True),
+        )
+        # Resolve the selection once, then prevent the generic recursive merge
+        # from restoring a saved Auto/fixed binding inside that resolved value.
+        baseline = self.model_copy(update={'llm_settings': None})
+        override = other.model_copy(update={'llm_settings': LLMSettingsModel.model_validate(settings)})
+        return MergeUpdateBase.merge_update(baseline, override)
 
     @model_validator(mode='after')
     def check_version_details_reachable(self):
