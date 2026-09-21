@@ -110,7 +110,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     **secret_info,
                 )
 
-                log.debug(f"Pipeline trigger GET: version_id={version_id}, trigger_data={trigger_data}, response={response.dict()}")
+                # Neither trigger_data nor the response may be dumped here: both carry the
+                # webhook secret, and in signing mode the response carries GitLab's unmasked
+                # signing token.
+                log.debug(
+                    f"Pipeline trigger GET: version_id={version_id}, type={trigger_type}, "
+                    f"webhook_type={webhook_type}, auth_method={gitlab_auth_method}"
+                )
                 return serialize(response.dict()), 200
 
         except Exception as e:

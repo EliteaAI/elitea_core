@@ -368,10 +368,17 @@ def get_webhook_secret_for_display(
         auth_method: GitLab authentication method, selects which secret is the active one
 
     Returns:
-        Dict with secret_configured, secret_header, secret_value, secret_instructions
+        Dict with secret_configured, signing_secret_configured, secret_header, secret_value,
+        secret_instructions
     """
+    # Reported regardless of which method is active: the save path reuses a stored signing ref
+    # when no new token is supplied, so the UI needs to know one exists even in secret-token
+    # mode. Keyed on ref presence to match exactly what that save path checks.
+    signing_secret_configured = bool(trigger_data.get("webhook_signing_secret")) if trigger_data else False
+
     empty_result = {
         "secret_configured": False,
+        "signing_secret_configured": signing_secret_configured,
         "secret_header": None,
         "secret_value": None,
         "secret_instructions": None,
@@ -395,6 +402,7 @@ def get_webhook_secret_for_display(
         secret_value = normalize_secret_value(secret)
         return {
             "secret_configured": True,
+            "signing_secret_configured": signing_secret_configured,
             "secret_header": None,
             "secret_value": mask_secret(secret_value) if should_mask else secret_value,
             "secret_instructions": None,
@@ -414,6 +422,7 @@ def get_webhook_secret_for_display(
 
     return {
         "secret_configured": True,
+        "signing_secret_configured": signing_secret_configured,
         "secret_header": config["display_header"],
         "secret_value": display_value,
         "secret_instructions": instructions,

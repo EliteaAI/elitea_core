@@ -300,3 +300,34 @@ class TestTriggerStorage:
     def test_other_webhook_types_carry_no_auth_method(self, pt):
         update = types.SimpleNamespace(type="webhook", webhook_type="github")
         assert "gitlab_auth_method" not in pt.build_trigger_for_storage(update, 7)
+
+
+class TestStoredSigningTokenIsReported:
+    """
+    A stored signing token is reused on save, so it has to be visible to the client even when
+    secret-token mode is active — otherwise the UI demands a token GitLab only ever shows once.
+    """
+
+    def test_signing_ref_is_reported_while_secret_token_mode_is_active(self, pt):
+        result = pt.get_webhook_secret_for_display(
+            1, {"webhook_signing_secret": "{{secret.webhook_signing_secret_v9}}"},
+            "gitlab", auth_method=pt.GITLAB_AUTH_SECRET_TOKEN,
+        )
+        assert result["signing_secret_configured"] is True
+        # The active method has no secret of its own, so nothing is shown for it.
+        assert result["secret_configured"] is False
+        assert result["secret_value"] is None
+
+    def test_absent_signing_ref_reports_false(self, pt):
+        result = pt.get_webhook_secret_for_display(
+            1, {}, "gitlab", auth_method=pt.GITLAB_AUTH_SECRET_TOKEN)
+        assert result["signing_secret_configured"] is False
+
+    def test_flag_is_present_on_the_populated_path(self, pt, signing, monkeypatch):
+        monkeypatch.setattr(pt, "get_webhook_secret_from_vault", lambda *a, **k: signing.token)
+        result = pt.get_webhook_secret_for_display(
+            1, {"webhook_signing_secret": "{{secret.webhook_signing_secret_v9}}"},
+            "gitlab", auth_method=pt.GITLAB_AUTH_SIGNING_TOKEN,
+        )
+        assert result["signing_secret_configured"] is True
+        assert result["secret_configured"] is True

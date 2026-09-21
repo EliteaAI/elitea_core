@@ -197,6 +197,9 @@ class PipelineTriggerResponse(BaseModel):
     gitlab_auth_method: Optional[str] = None
     # Webhook secret info (only present when type=webhook)
     secret_configured: Optional[bool] = None
+    # Independent of gitlab_auth_method: a stored signing token is reused on save, so the client
+    # must be able to tell one exists even while secret-token mode is active.
+    signing_secret_configured: Optional[bool] = None
     secret_header: Optional[str] = None
     secret_value: Optional[str] = None
     secret_instructions: Optional[str] = None
