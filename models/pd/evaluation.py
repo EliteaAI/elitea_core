@@ -159,8 +159,8 @@ class EvalDimensionCreateModel(EvalDimensionBaseModel):
 
 class EvalDimensionUpdateModel(EvalDimensionBaseModel):
     # name optional on update; everything else may be edited. tier is immutable for most callers,
-    # but a project-admin may move a dimension between agent_adhoc and project (§2.1) by sending
-    # tier explicitly — update_dimension() gates that on project-admin permission itself.
+    # but a project-admin (or a private project's owner) may move a dimension between agent_adhoc
+    # and project (§2.1) by sending tier explicitly — update_dimension() gates that itself.
     name: Optional[str] = Field(None, min_length=1, max_length=128)
     tier: Optional[str] = None
     agent_id: Optional[int] = None
