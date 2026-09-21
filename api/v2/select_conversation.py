@@ -1,3 +1,4 @@
+from pylon.core.tools import log
 from tools import api_tools, auth, db, config as c
 from tools import serialize
 
@@ -18,21 +19,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
         user_id = auth.current_user()['id']
 
         with db.get_session(project_id) as session:
-            selection = session.query(SelectedConversations).filter(
-                SelectedConversations.user_id == user_id
-            ).first()
-            conversation = session.query(Conversation).filter(
+            conversation_exists = session.query(Conversation.id).filter(
                 Conversation.id == conversation_id
-            ).first()
-            if not conversation:
+            ).scalar()
+            if not conversation_exists:
                 return serialize({"error": f"No such conversation with id {conversation_id}"}), 400
 
-            if selection:
-                selection.conversation_id = conversation_id
-            else:
+            selection = (
+                session.query(SelectedConversations)
+                .filter(SelectedConversations.user_id == user_id)
+                .with_for_update()
+                .first()
+            )
+            if selection is None:
                 selection = SelectedConversations(user_id=user_id, conversation_id=conversation_id)
                 session.add(selection)
-
+            else:
+                selection.conversation_id = conversation_id
             session.commit()
             return serialize(selection), 200
 
