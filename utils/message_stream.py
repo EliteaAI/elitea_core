@@ -8,6 +8,7 @@ from ..models.message_group import ConversationMessageGroup
 
 from pylon.core.tools import log
 
+from .context_analytics import extract_token_breakdown
 from .trace_step_writer import sync_trace_steps
 
 
@@ -171,6 +172,7 @@ def update_message_group_meta(
                 'current_context_tokens': 0,
                 'messages_in_context': 0,
                 'last_summarization': None,
+                'token_breakdown': {},
             }
 
         analytics = conversation.meta['context_analytics']
@@ -181,11 +183,18 @@ def update_message_group_meta(
             analytics['current_context_tokens'] = context_info.get('token_count', 0)
             analytics['messages_in_context'] = context_info.get('message_count', 0)
 
+            # Breakdown of what occupies the window, plus where the number came
+            # from. Empty when an older SDK reports only the totals.
+            token_breakdown = extract_token_breakdown(context_info)
+            analytics['token_breakdown'] = token_breakdown
+
             # Store message_count and token_count on the response message group meta
             if 'context' not in new_meta:
                 new_meta['context'] = {}
             new_meta['context']['message_count'] = context_info.get('message_count', 0)
             new_meta['context']['token_count_in_context'] = context_info.get('token_count', 0)
+            if token_breakdown:
+                new_meta['context']['token_breakdown'] = token_breakdown
 
             if context_info.get('summarized'):
                 analytics['summaries_generated'] = analytics.get('summaries_generated', 0) + 1

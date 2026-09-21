@@ -54,4 +54,6 @@ class ContextStatus(BaseModel):
     utilization: float
     message_groups_in_context: int
     summary_count: int = 0
+    token_source: str = 'approximate'
+    token_breakdown: Dict[str, Any] = Field(default_factory=dict)
     context_analytics: Dict[str, Any]

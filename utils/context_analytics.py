@@ -12,6 +12,38 @@ from ..models.message_group import ConversationMessageGroup
 from ..models.pd.context import ContextStrategy
 
 
+TOKEN_BREAKDOWN_KEYS = (
+    'prompt_tokens',
+    'token_count_user_facing',
+    'system_tokens',
+    'tool_schema_tokens',
+    'tool_message_tokens',
+    'overhead_tokens',
+    'provider_input_tokens',
+    'provider_output_tokens',
+    'cache_read_tokens',
+    'cache_creation_tokens',
+    'token_source',
+)
+
+DEFAULT_TOKEN_SOURCE = 'approximate'
+
+
+def extract_token_breakdown(context_info: dict | None) -> dict:
+    """Pick the token breakdown fields out of the SDK's context_info.
+
+    Older SDKs report only token_count / message_count / summarized; the keys
+    they omit are simply absent from the result.
+    """
+    if not context_info:
+        return {}
+    return {
+        key: context_info[key]
+        for key in TOKEN_BREAKDOWN_KEYS
+        if context_info.get(key) is not None
+    }
+
+
 def get_conversation_meta(project_id: int, conversation_id: int) -> dict:
     """Get conversation meta from database."""
     try:
@@ -93,6 +125,7 @@ def update_context_analytics_after_message_delete(
             **current_analytics,
             'current_context_tokens': ctx.get('token_count_in_context', 0),
             'messages_in_context': ctx.get('message_count', 0),
+            'token_breakdown': ctx.get('token_breakdown') or {},
         }
     else:
         updated_analytics = None
@@ -122,6 +155,8 @@ def build_context_response(
 
     utilization = (current_tokens / max_tokens) if max_tokens > 0 else 0.0
 
+    breakdown = (stored_analytics or {}).get('token_breakdown') or {}
+
     return {
         'current_tokens': current_tokens,
         'max_tokens': max_tokens,
@@ -129,6 +164,8 @@ def build_context_response(
         'message_groups_in_context': messages_in_context,
         'strategy_name': strategy_name,
         'summary_count': summary_count,
+        'token_source': breakdown.get('token_source', DEFAULT_TOKEN_SOURCE),
+        'token_breakdown': breakdown,
         'context_analytics': stored_analytics or {
             'summaries_generated': 0,
             'total_messages_summarized': 0,
