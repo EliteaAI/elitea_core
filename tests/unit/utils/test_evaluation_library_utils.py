@@ -198,6 +198,11 @@ _tools.db = types.SimpleNamespace(get_session=lambda project_id: (_ for _ in ())
 # check result per test.
 CURRENT_USER_ID = 42
 IS_PROJECT_ADMIN = True
+# The caller's own personal ("private") project id, as projects_get_personal_project_id would
+# report it. None means the caller has no personal project resolvable.
+PERSONAL_PROJECT_ID = None
+# Set to an exception instance to simulate the personal-project RPC failing.
+PERSONAL_PROJECT_RPC_ERROR = None
 
 
 class _FakeRpc:
@@ -206,6 +211,11 @@ class _FakeRpc:
 
     def admin_check_user_is_admin(self, _project_id, _user_id):
         return IS_PROJECT_ADMIN
+
+    def projects_get_personal_project_id(self, user_id):  # noqa: ARG002
+        if PERSONAL_PROJECT_RPC_ERROR is not None:
+            raise PERSONAL_PROJECT_RPC_ERROR
+        return PERSONAL_PROJECT_ID
 
 
 class _FakeRpcMixin:
@@ -303,9 +313,11 @@ def _reset_admin_flag():
     """Every tier-change test controls admin status via the module global; restore the
     default (admin) afterward so unrelated tests aren't affected by run order."""
     _self = sys.modules[__name__]
-    previous = _self.IS_PROJECT_ADMIN
+    previous = (_self.IS_PROJECT_ADMIN, _self.PERSONAL_PROJECT_ID,
+                _self.PERSONAL_PROJECT_RPC_ERROR)
     yield
-    _self.IS_PROJECT_ADMIN = previous
+    (_self.IS_PROJECT_ADMIN, _self.PERSONAL_PROJECT_ID,
+     _self.PERSONAL_PROJECT_RPC_ERROR) = previous
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +509,54 @@ def test_demote_rejected_for_non_admin(dimension):
     sys.modules[__name__].IS_PROJECT_ADMIN = False
     with pytest.raises(library.EvalDimensionTierPermissionError):
         _update(dimension, tier=EvalTier.agent_adhoc, agent_id=7)
+
+
+# --- #6669: a private project's owner holds editor/viewer/monitor and never an 'admin' role, so
+# admin_check_user_is_admin alone locked them out of tier changes in their own project.
+
+def test_private_project_owner_can_promote_without_an_admin_role(agent_adhoc_dimension):
+    _self = sys.modules[__name__]
+    _self.IS_PROJECT_ADMIN = False
+    _self.PERSONAL_PROJECT_ID = 1  # == the project_id _update() operates on
+    result, _ = _update(agent_adhoc_dimension, tier=EvalTier.project)
+    assert result.tier == EvalTier.project
+    assert result.agent_id is None
+
+
+def test_private_project_owner_can_demote_without_an_admin_role(dimension):
+    _self = sys.modules[__name__]
+    _self.IS_PROJECT_ADMIN = False
+    _self.PERSONAL_PROJECT_ID = 1
+    result, _ = _update(dimension, known_agent_ids=[7], tier=EvalTier.agent_adhoc, agent_id=7)
+    assert result.tier == EvalTier.agent_adhoc
+    assert result.agent_id == 7
+
+
+def test_non_admin_in_a_shared_project_is_still_rejected(agent_adhoc_dimension):
+    """The private-project allowance must not widen into shared projects: owning *some* personal
+    project elsewhere grants nothing in the project being edited."""
+    _self = sys.modules[__name__]
+    _self.IS_PROJECT_ADMIN = False
+    _self.PERSONAL_PROJECT_ID = 99  # caller's own project, but not this one
+    with pytest.raises(library.EvalDimensionTierPermissionError):
+        _update(agent_adhoc_dimension, tier=EvalTier.project)
+
+
+def test_admin_still_passes_when_the_personal_project_lookup_fails(agent_adhoc_dimension):
+    """Independent signals: a broken projects RPC must not revoke a real admin's authority."""
+    _self = sys.modules[__name__]
+    _self.IS_PROJECT_ADMIN = True
+    _self.PERSONAL_PROJECT_RPC_ERROR = RuntimeError('projects plugin unavailable')
+    result, _ = _update(agent_adhoc_dimension, tier=EvalTier.project)
+    assert result.tier == EvalTier.project
+
+
+def test_tier_change_fails_closed_when_both_signals_are_unavailable(agent_adhoc_dimension):
+    _self = sys.modules[__name__]
+    _self.IS_PROJECT_ADMIN = False
+    _self.PERSONAL_PROJECT_RPC_ERROR = RuntimeError('projects plugin unavailable')
+    with pytest.raises(library.EvalDimensionTierPermissionError):
+        _update(agent_adhoc_dimension, tier=EvalTier.project)
 
 
 def test_unchanged_tier_is_a_no_op_and_skips_the_admin_check(dimension):

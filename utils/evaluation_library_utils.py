@@ -77,8 +77,9 @@ class EvalDimensionDemoteMissingAgentError(EvalLibraryError):
 
 
 class EvalDimensionTierPermissionError(EvalLibraryError):
-    """Promoting/demoting a dimension's tier requires project-admin, distinct from the
-    editor-level permission that authorizes a routine field edit."""
+    """Promoting/demoting a dimension's tier requires project-admin (or ownership of the private
+    project it lives in), distinct from the editor-level permission that authorizes a routine
+    field edit."""
     http_status = 403
 
     def __init__(self):
@@ -257,6 +258,28 @@ def _is_project_admin(project_id: int, user_id: int) -> bool:
         return False
 
 
+def _is_own_personal_project(project_id: int, user_id: int) -> bool:
+    """A private project's owner is provisioned with editor/viewer/monitor and no admin role
+    (``projects.create_personal_project``), so ``_is_project_admin`` can never pass there."""
+    try:
+        personal_id = rpc_tools.RpcMixin().rpc.timeout(5).projects_get_personal_project_id(
+            user_id=user_id)
+    except Exception:  # pylint: disable=W0703
+        log.warning('eval dimension tier change: projects_get_personal_project_id failed',
+                    exc_info=True)
+        return False
+    return personal_id is not None and int(personal_id) == int(project_id)
+
+
+def _can_change_tier(project_id: int, user_id: int) -> bool:
+    """Independent signals, mirroring ``configurations.tracing_access.can_manage_tracing``: a
+    failing role lookup must not also revoke a private-project owner's authority over their own
+    project. Tier only scopes a dimension's visibility *between agents in a project*, so in a
+    single-member project there is nobody for the admin gate to protect."""
+    return (_is_project_admin(project_id, user_id)
+            or _is_own_personal_project(project_id, user_id))
+
+
 def _agent_exists(s, agent_id: int) -> bool:
     return s.query(Application.id).filter(Application.id == agent_id).first() is not None
 
@@ -299,7 +322,7 @@ def update_dimension(
             # is unreachable here: EvalDimensionUpdateModel only accepts project/agent_adhoc,
             # and the current-tier == platform case already raised above.
             caller_id = auth.current_user().get('id')
-            if not _is_project_admin(project_id, caller_id):
+            if not _can_change_tier(project_id, caller_id):
                 raise EvalDimensionTierPermissionError()
 
             if new_tier == EvalTier.project:
