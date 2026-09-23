@@ -22,9 +22,50 @@ an arbiter hop and an indexer worker to be refused on its first LLM call. The in
 gate in the usage plugin stays the authority.
 """
 
+import yaml
+
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 from tools import context  # pylint: disable=E0401
+
+# Pipeline node types that never reach an LLM. Anything else (llm, decision, agent, toolkit,
+# subgraph, custom, ...) or an unknown type keeps the door check.
+LLM_FREE_NODE_TYPES = frozenset({"code", "router", "state_modifier", "printer", "hitl"})
+
+
+def dispatch_may_use_llm(call_kwargs: dict) -> bool:
+    """False only for a pipeline whose every node is provably LLM-free; True when in doubt."""
+    payload = call_kwargs.get("kwargs") or {}
+    if (payload.get("next_input_suggestion") or {}).get("enabled"):
+        return True
+    #
+    version_details = (payload.get("application") or {}).get("version_details") or {}
+    if version_details:
+        return schema_may_use_llm(version_details.get("agent_type"), version_details.get("instructions"))
+    # REST predicts ship no version_details (the SDK refetches the version), so the call
+    # site computes this from the stored version and stamps it into the task meta
+    return (call_kwargs.get("meta") or {}).get("llm_free") is not True
+
+
+def schema_may_use_llm(agent_type, instructions) -> bool:
+    """False only for a pipeline schema whose every node is provably LLM-free."""
+    if agent_type != "pipeline":
+        return True
+    #
+    try:
+        schema = yaml.safe_load(instructions or "")
+    except Exception:  # pylint: disable=W0703
+        return True
+    nodes = schema.get("nodes") if isinstance(schema, dict) else None
+    if not isinstance(nodes, list) or not nodes:
+        return True
+    #
+    return any(
+        not isinstance(node, dict)
+        or node.get("type") not in LLM_FREE_NODE_TYPES
+        or node.get("decision")  # a decision edge on any node is an LLM call
+        for node in nodes
+    )
 
 
 def dispatch_owner(call_kwargs: dict):

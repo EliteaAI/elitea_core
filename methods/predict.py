@@ -9,6 +9,7 @@ from tools import VaultClient, db, serialize
 from ..models.pd.chat import ApplicationChatRequest, ContextStrategyModel
 from ..utils.predict_utils import generate_predict_payload, load_context_settings_from_conversation, user_input_preview
 from ..models.all import ApplicationVersion
+from ..utils.budget_door import schema_may_use_llm
 from ..utils.utils import verify_signature
 from ..utils.exceptions import VerifySignatureError, PoolSaturationError
 from ..utils.sio_utils import SioEvents
@@ -84,6 +85,7 @@ class Method:
                         f"was not found its settings, please provide it in request"
                 }
 
+            llm_free = not schema_may_use_llm(application_version.agent_type, application_version.instructions)
             application_version.project_id = project_id  # compatibility with pd model
             application_version_pd = ApplicationChatRequest.from_orm(
                 application_version
@@ -122,6 +124,7 @@ class Method:
                 # Pure REST predict (webhook / async / blocking API) — never has a
                 # Socket.IO consumer, so suppress streaming/UI-only events.
                 'non_interactive': True,
+                'llm_free': llm_free,
             }
         )
 
