@@ -619,7 +619,7 @@ class Module(module.ModuleModel):
 
         def _maintenance_gated_start_task(*args, **kwargs):
             from .utils.maintenance_gate import is_maintenance_active
-            from .utils.budget_door import closed_budget_scope, dispatch_owner
+            from .utils.budget_door import closed_budget_scope, dispatch_may_use_llm, dispatch_owner
             from .utils.exceptions import BudgetDoorClosedError, MaintenanceInProgressError
             if is_maintenance_active():
                 task_name = args[0] if args else kwargs.get("task_name") or "?"
@@ -631,7 +631,10 @@ class Module(module.ModuleModel):
             # Advisory door check: read-only, fails open, and reserves nothing — the
             # inference-plane gate remains the authority on what may be spent
             project_id, owner_id = dispatch_owner(kwargs)
-            closed_scope = closed_budget_scope(project_id, owner_id)
+            closed_scope = (
+                closed_budget_scope(project_id, owner_id)
+                if dispatch_may_use_llm(kwargs) else None
+            )
             if closed_scope is not None:
                 log.info(
                     "task_node.start_task: rejected — %s budget exhausted (project=%s)",

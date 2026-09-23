@@ -173,6 +173,101 @@ class TestDispatchOwner(unittest.TestCase):
         self.assertEqual(module.dispatch_owner({"pool": "indexer"}), (None, None))
 
 
+def pipeline_dispatch(instructions, agent_type="pipeline", suggestion=False):
+    return {"kwargs": {
+        "application": {"version_details": {"agent_type": agent_type, "instructions": instructions}},
+        "next_input_suggestion": {"enabled": suggestion},
+    }}
+
+
+CODE_ONLY = """
+entry_point: Code 1
+nodes:
+  - id: Code 1
+    type: code
+    transition: Format
+  - id: Format
+    type: state_modifier
+    transition: END
+"""
+
+
+class TestDispatchMayUseLlm(unittest.TestCase):
+    """Only a provably LLM-free pipeline may skip the door; every doubt keeps the check."""
+
+    def test_a_code_and_state_modifier_pipeline_skips_the_door(self):
+        module, _ = door()
+        #
+        self.assertFalse(module.dispatch_may_use_llm(pipeline_dispatch(CODE_ONLY)))
+
+    def test_an_llm_node_keeps_the_door(self):
+        module, _ = door()
+        #
+        yaml_text = CODE_ONLY + "  - id: Ask\n    type: llm\n"
+        self.assertTrue(module.dispatch_may_use_llm(pipeline_dispatch(yaml_text)))
+
+    def test_a_decision_edge_on_a_code_node_keeps_the_door(self):
+        module, _ = door()
+        #
+        yaml_text = "nodes:\n  - id: A\n    type: code\n    decision:\n      nodes: [B]\n"
+        self.assertTrue(module.dispatch_may_use_llm(pipeline_dispatch(yaml_text)))
+
+    def test_a_subgraph_node_keeps_the_door(self):
+        module, _ = door()
+        #
+        yaml_text = "nodes:\n  - id: A\n    type: subgraph\n"
+        self.assertTrue(module.dispatch_may_use_llm(pipeline_dispatch(yaml_text)))
+
+    def test_next_input_suggestion_keeps_the_door(self):
+        module, _ = door()
+        #
+        self.assertTrue(module.dispatch_may_use_llm(pipeline_dispatch(CODE_ONLY, suggestion=True)))
+
+    def test_an_agent_keeps_the_door(self):
+        module, _ = door()
+        #
+        self.assertTrue(module.dispatch_may_use_llm(pipeline_dispatch(CODE_ONLY, agent_type="react")))
+
+    def test_broken_or_empty_yaml_keeps_the_door(self):
+        module, _ = door()
+        #
+        for yaml_text in ("nodes: [", "", "nodes: []", "just a string"):
+            self.assertTrue(module.dispatch_may_use_llm(pipeline_dispatch(yaml_text)), yaml_text)
+
+    def test_a_non_predict_dispatch_keeps_the_door(self):
+        module, _ = door()
+        #
+        self.assertTrue(module.dispatch_may_use_llm({"kwargs": {"code": "print(1)"}}))
+
+    def test_a_rest_predict_without_version_details_trusts_the_stamped_meta(self):
+        module, _ = door()
+        #
+        rest = {"kwargs": {"application": {"id": 1, "version_details": {}}}, "meta": {"llm_free": True}}
+        self.assertFalse(module.dispatch_may_use_llm(rest))
+        rest["meta"]["llm_free"] = False
+        self.assertTrue(module.dispatch_may_use_llm(rest))
+
+    def test_version_details_win_over_the_meta_flag(self):
+        module, _ = door()
+        #
+        dispatch = pipeline_dispatch(CODE_ONLY + "  - id: Ask\n    type: llm\n")
+        dispatch["meta"] = {"llm_free": True}
+        self.assertTrue(module.dispatch_may_use_llm(dispatch))
+
+    def test_next_input_suggestion_beats_the_meta_flag(self):
+        module, _ = door()
+        #
+        dispatch = {"kwargs": {"next_input_suggestion": {"enabled": True}}, "meta": {"llm_free": True}}
+        self.assertTrue(module.dispatch_may_use_llm(dispatch))
+
+    def test_the_schema_helper_matches_the_stored_version_columns(self):
+        module, _ = door()
+        #
+        self.assertFalse(module.schema_may_use_llm("pipeline", CODE_ONLY))
+        self.assertTrue(module.schema_may_use_llm("react", CODE_ONLY))
+        self.assertTrue(module.schema_may_use_llm("pipeline", None))
+
+
 class TestErrorContract(unittest.TestCase):
     """The refusal has to be recognisable as the same budget refusal the proxy returns."""
 
