@@ -7,6 +7,7 @@ is dropped (never the draft), and a single surviving pair is mirrored onto the o
 import importlib.util
 import pathlib
 import sys
+import types
 
 import pytest
 
@@ -14,17 +15,29 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE_NAME = 'eval_draft_target_utils_test'
 
 
+def _pylon_stubs():
+    noop = lambda *a, **k: None  # noqa: E731
+    pylon_tools = types.ModuleType('pylon.core.tools')
+    pylon_tools.log = types.SimpleNamespace(
+        info=noop, warning=noop, error=noop, debug=noop, exception=noop)
+    pylon_core = types.ModuleType('pylon.core')
+    pylon_core.tools = pylon_tools
+    pylon = types.ModuleType('pylon')
+    pylon.core = pylon_core
+    return {'pylon': pylon, 'pylon.core': pylon_core, 'pylon.core.tools': pylon_tools}
+
+
 @pytest.fixture(scope='module')
 def sanitize():
-    spec = importlib.util.spec_from_file_location(
-        MODULE_NAME, PLUGIN_ROOT / 'utils' / 'eval_draft_target_utils.py')
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[MODULE_NAME] = module
-    try:
+    with pytest.MonkeyPatch.context() as mp:
+        for name, stub in _pylon_stubs().items():
+            mp.setitem(sys.modules, name, stub)
+        spec = importlib.util.spec_from_file_location(
+            MODULE_NAME, PLUGIN_ROOT / 'utils' / 'eval_draft_target_utils.py')
+        module = importlib.util.module_from_spec(spec)
+        mp.setitem(sys.modules, MODULE_NAME, module)
         spec.loader.exec_module(module)
         yield module.sanitize_draft_target
-    finally:
-        sys.modules.pop(MODULE_NAME, None)
 
 
 def _run(sanitize, **item):
