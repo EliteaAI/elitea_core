@@ -3491,6 +3491,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         try:
             if project_id_filter is not None:
+                all_projects = self.context.rpc_manager.call.project_list(
+                    filter_={"create_success": True}
+                ) or []
+                if not any(p["id"] == project_id_filter for p in all_projects):
+                    log.error(
+                        "migrate_project_chat_config: project_id %s does not exist",
+                        project_id_filter,
+                    )
+                    return {"error": f"project_id {project_id_filter} does not exist"}
                 projects = [{"id": project_id_filter}]
             else:
                 projects = self.context.rpc_manager.call.project_list(

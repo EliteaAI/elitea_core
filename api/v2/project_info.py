@@ -6,6 +6,31 @@ from ...models.pd.chat_config import ProjectChatConfig
 from ...utils.constants import PROMPT_LIB_MODE
 
 
+def _upsert_project_config(rpc, project_id, config_type, elitea_title, label, data_key, value):
+    """Create or update a single-record project configuration entry."""
+    existing = rpc.configurations_get_first_filtered_project(
+        project_id=project_id,
+        filter_fields={"type": config_type, "elitea_title": elitea_title},
+    )
+    if existing is None:
+        result, _ = rpc.configurations_create_if_not_exists(
+            payload={
+                "project_id": project_id,
+                "elitea_title": elitea_title,
+                "label": label,
+                "type": config_type,
+                "data": {data_key: value},
+            }
+        )
+    else:
+        result = rpc.configurations_update(
+            project_id=project_id,
+            config_id=existing["id"],
+            payload={"data": {data_key: value}},
+        )
+    return result
+
+
 class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(
         {
@@ -73,67 +98,32 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         response = {}
 
-        # --- icon_meta ---
         if 'icon_meta' in raw:
             raw_icon_meta = raw.get("icon_meta")
             icon_meta = IconMeta.model_validate(raw_icon_meta).model_dump() if raw_icon_meta else None
-
-            config = rpc.configurations_get_first_filtered_project(
-                project_id=project_id,
-                filter_fields={"type": "project_icon", "elitea_title": f"project_icon_{project_id}"},
+            result = _upsert_project_config(
+                rpc, project_id,
+                config_type="project_icon",
+                elitea_title=f"project_icon_{project_id}",
+                label="Project Icon",
+                data_key="icon_meta",
+                value=icon_meta,
             )
-
-            if config is None:
-                result, _ = rpc.configurations_create_if_not_exists(
-                    payload={
-                        "project_id": project_id,
-                        "elitea_title": f"project_icon_{project_id}",
-                        "label": "Project Icon",
-                        "type": "project_icon",
-                        "data": {"icon_meta": icon_meta},
-                    }
-                )
-            else:
-                result = rpc.configurations_update(
-                    project_id=project_id,
-                    config_id=config["id"],
-                    payload={"data": {"icon_meta": icon_meta}},
-                )
-
             updated_icon_meta = None
             if result and result.get("data"):
                 updated_icon_meta = result["data"].get("icon_meta")
             response["icon_meta"] = updated_icon_meta
 
-        # --- chat_config ---
         if 'chat_config' in raw:
             validated_chat_config = ProjectChatConfig.model_validate(raw["chat_config"]).model_dump()
-
-            chat_cfg = rpc.configurations_get_first_filtered_project(
-                project_id=project_id,
-                filter_fields={
-                    "type": "project_chat_config",
-                    "elitea_title": f"project_chat_config_{project_id}",
-                },
+            _upsert_project_config(
+                rpc, project_id,
+                config_type="project_chat_config",
+                elitea_title=f"project_chat_config_{project_id}",
+                label="Chat Default Configuration",
+                data_key="chat_config",
+                value=validated_chat_config,
             )
-
-            if chat_cfg is None:
-                rpc.configurations_create_if_not_exists(
-                    payload={
-                        "project_id": project_id,
-                        "elitea_title": f"project_chat_config_{project_id}",
-                        "label": "Chat Default Configuration",
-                        "type": "project_chat_config",
-                        "data": {"chat_config": validated_chat_config},
-                    }
-                )
-            else:
-                rpc.configurations_update(
-                    project_id=project_id,
-                    config_id=chat_cfg["id"],
-                    payload={"data": {"chat_config": validated_chat_config}},
-                )
-
             response["chat_config"] = validated_chat_config
 
         return response, 200
