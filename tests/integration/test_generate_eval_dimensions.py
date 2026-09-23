@@ -269,13 +269,15 @@ def _install_package():
     }.items():
         sys.modules[name] = mod
 
-    # Loaded for real (no relative imports of its own) — it owns this endpoint's failure reporting
-    draft_llm_utils_name = f'{PKG}.utils.draft_llm_utils'
-    draft_spec = importlib.util.spec_from_file_location(
-        draft_llm_utils_name, PLUGIN_ROOT / 'utils' / 'draft_llm_utils.py')
-    draft_module = importlib.util.module_from_spec(draft_spec)
-    sys.modules[draft_llm_utils_name] = draft_module
-    draft_spec.loader.exec_module(draft_module)
+    # Loaded for real (no relative imports of their own) — draft_llm_utils owns this endpoint's
+    # failure reporting, eval_draft_target_utils what the caller gets back as a target
+    for util_name in ('draft_llm_utils', 'eval_draft_target_utils'):
+        full_util = f'{PKG}.utils.{util_name}'
+        util_spec = importlib.util.spec_from_file_location(
+            full_util, PLUGIN_ROOT / 'utils' / f'{util_name}.py')
+        util_module = importlib.util.module_from_spec(util_spec)
+        sys.modules[full_util] = util_module
+        util_spec.loader.exec_module(util_module)
 
     full = f'{PKG}.api.v2.generate_eval_dimensions'
     spec = importlib.util.spec_from_file_location(
@@ -569,6 +571,45 @@ def test_project_tier_draft_carries_no_agent_id(api):
     assert status == 200
     assert payload['dimensions'][0]['tier'] == 'project'
     assert payload['dimensions'][0]['agent_id'] is None
+
+
+def _post_single_draft(api, **fields):
+    module, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    draft = {'dimensions': [dict(_VALID_DRAFT['dimensions'][0], **fields)]}
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(draft)))
+    return handler.post(1)
+
+
+def test_proposed_target_reaches_both_the_dimension_and_the_binding(api):
+    payload, status = _post_single_draft(api, default_target=80, default_target_operator='>=')
+
+    assert status == 200
+    dim = payload['dimensions'][0]
+    assert (dim['default_target'], dim['default_target_operator']) == (80.0, '>=')
+    assert (dim['target'], dim['target_operator']) == (80.0, '>=')
+
+
+def test_out_of_scale_target_is_dropped_not_rejected(api):
+    """A percentage on a 1-5 scale must not cost the user the whole generation."""
+    payload, status = _post_single_draft(
+        api, scale_type='ordinal', scale_min=1, scale_max=5,
+        default_target=80, default_target_operator='>=', target=80, target_operator='>=',
+    )
+
+    assert status == 200
+    dim = payload['dimensions'][0]
+    assert dim['default_target'] is None and dim['default_target_operator'] is None
+    assert dim['target'] is None and dim['target_operator'] is None
+
+
+def test_operator_outside_the_backend_set_is_dropped_not_rejected(api):
+    """Without the sanitizer an operator like '≥' fails model validation → 422 for the whole draft."""
+    payload, status = _post_single_draft(api, default_target=80, default_target_operator='≥')
+
+    assert status == 200
+    assert payload['dimensions'][0]['default_target'] is None
 
 
 def test_validation_failure_payload_is_json_serializable(api):
