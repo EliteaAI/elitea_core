@@ -486,6 +486,9 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_eval_suite_columns", self.migrate_eval_suite_columns, group="R-2.0.6",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_project_chat_config", self.migrate_project_chat_config, group="R-2.0.7",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -992,6 +995,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_empty_conversation_starters", self.migrate_empty_conversation_starters
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_project_chat_config", self.migrate_project_chat_config
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
