@@ -52,6 +52,7 @@ from ...utils.generate_application_utils import (
     build_eval_dimensions_system_prompt,
     ServicePromptTemplateError,
 )
+from ...utils.eval_draft_target_utils import sanitize_draft_target
 from ...utils.service_prompt_utils import get_service_prompt
 from ...utils.evaluation_library_utils import list_dimensions
 from ...utils.utils import extract_json_from_text
@@ -228,6 +229,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         item["agent_id"] = req.application_id
                     else:
                         item.pop("agent_id", None)
+                    sanitize_draft_target(item)
 
         try:
             draft = GenerateEvalDimensionsResponse.model_validate(parsed)
