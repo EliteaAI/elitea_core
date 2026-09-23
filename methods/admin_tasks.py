@@ -3434,6 +3434,146 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "dry_run": dry_run,
         }
 
+    @web.method()
+    def migrate_project_chat_config(self, *args, **kwargs):
+        """Admin task (R-2.0.7): initialise project-level chat configuration records.
+
+        R-2.0.7 introduces pre-configured chat participants — a per-project setting
+        that automatically adds specific agents/pipelines when a user opens a new chat.
+        The setting is stored in the configurations plugin under type
+        'project_chat_config' using the existing Configuration table (no schema
+        changes required).
+
+        For each project that does not yet have a 'project_chat_config' record, creates
+        one with an empty participants list. Projects that already have a record (i.e.
+        an admin already saved a chat configuration via the UI) are left untouched.
+
+        Idempotent: safe to run multiple times — skips projects whose record already
+        exists.
+
+        Param format:
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - preview which projects would get a new record
+            "project_id=all"          - create missing records across all projects
+            "project_id=3;dry_run"    - dry run for project 3 only
+            "project_id=3"            - create missing record for project 3 only
+
+        Always run with dry_run first to verify expected changes.
+        """
+        import time as _time  # pylint: disable=C0415
+        from tools import db  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("migrate_project_chat_config: invalid project_id '%s'", value)
+                        return {"error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        prefix = "[DRY RUN] " if dry_run else ""
+        log.info(
+            "Starting migrate_project_chat_config (dry_run=%s, project_id_filter=%s)",
+            dry_run, project_id_filter,
+        )
+        start_ts = _time.time()
+
+        try:
+            if project_id_filter is not None:
+                all_projects = self.context.rpc_manager.call.project_list(
+                    filter_={"create_success": True}
+                ) or []
+                if not any(p["id"] == project_id_filter for p in all_projects):
+                    log.error(
+                        "migrate_project_chat_config: project_id %s does not exist",
+                        project_id_filter,
+                    )
+                    return {"error": f"project_id {project_id_filter} does not exist"}
+                projects = [{"id": project_id_filter}]
+            else:
+                projects = self.context.rpc_manager.call.project_list(
+                    filter_={"create_success": True}
+                ) or []
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_project_chat_config: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        try:
+            rpc = self.context.rpc_manager.call
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_project_chat_config: failed to access rpc_manager")
+            return {"error": "failed to access rpc_manager"}
+
+        projects_with_config = 0
+        created = 0
+        errors = 0
+
+        for project in projects:
+            project_id = project["id"]
+            try:
+                existing = rpc.configurations_get_first_filtered_project(
+                    project_id=project_id,
+                    filter_fields={
+                        "type": "project_chat_config",
+                        "elitea_title": f"project_chat_config_{project_id}",
+                    },
+                )
+                if existing is not None:
+                    projects_with_config += 1
+                    log.info(
+                        "%smigrate_project_chat_config: project %s — record already exists, skip",
+                        prefix, project_id,
+                    )
+                else:
+                    log.info(
+                        "%smigrate_project_chat_config: project %s — %s empty record",
+                        prefix, project_id,
+                        "would create" if dry_run else "creating",
+                    )
+                    if not dry_run:
+                        rpc.configurations_create_if_not_exists(
+                            payload={
+                                "project_id": project_id,
+                                "elitea_title": f"project_chat_config_{project_id}",
+                                "label": "Chat Default Configuration",
+                                "type": "project_chat_config",
+                                "data": {"chat_config": {"participants": []}},
+                            }
+                        )
+                    created += 1
+            except Exception:  # pylint: disable=W0703
+                log.exception(
+                    "%smigrate_project_chat_config: error in project %s", prefix, project_id
+                )
+                errors += 1
+
+        end_ts = _time.time()
+        log.info(
+            "%sExiting migrate_project_chat_config — already_had_config=%s %s=%s errors=%s "
+            "(duration=%ss)",
+            prefix, projects_with_config,
+            "would_create" if dry_run else "created",
+            created, errors,
+            round(end_ts - start_ts, 2),
+        )
+        return {
+            "dry_run": dry_run,
+            "already_had_config": projects_with_config,
+            "created" if not dry_run else "would_create": created,
+            "errors": errors,
+        }
+
 
 def _run_chat_cleanup_dup_msgs(  # pylint: disable=R0913,R0914
     project_id, conversation_arg, dry_run, prefix,
