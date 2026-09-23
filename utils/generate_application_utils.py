@@ -9,11 +9,11 @@ from ..models.all import Application, ApplicationVersion
 from ..models.elitea_tools import EliteATool
 from ..models.skill import Skill
 
-_MAX_TOOLKITS = 10
-_MAX_MCP = 10
+_MAX_TOOLKITS = 5
+_MAX_MCP = 5
 _MAX_AGENTS = 5
 _MAX_PIPELINES = 5
-_MAX_SKILLS = 10
+_MAX_SKILLS = 5
 _MAX_EXISTING_DIMENSIONS = 50
 
 
