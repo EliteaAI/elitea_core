@@ -542,13 +542,15 @@ def resolve_credentials(project_settings: dict, toolkit_type: str,
             )
             user_configuration = personal_configurations[0] if personal_configurations else None
         else:
-            user_configuration = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_first_filtered_project(
+            project_configurations = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_filtered_project(
                 project_id=project_id,
+                include_shared=True,
                 filter_fields={
                     'type': config_type,
                     'elitea_title': config_title
                 }
             )
+            user_configuration = project_configurations[0] if project_configurations else None
 
         if not user_configuration:
             log.warning(
