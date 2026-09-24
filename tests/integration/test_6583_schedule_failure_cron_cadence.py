@@ -476,7 +476,7 @@ class TestRetryableCredentialLookup:
             raise TimeoutError("configurations RPC timed out")
         ok, issue, retryable = self._resolve(
             index_scheduling, monkeypatch,
-            rpc=types.SimpleNamespace(configurations_get_first_filtered_project=_boom))
+            rpc=types.SimpleNamespace(configurations_get_filtered_project=_boom))
         assert ok is False
         assert "could not look up credential" in issue
         assert retryable is True
@@ -487,7 +487,7 @@ class TestRetryableCredentialLookup:
         ok, issue, retryable = self._resolve(
             index_scheduling, monkeypatch,
             rpc=types.SimpleNamespace(
-                configurations_get_first_filtered_project=lambda **kw: None))
+                configurations_get_filtered_project=lambda **kw: []))
         assert (ok, retryable) == (False, False)
         assert "no longer exists" in issue
 
@@ -508,5 +508,5 @@ class TestRetryableCredentialLookup:
         ok, issue, retryable = self._resolve(
             index_scheduling, monkeypatch,
             rpc=types.SimpleNamespace(
-                configurations_get_first_filtered_project=lambda **kw: {"id": 1}))
+                configurations_get_filtered_project=lambda **kw: [{"id": 1}]))
         assert (ok, issue, retryable) == (True, None, False)

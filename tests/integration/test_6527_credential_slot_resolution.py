@@ -35,9 +35,10 @@ class FakeRpc:
     def timeout(self, _seconds):
         return self
 
-    def configurations_get_first_filtered_project(self, project_id, filter_fields):
+    def configurations_get_filtered_project(self, project_id, include_shared, filter_fields):
         self.calls.append(("project", project_id, dict(filter_fields)))
-        return self.project_configs.get((project_id, filter_fields["elitea_title"]))
+        found = self.project_configs.get((project_id, filter_fields["elitea_title"]))
+        return [found] if found else []
 
     def configurations_get_filtered_personal(self, user_id, include_shared, filter_fields):
         self.calls.append(("personal", user_id, dict(filter_fields)))
