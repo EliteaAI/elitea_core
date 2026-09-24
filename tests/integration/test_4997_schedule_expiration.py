@@ -717,3 +717,116 @@ class TestTickWiring:
         assert "'expired': 0" in source, "the counter must be initialised, not conditional"
         assert "expired={stats['expired']}" in source, \
             "the per-tick summary must report retirements"
+
+
+class TestAdminOverrideForTesting:
+    """``set_index_schedule_expiration`` lets QA see a 90-day window end in minutes.
+
+    It only writes a deadline; the tick does everything else. So the property that matters is
+    that the written entry looks exactly like a fresh deadline to the real tick: warnings
+    re-armed and the retirement mark cleared. Otherwise the override would test a state
+    production never reaches.
+    """
+
+    @pytest.fixture
+    def override(self, index_scheduling, monkeypatch):
+        monkeypatch.setattr(index_scheduling, "flag_modified", lambda *a, **k: None)
+        return index_scheduling.override_schedule_expiration
+
+    NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+
+    def test_the_deadline_is_minutes_from_now(self, override):
+        toolkit = _toolkit(expires_at="2026-12-01T00:00:00+00:00")
+        session = FakeSession()
+        result = override(session, toolkit, "docs", 5, now=self.NOW)
+        expected = (self.NOW + timedelta(minutes=5)).isoformat()
+        assert result == {"updated": {"7": expected}, "skipped": {}}
+        assert _entry(toolkit)["expires_at"] == expected
+        assert session.commits == 1
+
+    def test_spent_warnings_and_the_retirement_mark_are_reset(self, override):
+        toolkit = _toolkit(notified_expiry_warnings=["24h", "7d"], expired=True)
+        override(FakeSession(), toolkit, "docs", 5, now=self.NOW)
+        assert _entry(toolkit)["notified_expiry_warnings"] == []
+        assert _entry(toolkit)["expired"] is False
+
+    def test_the_rest_of_the_schedule_is_untouched(self, override):
+        toolkit = _toolkit()
+        before = dict(_entry(toolkit))
+        override(FakeSession(), toolkit, "docs", 5, now=self.NOW)
+        after = _entry(toolkit)
+        for key in ("cron", "enabled", "created_by", "last_run"):
+            assert after[key] == before[key]
+
+    def test_a_disabled_schedule_is_skipped_not_revived(self, override):
+        """The tick ignores disabled schedules, so a deadline written there would never fire —
+        and re-enabling it from here would bypass the renewal a real user goes through."""
+        toolkit = _toolkit(enabled=False, expires_at="2026-12-01T00:00:00+00:00")
+        session = FakeSession()
+        result = override(session, toolkit, "docs", 5, now=self.NOW)
+        assert result["updated"] == {}
+        assert "7" in result["skipped"]
+        assert _entry(toolkit)["enabled"] is False
+        assert _entry(toolkit)["expires_at"] == "2026-12-01T00:00:00+00:00"
+        assert session.commits == 0
+
+    def test_a_named_user_is_matched_against_string_keys(self, override):
+        """JSONB returns schedule keys as strings; the admin param arrives parsed as an int."""
+        toolkit = _toolkit(user="-1")
+        result = override(FakeSession(), toolkit, "docs", 5, user_id=-1, now=self.NOW)
+        assert list(result["updated"]) == ["-1"]
+
+    def test_without_a_user_every_schedule_of_the_index_moves(self, override):
+        toolkit = _toolkit()
+        toolkit.meta["indexes_meta"]["docs"]["schedules"]["-1"] = {
+            "cron": "0 4 * * *", "enabled": True, "created_by": 9}
+        result = override(FakeSession(), toolkit, "docs", 5, now=self.NOW)
+        assert sorted(result["updated"]) == ["-1", "7"]
+
+    def test_an_unknown_index_or_user_is_an_error(self, override):
+        with pytest.raises(ValueError, match="not found"):
+            override(FakeSession(), _toolkit(), "nope", 5, now=self.NOW)
+        with pytest.raises(ValueError, match="existing schedule keys"):
+            override(FakeSession(), _toolkit(), "docs", 5, user_id=99, now=self.NOW)
+
+    def test_negative_minutes_are_rejected(self, override):
+        with pytest.raises(ValueError):
+            override(FakeSession(), _toolkit(), "docs", -1, now=self.NOW)
+
+    def test_the_real_tick_warns_then_retires(self, override, expiry):
+        """End to end with the production helper: override to 5 minutes, then one tick inside
+        the window and one after it."""
+        call, sent = expiry
+        toolkit = _toolkit(expires_at="2026-12-01T00:00:00+00:00",
+                           notified_expiry_warnings=["7d"])
+        override(FakeSession(), toolkit, "docs", 5, now=self.NOW)
+
+        assert call(toolkit, now=self.NOW + timedelta(minutes=1)) is False
+        assert len(sent) == 1 and sent[0]["expired"] is False
+        assert "24 hours" in sent[0]["message"], "only the tightest crossed warning is sent"
+
+        assert call(toolkit, now=self.NOW + timedelta(minutes=6)) is True
+        assert _entry(toolkit)["enabled"] is False and _entry(toolkit)["expired"] is True
+        assert len(sent) == 2 and sent[1]["expired"] is True
+
+    def test_just_under_a_week_sends_the_week_warning(self, override, expiry):
+        call, sent = expiry
+        toolkit = _toolkit()
+        override(FakeSession(), toolkit, "docs", 7 * 24 * 60 - 1, now=self.NOW)
+        call(toolkit, now=self.NOW + timedelta(seconds=30))
+        assert len(sent) == 1 and "7 days" in sent[0]["message"]
+
+    def test_an_override_mid_tick_wins_over_the_tick(self, index_scheduling, override, expiry):
+        """The tick's writes are conditional on the deadline it read. An override changes that
+        deadline, so a tick already holding the old one must abandon its retirement."""
+        call, sent = expiry
+        toolkit = _toolkit(expires_at="2026-09-01T00:00:00+00:00")
+
+        def override_during_refresh(tk):
+            tk.meta["indexes_meta"]["docs"]["schedules"]["7"]["expires_at"] = \
+                (self.NOW + timedelta(days=1)).isoformat()
+
+        assert call(toolkit, session=FakeSession(on_refresh=override_during_refresh),
+                    now=self.NOW) is False
+        assert _entry(toolkit)["enabled"] is True
+        assert sent == []

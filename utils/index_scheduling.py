@@ -333,6 +333,61 @@ def handle_schedule_expiry(project_session, toolkit, index_meta_id, user_id, ctx
     return False
 
 
+def override_schedule_expiration(project_session, toolkit, index_meta_id, minutes: int,
+                                 user_id: str | None = None,
+                                 now: datetime | None = None) -> dict:
+    """Move schedule deadlines to ``minutes`` from now, so expiry can be tested in real time.
+
+    The real windows are 90 and 180 days, and the tick only acts on a stored deadline, so
+    writing one is enough to walk a schedule through both warnings and retirement exactly as
+    production would — no scaled clock, no second code path in the tick.
+
+    The entry is left in the state a fresh save produces for that deadline: warnings re-armed
+    and the retirement mark cleared, so the tick treats it as a new deadline rather than one
+    whose notices were already spent. ``enabled`` is not touched. The tick ignores disabled
+    schedules, so those are reported as skipped; switching one back on in the UI is a renewal
+    that reprices it to the full window, after which this can be run again.
+
+    ``user_id`` is the schedule key (``-1`` for a team schedule); omitted, every schedule of
+    the index is moved. Returns ``{'updated': {user_id: expires_at}, 'skipped': {user_id:
+    reason}}``. Raises ValueError when the index or the named schedule does not exist.
+    """
+    if minutes < 0:
+        raise ValueError(f"minutes must be >= 0, got {minutes}")
+    now = now or datetime.now(UTC)
+    expires_at = (now + timedelta(minutes=minutes)).isoformat()
+
+    # Same rule as _write_schedule_fields: refresh rebinds toolkit.meta, so read after it.
+    project_session.refresh(toolkit)
+    index_entry = (toolkit.meta or {}).get('indexes_meta', {}).get(index_meta_id)
+    if index_entry is None:
+        raise ValueError(f"index {index_meta_id!r} not found in toolkit {toolkit.id}")
+    schedules = index_entry.get('schedules') or {}
+    if user_id is not None:
+        # Keys come back from JSONB as strings whatever type they were written with.
+        if str(user_id) not in schedules:
+            raise ValueError(
+                f"no schedule for user {user_id} on index {index_meta_id!r}; "
+                f"existing schedule keys: {sorted(schedules)}")
+        targets = [str(user_id)]
+    else:
+        targets = list(schedules)
+
+    result = {'updated': {}, 'skipped': {}}
+    for key in targets:
+        entry = schedules[key]
+        if not entry.get('enabled', True):
+            result['skipped'][key] = "schedule is disabled; switch it on first"
+            continue
+        entry.update({'expires_at': expires_at, 'notified_expiry_warnings': [], 'expired': False})
+        result['updated'][key] = expires_at
+
+    if result['updated']:
+        flag_modified(toolkit, 'meta')
+        project_session.commit()
+    return result
+
+
 # Settings slots that never hold toolkit credentials, so they must not be mistaken
 # for the credential slot when the toolkit type does not match its settings key.
 _NON_CREDENTIAL_CONFIG_KEYS = frozenset({

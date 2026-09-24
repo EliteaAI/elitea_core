@@ -467,6 +467,9 @@ class Module(module.ModuleModel):
                 "reassign_skill_category", self.reassign_skill_category,
             )
             this.for_module("admin").module.register_admin_task(
+                "set_index_schedule_expiration", self.set_index_schedule_expiration,
+            )
+            this.for_module("admin").module.register_admin_task(
                 "migrate_share_token_columns", self.migrate_share_token_columns, group="R-2.0.6",
             )
             this.for_module("admin").module.register_admin_task(
@@ -1001,6 +1004,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "migrate_project_chat_config", self.migrate_project_chat_config
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "set_index_schedule_expiration", self.set_index_schedule_expiration
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
