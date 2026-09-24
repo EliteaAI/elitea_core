@@ -79,6 +79,45 @@ def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> No
         log.exception("%s: stop_task failed for %s", label, task_id)
 
 
+def _report_budget_door_closed(
+    module, budget_error, parsed, payload: dict, chat_project_id: Optional[int],
+    sio_event, start_event_content: Optional[dict],
+) -> None:
+    # Replays what the indexer sends for an in-run budget refusal (start, exception, persist),
+    # since a closed door never dispatches the task
+    module.stream_response(sio_event, {
+        'type': 'start_task',
+        'stream_id': parsed.stream_id,
+        'message_id': parsed.message_id,
+        'sio_event': f'{sio_event}',
+        'content': {'task_id': None, **(start_event_content or {})},
+        'interaction_uuid': parsed.interaction_uuid,
+    })
+    module.stream_response(sio_event, {
+        'type': 'agent_exception',
+        'stream_id': parsed.stream_id,
+        'message_id': parsed.message_id,
+        'sio_event': f'{sio_event}',
+        'content': budget_error.message,
+        'response_metadata': {
+            'human_readable': budget_error.message,
+            'budget_error_code': budget_error.code,
+        },
+    })
+    module.context.event_manager.fire_event('chat_message_stream_end', {
+        'message_id': parsed.message_id,
+        'content': budget_error.message,
+        'execution_generation': payload.get('execution_generation'),
+        'response_metadata': {
+            'project_id': parsed.project_id,
+            'chat_project_id': chat_project_id or parsed.project_id,
+            'is_error': True,
+            'error': budget_error.message,
+            'additional_response_meta': {'budget_error_code': budget_error.code},
+        },
+    })
+
+
 class RPC:
     @web.rpc(
         "applications_get_default_publish_validation_rules",
@@ -348,9 +387,14 @@ class RPC:
         except BudgetDoorClosedError as budget_error:
             # REST callers need the budget wire body, so only the SIO shape is translated here
             if sid:
+                _report_budget_door_closed(
+                    self, budget_error, parsed, payload, chat_project_id, sio_event, start_event_content,
+                )
+                # sid=None: the client already has the coded exception, a code-less error would override it;
+                # still raised so chat_all.py's SioValidationError cleanup runs
                 raise SioValidationError(
                     sio=self.context.sio,
-                    sid=sid,
+                    sid=None,
                     event=sio_event,
                     error=budget_error.message,
                     stream_id=parsed.stream_id,
@@ -580,9 +624,14 @@ class RPC:
         except BudgetDoorClosedError as budget_error:
             # REST callers need the budget wire body, so only the SIO shape is translated here
             if sid:
+                _report_budget_door_closed(
+                    self, budget_error, parsed, payload, chat_project_id, sio_event, start_event_content,
+                )
+                # sid=None: the client already has the coded exception, a code-less error would override it;
+                # still raised so chat_all.py's SioValidationError cleanup runs
                 raise SioValidationError(
                     sio=self.context.sio,
-                    sid=sid,
+                    sid=None,
                     event=sio_event,
                     error=budget_error.message,
                     stream_id=parsed.stream_id,
