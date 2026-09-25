@@ -2,6 +2,7 @@ import json
 
 from flask import request
 from pydantic import ValidationError
+from yaml import safe_load, YAMLError
 from tools import api_tools, auth, config as c, db, register_openapi
 
 from pylon.core.tools import log
@@ -15,7 +16,7 @@ from ...utils.constants import PROMPT_LIB_MODE
 from ...models.enums.all import ToolEntityTypes
 from ...models.enums.all import AgentTypes
 
-from ...utils.pipeline_utils import validate_yaml_from_str, from_str_to_yaml
+from ...utils.pipeline_utils import from_str_to_yaml
 from ...utils.application_tools import (
     toolkit_change_relation,
     ToolkitChangeRelationError,
@@ -234,16 +235,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 EntityToolMapping.tool_id == tool_id,
                 EntityToolMapping.entity_type == ToolEntityTypes.agent.value
             )
-            for pipeline in toolkit_pipelines_query.all():
+            toolkit_renamed = old_tool_parsed.toolkit_name != new_tool_parsed.toolkit_name
+            for pipeline in (toolkit_pipelines_query.all() if toolkit_renamed else []):
                 if not pipeline.instructions:
                     continue
 
+                # Plain parse: pipeline-level validation (e.g. reserved state vars) must not block toolkit save
                 try:
-                    instructions = validate_yaml_from_str(pipeline.instructions)
-                except Exception:
-                    return {
-                        'error': f'Invalid pipeline instructions (pipeline ID: {pipeline.application.id}, version ID: {pipeline.id})'
-                    }, 400
+                    instructions = safe_load(pipeline.instructions)
+                except YAMLError:
+                    instructions = None
+                if not isinstance(instructions, dict):
+                    log.warning(f"Skipping toolkit rename in unparseable pipeline version {pipeline.id}")
+                    continue
 
                 for node in instructions.get('nodes', []):
                     tool_names = node.get('tool_names', {})
