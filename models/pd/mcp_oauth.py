@@ -39,6 +39,7 @@ class McpOAuthTokenRequest(BaseModel):
     client_id: Optional[str] = Field(default=None, description="OAuth client ID")
     client_secret: Optional[str] = Field(default=None, description="OAuth client secret or vault reference (e.g., {{secret.my_secret}})")
     scope: Optional[str] = Field(default=None, description="OAuth scope")
+    resource: Optional[str] = Field(default=None, description="RFC 8707 resource indicator: the MCP server the token is for")
     toolkit_id: Optional[int] = Field(default=None, description="Toolkit ID to fetch credentials from DB")
     toolkit_type: Optional[str] = Field(default=None, description="Toolkit type for fetching credentials (e.g., mcp_github, etc.)")
     configuration_uuid: Optional[str] = Field(default=None, description="Configuration UUID for token storage key (frontend use only)")

@@ -193,6 +193,7 @@ class ProjectAPI(api_tools.APIModeHandler):
                     client_id=client_id,
                     client_secret=client_secret,
                     scope=scope,
+                    resource=data.resource,
                 )
                 log.debug(f"MCP OAuth proxy: token refresh successful")
                 log.debug(f"MCP OAuth proxy refresh response: has_access_token={bool(token_data.get('access_token'))}, "
@@ -226,6 +227,7 @@ class ProjectAPI(api_tools.APIModeHandler):
                 client_secret=client_secret,
                 code_verifier=data.code_verifier,
                 scope=scope,
+                resource=data.resource,
             )
             log.debug(f"MCP OAuth proxy: token exchange successful")
             log.debug(f"MCP OAuth proxy exchange response: has_access_token={bool(token_data.get('access_token'))}, "
