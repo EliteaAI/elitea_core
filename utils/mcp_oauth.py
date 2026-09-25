@@ -31,6 +31,7 @@ def exchange_token(
     client_secret: Optional[str] = None,
     code_verifier: Optional[str] = None,
     scope: Optional[str] = None,
+    resource: Optional[str] = None,
     timeout: int = 30,
 ):
     """
@@ -44,6 +45,7 @@ def exchange_token(
         client_secret: OAuth client secret (optional)
         code_verifier: PKCE code verifier (optional)
         scope: OAuth scope (optional)
+        resource: RFC 8707 resource indicator (optional)
         timeout: Request timeout in seconds
         
     Returns:
@@ -72,6 +74,8 @@ def exchange_token(
         token_body["code_verifier"] = code_verifier
     if scope:
         token_body["scope"] = scope
+    if resource:
+        token_body["resource"] = resource
 
     response = requests.post(
         token_endpoint,
@@ -102,6 +106,7 @@ def refresh_token(
     client_id: Optional[str] = None,
     client_secret: Optional[str] = None,
     scope: Optional[str] = None,
+    resource: Optional[str] = None,
     timeout: int = 30,
 ):
     """
@@ -113,6 +118,7 @@ def refresh_token(
         client_id: OAuth client ID (optional for DCR/public clients)
         client_secret: OAuth client secret (optional)
         scope: OAuth scope (optional)
+        resource: RFC 8707 resource indicator (optional)
         timeout: Request timeout in seconds
         
     Returns:
@@ -138,6 +144,8 @@ def refresh_token(
         token_body["client_secret"] = client_secret
     if scope:
         token_body["scope"] = scope
+    if resource:
+        token_body["resource"] = resource
 
     response = requests.post(
         token_endpoint,
