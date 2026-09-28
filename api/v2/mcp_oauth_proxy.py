@@ -24,7 +24,7 @@ from pylon.core.tools import log
 from ...models.elitea_tools import EliteATool
 from ...models.pd.mcp_oauth import McpOAuthTokenRequest
 from ...utils.mcp_config import is_mcp_exposure_enabled
-from ...utils.mcp_oauth import exchange_token, refresh_token
+from ...utils.mcp_oauth import exchange_token, get_oauth_configurations, pick_oauth_setting, refresh_token
 from ....configurations.utils import expand_configuration
 
 
@@ -112,54 +112,40 @@ class ProjectAPI(api_tools.APIModeHandler):
                         settings = self.module.resolve_mcp_prebuilt_settings(settings)
 
                     # Use DB/resolved credentials if not provided in request (or if request value was just a vault reference)
-                    # For SharePoint toolkit, sharepoint_configuration may be a reference to a configuration
-                    sp_config = settings.get('sharepoint_configuration', {})
-                    log.debug(f"MCP OAuth proxy: sp_config keys: {list(sp_config.keys()) if sp_config else 'None'}")
-
-                    # If sharepoint_configuration only has reference fields (elitea_title, private), expand it
-                    config_title = sp_config.get('elitea_title')
-                    if config_title and not sp_config.get('client_id'):
-                        log.debug(f"MCP OAuth proxy: expanding configuration by title: {config_title}")
-                        try:
-                            # Get user_id from auth context for private configuration lookup
-                            user_id = auth.current_user().get('id') if sp_config.get('private') else None
-                            # expand_configuration modifies sp_config in place and unsecretes the data
-                            expand_configuration(sp_config, current_project_id=project_id, user_id=user_id, unsecret=True)
-                            log.debug(f"MCP OAuth proxy: expanded configuration data, keys: {list(sp_config.keys())}")
-                        except Exception as e:
-                            log.error(f"MCP OAuth proxy: failed to expand configuration '{config_title}' - {e}")
-
-                    # For OpenAPI toolkit, credentials live inside openapi_configuration
-                    openapi_config = settings.get('openapi_configuration', {}) or {}
-                    if isinstance(openapi_config, dict):
-                        openapi_config_title = openapi_config.get('elitea_title')
-                        if openapi_config_title and not openapi_config.get('client_id'):
-                            log.debug(f"MCP OAuth proxy: expanding openapi configuration by title: {openapi_config_title}")
+                    # Delegated-OAuth toolkits (SharePoint, OpenAPI, Teams, Outlook) keep the OAuth client
+                    # in a referenced credential, e.g. {"elitea_title": ..., "private": ...}; expand it in place
+                    oauth_configs = get_oauth_configurations(settings)
+                    for oauth_config in oauth_configs:
+                        config_title = oauth_config.get('elitea_title')
+                        if config_title and not oauth_config.get('client_id'):
+                            log.debug(f"MCP OAuth proxy: expanding configuration by title: {config_title}")
                             try:
-                                user_id = auth.current_user().get('id') if openapi_config.get('private') else None
-                                expand_configuration(openapi_config, current_project_id=project_id, user_id=user_id, unsecret=True)
-                                log.debug(f"MCP OAuth proxy: expanded openapi configuration, keys: {list(openapi_config.keys())}")
+                                # Get user_id from auth context for private configuration lookup
+                                user_id = auth.current_user().get('id') if oauth_config.get('private') else None
+                                # expand_configuration modifies oauth_config in place and unsecretes the data
+                                expand_configuration(oauth_config, current_project_id=project_id, user_id=user_id, unsecret=True)
+                                log.debug(f"MCP OAuth proxy: expanded configuration data, keys: {list(oauth_config.keys())}")
                             except Exception as e:
-                                log.error(f"MCP OAuth proxy: failed to expand openapi configuration '{openapi_config_title}' - {e}")
-                    else:
-                        openapi_config = {}
+                                log.error(f"MCP OAuth proxy: failed to expand configuration '{config_title}' - {e}")
+
+                    credential_sources = [settings, *oauth_configs]
 
                     # FE always sends the DCR client_id in the same request, so the guard below
                     # is not hit in practice, but is included for symmetry with the secret guard
                     # to prevent a stale DB client_id from overwriting a DCR-registered one.
                     if not client_id and not data.used_dcr:
-                        client_id = settings.get('client_id') or sp_config.get('client_id') or openapi_config.get('client_id')
+                        client_id = pick_oauth_setting(credential_sources, 'client_id')
                     # When the client_id was obtained via DCR, the registered client is public
                     # (token_endpoint_auth_method=none). Never load a client_secret from DB in
                     # that case — sending a secret for a public client causes Aha (and others)
                     # to reject the token request with "unknown client".
                     if not client_secret and not data.used_dcr:
-                        client_secret = settings.get('client_secret') or sp_config.get('client_secret') or openapi_config.get('client_secret')
-                        log.debug(f"MCP OAuth proxy: extracted client_secret from DB: {bool(client_secret)}, preview: {client_secret[:8] if client_secret else 'None'}")
+                        client_secret = pick_oauth_setting(credential_sources, 'client_secret')
+                        log.debug(f"MCP OAuth proxy: extracted client_secret from DB: {bool(client_secret)}")
                     if not scope:
                         # Both spellings are in use: admin MCP server definitions declare `scope`,
                         # toolkit settings and configurations use `scopes`.
-                        for source in (settings, sp_config, openapi_config):
+                        for source in credential_sources:
                             scope = source.get('scopes') or source.get('scope')
                             if scope:
                                 break
