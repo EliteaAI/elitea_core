@@ -226,8 +226,8 @@ class FakeSession:
 # API handler loader
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _load_handler(session):
-    """Load api/v2/chat_templates.py with all deps stubbed.
+def _load_handler(session, module_name="chat_templates"):
+    """Load api/v2/<module_name>.py with all deps stubbed.
 
     After loading, callers patch mod.request before calling handler methods.
     """
@@ -265,7 +265,7 @@ def _load_handler(session):
         "tools.db": tools_mod.db,
     }
 
-    handler_path = os.path.join(PLUGIN_ROOT, "api", "v2", "chat_templates.py")
+    handler_path = os.path.join(PLUGIN_ROOT, "api", "v2", f"{module_name}.py")
 
     with _with_stubs(extra):
         for pkg_name in ("elitea_core", "elitea_core.api", "elitea_core.api.v2",
@@ -289,19 +289,19 @@ def _load_handler(session):
         })
 
         spec = importlib.util.spec_from_file_location(
-            "elitea_core.api.v2.chat_templates", handler_path,
+            f"elitea_core.api.v2.{module_name}", handler_path,
         )
         handler_mod = importlib.util.module_from_spec(spec)
         handler_mod.__package__ = "elitea_core.api.v2"
-        sys.modules["elitea_core.api.v2.chat_templates"] = handler_mod
+        sys.modules[f"elitea_core.api.v2.{module_name}"] = handler_mod
         spec.loader.exec_module(handler_mod)
 
     return handler_mod
 
 
-def _call(session, request_json, method, **kwargs):
+def _call(session, request_json, method, module_name="chat_templates", **kwargs):
     """Load handler, patch request, call method, return (body, status)."""
-    mod = _load_handler(session)
+    mod = _load_handler(session, module_name)
     # Patch the module-level `request` name; handler methods read it from globals
     mod.request = types.SimpleNamespace(json=request_json)
     return getattr(mod.PromptLibAPI(), method)(project_id=1, **kwargs)
@@ -443,16 +443,17 @@ class TestApiPostCreate(unittest.TestCase):
         _, status = _call(FakeSession([]), {"name": "Default"}, "post")
         self.assertEqual(status, 201)
 
-    def test_first_template_is_auto_default(self):
+    def test_first_template_is_not_auto_default(self):
         session = FakeSession([])
         _call(session, {"name": "First"}, "post")
-        self.assertTrue(session.added[0].is_default)
+        self.assertFalse(session.added[0].is_default)
 
-    def test_second_template_is_not_auto_default(self):
-        existing = [FakeChatTemplate(id=1, name="Existing", is_default=True)]
+    def test_template_created_when_none_is_default_stays_non_default(self):
+        existing = [FakeChatTemplate(id=1, name="Existing", is_default=False)]
         session = FakeSession(existing)
         _call(session, {"name": "Second"}, "post")
         self.assertFalse(session.added[0].is_default)
+        self.assertFalse(existing[0].is_default)
 
     def test_limit_5_returns_400(self):
         rows = [FakeChatTemplate(id=i, name=f"T{i}") for i in range(1, 6)]
@@ -478,30 +479,65 @@ class TestApiPostCreate(unittest.TestCase):
         self.assertEqual(status, 400)
 
 
+def _call_default(session, method, **kwargs):
+    return _call(session, {}, method, module_name="chat_template_default", **kwargs)
+
+
 class TestApiPostSetDefault(unittest.TestCase):
 
     def test_set_default_returns_200(self):
         default_tpl = FakeChatTemplate(id=1, name="Old Default", is_default=True)
         other_tpl = FakeChatTemplate(id=2, name="Other", is_default=False)
-        _, status = _call(FakeSession([default_tpl, other_tpl]), {}, "post", template_id=2)
+        _, status = _call_default(FakeSession([default_tpl, other_tpl]), "post", template_id=2)
         self.assertEqual(status, 200)
 
     def test_set_default_clears_previous(self):
         default_tpl = FakeChatTemplate(id=1, name="Old Default", is_default=True)
         other_tpl = FakeChatTemplate(id=2, name="New Default", is_default=False)
         session = FakeSession([default_tpl, other_tpl])
-        _call(session, {}, "post", template_id=2)
+        _call_default(session, "post", template_id=2)
         self.assertFalse(default_tpl.is_default)
         self.assertTrue(other_tpl.is_default)
 
     def test_set_default_idempotent_when_already_default(self):
         tpl = FakeChatTemplate(id=7, name="Default", is_default=True)
-        body, status = _call(FakeSession([tpl]), {}, "post", template_id=7)
+        body, status = _call_default(FakeSession([tpl]), "post", template_id=7)
         self.assertEqual(status, 200)
         self.assertTrue(body["is_default"])
 
     def test_set_default_not_found_returns_404(self):
-        _, status = _call(FakeSession([]), {}, "post", template_id=99)
+        _, status = _call_default(FakeSession([]), "post", template_id=99)
+        self.assertEqual(status, 404)
+
+
+class TestApiDeleteUnsetDefault(unittest.TestCase):
+
+    def test_unset_default_clears_flag(self):
+        tpl = FakeChatTemplate(id=1, name="Default", is_default=True)
+        session = FakeSession([tpl])
+        body, status = _call_default(session, "delete", template_id=1)
+        self.assertEqual(status, 200)
+        self.assertFalse(body["is_default"])
+        self.assertFalse(tpl.is_default)
+        self.assertTrue(session.committed)
+
+    def test_unset_leaves_no_default(self):
+        default_tpl = FakeChatTemplate(id=1, name="Default", is_default=True)
+        other_tpl = FakeChatTemplate(id=2, name="Other", is_default=False)
+        _call_default(FakeSession([default_tpl, other_tpl]), "delete", template_id=1)
+        self.assertFalse(default_tpl.is_default)
+        self.assertFalse(other_tpl.is_default)
+
+    def test_unset_non_default_is_noop(self):
+        tpl = FakeChatTemplate(id=2, name="Other", is_default=False)
+        session = FakeSession([tpl])
+        body, status = _call_default(session, "delete", template_id=2)
+        self.assertEqual(status, 200)
+        self.assertFalse(body["is_default"])
+        self.assertFalse(session.committed)
+
+    def test_unset_not_found_returns_404(self):
+        _, status = _call_default(FakeSession([]), "delete", template_id=99)
         self.assertEqual(status, 404)
 
 
@@ -512,10 +548,19 @@ class TestApiDelete(unittest.TestCase):
         _, status = _call(FakeSession([tpl]), {}, "delete", template_id=2)
         self.assertEqual(status, 204)
 
-    def test_delete_default_returns_400(self):
+    def test_delete_default_returns_204(self):
         tpl = FakeChatTemplate(id=1, name="Default", is_default=True)
-        _, status = _call(FakeSession([tpl]), {}, "delete", template_id=1)
-        self.assertEqual(status, 400)
+        session = FakeSession([tpl])
+        _, status = _call(session, {}, "delete", template_id=1)
+        self.assertEqual(status, 204)
+        self.assertIn(tpl, session.deleted)
+
+    def test_delete_commits(self):
+        tpl = FakeChatTemplate(id=2, name="Other", is_default=False)
+        session = FakeSession([tpl])
+        _, status = _call(session, {}, "delete", template_id=2)
+        self.assertEqual(status, 204)
+        self.assertTrue(session.committed)
 
     def test_delete_missing_returns_404(self):
         _, status = _call(FakeSession([]), {}, "delete", template_id=99)

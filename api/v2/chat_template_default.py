@@ -32,6 +32,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return result, 200
 
+    @auth.decorators.check_api({
+        "permissions": ["models.project_context.edit"],
+        "recommended_roles": {
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
+        },
+    })
+    @api_tools.endpoint_metrics
+    def delete(self, project_id: int, template_id: int, **kwargs):
+        # Unset default — a project may have no default template
+        with db.get_session(project_id) as session:
+            target = session.query(ChatTemplate).filter(ChatTemplate.id == template_id).first()
+            if not target:
+                return {'error': 'Template not found.'}, 404
+
+            if target.is_default:
+                target.is_default = False
+                session.commit()
+            result = ChatTemplateRead.model_validate(target).model_dump(mode='json')
+
+        return result, 200
+
 
 class API(api_tools.APIBase):
     url_params = api_tools.with_modes([
