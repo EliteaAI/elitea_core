@@ -784,6 +784,7 @@ class Module(module.ModuleModel):
         from .models import evaluation, eval_platform_dimension
         from .models.message_items import base, text, canvas, context
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
+        from .models import chat_template  # noqa: F401 — register ChatTemplate with db.Base.metadata
 
         self.thread = Thread(
             target=self.listen_in_memory_event

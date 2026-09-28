@@ -3436,34 +3436,38 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def migrate_project_chat_config(self, *args, **kwargs):
-        """Admin task (R-2.0.7): initialise project-level chat configuration records.
+        """Admin task (R-2.0.7): migrate legacy chat configuration to chat templates.
 
-        R-2.0.7 introduces pre-configured chat participants — a per-project setting
-        that automatically adds specific agents/pipelines when a user opens a new chat.
-        The setting is stored in the configurations plugin under type
-        'project_chat_config' using the existing Configuration table (no schema
-        changes required).
+        Two-step migration per project:
 
-        For each project that does not yet have a 'project_chat_config' record, creates
-        one with an empty participants list. Projects that already have a record (i.e.
-        an admin already saved a chat configuration via the UI) are left untouched.
+        Step 1 — Legacy config record (configurations table):
+          Ensures every project has a 'project_chat_config' record in the configurations
+          plugin. Projects that already have one are left untouched.
 
-        Idempotent: safe to run multiple times — skips projects whose record already
-        exists.
+        Step 2 — Chat templates table:
+          Seeds the new chat_templates table from the existing project_chat_config record.
+          For each project with no chat_templates rows yet, creates one "Default" template
+          (is_default=True) whose participants are mapped from the legacy format
+          (entity_id -> id). If the project has no config or an empty participant list,
+          an empty "Default" template is created so every project has at least one template.
+          Projects that already have chat_templates rows are skipped (idempotent).
+
+        Idempotent: safe to run multiple times.
 
         Param format:
             "project_id=<all|N>[;dry_run]"
 
         Examples:
-            "project_id=all;dry_run"  - preview which projects would get a new record
-            "project_id=all"          - create missing records across all projects
+            "project_id=all;dry_run"  - preview which projects would be changed
+            "project_id=all"          - run full migration across all projects
             "project_id=3;dry_run"    - dry run for project 3 only
-            "project_id=3"            - create missing record for project 3 only
+            "project_id=3"            - migrate project 3 only
 
         Always run with dry_run first to verify expected changes.
         """
         import time as _time  # pylint: disable=C0415
         from tools import db  # pylint: disable=C0415
+        from ..models.chat_template import ChatTemplate  # pylint: disable=C0415
 
         param = kwargs.get("param", "") or ""
         dry_run = False
@@ -3509,35 +3513,36 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.exception("migrate_project_chat_config: failed to list projects")
             return {"error": "failed to list projects"}
 
-        try:
-            rpc = self.context.rpc_manager.call
-        except Exception:  # pylint: disable=W0703
-            log.exception("migrate_project_chat_config: failed to access rpc_manager")
-            return {"error": "failed to access rpc_manager"}
+        rpc = self.context.rpc_manager.call
 
-        projects_with_config = 0
-        created = 0
+        # Step 1 counters
+        already_had_config = 0
+        config_created = 0
+        # Step 2 counters
+        templates_skipped = 0
+        templates_seeded = 0
         errors = 0
 
         for project in projects:
             project_id = project["id"]
             try:
-                existing = rpc.configurations_get_first_filtered_project(
+                # --- Step 1: ensure legacy config record exists ---
+                existing_cfg = rpc.configurations_get_first_filtered_project(
                     project_id=project_id,
                     filter_fields={
                         "type": "project_chat_config",
                         "elitea_title": f"project_chat_config_{project_id}",
                     },
                 )
-                if existing is not None:
-                    projects_with_config += 1
+                if existing_cfg is not None:
+                    already_had_config += 1
                     log.info(
-                        "%smigrate_project_chat_config: project %s — record already exists, skip",
+                        "%smigrate_project_chat_config: project %s — legacy config already exists",
                         prefix, project_id,
                     )
                 else:
                     log.info(
-                        "%smigrate_project_chat_config: project %s — %s empty record",
+                        "%smigrate_project_chat_config: project %s — %s empty legacy config record",
                         prefix, project_id,
                         "would create" if dry_run else "creating",
                     )
@@ -3551,7 +3556,53 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                                 "data": {"chat_config": {"participants": []}},
                             }
                         )
-                    created += 1
+                        # Re-read so Step 2 can use it
+                        existing_cfg = rpc.configurations_get_first_filtered_project(
+                            project_id=project_id,
+                            filter_fields={
+                                "type": "project_chat_config",
+                                "elitea_title": f"project_chat_config_{project_id}",
+                            },
+                        )
+                    config_created += 1
+
+                # --- Step 2: seed chat_templates from legacy config ---
+                with db.get_session(project_id) as session:
+                    existing_count = session.query(ChatTemplate).count()
+                    if existing_count > 0:
+                        log.info(
+                            "%smigrate_project_chat_config: project %s — already has %s template(s), skip step 2",
+                            prefix, project_id, existing_count,
+                        )
+                        templates_skipped += 1
+                        continue
+
+                    participants = []
+                    if existing_cfg and existing_cfg.get("data") and existing_cfg["data"].get("chat_config"):
+                        old_parts = existing_cfg["data"]["chat_config"].get("participants") or []
+                        for p in old_parts:
+                            participants.append({
+                                "id": p.get("entity_id"),
+                                "name": p.get("name"),
+                                "entity_name": p.get("entity_name"),
+                                "project_id": p.get("project_id", project_id),
+                                "agent_type": p.get("agent_type"),
+                            })
+
+                    log.info(
+                        "%smigrate_project_chat_config: project %s — %s 'Default' template with %s participant(s)",
+                        prefix, project_id,
+                        "would seed" if dry_run else "seeding",
+                        len(participants),
+                    )
+                    if not dry_run:
+                        session.add(ChatTemplate(
+                            name="Default",
+                            participants=participants,
+                            is_default=True,
+                        ))
+                    templates_seeded += 1
+
             except Exception:  # pylint: disable=W0703
                 log.exception(
                     "%smigrate_project_chat_config: error in project %s", prefix, project_id
@@ -3560,17 +3611,20 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         end_ts = _time.time()
         log.info(
-            "%sExiting migrate_project_chat_config — already_had_config=%s %s=%s errors=%s "
-            "(duration=%ss)",
-            prefix, projects_with_config,
-            "would_create" if dry_run else "created",
-            created, errors,
-            round(end_ts - start_ts, 2),
+            "%sExiting migrate_project_chat_config — already_had_config=%s config_%s=%s "
+            "templates_skipped=%s templates_%s=%s errors=%s (duration=%ss)",
+            prefix, already_had_config,
+            "would_create" if dry_run else "created", config_created,
+            templates_skipped,
+            "would_seed" if dry_run else "seeded", templates_seeded,
+            errors, round(end_ts - start_ts, 2),
         )
         return {
             "dry_run": dry_run,
-            "already_had_config": projects_with_config,
-            "created" if not dry_run else "would_create": created,
+            "already_had_config": already_had_config,
+            "config_created" if not dry_run else "config_would_create": config_created,
+            "templates_skipped": templates_skipped,
+            "templates_seeded" if not dry_run else "templates_would_seed": templates_seeded,
             "errors": errors,
         }
 

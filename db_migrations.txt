@@ -2,6 +2,19 @@
 # Try to make migrations safe to run multiple times (e.g. "IF NOT EXISTS")
 # When release tags are moved - comment with release version will be added
 
+# R-2.0.7 — Chat configuration templates
+# Run for every existing project schema {pid} (e.g. p_1, p_2, …).
+# New projects get the table via create_all() on project creation.
+CREATE TABLE IF NOT EXISTS {pid}.chat_templates (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(64) NOT NULL,
+    participants JSONB NOT NULL DEFAULT '[]'::jsonb,
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_chat_template_name_per_project UNIQUE (name)
+);
+
 # 1.7.0 -> 2.0.0-beta
 
 curl -X POST https://<url>/api/v2/elitea_core/index_meta_migration/administration \
