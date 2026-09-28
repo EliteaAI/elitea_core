@@ -42,14 +42,17 @@ def _is_analytics_enabled():
     return True
 
 
-def _cost_budgets_mode():
-    """Spend-tracking mode, or None when the usage plugin is unreachable."""
+def _usage_mode_settings():
+    """Mode plus warning-dismissibility in a single RPC hop; both live in the usage config."""
     try:
-        mode = rpc_tools.RpcMixin().rpc.timeout(5).usage_mode()
+        settings = rpc_tools.RpcMixin().rpc.timeout(5).usage_mode_settings()
     except Exception:  # pylint: disable=W0703
-        return None
+        return None, True
     #
-    return mode if mode in ("enforce", "observe") else None
+    mode = settings.get("mode")
+    return (mode if mode in ("enforce", "observe") else None), settings.get(
+        "warnings_dismissible", True
+    ) is not False
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -61,8 +64,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         Returns deployment-configured feature flags that control
         UI visibility and functionality availability.
         """
-        # Read once: both flags below describe the same mode
-        budgets_mode = _cost_budgets_mode()
+        # One RPC hop for both: mode and dismissibility live in the same usage config
+        budgets_mode, warning_dismissible = _usage_mode_settings()
         #
         return {
             "mcp_exposure_enabled": is_mcp_exposure_enabled(),
@@ -74,6 +77,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # Limits actually block. Observe mode tracks without blocking, so a warning
             # that requests are about to become unavailable would not be true there.
             "cost_budgets_enforcing": budgets_mode == "enforce",
+            "cost_budgets_warning_dismissible": warning_dismissible,
             "is_publish_blocked": getattr(this.module, 'is_publish_blocked', False),
             "publish_whitelist_project_ids": list(
                 getattr(this.module, 'publish_whitelist_project_ids', set())
