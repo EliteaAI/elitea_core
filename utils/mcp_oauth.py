@@ -23,6 +23,36 @@ import requests
 from urllib.parse import parse_qs
 
 
+# Toolkit settings keys that reference a credential carrying the OAuth client
+# (client_id / client_secret / scopes) for the delegated flow. Order is lookup priority.
+OAUTH_CONFIGURATION_KEYS = (
+    'sharepoint_configuration',
+    'openapi_configuration',
+    'teams_configuration',
+    'outlook_configuration',
+)
+
+
+def get_oauth_configurations(settings: dict) -> list:
+    """Return the OAuth credential configurations referenced by toolkit settings (same dict objects)."""
+    configs = []
+    for key in OAUTH_CONFIGURATION_KEYS:
+        config = settings.get(key)
+        if isinstance(config, dict) and config:
+            configs.append(config)
+    return configs
+
+
+def pick_oauth_setting(sources: list, *keys: str):
+    """Return the first truthy value of any of ``keys`` across ``sources``, in order."""
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if value:
+                return value
+    return None
+
+
 def exchange_token(
     token_endpoint: str,
     code: str,
