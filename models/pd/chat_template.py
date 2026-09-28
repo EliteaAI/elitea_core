@@ -10,6 +10,7 @@ class ChatTemplateParticipant(BaseModel):
     entity_name: str
     project_id: Optional[int] = None
     agent_type: Optional[str] = None
+    toolkit_type: Optional[str] = None
 
 
 class ChatTemplateCreate(BaseModel):
