@@ -3556,14 +3556,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                                 "data": {"chat_config": {"participants": []}},
                             }
                         )
-                        # Re-read so Step 2 can use it
-                        existing_cfg = rpc.configurations_get_first_filtered_project(
-                            project_id=project_id,
-                            filter_fields={
-                                "type": "project_chat_config",
-                                "elitea_title": f"project_chat_config_{project_id}",
-                            },
-                        )
+                        existing_cfg = {"data": {"chat_config": {"participants": []}}}
                     config_created += 1
 
                 # --- Step 2: seed chat_templates from legacy config ---
