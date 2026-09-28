@@ -12,7 +12,7 @@ no usage_event equivalent.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c, register_openapi
+    from tools import api_tools, auth, config as c, register_openapi, rpc_tools
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -45,7 +45,6 @@ if _API_AVAILABLE:
     def _usage_health(project_id, dt_from, dt_to):
         """llm/tool rows from usage_event (Overview's source), or None to keep audit numbers."""
         try:
-            from tools import rpc_tools  # pylint: disable=C0415,E0401
             return rpc_tools.RpcMixin().rpc.timeout(10).usage_event_type_health(
                 project_id, date_from=dt_from, date_to=dt_to,
             )
