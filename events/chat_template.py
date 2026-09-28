@@ -58,9 +58,10 @@ class Event:
         new_name = (application_data.get('data') or {}).get('name')
         if not new_name:
             return
-        update_entity_name_in_templates(
-            owner_id, _APP_ENTITY_NAMES, entity_id, owner_id, new_name
-        )
+        for project_id in _affected_projects(context, owner_id):
+            update_entity_name_in_templates(
+                project_id, _APP_ENTITY_NAMES, entity_id, owner_id, new_name
+            )
 
     @web.event(ApplicationEvents.toolkit_updated)
     def on_toolkit_updated(self, context, event, toolkit_data: dict):
@@ -69,6 +70,7 @@ class Event:
         new_name = (toolkit_data.get('data') or {}).get('name')
         if not new_name:
             return
-        update_entity_name_in_templates(
-            owner_id, _TOOLKIT_ENTITY_NAMES, entity_id, owner_id, new_name
-        )
+        for project_id in _affected_projects(context, owner_id):
+            update_entity_name_in_templates(
+                project_id, _TOOLKIT_ENTITY_NAMES, entity_id, owner_id, new_name
+            )

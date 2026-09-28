@@ -45,9 +45,10 @@ def update_entity_name_in_templates(
     try:
         with db.get_session(project_id) as session:
             templates = session.query(ChatTemplate).all()
-            changed = False
+            any_changed = False
             for template in templates:
                 updated = []
+                template_changed = False
                 for p in list(template.participants or []):
                     if (
                         p.get('entity_name') in entity_names
@@ -55,11 +56,12 @@ def update_entity_name_in_templates(
                         and p.get('project_id') == entity_project_id
                     ):
                         p = {**p, 'name': new_name}
-                        changed = True
+                        template_changed = True
                     updated.append(p)
-                if changed:
+                if template_changed:
                     template.participants = updated
-            if changed:
+                    any_changed = True
+            if any_changed:
                 session.commit()
     except Exception:  # pylint: disable=broad-except
         log.exception(

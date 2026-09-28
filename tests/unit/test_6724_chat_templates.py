@@ -4,6 +4,8 @@ Covers:
   1. Pydantic model validation — ChatTemplateCreate / Update / Read
   2. API handler business logic — template limits, name uniqueness, default guards
   3. Migration task — participant field remapping, idempotency, dry-run
+  4. chat_template_utils — delete and update helpers
+  5. Event handlers — _affected_projects scope, delete/rename propagation
 
 Run standalone: python3 tests/unit/test_6724_chat_templates.py
 """
@@ -799,6 +801,305 @@ class TestMigrationEmptyParticipants(unittest.TestCase):
         _load_migration_fn(rpc, {1: session})(param="project_id=1")
 
         self.assertEqual(session.added[0].participants, [])
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. chat_template_utils — delete and update helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _load_utils_fns(sessions):
+    """Load utils/chat_template_utils.py with stubs; return (delete_fn, update_fn)."""
+    @contextlib.contextmanager
+    def get_session(project_id):
+        yield sessions.get(project_id, FakeSession([]))
+
+    tools_mod = types.ModuleType("tools")
+    tools_mod.db = types.SimpleNamespace(get_session=get_session)
+
+    ct_orm_mod = types.ModuleType("elitea_core.models.chat_template")
+    ct_orm_mod.ChatTemplate = FakeChatTemplate
+
+    stubs = {
+        **_pylon_stubs(),
+        "tools": tools_mod,
+        "tools.db": tools_mod.db,
+        "elitea_core.models.chat_template": ct_orm_mod,
+    }
+
+    path = os.path.join(PLUGIN_ROOT, "utils", "chat_template_utils.py")
+    saved = {k: sys.modules.get(k) for k in stubs}
+    sys.modules.update(stubs)
+
+    for pkg in ("elitea_core", "elitea_core.models", "elitea_core.utils"):
+        if pkg not in sys.modules:
+            m = types.ModuleType(pkg)
+            m.__path__ = [PLUGIN_ROOT]
+            sys.modules[pkg] = m
+
+    sys.modules["elitea_core.models.chat_template"] = ct_orm_mod
+
+    spec = importlib.util.spec_from_file_location(
+        "elitea_core.utils.chat_template_utils", path,
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "elitea_core.utils"
+    sys.modules["elitea_core.utils.chat_template_utils"] = mod
+    spec.loader.exec_module(mod)
+
+    for k, v in saved.items():
+        if v is None:
+            sys.modules.pop(k, None)
+        else:
+            sys.modules[k] = v
+
+    return mod.delete_entity_from_templates, mod.update_entity_name_in_templates
+
+
+class TestDeleteEntityFromTemplates(unittest.TestCase):
+
+    def test_removes_matching_participant(self):
+        tpl = FakeChatTemplate(id=1, name="T", participants=[
+            {"entity_name": "application", "id": 42, "project_id": 1, "name": "App A"},
+        ])
+        delete_fn, _ = _load_utils_fns({1: FakeSession([tpl])})
+        delete_fn(1, ["application"], 42, 1)
+        self.assertEqual(tpl.participants, [])
+
+    def test_noop_when_id_does_not_match(self):
+        tpl = FakeChatTemplate(id=1, name="T", participants=[
+            {"entity_name": "application", "id": 99, "project_id": 1},
+        ])
+        delete_fn, _ = _load_utils_fns({1: FakeSession([tpl])})
+        delete_fn(1, ["application"], 42, 1)
+        self.assertEqual(len(tpl.participants), 1)
+
+    def test_removes_only_matching_entity_name(self):
+        tpl = FakeChatTemplate(id=1, name="T", participants=[
+            {"entity_name": "application", "id": 42, "project_id": 1},
+            {"entity_name": "toolkit", "id": 42, "project_id": 1},
+        ])
+        delete_fn, _ = _load_utils_fns({1: FakeSession([tpl])})
+        delete_fn(1, ["application"], 42, 1)
+        self.assertEqual(len(tpl.participants), 1)
+        self.assertEqual(tpl.participants[0]["entity_name"], "toolkit")
+
+    def test_removes_across_multiple_templates(self):
+        tpl1 = FakeChatTemplate(id=1, name="A", participants=[
+            {"entity_name": "application", "id": 7, "project_id": 1},
+        ])
+        tpl2 = FakeChatTemplate(id=2, name="B", participants=[
+            {"entity_name": "application", "id": 7, "project_id": 1},
+        ])
+        delete_fn, _ = _load_utils_fns({1: FakeSession([tpl1, tpl2])})
+        delete_fn(1, ["application"], 7, 1)
+        self.assertEqual(tpl1.participants, [])
+        self.assertEqual(tpl2.participants, [])
+
+
+class TestUpdateEntityNameInTemplates(unittest.TestCase):
+
+    def test_updates_matching_participant_name(self):
+        tpl = FakeChatTemplate(id=1, name="T", participants=[
+            {"entity_name": "application", "id": 5, "project_id": 1, "name": "Old Name"},
+        ])
+        _, update_fn = _load_utils_fns({1: FakeSession([tpl])})
+        update_fn(1, ["application"], 5, 1, "New Name")
+        self.assertEqual(tpl.participants[0]["name"], "New Name")
+
+    def test_noop_when_id_does_not_match(self):
+        tpl = FakeChatTemplate(id=1, name="T", participants=[
+            {"entity_name": "application", "id": 99, "project_id": 1, "name": "Unchanged"},
+        ])
+        _, update_fn = _load_utils_fns({1: FakeSession([tpl])})
+        update_fn(1, ["application"], 42, 1, "New Name")
+        self.assertEqual(tpl.participants[0]["name"], "Unchanged")
+
+    def test_updates_only_correct_entity_id(self):
+        tpl = FakeChatTemplate(id=1, name="T", participants=[
+            {"entity_name": "application", "id": 5, "project_id": 1, "name": "Target"},
+            {"entity_name": "application", "id": 6, "project_id": 1, "name": "Other"},
+        ])
+        _, update_fn = _load_utils_fns({1: FakeSession([tpl])})
+        update_fn(1, ["application"], 5, 1, "Updated")
+        self.assertEqual(tpl.participants[0]["name"], "Updated")
+        self.assertEqual(tpl.participants[1]["name"], "Other")
+
+    def test_does_not_dirty_unaffected_template(self):
+        tpl1 = FakeChatTemplate(id=1, name="A", participants=[
+            {"entity_name": "application", "id": 5, "project_id": 1, "name": "Target"},
+        ])
+        tpl2 = FakeChatTemplate(id=2, name="B", participants=[
+            {"entity_name": "application", "id": 9, "project_id": 1, "name": "Untouched"},
+        ])
+        original_list_obj = tpl2.participants
+        _, update_fn = _load_utils_fns({1: FakeSession([tpl1, tpl2])})
+        update_fn(1, ["application"], 5, 1, "Updated")
+        # tpl2 had no match — its participants list object must not be replaced
+        self.assertIs(tpl2.participants, original_list_obj)
+
+    def test_updates_across_multiple_templates(self):
+        tpl1 = FakeChatTemplate(id=1, name="A", participants=[
+            {"entity_name": "application", "id": 5, "project_id": 1, "name": "Old"},
+        ])
+        tpl2 = FakeChatTemplate(id=2, name="B", participants=[
+            {"entity_name": "application", "id": 5, "project_id": 1, "name": "Old"},
+        ])
+        _, update_fn = _load_utils_fns({1: FakeSession([tpl1, tpl2])})
+        update_fn(1, ["application"], 5, 1, "Updated")
+        self.assertEqual(tpl1.participants[0]["name"], "Updated")
+        self.assertEqual(tpl2.participants[0]["name"], "Updated")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. Event handlers — _affected_projects scope and rename propagation
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _load_events_module(public_project_id=None):
+    """Load events/chat_template.py with stubs.
+
+    Returns (Event instance, calls dict) where calls["delete"] and
+    calls["update"] accumulate the project_id arguments passed to the
+    mocked utility functions.
+    """
+    calls = {"delete": [], "update": []}
+
+    def mock_delete(project_id, entity_names, entity_id, entity_project_id):
+        calls["delete"].append(project_id)
+
+    def mock_update(project_id, entity_names, entity_id, entity_project_id, new_name):
+        calls["update"].append(project_id)
+
+    ct_utils_mod = types.ModuleType("elitea_core.utils.chat_template_utils")
+    ct_utils_mod.delete_entity_from_templates = mock_delete
+    ct_utils_mod.update_entity_name_in_templates = mock_update
+
+    utils_utils_mod = types.ModuleType("elitea_core.utils.utils")
+    utils_utils_mod.get_public_project_id = lambda: public_project_id
+
+    events_enums_mod = types.ModuleType("elitea_core.models.enums.events")
+    events_enums_mod.ApplicationEvents = types.SimpleNamespace(
+        application_deleted="application_deleted",
+        toolkit_deleted="toolkit_deleted",
+        application_updated="application_updated",
+        toolkit_updated="toolkit_updated",
+    )
+
+    stubs = {
+        **_pylon_stubs(),
+        "elitea_core.utils.chat_template_utils": ct_utils_mod,
+        "elitea_core.utils.utils": utils_utils_mod,
+        "elitea_core.models.enums.events": events_enums_mod,
+    }
+
+    path = os.path.join(PLUGIN_ROOT, "events", "chat_template.py")
+    saved = {k: sys.modules.get(k) for k in stubs}
+    sys.modules.update(stubs)
+
+    for pkg in ("elitea_core", "elitea_core.models", "elitea_core.models.enums",
+                "elitea_core.utils", "elitea_core.events"):
+        if pkg not in sys.modules:
+            m = types.ModuleType(pkg)
+            m.__path__ = [PLUGIN_ROOT]
+            sys.modules[pkg] = m
+
+    spec = importlib.util.spec_from_file_location(
+        "elitea_core.events.chat_template", path,
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "elitea_core.events"
+    sys.modules["elitea_core.events.chat_template"] = mod
+    spec.loader.exec_module(mod)
+
+    for k, v in saved.items():
+        if v is None:
+            sys.modules.pop(k, None)
+        else:
+            sys.modules[k] = v
+
+    return mod.Event(), calls
+
+
+def _make_context(project_ids):
+    """Build a fake pylon context whose rpc_manager returns the given project list."""
+    rpc = types.SimpleNamespace(
+        call=types.SimpleNamespace(
+            project_list=lambda filter_=None: [{"id": p} for p in project_ids],
+        )
+    )
+    return types.SimpleNamespace(rpc_manager=rpc)
+
+
+class TestEventHandlerDeletePropagation(unittest.TestCase):
+
+    def test_delete_propagates_to_all_projects_for_public_app(self):
+        PUBLIC_ID = 0
+        handler, calls = _load_events_module(public_project_id=PUBLIC_ID)
+        handler.on_application_deleted(_make_context([1, 2, 3]), None, {
+            "owner_id": PUBLIC_ID, "id": 42,
+        })
+        self.assertCountEqual(calls["delete"], [1, 2, 3])
+
+    def test_delete_propagates_to_all_projects_for_public_toolkit(self):
+        PUBLIC_ID = 0
+        handler, calls = _load_events_module(public_project_id=PUBLIC_ID)
+        handler.on_toolkit_deleted(_make_context([1, 2, 3]), None, {
+            "owner_id": PUBLIC_ID, "id": 42,
+        })
+        self.assertCountEqual(calls["delete"], [1, 2, 3])
+
+    def test_delete_only_touches_owning_project_for_private_entity(self):
+        handler, calls = _load_events_module(public_project_id=99)
+        handler.on_application_deleted(_make_context([1, 2, 3]), None, {
+            "owner_id": 5, "id": 42,
+        })
+        self.assertEqual(calls["delete"], [5])
+
+
+class TestEventHandlerRenamePropagation(unittest.TestCase):
+
+    def test_rename_propagates_to_all_projects_for_public_app(self):
+        PUBLIC_ID = 0
+        handler, calls = _load_events_module(public_project_id=PUBLIC_ID)
+        handler.on_application_updated(_make_context([1, 2, 3]), None, {
+            "owner_id": PUBLIC_ID, "id": 7, "data": {"name": "Renamed App"},
+        })
+        self.assertCountEqual(calls["update"], [1, 2, 3])
+
+    def test_rename_propagates_to_all_projects_for_public_toolkit(self):
+        PUBLIC_ID = 0
+        handler, calls = _load_events_module(public_project_id=PUBLIC_ID)
+        handler.on_toolkit_updated(_make_context([1, 2, 3]), None, {
+            "owner_id": PUBLIC_ID, "id": 7, "data": {"name": "Renamed Toolkit"},
+        })
+        self.assertCountEqual(calls["update"], [1, 2, 3])
+
+    def test_rename_only_touches_owning_project_for_private_app(self):
+        handler, calls = _load_events_module(public_project_id=99)
+        handler.on_application_updated(_make_context([1, 2, 3]), None, {
+            "owner_id": 5, "id": 7, "data": {"name": "Renamed"},
+        })
+        self.assertEqual(calls["update"], [5])
+
+    def test_rename_only_touches_owning_project_for_private_toolkit(self):
+        handler, calls = _load_events_module(public_project_id=99)
+        handler.on_toolkit_updated(_make_context([1, 2, 3]), None, {
+            "owner_id": 5, "id": 7, "data": {"name": "Renamed"},
+        })
+        self.assertEqual(calls["update"], [5])
+
+    def test_missing_name_in_payload_skips_update(self):
+        handler, calls = _load_events_module(public_project_id=99)
+        handler.on_application_updated(_make_context([1, 2, 3]), None, {
+            "owner_id": 5, "id": 7, "data": {},
+        })
+        self.assertEqual(calls["update"], [])
+
+    def test_null_data_field_skips_update(self):
+        handler, calls = _load_events_module(public_project_id=99)
+        handler.on_application_updated(_make_context([1, 2, 3]), None, {
+            "owner_id": 5, "id": 7, "data": None,
+        })
+        self.assertEqual(calls["update"], [])
 
 
 if __name__ == "__main__":
