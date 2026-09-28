@@ -6,6 +6,8 @@ place it can come from; missing those keys sent no secret and Entra answered AAD
 """
 import importlib.util
 import pathlib
+import sys
+import types
 
 import pytest
 
@@ -18,7 +20,16 @@ def mcp_oauth():
         'mcp_oauth_under_test', PLUGIN_ROOT / 'utils' / 'mcp_oauth.py'
     )
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # The helpers under test never touch the network; `requests` is only needed by the
+    # token functions and is not in tests/requirements-dev.txt, so stub it while loading.
+    stub_requests = 'requests' not in sys.modules and importlib.util.find_spec('requests') is None
+    if stub_requests:
+        sys.modules['requests'] = types.ModuleType('requests')
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if stub_requests:
+            sys.modules.pop('requests', None)
     return module
 
 
