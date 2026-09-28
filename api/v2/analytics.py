@@ -12,7 +12,7 @@ no usage_event equivalent.
 from pylon.core.tools import log
 
 try:
-    from tools import api_tools, auth, config as c, register_openapi
+    from tools import api_tools, auth, config as c, register_openapi, rpc_tools
     _API_AVAILABLE = True
 except ImportError:
     _API_AVAILABLE = False
@@ -38,6 +38,18 @@ if _API_AVAILABLE:
                 "Member lookup failed for project %s; analytics left unscoped", project_id,
                 exc_info=True,
             )
+            return None
+
+    _USAGE_EVENT_TYPES = ("llm", "tool")
+
+    def _usage_health(project_id, dt_from, dt_to):
+        """llm/tool rows from usage_event (Overview's source), or None to keep audit numbers."""
+        try:
+            return rpc_tools.RpcMixin().rpc.timeout(10).usage_event_type_health(
+                project_id, date_from=dt_from, date_to=dt_to,
+            )
+        except Exception:  # pylint: disable=W0703
+            log.warning("usage_event health lookup failed for project %s", project_id, exc_info=True)
             return None
 
     def _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to, member_ids=None):
@@ -268,6 +280,22 @@ if _API_AVAILABLE:
                         }
                         for r in health_rows
                     ]
+
+                    usage_rows = _usage_health(project_id, dt_from, dt_to)
+                    if usage_rows is not None:
+                        event_type_breakdown = [
+                            r for r in event_type_breakdown if r["event_type"] not in _USAGE_EVENT_TYPES
+                        ] + [{"event_type": r["event_type"], "count": r["total"]} for r in usage_rows]
+                        health = [h for h in health if h["event_type"] not in _USAGE_EVENT_TYPES] + [
+                            {
+                                "event_type": r["event_type"],
+                                "total": r["total"],
+                                "errors": r["errors"],
+                                "error_rate": round(r["errors"] / r["total"] * 100, 2) if r["total"] else 0,
+                                "avg_duration_ms": round(r["avg_duration_ms"], 1) if r["avg_duration_ms"] else 0,
+                            }
+                            for r in usage_rows
+                        ]
 
                     return {
                         "kpis": kpis,
