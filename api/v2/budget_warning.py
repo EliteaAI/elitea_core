@@ -9,6 +9,7 @@ NO_WARNING = {
     "scope": None,
     "percent_used": None,
     "warning_pct": None,
+    "level": None,
     "should_warn": False,
 }
 
@@ -44,6 +45,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "and at or above 100% -- at the limit the request is blocked and that error "
             "carries the message instead. It is also false unless budgets are enforcing, "
             "since observe mode tracks spend without ever blocking.\n\n"
+            "level is the warning step reached: the configured threshold, then 90 and 95. A "
+            "banner the user dismissed returns once level rises.\n\n"
             "The result is cached briefly, so the percentage may lag real spend by up to a "
             "minute. That is deliberate: resolving it reads a month of activity, and this "
             "endpoint is on the interactive path."

@@ -52,6 +52,14 @@ def _cost_budgets_mode():
     return mode if mode in ("enforce", "observe") else None
 
 
+def _budget_warning_dismissible():
+    """Whether users may close the budget warning banner; on when the usage plugin is unreachable."""
+    try:
+        return rpc_tools.RpcMixin().rpc.timeout(5).usage_get_warnings_dismissible() is not False
+    except Exception:  # pylint: disable=W0703
+        return True
+
+
 class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, **kwargs):
@@ -74,6 +82,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # Limits actually block. Observe mode tracks without blocking, so a warning
             # that requests are about to become unavailable would not be true there.
             "cost_budgets_enforcing": budgets_mode == "enforce",
+            "cost_budgets_warning_dismissible": _budget_warning_dismissible(),
             "is_publish_blocked": getattr(this.module, 'is_publish_blocked', False),
             "publish_whitelist_project_ids": list(
                 getattr(this.module, 'publish_whitelist_project_ids', set())
