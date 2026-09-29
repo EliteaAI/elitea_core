@@ -90,6 +90,8 @@ class Event:
 
     @web.event('user_deleted')
     def delete_user_participant_on_user_deleted(self, context, event, payload: dict):
+        # Fired by the admin UI when a user account is deleted entirely.
+        # Iterate all projects to remove the user from every conversation.
         user_id = payload.get('user_id')
         if not user_id:
             return

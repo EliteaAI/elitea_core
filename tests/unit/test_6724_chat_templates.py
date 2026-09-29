@@ -1135,13 +1135,15 @@ class TestEventHandlerUserRemovedFromProject(unittest.TestCase):
         _, _, entity_id, _ = calls["delete_full"][0]
         self.assertEqual(entity_id, 101)
 
-    def test_delete_called_with_project_id_as_entity_project_id(self):
+    def test_delete_called_with_none_entity_project_id(self):
+        # User participants are stored without project_id, so entity_project_id
+        # must be None to avoid silently matching nothing.
         handler, calls = _load_events_module()
         handler.on_user_removed_from_project(None, None, {
             "project_id": 5, "user_ids": [101],
         })
         _, _, _, entity_project_id = calls["delete_full"][0]
-        self.assertEqual(entity_project_id, 5)
+        self.assertIsNone(entity_project_id)
 
     def test_noop_when_user_ids_empty(self):
         handler, calls = _load_events_module()
@@ -1160,6 +1162,42 @@ class TestEventHandlerUserRemovedFromProject(unittest.TestCase):
     def test_noop_when_payload_empty(self):
         handler, calls = _load_events_module()
         handler.on_user_removed_from_project(None, None, {})
+        self.assertEqual(calls["delete"], [])
+
+
+class TestEventHandlerUserDeleted(unittest.TestCase):
+    """on_user_deleted — fired by admin UI when a user account is hard-deleted."""
+
+    def test_deletes_user_from_every_project(self):
+        handler, calls = _load_events_module()
+        ctx = _make_context([1, 2, 3])
+        handler.on_user_deleted(ctx, None, {"user_id": 101})
+        self.assertCountEqual(calls["delete"], [1, 2, 3])
+
+    def test_delete_called_with_none_entity_project_id(self):
+        handler, calls = _load_events_module()
+        ctx = _make_context([5])
+        handler.on_user_deleted(ctx, None, {"user_id": 101})
+        _, _, _, entity_project_id = calls["delete_full"][0]
+        self.assertIsNone(entity_project_id)
+
+    def test_delete_called_with_user_entity_name(self):
+        handler, calls = _load_events_module()
+        ctx = _make_context([5])
+        handler.on_user_deleted(ctx, None, {"user_id": 101})
+        _, entity_names, _, _ = calls["delete_full"][0]
+        self.assertEqual(entity_names, ["user"])
+
+    def test_noop_when_user_id_missing(self):
+        handler, calls = _load_events_module()
+        ctx = _make_context([1, 2])
+        handler.on_user_deleted(ctx, None, {})
+        self.assertEqual(calls["delete"], [])
+
+    def test_no_projects_means_no_deletes(self):
+        handler, calls = _load_events_module()
+        ctx = _make_context([])
+        handler.on_user_deleted(ctx, None, {"user_id": 101})
         self.assertEqual(calls["delete"], [])
 
 

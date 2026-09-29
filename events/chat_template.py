@@ -85,10 +85,15 @@ class Event:
             return
         for user_id in user_ids:
             log.info("[chat_template] deleting user_id=%s from templates in project_id=%s", user_id, project_id)
-            delete_entity_from_templates(project_id, _USER_ENTITY_NAMES, user_id, project_id)
+            # Pass entity_project_id=None: user participants are stored without
+            # project_id, so we match only by entity_name + id.
+            delete_entity_from_templates(project_id, _USER_ENTITY_NAMES, user_id, None)
 
     @web.event('user_deleted')
     def on_user_deleted(self, context, event, payload: dict):
+        # Fired by the admin UI when a user account is deleted entirely.
+        # user_removed_from_project is NOT fired on that path, so we must
+        # iterate all projects here to remove the user from every template.
         user_id = payload.get('user_id')
         if not user_id:
             return
@@ -98,4 +103,4 @@ class Event:
             log.exception("chat_template events: failed to list projects for user_deleted cleanup")
             return
         for project in projects:
-            delete_entity_from_templates(project['id'], _USER_ENTITY_NAMES, user_id, project['id'])
+            delete_entity_from_templates(project['id'], _USER_ENTITY_NAMES, user_id, None)
