@@ -1,4 +1,4 @@
-from pylon.core.tools import web
+from pylon.core.tools import log, web
 
 from ..models.enums.all import ParticipantTypes
 from ..utils.participant_utils import update_participant_meta
@@ -74,6 +74,36 @@ class Event:
             },
             meta=toolkit_data['data']
         )
+
+    @web.event('user_removed_from_project')
+    def delete_user_participant_handler(self, context, event, payload: dict):
+        project_id = payload.get('project_id')
+        user_ids = payload.get('user_ids') or []
+        if not project_id or not user_ids:
+            return
+        for user_id in user_ids:
+            self.delete_entity_in_all_conversations(
+                project_id,
+                ParticipantTypes.user.name,
+                {'id': user_id}
+            )
+
+    @web.event('user_deleted')
+    def delete_user_participant_on_user_deleted(self, context, event, payload: dict):
+        user_id = payload.get('user_id')
+        if not user_id:
+            return
+        try:
+            projects = context.rpc_manager.call.project_list(filter_={'create_success': True}) or []
+        except Exception:  # pylint: disable=broad-except
+            log.exception("participant events: failed to list projects for user_deleted cleanup")
+            return
+        for project in projects:
+            self.delete_entity_in_all_conversations(
+                project['id'],
+                ParticipantTypes.user.name,
+                {'id': user_id}
+            )
 
     @web.event('integration_settings_changed')
     def integration_model_changed(self, context, event, settings_data: dict):

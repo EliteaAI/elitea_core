@@ -12,6 +12,7 @@ from ..utils.utils import get_public_project_id
 # entity_name values stored in chat_template.participants for each entity type
 _APP_ENTITY_NAMES = ['application', 'pipeline']
 _TOOLKIT_ENTITY_NAMES = ['toolkit', 'mcp']
+_USER_ENTITY_NAMES = ['user']
 
 
 def _affected_projects(context, owner_id: int) -> list:
@@ -74,3 +75,27 @@ class Event:
             update_entity_name_in_templates(
                 project_id, _TOOLKIT_ENTITY_NAMES, entity_id, owner_id, new_name
             )
+
+    @web.event('user_removed_from_project')
+    def on_user_removed_from_project(self, context, event, payload: dict):
+        log.info("[chat_template] on_user_removed_from_project payload=%s", payload)
+        project_id = payload.get('project_id')
+        user_ids = payload.get('user_ids') or []
+        if not project_id or not user_ids:
+            return
+        for user_id in user_ids:
+            log.info("[chat_template] deleting user_id=%s from templates in project_id=%s", user_id, project_id)
+            delete_entity_from_templates(project_id, _USER_ENTITY_NAMES, user_id, project_id)
+
+    @web.event('user_deleted')
+    def on_user_deleted(self, context, event, payload: dict):
+        user_id = payload.get('user_id')
+        if not user_id:
+            return
+        try:
+            projects = context.rpc_manager.call.project_list(filter_={'create_success': True}) or []
+        except Exception:  # pylint: disable=broad-except
+            log.exception("chat_template events: failed to list projects for user_deleted cleanup")
+            return
+        for project in projects:
+            delete_entity_from_templates(project['id'], _USER_ENTITY_NAMES, user_id, project['id'])

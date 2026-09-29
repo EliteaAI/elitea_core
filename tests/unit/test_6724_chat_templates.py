@@ -961,10 +961,11 @@ def _load_events_module(public_project_id=None):
     calls["update"] accumulate the project_id arguments passed to the
     mocked utility functions.
     """
-    calls = {"delete": [], "update": []}
+    calls = {"delete": [], "delete_full": [], "update": []}
 
     def mock_delete(project_id, entity_names, entity_id, entity_project_id):
         calls["delete"].append(project_id)
+        calls["delete_full"].append((project_id, entity_names, entity_id, entity_project_id))
 
     def mock_update(project_id, entity_names, entity_id, entity_project_id, new_name):
         calls["update"].append(project_id)
@@ -1100,6 +1101,66 @@ class TestEventHandlerRenamePropagation(unittest.TestCase):
             "owner_id": 5, "id": 7, "data": None,
         })
         self.assertEqual(calls["update"], [])
+
+
+class TestEventHandlerUserRemovedFromProject(unittest.TestCase):
+
+    def test_removes_user_from_project_templates(self):
+        handler, calls = _load_events_module()
+        handler.on_user_removed_from_project(None, None, {
+            "project_id": 5, "user_ids": [101],
+        })
+        self.assertEqual(calls["delete"], [5])
+
+    def test_removes_multiple_users_calls_delete_for_each(self):
+        handler, calls = _load_events_module()
+        handler.on_user_removed_from_project(None, None, {
+            "project_id": 5, "user_ids": [101, 202, 303],
+        })
+        self.assertEqual(calls["delete"], [5, 5, 5])
+
+    def test_delete_called_with_user_entity_name(self):
+        handler, calls = _load_events_module()
+        handler.on_user_removed_from_project(None, None, {
+            "project_id": 5, "user_ids": [101],
+        })
+        _, entity_names, _, _ = calls["delete_full"][0]
+        self.assertEqual(entity_names, ["user"])
+
+    def test_delete_called_with_correct_user_id(self):
+        handler, calls = _load_events_module()
+        handler.on_user_removed_from_project(None, None, {
+            "project_id": 5, "user_ids": [101],
+        })
+        _, _, entity_id, _ = calls["delete_full"][0]
+        self.assertEqual(entity_id, 101)
+
+    def test_delete_called_with_project_id_as_entity_project_id(self):
+        handler, calls = _load_events_module()
+        handler.on_user_removed_from_project(None, None, {
+            "project_id": 5, "user_ids": [101],
+        })
+        _, _, _, entity_project_id = calls["delete_full"][0]
+        self.assertEqual(entity_project_id, 5)
+
+    def test_noop_when_user_ids_empty(self):
+        handler, calls = _load_events_module()
+        handler.on_user_removed_from_project(None, None, {
+            "project_id": 5, "user_ids": [],
+        })
+        self.assertEqual(calls["delete"], [])
+
+    def test_noop_when_project_id_missing(self):
+        handler, calls = _load_events_module()
+        handler.on_user_removed_from_project(None, None, {
+            "user_ids": [101],
+        })
+        self.assertEqual(calls["delete"], [])
+
+    def test_noop_when_payload_empty(self):
+        handler, calls = _load_events_module()
+        handler.on_user_removed_from_project(None, None, {})
+        self.assertEqual(calls["delete"], [])
 
 
 if __name__ == "__main__":
