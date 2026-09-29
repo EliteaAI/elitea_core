@@ -994,16 +994,21 @@ def execute_run(
         snapshot = run.snapshot or {}
         owner_id = run.owner_id
 
+        claim_values = {EvalRun.status: EvalRunStatus.running, EvalRun.started_at: datetime.utcnow()}
+        if platform_run_id:
+            # Lets usage analytics resolve eval_run_id -> usage_event.run_id
+            from sqlalchemy import cast, func as sa_func
+            from sqlalchemy.dialects.postgresql import JSONB
+            claim_values[EvalRun.meta] = sa_func.coalesce(EvalRun.meta, cast({}, JSONB)).op('||')(
+                cast({'platform_run_id': platform_run_id}, JSONB))
+
         # Claim the run with a conditional UPDATE: two concurrent launches would both pass a plain
         # read of `status`, both execute, and both write EvalResult rows — duplicated results and a
         # raced headline. Whoever loses the claim exits without touching anything.
         claimed = (
             s.query(EvalRun)
             .filter(EvalRun.id == run_id, EvalRun.status == EvalRunStatus.created)
-            .update(
-                {EvalRun.status: EvalRunStatus.running, EvalRun.started_at: datetime.utcnow()},
-                synchronize_session=False,
-            )
+            .update(claim_values, synchronize_session=False)
         )
         s.commit()
     if not claimed:
