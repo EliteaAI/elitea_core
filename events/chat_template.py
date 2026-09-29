@@ -91,17 +91,11 @@ class Event:
 
     @web.event('user_deleted')
     def on_user_deleted(self, context, event, payload: dict):
-        # Fired by the admin UI when a user account is deleted entirely.
-        # Scope cleanup to projects the user actually belongs to.
+        # Fired by the admin UI. project_ids is resolved by the publisher
+        # before auth.delete_user so there is no membership race.
         user_id = payload.get('user_id')
-        if not user_id:
-            return
-        try:
-            all_projects = context.rpc_manager.call.project_list(filter_={'create_success': True}) or []
-            all_ids = [p['id'] for p in all_projects]
-            project_ids = context.rpc_manager.call.admin_check_user_in_projects(all_ids, user_id)
-        except Exception:  # pylint: disable=broad-except
-            log.exception("chat_template events: failed to resolve user projects for user_deleted cleanup")
+        project_ids = payload.get('project_ids') or []
+        if not user_id or not project_ids:
             return
         for project_id in project_ids:
             delete_entity_from_templates(project_id, _USER_ENTITY_NAMES, user_id, None)

@@ -1020,17 +1020,11 @@ def _load_events_module(public_project_id=None):
     return mod.Event(), calls
 
 
-def _make_context(project_ids, user_project_ids=None):
-    """Build a fake pylon context whose rpc_manager returns the given project list.
-
-    user_project_ids: subset returned by admin_check_user_in_projects.
-    Defaults to all project_ids (user belongs to every project).
-    """
-    _user_pids = project_ids if user_project_ids is None else user_project_ids
+def _make_context(project_ids):
+    """Build a fake pylon context whose rpc_manager returns the given project list."""
     rpc = types.SimpleNamespace(
         call=types.SimpleNamespace(
             project_list=lambda filter_=None: [{"id": p} for p in project_ids],
-            admin_check_user_in_projects=lambda ids, user_id: _user_pids,
         )
     )
     return types.SimpleNamespace(rpc_manager=rpc)
@@ -1172,40 +1166,182 @@ class TestEventHandlerUserRemovedFromProject(unittest.TestCase):
 
 
 class TestEventHandlerUserDeleted(unittest.TestCase):
-    """on_user_deleted — fired by admin UI when a user account is hard-deleted."""
+    """on_user_deleted — fired by admin UI; project_ids supplied by publisher."""
 
-    def test_deletes_user_only_in_their_projects(self):
-        # user is in projects 1 and 3 out of [1, 2, 3]
+    def test_cleans_only_supplied_projects(self):
+        # publisher resolved user is in [1, 3] out of [1, 2, 3]
         handler, calls = _load_events_module()
-        ctx = _make_context([1, 2, 3], user_project_ids=[1, 3])
-        handler.on_user_deleted(ctx, None, {"user_id": 101})
+        handler.on_user_deleted(None, None, {"user_id": 101, "project_ids": [1, 3]})
         self.assertCountEqual(calls["delete"], [1, 3])
 
     def test_delete_called_with_none_entity_project_id(self):
         handler, calls = _load_events_module()
-        ctx = _make_context([5])
-        handler.on_user_deleted(ctx, None, {"user_id": 101})
+        handler.on_user_deleted(None, None, {"user_id": 101, "project_ids": [5]})
         _, _, _, entity_project_id = calls["delete_full"][0]
         self.assertIsNone(entity_project_id)
 
     def test_delete_called_with_user_entity_name(self):
         handler, calls = _load_events_module()
-        ctx = _make_context([5])
-        handler.on_user_deleted(ctx, None, {"user_id": 101})
+        handler.on_user_deleted(None, None, {"user_id": 101, "project_ids": [5]})
         _, entity_names, _, _ = calls["delete_full"][0]
         self.assertEqual(entity_names, ["user"])
 
     def test_noop_when_user_id_missing(self):
         handler, calls = _load_events_module()
-        ctx = _make_context([1, 2])
-        handler.on_user_deleted(ctx, None, {})
+        handler.on_user_deleted(None, None, {"project_ids": [1, 2]})
         self.assertEqual(calls["delete"], [])
 
-    def test_noop_when_user_belongs_to_no_projects(self):
+    def test_noop_when_project_ids_empty(self):
         handler, calls = _load_events_module()
-        ctx = _make_context([1, 2, 3], user_project_ids=[])
-        handler.on_user_deleted(ctx, None, {"user_id": 101})
+        handler.on_user_deleted(None, None, {"user_id": 101, "project_ids": []})
         self.assertEqual(calls["delete"], [])
+
+    def test_noop_when_project_ids_missing(self):
+        handler, calls = _load_events_module()
+        handler.on_user_deleted(None, None, {"user_id": 101})
+        self.assertEqual(calls["delete"], [])
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 6. events/participant.py — user_deleted and user_removed_from_project handlers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _load_participant_events_module():
+    """Load events/participant.py with stubs.
+
+    Returns (Event instance, calls list) where calls accumulates
+    (project_id, entity_name, entity_meta) tuples from delete_entity_in_all_conversations.
+    """
+    calls = []
+
+    participant_types_mod = types.ModuleType("elitea_core.models.enums.all")
+
+    class _ParticipantTypes:
+        user = types.SimpleNamespace(name="user")
+
+    participant_types_mod.ParticipantTypes = _ParticipantTypes
+
+    utils_utils_mod = types.ModuleType("elitea_core.utils.utils")
+    utils_utils_mod.get_public_project_id = lambda: None
+
+    participant_utils_mod = types.ModuleType("elitea_core.utils.participant_utils")
+    participant_utils_mod.update_participant_meta = lambda *a, **kw: None
+
+    stubs = {
+        **_pylon_stubs(),
+        "elitea_core.models.enums.all": participant_types_mod,
+        "elitea_core.utils.utils": utils_utils_mod,
+        "elitea_core.utils.participant_utils": participant_utils_mod,
+    }
+
+    path = os.path.join(PLUGIN_ROOT, "events", "participant.py")
+    saved = {k: sys.modules.get(k) for k in stubs}
+    sys.modules.update(stubs)
+
+    for pkg in ("elitea_core", "elitea_core.models", "elitea_core.models.enums",
+                "elitea_core.utils", "elitea_core.events"):
+        if pkg not in sys.modules:
+            m = types.ModuleType(pkg)
+            m.__path__ = [PLUGIN_ROOT]
+            sys.modules[pkg] = m
+
+    spec = importlib.util.spec_from_file_location(
+        "elitea_core.events.participant", path,
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "elitea_core.events"
+    sys.modules["elitea_core.events.participant"] = mod
+    spec.loader.exec_module(mod)
+
+    for k, v in saved.items():
+        if v is None:
+            sys.modules.pop(k, None)
+        else:
+            sys.modules[k] = v
+
+    instance = mod.Event()
+    instance.delete_entity_in_all_conversations = lambda pid, ename, emeta: calls.append(
+        (pid, ename, emeta)
+    )
+    return instance, calls
+
+
+class TestParticipantUserDeletedHandler(unittest.TestCase):
+    """events/participant.py — delete_user_participant_on_user_deleted."""
+
+    def test_cleans_only_supplied_projects(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_on_user_deleted(
+            None, None, {"user_id": 101, "project_ids": [1, 3]}
+        )
+        self.assertCountEqual([c[0] for c in calls], [1, 3])
+
+    def test_entity_name_is_user(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_on_user_deleted(
+            None, None, {"user_id": 101, "project_ids": [5]}
+        )
+        self.assertEqual(calls[0][1], "user")
+
+    def test_entity_meta_contains_user_id(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_on_user_deleted(
+            None, None, {"user_id": 101, "project_ids": [5]}
+        )
+        self.assertEqual(calls[0][2], {"id": 101})
+
+    def test_noop_when_project_ids_empty(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_on_user_deleted(
+            None, None, {"user_id": 101, "project_ids": []}
+        )
+        self.assertEqual(calls, [])
+
+    def test_noop_when_project_ids_missing(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_on_user_deleted(
+            None, None, {"user_id": 101}
+        )
+        self.assertEqual(calls, [])
+
+    def test_noop_when_user_id_missing(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_on_user_deleted(
+            None, None, {"project_ids": [1, 2]}
+        )
+        self.assertEqual(calls, [])
+
+
+class TestParticipantUserRemovedHandler(unittest.TestCase):
+    """events/participant.py — delete_user_participant_handler."""
+
+    def test_cleans_user_from_project(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_handler(
+            None, None, {"project_id": 5, "user_ids": [101]}
+        )
+        self.assertEqual(calls, [(5, "user", {"id": 101})])
+
+    def test_cleans_multiple_users(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_handler(
+            None, None, {"project_id": 5, "user_ids": [101, 202]}
+        )
+        self.assertCountEqual([(c[0], c[2]["id"]) for c in calls], [(5, 101), (5, 202)])
+
+    def test_noop_when_user_ids_empty(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_handler(
+            None, None, {"project_id": 5, "user_ids": []}
+        )
+        self.assertEqual(calls, [])
+
+    def test_noop_when_project_id_missing(self):
+        handler, calls = _load_participant_events_module()
+        handler.delete_user_participant_handler(
+            None, None, {"user_ids": [101]}
+        )
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
