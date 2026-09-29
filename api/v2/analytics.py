@@ -9,6 +9,8 @@ usage_event table (#6574); chat metrics stay here because they are socketio-deri
 no usage_event equivalent.
 """
 
+import uuid
+
 from pylon.core.tools import log
 
 try:
@@ -51,6 +53,65 @@ if _API_AVAILABLE:
         except Exception:  # pylint: disable=W0703
             log.warning("usage_event health lookup failed for project %s", project_id, exc_info=True)
             return None
+
+    def _run_scope_args(args):
+        """{run_id, eval_run_id} as given, or None when the request is not run-scoped.
+
+        Raises ValueError for an id that is not a UUID.
+        """
+        scope = {}
+        for key in ("run_id", "eval_run_id"):
+            value = (args.get(key) or "").strip()
+            if value:
+                try:
+                    scope[key] = str(uuid.UUID(value))
+                except ValueError as exc:
+                    raise ValueError(f"{key} must be a UUID") from exc
+        return scope or None
+
+    def _usage_health_row(row):
+        return {
+            "event_type": row["event_type"],
+            "total": row["total"],
+            "errors": row["errors"],
+            "error_rate": round(row["errors"] / row["total"] * 100, 2) if row["total"] else 0,
+            "avg_duration_ms": round(row["avg_duration_ms"], 1) if row["avg_duration_ms"] else 0,
+        }
+
+    def _run_scoped_analytics(project_id, args, run_scope):
+        """One run's payload, from usage_event only: audit_events carry no run or conversation
+        id, so the audit-derived sections (daily activity, chat sessions) cannot be scoped.
+        """
+        dt_from = dt_to = None
+        if args.get("date_from") or args.get("date_to"):
+            dt_from, dt_to = _parse_dates(args)
+        try:
+            usage_rows = rpc_tools.RpcMixin().rpc.timeout(10).usage_event_type_health(
+                project_id, date_from=dt_from, date_to=dt_to, **run_scope,
+            )
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        #
+        health = [_usage_health_row(r) for r in usage_rows or []]
+        total_events = sum(h["total"] for h in health)
+        error_count = sum(h["errors"] for h in health)
+        duration_sum = sum(
+            (r["avg_duration_ms"] or 0) * r["total"] for r in usage_rows or [] if r["avg_duration_ms"]
+        )
+        duration_count = sum(r["total"] for r in usage_rows or [] if r["avg_duration_ms"])
+        return {
+            "kpis": {
+                "total_events": total_events,
+                "avg_duration_ms": round(duration_sum / duration_count, 1) if duration_count else 0,
+                "error_rate": round(error_count / total_events * 100, 2) if total_events else 0,
+                "error_count": error_count,
+                "chat_msgs": 0,
+            },
+            "event_type_breakdown": [{"event_type": h["event_type"], "count": h["total"]} for h in health],
+            "daily_activity": [],
+            "chat_sessions": [],
+            "health": health,
+        }, 200
 
     def _apply_base_filters(session, AuditEvent, project_id, dt_from, dt_to, member_ids=None):
         """Build base query with project + date filters, excluding system users."""
@@ -111,6 +172,23 @@ if _API_AVAILABLE:
                     "schema": {"type": "string", "format": "date-time"},
                     "description": "End datetime (ISO 8601). Defaults to now.",
                     "example": "2025-01-31T23:59:59",
+                },
+                {
+                    "name": "run_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "uuid"},
+                    "description": (
+                        "Scope to one agent/pipeline run (Run History conversation uuid). Scoped "
+                        "payloads come from usage_event only; daily_activity and chat_sessions are empty."
+                    ),
+                },
+                {
+                    "name": "eval_run_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string", "format": "uuid"},
+                    "description": "Scope to one evaluation run by its uuid.",
                 },
             ],
             responses={
@@ -177,6 +255,17 @@ if _API_AVAILABLE:
             """
             from tools import db
             from ...models.audit_event import AuditEvent
+
+            try:
+                run_scope = _run_scope_args(request.args)
+            except ValueError as exc:
+                return {"error": str(exc)}, 400
+            if run_scope:
+                try:
+                    return _run_scoped_analytics(project_id, request.args, run_scope)
+                except Exception:  # pylint: disable=W0703
+                    log.error("Run-scoped analytics query failed", exc_info=True)
+                    return {"error": "Failed to query analytics"}, 500
 
             dt_from, dt_to = _parse_dates(request.args)
             member_ids = _project_member_ids(project_id)
@@ -287,14 +376,7 @@ if _API_AVAILABLE:
                             r for r in event_type_breakdown if r["event_type"] not in _USAGE_EVENT_TYPES
                         ] + [{"event_type": r["event_type"], "count": r["total"]} for r in usage_rows]
                         health = [h for h in health if h["event_type"] not in _USAGE_EVENT_TYPES] + [
-                            {
-                                "event_type": r["event_type"],
-                                "total": r["total"],
-                                "errors": r["errors"],
-                                "error_rate": round(r["errors"] / r["total"] * 100, 2) if r["total"] else 0,
-                                "avg_duration_ms": round(r["avg_duration_ms"], 1) if r["avg_duration_ms"] else 0,
-                            }
-                            for r in usage_rows
+                            _usage_health_row(r) for r in usage_rows
                         ]
 
                     return {
