@@ -2,8 +2,6 @@ from flask import request
 from pydantic import ValidationError
 from tools import api_tools, auth, config as c, db
 
-from pylon.core.tools import log
-
 from ...models.chat_template import ChatTemplate
 from ...models.pd.chat_template import ChatTemplateCreate, ChatTemplateRead, ChatTemplateUpdate
 from ...utils.constants import PROMPT_LIB_MODE
@@ -35,25 +33,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         },
     })
     @api_tools.endpoint_metrics
-    def post(self, project_id: int, template_id: int = None, **kwargs):
-        if template_id is not None:
-            with db.get_session(project_id) as session:
-                target = session.query(ChatTemplate).filter(ChatTemplate.id == template_id).first()
-                if not target:
-                    return {'error': 'Template not found.'}, 404
-
-                if target.is_default:
-                    return ChatTemplateRead.model_validate(target).model_dump(mode='json'), 200
-
-                session.query(ChatTemplate).filter(ChatTemplate.is_default == True).update(  # noqa: E712
-                    {'is_default': False}
-                )
-                target.is_default = True
-                session.commit()
-                result = ChatTemplateRead.model_validate(target).model_dump(mode='json')
-
-            return result, 200
-
+    def post(self, project_id: int, **kwargs):
         try:
             payload = ChatTemplateCreate.model_validate(request.json)
         except ValidationError as e:
@@ -72,11 +52,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if name_conflict:
                 return {'error': 'A template with this name already exists.'}, 400
 
-            is_first = count == 0
+            # A new template is never default on its own — the user sets it explicitly
             template = ChatTemplate(
                 name=payload.name,
                 participants=[p.model_dump() for p in payload.participants],
-                is_default=is_first,
+                is_default=False,
             )
             session.add(template)
             session.commit()
@@ -130,9 +110,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if not template:
                 return {'error': 'Template not found.'}, 404
 
-            if template.is_default:
-                return {'error': 'Cannot delete the default template. Set another template as default first.'}, 400
-
             session.delete(template)
             session.commit()
 
@@ -143,7 +120,6 @@ class API(api_tools.APIBase):
     url_params = api_tools.with_modes([
         '<int:project_id>/templates',
         '<int:project_id>/templates/<int:template_id>',
-        '<int:project_id>/templates/<int:template_id>/set-default',
     ])
 
     mode_handlers = {
