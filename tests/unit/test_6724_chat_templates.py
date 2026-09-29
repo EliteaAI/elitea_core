@@ -1020,11 +1020,17 @@ def _load_events_module(public_project_id=None):
     return mod.Event(), calls
 
 
-def _make_context(project_ids):
-    """Build a fake pylon context whose rpc_manager returns the given project list."""
+def _make_context(project_ids, user_project_ids=None):
+    """Build a fake pylon context whose rpc_manager returns the given project list.
+
+    user_project_ids: subset returned by admin_check_user_in_projects.
+    Defaults to all project_ids (user belongs to every project).
+    """
+    _user_pids = project_ids if user_project_ids is None else user_project_ids
     rpc = types.SimpleNamespace(
         call=types.SimpleNamespace(
             project_list=lambda filter_=None: [{"id": p} for p in project_ids],
+            admin_check_user_in_projects=lambda ids, user_id: _user_pids,
         )
     )
     return types.SimpleNamespace(rpc_manager=rpc)
@@ -1168,11 +1174,12 @@ class TestEventHandlerUserRemovedFromProject(unittest.TestCase):
 class TestEventHandlerUserDeleted(unittest.TestCase):
     """on_user_deleted — fired by admin UI when a user account is hard-deleted."""
 
-    def test_deletes_user_from_every_project(self):
+    def test_deletes_user_only_in_their_projects(self):
+        # user is in projects 1 and 3 out of [1, 2, 3]
         handler, calls = _load_events_module()
-        ctx = _make_context([1, 2, 3])
+        ctx = _make_context([1, 2, 3], user_project_ids=[1, 3])
         handler.on_user_deleted(ctx, None, {"user_id": 101})
-        self.assertCountEqual(calls["delete"], [1, 2, 3])
+        self.assertCountEqual(calls["delete"], [1, 3])
 
     def test_delete_called_with_none_entity_project_id(self):
         handler, calls = _load_events_module()
@@ -1194,9 +1201,9 @@ class TestEventHandlerUserDeleted(unittest.TestCase):
         handler.on_user_deleted(ctx, None, {})
         self.assertEqual(calls["delete"], [])
 
-    def test_no_projects_means_no_deletes(self):
+    def test_noop_when_user_belongs_to_no_projects(self):
         handler, calls = _load_events_module()
-        ctx = _make_context([])
+        ctx = _make_context([1, 2, 3], user_project_ids=[])
         handler.on_user_deleted(ctx, None, {"user_id": 101})
         self.assertEqual(calls["delete"], [])
 
