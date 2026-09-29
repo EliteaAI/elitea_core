@@ -36,7 +36,10 @@ class LLMSettingsRequest(BaseModel):
     )
     reasoning_effort: Optional[str] = Field(
         default=None,
-        description="For reasoning models (o1, o1-mini, claude-opus, etc.). Values: 'low', 'medium', 'high'"
+        description=(
+            "For reasoning models. One of the model's configured supported_efforts "
+            "(none, minimal, low, medium, high, xhigh, max); models without that configuration take low, medium or high"
+        )
     )
 
 

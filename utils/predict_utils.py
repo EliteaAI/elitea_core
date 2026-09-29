@@ -269,6 +269,12 @@ def generate_predict_payload(
     if model_max_output_tokens is not None:
         model_parameters['max_output_tokens'] = model_max_output_tokens
 
+    if supports_reasoning:
+        for capability in ("thinking_type", "supported_efforts", "default_effort"):
+            capability_value = llm_model_configuration.get(capability)
+            if capability_value is not None:
+                model_parameters[capability] = capability_value
+
     if is_auto:
         model_parameters['selection'] = selection.model_dump()
         model_parameters['routing_surface'] = 'agent' if isinstance(parsed, ApplicationChatRequest) else 'chat'
