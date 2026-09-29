@@ -1,9 +1,12 @@
-"""Validate that reserved system state variable names are rejected at pipeline save time (#6593)."""
+"""Validate that tool_outcomes and last_tool_outcome are allowed as pipeline state variables (#6593).
+
+These variables were previously reserved for system use, but are now exposed as default
+pipeline state variables that users can reference in their pipelines.
+"""
 import importlib.util
 import pathlib
 import sys
 
-import pytest
 import yaml
 
 # Load pipeline_utils directly to avoid package-install requirement
@@ -20,13 +23,22 @@ def _make_yaml(state: dict) -> str:
     return yaml.safe_dump({'nodes': [], 'state': state}, sort_keys=False)
 
 
-@pytest.mark.parametrize('name', ['tool_outcomes', 'last_tool_outcome'])
-def test_reserved_name_raises(name):
-    with pytest.raises(ValueError, match='reserved for system use'):
-        validate_yaml_from_str(_make_yaml({name: {'type': 'dict'}}))
+def test_tool_outcomes_is_allowed():
+    result = validate_yaml_from_str(_make_yaml({'tool_outcomes': {'type': 'dict'}}))
+    assert 'state' in result
 
 
-def test_non_reserved_name_passes():
+def test_last_tool_outcome_is_allowed():
+    result = validate_yaml_from_str(_make_yaml({'last_tool_outcome': {'type': 'dict'}}))
+    assert 'state' in result
+
+
+def test_tool_outcomes_mixed_with_user_vars_passes():
+    result = validate_yaml_from_str(_make_yaml({'my_var': {'type': 'str'}, 'tool_outcomes': {'type': 'dict'}}))
+    assert 'state' in result
+
+
+def test_non_default_name_passes():
     result = validate_yaml_from_str(_make_yaml({'my_var': {'type': 'str'}}))
     assert 'state' in result
 
@@ -39,8 +51,3 @@ def test_no_state_key_passes():
 def test_empty_state_passes():
     result = validate_yaml_from_str(_make_yaml({}))
     assert isinstance(result, dict)
-
-
-def test_mixed_state_raises_on_reserved():
-    with pytest.raises(ValueError, match='reserved for system use'):
-        validate_yaml_from_str(_make_yaml({'my_var': {'type': 'str'}, 'tool_outcomes': {'type': 'dict'}}))
