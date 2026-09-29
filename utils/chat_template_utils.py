@@ -1,5 +1,7 @@
 """Utilities for keeping chat_templates participants in sync with entity changes."""
 
+from typing import Optional
+
 from pylon.core.tools import log
 
 from tools import db
@@ -7,9 +9,16 @@ from tools import db
 from ..models.chat_template import ChatTemplate
 
 
-def delete_entity_from_templates(project_id: int, entity_names: list, entity_id: int, entity_project_id: int) -> None:
-    """Remove every participant matching entity_names + entity_id + entity_project_id
-    from all chat templates in the given project.
+def delete_entity_from_templates(
+    project_id: int,
+    entity_names: list,
+    entity_id: int,
+    entity_project_id: Optional[int],
+) -> None:
+    """Remove every participant matching entity_names + entity_id from all chat
+    templates in the given project.  When entity_project_id is None the
+    project_id field on the stored participant is not checked; pass None for
+    entity types (e.g. users) whose participants are stored without project_id.
     """
     try:
         with db.get_session(project_id) as session:
@@ -22,7 +31,7 @@ def delete_entity_from_templates(project_id: int, entity_names: list, entity_id:
                     if not (
                         p.get('entity_name') in entity_names
                         and p.get('id') == entity_id
-                        and p.get('project_id') == entity_project_id
+                        and (entity_project_id is None or p.get('project_id') == entity_project_id)
                     )
                 ]
                 if len(updated) != len(original):

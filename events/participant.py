@@ -75,6 +75,34 @@ class Event:
             meta=toolkit_data['data']
         )
 
+    @web.event('user_removed_from_project')
+    def delete_user_participant_handler(self, context, event, payload: dict):
+        project_id = payload.get('project_id')
+        user_ids = payload.get('user_ids') or []
+        if not project_id or not user_ids:
+            return
+        for user_id in user_ids:
+            self.delete_entity_in_all_conversations(
+                project_id,
+                ParticipantTypes.user.name,
+                {'id': user_id}
+            )
+
+    @web.event('user_deleted')
+    def delete_user_participant_on_user_deleted(self, context, event, payload: dict):
+        # Fired by the admin UI. project_ids is resolved by the publisher
+        # before auth.delete_user so there is no membership race.
+        user_id = payload.get('user_id')
+        project_ids = payload.get('project_ids') or []
+        if not user_id or not project_ids:
+            return
+        for project_id in project_ids:
+            self.delete_entity_in_all_conversations(
+                project_id,
+                ParticipantTypes.user.name,
+                {'id': user_id}
+            )
+
     @web.event('integration_settings_changed')
     def integration_model_changed(self, context, event, settings_data: dict):
         project_ids = settings_data['project_ids']
