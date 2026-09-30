@@ -1211,6 +1211,7 @@ class RPC:
                 pool="indexer",
                 meta={
                     "task_name": "indexer_validator",
+                    "llm_free": True,
                     "toolkit_type": type_,
                     "project_id": project_id,
                     "user_input_preview": f"validate toolkit {type_}"[:100],
