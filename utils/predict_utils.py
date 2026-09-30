@@ -65,10 +65,10 @@ def get_system_user_token(project_id: int, name: str = 'api', create_if_not_exis
     system_user = rpc_tools.RpcMixin().rpc.timeout(
         2
     ).admin_get_project_system_user(project_id)
-    token_list = auth.list_tokens(system_user['id'])
-    for i in token_list:
-        if i['name'] == name:
-            return auth.encode_token(i['id'])
+    # Newest matches the Vault auth_token, which rotation keeps alive for one more cycle
+    matching = [i for i in auth.list_tokens(system_user['id']) if i['name'] == name]
+    if matching:
+        return auth.encode_token(max(matching, key=lambda i: i['id'])['id'])
     if create_if_not_exists:
         token_id = auth.add_token(system_user['id'], 'api')
         return auth.encode_token(token_id)
