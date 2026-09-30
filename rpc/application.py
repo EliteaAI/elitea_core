@@ -1211,6 +1211,7 @@ class RPC:
                 pool="indexer",
                 meta={
                     "task_name": "indexer_validator",
+                    "llm_free": True,
                     "toolkit_type": type_,
                     "project_id": project_id,
                     "user_input_preview": f"validate toolkit {type_}"[:100],
@@ -1580,6 +1581,7 @@ class RPC:
                 pool="agents",
                 meta={
                     "task_name": "indexer_test_toolkit_tool",
+                    "llm_free": True,
                     "project_id": project_id,
                     'chat_project_id': chat_project_id,
                     "message_id": data['message_id'],

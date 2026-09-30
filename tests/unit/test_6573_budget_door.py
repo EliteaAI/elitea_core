@@ -140,6 +140,49 @@ class TestFailsOpen(unittest.TestCase):
         self.assertIsNone(module.closed_budget_scope(42))
 
 
+class TestFailFast(unittest.TestCase):
+    """A failed check must not make every following dispatch wait out the RPC timeout again."""
+
+    def test_a_failed_check_skips_the_gate_for_the_backoff_window(self):
+        module, gate = door(raises=RuntimeError("no usage plugin"))
+        #
+        self.assertIsNone(module.closed_budget_scope(42, 7))
+        self.assertIsNone(module.closed_budget_scope(42, 7))
+        self.assertIsNone(module.closed_budget_scope(43, 8))
+        self.assertEqual(gate.calls, [(42, 7)])
+
+    def test_the_gate_is_probed_again_once_the_backoff_expires(self):
+        module, gate = door(raises=RuntimeError("no usage plugin"))
+        #
+        module.closed_budget_scope(42)
+        module._skip_until = 0.0  # pylint: disable=W0212
+        module.closed_budget_scope(42)
+        #
+        self.assertEqual(len(gate.calls), 2)
+
+    def test_a_working_gate_is_never_skipped(self):
+        module, gate = door({"closed": False, "scope": None, "healthy": True})
+        #
+        for _ in range(3):
+            module.closed_budget_scope(42)
+        #
+        self.assertEqual(len(gate.calls), 3)
+
+    def test_an_unknown_verdict_does_not_start_a_backoff(self):
+        module, gate = door({"closed": False, "scope": None, "healthy": False})
+        #
+        module.closed_budget_scope(42)
+        module.closed_budget_scope(42)
+        #
+        self.assertEqual(len(gate.calls), 2)
+
+    def test_a_backoff_never_hides_a_closed_budget_seen_before_it(self):
+        module, _ = door({"closed": True, "scope": "project", "healthy": True})
+        #
+        self.assertEqual(module.closed_budget_scope(42), "project")
+        self.assertEqual(module.closed_budget_scope(42), "project")
+
+
 class TestDispatchOwner(unittest.TestCase):
     """start_task kwargs nest the payload, so the ids are never at the top level."""
 
