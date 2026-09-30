@@ -29,7 +29,6 @@ class Method:
             pool="agents",
             meta={
                 "task_name": "indexer_test_toolkit_tool",
-                "llm_free": True,
                 "toolkit_id": toolkit_id,
                 "tool_name": tool_name,
                 "project_id": project_id,

@@ -22,8 +22,6 @@ an arbiter hop and an indexer worker to be refused on its first LLM call. The in
 gate in the usage plugin stays the authority.
 """
 
-import time
-
 import yaml
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
@@ -33,12 +31,6 @@ from tools import context  # pylint: disable=E0401
 # Pipeline node types that never reach an LLM. Anything else (llm, decision, agent, toolkit,
 # subgraph, custom, ...) or an unknown type keeps the door check.
 LLM_FREE_NODE_TYPES = frozenset({"code", "router", "state_modifier", "printer", "hitl"})
-
-# After a failed check (typically no usage plugin answering, i.e. a full RPC timeout) the door
-# is skipped for this long, so an environment without a responder pays the wait once, not on
-# every gated dispatch. Per-process and racy on purpose: the door is advisory and fails open.
-CHECK_BACKOFF_SECONDS = 60
-_skip_until = 0.0
 
 
 def dispatch_may_use_llm(call_kwargs: dict) -> bool:
@@ -88,10 +80,8 @@ def dispatch_owner(call_kwargs: dict):
 
 
 def closed_budget_scope(project_id, user_id=None):
-    """Which budget is already full ('project'/'member'), or None. Fails open, and fast after a failure."""
-    global _skip_until  # pylint: disable=W0603
-    #
-    if project_id is None or time.monotonic() < _skip_until:
+    """Which budget is already full ('project'/'member'), or None. Fails open."""
+    if project_id is None:
         return None
     #
     try:
@@ -101,6 +91,5 @@ def closed_budget_scope(project_id, user_id=None):
         #
         return verdict.get("scope") or None if verdict.get("closed") else None
     except:  # pylint: disable=W0702
-        _skip_until = time.monotonic() + CHECK_BACKOFF_SECONDS
         log.debug("budget_door: check failed for project %s", project_id, exc_info=True)
         return None

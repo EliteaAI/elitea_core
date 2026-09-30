@@ -1968,7 +1968,6 @@ def start_index_task(task_node, data, sio_event, initiator=InitiatorType.user):
         pool="agents",
         meta={
             "task_name": "indexer_test_toolkit_tool",
-            "llm_free": True,
             "project_id": project_id,
             "chat_project_id": chat_project_id,
             "message_id": message_id,
