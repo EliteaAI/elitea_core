@@ -61,18 +61,11 @@ def resolve_application_name(parsed: ApplicationChatRequest) -> Optional[str]:
     return application_name or version_name
 
 
-def get_system_user_token(project_id: int, name: str = 'api', create_if_not_exists: bool = True) -> Optional[str]:
-    system_user = rpc_tools.RpcMixin().rpc.timeout(
-        2
-    ).admin_get_project_system_user(project_id)
-    # Newest matches the Vault auth_token, which rotation keeps alive for one more cycle
-    matching = [i for i in auth.list_tokens(system_user['id']) if i['name'] == name]
-    if matching:
-        return auth.encode_token(max(matching, key=lambda i: i['id'])['id'])
-    if create_if_not_exists:
-        token_id = auth.add_token(system_user['id'], 'api')
-        return auth.encode_token(token_id)
-    return
+def get_system_user_token(project_id: int, create_if_not_exists: bool = True) -> Optional[str]:
+    # admin owns the pick, so it cannot drift from what rotation keeps alive
+    return rpc_tools.RpcMixin().rpc.timeout(2).admin_get_project_system_token(
+        project_id, create_if_not_exists=create_if_not_exists,
+    )
 
 
 def get_user_token(user_id: int) -> Optional[str]:
@@ -101,7 +94,6 @@ def get_system_token(project_id: int) -> Optional[str]:
     """
     system_token: str = get_system_user_token(
         project_id=project_id,
-        name='api',
         create_if_not_exists=True
     )
     return system_token
