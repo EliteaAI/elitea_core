@@ -187,8 +187,20 @@ class TestOutcomesThatMustNotBeReused:
         assert len(harness.cache) == 0
 
     @staticmethod
+    def test_toolkits_with_large_sdk_schemas_are_still_reused(harness):
+        # github / jira / confluence schemas are 30-42KB; a cap on the whole key input would
+        # silently disable reuse for exactly the most common toolkits.
+        harness.schema_lookup.return_value = ({**SCHEMA, "description": "x" * 45_000}, False)
+        harness.script({"result": VALIDATED})
+
+        harness.call()
+        harness.call()
+
+        assert len(harness.node.started) == 1
+
+    @staticmethod
     def test_oversized_settings_bypass_the_cache(harness):
-        huge = {"spec": "x" * harness.cache_module.MAX_CACHEABLE_BYTES}
+        huge = {"spec": "x" * harness.cache_module.MAX_CACHEABLE_SETTINGS_BYTES}
         harness.script({"result": VALIDATED}, {"result": VALIDATED})
 
         harness.call(settings=huge)

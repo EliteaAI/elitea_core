@@ -69,18 +69,31 @@ class TestCacheKey(unittest.TestCase):
     def test_unserializable_settings_are_not_cached(self):
         self.assertIsNone(vc.make_validator_cache_key("artifact", {"x": object()}, SCHEMA))
 
-    def test_oversized_payload_is_not_cached(self):
-        # Entry count alone is a weak memory bound: one toolkit with a huge inline spec would
-        # dominate the cache, so anything over the cap bypasses it entirely.
-        big = {"spec": "x" * vc.MAX_CACHEABLE_BYTES}
+    def test_oversized_settings_are_not_cached(self):
+        # The stored result mirrors the settings, so the per-entry memory bound is a cap on
+        # settings size: one toolkit with a huge inline spec must not crowd out the rest.
+        big = {"spec": "x" * vc.MAX_CACHEABLE_SETTINGS_BYTES}
         self.assertIsNone(vc.make_validator_cache_key("openapi", big, SCHEMA))
 
-    def test_payload_at_the_cap_is_still_cached(self):
-        overhead = len(vc.json.dumps(["openapi", {"spec": ""}, SCHEMA], sort_keys=True, separators=(",", ":")))
-        fits = {"spec": "x" * (vc.MAX_CACHEABLE_BYTES - overhead)}
+    def test_settings_at_the_cap_are_still_cached(self):
+        overhead = len(vc._dumps({"spec": ""}))
+        fits = {"spec": "x" * (vc.MAX_CACHEABLE_SETTINGS_BYTES - overhead)}
         self.assertIsNotNone(vc.make_validator_cache_key("openapi", fits, SCHEMA))
-        over = {"spec": "x" * (vc.MAX_CACHEABLE_BYTES - overhead + 1)}
+        over = {"spec": "x" * (vc.MAX_CACHEABLE_SETTINGS_BYTES - overhead + 1)}
         self.assertIsNone(vc.make_validator_cache_key("openapi", over, SCHEMA))
+
+    def test_a_large_schema_does_not_count_against_the_cap(self):
+        # Real SDK schemas reach ~42KB (github, jira, confluence). They are only hashed, never
+        # stored, so they must not stop the most common toolkits from being cached.
+        big_schema = {**SCHEMA, "description": "x" * (2 * vc.MAX_CACHEABLE_SETTINGS_BYTES)}
+        self.assertIsNotNone(vc.make_validator_cache_key("github", SETTINGS, big_schema))
+
+    def test_fields_cannot_bleed_into_each_other(self):
+        # The pieces are joined into one hash input; shifting text between them must not collide.
+        self.assertNotEqual(
+            vc.make_validator_cache_key("a", {"k": "b"}, {}),
+            vc.make_validator_cache_key("ab", {"k": ""}, {}),
+        )
 
 
 class TestValidatorResultCache(unittest.TestCase):
@@ -123,6 +136,51 @@ class TestValidatorResultCache(unittest.TestCase):
         self.assertIsNone(self.cache.get("a"))
         self.cache.put("c", {"v": 3})  # still usable after a clear
         self.assertEqual(self.cache.get("c"), {"v": 3})
+
+    def test_total_byte_budget_evicts_least_recently_used(self):
+        one_kb = {"blob": "x" * 1000}
+        size = vc._result_size(one_kb)
+        cache = vc.ValidatorResultCache(max_entries=100, ttl_seconds=60,
+                                        max_total_bytes=size * 2, clock=self.clock)
+        cache.put("a", one_kb)
+        cache.put("b", one_kb)
+        cache.get("a")  # 'b' becomes least recently used
+        cache.put("c", one_kb)
+
+        self.assertIsNotNone(cache.get("a"))
+        self.assertIsNone(cache.get("b"))
+        self.assertIsNotNone(cache.get("c"))
+        self.assertEqual(cache.total_bytes, size * 2)
+
+    def test_result_larger_than_the_whole_budget_is_not_stored(self):
+        cache = vc.ValidatorResultCache(max_total_bytes=100, clock=self.clock)
+        cache.put("small", {"v": 1})
+        cache.put("huge", {"blob": "x" * 500})
+
+        self.assertIsNone(cache.get("huge"))
+        self.assertIsNotNone(cache.get("small"))  # an unstorable entry must not evict others
+
+    def test_byte_accounting_stays_exact_across_replace_expire_and_clear(self):
+        # A drifting counter would either evict everything forever or stop bounding memory.
+        cache = vc.ValidatorResultCache(ttl_seconds=60, clock=self.clock)
+        cache.put("k", {"v": "short"})
+        cache.put("k", {"v": "a much longer replacement value"})
+        self.assertEqual(cache.total_bytes, vc._result_size({"v": "a much longer replacement value"}))
+
+        self.clock.now += 61
+        self.assertIsNone(cache.get("k"))
+        self.assertEqual(cache.total_bytes, 0)
+
+        cache.put("a", {"v": 1})
+        cache.put("b", {"v": 2})
+        cache.clear()
+        self.assertEqual(cache.total_bytes, 0)
+
+    def test_count_eviction_also_releases_bytes(self):
+        self.cache.put("a", {"v": 1})
+        self.cache.put("b", {"v": 2})
+        self.cache.put("c", {"v": 3})  # max_entries=2 evicts 'a'
+        self.assertEqual(self.cache.total_bytes, vc._result_size({"v": 2}) + vc._result_size({"v": 3}))
 
     def test_returned_results_are_isolated_copies(self):
         # Callers assign the result into pydantic values and may mutate it; that must not
