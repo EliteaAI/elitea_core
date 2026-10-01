@@ -56,10 +56,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         available_to_users=True,
     )
     @auth.decorators.check_api({
-        "permissions": [
-            "models.chat.conversations.list",
-            "models.chat.conversations.list_custom",
-        ],
+        "permissions": ["models.chat.conversations.list"],
         "recommended_roles": {
             c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
