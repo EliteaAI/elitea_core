@@ -63,6 +63,7 @@ from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.vectorstore import get_pgvector_connection_string
 from ..utils.run_id import PREDICT_RUN_ID_KWARGS_KEY
 from ..utils.usage_attribution import ENTITY_KWARGS_KEY, ROOT_ENTITY_KWARGS_KEY
+from ..utils.validator_cache import make_validator_cache_key, toolkit_validator_cache
 
 
 def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
@@ -1202,6 +1203,10 @@ class RPC:
             # Passthrough if no schema found
             return {"ok": True, "result": settings}
         if not external:
+            cache_key = make_validator_cache_key(type_, settings, tk)
+            cached = toolkit_validator_cache.get(cache_key)
+            if cached is not None:
+                return {"ok": True, "result": cached}
             task_id = self.task_node.start_task(
                 "indexer_validator",
                 kwargs={
@@ -1221,6 +1226,7 @@ class RPC:
             if "error" in task_result:
                 return {"ok": False, "error": task_result['error']}
 
+            toolkit_validator_cache.put(cache_key, task_result['result'])
             return {"ok": True, "result": task_result['result']}
         else:
             # TODO: validate by different rpc from external service

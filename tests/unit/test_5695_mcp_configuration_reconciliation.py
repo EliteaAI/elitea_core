@@ -83,9 +83,22 @@ def _load_method(monkeypatch, rpc_manager):
     tools.context = types.SimpleNamespace(rpc_manager=rpc_manager)
     monkeypatch.setitem(sys.modules, "tools", tools)
 
+    # methods/toolkits.py imports ..utils.validator_cache, so it needs a parent package
+    pkg = "elitea_core_el5695"
+    for name, sub in ((pkg, None), (f"{pkg}.utils", "utils"), (f"{pkg}.methods", "methods")):
+        package = types.ModuleType(name)
+        package.__path__ = [str(PLUGIN_ROOT / sub)] if sub else [str(PLUGIN_ROOT)]
+        monkeypatch.setitem(sys.modules, name, package)
+
+    cache_spec = importlib.util.spec_from_file_location(
+        f"{pkg}.utils.validator_cache", PLUGIN_ROOT / "utils" / "validator_cache.py",
+    )
+    cache_module = importlib.util.module_from_spec(cache_spec)
+    monkeypatch.setitem(sys.modules, cache_spec.name, cache_module)
+    cache_spec.loader.exec_module(cache_module)
+
     spec = importlib.util.spec_from_file_location(
-        "elitea_core_toolkits_el5695",
-        PLUGIN_ROOT / "methods" / "toolkits.py",
+        f"{pkg}.methods.toolkits", PLUGIN_ROOT / "methods" / "toolkits.py",
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -206,3 +219,19 @@ def test_foreign_mcp_prefix_registration_is_not_replaced_or_removed(monkeypatch)
 
     assert rpc.unregistered == []
     assert rpc.registered == []
+
+
+def test_schema_collections_clear_validator_result_cache(monkeypatch):
+    # A re-registered indexer may ship changed validator logic under an identical JSON schema,
+    # so both collection events must drop every cached validation result.
+    module = _load_method(monkeypatch, _RpcManager([]))
+    instance = _method_instance(module)
+    cache = module.toolkit_validator_cache
+
+    cache.put("k1", {"bucket": "a"})
+    instance.toolkits_collected(None, [_schema("mcp_new")])
+    assert cache.get("k1") is None
+
+    cache.put("k2", {"bucket": "b"})
+    instance.toolkit_configurations_collected(None, {})
+    assert cache.get("k2") is None
