@@ -235,6 +235,7 @@ def _execute_pipeline(
         conversation_uuid=conversation_uuid,
         response_message_id=response_message_id,
         user_input="",  # Empty input for scheduled runs
+        trigger_source="scheduled",
     )
 
     return result

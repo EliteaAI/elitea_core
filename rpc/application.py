@@ -181,6 +181,7 @@ class RPC:
                     platform_run_id: Optional[str] = None,
                     usage_entity: Optional[dict] = None,
                     routing_projection: Optional[dict] = None,
+                    trigger_source: Optional[str] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -313,6 +314,9 @@ class RPC:
             payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
+            # Usage analytics separates automated runs from human ones (#6881)
+            if trigger_source:
+                payload['trigger_source'] = trigger_source
         except PredictPayloadError as e:
             raise SioValidationError(
                 sio=self.context.sio,
