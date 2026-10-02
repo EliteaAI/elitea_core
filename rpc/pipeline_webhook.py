@@ -88,6 +88,7 @@ def execute_pipeline_webhook(
             conversation_uuid=conversation_uuid,
             response_message_id=response_message_id,
             user_input=payload_str,  # Full payload as input for webhook
+            trigger_source="webhook",
         )
     except PoolSaturationError:
         # Mark the response placeholder as not streaming to avoid stuck History entry

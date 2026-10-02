@@ -183,6 +183,7 @@ def execute_pipeline_via_predict_sio(
     conversation_uuid: str,
     response_message_id: str,
     user_input: str = "",
+    trigger_source: str | None = None,
 ) -> dict:
     """
     Execute a pipeline using the applications_predict_sio RPC.
@@ -223,6 +224,7 @@ def execute_pipeline_via_predict_sio(
         # index/HITL/error state events are preserved. Redundant with the
         # sid-is-None auto-derive (sid=None here), but kept to document intent.
         non_interactive=True,
+        trigger_source=trigger_source,
     )
 
     log.debug(
