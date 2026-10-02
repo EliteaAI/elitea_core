@@ -593,7 +593,6 @@ class Module(module.ModuleModel):
             "recommended_roles": {
                 "administration": {"admin": True, "viewer": False, "editor": False},
                 "default": {"admin": True, "viewer": False, "editor": False},
-                "developer": {"admin": True, "viewer": False, "editor": False},
             }
         })
         auth.register_permissions({
@@ -601,7 +600,6 @@ class Module(module.ModuleModel):
             "recommended_roles": {
                 "administration": {"admin": True, "viewer": False, "editor": False},
                 "default": {"admin": True, "viewer": False, "editor": False},
-                "developer": {"admin": True, "viewer": False, "editor": False},
             }
         })
 
@@ -1252,7 +1250,6 @@ class Module(module.ModuleModel):
             "recommended_roles": {
                 "administration": {"admin": True, "viewer": False, "editor": False},
                 "default": {"admin": True, "viewer": False, "editor": False},
-                "developer": {"admin": True, "viewer": False, "editor": False},
             }
         })
         auth.register_permissions({
@@ -1260,7 +1257,6 @@ class Module(module.ModuleModel):
             "recommended_roles": {
                 "administration": {"admin": True, "viewer": False, "editor": False},
                 "default": {"admin": True, "viewer": False, "editor": False},
-                "developer": {"admin": True, "viewer": False, "editor": False},
             }
         })
 
