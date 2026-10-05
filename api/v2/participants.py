@@ -11,6 +11,7 @@ from ...models.pd.participant import ParticipantBase, ParticipantCreate
 from ...utils.participant_utils import add_participant_to_conversation
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_access import check_conversation_access
 from ...utils.sio_utils import SioEvents
 
 from pylon.core.tools import log
@@ -78,6 +79,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {'error': f'No such conversation with id {conversation_id}'}, 400
 
             current_user_id = auth.current_user().get("id")
+            denied = check_conversation_access(session, project_id, conversation, current_user_id)
+            if denied:
+                return denied
             room = get_chat_room(conversation.uuid)
 
             result_details = list()

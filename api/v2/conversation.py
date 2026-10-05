@@ -1,9 +1,11 @@
 from flask import request, current_app
-from tools import api_tools, auth, config as c, rpc_tools, register_openapi
+from tools import api_tools, auth, db, config as c, rpc_tools, register_openapi
 from pylon.core.tools import log
 
 
+from ...models.conversation import Conversation
 from ...models.pd.conversation import ConversationUpdate
+from ...utils.conversation_access import check_conversation_access, is_privileged_update, is_own_folder
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.support_utils import get_support_config
 
@@ -112,6 +114,20 @@ class PromptLibAPI(api_tools.APIModeHandler):
         data = dict(request.json) if request.json else {}
         log.debug(f"Update conversation {conversation_id} with data: {data}")
         rpc = rpc_tools.RpcMixin().rpc
+        user_id = auth.current_user().get('id')
+
+        with db.get_session(project_id) as session:
+            conversation = session.query(Conversation).filter(Conversation.id == conversation_id).first()
+            if not conversation:
+                return {'error': 'Conversation not found'}, 404
+            denied = check_conversation_access(
+                session, project_id, conversation, user_id,
+                needs_privilege=is_privileged_update(conversation, data),
+            )
+            if denied:
+                return denied
+            if data.get('folder_id') is not None and not is_own_folder(session, data['folder_id'], user_id):
+                return {'error': 'Folder not found'}, 404
 
         kwargs = {
             'project_id': project_id,
@@ -122,7 +138,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             'is_hidden': data.get('is_hidden'),
             'meta': data.get('meta'),
             'attachment_participant_id': data.get('attachment_participant_id'),
-            'caller_id': auth.current_user().get('id'),
+            'caller_id': user_id,
         }
 
         if 'folder_id' in data:
@@ -152,6 +168,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, conversation_id: int):
         rpc = rpc_tools.RpcMixin().rpc
+
+        with db.get_session(project_id) as session:
+            conversation = session.query(Conversation).filter(Conversation.id == conversation_id).first()
+            if not conversation:
+                return {'error': 'Conversation not found'}, 404
+            denied = check_conversation_access(
+                session, project_id, conversation, auth.current_user().get('id'), needs_privilege=True,
+            )
+            if denied:
+                return denied
 
         result = rpc.timeout(5).chat_delete_conversation_rpc(
             project_id=project_id,

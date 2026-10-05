@@ -1,9 +1,11 @@
 from tools import api_tools, auth, db, config as c, serialize, register_openapi
 
+from ...models.conversation import Conversation
 from ...models.participants import Participant
 from ...models.pd.participant import ParticipantDetails
 from ...utils.participant_utils import delete_participant_from_conversation
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.conversation_access import check_conversation_access, get_user_participant_id
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -62,6 +64,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, conversation_id: int, participant_id: int, **kwargs):
+        user_id = auth.current_user().get('id')
+        with db.get_session(project_id) as session:
+            conversation = session.query(Conversation).filter(Conversation.id == conversation_id).first()
+            if not conversation:
+                return {'error': 'Conversation not found'}, 404
+            # Leaving a conversation yourself is allowed; removing others is author/admin only
+            is_self = get_user_participant_id(session, conversation_id, user_id) == participant_id
+            denied = check_conversation_access(
+                session, project_id, conversation, user_id, needs_privilege=not is_self,
+            )
+            if denied:
+                return denied
         ret, code = delete_participant_from_conversation(project_id, conversation_id, participant_id)
         return ret, code
 
