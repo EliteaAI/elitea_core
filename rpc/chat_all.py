@@ -37,6 +37,7 @@ from ..utils.sio_utils import get_chat_room
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
+from ..utils.conversation_access import check_post_access
 from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
@@ -1047,6 +1048,17 @@ def prepare_conversation_history(
 
 
 class RPC:
+    @web.method()
+    def _predict_access_error(self, session, project_id: int, conversation, user_id: int) -> str | None:
+        if conversation is None:
+            return 'Conversation not found'
+        is_participant = any(
+            p.entity_name == ParticipantTypes.user.value and (p.entity_meta or {}).get('id') == user_id
+            for p in conversation.participants
+        )
+        denied = check_post_access(session, project_id, conversation, user_id, is_participant)
+        return denied[0]['error'] if denied else None
+
     @web.rpc("chat_predict_sio", "chat_predict_sio")
     def predict_sio(
         self, sid: str | None, data: dict, await_task_timeout: int = -1, return_message_ids: bool = False,
@@ -1075,6 +1087,20 @@ class RPC:
             conversation: Conversation = session.query(Conversation).where(
                 Conversation.uuid == parsed.conversation_uuid
             ).first()
+            # Checked before any write so a rejected sender leaves no trace in the conversation
+            denied_error = self._predict_access_error(session, parsed.project_id, conversation, current_user['id'])
+            if denied_error:
+                if sid:
+                    raise SioValidationError(
+                        sio=self.context.sio,
+                        sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error=denied_error,
+                        stream_id=parsed.conversation_uuid,
+                        message_id=parsed.question_id,
+                    )
+                return {"error": denied_error}
+
             context_management_enabled = get_context_manager_feature_flag(
                 parsed.project_id,
             )

@@ -48,6 +48,21 @@ def check_conversation_access(session, project_id: int, conversation, user_id: i
     )
 
 
+def check_post_access(session, project_id: int, conversation, user_id: int, is_participant: bool):
+    # Public conversations keep auto-join on first message; private ones need membership
+    if not conversation.is_private or is_participant:
+        return None
+    if get_support_config().get('project_id') == project_id:
+        return None
+    return decide_access(
+        is_private=True,
+        is_author=conversation.author_id == user_id,
+        is_participant=False,
+        is_admin=lambda: bool(rpc_tools.RpcMixin().rpc.timeout(3).admin_check_user_is_admin(project_id, user_id)),
+        needs_privilege=False,
+    )
+
+
 def is_privileged_update(conversation, data: dict) -> bool:
     # UI resends unchanged fields (e.g. full meta), so only real changes count
     if data.get('instructions') is not None and data['instructions'] != conversation.instructions:
