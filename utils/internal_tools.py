@@ -71,6 +71,27 @@ MCP_BUILDER_TOOL_KEYS = {
     MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY,
     MCP_PROJECT_CONTEXT_BUILDER_INTERNAL_TOOL_KEY,
 }
+SKILL_SCOPE_INSTRUCTION = (
+    " Disambiguate 'skill' from the full conversation context: treat it as an ELITEA platform "
+    "Skill entity only when the user request is clearly about ELITEA entities/workflows "
+    "(e.g., create/update/list/publish/import/export/link/version/category in ELITEA via "
+    "elitea_core/skills). If the user means a general human capability, handle it as a regular "
+    "concept and do not invoke ELITEA skills MCP tools unless explicitly requested."
+)
+SKILL_BUILDER_NOT_ENABLED_INSTRUCTION = (
+    " ELITEA Skills are a separate entity from agents and pipelines, and the Skill Builder tool "
+    "that manages them is not enabled in this conversation. If the user asks to create, edit, "
+    "delete, list, publish, import, export, attach or detach an ELITEA skill, do not create or "
+    "change an agent, a pipeline or any other entity in its place. Tell the user that managing "
+    "skills needs the Skill Builder tool, which they can enable in this conversation's internal "
+    "tools, and stop there. This does not restrict using skills or other agent work: skills "
+    "listed in <available_skills> are loaded and applied as usual, and creating or editing agent "
+    "and pipeline versions works normally. Creating a version with these tools does not carry "
+    "over skills attached to another version, so do not tell the user a new version has the same "
+    "skills; say that its skills must be attached with the Skill Builder tool or in the agent's "
+    "editor, and still create the version if asked. A skill the user names that is not listed "
+    "there is not attached to this agent, and attaching it is managing skills."
+)
 
 
 def should_inject_runtime_context(internal_tools: list[str], is_pipeline: bool) -> bool:
@@ -882,15 +903,12 @@ def get_mcp_entity_link_instructions(internal_tools: list[str]) -> str:
         return ''
     enabled_tools = set(internal_tools or [])
     app_host = c.APP_HOST.rstrip('/')
-    skill_scope_instruction = (
-        " Disambiguate 'skill' from the full conversation context: treat it as an ELITEA platform "
-        "Skill entity only when the user request is clearly about ELITEA entities/workflows "
-        "(e.g., create/update/list/publish/import/export/link/version/category in ELITEA via "
-        "elitea_core/skills). If the user means a general human capability, handle it as a regular "
-        "concept and do not invoke ELITEA skills MCP tools unless explicitly requested."
-        if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools
-        else ""
-    )
+    if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
+        skill_scope_instruction = SKILL_SCOPE_INSTRUCTION
+    elif MCP_INTERNAL_TOOL_KEY in enabled_tools:
+        skill_scope_instruction = SKILL_BUILDER_NOT_ENABLED_INSTRUCTION
+    else:
+        skill_scope_instruction = ""
     few_shot_blocks = []
     if MCP_SKILL_BUILDER_INTERNAL_TOOL_KEY in enabled_tools:
         few_shot_blocks.append(
