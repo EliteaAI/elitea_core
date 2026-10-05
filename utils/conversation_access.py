@@ -31,16 +31,29 @@ def decide_access(is_private: bool, is_author: bool, is_participant: bool, is_ad
     return NOT_PRIVILEGED
 
 
+def _admin_checker(project_id: int, user_id: int):
+    return lambda: bool(rpc_tools.RpcMixin().rpc.timeout(3).admin_check_user_is_admin(project_id, user_id))
+
+
+def _is_support_project(project_id: int) -> bool:
+    return get_support_config().get('project_id') == project_id
+
+
 def check_conversation_access(project_id: int, conversation, user_id: int, needs_privilege: bool = False):
-    if get_support_config().get('project_id') == project_id:
+    # Author is the common case: answer before any RPC
+    if conversation.author_id == user_id:
         return None
-    return decide_access(
+    denied = decide_access(
         is_private=bool(conversation.is_private),
-        is_author=conversation.author_id == user_id,
+        is_author=False,
         is_participant=find_user_participant_id(conversation.participants, user_id) is not None,
-        is_admin=lambda: bool(rpc_tools.RpcMixin().rpc.timeout(3).admin_check_user_is_admin(project_id, user_id)),
+        is_admin=_admin_checker(project_id, user_id),
         needs_privilege=needs_privilege,
     )
+    # Support-project lookup is an RPC, so only pay for it when about to deny
+    if denied and _is_support_project(project_id):
+        return None
+    return denied
 
 
 def check_post_access(project_id: int, conversation, user_id: int):
@@ -49,13 +62,13 @@ def check_post_access(project_id: int, conversation, user_id: int):
     # Public conversations keep auto-join on first message; private ones need membership
     if not conversation.is_private or find_user_participant_id(conversation.participants, user_id) is not None:
         return None
-    if get_support_config().get('project_id') == project_id:
+    if _is_support_project(project_id):
         return None
     return decide_access(
         is_private=True,
         is_author=conversation.author_id == user_id,
         is_participant=False,
-        is_admin=lambda: bool(rpc_tools.RpcMixin().rpc.timeout(3).admin_check_user_is_admin(project_id, user_id)),
+        is_admin=_admin_checker(project_id, user_id),
         needs_privilege=False,
     )
 
