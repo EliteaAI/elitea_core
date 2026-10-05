@@ -28,6 +28,16 @@ from ...utils.mcp_oauth import exchange_token, get_oauth_configurations, pick_oa
 from ....configurations.utils import expand_configuration
 
 
+def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sources: list) -> bool:
+    """token_endpoint is caller-supplied: only send a stored secret to the endpoint the toolkit
+    declares, or for callers who can edit toolkits anyway."""
+    stored_endpoint = pick_oauth_setting(credential_sources, 'token_endpoint', 'token_url')
+    if stored_endpoint and stored_endpoint.rstrip('/') == (token_endpoint or '').rstrip('/'):
+        return True
+    user_permissions = auth.resolve_permissions(mode=c.DEFAULT_MODE, project_id=project_id)
+    return "models.applications.tool.patch" in user_permissions
+
+
 class ProjectAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="MCP OAuth Token Proxy",
@@ -40,10 +50,10 @@ class ProjectAPI(api_tools.APIModeHandler):
         available_to_users=True,
     )
     @auth.decorators.check_api({
-        "permissions": ["models.applications.tool.patch"],
+        "permissions": ["models.applications.mcp_auth.post"],
         "recommended_roles": {
-            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
-            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": True},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
     def post(self, project_id: int, **kwargs):
@@ -77,10 +87,8 @@ class ProjectAPI(api_tools.APIModeHandler):
             log.debug(f"MCP OAuth proxy: detected masked client_secret, will fetch from database")
             client_secret = None
 
-        # Unsecret any vault references in the request data (e.g., {{secret.my_secret}})
         vault_client = VaultClient(project_id)
-        if client_secret:
-            client_secret = vault_client.unsecret(client_secret)
+        credential_sources = []
 
         # If toolkit_id is provided, fetch credentials from database
         if data.toolkit_id:
@@ -141,6 +149,10 @@ class ProjectAPI(api_tools.APIModeHandler):
                     # to reject the token request with "unknown client".
                     if not client_secret and not data.used_dcr:
                         client_secret = pick_oauth_setting(credential_sources, 'client_secret')
+                        if client_secret and not _may_send_stored_secret(project_id, data.token_endpoint, credential_sources):
+                            log.warning(f"MCP OAuth proxy: stored client_secret withheld for toolkit {data.toolkit_id}, "
+                                        f"token_endpoint does not match the toolkit and caller cannot edit toolkits")
+                            client_secret = None
                         log.debug(f"MCP OAuth proxy: extracted client_secret from DB: {bool(client_secret)}")
                     if not scope:
                         # Both spellings are in use: admin MCP server definitions declare `scope`,
@@ -156,6 +168,15 @@ class ProjectAPI(api_tools.APIModeHandler):
             except Exception as e:
                 log.error(f"MCP OAuth proxy: error fetching toolkit - {e}")
                 return {"error": "Database error", "details": str(e)}, 500
+
+        # Unsecret vault references sent in the request (e.g., {{secret.my_secret}})
+        if client_secret and data.client_secret and client_secret == data.client_secret:
+            resolved_secret = vault_client.unsecret(client_secret)
+            if resolved_secret != client_secret and not _may_send_stored_secret(
+                    project_id, data.token_endpoint, credential_sources):
+                return {"error": "access_denied",
+                        "error_description": "Vault secret references require toolkit edit permission"}, 403
+            client_secret = resolved_secret
 
         # Note: client_id may be optional for some OAuth flows:
         # - Dynamic Client Registration (DCR): client_id obtained during registration
