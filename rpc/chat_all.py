@@ -1048,17 +1048,6 @@ def prepare_conversation_history(
 
 
 class RPC:
-    @web.method()
-    def _predict_access_error(self, session, project_id: int, conversation, user_id: int) -> str | None:
-        if conversation is None:
-            return 'Conversation not found'
-        is_participant = any(
-            p.entity_name == ParticipantTypes.user.value and (p.entity_meta or {}).get('id') == user_id
-            for p in conversation.participants
-        )
-        denied = check_post_access(session, project_id, conversation, user_id, is_participant)
-        return denied[0]['error'] if denied else None
-
     @web.rpc("chat_predict_sio", "chat_predict_sio")
     def predict_sio(
         self, sid: str | None, data: dict, await_task_timeout: int = -1, return_message_ids: bool = False,
@@ -1088,8 +1077,9 @@ class RPC:
                 Conversation.uuid == parsed.conversation_uuid
             ).first()
             # Checked before any write so a rejected sender leaves no trace in the conversation
-            denied_error = self._predict_access_error(session, parsed.project_id, conversation, current_user['id'])
-            if denied_error:
+            denied = check_post_access(parsed.project_id, conversation, current_user['id'])
+            if denied:
+                denied_error = denied[0]['error']
                 if sid:
                     raise SioValidationError(
                         sio=self.context.sio,

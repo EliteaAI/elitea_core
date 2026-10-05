@@ -121,7 +121,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if not conversation:
                 return {'error': 'Conversation not found'}, 404
             denied = check_conversation_access(
-                session, project_id, conversation, user_id,
+                project_id, conversation, user_id,
                 needs_privilege=is_privileged_update(conversation, data),
             )
             if denied:
@@ -174,7 +174,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if not conversation:
                 return {'error': 'Conversation not found'}, 404
             denied = check_conversation_access(
-                session, project_id, conversation, auth.current_user().get('id'), needs_privilege=True,
+                project_id, conversation, auth.current_user().get('id'), needs_privilege=True,
             )
             if denied:
                 return denied
