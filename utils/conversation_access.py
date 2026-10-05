@@ -1,9 +1,7 @@
-from sqlalchemy import Integer
 from tools import rpc_tools
 
 from ..models.enums.all import ParticipantTypes
 from ..models.folder import ConversationFolder
-from ..models.participants import Participant, ParticipantMapping
 from .support_utils import get_support_config
 
 
@@ -12,15 +10,12 @@ NOT_PARTICIPANT = ({'error': 'Only conversation participants can do this'}, 403)
 NOT_PRIVILEGED = ({'error': 'Only the conversation author or a project admin can do this'}, 403)
 
 
-def get_user_participant_id(session, conversation_id: int, user_id: int) -> int | None:
-    row = session.query(Participant.id).join(
-        ParticipantMapping, ParticipantMapping.participant_id == Participant.id
-    ).filter(
-        ParticipantMapping.conversation_id == conversation_id,
-        Participant.entity_name == ParticipantTypes.user.value,
-        Participant.entity_meta['id'].astext.cast(Integer) == user_id,
-    ).first()
-    return row[0] if row else None
+def find_user_participant_id(participants, user_id: int) -> int | None:
+    # str() on both sides: entity_meta ids are JSON and may be stored as "5" instead of 5
+    for p in participants:
+        if p.entity_name == ParticipantTypes.user.value and str((p.entity_meta or {}).get('id')) == str(user_id):
+            return p.id
+    return None
 
 
 def decide_access(is_private: bool, is_author: bool, is_participant: bool, is_admin, needs_privilege: bool):
@@ -36,15 +31,32 @@ def decide_access(is_private: bool, is_author: bool, is_participant: bool, is_ad
     return NOT_PRIVILEGED
 
 
-def check_conversation_access(session, project_id: int, conversation, user_id: int, needs_privilege: bool = False):
+def check_conversation_access(project_id: int, conversation, user_id: int, needs_privilege: bool = False):
     if get_support_config().get('project_id') == project_id:
         return None
     return decide_access(
         is_private=bool(conversation.is_private),
         is_author=conversation.author_id == user_id,
-        is_participant=get_user_participant_id(session, conversation.id, user_id) is not None,
+        is_participant=find_user_participant_id(conversation.participants, user_id) is not None,
         is_admin=lambda: bool(rpc_tools.RpcMixin().rpc.timeout(3).admin_check_user_is_admin(project_id, user_id)),
         needs_privilege=needs_privilege,
+    )
+
+
+def check_post_access(project_id: int, conversation, user_id: int):
+    if conversation is None:
+        return NOT_FOUND
+    # Public conversations keep auto-join on first message; private ones need membership
+    if not conversation.is_private or find_user_participant_id(conversation.participants, user_id) is not None:
+        return None
+    if get_support_config().get('project_id') == project_id:
+        return None
+    return decide_access(
+        is_private=True,
+        is_author=conversation.author_id == user_id,
+        is_participant=False,
+        is_admin=lambda: bool(rpc_tools.RpcMixin().rpc.timeout(3).admin_check_user_is_admin(project_id, user_id)),
+        needs_privilege=False,
     )
 
 

@@ -79,7 +79,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {'error': f'No such conversation with id {conversation_id}'}, 400
 
             current_user_id = auth.current_user().get("id")
-            denied = check_conversation_access(session, project_id, conversation, current_user_id)
+            denied = check_conversation_access(project_id, conversation, current_user_id)
             if denied:
                 return denied
             room = get_chat_room(conversation.uuid)

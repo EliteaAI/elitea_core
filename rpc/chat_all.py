@@ -37,6 +37,7 @@ from ..utils.sio_utils import get_chat_room
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
+from ..utils.conversation_access import check_post_access
 from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
@@ -1075,6 +1076,21 @@ class RPC:
             conversation: Conversation = session.query(Conversation).where(
                 Conversation.uuid == parsed.conversation_uuid
             ).first()
+            # Checked before any write so a rejected sender leaves no trace in the conversation
+            denied = check_post_access(parsed.project_id, conversation, current_user['id'])
+            if denied:
+                denied_error = denied[0]['error']
+                if sid:
+                    raise SioValidationError(
+                        sio=self.context.sio,
+                        sid=sid,
+                        event=SioEvents.chat_predict.value,
+                        error=denied_error,
+                        stream_id=parsed.conversation_uuid,
+                        message_id=parsed.question_id,
+                    )
+                return {"error": denied_error}
+
             context_management_enabled = get_context_manager_feature_flag(
                 parsed.project_id,
             )
