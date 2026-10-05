@@ -658,8 +658,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return e.errors(), 400
 
         with db.get_session(project_id) as session:
+            # Folders are personal: other users get the same 404 as for a missing folder
             folder = session.query(ConversationFolder).filter(
-                ConversationFolder.id == folder_id
+                ConversationFolder.id == folder_id,
+                ConversationFolder.owner_id == user_id,
             ).first()
             if not folder:
                 return {"error": "Folder not found"}, 404
@@ -825,6 +827,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def patch(self, project_id: int, folder_id: int, **kwargs):
         """Update folder pin status."""
         raw = dict(request.json)
+        user_id = auth.current_user().get("id")
         is_pinned_raw = raw.get('is_pinned')
 
         if is_pinned_raw is None:
@@ -838,8 +841,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"error": "is_pinned must be a boolean value"}, 400
 
         with db.get_session(project_id) as session:
+            # Folders are personal: other users get the same 404 as for a missing folder
             folder = session.query(ConversationFolder).filter(
-                ConversationFolder.id == folder_id
+                ConversationFolder.id == folder_id,
+                ConversationFolder.owner_id == user_id,
             ).first()
 
             if not folder:
@@ -873,9 +878,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         """
         Delete a folder.
         """
+        user_id = auth.current_user().get("id")
         with db.get_session(project_id) as session:
+            # Folders are personal: other users get the same 404 as for a missing folder
             folder = session.query(ConversationFolder).filter(
-                ConversationFolder.id == folder_id
+                ConversationFolder.id == folder_id,
+                ConversationFolder.owner_id == user_id,
             ).first()
             if not folder:
                 return {"error": "Folder not found"}, 404
