@@ -15,7 +15,7 @@ import pytest
 
 
 MODULE_PATH = pathlib.Path(__file__).resolve().parents[3] / 'utils' / 'conversation_access.py'
-FUNCS = ('decide_access', 'check_post_access', 'find_user_participant_id')
+FUNCS = ('decide_access', 'check_post_access', 'find_user_participant_id', '_admin_checker', '_is_support_project')
 
 
 @pytest.fixture
