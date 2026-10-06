@@ -143,6 +143,8 @@ def test_suite_rejects_bad_steps_limit(pd, limit):
     None, {}, {'per_case': None, 'per_run': None},
     {'per_run': {'tokens': 50000}}, {'per_case': {'tokens': 0, 'cost': 0.25}},
     {'per_case': {'cost': 1}, 'per_run': {'tokens': None, 'cost': 10.5}},
+    {'per_run': {'tokens': 500, 'on_breach': 'report'}}, {'per_run': {'tokens': 500, 'on_breach': 'stop'}},
+    {'per_run': {'tokens': 500, 'on_breach': None}},
 ])
 def test_suite_accepts_consumption_budget(pd, budget):
     meta = {'consumption_budget': budget}
@@ -154,6 +156,7 @@ def test_suite_accepts_consumption_budget(pd, budget):
     'lots', {'per_week': {'tokens': 1}}, {'per_run': 5}, {'per_run': {'calls': 1}},
     {'per_run': {'tokens': -1}}, {'per_run': {'tokens': 2.5}}, {'per_run': {'tokens': True}},
     {'per_case': {'cost': -0.1}}, {'per_case': {'cost': '1'}}, {'per_case': {'cost': False}},
+    {'per_run': {'tokens': 500, 'on_breach': 'warn'}}, {'per_case': {'tokens': 500, 'on_breach': 'report'}},
 ])
 def test_suite_rejects_bad_consumption_budget(pd, budget):
     with pytest.raises(ValidationError, match='consumption_budget'):

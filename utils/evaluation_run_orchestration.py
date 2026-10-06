@@ -56,6 +56,8 @@ STOP_CANCEL_REQUESTED = 'cancel_requested'
 STOP_TIME_BUDGET = 'time_budget'
 #: The agent's summed runtime tokens reached the suite's ``consumption_budget.per_run.tokens``.
 STOP_BUDGET_EXHAUSTED = 'budget_exhausted'
+#: ``consumption_budget.per_run.on_breach`` value that keeps the run going past ``per_run.tokens``.
+ON_BREACH_REPORT = 'report'
 #: The project/member budget gate refused a case (``budget_blocked``); ``stop_scope`` says which.
 STOP_GATE_CLOSED = 'gate_closed'
 #: Orchestration-level failure; the run is ``errored``.
@@ -781,8 +783,9 @@ def orchestrate_run(
     results_by_index: dict = {}
     stop_reason: Optional[str] = None
     stop_scope: Optional[str] = None
-    run_token_limit = ((((snapshot.get('suite') or {}).get('consumption_budget') or {})
-                        .get('per_run') or {}).get('tokens'))
+    run_budget = ((snapshot.get('suite') or {}).get('consumption_budget') or {}).get('per_run') or {}
+    # A 'report' limit is only checked after the run, in the budget verdict.
+    run_token_limit = None if run_budget.get('on_breach') == ON_BREACH_REPORT else run_budget.get('tokens')
     run_tokens_spent = 0
     deadline = (
         time.monotonic() + max(1, int(time_budget_seconds))

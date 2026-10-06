@@ -210,7 +210,7 @@ def test_per_run_tokens_pass_and_breach(usage):
     assert usage.budget_verdict(rows, {'per_run': {'tokens': 220}})['verdict'] == 'pass'
     v = usage.budget_verdict(rows, {'per_run': {'tokens': 219}})
     assert v['verdict'] == 'breached'
-    assert v['per_run']['tokens'] == {'limit': 219, 'value': 220, 'verdict': 'breached'}
+    assert v['per_run']['tokens'] == {'limit': 219, 'value': 220, 'verdict': 'breached', 'on_breach': 'stop'}
 
 
 def test_a_missing_figure_is_unknown_not_pass(usage):
@@ -355,6 +355,16 @@ def test_token_budget_reached_on_the_last_case_is_not_a_stop(orch, usage):
     rows, _ = orch.split_case_usage(out['cases'])
     meta = orch.usage_meta(rows, snap['suite']['consumption_budget'])
     assert meta['budget_verdict']['per_run']['tokens']['verdict'] == 'breached'
+
+
+def test_report_only_token_budget_runs_every_case(orch, usage):
+    snap = _snapshot(orch, 5, budget={'per_run': {'tokens': 250, 'on_breach': 'report'}})
+    out = orch.orchestrate_run(snap, agent_runner=_agent(usage), code_scorer=_CODE)
+    assert (out['stop_reason'], out['cancelled']) == (None, False)
+    assert out['progress'] == {'done': 5, 'total': 5}
+    rows, _ = orch.split_case_usage(out['cases'])
+    check = orch.usage_meta(rows, snap['suite']['consumption_budget'])['budget_verdict']['per_run']['tokens']
+    assert (check['verdict'], check['value'], check['on_breach']) == ('breached', 550, 'report')
 
 
 def test_closed_gate_on_the_last_case_still_stops(orch, usage):

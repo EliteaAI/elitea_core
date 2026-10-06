@@ -342,6 +342,9 @@ def budget_verdict(agent_rows: List[dict], budget: Optional[dict]) -> Optional[d
         if scope == 'per_run':
             check = {'limit': limit, 'value': sum(v for v in values if v is not None),
                      'verdict': _limit_check(values, limit)}
+            if kind == 'tokens':
+                # Whether reaching the limit stopped the run or was only reported.
+                check['on_breach'] = budget['per_run'].get('on_breach') or 'stop'
         else:
             per_case = [_limit_check([v], limit) for v in values]
             check = {'limit': limit, 'cases': len(per_case),

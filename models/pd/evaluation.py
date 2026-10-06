@@ -44,6 +44,8 @@ _RUN_TRIGGERS = {EvalRunTrigger.offline_batch, EvalRunTrigger.on_demand}
 # Upper bound for a suite's ``meta.steps_limit``; the SDK default is 25.
 MAX_SUITE_STEPS_LIMIT = 100
 CONSUMPTION_BUDGET_SCOPES = ('per_case', 'per_run')
+#: What reaching ``per_run.tokens`` does: stop starting cases (default) or only report the breach.
+BUDGET_ON_BREACH = ('stop', 'report')
 
 
 def _check_evidence_scope(v: dict) -> dict:
@@ -362,6 +364,7 @@ class EvalSuiteBaseModel(BaseModel):
     def _check_consumption_budget(cls, v: dict) -> dict:
         # ``meta.consumption_budget = {per_case: {tokens, cost}, per_run: {tokens, cost}}`` (#6716,
         # design §5.4). Every limit is optional and null means no limit; tokens are integers, cost USD.
+        # ``per_run.on_breach`` ('stop' | 'report') says whether the run token limit stops the run.
         budget = (v or {}).get('consumption_budget')
         if budget is None:
             return v
@@ -370,8 +373,12 @@ class EvalSuiteBaseModel(BaseModel):
         for scope, limits in budget.items():
             if limits is None:
                 continue
-            if not isinstance(limits, dict) or set(limits) - {'tokens', 'cost'}:
+            allowed = {'tokens', 'cost', 'on_breach'} if scope == 'per_run' else {'tokens', 'cost'}
+            if not isinstance(limits, dict) or set(limits) - allowed:
                 raise ValueError(f'meta.consumption_budget.{scope} must be an object with tokens and/or cost')
+            on_breach = limits.get('on_breach')
+            if on_breach is not None and on_breach not in BUDGET_ON_BREACH:
+                raise ValueError(f'meta.consumption_budget.per_run.on_breach must be one of {BUDGET_ON_BREACH}')
             tokens, cost = limits.get('tokens'), limits.get('cost')
             if tokens is not None and (isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0):
                 raise ValueError(f'meta.consumption_budget.{scope}.tokens must be a non-negative integer or null')
