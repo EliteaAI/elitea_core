@@ -308,8 +308,9 @@ class EvalDatasetCase(db_tools.AbstractBaseMixin, db.Base):
     input: Mapped[str] = mapped_column(Text, nullable=False)
     variables: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     expected_output: Mapped[str] = mapped_column(Text, nullable=True)  # present -> reference-based
-    # #6809 item 4: optional tool-call reference, see utils/evaluation_expected_trajectory.py
-    expected_trajectory: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    # #6809 item 4: optional tool-call reference, see utils/evaluation_expected_trajectory.py.
+    # none_as_null: a cleared reference is SQL NULL, not a JSON 'null' that IS NOT NULL matches.
+    expected_trajectory: Mapped[dict] = mapped_column(JSONB(none_as_null=True), nullable=True)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, default=EvalCaseSource.manual)
     source_ref: Mapped[str] = mapped_column(String(256), nullable=True)  # e.g. originating conversation_id
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)

@@ -154,6 +154,12 @@ def _snapshot_cases(cases: List[dict]) -> List[dict]:
                 truncated = True
             case[field] = value
             spent += len(value) if isinstance(value, str) else 0
+        # #6809 item 4: already normalized and size-capped at write time, so it is carried whole
+        # (never clipped mid-JSON) but still spends budget and goes with the text once dropped.
+        expected_trajectory = c.get('expected_trajectory')
+        if expected_trajectory is not None and not dropped:
+            case['expected_trajectory'] = expected_trajectory
+            spent += len(json.dumps(expected_trajectory, default=str))
         if dropped:
             case['truncated'] = True
             case['dropped'] = True

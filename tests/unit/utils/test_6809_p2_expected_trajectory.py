@@ -273,3 +273,35 @@ def test_tool_calls_by_group_without_groups_skips_the_query(turns):
     session = _Session([])
     assert turns.tool_calls_by_group(session, []) == {}
     assert session.log == []
+
+
+# --- run snapshot (the real call site: build_run_snapshot's case whitelist) ------------------
+
+@pytest.fixture(scope='module')
+def orch(utils_path):
+    for sibling in ('evaluation_scoring', 'evaluation_ai_judge', 'evaluation_execution',
+                    'evaluation_usage'):
+        load_utils_module(utils_path, sibling)
+    return load_utils_module(utils_path, 'evaluation_run_orchestration')
+
+
+def _frozen(orch, cases):
+    return orch.build_run_snapshot(
+        suite={'id': 1, 'name': 'S', 'judge_model': {'model_name': 'm'}}, dimensions=[],
+        bindings=[], cases=cases, application_id=10, application_version_id=99)['cases']
+
+
+def test_snapshot_freezes_expected_trajectory(orch):
+    ref = {'match': 'in_order', 'tools': [{'name': 'a'}], 'forbidden': [], 'allow_repeat': []}
+    frozen = _frozen(orch, [{'id': 1, 'input': 'q', 'expected_trajectory': ref}, {'id': 2, 'input': 'q'}])
+    assert frozen[0]['expected_trajectory'] == ref
+    assert 'expected_trajectory' not in frozen[1]  # pre-item-4 snapshot shape unchanged
+
+
+def test_snapshot_drops_expected_trajectory_with_the_text(orch):
+    ref = {'match': 'superset', 'tools': [{'name': 'a', 'args': {'x': 'z' * 50_000},
+                                           'args_match': 'subset'}], 'forbidden': [], 'allow_repeat': []}
+    frozen = _frozen(orch, [{'id': i, 'input': 'q', 'expected_trajectory': ref} for i in range(1, 200)])
+    assert frozen[0]['expected_trajectory'] == ref
+    assert frozen[-1]['dropped'] is True and 'expected_trajectory' not in frozen[-1]
+    assert len(json.dumps(frozen)) < 2 * orch.MAX_CASES_BYTES
