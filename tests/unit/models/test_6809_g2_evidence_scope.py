@@ -49,6 +49,10 @@ def pd():
                  'EvalRunTrigger'):
         setattr(enums, name, _AnyMember(name, (), {}))
     sys.modules[enums.__name__] = enums
+    # pd/evaluation.py imports the expected_trajectory normalizer; the conftest registered it.
+    _package(f'{PKG}.utils')
+    sys.modules[f'{PKG}.utils.evaluation_expected_trajectory'] = sys.modules[
+        'plugins.elitea_core.utils.evaluation_expected_trajectory']
 
     module_name = f'{PKG}.models.pd.evaluation'
     spec = importlib.util.spec_from_file_location(module_name, PLUGIN_ROOT / 'models/pd/evaluation.py')

@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator, model_valida
 from ..evaluation import (
     EvalTier, EvalEngine, EvalScaleType, EvalPolarity, EvalCaseSource, EvalRunTrigger,
 )
+from ...utils.evaluation_expected_trajectory import normalize_expected_trajectory
 
 _ENGINES = {EvalEngine.ai, EvalEngine.human, EvalEngine.code}
 _SCALE_TYPES = {EvalScaleType.binary, EvalScaleType.ordinal, EvalScaleType.continuous}
@@ -37,7 +38,7 @@ _SCORED_EVIDENCE_KEYS = ('structure', 'input', 'output', 'trajectory', 'usage')
 # project library is home (§16); platform tier is seeded via the admin console, not this API.
 _PROJECT_WRITABLE_TIERS = {EvalTier.project, EvalTier.agent_adhoc}
 _CASE_SOURCES = {EvalCaseSource.manual, EvalCaseSource.import_, EvalCaseSource.conversation}
-_IMPORT_FORMATS = {'csv', 'json'}
+_IMPORT_FORMATS = {'csv', 'json', 'jsonl'}
 _RUN_TRIGGERS = {EvalRunTrigger.offline_batch, EvalRunTrigger.on_demand}
 
 
@@ -456,13 +457,20 @@ class EvalHumanScoreDetailModel(BaseModel):
 
 class EvalDatasetCaseBaseModel(BaseModel):
     """A single golden case (§17.1). ``expected_output`` present → the case supports
-    reference-based validations; absent → reference-free only (§17.5)."""
+    reference-based validations; absent → reference-free only (§17.5). ``expected_trajectory``
+    (#6809 item 4) is the optional tool-call reference, stored normalized; ``{}`` clears it."""
     variables: dict = Field(default_factory=dict)
     expected_output: Optional[str] = None
+    expected_trajectory: Optional[dict] = None
     source_type: str = EvalCaseSource.manual
     source_ref: Optional[str] = Field(None, max_length=256)
     order_index: int = 0
     meta: dict = Field(default_factory=dict)
+
+    @field_validator('expected_trajectory', mode='before')
+    @classmethod
+    def _validate_expected_trajectory(cls, v):
+        return normalize_expected_trajectory(v)
 
     @field_validator('source_type')
     @classmethod
@@ -498,6 +506,7 @@ class EvalDatasetCaseDetailModel(BaseModel):
     input: str
     variables: dict = Field(default_factory=dict)
     expected_output: Optional[str] = None
+    expected_trajectory: Optional[dict] = None
     source_type: str
     source_ref: Optional[str] = None
     meta: dict = Field(default_factory=dict)
@@ -581,9 +590,9 @@ class EvalDatasetDetailModel(BaseModel):
 
 
 class EvalDatasetImportModel(BaseModel):
-    """Bulk case import (§17.2 CSV/JSON). ``content`` is the raw file text; rows are parsed
+    """Bulk case import (§17.2 CSV/JSON, plus JSONL for #6809). ``content`` is the raw file text; rows are parsed
     and validated per-row by the import util, which returns an accepted-count + error report."""
-    format: str = Field(..., description="csv | json")
+    format: str = Field(..., description="csv | json | jsonl")
     # Capped at the API boundary so a huge body is rejected before it is parsed and held in memory
     # twice (raw text + parsed rows); the parser applies its own per-row and per-cell caps.
     content: str = Field(..., min_length=1, max_length=20_000_000)
@@ -599,7 +608,8 @@ class EvalDatasetImportModel(BaseModel):
 
 class EvalDatasetPromoteModel(BaseModel):
     """Promote-from-conversations (§17.2, §8.3). Each user turn → a case ``input``; the agent
-    reply becomes ``expected_output`` when ``include_expected`` (else the case is reference-free).
+    reply becomes ``expected_output`` when ``include_expected`` (else the case is reference-free),
+    and that reply's recorded tool calls pre-fill ``expected_trajectory`` (#6809 item 4).
     ``source_type=conversation`` + ``source_ref=<conversation_id>`` links back to the origin."""
     conversation_id: int
     include_expected: bool = True

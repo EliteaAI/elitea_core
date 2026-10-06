@@ -413,3 +413,50 @@ def test_non_owner_cannot_write_a_shared_dataset(dataset_utils):
 def test_non_owner_cannot_read_a_private_dataset(dataset_utils):
     with pytest.raises(dataset_utils.EvalDatasetNotFoundError):
         dataset_utils._check_dataset_access(_dataset(agent_id=5, is_shared=False), agent_id=9, require_owner=False)
+
+
+# ---------------------------------------------------------------------------
+# #6809 item 4 — promote pre-fills expected_trajectory from the reply's tool calls
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def promote(dataset_utils, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(dataset_utils, '_require_dataset', lambda *a, **k: None)
+    monkeypatch.setattr(dataset_utils, 'extract_conversation_cases', lambda *a, **k: [
+        ('q1', 'a1', [11, 12]), ('  ', 'skipped', [13]), ('q2', None, []), ('q3', 'a3', [14])])
+
+    def _calls(session, group_ids):
+        captured['group_ids'] = list(group_ids)
+        return {11: ['jira_search'], 12: ['post_comment'], 13: ['never'], 14: []}
+
+    def _append(session, dataset_id, rows, source, error_source=None):
+        captured['rows'] = rows
+        return rows
+
+    monkeypatch.setattr(dataset_utils, 'tool_calls_by_group', _calls)
+    monkeypatch.setattr(dataset_utils, '_append_rows', _append)
+    return dataset_utils, captured
+
+
+def test_promote_prefills_expected_trajectory_per_case(promote):
+    dataset_utils, captured = promote
+    dataset_utils.promote_from_conversation(1, 4, 42, session=_RecordingSession())
+
+    assert captured['group_ids'] == [11, 12, 14]  # one lookup, blank-input cases excluded
+    rows = captured['rows']
+    assert [r['input'] for r in rows] == ['q1', 'q2', 'q3']
+    assert rows[0]['expected_trajectory'] == {
+        'match': 'superset', 'tools': [{'name': 'jira_search'}, {'name': 'post_comment'}],
+        'forbidden': [], 'allow_repeat': []}
+    assert rows[1]['expected_trajectory'] is None and rows[2]['expected_trajectory'] is None
+
+
+def test_promote_without_expected_skips_the_trace_lookup(promote):
+    dataset_utils, captured = promote
+    dataset_utils.promote_from_conversation(1, 4, 42, include_expected=False,
+                                            session=_RecordingSession())
+
+    assert 'group_ids' not in captured
+    assert all('expected_trajectory' not in r and r['expected_output'] is None
+               for r in captured['rows'])

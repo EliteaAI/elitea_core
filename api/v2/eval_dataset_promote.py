@@ -1,8 +1,9 @@
 """Eval dataset **promote** — promote-from-conversations for EVAL-P1-B3 (§17.2, §8.3, E2E-06).
 
 Turns a stored conversation into golden cases via the verified turn-extraction contract
-(EVAL-H7): each user turn → a case ``input``; the agent reply → ``expected_output`` when
-``include_expected``. Editor-gated (dataset content mutation).
+(EVAL-H7): each user turn → a case ``input``; the agent reply → ``expected_output`` and its tool
+calls → a names-only ``expected_trajectory`` when ``include_expected`` (#6809 item 4).
+Editor-gated (dataset content mutation).
 """
 
 from flask import request
@@ -22,7 +23,7 @@ from ...utils.constants import PROMPT_LIB_MODE
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Promote a conversation into an eval dataset",
-        description="Extracts (input, output) turn pairs from a conversation (§8.3) and appends them as conversation-sourced cases. include_expected controls whether the agent reply is stored as expected_output.",
+        description="Extracts (input, output) turn pairs from a conversation (§8.3) and appends them as conversation-sourced cases. include_expected controls whether the agent reply is stored as expected_output and its tool calls pre-fill expected_trajectory.",
         request_body=EvalDatasetPromoteModel,
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},

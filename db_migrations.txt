@@ -277,6 +277,11 @@ Run admin task migrate_eval_binding_constraints with param: project_id=all
 # Idempotent (ADD COLUMN IF NOT EXISTS): safe to run multiple times.
 Run admin task migrate_eval_dataset_columns with param: project_id=all
 
+# Issue #6809 item 4: eval_dataset_case gets an optional expected_trajectory (JSONB, nullable,
+# no backfill). Fresh environments get it from create_all; existing p_N schemas get it from the
+# same task as above, so re-run it once on upgrade. Idempotent (ADD COLUMN IF NOT EXISTS).
+Run admin task migrate_eval_dataset_columns with param: project_id=all
+
 # Dimension tier=agent_adhoc scoping: eval_dimension gets an owning agent_id (nullable, for rows
 # created before this column existed, which stay visible everywhere). Fresh environments get it
 # from create_all; existing p_N schemas need the column backfilled. Per-project loop.

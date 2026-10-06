@@ -24,7 +24,8 @@ from ..models.pd.evaluation import (
 )
 from .evaluation_library_utils import EvalLibraryError, _session
 from .evaluation_dataset_import import parse_import
-from .evaluation_turn_extraction import extract_conversation_turns
+from .evaluation_expected_trajectory import from_tool_calls
+from .evaluation_turn_extraction import extract_conversation_cases, tool_calls_by_group
 
 
 class EvalDatasetNotFoundError(EvalLibraryError):
@@ -293,6 +294,7 @@ def add_case(
             input=data.input,
             variables=data.variables,
             expected_output=data.expected_output,
+            expected_trajectory=data.expected_trajectory,
             source_type=data.source_type,
             source_ref=data.source_ref,
             meta=data.meta,
@@ -367,6 +369,7 @@ def _append_rows(
             input=row['input'],
             variables=row.get('variables') or {},
             expected_output=row.get('expected_output'),
+            expected_trajectory=row.get('expected_trajectory'),
             source_type=source_type,
             source_ref=row.get('source_ref'),
             meta={},
@@ -415,20 +418,27 @@ def promote_from_conversation(
     agent_id: Optional[int] = None, session=None,
 ) -> dict:
     """Promote a stored conversation into golden cases (§17.2, §8.3). Each user turn → a case
-    ``input``; the agent reply → ``expected_output`` when ``include_expected``. ``source_type=
-    conversation`` + ``source_ref=<conversation_id>`` link back to the origin. Returns
-    ``{accepted, cases}``."""
+    ``input``; the agent reply → ``expected_output`` when ``include_expected``, and the reply's
+    tool calls → a names-only ``expected_trajectory`` (``superset``) to edit (#6809 item 4).
+    ``source_type=conversation`` + ``source_ref=<conversation_id>`` link back to the origin.
+    Returns ``{accepted, cases}``."""
     with _session(session, project_id) as s:
         _require_dataset(s, dataset_id, agent_id=agent_id, require_owner=True, lock=True)
-        pairs = extract_conversation_turns(project_id, conversation_id, session=s)
-        rows = [
-            {
+        cases = [c for c in extract_conversation_cases(project_id, conversation_id, session=s)
+                 if c[0] and c[0].strip()]
+        calls = {}
+        if include_expected:
+            calls = tool_calls_by_group(s, [g for _, _, groups in cases for g in groups])
+        rows = []
+        for input_text, output_text, groups in cases:
+            row = {
                 'input': input_text,
                 'expected_output': (output_text if include_expected else None),
                 'source_ref': str(conversation_id),
             }
-            for input_text, output_text in pairs
-            if input_text and input_text.strip()
-        ]
+            if include_expected:
+                row['expected_trajectory'] = from_tool_calls(
+                    [name for g in groups for name in calls.get(g, [])])
+            rows.append(row)
         created = _append_rows(s, dataset_id, rows, EvalCaseSource.conversation, error_source='promote')
         return {'accepted': len(created), 'cases': created}

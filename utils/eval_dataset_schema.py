@@ -1,6 +1,7 @@
 """Idempotent per-project schema setup for eval dataset scoping.
 
-Adds the columns eval dataset scoping relies on to each project (tenant) schema.
+Adds the columns eval dataset scoping relies on to each project (tenant) schema, plus the
+case-level ``expected_trajectory`` reference (#6809 item 4).
 `create_all` provisions these for new projects automatically; existing project
 schemas predate the columns and are brought up to date here via the admin
 migration task.
@@ -21,6 +22,7 @@ _MIGRATION_STATEMENTS = (
     "EXCEPTION WHEN duplicate_object THEN NULL; END $$",
     "CREATE INDEX IF NOT EXISTS eval_dataset_agent_id_idx "
     "ON p_{pid}.eval_dataset (agent_id)",
+    "ALTER TABLE p_{pid}.eval_dataset_case ADD COLUMN IF NOT EXISTS expected_trajectory JSONB",
 )
 
 

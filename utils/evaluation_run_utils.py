@@ -102,6 +102,7 @@ def _case_dict(c) -> dict:
     return {
         'id': c.id, 'input': c.input, 'output': None,
         'expected_output': c.expected_output, 'structure': None,
+        'expected_trajectory': c.expected_trajectory,
         'variables': c.variables or {},
         'order_index': c.order_index,
     }

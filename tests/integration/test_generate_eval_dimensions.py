@@ -261,6 +261,9 @@ def _install_package():
         f'{PKG}.utils.exceptions': exceptions,
         f'{PKG}.utils.utils': utils_utils,
         f'{PKG}.utils.constants': constants,
+        # pd/evaluation.py imports the expected_trajectory normalizer; the conftest registered it.
+        f'{PKG}.utils.evaluation_expected_trajectory':
+            sys.modules['plugins.elitea_core.utils.evaluation_expected_trajectory'],
         'flask': flask,
         'pylon': pylon,
         'pylon.core': pylon_core,
