@@ -1,7 +1,9 @@
+from pylon.core.tools import log
 from tools import rpc_tools
 
 from ..models.enums.all import ParticipantTypes
 from ..models.folder import ConversationFolder
+from ..models.participants import Participant, ParticipantMapping
 from .support_utils import get_support_config
 
 
@@ -71,6 +73,44 @@ def check_post_access(project_id: int, conversation, user_id: int):
         is_admin=_admin_checker(project_id, user_id),
         needs_privilege=False,
     )
+
+
+def is_conversation_participant(session, conversation_id: int, user_id: int) -> bool:
+    users = session.query(Participant).join(
+        ParticipantMapping, ParticipantMapping.participant_id == Participant.id
+    ).filter(
+        ParticipantMapping.conversation_id == conversation_id,
+        Participant.entity_name == ParticipantTypes.user.value,
+    ).all()
+    return find_user_participant_id(users, user_id) is not None
+
+
+def room_access_facts(session, conversation_id: int, is_private: bool, author_id: int, user_id: int) -> dict:
+    # Participant lookup only matters for private conversations the user does not own
+    is_author = author_id == user_id
+    is_participant = bool(is_private) and not is_author and is_conversation_participant(
+        session, conversation_id, user_id
+    )
+    return {'is_private': bool(is_private), 'is_author': is_author, 'is_participant': is_participant}
+
+
+def can_join_room(project_id: int, user_id: int, is_private: bool, is_author: bool, is_participant: bool) -> bool:
+    if not is_private:
+        return True
+
+    def is_admin():
+        try:
+            return _admin_checker(project_id, user_id)()
+        except Exception as e:  # pylint: disable=W0703
+            log.warning("Admin check failed for user %s in project %s: %s", user_id, project_id, e)
+            return False
+
+    denied = decide_access(
+        is_private=True, is_author=is_author, is_participant=is_participant,
+        is_admin=is_admin, needs_privilege=False,
+    )
+    # Support-project lookup is an RPC, so only pay for it when about to deny
+    return denied is None or _is_support_project(project_id)
 
 
 def is_privileged_update(conversation, data: dict) -> bool:

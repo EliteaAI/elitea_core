@@ -24,6 +24,7 @@ from pylon.core.tools import log, web
 from sqlalchemy import desc
 
 from ..models.conversation import Conversation
+from ..models.message_group import ConversationMessageGroup
 from ..models.enums.all import ParticipantTypes
 from ..models.message_items.canvas import CanvasVersionItem, CanvasMessageItem
 from ..models.pd.participant import ParticipantEntityUser
@@ -38,12 +39,28 @@ from ..models.pd.sio import (
     EvalRunRoomPayload,
 )
 from ..utils.continue_message import continue_message
+from ..utils.conversation_access import can_join_room, room_access_facts
 from ..utils.participant_utils import get_entity_details, get_or_create_one
 from ..utils.canvas_utils import get_canvas_key, get_canvas_authors_key, get_shadow_key
 from ..utils.chat_constants import CANVAS_CONTENT_TTL, CANVAS_SHADOW_KEY_OFFSET_TTL
 from ..utils.sio_utils import get_chat_room, get_canvas_room, get_event_room, get_eval_run_room
 from ..utils.sio_utils import SioEvents, SioValidationError
 from pydantic import ValidationError
+
+
+def _can_access_canvas(project_id: int, canvas_uuid, user_id: int) -> bool:
+    with db.get_session(project_id) as session:
+        # Column query: no Conversation entity, so participants are not eager-loaded
+        row = session.query(Conversation.id, Conversation.is_private, Conversation.author_id).join(
+            ConversationMessageGroup, ConversationMessageGroup.conversation_id == Conversation.id
+        ).join(
+            CanvasMessageItem, CanvasMessageItem.message_group_id == ConversationMessageGroup.id
+        ).filter(CanvasMessageItem.uuid == str(canvas_uuid)).first()
+        # Unknown canvas passes through so the handlers keep their own not-found handling
+        if not row:
+            return True
+        facts = room_access_facts(session, row.id, row.is_private, row.author_id, user_id)
+    return can_join_room(project_id, user_id, **facts)
 
 
 class SIO:
@@ -64,15 +81,27 @@ class SIO:
             log.warning("Sid %s is not in project %s", sid, parsed.project_id)
             return  # FIXME: return valid error or raise SioValidationError
         #
+        user_id = auth.current_user(auth_data=auth.sio_users[sid]).get('id')
+        if not user_id:
+            return
         with db.get_session(parsed.project_id) as session:
             conv_id = parsed.conversation_id
+            columns = (Conversation.id, Conversation.uuid, Conversation.is_private, Conversation.author_id)
             if isinstance(conv_id, int):
-                conversation = session.query(Conversation).filter(Conversation.id == conv_id).first()
+                conversation = session.query(*columns).filter(Conversation.id == conv_id).first()
             else:
-                conversation = session.query(Conversation).filter(Conversation.uuid == str(conv_id)).first()
-            if conversation:
-                room = get_chat_room(conversation.uuid)
-                self.context.sio.enter_room(sid, room)
+                conversation = session.query(*columns).filter(Conversation.uuid == str(conv_id)).first()
+            if not conversation:
+                return
+            conversation_uuid = conversation.uuid
+            facts = room_access_facts(
+                session, conversation.id, conversation.is_private, conversation.author_id, user_id
+            )
+        # Denial stays silent, same as an unknown conversation, so private chats don't leak existence
+        if not can_join_room(parsed.project_id, user_id, **facts):
+            log.warning("Sid %s denied room of conversation %s in project %s", sid, conv_id, parsed.project_id)
+            return
+        self.context.sio.enter_room(sid, get_chat_room(conversation_uuid))
 
     @web.sio(SioEvents.test_toolkit_enter_room)
     def test_toolkit_enter_room(self, sid: str, data: dict) -> None:
@@ -246,6 +275,11 @@ class SIO:
             log.warning("Sid %s is not in project %s", sid, parsed.project_id)
             return  # FIXME: return valid error or raise SioValidationError
 
+        if not _can_access_canvas(parsed.project_id, parsed.canvas_uuid, current_user['id']):
+            log.warning("Sid %s denied canvas %s in project %s", sid, parsed.canvas_uuid, parsed.project_id)
+            self.context.sio.emit(event=SioEvents.chat_canvas_error, data={'error': 'No such canvas was found'}, room=sid)
+            return
+
         client = self.get_redis_client()
 
         with db.get_session(parsed.project_id) as session:
@@ -362,6 +396,11 @@ class SIO:
         if not auth.is_sio_user_in_project(sid, parsed.project_id):
             log.warning("Sid %s is not in project %s", sid, parsed.project_id)
             return  # FIXME: return valid error or raise SioValidationError
+
+        if not _can_access_canvas(parsed.project_id, parsed.canvas_uuid, current_user['id']):
+            log.warning("Sid %s denied canvas %s in project %s", sid, parsed.canvas_uuid, parsed.project_id)
+            self.context.sio.emit(event=SioEvents.chat_canvas_error, data={'error': 'No such canvas was found'}, room=sid)
+            return
 
         canvas_uuid = parsed.canvas_uuid
         project_id = parsed.project_id
