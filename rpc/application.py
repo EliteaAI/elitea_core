@@ -261,6 +261,10 @@ class RPC:
             # Set application_name AFTER merge to prevent client override (security)
             parsed.application_name = application_name
 
+        # The schema the application lives in (the public project for a public agent), kept
+        # for usage attribution (#6902) before it is swapped for the chat project below
+        application_project_id = parsed.project_id
+
         # TODO: fragile code: app itself and toolkits may be in different projects
         # in generated version_details payload
         # so try using chat project_id where toolkit participants expected to be
@@ -314,6 +318,8 @@ class RPC:
             payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
+            if isinstance(payload.get('application'), dict) and application_project_id:
+                payload['application']['project_id'] = application_project_id
             # Usage analytics separates automated runs from human ones (#6881)
             if trigger_source:
                 payload['trigger_source'] = trigger_source
@@ -364,7 +370,9 @@ class RPC:
             if usage_entity.get("entity"):
                 payload[ENTITY_KWARGS_KEY] = usage_entity["entity"]
             if usage_entity.get("root"):
-                payload[ROOT_ENTITY_KWARGS_KEY] = usage_entity["root"]
+                payload[ROOT_ENTITY_KWARGS_KEY] = {
+                    "project_id": application_project_id, **usage_entity["root"],
+                }
 
         try:
             task_id = self.task_node.start_task(
