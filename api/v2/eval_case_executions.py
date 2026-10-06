@@ -23,6 +23,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             {"name": "run_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "case_index", "in": "query", "schema": {"type": "integer"},
              "description": "Only this case (its position in the run's frozen case list)."},
+            {"name": "dataset_case_id", "in": "query", "schema": {"type": "integer"},
+             "description": "Only this case (its dataset case id)."},
             {"name": "include_trajectory", "in": "query", "schema": {"type": "boolean"},
              "description": "Set false to get states and counters without the step lists (default true)."},
         ],
@@ -36,17 +38,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def get(self, project_id: int, run_id: int, **kwargs):
-        case_index = request.args.get("case_index")
-        try:
-            case_index = int(case_index) if case_index not in (None, "") else None
-        except ValueError:
-            return {"error": "case_index must be an integer"}, 400
+        filters = {}
+        for name in ("case_index", "dataset_case_id"):
+            value = request.args.get(name)
+            try:
+                filters[name] = int(value) if value not in (None, "") else None
+            except ValueError:
+                return {"error": f"{name} must be an integer"}, 400
         include_trajectory = request.args.get("include_trajectory", "true").lower() not in ("false", "0", "no")
         with db.get_session(project_id) as session:
             try:
                 data = get_case_executions(
                     project_id, run_id, session=session,
-                    case_index=case_index, include_trajectory=include_trajectory,
+                    include_trajectory=include_trajectory, **filters,
                 )
             except EvalLibraryError as exc:
                 return {"error": str(exc)}, exc.http_status

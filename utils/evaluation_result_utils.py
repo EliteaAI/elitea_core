@@ -135,10 +135,12 @@ def get_case_executions(
     session=None,
     case_index: Optional[int] = None,
     include_trajectory: bool = True,
+    dataset_case_id: Optional[int] = None,
 ) -> dict:
     """A run's per-case executions (#6809 P1): trajectory state, counters and, unless
     ``include_trajectory`` is false, the trajectory itself — which can be hundreds of KB per case,
-    so a list view asks without it and the drill-down asks for one ``case_index``.
+    so a list view asks without it and the drill-down asks for one case, by ``dataset_case_id`` (the
+scorecard's case key) or ``case_index``.
 
     An on-demand run (output supplied, no agent executed) has no rows; the reply is then an empty
     list, not an error. Raises :class:`EvalRunNotFoundError` when the run is absent."""
@@ -150,6 +152,8 @@ def get_case_executions(
         query = s.query(EvalCaseExecution).filter(EvalCaseExecution.run_id == run_id)
         if case_index is not None:
             query = query.filter(EvalCaseExecution.case_index == case_index)
+        if dataset_case_id is not None:
+            query = query.filter(EvalCaseExecution.dataset_case_id == dataset_case_id)
         rows = [_execution_row(r) for r in query.order_by(EvalCaseExecution.case_index).all()]
     if not include_trajectory:
         for row in rows:
