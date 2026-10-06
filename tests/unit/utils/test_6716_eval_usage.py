@@ -345,6 +345,25 @@ def test_token_budget_stops_the_run(orch, usage):
     assert out['progress'] == {'done': 3, 'total': 5}
 
 
+def test_token_budget_reached_on_the_last_case_is_not_a_stop(orch, usage):
+    """Nothing was skipped, so the run is complete; the breach stays in the verdict."""
+    snap = _snapshot(orch, 2, budget={'per_run': {'tokens': 200}})
+    out = orch.orchestrate_run(snap, agent_runner=_agent(usage), code_scorer=_CODE)
+    # 110 < 200 → second case runs, 220 ≥ 200 on the last case.
+    assert (out['stop_reason'], out['cancelled']) == (None, False)
+    assert out['progress'] == {'done': 2, 'total': 2}
+    rows, _ = orch.split_case_usage(out['cases'])
+    meta = orch.usage_meta(rows, snap['suite']['consumption_budget'])
+    assert meta['budget_verdict']['per_run']['tokens']['verdict'] == 'breached'
+
+
+def test_closed_gate_on_the_last_case_still_stops(orch, usage):
+    snap = _snapshot(orch, 1)
+    out = orch.orchestrate_run(snap, agent_runner=_agent(usage, status='budget_blocked', scope='member'),
+                               code_scorer=_CODE)
+    assert (out['stop_reason'], out['stop_scope']) == ('gate_closed', 'member')
+
+
 def test_closed_gate_stops_the_run_with_its_scope(orch, usage):
     snap = _snapshot(orch, 4)
     out = orch.orchestrate_run(snap, agent_runner=_agent(usage, status='budget_blocked', scope='project'),

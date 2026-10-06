@@ -888,6 +888,10 @@ def orchestrate_run(
                     _report(_count_done())
 
     scored_case_count = len(resolved)
+    if stop_reason not in (None, STOP_GATE_CLOSED) and scored_case_count == total:
+        # The limit was reached on the last case, so nothing was skipped: the run is complete and
+        # must not read as stopped. A closed gate is kept — the case that hit it was not run.
+        stop_reason = stop_scope = None
     # The caller writes `cases` back onto the frozen snapshot, so any case never reached has to be
     # carried through verbatim — dropping it would rewrite history and shrink the run's case set to
     # whatever happened to be scored before the stop.
