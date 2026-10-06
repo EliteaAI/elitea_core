@@ -1025,6 +1025,14 @@ def usage_meta(rows: List[dict], budget: Optional[dict]) -> dict:
     return meta
 
 
+def trajectory_meta(rows: List[dict]) -> dict:
+    """``EvalRun.meta`` key for the run's trajectory rollup, left out when no case reached the
+    agent. Written once at the terminal write; settlement does not touch trajectories."""
+    from .evaluation_execution import trajectory_rollup
+    rollup = trajectory_rollup(rows)
+    return {'trajectory_rollup': rollup} if rollup is not None else {}
+
+
 #: The usage queue flushes every 5 s (``queue_flush_interval_seconds``); the first read waits a
 #: little longer, then re-reads until the ledger stops growing (design §4.3).
 SETTLE_FIRST_WAIT_SECONDS = 7
@@ -1405,6 +1413,7 @@ def execute_run(
             run.meta = {
                 **(run.meta or {}),
                 **usage_meta(usage_rows, budget),
+                **trajectory_meta(executions),
                 **{k: outcome[k] for k in ('stop_reason', 'stop_scope') if outcome.get(k)},
                 **({'settlement': {'state': 'pending'}} if usage_rows and platform_run_id else {}),
             }

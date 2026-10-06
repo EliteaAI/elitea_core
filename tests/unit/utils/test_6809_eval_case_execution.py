@@ -320,3 +320,51 @@ def test_split_case_executions(orchestration):
     assert all('_execution' not in c for c in stripped)
     assert [c['id'] for c in stripped] == [7, 8, 9]
     assert stripped[2]['_agent_error'] == 'agent timed out after 120s'
+
+
+# --- trajectory rollup (G7) -------------------------------------------------------------------
+
+def _exec_row(state, *, status='ok', reason=None, **metrics):
+    return {'status': status, 'trajectory_state': state, 'trajectory_state_reason': reason,
+            'metrics': metrics}
+
+
+def test_trajectory_rollup_averages_only_recorded_cases(execution):
+    rows = [
+        _exec_row('recorded', llm_calls=2, tool_calls=3, retries=1, latency_ms=1000),
+        _exec_row('recorded', llm_calls=4, tool_calls=1, redundant_calls=2, step_limit_hit=True,
+                  latency_ms=3000),
+        _exec_row('not_recorded', status='timeout', reason='timeout', latency_ms=60000),
+        _exec_row('not_recorded', status='budget_blocked', reason='budget_blocked'),
+        _exec_row('not_applicable', status='unsupported', reason='unsupported'),
+    ]
+
+    rollup = execution.trajectory_rollup(rows)
+
+    assert (rollup['cases'], rollup['recorded_cases']) == (5, 2)
+    assert rollup['totals']['llm_calls'] == 6
+    assert rollup['averages']['tool_calls'] == 2
+    assert rollup['totals']['redundant_calls'] == 2
+    assert rollup['step_limit_hits'] == 1
+    # The timed-out case's latency is not averaged in: it has no trajectory to compare against.
+    assert rollup['average_latency_ms'] == 2000
+    assert rollup['excluded_cases'] == {'count': 3, 'budget_blocked': 1, 'not_applicable': 1,
+                                        'not_recorded': 1}
+
+
+def test_trajectory_rollup_with_nothing_recorded_has_no_averages(execution):
+    rollup = execution.trajectory_rollup([_exec_row('not_recorded', reason='no_envelope')])
+
+    assert rollup['recorded_cases'] == 0
+    assert rollup['averages']['llm_calls'] is None
+    assert rollup['average_latency_ms'] is None
+    assert rollup['excluded_cases']['not_recorded'] == 1
+
+
+def test_trajectory_rollup_is_none_without_rows(execution):
+    assert execution.trajectory_rollup([]) is None
+
+
+def test_trajectory_meta_omits_the_key_without_rows(orchestration):
+    assert orchestration.trajectory_meta([]) == {}
+    assert orchestration.trajectory_meta([_exec_row('recorded')])['trajectory_rollup']['recorded_cases'] == 1

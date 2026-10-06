@@ -374,3 +374,44 @@ def not_applicable_execution(reason: str) -> dict:
         'trajectory': None,
         'metrics': {},
     }
+
+
+#: Counters summed across recorded cases in ``trajectory_rollup``.
+ROLLUP_COUNTERS = ('llm_calls', 'tool_calls', 'tool_errors', 'retries', 'redundant_calls',
+                   'guardrail_events')
+
+
+def trajectory_rollup(rows: List[dict]) -> Optional[dict]:
+    """Run-level trajectory counters (``EvalRun.meta.trajectory_rollup``) from execution rows.
+
+    Totals and averages come from recorded cases only. A case with no trajectory to read is
+    counted in ``excluded_cases``, split by why, so an average never silently covers fewer cases
+    than the run had (G7). ``None`` when the run has no execution rows."""
+    if not rows:
+        return None
+    recorded = [r for r in rows if r.get('trajectory_state') == TRAJECTORY_RECORDED]
+    excluded = {'count': 0, 'budget_blocked': 0, TRAJECTORY_NOT_APPLICABLE: 0, TRAJECTORY_NOT_RECORDED: 0}
+    for row in rows:
+        if row.get('trajectory_state') == TRAJECTORY_RECORDED:
+            continue
+        excluded['count'] += 1
+        if row.get('status') == 'budget_blocked' or row.get('trajectory_state_reason') == 'budget_blocked':
+            excluded['budget_blocked'] += 1
+        elif row.get('trajectory_state') == TRAJECTORY_NOT_APPLICABLE:
+            excluded[TRAJECTORY_NOT_APPLICABLE] += 1
+        else:
+            excluded[TRAJECTORY_NOT_RECORDED] += 1
+
+    metrics = [r.get('metrics') or {} for r in recorded]
+    n = len(recorded)
+    totals = {key: sum(m.get(key) or 0 for m in metrics) for key in ROLLUP_COUNTERS}
+    latencies = [m['latency_ms'] for m in metrics if isinstance(m.get('latency_ms'), (int, float))]
+    return {
+        'cases': len(rows),
+        'recorded_cases': n,
+        'totals': totals,
+        'averages': {key: (totals[key] / n if n else None) for key in ROLLUP_COUNTERS},
+        'step_limit_hits': sum(1 for m in metrics if m.get('step_limit_hit')),
+        'average_latency_ms': sum(latencies) / len(latencies) if latencies else None,
+        'excluded_cases': excluded,
+    }
