@@ -911,8 +911,10 @@ class RPC:
 
             try:
                 application = create_application(application_data, session, project_id)
-            except Exception as e:
-                errors.append(str(e))
+            except Exception:
+                log.exception('[IMPORT] Failed to create application in project %s', project_id)
+                errors.append('Import function has been failed')
+                return '', errors
 
             # Stamp resolved model_project_id for versions that arrived with null.
             # validate_and_resolve_llm_settings returns a copy with model_project_id
