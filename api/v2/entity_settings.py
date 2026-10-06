@@ -22,7 +22,7 @@ from ...utils.utils import get_public_project_id
 # GPT-shaped default (temperature set, or effort null) silently runs it thinking-off (issue #5859).
 # Reject at write instead of persisting the invalid combo.
 INVALID_REASONING_MODEL_LLM_SETTINGS_ERROR = (
-    "a reasoning-capable model requires a reasoning_effort (low/medium/high) and no temperature"
+    "a reasoning-capable model requires a reasoning effort level this model supports and no temperature"
 )
 
 
