@@ -28,6 +28,7 @@ The DB/dispatch wrapper (:func:`execute_run`) keeps every ORM/SDK import lazy in
 function so this module loads by source with no ``tools``/SDK present — the pure core is
 unit-tested here; the wrapper's live behavior is exercised end-to-end (E2E-09 / E2E-11).
 """
+import hashlib
 import json
 import time
 from typing import Any, Callable, List, Optional
@@ -69,7 +70,7 @@ STOP_FAILURE = 'failure'
 #: slow agent) can hold a pool slot and heartbeat indefinitely. 6h is far longer than any sane
 #: dataset needs and short enough that a stuck run frees its slot within a working day.
 RUN_TIME_BUDGET_SECONDS = 6 * 60 * 60
-STATUS_SKIPPED = 'skipped'          # a code validation's own script returned 'na' (not scope-driven)
+STATUS_SKIPPED = 'skipped'          # a code script returned 'na', or a trajectory/usage scope had nothing recorded
 
 TRIGGER_OFFLINE_BATCH = 'offline_batch'
 TRIGGER_ON_DEMAND = 'on_demand'
@@ -350,7 +351,92 @@ def select_evidence(case: dict, scope: dict) -> dict:
         evidence['input'] = case.get('input')
     if scope.get('structure', False):
         evidence['structure'] = case.get('structure')
+    if scope.get('trajectory', False):
+        evidence['trajectory'] = trajectory_evidence(case)
+        expected_trajectory = case.get('expected_trajectory')
+        if expected_trajectory:
+            evidence['expected_trajectory'] = expected_trajectory
+    if scope.get('usage', False):
+        evidence['usage'] = usage_evidence(case)
     return evidence
+
+
+def trajectory_evidence(case: dict) -> Optional[dict]:
+    """What a trajectory-scoped binding sees (design §5.1): the recorded steps, tool sequence,
+    pause and counters of this case's agent run. ``None`` when no trajectory was recorded — an
+    on-demand case, a ``not_recorded``/``not_applicable`` run — so the binding is skipped rather
+    than scored on empty data."""
+    execution = case.get('_execution') or {}
+    trajectory = execution.get('trajectory')
+    if execution.get('trajectory_state') != 'recorded' or not isinstance(trajectory, dict):
+        return None
+    return {
+        'steps': trajectory.get('steps') or [],
+        'tool_sequence': trajectory.get('tool_sequence') or [],
+        'truncated': bool(trajectory.get('truncated')),
+        'pause': trajectory.get('pause'),
+        'metrics': execution.get('metrics') or {},
+        'case_index': execution.get('case_index'),
+    }
+
+
+USAGE_EVIDENCE_KEYS = (
+    'model_name', 'models', 'token_source', 'input_tokens', 'output_tokens',
+    'cache_read_tokens', 'cache_creation_tokens', 'reasoning_tokens',
+)
+
+
+def usage_evidence(case: dict) -> Optional[dict]:
+    """What a usage-scoped binding sees: the agent's own tokens for this case, as the runtime
+    reported them. ``None`` when usage was not recorded. Cost is not included — it is priced only
+    at settlement, after scoring (design §6 defers usage-scoped scoring to settle; runtime figures
+    are used until then)."""
+    agent = (case.get('_usage') or {}).get('agent') or {}
+    if agent.get('usage_state') != 'recorded':
+        return None
+    evidence = {k: agent.get(k) for k in USAGE_EVIDENCE_KEYS}
+    evidence['total_tokens'] = (agent.get('input_tokens') or 0) + (agent.get('output_tokens') or 0)
+    return evidence
+
+
+_MISSING_EVIDENCE_NOTES = {
+    'trajectory': 'Skipped: no trajectory was recorded for this case.',
+    'usage': 'Skipped: no token usage was recorded for this case.',
+}
+
+
+def missing_evidence_note(evidence: dict) -> Optional[str]:
+    """The skip reason when a scope the binding asked for has nothing recorded, else ``None``."""
+    for key, note in _MISSING_EVIDENCE_NOTES.items():
+        if key in evidence and evidence[key] is None:
+            return note
+    return None
+
+
+def stored_evidence(evidence: dict) -> dict:
+    """Evidence as frozen on the result row. The trajectory is already stored once per case in
+    ``eval_case_execution``, so the row keeps a reference plus a digest of exactly what was scored
+    rather than a second copy (design §5.1)."""
+    trajectory = evidence.get('trajectory')
+    if not isinstance(trajectory, dict):
+        return evidence
+    digest = hashlib.sha256(
+        json.dumps(trajectory, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+    return {**evidence, 'trajectory': {
+        'ref': 'eval_case_execution',
+        'case_index': trajectory.get('case_index'),
+        'digest': digest,
+        'steps': len(trajectory.get('steps') or []),
+    }}
+
+
+def judge_evidence(evidence: dict) -> dict:
+    """The judge reads the trajectory as compact text, which its budget truncation can trim."""
+    trajectory = evidence.get('trajectory')
+    if not isinstance(trajectory, dict):
+        return evidence
+    from .evaluation_ai_judge import render_trajectory
+    return {**evidence, 'trajectory': render_trajectory(trajectory)}
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +509,7 @@ def _result_row(
         'native_score': native_score,
         'normalized_score': normalized_score,
         'verdict': cap_envelope(verdict or {}),
-        'evidence': cap_envelope(evidence),
+        'evidence': cap_envelope(stored_evidence(evidence)),
     }
 
 
@@ -611,10 +697,18 @@ def assemble_case_results(
     for _key, group in ai_groups.items():
         scope = group[0].get('evidence_scope') or {}
         evidence = select_evidence(case, scope)
+        skip_note = missing_evidence_note(evidence)
+        if skip_note:
+            for b in group:
+                results.append(_result_row(
+                    case['id'], engine=ENGINE_AI, status=STATUS_SKIPPED, evidence=evidence,
+                    dimension_id=b.get('dimension_id'), verdict={'note': skip_note}))
+            continue
         dims = _dimension_specs(group, snapshot)
         try:
             scored = (
-                _score_ai_group_with_budget(evidence, dims, ai_scorer, judge_budget_tokens, judge_model_name)
+                _score_ai_group_with_budget(judge_evidence(evidence), dims, ai_scorer,
+                                            judge_budget_tokens, judge_model_name)
                 if ai_scorer else []
             )
         except Exception as exc:  # noqa: BLE001 - fail-closed (E4): a scorer crash is per-group error
@@ -635,6 +729,13 @@ def assemble_case_results(
             continue
         scope = b.get('evidence_scope') or {}
         evidence = select_evidence(case, scope)
+        skip_note = missing_evidence_note(evidence)
+        if skip_note:
+            results.append(_result_row(
+                case['id'], engine=ENGINE_CODE, status=STATUS_SKIPPED, evidence=evidence,
+                dimension_id=b.get('dimension_id'), platform_key=b.get('platform_key'),
+                verdict={'note': skip_note}))
+            continue
         try:
             verdict = code_scorer(b, evidence) if code_scorer else {
                 'status': 'error', 'error': 'No code executor configured.'}
@@ -696,7 +797,11 @@ def run_one_case(
                     outcome.get('error') or f"agent execution {outcome.get('status')}"}
         if outcome.get('execution') is not None:
             # Persisted as an eval_case_execution row by execute_run, never on the snapshot.
-            case['_execution'] = {**outcome['execution'], 'status': outcome.get('status')}
+            case['_execution'] = {**outcome['execution'], 'status': outcome.get('status'),
+                                  'case_index': case_index}
+        if usage:
+            # Usage-scoped bindings read the agent's tokens while scoring (design §5.1).
+            case = {**case, '_usage': usage}
     judge_calls: List[dict] = []
     scorer = ai_scorer
     scorer_kwargs: dict = {}
@@ -1143,6 +1248,10 @@ def _make_code_scorer(snapshot: dict, executor):
             if 'input' in evidence else _RESULT_SENTINEL,
             structure=evidence.get('structure', _RESULT_SENTINEL)
             if 'structure' in evidence else _RESULT_SENTINEL,
+            trajectory=evidence['trajectory'] if 'trajectory' in evidence else _RESULT_SENTINEL,
+            expected_trajectory=evidence['expected_trajectory']
+            if 'expected_trajectory' in evidence else _RESULT_SENTINEL,
+            usage=evidence['usage'] if 'usage' in evidence else _RESULT_SENTINEL,
             return_contract=spec.get('return_contract', 'bool'),
             executor=executor,
         )

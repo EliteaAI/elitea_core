@@ -39,12 +39,16 @@ def build_validation_prelude(
     expected: Any = _RESULT_SENTINEL,
     input: Any = _RESULT_SENTINEL,  # noqa: A002 - matches the injected variable name
     structure: Any = _RESULT_SENTINEL,
+    trajectory: Any = _RESULT_SENTINEL,
+    expected_trajectory: Any = _RESULT_SENTINEL,
+    usage: Any = _RESULT_SENTINEL,
 ) -> str:
     """Assemble ``prelude + user script`` (§19.4).
 
     Evidence is injected as **plain Python literals** via ``repr`` (no client, no network).
-    ``output`` is always injected; ``expected`` / ``input`` / ``structure`` only when the
-    binding's evidence scope provided them (Axis-C). The untrusted script follows and must
+    ``output`` is always injected; ``expected`` / ``input`` / ``structure`` / ``trajectory`` /
+    ``expected_trajectory`` / ``usage`` only when the binding's evidence scope provided them
+    (Axis-C, design §5.1). The untrusted script follows and must
     assign ``result``. NOTE: injection is done by the trusted harness, so ``repr`` of the
     (JSON-safe) evidence values is a safe Python source literal here.
 
@@ -64,6 +68,12 @@ def build_validation_prelude(
         lines.append(f'input = {input!r}')
     if structure is not _RESULT_SENTINEL:
         lines.append(f'structure = {structure!r}')
+    if trajectory is not _RESULT_SENTINEL:
+        lines.append(f'trajectory = {trajectory!r}')
+    if expected_trajectory is not _RESULT_SENTINEL:
+        lines.append(f'expected_trajectory = {expected_trajectory!r}')
+    if usage is not _RESULT_SENTINEL:
+        lines.append(f'usage = {usage!r}')
     lines.append('# --- user script (untrusted) ---')
     lines.append(script)
     lines.append('# --- eval harness epilogue (trusted, generated) ---')
@@ -217,6 +227,9 @@ def run_code_validation(
     expected: Any = _RESULT_SENTINEL,
     input: Any = _RESULT_SENTINEL,  # noqa: A002 - matches the injected variable name
     structure: Any = _RESULT_SENTINEL,
+    trajectory: Any = _RESULT_SENTINEL,
+    expected_trajectory: Any = _RESULT_SENTINEL,
+    usage: Any = _RESULT_SENTINEL,
     return_contract: str = 'bool',
     executor,
 ) -> dict:
@@ -243,6 +256,7 @@ def run_code_validation(
 
     prelude = build_validation_prelude(
         script, output=output, expected=expected, input=input, structure=structure,
+        trajectory=trajectory, expected_trajectory=expected_trajectory, usage=usage,
     )
     exec_result = executor(prelude)
 
