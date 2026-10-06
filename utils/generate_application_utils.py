@@ -15,6 +15,11 @@ _MAX_AGENTS = 5
 _MAX_PIPELINES = 5
 _MAX_SKILLS = 5
 _MAX_EXISTING_DIMENSIONS = 50
+_MAX_AGENT_TOOLS = 100
+
+# Same rule the SDK applies to a sub-agent's tool name (elitea_sdk.tools.utils.clean_string), so
+# the names offered here are the ones a recorded trajectory carries.
+_TOOL_NAME_STRIP = re.compile(r'[^a-zA-Z0-9_.-]')
 
 
 class ServicePromptTemplateError(Exception):
@@ -326,7 +331,60 @@ def fetch_application_instructions(
             "application_name": application.name,
             "version_id": version.id,
             "instructions": version.instructions or "",
+            "tools": agent_tool_groups(version.to_dict().get("tools") or []),
         }
+
+
+def agent_tool_groups(tools: list) -> list:
+    """The agent's callable tools as ``[{toolkit, type, names}]``, named as a trajectory records them.
+
+    A toolkit's tools are its ``settings.selected_tools`` function names, unprefixed; a sub-agent
+    (``application``) is one tool named by its cleaned name. A toolkit that lists no tools (MCP,
+    or "all tools") gets ``names=[]``: its tools exist but cannot be enumerated here.
+    """
+    groups = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        toolkit = tool.get("toolkit_name") or tool.get("name") or tool.get("type") or "toolkit"
+        if tool.get("type") == "application":
+            name = _TOOL_NAME_STRIP.sub("", tool.get("name") or "").replace(".", "_")
+            names = [name] if name else []
+        else:
+            selected = (tool.get("settings") or {}).get("selected_tools") or []
+            names = [n for n in selected if isinstance(n, str) and n]
+        groups.append({"toolkit": toolkit, "type": tool.get("type"), "names": names})
+    return groups
+
+
+def _agent_tools_clause(tool_groups: Optional[list]) -> str:
+    if not tool_groups:
+        return (
+            "This agent has no tools, so propose no tool-use dimensions and leave "
+            '"trajectory" false in every evidence_scope.'
+        )
+    lines, budget = [], _MAX_AGENT_TOOLS
+    for group in tool_groups:
+        names = group.get("names") or []
+        label = "sub-agent" if group.get("type") == "application" else f'toolkit "{group["toolkit"]}"'
+        if not names:
+            lines.append(f"- {label}: tools not listed")
+            continue
+        shown = names[:max(budget, 0)]
+        budget -= len(shown)
+        more = f" (+{len(names) - len(shown)} more)" if len(shown) < len(names) else ""
+        lines.append(f"- {label}: " + (", ".join(shown) or "...") + more)
+    return (
+        "The agent can call these tools (names as they appear in its recorded tool calls):\n"
+        + "\n".join(lines)
+        + "\n\nWhere tool use matters for this agent — picking the right tool, using its result, "
+        "not making unnecessary or repeated calls — you may propose dimensions that judge it. "
+        'evidence_scope takes a fifth key beyond the four in the schema, "trajectory": <bool>; for '
+        'those dimensions set "trajectory": true so the judge sees the recorded tool calls '
+        '(an evidence_scope with only "trajectory" true is valid). Do not propose checks for an '
+        "exact expected tool sequence, forbidden tools or a tool-call budget: the platform has "
+        "deterministic built-in checks for those."
+    )
 
 
 def build_eval_dimensions_system_prompt(
@@ -336,7 +394,16 @@ def build_eval_dimensions_system_prompt(
     count_hint: Optional[int] = None,
     existing_dimension_names: Optional[list] = None,
     custom_instructions: Optional[str] = None,
+    agent_tools: Optional[list] = None,
 ) -> str:
+    """``agent_tools`` is :func:`agent_tool_groups` output; ``None`` leaves tools out entirely.
+
+    A template with an ``{agent_tools}`` placeholder places the tools clause itself. One without
+    (every seeded version so far) gets it as a closing section after the whole template, so the
+    clause reaches the model without a template migration. Not inside the instructions block: the
+    templates frame that as context that never overrides the task, and the model then keeps to
+    the schema's four evidence_scope keys and never sets "trajectory".
+    """
     count_clause = (
         f"Propose at most {count_hint} dimensions."
         if count_hint
@@ -363,10 +430,13 @@ def build_eval_dimensions_system_prompt(
         else ""
     )
 
+    instructions = instructions or "(no instructions set)"
+    tools_clause = _agent_tools_clause(agent_tools) if agent_tools is not None else ""
     try:
-        return template.format(
+        prompt = template.format(
             application_name=application_name,
-            instructions=instructions or "(no instructions set)",
+            instructions=instructions,
+            agent_tools=tools_clause,
             count_clause=count_clause,
             existing_dimensions=existing_clause,
             custom_instructions_clause=custom_instructions_clause,
@@ -374,3 +444,6 @@ def build_eval_dimensions_system_prompt(
     except (KeyError, IndexError, ValueError):
         log.exception("build_eval_dimensions_system_prompt: malformed service prompt template")
         raise ServicePromptTemplateError("generate_eval_dimensions template is malformed")
+    if tools_clause and "{agent_tools}" not in template:
+        prompt = f"{prompt}\n\n## Agent tools (extends the response schema above)\n{tools_clause}"
+    return prompt
