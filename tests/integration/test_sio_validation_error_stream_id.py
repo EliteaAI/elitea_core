@@ -23,11 +23,11 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 PKG = 'sioerrpkg_stream_id_test'
 
-_STUBBED = ('redis', 'tools', 'sqlalchemy', 'pylon', f'{PKG}.models.conversation',
+_STUBBED = ('redis', 'tools', 'sqlalchemy', 'pylon', f'{PKG}.models.conversation', f'{PKG}.models.message_group',
             f'{PKG}.models.enums', f'{PKG}.models.message_items', f'{PKG}.models.pd.participant',
             f'{PKG}.models.pd.predict', f'{PKG}.utils.continue_message',
             f'{PKG}.utils.participant_utils', f'{PKG}.utils.canvas_utils',
-            f'{PKG}.utils.chat_constants')
+            f'{PKG}.utils.chat_constants', f'{PKG}.utils.conversation_access')
 
 
 class _MockFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
@@ -53,6 +53,9 @@ class _MockFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 
 def _load_sio_module():
     finder = _MockFinder()
+    # Stubs left in sys.modules by earlier tests would bypass the finder in a full-suite run
+    shadowed = {k: sys.modules.pop(k) for k in list(sys.modules)
+                if any(k == root or k.startswith(root + '.') for root in _STUBBED)}
     sys.meta_path.insert(0, finder)
 
     pkg = types.ModuleType(PKG)
@@ -71,6 +74,7 @@ def _load_sio_module():
     try:
         for full, relpath in (
             (f'{PKG}.utils.sio_utils', 'utils/sio_utils.py'),
+            (f'{PKG}.utils.toolkit_test_rooms', 'utils/toolkit_test_rooms.py'),
             (f'{PKG}.models.pd.sio', 'models/pd/sio.py'),
             (f'{PKG}.sio.all', 'sio/all.py'),
         ):
@@ -80,6 +84,7 @@ def _load_sio_module():
             spec.loader.exec_module(module)
     finally:
         sys.meta_path.remove(finder)
+        sys.modules.update(shadowed)
 
     return sys.modules[f'{PKG}.sio.all']
 

@@ -64,6 +64,7 @@ from ..utils.vectorstore import get_pgvector_connection_string
 from ..utils.run_id import PREDICT_RUN_ID_KWARGS_KEY
 from ..utils.usage_attribution import ENTITY_KWARGS_KEY, ROOT_ENTITY_KWARGS_KEY
 from ..utils.validator_cache import make_validator_cache_key, toolkit_validator_cache
+from ..utils.toolkit_test_rooms import OWNED_EVENTS, claim_stream
 
 
 def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
@@ -78,6 +79,26 @@ def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> No
         module.stop_task(task_id)
     except Exception:  # pylint: disable=W0703
         log.exception("%s: stop_task failed for %s", label, task_id)
+
+
+def _guard_test_stream(module, sid, sio_event, data: dict) -> None:
+    """Refuse a toolkit-test start on a stream_id another user already owns."""
+    if sio_event not in OWNED_EVENTS:
+        return  # chat streams are keyed on the shared conversation uuid
+    try:
+        owned = claim_stream(module.get_redis_client(), data['stream_id'], data.get('user_id'))
+    except Exception as e:  # pylint: disable=W0703
+        log.warning("%s: stream owner check skipped, Redis failed: %s", sio_event, e)
+        return
+    if not owned:
+        raise SioValidationError(
+            sio=module.context.sio,
+            sid=sid,
+            event=sio_event,
+            error='stream_id is already in use',
+            stream_id=data.get('stream_id'),
+            message_id=data.get('message_id'),
+        )
 
 
 def _report_budget_door_closed(
@@ -1516,6 +1537,7 @@ class RPC:
         )
 
         if sid:
+            _guard_test_stream(self, sid, sio_event, data)
             self.context.sio.enter_room(sid, room)
 
         # Log the parameters being passed to indexer for debugging
@@ -1789,6 +1811,7 @@ class RPC:
         )
 
         if sid:
+            _guard_test_stream(self, sid, sio_event, data)
             self.context.sio.enter_room(sid, room)
 
         # Prepare kwargs without stream_id and message_id since they're passed as args

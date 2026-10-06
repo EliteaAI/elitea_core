@@ -44,6 +44,7 @@ from ..utils.participant_utils import get_entity_details, get_or_create_one
 from ..utils.canvas_utils import get_canvas_key, get_canvas_authors_key, get_shadow_key
 from ..utils.chat_constants import CANVAS_CONTENT_TTL, CANVAS_SHADOW_KEY_OFFSET_TTL
 from ..utils.sio_utils import get_chat_room, get_canvas_room, get_event_room, get_eval_run_room
+from ..utils.toolkit_test_rooms import claim_stream
 from ..utils.sio_utils import SioEvents, SioValidationError
 from pydantic import ValidationError
 
@@ -119,7 +120,16 @@ class SIO:
                 error=e.errors(include_url=False, include_context=False),
                 stream_id=str(data.get('stream_id')) if isinstance(data, dict) else '',
             )
-        # Build the room name using the same pattern as test_toolkit_tool_sio
+        user_id = auth.current_user(auth_data=auth.sio_users[sid]).get('id') if sid in auth.sio_users else None
+        # Denial stays silent, same as an unknown room; a Redis failure denies too
+        try:
+            owned = claim_stream(self.get_redis_client(), parsed.stream_id, user_id)
+        except Exception as e:  # pylint: disable=W0703
+            log.warning("Toolkit room owner check failed for sid %s: %s", sid, e)
+            owned = False
+        if not owned:
+            log.warning("Sid %s denied toolkit test room %s", sid, parsed.stream_id)
+            return
         room = get_event_room(
             event_name=parsed.event_name,
             room_id=str(parsed.stream_id)
