@@ -168,6 +168,10 @@ def pu():
         'plugins.elitea_core.utils.application_utils': {'build_skill_mappings_list': lambda ms: list(ms)},
         'plugins.elitea_core.utils.skill_export_import': {'build_skill_fork_payload': noop},
         'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': noop},
+        'plugins.elitea_core.utils.export_import': {
+            'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'export_version_toolkit': noop,
+        },
+        'plugins.elitea_core.utils.toolkit_meta': {'drop_index_schedules': lambda meta: meta or {}},
     }
     for modname, attrs in stubs.items():
         sys.modules[modname] = _module(modname, **attrs)
@@ -184,6 +188,7 @@ def pu():
             ('db', types.SimpleNamespace(get_session=None)),
             ('this', types.SimpleNamespace(module=None, descriptor=None)),
             ('rpc_tools', types.SimpleNamespace(RpcMixin=object)),
+            ('serialize', lambda value: value),
         ):
             if not hasattr(tools_mod, attr):
                 setattr(tools_mod, attr, default)
