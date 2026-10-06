@@ -453,3 +453,61 @@ def test_snapshot_freezes_the_consumption_budget(orch):
     budget = {'per_run': {'tokens': 1000}}
     assert _snapshot(orch, 1, budget=budget)['suite']['consumption_budget'] == budget
     assert _snapshot(orch, 1)['suite']['consumption_budget'] is None
+
+
+# --- pre-run estimate (design Q-S6) -------------------------------------------------------------
+
+def _usage_row(case_index, role, tokens, cost, state='recorded'):
+    return {'case_index': case_index, 'role': role, 'usage_state': state,
+            'input_tokens': tokens, 'output_tokens': 0,
+            'cost': None if cost is None else Decimal(str(cost))}
+
+
+def test_estimate_scales_per_case_range_to_case_count(usage):
+    rows = [
+        _usage_row(0, 'agent', 100, '0.01'), _usage_row(0, 'judge', 20, '0.002'),
+        _usage_row(1, 'agent', 300, '0.03'), _usage_row(1, 'judge', 20, '0.002'),
+    ]
+    est = usage.estimate_run(rows, 10)
+    assert est['cases'] == 10 and est['based_on_cases'] == 2 and est['includes_judge']
+    assert est['tokens'] == {'low': 1200, 'expected': 2200, 'high': 3200}
+    assert est['cost'] == pytest.approx({'low': 0.12, 'expected': 0.22, 'high': 0.32})
+    assert est['unpriced_cases'] == 0
+
+
+def test_estimate_without_prices_keeps_tokens(usage):
+    rows = [_usage_row(0, 'agent', 100, None), _usage_row(1, 'agent', 50, '0.01')]
+    est = usage.estimate_run(rows, 4)
+    assert est['tokens'] == {'low': 200, 'expected': 300, 'high': 400}
+    assert est['cost'] == pytest.approx({'low': 0.04, 'expected': 0.04, 'high': 0.04})
+    assert est['unpriced_cases'] == 1
+    assert not est['includes_judge']
+
+    unpriced = usage.estimate_run([_usage_row(0, 'agent', 100, None)], 4)
+    assert unpriced['cost'] is None and unpriced['tokens']['expected'] == 400
+
+
+def test_estimate_ignores_unrecorded_rows_and_needs_history(usage):
+    rows = [_usage_row(0, 'agent', 999, '9', state='not_recorded'), _usage_row(1, 'agent', 10, '0.1')]
+    assert usage.estimate_run(rows, 2)['tokens']['expected'] == 20
+    assert usage.estimate_run([], 5) is None
+    assert usage.estimate_run([_usage_row(0, 'agent', 0, None, state='not_applicable')], 5) is None
+    assert usage.estimate_run(rows, 0) is None
+
+
+def test_binding_budget_picks_the_tighter_scope(usage):
+    project = {'remaining': 40.0, 'effective_limit': 100}
+    member = {'remaining': 5.0, 'effective_limit': 10, 'spend_available': True}
+    assert usage.binding_budget(project, member) == {
+        'scope': 'member', 'remaining': 5.0, 'limit': 10, 'spend_available': True}
+    assert usage.binding_budget(project, {'remaining': None})['scope'] == 'project'
+    assert usage.binding_budget({'remaining': None}, None) is None
+
+
+def test_estimate_exceeds_budget(usage):
+    est = usage.estimate_run([_usage_row(0, 'agent', 10, '1')], 3)
+    assert usage.estimate_exceeds_budget(est, {'remaining': 2.0}) is True
+    assert usage.estimate_exceeds_budget(est, {'remaining': 3.0}) is False
+    assert usage.estimate_exceeds_budget(est, None) is None
+    unpriced = usage.estimate_run([_usage_row(0, 'agent', 10, None)], 3)
+    assert usage.estimate_exceeds_budget(unpriced, {'remaining': 2.0}) is None

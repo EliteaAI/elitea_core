@@ -467,3 +467,73 @@ def settle_usage_rows(rows: List[dict], breakdown: Iterable[dict], platform_run_
 def ledger_calls(breakdown: Iterable[dict]) -> int:
     """How many llm rows the breakdown counts; settlement polls until this stops growing."""
     return sum(_count(entry.get('llm_calls')) for entry in breakdown or [])
+
+
+# --- pre-run estimate (design Q-S6) -------------------------------------------------------------
+
+def _case_totals(rows: List[dict]) -> List[dict]:
+    """One ``{tokens, cost}`` per case, the agent and judge rows of that case added together. Only
+    recorded rows count; a case's cost is None when any of its recorded rows is unpriced."""
+    cases = {}
+    for row in rows:
+        if row.get('usage_state') != USAGE_RECORDED:
+            continue
+        case = cases.setdefault(row.get('case_index'), {'tokens': 0, 'cost': Decimal(0), 'roles': set()})
+        case['tokens'] += _count(row.get('input_tokens')) + _count(row.get('output_tokens'))
+        case['roles'].add(row.get('role'))
+        if row.get('cost') is None or case['cost'] is None:
+            case['cost'] = None
+        else:
+            case['cost'] += Decimal(str(row['cost']))
+    return list(cases.values())
+
+
+def _spread(values: List, cases: int) -> Optional[dict]:
+    if not values:
+        return None
+    mean = sum(values) / len(values)
+    return {'low': _number(min(values) * cases), 'expected': _number(mean * cases),
+            'high': _number(max(values) * cases)}
+
+
+def estimate_run(history_rows: List[dict], cases: int) -> Optional[dict]:
+    """``cases`` × what one case cost on the suite's last finished run (agent + judge), as a range.
+
+    ``expected`` uses the per-case mean, ``low`` / ``high`` the cheapest and dearest case seen.
+    Tokens are input plus output, as in the budget check. The cost range is None when no case of
+    that run was fully priced, so the caller can still show tokens. Returns None when the run
+    recorded no usage at all: there is nothing to estimate from."""
+    per_case = _case_totals(history_rows)
+    if not per_case or cases <= 0:
+        return None
+    priced = [c['cost'] for c in per_case if c['cost'] is not None]
+    return {
+        'cases': cases,
+        'based_on_cases': len(per_case),
+        'includes_judge': any(ROLE_JUDGE in c['roles'] for c in per_case),
+        'tokens': _spread([c['tokens'] for c in per_case], cases),
+        'cost': _spread(priced, cases),
+        'unpriced_cases': len(per_case) - len(priced),
+    }
+
+
+def binding_budget(project: Optional[dict], member: Optional[dict]) -> Optional[dict]:
+    """The budget that runs out first, from the project and member budget states (USD).
+
+    Each state carries ``remaining`` (None = unlimited). Returns None when neither scope limits
+    the caller."""
+    scopes = [(scope, state) for scope, state in (('project', project), ('member', member))
+              if state and state.get('remaining') is not None]
+    if not scopes:
+        return None
+    scope, state = min(scopes, key=lambda item: item[1]['remaining'])
+    return {'scope': scope, 'remaining': float(state['remaining']),
+            'limit': state.get('effective_limit'), 'spend_available': state.get('spend_available')}
+
+
+def estimate_exceeds_budget(estimate: Optional[dict], budget: Optional[dict]) -> Optional[bool]:
+    """Whether the expected cost is over the remaining budget. None when either side is unknown."""
+    cost = (estimate or {}).get('cost')
+    if not cost or not budget:
+        return None
+    return cost['expected'] > budget['remaining']
