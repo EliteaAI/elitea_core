@@ -253,9 +253,13 @@ def is_structure_only_binding(binding: dict) -> bool:
     purely from the agent's structure/instructions with no per-case data at all. Used to allow an
     offline-batch run with no dataset (§19.4 follow-up): if every binding in the suite is
     structure-only, there is nothing case-shaped left to iterate over, so the run needs neither a
-    dataset nor a live agent call to produce evidence."""
+    dataset nor a live agent call to produce evidence.
+
+    ``trajectory`` and ``usage`` (opt-in, default off) are evidence of what the agent *did*, so a
+    binding with either in scope needs the agent run even with ``input``/``output`` off (#6809 G2)."""
     scope = binding.get('evidence_scope') or {}
-    return not scope.get('input', True) and not scope.get('output', True)
+    return (not scope.get('input', True) and not scope.get('output', True)
+            and not scope.get('trajectory', False) and not scope.get('usage', False))
 
 
 def all_bindings_structure_only(bindings: List[dict]) -> bool:
@@ -309,6 +313,8 @@ def evidence_scope_key(scope: dict) -> tuple:
         bool(scope.get('structure', False)),
         bool(scope.get('input', True)),
         bool(scope.get('output', True)),
+        bool(scope.get('trajectory', False)),
+        bool(scope.get('usage', False)),
     )
 
 

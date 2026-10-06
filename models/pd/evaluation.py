@@ -30,7 +30,10 @@ _SCALE_TYPES = {EvalScaleType.binary, EvalScaleType.ordinal, EvalScaleType.conti
 _POLARITIES = {EvalPolarity.higher_better, EvalPolarity.lower_better}
 _OPERATORS = {'>=', '>', '<=', '<', '=='}
 _RETURN_CONTRACTS = {'bool', 'number'}
-_EVIDENCE_KEYS = {'structure', 'input', 'output', 'expected'}
+_EVIDENCE_KEYS = {'structure', 'input', 'output', 'expected', 'trajectory', 'usage'}
+# Scope flags that make a binding score something. ``trajectory`` / ``usage`` (#6809, #6716) are
+# opt-in like ``structure`` and, unlike it, need the agent to run (see is_structure_only_binding).
+_SCORED_EVIDENCE_KEYS = ('structure', 'input', 'output', 'trajectory', 'usage')
 # project library is home (§16); platform tier is seeded via the admin console, not this API.
 _PROJECT_WRITABLE_TIERS = {EvalTier.project, EvalTier.agent_adhoc}
 _CASE_SOURCES = {EvalCaseSource.manual, EvalCaseSource.import_, EvalCaseSource.conversation}
@@ -44,8 +47,9 @@ def _check_evidence_scope(v: dict) -> dict:
         raise ValueError(f'evidence_scope keys must be a subset of {sorted(_EVIDENCE_KEYS)}')
     if any(not isinstance(val, bool) for val in v.values()):
         raise ValueError('evidence_scope values must be booleans')
-    if not any(v.get(key, False) for key in ('structure', 'input', 'output')):
-        raise ValueError('evidence_scope must have at least one of structure/input/output set to true')
+    if not any(v.get(key, False) for key in _SCORED_EVIDENCE_KEYS):
+        raise ValueError(
+            f'evidence_scope must have at least one of {"/".join(_SCORED_EVIDENCE_KEYS)} set to true')
     return v
 
 
