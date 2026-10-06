@@ -19,6 +19,8 @@ from ..models.enums.all import NotificationEventTypes
 from ..utils.authors import get_authors_data
 from ..utils.sio_utils import SioEvents
 
+REASONING_EFFORT_OFF = 'none'
+
 
 class UnknownEntityError(Exception):
     pass
@@ -39,16 +41,18 @@ def invalid_llm_settings_for_reasoning_model(
 
     A reasoning model (Anthropic extended thinking, OpenAI o1/gpt-5) must run with a non-null
     reasoning_effort and no temperature. Both a stale temperature and a null effort silently run
-    it thinking-off, which triggers the write-tool fabrication of #5826. The already-valid shape
-    (no temperature + an active effort) needs no model lookup, so a clean write pays no RPC. Fails
-    open (returns False) if the model can't be resolved — availability is enforced elsewhere; this
-    check must not block a write on a transient RPC error.
+    it thinking-off, which triggers the write-tool fabrication of #5826. An explicit 'none' is
+    allowed only on a model whose admin-configured levels offer it (#6819 GPT-5.x/GPT-6); a model
+    without an off path (Claude) keeps rejecting it. The already-valid shape (no temperature + an
+    active effort) needs no model lookup, so a clean write pays no RPC. Fails open (returns False)
+    if the model can't be resolved — availability is enforced elsewhere; this check must not block
+    a write on a transient RPC error.
     """
     if not llm_settings:
         return False
     has_temperature = llm_settings.get('temperature') is not None
     effort = llm_settings.get('reasoning_effort')
-    has_active_effort = effort not in (None, 'none')
+    has_active_effort = effort not in (None, REASONING_EFFORT_OFF)
     # Valid for a reasoning model (and harmless for a non-reasoning one) — skip the lookup.
     if not has_temperature and has_active_effort:
         return False
@@ -66,7 +70,11 @@ def invalid_llm_settings_for_reasoning_model(
             f"reasoning-family llm_settings: {exc}"
         )
         return False
-    return bool(config and config.get('supports_reasoning', False))
+    if not (config and config.get('supports_reasoning', False)):
+        return False
+    if has_temperature or effort is None:
+        return True
+    return REASONING_EFFORT_OFF not in (config.get('supported_efforts') or ())
 
 
 def make_query_filter_for_entity(entity_name: ParticipantTypes, entity_meta: EntityMetaType) -> list:
