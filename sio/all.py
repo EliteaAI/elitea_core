@@ -24,6 +24,7 @@ from pylon.core.tools import log, web
 from sqlalchemy import desc
 
 from ..models.conversation import Conversation
+from ..models.message_group import ConversationMessageGroup
 from ..models.enums.all import ParticipantTypes
 from ..models.message_items.canvas import CanvasVersionItem, CanvasMessageItem
 from ..models.pd.participant import ParticipantEntityUser
@@ -38,7 +39,7 @@ from ..models.pd.sio import (
     EvalRunRoomPayload,
 )
 from ..utils.continue_message import continue_message
-from ..utils.conversation_access import can_join_room, find_user_participant_id
+from ..utils.conversation_access import can_join_room, room_access_facts
 from ..utils.participant_utils import get_entity_details, get_or_create_one
 from ..utils.canvas_utils import get_canvas_key, get_canvas_authors_key, get_shadow_key
 from ..utils.chat_constants import CANVAS_CONTENT_TTL, CANVAS_SHADOW_KEY_OFFSET_TTL
@@ -48,17 +49,17 @@ from pydantic import ValidationError
 
 
 def _can_access_canvas(project_id: int, canvas_uuid, user_id: int) -> bool:
-    # Unknown canvas passes through so the handlers keep their own not-found handling
     with db.get_session(project_id) as session:
-        canvas = session.query(CanvasMessageItem).filter(CanvasMessageItem.uuid == str(canvas_uuid)).first()
-        if not canvas or not canvas.message_group or not canvas.message_group.conversation:
+        # Column query: no Conversation entity, so participants are not eager-loaded
+        row = session.query(Conversation.id, Conversation.is_private, Conversation.author_id).join(
+            ConversationMessageGroup, ConversationMessageGroup.conversation_id == Conversation.id
+        ).join(
+            CanvasMessageItem, CanvasMessageItem.message_group_id == ConversationMessageGroup.id
+        ).filter(CanvasMessageItem.uuid == str(canvas_uuid)).first()
+        # Unknown canvas passes through so the handlers keep their own not-found handling
+        if not row:
             return True
-        conversation = canvas.message_group.conversation
-        facts = {
-            'is_private': bool(conversation.is_private),
-            'is_author': conversation.author_id == user_id,
-            'is_participant': find_user_participant_id(conversation.participants, user_id) is not None,
-        }
+        facts = room_access_facts(session, row.id, row.is_private, row.author_id, user_id)
     return can_join_room(project_id, user_id, **facts)
 
 
@@ -85,18 +86,17 @@ class SIO:
             return
         with db.get_session(parsed.project_id) as session:
             conv_id = parsed.conversation_id
+            columns = (Conversation.id, Conversation.uuid, Conversation.is_private, Conversation.author_id)
             if isinstance(conv_id, int):
-                conversation = session.query(Conversation).filter(Conversation.id == conv_id).first()
+                conversation = session.query(*columns).filter(Conversation.id == conv_id).first()
             else:
-                conversation = session.query(Conversation).filter(Conversation.uuid == str(conv_id)).first()
+                conversation = session.query(*columns).filter(Conversation.uuid == str(conv_id)).first()
             if not conversation:
                 return
             conversation_uuid = conversation.uuid
-            facts = {
-                'is_private': bool(conversation.is_private),
-                'is_author': conversation.author_id == user_id,
-                'is_participant': find_user_participant_id(conversation.participants, user_id) is not None,
-            }
+            facts = room_access_facts(
+                session, conversation.id, conversation.is_private, conversation.author_id, user_id
+            )
         # Denial stays silent, same as an unknown conversation, so private chats don't leak existence
         if not can_join_room(parsed.project_id, user_id, **facts):
             log.warning("Sid %s denied room of conversation %s in project %s", sid, conv_id, parsed.project_id)
