@@ -135,3 +135,26 @@ def test_suite_accepts_steps_limit(pd, meta):
 def test_suite_rejects_bad_steps_limit(pd, limit):
     with pytest.raises(ValidationError, match='steps_limit'):
         pd.EvalSuiteCreateModel(application_id=1, meta={'steps_limit': limit})
+
+
+# --- #6716: suite meta.consumption_budget -------------------------------------------------------
+
+@pytest.mark.parametrize('budget', [
+    None, {}, {'per_case': None, 'per_run': None},
+    {'per_run': {'tokens': 50000}}, {'per_case': {'tokens': 0, 'cost': 0.25}},
+    {'per_case': {'cost': 1}, 'per_run': {'tokens': None, 'cost': 10.5}},
+])
+def test_suite_accepts_consumption_budget(pd, budget):
+    meta = {'consumption_budget': budget}
+    assert pd.EvalSuiteCreateModel(application_id=1, meta=meta).meta == meta
+    assert pd.EvalSuiteUpdateModel(meta=meta).meta == meta
+
+
+@pytest.mark.parametrize('budget', [
+    'lots', {'per_week': {'tokens': 1}}, {'per_run': 5}, {'per_run': {'calls': 1}},
+    {'per_run': {'tokens': -1}}, {'per_run': {'tokens': 2.5}}, {'per_run': {'tokens': True}},
+    {'per_case': {'cost': -0.1}}, {'per_case': {'cost': '1'}}, {'per_case': {'cost': False}},
+])
+def test_suite_rejects_bad_consumption_budget(pd, budget):
+    with pytest.raises(ValidationError, match='consumption_budget'):
+        pd.EvalSuiteCreateModel(application_id=1, meta={'consumption_budget': budget})

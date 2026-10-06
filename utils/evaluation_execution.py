@@ -51,6 +51,7 @@ _ASSISTANT_ROLES = ('assistant', 'ai')
 _NO_ENVELOPE_REASONS = {
     'timeout': 'timeout',
     'predict_exception': 'no_envelope',
+    'budget_blocked': 'budget_blocked',
 }
 
 

@@ -25,10 +25,14 @@ Split of responsibility (mirrors :mod:`llm_judge`):
 Outcome dict shape::
 
     {'status': 'ok'|'unsupported'|'timeout'|'predict_exception'|'predict_error'|'empty'
-               |'guardrail_paused'|'parked',
+               |'guardrail_paused'|'parked'|'budget_blocked',
      'output': <assistant text> | None,   # set only when status == 'ok'
      'error':  <str> | None,              # set when status != 'ok'
-     'execution': {...}}                  # trajectory + counters, see :mod:`evaluation_execution`
+     'execution': {...},                  # trajectory + counters, see :mod:`evaluation_execution`
+     'usage': {...}}                      # tokens per model, see :mod:`evaluation_usage`
+
+``status='budget_blocked'`` (with ``budget_scope``: ``project`` | ``member``) is a call refused by
+the project/member budget gate at dispatch. The run stops on it (``stop_reason=gate_closed``).
 """
 import copy
 import time
@@ -197,11 +201,14 @@ def run_agent(
     a batch run, so that text is not the agent's answer (design §4.5)."""
     # Lazy: keeps this module importable with no package context (sibling preloaded in tests).
     from .evaluation_execution import extract_execution, is_parked, pause_details
+    from .evaluation_usage import envelope_usage, not_applicable_usage
 
     def _outcome(status, output, error, result=None, latency_ms=None):
         return {'status': status, 'output': output, 'error': error,
                 'execution': extract_execution(result, status=status, latency_ms=latency_ms,
-                                               error=error or _predict_error_text(result))}
+                                               error=error or _predict_error_text(result)),
+                'usage': (not_applicable_usage('unsupported') if status == 'unsupported'
+                          else envelope_usage(result, status=status))}
 
     if not agent_type_supported(version_details):
         agent_type = (version_details or {}).get('agent_type')
@@ -221,8 +228,14 @@ def run_agent(
                          user_id=user_id, skip_expansion=True, return_chat_history=True,
                          platform_run_id=platform_run_id, usage_entity=usage_entity)
     except Exception as exc:  # noqa: BLE001 - execution-level failure is a value, not a raise
-        return _outcome('predict_exception', None, str(exc),
-                        latency_ms=int((time.monotonic() - started) * 1000))
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if getattr(exc, 'type', None) == 'budget_exceeded':
+            # BudgetDoorClosedError: the gate refused the call before any model ran (§5.4).
+            outcome = _outcome('budget_blocked', None, str(exc), latency_ms=latency_ms)
+            outcome['budget_scope'] = getattr(exc, 'scope', None)
+            outcome['execution']['metrics']['budget_scope'] = outcome['budget_scope']
+            return outcome
+        return _outcome('predict_exception', None, str(exc), latency_ms=latency_ms)
     latency_ms = int((time.monotonic() - started) * 1000)
 
     # Task timeout — predict_sio returns {"task_id": ...} without a "result" (matches run_llm_judge).

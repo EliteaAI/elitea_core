@@ -285,12 +285,16 @@ def evaluate_case(
     user_id: Optional[int] = None,
     platform_run_id: Optional[str] = None,
     usage_entity: Optional[dict] = None,
+    usage_sink: Optional[Callable[[dict], None]] = None,
 ) -> List[dict]:
     """Score ``case`` against ``dimensions`` with one batched judge call.
 
     Returns one result dict per dimension (order preserved):
     ``{dimension_id, dimension_name, native_score: float|None, rationale: str,
        status: 'scored'|'error', error: str|None}``. Never raises for a judge-level failure.
+
+    ``usage_sink``, when given, receives the call's usage (#6716) whatever its outcome: a judge
+    that returned unparseable output still spent its tokens.
     """
     if not dimensions:
         return []
@@ -303,6 +307,11 @@ def evaluate_case(
     outcome = judge(project_id, judge_llm_settings, system_prompt, payload, timeout,
                     stream_key='eval_judge', user_id=user_id,
                     platform_run_id=platform_run_id, usage_entity=usage_entity)
+    if usage_sink is not None:
+        from .evaluation_usage import envelope_usage
+        status = outcome.get('status')
+        usage_sink(envelope_usage(outcome.get('raw'),
+                                  status=status if status in ('timeout', 'predict_exception') else None))
 
     if outcome.get('status') != 'ok':
         return _error_results(

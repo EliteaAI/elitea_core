@@ -25,6 +25,7 @@ from fixtures.helpers import load_utils_module  # noqa: E402
 @pytest.fixture(scope='module')
 def runner(utils_path):
     load_utils_module(utils_path, 'evaluation_execution')
+    load_utils_module(utils_path, 'evaluation_usage')
     return load_utils_module(utils_path, 'evaluation_agent_runner')
 
 
@@ -33,6 +34,7 @@ def orch(utils_path):
     load_utils_module(utils_path, 'evaluation_scoring')
     load_utils_module(utils_path, 'evaluation_ai_judge')
     load_utils_module(utils_path, 'evaluation_execution')
+    load_utils_module(utils_path, 'evaluation_usage')
     load_utils_module(utils_path, 'evaluation_agent_runner')
     return load_utils_module(utils_path, 'evaluation_run_orchestration')
 

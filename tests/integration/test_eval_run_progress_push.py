@@ -67,6 +67,10 @@ class EvalCaseExecution(EvalResult):
     pass
 
 
+class EvalCaseUsage(EvalResult):
+    pass
+
+
 class _FakeRow:
     def __init__(self, run_id, snapshot):
         self.id = run_id
@@ -144,6 +148,7 @@ def _install_package(row_holder, added):
     evaluation_models.EvalRun = EvalRun
     evaluation_models.EvalResult = EvalResult
     evaluation_models.EvalCaseExecution = EvalCaseExecution
+    evaluation_models.EvalCaseUsage = EvalCaseUsage
     evaluation_models.EvalRunStatus = EvalRunStatus
 
     code_validation = types.ModuleType(f'{PKG}.utils.code_validation')

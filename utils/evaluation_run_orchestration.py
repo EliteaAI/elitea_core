@@ -51,8 +51,15 @@ STATUS_PENDING_HUMAN = 'pending_human'
 
 # Why a run stopped short of its last case. Both keep the partial scorecard, but the user needs to
 # know which one happened: one is something they asked for, the other is the platform giving up.
+# Persisted as ``EvalRun.meta.stop_reason`` (G3, design §13), so the strings are API.
 STOP_CANCEL_REQUESTED = 'cancel_requested'
-STOP_TIME_BUDGET = 'time_budget_exceeded'
+STOP_TIME_BUDGET = 'time_budget'
+#: The agent's summed runtime tokens reached the suite's ``consumption_budget.per_run.tokens``.
+STOP_BUDGET_EXHAUSTED = 'budget_exhausted'
+#: The project/member budget gate refused a case (``budget_blocked``); ``stop_scope`` says which.
+STOP_GATE_CLOSED = 'gate_closed'
+#: Orchestration-level failure; the run is ``errored``.
+STOP_FAILURE = 'failure'
 
 #: Wall-clock ceiling on a whole run, checked at case boundaries. Distinct from the reaper's
 #: ``RUN_STALE_AFTER_SECONDS``, which bounds the *quiet gap between two cases* — a run that keeps
@@ -180,6 +187,8 @@ def build_run_snapshot(
             'judge_model': suite.get('judge_model'),
             # null = the agent's own limit (§4.5); frozen so a later suite edit cannot change it.
             'steps_limit': suite.get('steps_limit'),
+            # {per_case, per_run} x {tokens, cost}; checked on the agent role only (§5.4).
+            'consumption_budget': suite.get('consumption_budget'),
         },
         'application_id': application_id,
         'application_version_id': application_version_id,
@@ -659,9 +668,17 @@ def run_one_case(
 
     Everything a single case needs, touching no shared state, so :func:`orchestrate_run` can call
     it either in-line or on a worker thread without the two paths diverging.
+
+    The case's usage goes on ``_usage`` (``agent``: the agent outcome's usage, ``judge``: the sum
+    of its judge calls). ``execute_run`` turns it into ``eval_case_usage`` rows, never storing it
+    on the snapshot. Judge usage is collected only from a scorer marked ``accepts_usage_sink``.
     """
+    usage: dict = {}
     if agent_runner is not None and case.get('output') is None:
         outcome = agent_runner(case)
+        if outcome.get('usage') is not None:
+            usage.update(agent=outcome['usage'], case_status=outcome.get('status'),
+                         budget_scope=outcome.get('budget_scope'))
         if outcome.get('status') == 'ok':
             case = {**case, 'output': outcome.get('output'), 'structure': outcome.get('structure')}
         else:
@@ -671,10 +688,21 @@ def run_one_case(
         if outcome.get('execution') is not None:
             # Persisted as an eval_case_execution row by execute_run, never on the snapshot.
             case['_execution'] = {**outcome['execution'], 'status': outcome.get('status')}
-    return case, assemble_case_results(
-        case, snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
+    judge_calls: List[dict] = []
+    scorer = ai_scorer
+    if ai_scorer is not None and getattr(ai_scorer, 'accepts_usage_sink', False):
+        def scorer(evidence, dims):
+            return ai_scorer(evidence, dims, usage_sink=judge_calls.append)
+    results = assemble_case_results(
+        case, snapshot, ai_scorer=scorer, code_scorer=code_scorer,
         judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name,
     )
+    if judge_calls:
+        from .evaluation_usage import merge_usage
+        usage['judge'] = merge_usage(judge_calls)
+    if usage:
+        case = {**case, '_usage': usage}
+    return case, results
 
 
 def orchestrate_run(
@@ -740,6 +768,10 @@ def orchestrate_run(
     resolved: dict = {}
     results_by_index: dict = {}
     stop_reason: Optional[str] = None
+    stop_scope: Optional[str] = None
+    run_token_limit = ((((snapshot.get('suite') or {}).get('consumption_budget') or {})
+                        .get('per_run') or {}).get('tokens'))
+    run_tokens_spent = 0
     deadline = (
         time.monotonic() + max(1, int(time_budget_seconds))
         if time_budget_seconds else None
@@ -771,6 +803,23 @@ def orchestrate_run(
             stop_reason = STOP_CANCEL_REQUESTED
         return stop_reason is not None
 
+    def _account(case: dict) -> None:
+        """Stop on what a finished case reports: a closed budget gate, or the run's token budget
+        spent (§5.4). Runtime tokens, not cost: cost reaches the ledger seconds later. Called from
+        the submitting thread only, like ``_should_stop``. An earlier stop reason is kept."""
+        nonlocal stop_reason, stop_scope, run_tokens_spent
+        usage = case.get('_usage') if isinstance(case, dict) else None
+        if not usage:
+            return
+        from .evaluation_usage import STATUS_BUDGET_BLOCKED, run_tokens
+        run_tokens_spent += run_tokens(usage.get('agent'))
+        if stop_reason is not None:
+            return
+        if usage.get('case_status') == STATUS_BUDGET_BLOCKED:
+            stop_reason, stop_scope = STOP_GATE_CLOSED, usage.get('budget_scope')
+        elif run_token_limit is not None and run_tokens_spent >= run_token_limit:
+            stop_reason = STOP_BUDGET_EXHAUSTED
+
     if workers == 1:
         # Kept as a real in-line loop, not a one-worker pool: this is the default path, and running
         # it on the calling thread means the common case never inherits thread-affinity surprises
@@ -782,6 +831,7 @@ def orchestrate_run(
                 cases[index], snapshot, agent_runner=agent_runner,
                 ai_scorer=ai_scorer, code_scorer=code_scorer,
                 judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name)
+            _account(resolved[index])
             _report(len(resolved))
     else:
         import threading
@@ -821,6 +871,7 @@ def orchestrate_run(
                     # A raise here propagates once the `with` drains the rest, marking the run
                     # errored exactly as the sequential path would.
                     resolved[index], results_by_index[index] = future.result()
+                    _account(resolved[index])
                     _report(_count_done())
 
     scored_case_count = len(resolved)
@@ -848,6 +899,8 @@ def orchestrate_run(
         # thing the terminal status has to express. `stop_reason` carries the distinction.
         'cancelled': stop_reason is not None,
         'stop_reason': stop_reason,
+        # `project` | `member` for STOP_GATE_CLOSED, else None.
+        'stop_scope': stop_scope,
         # On an early stop the count is the cases actually scored, so the progress bar keeps telling
         # the truth about how far the run got instead of jumping to N/N.
         'progress': {'done': scored_case_count, 'total': total},
@@ -870,11 +923,14 @@ def _make_ai_scorer(project_id: int, judge_settings: dict, *, user_id: Optional[
     """Bind :func:`evaluation_ai_judge.evaluate_case` into the ``ai_scorer`` contract."""
     from .evaluation_ai_judge import evaluate_case
 
-    def _score(evidence: dict, dimensions: List[dict]) -> List[dict]:
+    def _score(evidence: dict, dimensions: List[dict], usage_sink=None) -> List[dict]:
         return evaluate_case(project_id, judge_settings, evidence, dimensions,
                              timeout=timeout, judge=judge, user_id=user_id,
-                             platform_run_id=platform_run_id, usage_entity=usage_entity)
+                             platform_run_id=platform_run_id, usage_entity=usage_entity,
+                             usage_sink=usage_sink)
 
+    # run_one_case passes a per-case sink only to a scorer that says it takes one.
+    _score.accepts_usage_sink = True
     return _score
 
 
@@ -901,6 +957,50 @@ def split_case_executions(cases: List[dict]) -> tuple:
             'metrics': execution.get('metrics') or {},
         })
     return rows, stripped
+
+
+def split_case_usage(cases: List[dict], pricer: Optional[Callable[..., dict]] = None) -> tuple:
+    """``(usage_rows, cases_without_usage)`` from orchestrate_run's resolved cases (#6716).
+
+    One ``eval_case_usage`` row per case and role that has a figure: ``agent`` for every case that
+    reached the agent, ``judge`` for every case an AI judge scored. Each row is priced at runtime
+    through ``pricer`` (``costs_compute_llm_cost``); settlement later replaces the cost with the
+    ledger's. A case never reached (early stop) has no row, which is how the rollup tells
+    "not run" from "ran and recorded nothing"."""
+    from .evaluation_usage import ROLE_AGENT, ROLE_JUDGE, price_usage, usage_row
+    rows, stripped = [], []
+    for index, case in enumerate(cases):
+        usage = case.get('_usage') if isinstance(case, dict) else None
+        if not usage:
+            stripped.append(case)
+            continue
+        stripped.append({k: v for k, v in case.items() if k != '_usage'})
+        status = usage.get('case_status')
+        for role in (ROLE_AGENT, ROLE_JUDGE):
+            if usage.get(role) is None:
+                continue
+            rows.append(usage_row(
+                dataset_case_id=case.get('id'), case_index=index, role=role, usage=usage[role],
+                priced=price_usage(usage[role], pricer), case_status=status,
+            ))
+    return rows, stripped
+
+
+def usage_meta(rows: List[dict], budget: Optional[dict]) -> dict:
+    """``EvalRun.meta`` keys for the run's usage: one rollup per role that has rows, and the
+    budget verdict when the suite sets a limit. Keys with nothing to say are left out."""
+    from .evaluation_usage import ROLE_AGENT, ROLE_JUDGE, budget_verdict, usage_rollup
+    agent = [r for r in rows if r['role'] == ROLE_AGENT]
+    judge = [r for r in rows if r['role'] == ROLE_JUDGE]
+    meta = {}
+    if agent:
+        meta['agent_usage'] = usage_rollup(agent)
+    if judge:
+        meta['judge_usage'] = usage_rollup(judge)
+    verdict = budget_verdict(agent, budget)
+    if verdict is not None:
+        meta['budget_verdict'] = verdict
+    return meta
 
 
 def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: int = 120,
@@ -1023,7 +1123,9 @@ def execute_run(
     therefore opens its own short session and closes it: claim, one per progress heartbeat, one per
     cancel poll, and one for the terminal write. Nothing ORM-mapped is carried between phases —
     only the plain snapshot dict and ``owner_id`` — so there are no detached instances."""
-    from ..models.evaluation import EvalRun, EvalResult, EvalRunStatus, EvalCaseExecution
+    from ..models.evaluation import (
+        EvalRun, EvalResult, EvalRunStatus, EvalCaseExecution, EvalCaseUsage,
+    )
     from .code_validation import make_task_node_executor
     from tools import db  # pylint: disable=E0401
     from datetime import datetime
@@ -1117,6 +1219,7 @@ def execute_run(
                 if row is not None:
                     row.status = EvalRunStatus.errored
                     row.error = message
+                    row.meta = {**(row.meta or {}), 'stop_reason': STOP_FAILURE}
                     row.finished_at = datetime.utcnow()
                     s.commit()
         except Exception:  # noqa: BLE001 - never mask the original failure
@@ -1204,6 +1307,24 @@ def execute_run(
         _mark_errored(str(exc))
         raise
 
+    # --- usage (priced before the session: one RPC per case × role × model) ----------------
+    usage_rows, cases = [], outcome['cases']
+    try:
+        from tools import context as pylon_context  # pylint: disable=E0401
+
+        def _pricer(**kwargs):
+            return pylon_context.rpc_manager.timeout(10).costs_compute_llm_cost(**kwargs)
+    except Exception:  # noqa: BLE001 - no pricing: every row stays `pending` for settlement
+        _pricer = None
+    try:
+        usage_rows, cases = split_case_usage(cases, _pricer)
+    except Exception:  # noqa: BLE001 - usage is evidence about the run, never a reason to lose it
+        from pylon.core.tools import log  # local: this module loads without pylon present
+        log.exception('Eval run %s: could not build usage rows', run_id)
+        cases = [{k: v for k, v in c.items() if k != '_usage'} if isinstance(c, dict) else c
+                 for c in cases]
+    budget = (snapshot.get('suite') or {}).get('consumption_budget')
+
     # --- terminal write --------------------------------------------------------------------
     try:
         with db.get_session(project_id) as s:
@@ -1212,9 +1333,16 @@ def execute_run(
                 raise ValueError(f'Eval run {run_id} disappeared while executing')
             for row in outcome['results']:
                 s.add(EvalResult(run_id=run.id, **row))
-            executions, cases = split_case_executions(outcome['cases'])
+            executions, cases = split_case_executions(cases)
             for row in executions:
                 s.add(EvalCaseExecution(run_id=run.id, **row))
+            for row in usage_rows:
+                s.add(EvalCaseUsage(run_id=run.id, **row))
+            run.meta = {
+                **(run.meta or {}),
+                **usage_meta(usage_rows, budget),
+                **{k: outcome[k] for k in ('stop_reason', 'stop_scope') if outcome.get(k)},
+            }
             run.headline_score = outcome['headline_score']
             run.progress = outcome['progress']
             # Reassign (not mutate in place) so SQLAlchemy detects the JSONB column changed —
@@ -1233,6 +1361,20 @@ def execute_run(
                     f'Run stopped after its {hours:g}h time limit with '
                     f"{outcome['progress']['done']} of {outcome['progress']['total']} cases scored. "
                     'The scores below cover only those cases. Split the dataset into smaller runs.'
+                )
+            elif outcome.get('stop_reason') == STOP_BUDGET_EXHAUSTED:
+                limit = ((budget or {}).get('per_run') or {}).get('tokens')
+                run.error = (
+                    f'Run stopped when the agent reached the suite\'s {limit} token budget with '
+                    f"{outcome['progress']['done']} of {outcome['progress']['total']} cases scored. "
+                    'The scores below cover only those cases.'
+                )
+            elif outcome.get('stop_reason') == STOP_GATE_CLOSED:
+                who = 'your' if outcome.get('stop_scope') == 'member' else 'the project\'s'
+                run.error = (
+                    f'Run stopped because {who} monthly budget is used up, with '
+                    f"{outcome['progress']['done']} of {outcome['progress']['total']} cases scored. "
+                    'The scores below cover only those cases.'
                 )
             run.finished_at = datetime.utcnow()
             s.commit()

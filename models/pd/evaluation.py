@@ -43,6 +43,7 @@ _RUN_TRIGGERS = {EvalRunTrigger.offline_batch, EvalRunTrigger.on_demand}
 
 # Upper bound for a suite's ``meta.steps_limit``; the SDK default is 25.
 MAX_SUITE_STEPS_LIMIT = 100
+CONSUMPTION_BUDGET_SCOPES = ('per_case', 'per_run')
 
 
 def _check_evidence_scope(v: dict) -> dict:
@@ -354,6 +355,28 @@ class EvalSuiteBaseModel(BaseModel):
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
                                   or not 1 <= limit <= MAX_SUITE_STEPS_LIMIT):
             raise ValueError(f'meta.steps_limit must be an integer 1..{MAX_SUITE_STEPS_LIMIT} or null')
+        return v
+
+    @field_validator('meta')
+    @classmethod
+    def _check_consumption_budget(cls, v: dict) -> dict:
+        # ``meta.consumption_budget = {per_case: {tokens, cost}, per_run: {tokens, cost}}`` (#6716,
+        # design §5.4). Every limit is optional and null means no limit; tokens are integers, cost USD.
+        budget = (v or {}).get('consumption_budget')
+        if budget is None:
+            return v
+        if not isinstance(budget, dict) or set(budget) - set(CONSUMPTION_BUDGET_SCOPES):
+            raise ValueError('meta.consumption_budget must be an object with per_case and/or per_run')
+        for scope, limits in budget.items():
+            if limits is None:
+                continue
+            if not isinstance(limits, dict) or set(limits) - {'tokens', 'cost'}:
+                raise ValueError(f'meta.consumption_budget.{scope} must be an object with tokens and/or cost')
+            tokens, cost = limits.get('tokens'), limits.get('cost')
+            if tokens is not None and (isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0):
+                raise ValueError(f'meta.consumption_budget.{scope}.tokens must be a non-negative integer or null')
+            if cost is not None and (isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0):
+                raise ValueError(f'meta.consumption_budget.{scope}.cost must be a non-negative number or null')
         return v
 
 

@@ -32,7 +32,7 @@ from typing import List, Optional
 
 from tools import db_tools, db, config as c
 from sqlalchemy import (
-    Integer, String, Text, DateTime, Float, Boolean, func, ForeignKey,
+    Integer, BigInteger, Numeric, String, Text, DateTime, Float, Boolean, func, ForeignKey,
     UniqueConstraint, Index, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -444,6 +444,52 @@ class EvalCaseExecution(db_tools.AbstractBaseMixin, db.Base):
     # llm_calls, tool_calls, distinct_tools, tool_errors, retries, redundant_calls,
     # step_limit_hit, guardrail_events, latency_ms
     metrics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())
+
+
+class EvalCaseUsage(db_tools.AbstractBaseMixin, db.Base):
+    """Tokens and cost of one case of a run, for one role (#6716, design §3.4).
+
+    One row per run × case × role. ``agent`` and ``judge`` are separate rows, so the two are
+    never summed by accident. A row is written for every case that reached the agent, whatever
+    its outcome, including ``timeout`` and ``budget_blocked``. ``usage_state`` says whether the
+    token columns mean anything: ``recorded`` (zero is a real zero), ``not_recorded`` (+ reason)
+    or ``not_applicable``. ``cost`` is null until priced. ``cost_source`` says how it was priced:
+    ``pending``, ``runtime:costs-catalog``, ``usage_event`` (from the ledger) or ``unpriced``."""
+    __tablename__ = 'eval_case_usage'
+    __table_args__ = (
+        UniqueConstraint('run_id', 'case_index', 'role', name='uq_eval_case_usage_run_case_role'),
+        {'schema': c.POSTGRES_TENANT_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.eval_run.id', ondelete='CASCADE'),
+        nullable=False, index=True,
+    )
+    dataset_case_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
+    case_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)   # agent | judge
+
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cache_creation_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # USD, never rounded at storage
+    cost = mapped_column(Numeric(18, 8), nullable=True)
+    # the most-used model; the per-model split stays in the ledger
+    model_name: Mapped[str] = mapped_column(String(256), nullable=True)
+
+    usage_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    usage_state_reason: Mapped[str] = mapped_column(String(32), nullable=True)
+    token_source: Mapped[str] = mapped_column(String(32), nullable=True)
+    cost_source: Mapped[str] = mapped_column(String(32), nullable=False, default='pending')
+    # the agent outcome of the case, for every terminal status
+    case_status: Mapped[str] = mapped_column(String(32), nullable=True)
+    settled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())

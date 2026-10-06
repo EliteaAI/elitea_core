@@ -21,6 +21,7 @@ from fixtures.helpers import load_utils_module  # noqa: E402
 
 @pytest.fixture(scope='module')
 def execution(utils_path):
+    load_utils_module(utils_path, 'evaluation_usage')  # sibling for the runner's lazy import
     return load_utils_module(utils_path, 'evaluation_execution')
 
 
