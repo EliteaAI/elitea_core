@@ -361,3 +361,106 @@ def run_tokens(usage: Optional[dict]) -> int:
         return 0
     return _count(usage.get('input_tokens')) + _count(usage.get('output_tokens'))
 
+
+
+# --- settlement against the usage ledger (design §4.3) ------------------------------------------
+
+#: ``stream_key`` per role. The predict path stores the stream id as ``usage_event.conversation_id``.
+STREAM_KEYS = {ROLE_AGENT: 'eval_agent', ROLE_JUDGE: 'eval_judge'}
+
+SETTLEMENT_PENDING = 'pending'
+SETTLEMENT_SETTLED = 'settled'
+SETTLEMENT_PARTIAL = 'partial'
+SETTLEMENT_UNAVAILABLE = 'unavailable'
+
+_NANO = Decimal(10) ** 9
+
+
+def case_stream_key(role: str, platform_run_id: Optional[str], case_index: Optional[int]) -> str:
+    """``stream_key`` for one case's call, so its ledger rows can be told apart from the others.
+
+    The stream id is ``<key>_<uid>``. The uid keeps each call's checkpointer thread its own. Without
+    a run id or index the plain key is returned, and settlement leaves that row on its runtime
+    figure."""
+    base = STREAM_KEYS[role]
+    if not platform_run_id or case_index is None:
+        return base
+    return f'{base}_{platform_run_id}_{case_index}'
+
+
+def parse_case_stream(conversation_id, platform_run_id: str) -> Optional[tuple]:
+    """``(case_index, role)`` for a ledger row's ``conversation_id``, or None when it is not one of
+    this run's case calls."""
+    if not isinstance(conversation_id, str) or not platform_run_id:
+        return None
+    for role, base in STREAM_KEYS.items():
+        prefix = f'{base}_{platform_run_id}_'
+        if conversation_id.startswith(prefix):
+            index = conversation_id[len(prefix):].split('_', 1)[0]
+            return (int(index), role) if index.isdigit() else None
+    return None
+
+
+def _expects_ledger(row: dict) -> bool:
+    """Rows where a model call was attempted. A refused or skipped case has nothing to settle."""
+    return (row.get('case_status') != STATUS_BUDGET_BLOCKED
+            and row.get('usage_state') != USAGE_NOT_APPLICABLE)
+
+
+def settle_usage_rows(rows: List[dict], breakdown: Iterable[dict], platform_run_id: str) -> tuple:
+    """``(rows, settlement)``: the usage rows with the ledger's figures where it has them.
+
+    ``breakdown`` is ``usage_eval_run_breakdown``: llm rows summed per ``conversation_id``. A
+    row the ledger has calls for takes the ledger's tokens and cost and is marked ``settled``. An
+    unpriced call keeps the cost unknown rather than summing the priced part. A row the ledger has
+    nothing for keeps its runtime figure, unsettled. This is the degraded mode when the calls did
+    not go through a metered interface. ``settlement`` says how far that got."""
+    ledger: dict = {}
+    for entry in breakdown or []:
+        key = parse_case_stream(entry.get('conversation_id'), platform_run_id)
+        if key is None or not _count(entry.get('llm_calls')):
+            continue
+        bucket = ledger.setdefault(key, {'llm_calls': 0, 'cost_nano_usd': 0, 'unpriced_calls': 0,
+                                         'model_name': None, **_empty_bucket()})
+        _add(bucket, entry)
+        for field in ('llm_calls', 'cost_nano_usd', 'unpriced_calls'):
+            bucket[field] += _count(entry.get(field))
+        bucket['model_name'] = bucket['model_name'] or entry.get('model_name')
+
+    settled_rows, expected, matched = [], 0, set()
+    for row in rows:
+        expected += _expects_ledger(row)
+        key = (row.get('case_index'), row.get('role'))
+        bucket = ledger.get(key)
+        if bucket is None:
+            settled_rows.append(row)
+            continue
+        matched.add(key)
+        unpriced = bucket['unpriced_calls'] > 0
+        settled_rows.append({
+            **row,
+            **{field: bucket[field] for field in TOKEN_FIELDS},
+            'model_name': row.get('model_name') or bucket['model_name'],
+            'usage_state': USAGE_RECORDED,
+            'usage_state_reason': None if row.get('usage_state') == USAGE_RECORDED else 'ledger',
+            'token_source': COST_LEDGER,
+            'cost': None if unpriced else Decimal(bucket['cost_nano_usd']) / _NANO,
+            'cost_source': COST_UNPRICED if unpriced else COST_LEDGER,
+            'settled': True,
+        })
+
+    count = len(matched)
+    if expected and count >= expected:
+        state = SETTLEMENT_SETTLED
+    elif count:
+        state = SETTLEMENT_PARTIAL
+    else:
+        state = SETTLEMENT_UNAVAILABLE
+    return settled_rows, {'state': state, 'settled_rows': count, 'expected_rows': expected,
+                          'ledger_calls': sum(b['llm_calls'] for b in ledger.values()),
+                          'unmatched_ledger_rows': len(set(ledger) - matched)}
+
+
+def ledger_calls(breakdown: Iterable[dict]) -> int:
+    """How many llm rows the breakdown counts; settlement polls until this stops growing."""
+    return sum(_count(entry.get('llm_calls')) for entry in breakdown or [])

@@ -286,6 +286,7 @@ def evaluate_case(
     platform_run_id: Optional[str] = None,
     usage_entity: Optional[dict] = None,
     usage_sink: Optional[Callable[[dict], None]] = None,
+    case_index: Optional[int] = None,
 ) -> List[dict]:
     """Score ``case`` against ``dimensions`` with one batched judge call.
 
@@ -294,7 +295,8 @@ def evaluate_case(
        status: 'scored'|'error', error: str|None}``. Never raises for a judge-level failure.
 
     ``usage_sink``, when given, receives the call's usage (#6716) whatever its outcome: a judge
-    that returned unparseable output still spent its tokens.
+    that returned unparseable output still spent its tokens. ``case_index`` names the case in the
+    call's stream id so settlement can match its ledger rows.
     """
     if not dimensions:
         return []
@@ -302,10 +304,12 @@ def evaluate_case(
         from .llm_judge import run_llm_judge
         judge = run_llm_judge
 
+    from .evaluation_usage import ROLE_JUDGE, case_stream_key
     system_prompt = build_judge_system_prompt(dimensions)
     payload = build_case_payload(case, dimensions)
     outcome = judge(project_id, judge_llm_settings, system_prompt, payload, timeout,
-                    stream_key='eval_judge', user_id=user_id,
+                    stream_key=case_stream_key(ROLE_JUDGE, platform_run_id, case_index),
+                    user_id=user_id,
                     platform_run_id=platform_run_id, usage_entity=usage_entity)
     if usage_sink is not None:
         from .evaluation_usage import envelope_usage

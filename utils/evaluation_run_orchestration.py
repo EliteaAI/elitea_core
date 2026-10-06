@@ -663,6 +663,7 @@ def run_one_case(
     code_scorer: Optional[Callable[[dict, dict], dict]] = None,
     judge_budget_tokens: Optional[int] = None,
     judge_model_name: Optional[str] = None,
+    case_index: Optional[int] = None,
 ) -> tuple:
     """Resolve one case's output (H4) then score it → ``(resolved_case, result_rows)``.
 
@@ -672,10 +673,16 @@ def run_one_case(
     The case's usage goes on ``_usage`` (``agent``: the agent outcome's usage, ``judge``: the sum
     of its judge calls). ``execute_run`` turns it into ``eval_case_usage`` rows, never storing it
     on the snapshot. Judge usage is collected only from a scorer marked ``accepts_usage_sink``.
+
+    ``case_index`` reaches a runner or scorer marked ``accepts_case_index``, which names the case
+    in its calls' stream ids so settlement can match the ledger rows (#6716).
     """
     usage: dict = {}
     if agent_runner is not None and case.get('output') is None:
-        outcome = agent_runner(case)
+        if getattr(agent_runner, 'accepts_case_index', False):
+            outcome = agent_runner(case, case_index=case_index)
+        else:
+            outcome = agent_runner(case)
         if outcome.get('usage') is not None:
             usage.update(agent=outcome['usage'], case_status=outcome.get('status'),
                          budget_scope=outcome.get('budget_scope'))
@@ -690,9 +697,14 @@ def run_one_case(
             case['_execution'] = {**outcome['execution'], 'status': outcome.get('status')}
     judge_calls: List[dict] = []
     scorer = ai_scorer
+    scorer_kwargs: dict = {}
     if ai_scorer is not None and getattr(ai_scorer, 'accepts_usage_sink', False):
+        scorer_kwargs['usage_sink'] = judge_calls.append
+    if ai_scorer is not None and getattr(ai_scorer, 'accepts_case_index', False):
+        scorer_kwargs['case_index'] = case_index
+    if scorer_kwargs:
         def scorer(evidence, dims):
-            return ai_scorer(evidence, dims, usage_sink=judge_calls.append)
+            return ai_scorer(evidence, dims, **scorer_kwargs)
     results = assemble_case_results(
         case, snapshot, ai_scorer=scorer, code_scorer=code_scorer,
         judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name,
@@ -830,7 +842,8 @@ def orchestrate_run(
             resolved[index], results_by_index[index] = run_one_case(
                 cases[index], snapshot, agent_runner=agent_runner,
                 ai_scorer=ai_scorer, code_scorer=code_scorer,
-                judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name)
+                judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name,
+                case_index=index)
             _account(resolved[index])
             _report(len(resolved))
     else:
@@ -857,7 +870,7 @@ def orchestrate_run(
                         run_one_case, cases[next_index], snapshot, agent_runner=agent_runner,
                         ai_scorer=ai_scorer, code_scorer=code_scorer,
                         judge_budget_tokens=judge_budget_tokens,
-                        judge_model_name=judge_model_name)] = next_index
+                        judge_model_name=judge_model_name, case_index=next_index)] = next_index
                     next_index += 1
                 if not pending:
                     break
@@ -923,14 +936,16 @@ def _make_ai_scorer(project_id: int, judge_settings: dict, *, user_id: Optional[
     """Bind :func:`evaluation_ai_judge.evaluate_case` into the ``ai_scorer`` contract."""
     from .evaluation_ai_judge import evaluate_case
 
-    def _score(evidence: dict, dimensions: List[dict], usage_sink=None) -> List[dict]:
+    def _score(evidence: dict, dimensions: List[dict], usage_sink=None,
+               case_index: Optional[int] = None) -> List[dict]:
         return evaluate_case(project_id, judge_settings, evidence, dimensions,
                              timeout=timeout, judge=judge, user_id=user_id,
                              platform_run_id=platform_run_id, usage_entity=usage_entity,
-                             usage_sink=usage_sink)
+                             usage_sink=usage_sink, case_index=case_index)
 
-    # run_one_case passes a per-case sink only to a scorer that says it takes one.
+    # run_one_case passes a per-case sink and index only to a scorer that says it takes them.
     _score.accepts_usage_sink = True
+    _score.accepts_case_index = True
     return _score
 
 
@@ -1003,6 +1018,38 @@ def usage_meta(rows: List[dict], budget: Optional[dict]) -> dict:
     return meta
 
 
+#: The usage queue flushes every 5 s (``queue_flush_interval_seconds``); the first read waits a
+#: little longer, then re-reads until the ledger stops growing (design §4.3).
+SETTLE_FIRST_WAIT_SECONDS = 7
+SETTLE_POLL_SECONDS = 3
+SETTLE_MAX_WAIT_SECONDS = 60
+
+
+def poll_ledger_breakdown(fetch: Callable[[], List[dict]], *, sleep: Callable[[float], None] = None,
+                          clock: Callable[[], float] = None,
+                          first_wait: float = SETTLE_FIRST_WAIT_SECONDS,
+                          interval: float = SETTLE_POLL_SECONDS,
+                          max_wait: float = SETTLE_MAX_WAIT_SECONDS) -> List[dict]:
+    """Read the run's ledger breakdown once it has stopped growing.
+
+    Two reads in a row with the same llm call count end the wait, and so does ``max_wait``,
+    which returns the latest read. A run whose calls never reached the ledger reads 0 twice and
+    returns quickly. ``fetch`` errors propagate; the caller degrades to the runtime figures."""
+    from .evaluation_usage import ledger_calls
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    started = clock()
+    sleep(first_wait)
+    breakdown = fetch()
+    while clock() - started < max_wait:
+        sleep(interval)
+        latest = fetch()
+        if ledger_calls(latest) == ledger_calls(breakdown):
+            return latest
+        breakdown = latest
+    return breakdown
+
+
 def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: int = 120,
                        platform_run_id: Optional[str] = None, usage_entity: Optional[dict] = None):
     """Bind live agent execution (H4) into the ``agent_runner`` contract for an offline-batch run.
@@ -1040,7 +1087,7 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
     structure_only_run = snapshot.get('dataset_id') is None
     step_limit = (snapshot.get('suite') or {}).get('steps_limit')
 
-    def _run(case: dict) -> dict:
+    def _run(case: dict, case_index: Optional[int] = None) -> dict:
         if structure_only_run:
             return {'status': 'ok', 'output': None, 'structure': structure,
                     'execution': not_applicable_execution('structure_only')}
@@ -1054,9 +1101,10 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
         outcome = run_agent(project_id, version_details, case,
                             user_id=user_id, timeout=timeout,
                             platform_run_id=platform_run_id, usage_entity=usage_entity,
-                            step_limit=step_limit)
+                            step_limit=step_limit, case_index=case_index)
         return {**outcome, 'structure': structure}
 
+    _run.accepts_case_index = True
     return _run
 
 
@@ -1099,6 +1147,7 @@ def execute_run(
     executor=None,
     progress_publisher: Optional[Callable[[dict], None]] = None,
     platform_run_id: Optional[str] = None,
+    settle_sleep: Optional[Callable[[float], None]] = None,
 ) -> dict:
     """Execute a persisted ``created`` run to completion and persist its results + headline.
 
@@ -1114,6 +1163,13 @@ def execute_run(
       * ``judge_llm_settings`` — resolved by the caller (suite override §18.7, else project
         default); falls back to the snapshot's frozen ``suite.judge_model``.
       * ``judge`` / ``executor`` — optional overrides for tests. Live path (E2E-09/E2E-11).
+      * ``settle_sleep`` — the settlement wait, injectable for tests.
+
+    After the terminal write the run's usage rows are **settled** against the usage ledger: the
+    ledger's tokens and cost replace the runtime figures where it has the case's calls, and
+    ``meta.settlement`` says how far that got. The run is already terminal and pushed by then, so
+    a slow or failed settlement leaves the runtime figures in place (``unavailable``) and never
+    changes the outcome.
 
     **Sessions are per checkpoint, never held across the run.** A run lasts as long as its dataset
     takes — minutes to hours of blocking agent and judge calls — so a single session spanning it
@@ -1138,7 +1194,8 @@ def execute_run(
         snapshot = run.snapshot or {}
         owner_id = run.owner_id
 
-        claim_values = {EvalRun.status: EvalRunStatus.running, EvalRun.started_at: datetime.utcnow()}
+        started_at = datetime.utcnow()
+        claim_values = {EvalRun.status: EvalRunStatus.running, EvalRun.started_at: started_at}
         if platform_run_id:
             # Lets usage analytics resolve eval_run_id -> usage_event.run_id
             from sqlalchemy import cast, func as sa_func
@@ -1342,6 +1399,7 @@ def execute_run(
                 **(run.meta or {}),
                 **usage_meta(usage_rows, budget),
                 **{k: outcome[k] for k in ('stop_reason', 'stop_scope') if outcome.get(k)},
+                **({'settlement': {'state': 'pending'}} if usage_rows and platform_run_id else {}),
             }
             run.headline_score = outcome['headline_score']
             run.progress = outcome['progress']
@@ -1382,7 +1440,63 @@ def execute_run(
                       'headline_score': run.headline_score, 'progress': run.progress}
             terminal_error = run.error
         _push({**result, 'project_id': project_id, 'error': terminal_error})
-        return result
     except Exception as exc:  # noqa: BLE001 - results are lost, but the row must not stay `running`
         _mark_errored(f'Run completed but its results could not be saved: {exc}')
         raise
+
+    # --- settlement (after the run is terminal: never changes its outcome) ------------------
+    if usage_rows and platform_run_id:
+        settle_run_usage(project_id, run_id, platform_run_id, usage_rows, budget,
+                         started_at=started_at, sleep=settle_sleep)
+    return result
+
+
+def settle_run_usage(project_id: int, run_id: int, platform_run_id: str, usage_rows: List[dict],
+                     budget: Optional[dict], *, started_at, sleep=None, fetch=None) -> dict:
+    """Settle a finished run's ``eval_case_usage`` rows against the ledger (design §4.3).
+
+    Reads ``usage_eval_run_breakdown`` once it has stopped growing, takes the ledger's figures
+    for each case and role it has calls for, and rewrites the rollups, the budget verdict and
+    ``meta.settlement``. Never raises: a ledger that cannot be read leaves the runtime figures
+    and marks the settlement ``unavailable``. Returns the settlement summary."""
+    from datetime import datetime, timedelta, timezone
+    from .evaluation_usage import SETTLEMENT_UNAVAILABLE, TOKEN_FIELDS, settle_usage_rows
+    from ..models.evaluation import EvalRun, EvalCaseUsage
+    from tools import db  # pylint: disable=E0401
+    from pylon.core.tools import log  # local: this module loads without pylon present
+
+    try:
+        if fetch is None:
+            from tools import context as pylon_context  # pylint: disable=E0401
+            margin = timedelta(minutes=5)
+            date_from = started_at.replace(tzinfo=timezone.utc) - margin
+
+            def fetch():
+                return pylon_context.rpc_manager.timeout(10).usage_eval_run_breakdown(
+                    project_id=project_id, platform_run_id=platform_run_id,
+                    date_from=date_from, date_to=datetime.now(timezone.utc) + margin)
+        breakdown = poll_ledger_breakdown(fetch, sleep=sleep)
+        rows, settlement = settle_usage_rows(usage_rows, breakdown, platform_run_id)
+    except Exception:  # noqa: BLE001 - G6: the runtime figures stand
+        log.exception('Eval run %s: usage settlement could not read the ledger', run_id)
+        rows, settlement = usage_rows, {'state': SETTLEMENT_UNAVAILABLE, 'reason': 'ledger_unreadable'}
+
+    fields = (*TOKEN_FIELDS, 'cost', 'cost_source', 'usage_state', 'usage_state_reason',
+              'token_source', 'model_name', 'settled')
+    try:
+        with db.get_session(project_id) as s:
+            settled = {(r['case_index'], r['role']): r for r in rows if r.get('settled')}
+            if settled:
+                for record in s.query(EvalCaseUsage).filter(EvalCaseUsage.run_id == run_id).all():
+                    row = settled.get((record.case_index, record.role))
+                    if row is not None:
+                        for field in fields:
+                            setattr(record, field, row.get(field))
+            run = s.query(EvalRun).filter(EvalRun.id == run_id).first()
+            if run is not None:
+                run.meta = {**(run.meta or {}), **usage_meta(rows, budget), 'settlement': settlement}
+            s.commit()
+    except Exception:  # noqa: BLE001 - the terminal write already holds the runtime figures
+        log.exception('Eval run %s: usage settlement could not be saved', run_id)
+        settlement = {'state': SETTLEMENT_UNAVAILABLE, 'reason': 'write_failed'}
+    return settlement

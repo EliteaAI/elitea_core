@@ -142,6 +142,8 @@ def _install_package(row_holder, added):
     evaluation_models = types.ModuleType(f'{PKG}.models.evaluation')
     evaluation_models.EvalRun = EvalRun
     evaluation_models.EvalResult = EvalResult
+    evaluation_models.EvalCaseExecution = EvalResult
+    evaluation_models.EvalCaseUsage = EvalResult
     evaluation_models.EvalRunStatus = EvalRunStatus
 
     code_validation = types.ModuleType(f'{PKG}.utils.code_validation')
@@ -215,7 +217,7 @@ def _ai_snapshot(orch, case_count=1, dims=None, evidence=None):
 def _stub_judge(calls):
     """Records each call's dimension_ids and answers every dimension it was asked to score."""
     def judge(project_id, settings, system_prompt, payload, timeout, *, stream_key=None,
-              user_id=None, platform_run_id=None):
+              user_id=None, platform_run_id=None, usage_entity=None):
         import json
         dim_ids = json.loads(payload)['dimension_ids']
         calls.append(dim_ids)
@@ -289,7 +291,7 @@ def test_single_oversized_dimension_gets_evidence_truncated_but_still_scored(har
     from evalpkg_judge_budget_test.utils import evaluation_ai_judge as aij
 
     def judge(project_id, settings, system_prompt, payload, timeout, *, stream_key=None,
-              user_id=None, platform_run_id=None):
+              user_id=None, platform_run_id=None, usage_entity=None):
         import json
         seen_payloads.append(payload)
         dim_ids = json.loads(payload)['dimension_ids']

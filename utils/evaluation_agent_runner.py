@@ -185,6 +185,7 @@ def run_agent(
     platform_run_id: Optional[str] = None,
     usage_entity: Optional[dict] = None,
     step_limit: Optional[int] = None,
+    case_index: Optional[int] = None,
 ) -> dict:
     """Run the pinned agent over one case's input and return a structured outcome (never raises).
 
@@ -198,10 +199,13 @@ def run_agent(
 
     A run that paused for human review (``guardrail_paused``) or parked on a sub-agent fan-out
     (``parked``) fails the case even when text preceded the pause: nobody can answer the prompt in
-    a batch run, so that text is not the agent's answer (design §4.5)."""
+    a batch run, so that text is not the agent's answer (design §4.5).
+
+    ``case_index`` with ``platform_run_id`` makes the stream id, which the ledger keeps as the
+    row's ``conversation_id``, name this case, so settlement can find its ledger rows."""
     # Lazy: keeps this module importable with no package context (sibling preloaded in tests).
     from .evaluation_execution import extract_execution, is_parked, pause_details
-    from .evaluation_usage import envelope_usage, not_applicable_usage
+    from .evaluation_usage import ROLE_AGENT, case_stream_key, envelope_usage, not_applicable_usage
 
     def _outcome(status, output, error, result=None, latency_ms=None):
         return {'status': status, 'output': output, 'error': error,
@@ -221,7 +225,8 @@ def run_agent(
         predict = this.module.predict_sio
 
     data = build_agent_predict_data(project_id, version_details, case.get('input'),
-                                    case.get('variables'), step_limit=step_limit)
+                                    case.get('variables'), step_limit=step_limit,
+                                    stream_key=case_stream_key(ROLE_AGENT, platform_run_id, case_index))
     started = time.monotonic()
     try:
         result = predict(sid=None, data=data, await_task_timeout=timeout,
