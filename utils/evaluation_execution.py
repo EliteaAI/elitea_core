@@ -20,6 +20,7 @@ steps is a real "the agent answered without tools", while a missing envelope is 
 with a reason, and a case where no agent ran is ``not_applicable``.
 """
 import json
+import re
 from datetime import datetime
 from typing import Any, List, Optional
 
@@ -41,6 +42,10 @@ _BLOCKED_RESULT_TYPE = 'sensitive_tool_blocked'
 # How a run that ran out of steps shows up: the SDK tool loop appends a fixed warning as the last
 # AI message (``runtime/tools/llm.py``), and the LangGraph recursion limit raises an error.
 _STEP_LIMIT_MARKERS = ('maximum tool execution iterations', 'recursion limit', 'graphrecursionerror')
+# The SDK catches LangGraph's GraphRecursionError and answers with this sentence instead, so a run
+# stopped by the graph-level limit looks like an ordinary reply (langraph_agent.py
+# `_handle_graph_recursion_error`). Anchored so a reply that merely discusses limits does not match.
+_GRAPH_STEP_LIMIT_REPLY = re.compile(r'^tool step limit \d+ reached for this run\.')
 _ASSISTANT_ROLES = ('assistant', 'ai')
 # Outcomes where the indexer never returned an envelope to read.
 _NO_ENVELOPE_REASONS = {
@@ -325,7 +330,8 @@ def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] 
         'tool_errors': sum(1 for s in tools if s.get('is_error')),
         'retries': retries,
         'redundant_calls': redundant,
-        'step_limit_hit': any(marker in lowered for marker in _STEP_LIMIT_MARKERS),
+        'step_limit_hit': (any(marker in lowered for marker in _STEP_LIMIT_MARKERS)
+                           or bool(_GRAPH_STEP_LIMIT_REPLY.match((final_text or '').strip().lower()))),
         'guardrail_events': sum(1 for s in tools if s.get('status') in ('blocked', 'action_required')) + paused,
         'latency_ms': latency_ms,
     }

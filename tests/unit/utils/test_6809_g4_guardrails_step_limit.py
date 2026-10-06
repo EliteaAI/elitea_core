@@ -226,3 +226,22 @@ def test_repeat_after_failure_is_a_retry_not_redundant(execution):
     }}}
     metrics = execution.extract_execution(envelope, status='ok')['metrics']
     assert (metrics['retries'], metrics['redundant_calls']) == (1, 1)
+
+
+# --- graph-level limit: the SDK's soft-boundary reply (seen live, suite limit 1) ---------------
+
+GRAPH_LIMIT_REPLY = ('Tool step limit 1 reached for this run. You can continue by sending another '
+                     'message or refining your request.')
+
+
+def test_step_limit_hit_from_graph_recursion_reply(execution):
+    envelope = {'result': {'chat_history': [{'role': 'assistant', 'content': GRAPH_LIMIT_REPLY}],
+                           'thinking_steps': [], 'tool_calls_dict': {}, 'error': None}}
+    assert execution.extract_execution(envelope, status='ok')['metrics']['step_limit_hit'] is True
+
+
+def test_reply_that_discusses_step_limits_is_not_a_hit(execution):
+    text = 'If the tool step limit 5 reached for this run, raise it in the suite settings.'
+    envelope = {'result': {'chat_history': [{'role': 'assistant', 'content': text}],
+                           'thinking_steps': [], 'tool_calls_dict': {}}}
+    assert execution.extract_execution(envelope, status='ok')['metrics']['step_limit_hit'] is False
