@@ -1,3 +1,4 @@
+from pylon.core.tools import log
 from tools import rpc_tools
 
 from ..models.enums.all import ParticipantTypes
@@ -71,6 +72,19 @@ def check_post_access(project_id: int, conversation, user_id: int):
         is_admin=_admin_checker(project_id, user_id),
         needs_privilege=False,
     )
+
+
+def can_join_room(project_id: int, user_id: int, is_private: bool, is_author: bool, is_participant: bool) -> bool:
+    # Takes plain facts so callers can close the DB session before the admin RPC
+    if not is_private or is_author or is_participant:
+        return True
+    if _is_support_project(project_id):
+        return True
+    try:
+        return _admin_checker(project_id, user_id)()
+    except Exception as e:  # pylint: disable=W0703
+        log.warning("Admin check failed for user %s in project %s: %s", user_id, project_id, e)
+        return False
 
 
 def is_privileged_update(conversation, data: dict) -> bool:
