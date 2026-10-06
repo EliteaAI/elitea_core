@@ -21,7 +21,7 @@ from uuid import NAMESPACE_OID, uuid5
 from pydantic import BaseModel, Field, ValidationError
 from pylon.core.tools import log
 from sqlalchemy.orm import selectinload
-from tools import db, this, rpc_tools
+from tools import db, this, rpc_tools, serialize
 
 from ..models.all import Application, ApplicationVersion
 from ..models.elitea_tools import EliteATool, EntityToolMapping
@@ -37,6 +37,8 @@ from ..models.pd.version import ApplicationVersionForkCreateModel
 from ..models.pd.publish import PublishAIResult
 from ..models.skill import EntitySkillMapping, Skill, SkillVersion
 from .create_utils import create_application, create_version
+from .export_import import PUBLISHED_TOOLKITS_META_KEY, export_version_toolkit
+from .toolkit_meta import drop_index_schedules
 from .llm_judge import run_llm_judge
 from .utils import get_public_project_id
 from .category_utils import apply_category_to_tag_dicts, is_valid_category
@@ -877,6 +879,32 @@ def get_agent_nesting_metadata(
 # Snapshot creation
 # ---------------------------------------------------------------------------
 
+_FORK_WIZARD_TOOLKIT_FIELDS = ('type', 'name', 'settings', 'selected_tools', 'meta', 'import_uuid')
+_NO_AUTHOR_LOOKUP = {'authors_map': {}}
+_PRIVATE_SOURCE_LINEAGE_KEYS = frozenset({'parent_entity_id', 'parent_project_id', 'parent_author_id'})
+
+
+def _is_sub_agent_link(tool: dict) -> bool:
+    return tool.get('type') == 'application'
+
+
+def _snapshot_fork_toolkits(tools: List[dict], project_id: int, user_id: int) -> List[dict]:
+    fork_toolkits = []
+    for tool in tools:
+        if _is_sub_agent_link(tool):
+            continue
+        exported = export_version_toolkit(
+            deepcopy(tool), project_id, user_id, forked=True, validation_context=_NO_AUTHOR_LOOKUP,
+        )
+        toolkit = serialize({key: exported[key] for key in _FORK_WIZARD_TOOLKIT_FIELDS if key in exported})
+        toolkit['meta'] = {
+            key: value for key, value in drop_index_schedules(toolkit.get('meta')).items()
+            if key not in _PRIVATE_SOURCE_LINEAGE_KEYS
+        }
+        fork_toolkits.append(toolkit)
+    return fork_toolkits
+
+
 def create_publish_snapshot(
     project_id: int,
     version_id: int,
@@ -912,6 +940,9 @@ def create_publish_snapshot(
     # Preserve allowed meta keys
     raw_meta = version_dict.get('meta') or {}
     sanitised_meta = {k: deepcopy(raw_meta[k]) for k in _META_ALLOWLIST if k in raw_meta}
+    fork_toolkits = _snapshot_fork_toolkits(version_dict.get('tools') or [], project_id, user_id)
+    if fork_toolkits:
+        sanitised_meta[PUBLISHED_TOOLKITS_META_KEY] = fork_toolkits
     sanitised_version['meta'] = sanitised_meta
 
     # Log stripped content for auditing

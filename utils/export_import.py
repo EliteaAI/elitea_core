@@ -10,6 +10,7 @@ import yaml
 
 from ..models.all import Application, ApplicationVersion
 from ..models.elitea_tools import EliteATool
+from ..models.enums.all import PublishStatus
 from sqlalchemy.orm import joinedload, selectinload
 
 from tools import db, rpc_tools, serialize
@@ -17,6 +18,7 @@ from pylon.core.tools import log
 
 from .export_import_utils import slugify
 from .toolkit_meta import drop_index_schedules
+from .utils import get_public_project_id
 
 from ..models.pd.application import (
     ApplicationExportModel,
@@ -105,6 +107,50 @@ def _export_compound_application_tools(
     return res
 
 
+PUBLISHED_TOOLKITS_META_KEY = 'fork_toolkits'
+_PUBLISH_SNAPSHOT_STATUSES = frozenset({PublishStatus.published, PublishStatus.embedded})
+
+
+def export_version_toolkit(
+    tool: dict, project_id: int, user_id: int, forked: bool, validation_context: dict = None,
+) -> dict:
+    tool['project_id'] = project_id
+    tool['user_id'] = user_id
+    result_model = ToolExportDetails if not forked else ToolForkDetails
+    details = result_model.model_validate(tool, context=validation_context)
+    if forked:
+        details.owner_id = project_id
+    details.fix_name(project_id)
+    toolkit_dict = details.model_dump()
+    if 'settings' in toolkit_dict and toolkit_dict['settings'].get('selected_tools'):
+        toolkit_dict['selected_tools'] = toolkit_dict['settings']['selected_tools']
+    if 'settings' in toolkit_dict:
+        toolkit_dict['settings'] = _filter_internal_keys(
+            _sanitize_mcp_headers(
+                _sanitize_pgvector_configuration(toolkit_dict['settings'])
+            )
+        )
+    return toolkit_dict
+
+
+def _holds_publish_snapshot(project_id: int, version_status) -> bool:
+    return project_id == get_public_project_id() and version_status in _PUBLISH_SNAPSHOT_STATUSES
+
+
+def _pop_published_toolkits(version: dict) -> list:
+    return (version.get('meta') or {}).pop(PUBLISHED_TOOLKITS_META_KEY, None) or []
+
+
+def _attach_toolkits(version: dict, published_toolkits: list, toolkits: list) -> None:
+    if not published_toolkits:
+        return
+    version_tools = version.get('tools') or []
+    for toolkit in published_toolkits:
+        toolkits.append(deepcopy(toolkit))
+        version_tools.append({'import_uuid': toolkit['import_uuid']})
+    version['tools'] = version_tools
+
+
 def _export_application_main(project_id: int, user_id: int, application_ids, forked: bool, data_done: dict, follow_version_ids: set = None):
     with db.get_session(project_id) as session:
         applications = session.query(
@@ -159,26 +205,18 @@ def _export_application_main(project_id: int, user_id: int, application_ids, for
         for app in applications_serialized:
             for version in app['versions']:
                 for tool in version.get('tools', []):
-                    tool['project_id'] = project_id
-                    tool['user_id'] = user_id
-                    result_model = ToolExportDetails if not forked else ToolForkDetails
-                    details = result_model.model_validate(tool)
-                    if forked:
-                        details.owner_id = project_id
-                    details.fix_name(project_id)
-                    toolkit_dict = details.model_dump()
-                    # Extract selected_tools to top-level before filtering
-                    # (selected_tools comes from EntityToolMapping via apply_selected_tools_intersection)
-                    if 'settings' in toolkit_dict and toolkit_dict['settings'].get('selected_tools'):
-                        toolkit_dict['selected_tools'] = toolkit_dict['settings']['selected_tools']
-                    # Sanitize and filter settings for export
-                    if 'settings' in toolkit_dict:
-                        toolkit_dict['settings'] = _filter_internal_keys(
-                            _sanitize_mcp_headers(
-                                _sanitize_pgvector_configuration(toolkit_dict['settings'])
-                            )
-                        )
-                    toolkits.append(toolkit_dict)
+                    toolkits.append(export_version_toolkit(tool, project_id, user_id, forked))
+
+    version_statuses = {
+        version['id']: version.get('status')
+        for app in applications_serialized
+        for version in app['versions']
+    }
+    for app in result:
+        for version in app['versions']:
+            published_toolkits = _pop_published_toolkits(version)
+            if forked and _holds_publish_snapshot(project_id, version_statuses.get(version.get('id'))):
+                _attach_toolkits(version, published_toolkits, toolkits)
 
     for app in result:
         data_done['application_id'][app['id']] = app['import_uuid']

@@ -90,6 +90,10 @@ def export_import():
             'ToolExportDetails': placeholder, 'ToolForkDetails': placeholder,
         },
         'plugins.elitea_core.models.pd.skill': {'SkillExportModel': placeholder},
+        'plugins.elitea_core.models.enums.all': {'PublishStatus': types.SimpleNamespace(
+            published='published', embedded='embedded',
+        )},
+        'plugins.elitea_core.utils.utils': {'get_public_project_id': lambda: 1},
     }.items():
         install(name, _module(name, **attrs))
 
