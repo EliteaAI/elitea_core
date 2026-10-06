@@ -541,15 +541,15 @@ def estimate_exceeds_budget(estimate: Optional[dict], budget: Optional[dict]) ->
 
 def case_usage_view(row: dict) -> dict:
     """One ``eval_case_usage`` row as the case drill-down reads it (#6716): the token columns,
-    their total (input + output, as the per-case token limit counts them), ``cost`` as a float
-    (null until priced) and where the figures came from."""
+    their total (input + output + reasoning, as the run's Consumption card adds them up), ``cost``
+    as a float (null until priced) and where the figures came from."""
     tokens = {field: _count(row.get(field)) for field in TOKEN_FIELDS}
     return {
         'role': row.get('role'),
         'case_index': row.get('case_index'),
         'dataset_case_id': row.get('dataset_case_id'),
         **tokens,
-        'total_tokens': tokens['input_tokens'] + tokens['output_tokens'],
+        'total_tokens': tokens['input_tokens'] + tokens['output_tokens'] + tokens['reasoning_tokens'],
         'cost': _number(row.get('cost')),
         'model_name': row.get('model_name'),
         'usage_state': row.get('usage_state'),

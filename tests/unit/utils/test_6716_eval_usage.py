@@ -520,8 +520,8 @@ def test_case_usage_view_totals_tokens_and_floats_cost(usage):
         'cost': Decimal('0.01234567'), 'model_name': 'm', 'usage_state': 'recorded',
         'token_source': 'provider', 'cost_source': 'usage_event', 'settled': True,
     })
-    # as the per-case limit counts: cache reads are already inside input, reasoning is not added
-    assert view['total_tokens'] == 140
+    # as the run's Consumption card adds up: cache reads are already inside input
+    assert view['total_tokens'] == 150
     assert view['cache_read_tokens'] == 500
     assert view['cost'] == pytest.approx(0.01234567) and isinstance(view['cost'], float)
     assert view['settled'] is True
