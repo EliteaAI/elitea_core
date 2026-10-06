@@ -119,9 +119,11 @@ def test_trajectory_is_none_when_not_recorded(orch, recorded):
 
 
 def test_usage_scope_attaches_agent_tokens_without_cost(orch):
-    usage = orch.select_evidence(_case(), {'usage': True})['usage']
+    case = _case()
+    case['_usage'] = {'agent': {**AGENT_USAGE, 'reasoning_tokens': 6}}
+    usage = orch.select_evidence(case, {'usage': True})['usage']
     assert usage['input_tokens'] == 120 and usage['output_tokens'] == 14
-    assert usage['total_tokens'] == 134
+    assert usage['total_tokens'] == 140  # input + output + reasoning, as the Consumption card
     assert usage['model_name'] == 'gpt-4o' and usage['token_source'] == 'provider'
     assert 'usage_state' not in usage and 'cost' not in usage
 

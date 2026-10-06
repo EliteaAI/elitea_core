@@ -395,7 +395,9 @@ def usage_evidence(case: dict) -> Optional[dict]:
     if agent.get('usage_state') != 'recorded':
         return None
     evidence = {k: agent.get(k) for k in USAGE_EVIDENCE_KEYS}
-    evidence['total_tokens'] = (agent.get('input_tokens') or 0) + (agent.get('output_tokens') or 0)
+    # Same total as the run's Consumption card: input + output + reasoning.
+    evidence['total_tokens'] = sum(agent.get(k) or 0
+                                   for k in ('input_tokens', 'output_tokens', 'reasoning_tokens'))
     return evidence
 
 
