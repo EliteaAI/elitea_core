@@ -215,6 +215,21 @@ def inherit_binding_defaults(
     return inherited
 
 
+def _inherited_evidence_scope(data: EvalBindingCreateModel, dimension: Optional[EvalDimension]) -> dict:
+    """The request's scope, else the dimension's ``meta.default_evidence_scope`` (a built-in
+    trajectory check needs ``trajectory`` on, #6809 item 5), else the model default."""
+    if 'evidence_scope' in data.model_fields_set or dimension is None:
+        return data.evidence_scope
+    default = (getattr(dimension, 'meta', None) or {}).get('default_evidence_scope')
+    if not isinstance(default, dict):
+        return data.evidence_scope
+    try:
+        return EvalBindingCreateModel(dimension_id=data.dimension_id,
+                                      evidence_scope=default).evidence_scope
+    except ValueError:  # a malformed default never blocks the attach
+        return data.evidence_scope
+
+
 def _validate_source(
     suite: EvalSuite, data: EvalBindingCreateModel, dimension: Optional[EvalDimension],
 ) -> None:
@@ -309,6 +324,10 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
         engine = data.engine
         if data.platform_key is not None:
             engine = EvalEngine.code
+        elif 'engine' not in data.model_fields_set and dimension is not None \
+                and list(dimension.allowed_engines or []) == [EvalEngine.code]:
+            # A code-only dimension has one possible engine; the 'ai' default would just 409.
+            engine = EvalEngine.code
         _validate_dimension_engine(dimension, engine)
         _require_not_already_bound(s, suite_id, data)
         # Fall back to the dimension's authored defaults for any knob the request left out.
@@ -325,7 +344,7 @@ def add_binding(project_id: int, suite_id: int, data: EvalBindingCreateModel, se
             dimension_id=data.dimension_id,
             platform_key=data.platform_key,
             engine=engine,
-            evidence_scope=data.evidence_scope,
+            evidence_scope=_inherited_evidence_scope(data, dimension),
             weight=inherited.get('weight', data.weight),
             target=inherited.get('target', data.target),
             target_operator=inherited.get('target_operator', data.target_operator),

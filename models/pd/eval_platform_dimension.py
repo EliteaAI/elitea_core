@@ -4,8 +4,10 @@ Separate from ``pd/evaluation.py``'s dimension models on purpose: the project-fa
 ``EvalDimensionCreateModel`` rejects ``tier='platform'`` and must keep doing so. These models
 are the admin-console boundary and carry no ``tier`` (always platform).
 
-``allowed_engines`` is limited to ai/human: a platform rubric is reusable text, whereas a
-code-scored dimension needs a project-local script that cannot be shared through the registry.
+``allowed_engines`` is ai/human for an authored entry: a platform rubric is reusable text. The
+registry never carries a script, so ``['code']`` is accepted only for a *built-in* check — one whose
+``meta.builtin_check`` names a script shipped with the plugin (``utils/evaluation_trajectory_checks``,
+#6809 item 5). The admin console can retune such an entry's weight, target or wording, not its code.
 """
 
 from datetime import datetime
@@ -15,6 +17,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator, model_valida
 
 from .evaluation import _OPERATORS, _POLARITIES, _SCALE_TYPES
 from ..evaluation import EvalEngine, EvalPolarity, EvalScaleType
+from ...utils.evaluation_trajectory_checks import builtin_key
 
 _PLATFORM_ENGINES = {EvalEngine.ai, EvalEngine.human}
 
@@ -36,6 +39,8 @@ class EvalPlatformDimensionBaseModel(BaseModel):
     def _validate_engines(cls, v: List[str]) -> List[str]:
         if not v:
             raise ValueError('allowed_engines must not be empty')
+        if v == [EvalEngine.code]:
+            return v  # paired with meta.builtin_check below
         bad = [engine for engine in v if engine not in _PLATFORM_ENGINES]
         if bad:
             raise ValueError(
@@ -69,6 +74,17 @@ class EvalPlatformDimensionBaseModel(BaseModel):
     def _validate_scale_bounds(self):
         if self.scale_min >= self.scale_max:
             raise ValueError('scale_min must be strictly less than scale_max')
+        return self
+
+    @model_validator(mode='after')
+    def _validate_builtin_code(self):
+        # A partial update may omit either side; the pairing is judged on what was sent.
+        if 'allowed_engines' not in self.model_fields_set:
+            return self
+        if self.allowed_engines == [EvalEngine.code] and builtin_key(self.meta) is None:
+            raise ValueError(
+                "allowed_engines ['code'] is only valid for a built-in check "
+                '(meta.builtin_check naming a shipped script)')
         return self
 
 

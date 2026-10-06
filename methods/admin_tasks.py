@@ -806,6 +806,45 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         return {"ok": True, "applied": len(applied)}
 
+    @web.method("seed_eval_trajectory_dimensions")
+    def seed_eval_trajectory_dimensions(self, *args, **kwargs):  # pylint: disable=W0613
+        """Admin task: add the built-in trajectory checks to the platform dimension registry.
+
+        Seven code-scored platform dimensions (trajectory.tool_match, .forbidden_tools,
+        .tool_errors, .redundant_calls, .step_budget, .step_limit_hit, .guardrail_events; #6809
+        item 5). Their scripts ship with the plugin (utils/evaluation_trajectory_checks.py) and are
+        resolved at run time, so the registry rows carry only the definition and
+        meta.builtin_check.
+
+        Insert-only and idempotent: an entry already present under its name is left as is, so an
+        admin's weight/target edits survive a re-run. A same-named entry that is *not* the
+        built-in check is reported as a conflict and left alone. No dry run needed.
+        """
+        from ..models.eval_platform_dimension import EvalPlatformDimension  # pylint: disable=C0415
+        from ..utils.evaluation_trajectory_checks import builtin_key, registry_seed  # pylint: disable=C0415
+
+        inserted, present, conflicts = [], [], []
+        try:
+            with db.with_project_schema_session(None) as session:
+                existing = {row.name: row for row in session.query(EvalPlatformDimension).all()}
+                for values in registry_seed():
+                    row = existing.get(values['name'])
+                    if row is None:
+                        session.add(EvalPlatformDimension(**values))
+                        inserted.append(values['name'])
+                    elif builtin_key(row.meta) == values['meta']['builtin_check']:
+                        present.append(values['name'])
+                    else:
+                        conflicts.append(values['name'])
+                session.commit()
+        except Exception as exc:  # pylint: disable=W0703
+            log.exception("seed_eval_trajectory_dimensions: failed")
+            return {"ok": False, "error": str(exc)}
+        #
+        result = {"ok": True, "inserted": inserted, "present": present, "conflicts": conflicts}
+        log.info("seed_eval_trajectory_dimensions: %s", result)
+        return result
+
     @web.method()
     def migrate_toolkit_settings_alita_title(self, *args, **kwargs):
         """Admin task: rename 'alita_title' to 'elitea_title' inside toolkit settings JSON.

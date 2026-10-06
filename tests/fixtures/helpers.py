@@ -45,6 +45,15 @@ def register_expected_trajectory_module(plugin_root: pathlib.Path):
     return load_module_with_stubs(plugin_root / 'utils' / 'evaluation_expected_trajectory.py', name)
 
 
+def register_trajectory_checks_module(plugin_root: pathlib.Path):
+    """Same, for ``utils/evaluation_trajectory_checks.py`` (the built-in trajectory checks, #6809
+    item 5): the registry pd models, the projection and the run snapshot import it. Stdlib only."""
+    name = 'plugins.elitea_core.utils.evaluation_trajectory_checks'
+    if name in sys.modules:
+        return sys.modules[name]
+    return load_module_with_stubs(plugin_root / 'utils' / 'evaluation_trajectory_checks.py', name)
+
+
 def load_module_with_stubs(
     module_path: pathlib.Path,
     module_name: str,

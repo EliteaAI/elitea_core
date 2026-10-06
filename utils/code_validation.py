@@ -119,12 +119,21 @@ def _base_verdict(dimension_id: Optional[int], name: str) -> dict:
     }
 
 
-def na_verdict(dimension_id: Optional[int], name: str) -> dict:
+def na_verdict(dimension_id: Optional[int], name: str,
+               detail: str = 'Skipped: validation needs expected_output, case has none.') -> dict:
     """Reference-based validation skipped: case has no ``expected_output`` (§17.5).
     Excluded from the aggregate; never counts as pass or fail."""
     v = _base_verdict(dimension_id, name)
-    v.update(status=STATUS_NA, error='Skipped: validation needs expected_output, case has none.')
+    v.update(status=STATUS_NA, error=detail)
     return v
+
+
+# A script assigns ``result = 'na'`` when the case lacks the reference it needs (#6809 item 5,
+# e.g. no expected trajectory). A string was an error under both contracts before, so no existing
+# script changes meaning.
+NA_RESULT = 'na'
+NA_RESULT_DETAIL = 'Skipped: the check needs a reference the case does not have.'
+
 
 
 def unavailable_verdict(dimension_id: Optional[int], name: str,
@@ -163,6 +172,11 @@ def map_execution_result(
     if status != 'success':
         v = error_verdict(dimension_id, name,
                           exec_result.get('stderr') or f'Sandbox execution {status}.')
+        v.update(stdout=stdout, execution_time=exec_time)
+        return v
+
+    if exec_result.get('result') == NA_RESULT:
+        v = na_verdict(dimension_id, name, NA_RESULT_DETAIL)
         v.update(stdout=stdout, execution_time=exec_time)
         return v
 
