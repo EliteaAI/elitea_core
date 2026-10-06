@@ -24,7 +24,8 @@ Split of responsibility (mirrors :mod:`llm_judge`):
 
 Outcome dict shape::
 
-    {'status': 'ok'|'unsupported'|'timeout'|'predict_exception'|'predict_error'|'empty',
+    {'status': 'ok'|'unsupported'|'timeout'|'predict_exception'|'predict_error'|'empty'
+               |'guardrail_paused'|'parked',
      'output': <assistant text> | None,   # set only when status == 'ok'
      'error':  <str> | None,              # set when status != 'ok'
      'execution': {...}}                  # trajectory + counters, see :mod:`evaluation_execution`
@@ -101,16 +102,23 @@ def build_agent_predict_data(
     case_variables: Optional[dict] = None,
     *,
     stream_key: str = 'eval_agent',
+    step_limit: Optional[int] = None,
 ) -> dict:
     """Assemble the ``predict_sio`` payload for one case (pure; no I/O).
 
     Uses the run's *real* frozen ``version_details`` (agent_type, instructions, llm_settings,
     tools, skills, meta) so the agent responds exactly as it would in chat — unlike the judge,
     which injects a synthetic tool-less prompt. Case variables are overlaid (§17.1). ``user_input``
-    falls back to ``'continue'`` when empty, matching the chat path's guard."""
+    falls back to ``'continue'`` when empty, matching the chat path's guard.
+
+    ``step_limit`` is the suite's frozen ``steps_limit`` (design §4.5). It goes into
+    ``version_details['meta']['step_limit']``, which ``indexer_agent`` reads as the run's recursion
+    limit; None leaves the agent's own setting (SDK default 25)."""
     vd = copy.deepcopy(version_details or {})
     if case_variables:
         vd['variables'] = merge_case_variables(vd.get('variables'), case_variables)
+    if step_limit is not None:
+        vd['meta'] = {**(vd.get('meta') or {}), 'step_limit': step_limit}
 
     uid = uuid4().hex[:12]
     text = user_input if (isinstance(user_input, str) and user_input.strip()) else 'continue'
@@ -172,6 +180,7 @@ def run_agent(
     predict: Optional[Callable[..., dict]] = None,
     platform_run_id: Optional[str] = None,
     usage_entity: Optional[dict] = None,
+    step_limit: Optional[int] = None,
 ) -> dict:
     """Run the pinned agent over one case's input and return a structured outcome (never raises).
 
@@ -181,9 +190,13 @@ def run_agent(
 
     ``user_id`` must be passed explicitly: a batch run executes on the ``eval_runs`` pool, so
     ``predict_sio`` has neither a sid nor a live request to recover the acting user from, and
-    without it every case fails with 'User token not found'."""
+    without it every case fails with 'User token not found'.
+
+    A run that paused for human review (``guardrail_paused``) or parked on a sub-agent fan-out
+    (``parked``) fails the case even when text preceded the pause: nobody can answer the prompt in
+    a batch run, so that text is not the agent's answer (design §4.5)."""
     # Lazy: keeps this module importable with no package context (sibling preloaded in tests).
-    from .evaluation_execution import extract_execution
+    from .evaluation_execution import extract_execution, is_parked, pause_details
 
     def _outcome(status, output, error, result=None, latency_ms=None):
         return {'status': status, 'output': output, 'error': error,
@@ -201,7 +214,7 @@ def run_agent(
         predict = this.module.predict_sio
 
     data = build_agent_predict_data(project_id, version_details, case.get('input'),
-                                    case.get('variables'))
+                                    case.get('variables'), step_limit=step_limit)
     started = time.monotonic()
     try:
         result = predict(sid=None, data=data, await_task_timeout=timeout,
@@ -220,6 +233,17 @@ def run_agent(
         except Exception:
             pass
         return _outcome('timeout', None, f'agent timed out after {timeout}s', latency_ms=latency_ms)
+
+    if is_parked(result):
+        return _outcome('parked', None,
+                        'agent parked on a sub-agent fan-out, which a batch run cannot resume',
+                        result, latency_ms)
+    pause = pause_details(result)
+    if pause is not None:
+        what = pause.get('tool_name') or pause.get('node_name') or pause.get('guardrail_type') or 'a guardrail'
+        return _outcome('guardrail_paused', None,
+                        f'agent paused for human review at {what}; batch runs fail the case', result,
+                        latency_ms)
 
     output = extract_agent_output(result)
     if output is not None:

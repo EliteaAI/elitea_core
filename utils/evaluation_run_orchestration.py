@@ -178,6 +178,8 @@ def build_run_snapshot(
             'id': suite.get('id'),
             'name': suite.get('name'),
             'judge_model': suite.get('judge_model'),
+            # null = the agent's own limit (§4.5); frozen so a later suite edit cannot change it.
+            'steps_limit': suite.get('steps_limit'),
         },
         'application_id': application_id,
         'application_version_id': application_version_id,
@@ -936,6 +938,7 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
     # `create_batch_run`) — there is no real case input to run the agent against, and `structure`
     # is already fully known from `version_details`, so skip the live LLM call entirely.
     structure_only_run = snapshot.get('dataset_id') is None
+    step_limit = (snapshot.get('suite') or {}).get('steps_limit')
 
     def _run(case: dict) -> dict:
         if structure_only_run:
@@ -950,7 +953,8 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
                     'execution': not_applicable_execution('unsupported')}
         outcome = run_agent(project_id, version_details, case,
                             user_id=user_id, timeout=timeout,
-                            platform_run_id=platform_run_id, usage_entity=usage_entity)
+                            platform_run_id=platform_run_id, usage_entity=usage_entity,
+                            step_limit=step_limit)
         return {**outcome, 'structure': structure}
 
     return _run

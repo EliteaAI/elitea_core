@@ -35,6 +35,13 @@ MAX_TRAJECTORY_BYTES = 256_000
 _TRUNCATED_MARK = '… [truncated]'
 
 _ENVELOPE_KEYS = ('thinking_steps', 'tool_calls_dict')
+# The tool result the SDK's sensitive-tool guard returns when the user declined a call
+# (``runtime/tools/llm.py`` SENSITIVE_TOOL_BLOCKED_RESULT_TYPE). The agent keeps going after it.
+_BLOCKED_RESULT_TYPE = 'sensitive_tool_blocked'
+# How a run that ran out of steps shows up: the SDK tool loop appends a fixed warning as the last
+# AI message (``runtime/tools/llm.py``), and the LangGraph recursion limit raises an error.
+_STEP_LIMIT_MARKERS = ('maximum tool execution iterations', 'recursion limit', 'graphrecursionerror')
+_ASSISTANT_ROLES = ('assistant', 'ai')
 # Outcomes where the indexer never returned an envelope to read.
 _NO_ENVELOPE_REASONS = {
     'timeout': 'timeout',
@@ -123,15 +130,30 @@ def _llm_step(step: dict) -> dict:
     }
 
 
-def tool_step_status(entry: dict) -> str:
-    """``ok`` | ``error`` | ``action_required`` for one ``tool_calls_dict`` entry.
+def _is_blocked(tool_output) -> bool:
+    if isinstance(tool_output, dict):
+        return tool_output.get('type') == _BLOCKED_RESULT_TYPE
+    if isinstance(tool_output, str) and _BLOCKED_RESULT_TYPE in tool_output:
+        try:
+            payload = json.loads(tool_output.strip())
+        except ValueError:
+            return False
+        return isinstance(payload, dict) and payload.get('type') == _BLOCKED_RESULT_TYPE
+    return False
 
-    ``action_required`` is the MCP-auth pause the indexer writes on the call; it is not a tool
-    failure. ``blocked`` / ``paused`` (sensitive-tool and HITL guardrails) arrive with P1 item 2.
+
+def tool_step_status(entry: dict) -> str:
+    """``ok`` | ``error`` | ``action_required`` | ``blocked`` for one ``tool_calls_dict`` entry.
+
+    ``action_required`` is the MCP-auth pause the indexer writes on the call; ``blocked`` is a
+    sensitive tool the guard refused (design §4.5). Neither is a tool failure. A HITL pause is not a
+    step status: it ends the run and is recorded once, on the trajectory (:func:`pause_details`).
     """
     finish_reason = entry.get('finish_reason')
     if finish_reason == 'action_required':
         return 'action_required'
+    if _is_blocked(entry.get('tool_output')):
+        return 'blocked'
     if finish_reason == 'error' or entry.get('error'):
         return 'error'
     return 'ok'
@@ -220,6 +242,48 @@ def build_trajectory(predict_result) -> Optional[dict]:
     })
 
 
+def is_parked(predict_result) -> bool:
+    """The run parked on a sub-agent fan-out (indexer ``build_parked_result``). A batch run
+    cannot resume a parked parent, so the case has no answer."""
+    inner = _inner(predict_result)
+    return bool(inner and inner.get('parallel_parked'))
+
+
+def pause_details(predict_result) -> Optional[dict]:
+    """What the run paused on, or None when it did not pause (indexer ``build_success_result``).
+
+    Only identities are kept; the interrupt's tool arguments and message stay out of storage.
+    A parallel aggregate carries its paused calls in ``pending``; the first one is reported."""
+    inner = _inner(predict_result)
+    if not inner or not (inner.get('paused') or inner.get('hitl_interrupt') or inner.get('hitl_interrupts')):
+        return None
+    interrupts = [i for i in (inner.get('hitl_interrupts') or [inner.get('hitl_interrupt')])
+                  if isinstance(i, dict)]
+    first = interrupts[0] if interrupts else {}
+    pending = first.get('pending') if isinstance(first.get('pending'), list) else []
+    leaf = pending[0] if pending and isinstance(pending[0], dict) else first
+    return {
+        'pause_type': inner.get('pause_type') or 'hitl',
+        'interaction_type': first.get('interaction_type'),
+        'guardrail_type': first.get('guardrail_type'),
+        'node_name': leaf.get('node_name') or first.get('node_name'),
+        'tool_name': leaf.get('tool_name'),
+        'toolkit_name': leaf.get('toolkit_name'),
+        'interrupts': max(len(interrupts), len(pending)),
+    }
+
+
+def _final_assistant_text(predict_result) -> Optional[str]:
+    inner = _inner(predict_result) or {}
+    history = inner.get('chat_history')
+    for msg in reversed(history if isinstance(history, list) else []):
+        if isinstance(msg, dict) and (msg.get('role') in _ASSISTANT_ROLES or msg.get('type') == 'ai'):
+            content = msg.get('content')
+            if isinstance(content, str) and content.strip():
+                return content
+    return None
+
+
 def _canonical(value) -> str:
     try:
         return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
@@ -228,26 +292,32 @@ def _canonical(value) -> str:
 
 
 def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] = None,
-                       error: Optional[str] = None) -> dict:
+                       error: Optional[str] = None, final_text: Optional[str] = None) -> dict:
     """Per-case counters (G8), computed once here so the UI and P2 dimensions read, not recompute.
 
-    * ``redundant_calls`` — repeats of an identical (tool, inputs) call (Q-S13, proposed).
+    * ``redundant_calls`` — a repeat of an identical (tool, inputs) call that already succeeded
+      (design §5.2). A repeat after a failure is a retry, not redundant.
     * ``retries`` — a call to the tool that has just failed, made right after the failure.
-    * ``step_limit_hit`` — the run ended on the agent's step (recursion) limit.
+    * ``step_limit_hit`` — the run ended on the agent's step limit: the SDK's warning is the final
+      message, or the recursion limit raised (§4.5).
+    * ``guardrail_events`` — blocked and auth-paused tool calls, plus the HITL pause that ended the
+      run, if any.
     """
     steps = (trajectory or {}).get('steps') or []
     tools = [s for s in steps if s.get('kind') == 'tool']
-    seen, redundant, retries = set(), 0, 0
+    succeeded, redundant, retries = set(), 0, 0
     previous = None
     for step in tools:
         key = (step.get('tool_name'), _canonical(step.get('tool_inputs')))
-        if key in seen:
+        if key in succeeded:
             redundant += 1
-        seen.add(key)
+        if step.get('status') == 'ok':
+            succeeded.add(key)
         if previous is not None and previous.get('is_error') and previous.get('tool_name') == step.get('tool_name'):
             retries += 1
         previous = step
-    lowered = (error or '').lower()
+    lowered = f"{error or ''}\n{final_text or ''}".lower()
+    paused = 1 if (trajectory or {}).get('pause') else 0
     return {
         'llm_calls': sum(1 for s in steps if s.get('kind') == 'llm'),
         'tool_calls': len(tools),
@@ -255,8 +325,8 @@ def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] 
         'tool_errors': sum(1 for s in tools if s.get('is_error')),
         'retries': retries,
         'redundant_calls': redundant,
-        'step_limit_hit': 'recursion limit' in lowered or 'graphrecursionerror' in lowered,
-        'guardrail_events': sum(1 for s in tools if s.get('status') in ('blocked', 'paused', 'action_required')),
+        'step_limit_hit': any(marker in lowered for marker in _STEP_LIMIT_MARKERS),
+        'guardrail_events': sum(1 for s in tools if s.get('status') in ('blocked', 'action_required')) + paused,
         'latency_ms': latency_ms,
     }
 
@@ -277,11 +347,15 @@ def extract_execution(predict_result: Any, *, status: str, latency_ms: Optional[
             'trajectory': None,
             'metrics': {'latency_ms': latency_ms},
         }
+    pause = pause_details(predict_result)
+    if pause is not None:
+        trajectory['pause'] = pause
     return {
         'trajectory_state': TRAJECTORY_RECORDED,
         'trajectory_state_reason': None,
         'trajectory': trajectory,
-        'metrics': trajectory_metrics(trajectory, latency_ms=latency_ms, error=error),
+        'metrics': trajectory_metrics(trajectory, latency_ms=latency_ms, error=error,
+                                      final_text=_final_assistant_text(predict_result)),
     }
 
 

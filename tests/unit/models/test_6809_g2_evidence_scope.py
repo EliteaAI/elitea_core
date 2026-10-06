@@ -120,3 +120,18 @@ def test_existing_scopes_group_as_before(orch):
     assert orch.evidence_scope_key({}) == orch.evidence_scope_key(
         {'structure': False, 'input': True, 'output': True, 'trajectory': False, 'usage': False})
     assert orch.evidence_scope_key({'input': True, 'output': False}) != orch.evidence_scope_key({})
+
+
+# --- G4: suite meta.steps_limit ---------------------------------------------------------------
+
+@pytest.mark.parametrize('meta', [{}, {'steps_limit': None}, {'steps_limit': 1}, {'steps_limit': 100},
+                                  {'steps_limit': 3, 'other': 'kept'}])
+def test_suite_accepts_steps_limit(pd, meta):
+    assert pd.EvalSuiteCreateModel(application_id=1, meta=meta).meta == meta
+    assert pd.EvalSuiteUpdateModel(meta=meta).meta == meta
+
+
+@pytest.mark.parametrize('limit', [0, 101, -1, 2.5, '3', True])
+def test_suite_rejects_bad_steps_limit(pd, limit):
+    with pytest.raises(ValidationError, match='steps_limit'):
+        pd.EvalSuiteCreateModel(application_id=1, meta={'steps_limit': limit})

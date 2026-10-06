@@ -41,6 +41,10 @@ _IMPORT_FORMATS = {'csv', 'json'}
 _RUN_TRIGGERS = {EvalRunTrigger.offline_batch, EvalRunTrigger.on_demand}
 
 
+# Upper bound for a suite's ``meta.steps_limit``; the SDK default is 25.
+MAX_SUITE_STEPS_LIMIT = 100
+
+
 def _check_evidence_scope(v: dict) -> dict:
     bad = set(v) - _EVIDENCE_KEYS
     if bad:
@@ -340,6 +344,17 @@ class EvalSuiteBaseModel(BaseModel):
     baseline_run_id: Optional[int] = None         # comparison baseline pointer (§21.6)
     trigger_config: dict = Field(default_factory=dict)
     meta: dict = Field(default_factory=dict)
+
+    @field_validator('meta')
+    @classmethod
+    def _check_steps_limit(cls, v: dict) -> dict:
+        # ``meta.steps_limit`` caps the agent's steps on every case of a batch run (#6809 §4.5);
+        # absent or null keeps the agent's own limit.
+        limit = (v or {}).get('steps_limit')
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
+                                  or not 1 <= limit <= MAX_SUITE_STEPS_LIMIT):
+            raise ValueError(f'meta.steps_limit must be an integer 1..{MAX_SUITE_STEPS_LIMIT} or null')
+        return v
 
 
 class EvalSuiteCreateModel(EvalSuiteBaseModel):
