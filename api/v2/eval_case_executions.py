@@ -1,8 +1,8 @@
 """Eval **case executions** — what the agent did on each case of a run (#6809 P1, design §3.1).
 
 GET returns the run's ``eval_case_execution`` rows: per case, the agent outcome, whether a
-trajectory was recorded (and why not), the normalized trajectory and its counters. Drives the
-Trajectory tab of the case drill-down. Read-only and viewer-visible, like the results endpoint.
+trajectory was recorded (and why not), the normalized trajectory and its counters, plus the cases'
+agent and judge usage (#6716). Drives the Trajectory tab of the case drill-down. Read-only and viewer-visible, like the results endpoint.
 """
 
 from flask import request  # pylint: disable=E0401
@@ -17,7 +17,7 @@ from ...utils.constants import PROMPT_LIB_MODE
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Read eval run case executions",
-        description="Returns a run's per-case agent executions: outcome status, trajectory state and reason, the normalized trajectory (LLM and tool steps) and its counters. Empty for runs that did not execute the agent.",
+        description="Returns a run's per-case agent executions: outcome status, trajectory state and reason, the normalized trajectory (LLM and tool steps) and its counters, and the cases' agent and judge token and cost rows. Empty for runs that did not execute the agent.",
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},
             {"name": "run_id", "in": "path", "schema": {"type": "integer"}},

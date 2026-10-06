@@ -511,3 +511,28 @@ def test_estimate_exceeds_budget(usage):
     assert usage.estimate_exceeds_budget(est, None) is None
     unpriced = usage.estimate_run([_usage_row(0, 'agent', 10, None)], 3)
     assert usage.estimate_exceeds_budget(unpriced, {'remaining': 2.0}) is None
+
+
+def test_case_usage_view_totals_tokens_and_floats_cost(usage):
+    view = usage.case_usage_view({
+        'role': 'agent', 'case_index': 0, 'dataset_case_id': 7,
+        'input_tokens': 100, 'output_tokens': 40, 'reasoning_tokens': 10, 'cache_read_tokens': 500,
+        'cost': Decimal('0.01234567'), 'model_name': 'm', 'usage_state': 'recorded',
+        'token_source': 'provider', 'cost_source': 'usage_event', 'settled': True,
+    })
+    # as the per-case limit counts: cache reads are already inside input, reasoning is not added
+    assert view['total_tokens'] == 140
+    assert view['cache_read_tokens'] == 500
+    assert view['cost'] == pytest.approx(0.01234567) and isinstance(view['cost'], float)
+    assert view['settled'] is True
+
+
+def test_case_usage_view_keeps_unpriced_and_unrecorded(usage):
+    view = usage.case_usage_view({
+        'role': 'judge', 'case_index': 1, 'input_tokens': None, 'cost': None,
+        'usage_state': 'not_recorded', 'usage_state_reason': 'timeout', 'cost_source': 'pending',
+    })
+    assert view['cost'] is None
+    assert view['input_tokens'] == 0 and view['total_tokens'] == 0
+    assert view['usage_state_reason'] == 'timeout'
+    assert view['settled'] is False

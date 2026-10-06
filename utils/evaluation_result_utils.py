@@ -142,20 +142,32 @@ def get_case_executions(
     so a list view asks without it and the drill-down asks for one case, by ``dataset_case_id`` (the
 scorecard's case key) or ``case_index``.
 
-    An on-demand run (output supplied, no agent executed) has no rows; the reply is then an empty
-    list, not an error. Raises :class:`EvalRunNotFoundError` when the run is absent."""
-    from ..models.evaluation import EvalRun, EvalCaseExecution
+    ``usage`` lists the same cases' ``eval_case_usage`` rows, agent and judge (#6716).
+
+    An on-demand run (output supplied, no agent executed) has no execution rows; ``executions`` is
+    then an empty list, not an error. Raises :class:`EvalRunNotFoundError` when the run is absent."""
+    from ..models.evaluation import EvalRun, EvalCaseExecution, EvalCaseUsage
+    from .evaluation_usage import case_usage_view
 
     with _session(session, project_id) as s:
         if not s.query(EvalRun.id).filter(EvalRun.id == run_id).first():
             raise EvalRunNotFoundError(run_id)
         query = s.query(EvalCaseExecution).filter(EvalCaseExecution.run_id == run_id)
+        usage_query = s.query(EvalCaseUsage).filter(EvalCaseUsage.run_id == run_id)
         if case_index is not None:
             query = query.filter(EvalCaseExecution.case_index == case_index)
+            usage_query = usage_query.filter(EvalCaseUsage.case_index == case_index)
         if dataset_case_id is not None:
             query = query.filter(EvalCaseExecution.dataset_case_id == dataset_case_id)
+            usage_query = usage_query.filter(EvalCaseUsage.dataset_case_id == dataset_case_id)
         rows = [_execution_row(r) for r in query.order_by(EvalCaseExecution.case_index).all()]
+        # Agent and judge usage of the same cases (#6716). An on-demand run has judge rows and no
+        # executions, so these are listed beside the executions rather than inside them.
+        usage = [
+            case_usage_view(r.to_json())
+            for r in usage_query.order_by(EvalCaseUsage.case_index, EvalCaseUsage.role).all()
+        ]
     if not include_trajectory:
         for row in rows:
             row['trajectory'] = None
-    return {'run_id': run_id, 'executions': rows}
+    return {'run_id': run_id, 'executions': rows, 'usage': usage}
