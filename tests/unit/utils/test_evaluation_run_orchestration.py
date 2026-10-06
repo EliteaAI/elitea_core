@@ -24,6 +24,7 @@ from fixtures.helpers import load_utils_module  # noqa: E402
 def orch(utils_path):
     load_utils_module(utils_path, 'evaluation_scoring')  # sibling for the relative import
     load_utils_module(utils_path, 'evaluation_ai_judge')  # sibling for the budget-split lazy import
+    load_utils_module(utils_path, 'evaluation_execution')  # sibling for the agent-runner lazy import
     return load_utils_module(utils_path, 'evaluation_run_orchestration')
 
 

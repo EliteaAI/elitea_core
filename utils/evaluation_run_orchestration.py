@@ -660,6 +660,9 @@ def run_one_case(
             case = {**case, 'structure': outcome.get('structure'),
                     '_agent_error':
                     outcome.get('error') or f"agent execution {outcome.get('status')}"}
+        if outcome.get('execution') is not None:
+            # Persisted as an eval_case_execution row by execute_run, never on the snapshot.
+            case['_execution'] = {**outcome['execution'], 'status': outcome.get('status')}
     return case, assemble_case_results(
         case, snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
         judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name,
@@ -867,6 +870,31 @@ def _make_ai_scorer(project_id: int, judge_settings: dict, *, user_id: Optional[
     return _score
 
 
+def split_case_executions(cases: List[dict]) -> tuple:
+    """``(execution_rows, cases_without_execution)`` from orchestrate_run's resolved cases.
+
+    The trajectory can be hundreds of KB per case, so it lives in ``eval_case_execution`` (one row
+    per run × case, design §3.1) rather than on ``EvalRun.snapshot``. A case that never reached the
+    agent (on-demand output, or never run because the run stopped early) has no row."""
+    rows, stripped = [], []
+    for index, case in enumerate(cases):
+        execution = case.get('_execution') if isinstance(case, dict) else None
+        if execution is None:
+            stripped.append(case)
+            continue
+        stripped.append({k: v for k, v in case.items() if k != '_execution'})
+        rows.append({
+            'dataset_case_id': case.get('id'),
+            'case_index': index,
+            'status': execution.get('status'),
+            'trajectory_state': execution.get('trajectory_state'),
+            'trajectory_state_reason': execution.get('trajectory_state_reason'),
+            'trajectory': execution.get('trajectory'),
+            'metrics': execution.get('metrics') or {},
+        })
+    return rows, stripped
+
+
 def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: int = 120,
                        platform_run_id: Optional[str] = None, usage_entity: Optional[dict] = None):
     """Bind live agent execution (H4) into the ``agent_runner`` contract for an offline-batch run.
@@ -877,6 +905,7 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
     degrades every case to an ``unsupported``/``error`` outcome (E4) rather than raising, so the run
     still finishes with error rows the UI can show."""
     from .evaluation_agent_runner import run_agent, agent_type_supported, agent_structure_snapshot
+    from .evaluation_execution import not_applicable_execution, extract_execution
 
     application_id = snapshot.get('application_id')
     version_id = snapshot.get('application_version_id')
@@ -889,7 +918,8 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
         message = f'could not load agent version {version_id}: {exc}'
 
         def _unavailable(_case: dict) -> dict:
-            return {'status': 'error', 'output': None, 'error': message, 'structure': None}
+            return {'status': 'error', 'output': None, 'error': message, 'structure': None,
+                    'execution': extract_execution(None, status='error')}
 
         return _unavailable
 
@@ -903,13 +933,15 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
 
     def _run(case: dict) -> dict:
         if structure_only_run:
-            return {'status': 'ok', 'output': None, 'structure': structure}
+            return {'status': 'ok', 'output': None, 'structure': structure,
+                    'execution': not_applicable_execution('structure_only')}
         if not supported:
             agent_type = version_details.get('agent_type')
             return {'status': 'unsupported', 'output': None,
                     'error': f"agent_type '{agent_type}' is not supported for live batch execution "
                              '(P1 scope: single-turn agents only, pipelines deferred)',
-                    'structure': structure}
+                    'structure': structure,
+                    'execution': not_applicable_execution('unsupported')}
         outcome = run_agent(project_id, version_details, case,
                             user_id=user_id, timeout=timeout,
                             platform_run_id=platform_run_id, usage_entity=usage_entity)
@@ -981,7 +1013,7 @@ def execute_run(
     therefore opens its own short session and closes it: claim, one per progress heartbeat, one per
     cancel poll, and one for the terminal write. Nothing ORM-mapped is carried between phases —
     only the plain snapshot dict and ``owner_id`` — so there are no detached instances."""
-    from ..models.evaluation import EvalRun, EvalResult, EvalRunStatus
+    from ..models.evaluation import EvalRun, EvalResult, EvalRunStatus, EvalCaseExecution
     from .code_validation import make_task_node_executor
     from tools import db  # pylint: disable=E0401
     from datetime import datetime
@@ -1170,11 +1202,14 @@ def execute_run(
                 raise ValueError(f'Eval run {run_id} disappeared while executing')
             for row in outcome['results']:
                 s.add(EvalResult(run_id=run.id, **row))
+            executions, cases = split_case_executions(outcome['cases'])
+            for row in executions:
+                s.add(EvalCaseExecution(run_id=run.id, **row))
             run.headline_score = outcome['headline_score']
             run.progress = outcome['progress']
             # Reassign (not mutate in place) so SQLAlchemy detects the JSONB column changed —
             # the drill-down reads `snapshot.cases[i].output`, which is only known post-execution.
-            run.snapshot = {**snapshot, 'cases': outcome['cases']}
+            run.snapshot = {**snapshot, 'cases': cases}
             # A run stopped early keeps the cases it did score (partial scorecard) but must not be
             # read as a completed evaluation of the whole dataset.
             run.status = (

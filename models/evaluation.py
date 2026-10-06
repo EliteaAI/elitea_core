@@ -416,6 +416,39 @@ class EvalResult(db_tools.AbstractBaseMixin, db.Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())
 
 
+class EvalCaseExecution(db_tools.AbstractBaseMixin, db.Base):
+    """What the agent did on one case of a run: its trajectory and counters (#6809, design §3.1).
+
+    One row per run × case, written only when the run executed the agent (offline batch). Kept
+    off ``EvalRun.snapshot`` because a trajectory can be hundreds of KB per case, and per case
+    rather than per ``EvalResult`` because every binding of the case shares one execution.
+    ``trajectory_state`` says whether ``trajectory`` is meaningful: ``recorded`` (possibly with
+    zero steps), ``not_recorded`` (``timeout`` / ``no_envelope``) or ``not_applicable``
+    (``structure_only`` / ``unsupported``). Token and cost totals belong to the usage table."""
+    __tablename__ = 'eval_case_execution'
+    __table_args__ = ({'schema': c.POSTGRES_TENANT_SCHEMA},)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.eval_run.id', ondelete='CASCADE'),
+        nullable=False, index=True,
+    )
+    dataset_case_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
+    case_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    # the agent outcome: ok | empty | timeout | predict_error | predict_exception | unsupported | error
+    status: Mapped[str] = mapped_column(String(32), nullable=True)
+    trajectory_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    trajectory_state_reason: Mapped[str] = mapped_column(String(32), nullable=True)
+    # {steps, tool_sequence, truncated, source}; see utils/evaluation_execution.py
+    trajectory: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    # llm_calls, tool_calls, distinct_tools, tool_errors, retries, redundant_calls,
+    # step_limit_hit, guardrail_events, latency_ms
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())
+
+
 # ----------------------------------------------------------------------------
 # Human scores — append-only annotation layer (§3.4, §15.6, D2)
 # ----------------------------------------------------------------------------

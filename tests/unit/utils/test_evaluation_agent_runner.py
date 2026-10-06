@@ -20,6 +20,7 @@ from fixtures.helpers import load_utils_module  # noqa: E402
 
 @pytest.fixture(scope='module')
 def runner(utils_path):
+    load_utils_module(utils_path, 'evaluation_execution')  # sibling for the lazy relative import
     return load_utils_module(utils_path, 'evaluation_agent_runner')
 
 
@@ -173,7 +174,10 @@ def test_run_agent_ok_returns_output(runner):
         return {'result': {'chat_history': [{'role': 'assistant', 'content': 'the answer'}]}}
 
     out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=predict)
+    execution = out.pop('execution')
     assert out == {'status': 'ok', 'output': 'the answer', 'error': None}
+    # chat_history only (a pre-#6809 indexer): no evidence to read, which is not "zero steps".
+    assert (execution['trajectory_state'], execution['trajectory_state_reason']) == ('not_recorded', 'no_envelope')
 
 
 def test_run_agent_timeout_maps_closed(runner):

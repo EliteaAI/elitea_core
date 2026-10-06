@@ -26,9 +26,11 @@ Outcome dict shape::
 
     {'status': 'ok'|'unsupported'|'timeout'|'predict_exception'|'predict_error'|'empty',
      'output': <assistant text> | None,   # set only when status == 'ok'
-     'error':  <str> | None}              # set when status != 'ok'
+     'error':  <str> | None,              # set when status != 'ok'
+     'execution': {...}}                  # trajectory + counters, see :mod:`evaluation_execution`
 """
 import copy
+import time
 from typing import Callable, List, Optional
 from uuid import uuid4
 
@@ -180,11 +182,19 @@ def run_agent(
     ``user_id`` must be passed explicitly: a batch run executes on the ``eval_runs`` pool, so
     ``predict_sio`` has neither a sid nor a live request to recover the acting user from, and
     without it every case fails with 'User token not found'."""
+    # Lazy: keeps this module importable with no package context (sibling preloaded in tests).
+    from .evaluation_execution import extract_execution
+
+    def _outcome(status, output, error, result=None, latency_ms=None):
+        return {'status': status, 'output': output, 'error': error,
+                'execution': extract_execution(result, status=status, latency_ms=latency_ms,
+                                               error=error or _predict_error_text(result))}
+
     if not agent_type_supported(version_details):
         agent_type = (version_details or {}).get('agent_type')
-        return {'status': 'unsupported', 'output': None,
-                'error': f"agent_type '{agent_type}' is not supported for live batch execution "
-                         '(P1 scope: single-turn agents only, pipelines deferred)'}
+        return _outcome('unsupported', None,
+                        f"agent_type '{agent_type}' is not supported for live batch execution "
+                        '(P1 scope: single-turn agents only, pipelines deferred)')
 
     if predict is None:
         from tools import this
@@ -192,12 +202,15 @@ def run_agent(
 
     data = build_agent_predict_data(project_id, version_details, case.get('input'),
                                     case.get('variables'))
+    started = time.monotonic()
     try:
         result = predict(sid=None, data=data, await_task_timeout=timeout,
                          user_id=user_id, skip_expansion=True, return_chat_history=True,
                          platform_run_id=platform_run_id, usage_entity=usage_entity)
     except Exception as exc:  # noqa: BLE001 - execution-level failure is a value, not a raise
-        return {'status': 'predict_exception', 'output': None, 'error': str(exc)}
+        return _outcome('predict_exception', None, str(exc),
+                        latency_ms=int((time.monotonic() - started) * 1000))
+    latency_ms = int((time.monotonic() - started) * 1000)
 
     # Task timeout — predict_sio returns {"task_id": ...} without a "result" (matches run_llm_judge).
     if isinstance(result, dict) and 'task_id' in result and 'result' not in result:
@@ -206,15 +219,13 @@ def run_agent(
             this.module.stop_task(result['task_id'])
         except Exception:
             pass
-        return {'status': 'timeout', 'output': None,
-                'error': f'agent timed out after {timeout}s'}
+        return _outcome('timeout', None, f'agent timed out after {timeout}s', latency_ms=latency_ms)
 
     output = extract_agent_output(result)
     if output is not None:
-        return {'status': 'ok', 'output': output, 'error': None}
+        return _outcome('ok', output, None, result, latency_ms)
 
     err = _predict_error_text(result)
     if err:
-        return {'status': 'predict_error', 'output': None, 'error': err}
-    return {'status': 'empty', 'output': None,
-            'error': 'agent produced no assistant output'}
+        return _outcome('predict_error', None, err, result, latency_ms)
+    return _outcome('empty', None, 'agent produced no assistant output', result, latency_ms)

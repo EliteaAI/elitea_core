@@ -112,3 +112,46 @@ def get_run_results(
             'limit': page_size,
             'offset': max(offset, 0),
         }
+
+
+def _execution_row(row) -> dict:
+    return {
+        'id': row.id,
+        'run_id': row.run_id,
+        'dataset_case_id': row.dataset_case_id,
+        'case_index': row.case_index,
+        'status': row.status,
+        'trajectory_state': row.trajectory_state,
+        'trajectory_state_reason': row.trajectory_state_reason,
+        'trajectory': row.trajectory,
+        'metrics': row.metrics or {},
+        'created_at': row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def get_case_executions(
+    project_id: int,
+    run_id: int,
+    session=None,
+    case_index: Optional[int] = None,
+    include_trajectory: bool = True,
+) -> dict:
+    """A run's per-case executions (#6809 P1): trajectory state, counters and, unless
+    ``include_trajectory`` is false, the trajectory itself — which can be hundreds of KB per case,
+    so a list view asks without it and the drill-down asks for one ``case_index``.
+
+    An on-demand run (output supplied, no agent executed) has no rows; the reply is then an empty
+    list, not an error. Raises :class:`EvalRunNotFoundError` when the run is absent."""
+    from ..models.evaluation import EvalRun, EvalCaseExecution
+
+    with _session(session, project_id) as s:
+        if not s.query(EvalRun.id).filter(EvalRun.id == run_id).first():
+            raise EvalRunNotFoundError(run_id)
+        query = s.query(EvalCaseExecution).filter(EvalCaseExecution.run_id == run_id)
+        if case_index is not None:
+            query = query.filter(EvalCaseExecution.case_index == case_index)
+        rows = [_execution_row(r) for r in query.order_by(EvalCaseExecution.case_index).all()]
+    if not include_trajectory:
+        for row in rows:
+            row['trajectory'] = None
+    return {'run_id': run_id, 'executions': rows}
