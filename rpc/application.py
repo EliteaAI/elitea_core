@@ -64,6 +64,7 @@ from ..utils.vectorstore import get_pgvector_connection_string
 from ..utils.run_id import PREDICT_RUN_ID_KWARGS_KEY
 from ..utils.usage_attribution import ENTITY_KWARGS_KEY, ROOT_ENTITY_KWARGS_KEY
 from ..utils.validator_cache import make_validator_cache_key, toolkit_validator_cache
+from ..utils.toolkit_test_rooms import guard_test_stream
 
 
 def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
@@ -1516,6 +1517,7 @@ class RPC:
         )
 
         if sid:
+            guard_test_stream(self, sid, sio_event, data)
             self.context.sio.enter_room(sid, room)
 
         # Log the parameters being passed to indexer for debugging
@@ -1789,6 +1791,7 @@ class RPC:
         )
 
         if sid:
+            guard_test_stream(self, sid, sio_event, data)
             self.context.sio.enter_room(sid, room)
 
         # Prepare kwargs without stream_id and message_id since they're passed as args
