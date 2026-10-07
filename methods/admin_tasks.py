@@ -47,6 +47,7 @@ from ..utils.embedding_migration_utils import (
     migrate_toolkit_embedding_models,
 )
 from ..utils.trace_step_backfill_utils import parse_backfill_params, backfill_project
+from ..utils.skill_publish_schema import apply_skill_run_settings_column
 from ..utils.utils import get_public_project_id, make_yield_to_hub
 
 
@@ -560,6 +561,36 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return {"migrated": 0, "error": "failed to list projects"}
 
         migrated, failed = apply_skill_publish_columns(project_ids)
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
+
+    @web.method()
+    def migrate_skill_run_settings_column(self, *args, **kwargs):
+        param = kwargs.get("param", "") or ""
+        project_id_filter = None
+        for seg in [s.strip() for s in param.split(";")]:
+            if seg.lower().startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.warning(
+                            "migrate_skill_run_settings_column: invalid project_id '%s', scanning all", value)
+
+        try:
+            if project_id_filter is not None:
+                project_ids = [project_id_filter]
+            else:
+                project_ids = [
+                    p["id"] for p in (
+                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                    )
+                ]
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_skill_run_settings_column: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_skill_run_settings_column(project_ids)
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()

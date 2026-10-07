@@ -33,6 +33,8 @@ def _package(name):
 
 def fake_resolve(project_id, llm_settings, **kwargs):
     settings = dict(llm_settings or {})
+    if (settings.get('selection') or {}).get('mode') == 'auto':
+        return settings
     name, project = settings.get('model_name'), settings.get('model_project_id')
     if name and project is None:
         project = next((p for (n, p) in AVAILABLE_MODELS if n == name), None)
@@ -117,7 +119,7 @@ def env(isolated_sys_modules):
         _package(name)
 
     pylon_tools = types.ModuleType('pylon.core.tools')
-    pylon_tools.log = types.SimpleNamespace(exception=lambda *a, **k: None)
+    pylon_tools.log = types.SimpleNamespace(exception=lambda *a, **k: None, warning=lambda *a, **k: None)
     _package('pylon').core = _package('pylon.core')
     sys.modules['pylon.core'].tools = pylon_tools
     sys.modules['pylon.core.tools'] = pylon_tools
@@ -128,8 +130,21 @@ def env(isolated_sys_modules):
     def with_project_schema_session(project_id):
         yield types.SimpleNamespace(query=lambda model: FakeQuery(schemas.get(project_id, [])))
 
+    routing = {'enabled': True}
+
+    class FakeRpc:
+        def timeout(self, seconds):
+            return self
+
+        def configurations_get_available_models(self, project_id, section, include_shared):
+            return {(project, name): {} for (name, project) in AVAILABLE_MODELS}
+
+        def configurations_get_auto_routing_settings(self, project_id):
+            return dict(routing)
+
     tools = types.ModuleType('tools')
     tools.db = types.SimpleNamespace(with_project_schema_session=with_project_schema_session)
+    tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=FakeRpc()))
     tools.auth = types.SimpleNamespace(
         sio_users={sid: {'user': owner} for sid, owner in SOCKET_OWNER.items()},
         current_user=lambda auth_data: {'id': auth_data['user']},
@@ -157,11 +172,13 @@ def env(isolated_sys_modules):
     sys.modules[models_skill.__name__] = models_skill
 
     _load('models/enums/all.py', f'{PACKAGE}.models.enums.all')
-    _load('models/pd/skill_predict.py', f'{PACKAGE}.models.pd.skill_predict')
-    for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution'):
+    for name in ('skill_predict', 'llm', 'skill_run_settings'):
+        _load(f'models/pd/{name}.py', f'{PACKAGE}.models.pd.{name}')
+    for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution',
+                 'skill_run_settings'):
         _load(f'utils/{name}.py', f'{PACKAGE}.utils.{name}')
     module = _load('utils/skill_run_utils.py', f'{PACKAGE}.utils.skill_run_utils')
-    return types.SimpleNamespace(mod=module, schemas=schemas, project_context=project_context)
+    return types.SimpleNamespace(mod=module, schemas=schemas, project_context=project_context, routing=routing)
 
 
 def _run(env, module, body, *, skill_project_id=CALLER_PROJECT_ID, skill_id=10, version_id=None,
@@ -497,12 +514,14 @@ class TestResponseMeta:
         assert status == 200
         assert body['meta'] == {
             'invoked_skills': [{'skill_id': 10, 'name': 'Reviewer', 'icon_meta': {'url': 'i.png'}}],
-            'skill_run': {'skill_id': 10, 'skill_version_id': 100, 'version_name': 'base'},
+            'skill_run': {'skill_id': 10, 'skill_version_id': 100, 'version_name': 'base', 'model_fallback': False},
         }
 
     def test_async_response_carries_the_same_meta(self, env, own_skill):
         body, _ = _run(env, FakeModule(outcome={'task_id': 't-1'}), {'user_input': 'hi', 'async_mode': True})
-        assert body['meta']['skill_run'] == {'skill_id': 10, 'skill_version_id': 100, 'version_name': 'base'}
+        assert body['meta']['skill_run'] == {
+            'skill_id': 10, 'skill_version_id': 100, 'version_name': 'base', 'model_fallback': False,
+        }
 
     def test_start_event_carries_the_meta_to_the_stream(self, env, own_skill):
         module = FakeModule()

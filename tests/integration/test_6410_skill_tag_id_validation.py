@@ -25,6 +25,7 @@ so it would hide the `AttributeError` -> 500 that `TagBaseModel` triggers.
 Run via:
     python tests/run_tests.py integration/test_6410_skill_tag_id_validation.py -v
 """
+from typing import Optional
 import importlib.util
 import pathlib
 import sys
@@ -188,6 +189,7 @@ def skill_utils_module():
 
     class _Permissive(BaseModel):
         model_config = ConfigDict(extra='allow')
+        run_settings: Optional[dict] = None
 
     pd_skill = types.ModuleType(f'{PKG_ROOT}.elitea_core.models.pd.skill')
     for n in ('SkillCreateModel', 'SkillDetailModel', 'SkillUpdateModel',
@@ -199,6 +201,13 @@ def skill_utils_module():
     for n in ('SkillVersionCreateModel', 'SkillVersionUpdateModel', 'SkillVersionDetailModel'):
         setattr(pd_skill_version, n, type(n, (_Permissive,), {}))
     _register(f'{PKG_ROOT}.elitea_core.models.pd.skill_version', pd_skill_version)
+
+    _register(f'{PKG_ROOT}.elitea_core.models.pd.skill_run_settings', types.SimpleNamespace(
+        dump_run_settings=lambda settings: settings,
+    ))
+    _register(f'{PKG_ROOT}.elitea_core.utils.skill_run_settings', types.SimpleNamespace(
+        portable_run_settings=lambda project_id, raw: raw,
+    ))
 
     folder_access = types.ModuleType(f'{PKG_ROOT}.elitea_core.utils.folder_access')
     folder_access.folder_exclusion_clause = lambda *a, **k: None

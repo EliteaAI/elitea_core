@@ -107,6 +107,7 @@ class SkillVersion(db_tools.AbstractBaseMixin, db.Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     uuid: Mapped[str] = mapped_column(UUID(as_uuid=True), unique=True, default=uuid.uuid4)
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
+    run_settings: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, deferred=True)
 
     # Tags (follows ApplicationVersion pattern)
     tags: Mapped[List['Tag']] = relationship(

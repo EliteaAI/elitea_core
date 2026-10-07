@@ -35,6 +35,8 @@ from .publish_utils import (
     verify_validation_token,
 )
 from .constants import DEFAULT_FALLBACK_CATEGORY
+from .skill_run_settings import SHARED_MODEL_REQUIRED, unshared_model_issue
+from .utils import get_public_project_id
 from .skill_category_utils import (
     apply_skill_category_to_tag_dicts,
     get_active_skill_categories,
@@ -76,13 +78,16 @@ def build_skill_validation_input(
             'instructions': version.instructions or '',
             'tags': [t.name for t in (version.tags or [])],
         }
+        run_settings = version.run_settings
 
     skill_data = {
         'skill': skill_info,
         'version_name': version_name,
         'category': category,
     }
-    return json.dumps(skill_data, indent=2), skill_data
+    json_str = json.dumps(skill_data, indent=2)
+    skill_data['run_settings'] = run_settings
+    return json_str, skill_data
 
 
 class SkillNameChecker(BaseChecker):
@@ -257,6 +262,13 @@ class SkillVersionNameChecker(BaseChecker):
             )
 
 
+class SkillRunModelChecker(BaseChecker):
+    def check(self, data, result, *, context=None):
+        issue = unshared_model_issue(data.get('run_settings'), get_public_project_id())
+        if issue:
+            result.issue('critical', 'run_settings', issue, SHARED_MODEL_REQUIRED, context)
+
+
 def _skill_version_name_exists(
     project_id: int, skill_id: int, name: str,
 ) -> bool:
@@ -280,6 +292,7 @@ _SKILL_CHAIN = ValidationChain([
     SkillCategoryChecker(),
     SkillInstructionsChecker(),
     SkillVersionNameChecker(),
+    SkillRunModelChecker(),
 ])
 
 
@@ -301,6 +314,7 @@ def run_skill_deterministic_checks(
         'category': category,
         'instructions': skill.get('instructions'),
         'version_name': version_name,
+        'run_settings': skill_data.get('run_settings'),
     }
     context = {'skill_id': skill_id, 'project_id': project_id}
     _SKILL_CHAIN.run(parent_data, result, context=context)
@@ -716,6 +730,7 @@ def create_skill_publish_snapshot(
                 'instructions': version.instructions or '',
                 'tags': [t.name for t in (version.tags or [])],
                 'meta': {'icon_meta': meta.get('icon_meta')},
+                'run_settings': version.run_settings,
             },
             'source': {
                 'project_id': project_id,
@@ -810,6 +825,7 @@ def publish_skill_first_version(
             instructions=ver_info['instructions'],
             author_id=user_id,
             meta=dict(published_meta),
+            run_settings=ver_info.get('run_settings'),
         )
         version.status = PublishStatus.published
         session.add(version)
@@ -845,6 +861,7 @@ def publish_skill_additional_version(
             instructions=ver_info['instructions'],
             author_id=user_id,
             meta=dict(published_meta),
+            run_settings=ver_info.get('run_settings'),
         )
         version.status = PublishStatus.published
         session.add(version)
@@ -983,6 +1000,7 @@ def _clone_source_version_for_publish(
             author_id=user_id,
             tags=[TagBaseModel(name=t.name, data=t.data or {}) for t in (src.tags or [])],
             meta=src.meta or {},
+            run_settings=src.run_settings,
         )
 
     result = create_skill_version(project_id, skill_id, version_data)

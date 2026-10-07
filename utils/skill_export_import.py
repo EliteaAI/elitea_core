@@ -19,6 +19,10 @@ ALLOWED_SKILL_EXTENSIONS = {'.md'}
 
 REQUIRED_FRONTMATTER_FIELDS = ('name', 'description')
 
+RUN_SETTINGS_FRONTMATTER_KEY = 'elitea_run_settings'
+FRONTMATTER_LLM_FIELDS = ('model_name', 'temperature', 'max_tokens', 'reasoning_effort')
+FRONTMATTER_RUN_SETTINGS_FIELDS = (*FRONTMATTER_LLM_FIELDS, 'selection', 'ignore_project_context')
+
 
 def _select_version(skill_data: dict, version_name: Optional[str]) -> dict:
     versions = skill_data.get('versions') or []
@@ -91,9 +95,11 @@ def skill_to_md(skill_data: dict, version_name: Optional[str] = None) -> str:
     if not version.get('instructions') and details.get('name') == version.get('name'):
         instructions = details.get('instructions', '')
         tags_source = details if details.get('tags') else version
+        run_settings = details.get('run_settings')
     else:
         instructions = version.get('instructions', '')
         tags_source = version
+        run_settings = version.get('run_settings')
 
     frontmatter: Dict[str, Any] = {
         'name': skill_data.get('name', ''),
@@ -108,6 +114,10 @@ def skill_to_md(skill_data: dict, version_name: Optional[str] = None) -> str:
     if tags:
         frontmatter['tags'] = tags
 
+    run_settings_frontmatter = run_settings_to_frontmatter(run_settings)
+    if run_settings_frontmatter:
+        frontmatter[RUN_SETTINGS_FRONTMATTER_KEY] = run_settings_frontmatter
+
     yaml_str = yaml.dump(
         frontmatter,
         default_flow_style=False,
@@ -117,6 +127,30 @@ def skill_to_md(skill_data: dict, version_name: Optional[str] = None) -> str:
     )
 
     return f"---\n{yaml_str}---\n\n{instructions}"
+
+
+def run_settings_to_frontmatter(run_settings: Optional[dict]) -> Dict[str, Any]:
+    if not run_settings:
+        return {}
+    llm_settings = run_settings.get('llm_settings') or {}
+    block = {k: llm_settings[k] for k in FRONTMATTER_LLM_FIELDS if llm_settings.get(k) is not None}
+    selection = llm_settings.get('selection') or {}
+    if selection.get('mode') == 'auto':
+        block['selection'] = selection
+    if run_settings.get('ignore_project_context'):
+        block['ignore_project_context'] = True
+    return block
+
+
+def run_settings_from_frontmatter(meta: dict) -> Optional[dict]:
+    block = meta.get(RUN_SETTINGS_FRONTMATTER_KEY)
+    if not block:
+        return None
+    llm_settings = {k: block[k] for k in (*FRONTMATTER_LLM_FIELDS, 'selection') if block.get(k) is not None}
+    run_settings = {'ignore_project_context': block.get('ignore_project_context', False)}
+    if llm_settings:
+        run_settings['llm_settings'] = llm_settings
+    return run_settings
 
 
 def export_skill_md(
@@ -263,6 +297,8 @@ def validate_skill_frontmatter(meta: dict) -> None:
     - ``name`` and ``description`` are required and non-empty.
     - ``elitea_version``, when present, must be a non-empty string.
     - ``tags``, when present, must be a list of strings.
+    - ``elitea_run_settings``, when present, must be a mapping of known fields; its
+      values are validated on import, where an invalid model setting is dropped.
 
     """
     if not isinstance(meta, dict):
@@ -284,6 +320,16 @@ def validate_skill_frontmatter(meta: dict) -> None:
             raise ValueError('Tags must be a list')
         if any(not isinstance(t, str) for t in tags):
             raise ValueError('All tags must be strings')
+
+    run_settings = meta.get(RUN_SETTINGS_FRONTMATTER_KEY)
+    if run_settings is not None:
+        if not isinstance(run_settings, dict):
+            raise ValueError(f'"{RUN_SETTINGS_FRONTMATTER_KEY}" must be a YAML mapping')
+        unknown = sorted(set(run_settings) - set(FRONTMATTER_RUN_SETTINGS_FIELDS))
+        if unknown:
+            raise ValueError(
+                f'Unknown "{RUN_SETTINGS_FRONTMATTER_KEY}" field(s): {", ".join(unknown)}'
+            )
 
 
 def validate_skill_import_filename(filename: Optional[str]) -> None:
@@ -322,7 +368,12 @@ def import_skill_md(
     tags = frontmatter.get('tags')
     tag_payload = [{'name': tag} for tag in tags] if tags else None
 
-    version = {'name': DEFAULT_VERSION_NAME, 'instructions': body, 'author_id': author_id}
+    version = {
+        'name': DEFAULT_VERSION_NAME,
+        'instructions': body,
+        'author_id': author_id,
+        'run_settings': run_settings_from_frontmatter(frontmatter),
+    }
     if tag_payload:
         version['tags'] = tag_payload
 

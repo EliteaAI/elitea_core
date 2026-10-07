@@ -340,6 +340,8 @@ def test_skill_version_transfer_models_omit_status():
     pkg_names = [
         'plugins.elitea_core.models.pd.collection_base',
         'plugins.elitea_core.models.pd.tag',
+        'plugins.elitea_core.models.pd.llm',
+        'plugins.elitea_core.models.pd.skill_run_settings',
     ]
     for pkg_name in pkg_names:
         path = PLUGIN_ROOT / 'models' / 'pd' / (pkg_name.rsplit('.', 1)[1] + '.py')

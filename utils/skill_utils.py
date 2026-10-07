@@ -13,6 +13,7 @@ from .authors import get_authors_data
 from .utils import set_columns_as_attrs, get_public_project_id, parse_ids_filter
 from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
 from .folder_access import folder_exclusion_clause
+from .skill_run_settings import portable_run_settings
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag, ApplicationVersion, Application
 from ..models.enums.all import SkillEntityTypes, PublishStatus, AgentTypes
@@ -29,6 +30,7 @@ from ..models.pd.skill_version import (
     SkillVersionUpdateModel,
     SkillVersionDetailModel,
 )
+from ..models.pd.skill_run_settings import dump_run_settings
 
 
 MAX_SKILLS_PER_AGENT = 5
@@ -879,6 +881,7 @@ def create_skill(
             instructions=version_data.instructions,
             author_id=version_data.author_id or skill.author_id,
             meta=version_data.meta or {},
+            run_settings=dump_run_settings(version_data.run_settings),
         )
         session.add(version)
         session.flush()
@@ -1031,6 +1034,7 @@ def create_skill_version(
             instructions=version_data.instructions,
             author_id=version_data.author_id or auth.current_user().get('id'),
             meta=version_data.meta or {},
+            run_settings=dump_run_settings(version_data.run_settings),
         )
         s.add(version)
         s.flush()
@@ -1215,6 +1219,7 @@ def import_skill(
             'author_id': v.get('author_id', author_id),
             'tags': v.get('tags') or None,
             'meta': v.get('meta') or None,
+            'run_settings': portable_run_settings(project_id, v.get('run_settings')),
         }
         for v in versions
     ]
@@ -1810,6 +1815,8 @@ def _update_version_fields(session, version: SkillVersion, update_data: SkillVer
         version.instructions = update_data.instructions
     if update_data.meta is not None:
         version.meta = {**(version.meta or {}), **update_data.meta}
+    if 'run_settings' in update_data.model_fields_set:
+        version.run_settings = dump_run_settings(update_data.run_settings)
 
     # Handle tags
     if update_data.tags is not None:

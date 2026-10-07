@@ -375,7 +375,7 @@ class SkillMcpUpdateModel(BaseModel):
     version: Optional[SkillVersionNestedUpdateModel] = Field(
         None,
         description=(
-            "Version content to write (instructions, tags, name, meta). version.id selects which "
+            "Version content to write (instructions, tags, name, meta, run_settings). version.id selects which "
             "version; it must match version_id when that is supplied. This is the recommended "
             "shape whenever a version is targeted."
         ),

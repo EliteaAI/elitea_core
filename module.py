@@ -492,6 +492,10 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_project_chat_config", self.migrate_project_chat_config, group="R-2.0.7",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_skill_run_settings_column", self.migrate_skill_run_settings_column,
+                group="R-2.0.7",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -513,13 +517,13 @@ class Module(module.ModuleModel):
             try:
                 from .utils.skill_publish_schema import (
                     project_ids_missing_skill_columns,
-                    apply_skill_publish_columns,
+                    apply_skill_columns,
                 )
                 pending = project_ids_missing_skill_columns()
                 if not pending:
                     return
                 log.info("skill publish schema: auto-migrating %s project(s)", len(pending))
-                migrated, failed = apply_skill_publish_columns(pending)
+                migrated, failed = apply_skill_columns(pending)
                 log.info(
                     "skill publish schema: auto-migration done (migrated=%s failed=%s)",
                     len(migrated), len(failed),
