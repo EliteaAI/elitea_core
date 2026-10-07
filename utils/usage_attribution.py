@@ -12,6 +12,7 @@ ENTITY_KWARGS_KEY = "_elitea_entity"
 ROOT_ENTITY_KWARGS_KEY = "_elitea_root_entity"
 ENTITY_TYPE_APPLICATION = "application"
 ENTITY_TYPE_EVALUATION = "evaluation"
+ENTITY_TYPE_SKILL = "skill"
 
 
 def evaluation_attribution(
@@ -36,5 +37,21 @@ def evaluation_attribution(
             "type": ENTITY_TYPE_APPLICATION,
             "id": application_id,
             "version_id": application_version_id,
+        },
+    }
+
+
+def skill_attribution(skill_id: int, skill_version_id: int, skill_name: str) -> dict:
+    return {
+        "entity": {
+            "type": ENTITY_TYPE_SKILL,
+            "id": skill_id,
+            "version_id": skill_version_id,
+            "name": skill_name,
+        },
+        "root": {
+            "type": ENTITY_TYPE_SKILL,
+            "id": skill_id,
+            "version_id": skill_version_id,
         },
     }
