@@ -565,27 +565,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def migrate_skill_run_settings_column(self, *args, **kwargs):
-        param = kwargs.get("param", "") or ""
-        project_id_filter = None
-        for seg in [s.strip() for s in param.split(";")]:
-            if seg.lower().startswith("project_id="):
-                value = seg[len("project_id="):].strip()
-                if value.lower() != "all":
-                    try:
-                        project_id_filter = int(value)
-                    except ValueError:
-                        log.warning(
-                            "migrate_skill_run_settings_column: invalid project_id '%s', scanning all", value)
-
         try:
-            if project_id_filter is not None:
-                project_ids = [project_id_filter]
-            else:
-                project_ids = [
-                    p["id"] for p in (
-                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
-                    )
-                ]
+            project_ids = _target_project_ids(self.context.rpc_manager, kwargs.get("param"))
         except Exception:  # pylint: disable=W0703
             log.exception("migrate_skill_run_settings_column: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
@@ -3965,3 +3946,24 @@ def _run_ado_project_migration(  # pylint: disable=R0913,R0914
             session.commit()
 
     return results
+
+
+def _requested_project_id(param):
+    for segment in (param or "").split(";"):
+        key, _, value = segment.partition("=")
+        value = value.strip()
+        if key.strip().lower() != "project_id" or value.lower() == "all":
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            log.warning("invalid project_id '%s', scanning all projects", value)
+    return None
+
+
+def _target_project_ids(rpc_manager, param):
+    project_id = _requested_project_id(param)
+    if project_id is not None:
+        return [project_id]
+    projects = rpc_manager.call.project_list(filter_={"create_success": True}) or []
+    return [project["id"] for project in projects]
