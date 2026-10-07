@@ -36,7 +36,7 @@ def sp(monkeypatch):
     monkeypatch.setitem(sys.modules, 'plugins.elitea_core.utils.publish_utils', publish_utils)
     # Other suites replace `tools` with narrower stubs; pin our own so test order does not matter
     tools_stub = types.ModuleType('tools')
-    tools_stub.rpc_tools = types.SimpleNamespace(RpcMixin=None)
+    tools_stub.this = types.SimpleNamespace(module=None)
     monkeypatch.setitem(sys.modules, 'tools', tools_stub)
 
     spec = importlib.util.spec_from_file_location(
@@ -243,3 +243,36 @@ def test_permission_not_checked_when_there_are_no_sub_agents(sp, monkeypatch):
 
     assert sp.collect_subagent_version_details(7, [{'type': 'artifact', 'settings': {}}], user_id=5) == {}
     assert calls == []
+
+
+def test_expand_calls_the_module_directly_not_rpc(sp, monkeypatch):
+    # Same-plugin call: an RPC to ourselves is a pylon_main -> pylon_main round trip (deadlock-prone).
+    calls = []
+
+    class Module:
+        def get_application_version_details_expanded(self, **kwargs):
+            calls.append(kwargs)
+            return {'id': kwargs['version_id'], 'tools': [], 'meta': {}}
+
+    monkeypatch.setattr(sys.modules['tools'], 'this', types.SimpleNamespace(module=Module()), raising=False)
+    monkeypatch.setattr(sp, 'this', sys.modules['tools'].this)
+    internal_tools = types.ModuleType('plugins.elitea_core.utils.internal_tools')
+    internal_tools.inject_mcp_toolkits = lambda **kwargs: []
+    internal_tools.dedupe_internal_mcp_tools = lambda tools: None
+    internal_tools.resolve_internal_mcp_tools = lambda tools, user_id, project_id: None
+    skill_utils = types.ModuleType('plugins.elitea_core.utils.skill_utils')
+    skill_utils.apply_runtime_skills = lambda details: None
+    monkeypatch.setitem(sys.modules, 'plugins.elitea_core.utils.internal_tools', internal_tools)
+    monkeypatch.setitem(sys.modules, 'plugins.elitea_core.utils.skill_utils', skill_utils)
+
+    result = sp.expand_version_for_sdk(7, 1, 11, 5)
+
+    assert result['id'] == 11
+    assert calls == [{'project_id': 7, 'application_id': 1, 'version_id': 11, 'user_id': 5}]
+
+
+def test_expand_returns_the_error_dict_unchanged(sp, monkeypatch):
+    module = types.SimpleNamespace(get_application_version_details_expanded=lambda **kwargs: {'error': 'not found'})
+    monkeypatch.setattr(sp, 'this', types.SimpleNamespace(module=module))
+
+    assert sp.expand_version_for_sdk(7, 1, 11, 5) == {'error': 'not found'}

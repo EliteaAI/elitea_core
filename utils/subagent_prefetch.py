@@ -2,7 +2,7 @@ import json
 from typing import Optional
 
 from pylon.core.tools import log
-from tools import rpc_tools
+from tools import this
 
 from .folder_access import APPLICATION_ENTITY_TYPES, resolve_entities_access
 
@@ -17,7 +17,8 @@ def prefetch_key(application_id, version_id) -> str:
 
 def expand_version_for_sdk(project_id: int, application_id: int, version_id: int, user_id: int) -> dict:
     """Version details exactly as the SDK receives them from PATCH version; {'error': ...} on failure."""
-    version_details = rpc_tools.RpcMixin().rpc.call.applications_get_application_version_details_expanded(
+    # Same-plugin call: go through the module, an RPC would be a pylon_main -> pylon_main round trip
+    version_details = this.module.get_application_version_details_expanded(
         project_id=project_id,
         application_id=application_id,
         version_id=version_id,
