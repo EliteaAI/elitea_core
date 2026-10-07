@@ -1,4 +1,5 @@
 import json
+from time import monotonic
 from typing import Optional
 
 from pylon.core.tools import log
@@ -151,3 +152,21 @@ def collect_subagent_version_details(
     except Exception as e:
         log.warning(f"[subagent_prefetch] stopped after {len(result)} sub-agents: {e}")
     return result
+
+
+def attach_subagent_prefetch(payload: dict, project_id: int, user_id: int) -> None:
+    """Adds application.subagent_version_details to the predict payload; never raises."""
+    application = payload.get('application')
+    try:
+        if not isinstance(application, dict):
+            return
+        if not (this.descriptor.config.get('predict') or {}).get('prefetch_subagents', True):
+            return
+        started = monotonic()
+        application['subagent_version_details'] = collect_subagent_version_details(
+            project_id=project_id, root_tools=payload.get('tools'), user_id=user_id,
+        )
+        log.info("[subagent_prefetch] %d sub-agents in %.3fs",
+                 len(application['subagent_version_details']), monotonic() - started)
+    except Exception as e:
+        log.warning(f"[subagent_prefetch] skipped, SDK will fetch sub-agents itself: {e}")
