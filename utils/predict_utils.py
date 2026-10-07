@@ -515,6 +515,23 @@ def generate_predict_payload(
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
 
+        # #6913: ship expanded sub-agents so the SDK skips a GET+PATCH round trip per child
+        application = payload.get('application')
+        try:
+            if isinstance(application, dict) and (this.descriptor.config.get('predict') or {}).get('prefetch_subagents', True):
+                from time import monotonic
+                from .subagent_prefetch import collect_subagent_version_details
+                started = monotonic()
+                application['subagent_version_details'] = collect_subagent_version_details(
+                    project_id=parsed.project_id,
+                    root_tools=payload.get('tools'),
+                    user_id=user_id,
+                )
+                log.info("[subagent_prefetch] %d sub-agents in %.3fs",
+                         len(application['subagent_version_details']), monotonic() - started)
+        except Exception as e:
+            log.warning(f"[subagent_prefetch] skipped, SDK will fetch sub-agents itself: {e}")
+
     return payload
 
 

@@ -29,7 +29,7 @@ from ...utils.mcp_versioning import (
     instructions_sha256,
     sanitize_mcp_settings_update,
 )
-from ...utils.skill_utils import apply_runtime_skills
+from ...utils.subagent_prefetch import expand_version_for_sdk
 from ...utils.utils import mask_secret
 from ....configurations.utils import expand_configuration
 from ...utils.constants import PROMPT_LIB_MODE
@@ -130,51 +130,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not unsecret:
             return {'error': 'Invalid secret header'}, 400
 
-        version_details = self.module.get_application_version_details_expanded(
+        # Shared with the predict-time sub-agent prefetch so both paths return identical details
+        version_details = expand_version_for_sdk(
             project_id=project_id,
             application_id=application_id,
             version_id=version_id,
-            user_id=user_id
+            user_id=user_id,
         )
         if 'error' in version_details:
             return {'error': version_details['error']}, 404
-
-        # #5267: MCP tools are computed at runtime, not stored in the DB. The direct-chat
-        # path injects them in generate_toolkit_payload(); the SDK sub-agent path fetches
-        # version details through this endpoint and never received them. Inject here, scoped
-        # to the resolved end-user (own private project + own token) — see
-        # inject_mcp_toolkits(). Guarded and non-fatal: agents without 'internal_mcp' return
-        # before any RPC/token work.
-        # project_id is the SDK client's project, which is the conversation's
-        # (predict_utils.py sets llm.kwargs.project_id = parsed.project_id), and the SDK only
-        # reaches this endpoint for a sub-agent in that same project — a cross-project one is
-        # served by get_public_app_details instead. So it is the right scope: without it, a
-        # sub-agent carrying builder tools would be an unclamped route out of a clamped
-        # conversation.
-        try:
-            from ...utils.internal_tools import inject_mcp_toolkits
-            agent_internal_tools = (version_details.get('meta') or {}).get('internal_tools', [])
-            mcp_tools = inject_mcp_toolkits(
-                user_id=user_id,
-                current_project_id=project_id,
-                internal_tools=agent_internal_tools,
-                existing_tools=version_details.get('tools'),
-                scope_project_id=project_id,
-            )
-            if mcp_tools:
-                version_details.setdefault('tools', [])
-                version_details['tools'].extend(mcp_tools)
-        except Exception as e:
-            log.warning(f"[#5267] Failed to inject MCP toolkits into version details: {e}")
-
-        try:
-            from ...utils.internal_tools import dedupe_internal_mcp_tools, resolve_internal_mcp_tools
-            dedupe_internal_mcp_tools(version_details.get('tools'))
-            resolve_internal_mcp_tools(version_details.get('tools'), user_id, project_id)
-        except Exception as e:
-            log.warning(f"Failed to resolve internal MCP toolkits in version details: {e}")
-
-        apply_runtime_skills(version_details)
 
         return version_details, 200
 
