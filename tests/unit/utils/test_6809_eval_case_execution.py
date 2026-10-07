@@ -348,6 +348,7 @@ def test_trajectory_rollup_averages_only_recorded_cases(execution):
     assert rollup['step_limit_hits'] == 1
     # The timed-out case's latency is not averaged in: it has no trajectory to compare against.
     assert rollup['average_latency_ms'] == 2000
+    assert (rollup['p50_latency_ms'], rollup['p95_latency_ms']) == (1000, 3000)
     assert rollup['excluded_cases'] == {'count': 3, 'budget_blocked': 1, 'not_applicable': 1,
                                         'not_recorded': 1}
 
@@ -358,7 +359,20 @@ def test_trajectory_rollup_with_nothing_recorded_has_no_averages(execution):
     assert rollup['recorded_cases'] == 0
     assert rollup['averages']['llm_calls'] is None
     assert rollup['average_latency_ms'] is None
+    assert rollup['p50_latency_ms'] is None and rollup['p95_latency_ms'] is None
     assert rollup['excluded_cases']['not_recorded'] == 1
+
+
+def test_trajectory_rollup_latency_percentiles_are_nearest_rank(execution):
+    rows = [_exec_row('recorded', latency_ms=ms) for ms in range(100, 2100, 100)]  # 20 cases
+    rows.append(_exec_row('recorded'))  # no latency: left out, not counted as 0
+
+    rollup = execution.trajectory_rollup(rows)
+
+    assert rollup['p50_latency_ms'] == 1000
+    assert rollup['p95_latency_ms'] == 1900
+    single = execution.trajectory_rollup([_exec_row('recorded', latency_ms=750)])
+    assert (single['p50_latency_ms'], single['p95_latency_ms']) == (750, 750)
 
 
 def test_trajectory_rollup_is_none_without_rows(execution):

@@ -20,6 +20,7 @@ steps is a real "the agent answered without tools", while a missing envelope is 
 with a reason, and a case where no agent ran is ``not_applicable``.
 """
 import json
+import math
 import re
 from datetime import datetime
 from typing import Any, List, Optional
@@ -403,6 +404,14 @@ ROLLUP_COUNTERS = ('llm_calls', 'tool_calls', 'tool_errors', 'retries', 'redunda
                    'guardrail_events')
 
 
+def _percentile(values: List[float], percent: int) -> Optional[float]:
+    """Nearest-rank percentile: always a latency some case actually had, never an interpolation."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(math.ceil(percent / 100 * len(ordered)) - 1, 0)]
+
+
 def trajectory_rollup(rows: List[dict]) -> Optional[dict]:
     """Run-level trajectory counters (``EvalRun.meta.trajectory_rollup``) from execution rows.
 
@@ -435,5 +444,7 @@ def trajectory_rollup(rows: List[dict]) -> Optional[dict]:
         'averages': {key: (totals[key] / n if n else None) for key in ROLLUP_COUNTERS},
         'step_limit_hits': sum(1 for m in metrics if m.get('step_limit_hit')),
         'average_latency_ms': sum(latencies) / len(latencies) if latencies else None,
+        'p50_latency_ms': _percentile(latencies, 50),
+        'p95_latency_ms': _percentile(latencies, 95),
         'excluded_cases': excluded,
     }
