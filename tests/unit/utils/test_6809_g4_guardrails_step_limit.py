@@ -130,6 +130,57 @@ def test_paused_run_records_pause_and_counts_it(execution):
     assert out['metrics']['guardrail_events'] == 1
 
 
+ASK_USER_TRACEBACK = ('Traceback (most recent call last):\n  ...\n'
+                      "langgraph.errors.GraphInterrupt: (Interrupt(value={'type': 'hitl', "
+                      "'guardrail_type': 'clarifying_question', 'tool_name': 'ask_user'}),)")
+
+ASK_USER_INTERRUPT = {'type': 'hitl', 'interrupt_id': 'hitl_2', 'guardrail_type': 'clarifying_question',
+                      'node_name': 'ask_user', 'tool_name': 'ask_user', 'message': 'Which language?'}
+
+
+def _ask_user_envelope():
+    """Live shape (run 156): the interrupted ``ask_user`` call is an errored entry with the traceback."""
+    envelope = _paused_envelope(ASK_USER_INTERRUPT, text='')
+    entry = _tool('ask_user', '2026-10-07T11:57:00+00:00', output=None, finish_reason='error')
+    entry['error'] = ASK_USER_TRACEBACK
+    envelope['result']['tool_calls_dict'] = {'q': entry}
+    return envelope
+
+
+def test_interrupted_call_is_paused_not_a_tool_error(execution):
+    out = execution.extract_execution(_ask_user_envelope(), status='guardrail_paused')
+    step = out['trajectory']['steps'][0]
+    assert (step['status'], step['is_error'], step['error']) == ('paused', False, None)
+    assert out['metrics']['tool_errors'] == 0
+    assert out['metrics']['retries'] == 0
+    # The pause is counted once, on the trajectory, not again for its call.
+    assert out['metrics']['guardrail_events'] == 1
+
+
+def test_interrupt_marker_is_paused_without_a_recorded_pause(execution):
+    assert execution.tool_step_status({'finish_reason': 'error', 'error': ASK_USER_TRACEBACK}) == 'paused'
+
+
+def test_paused_tool_error_without_marker_is_relabelled(execution):
+    envelope = _paused_envelope()
+    failed = _tool('list_branches', '2026-10-06T06:00:01+00:00', finish_reason='error')
+    failed['error'] = 'boom'
+    guarded = _tool('delete_branch', '2026-10-06T06:00:02+00:00', output=None, finish_reason='error')
+    guarded['error'] = 'Waiting for approval'
+    envelope['result']['tool_calls_dict'] = {'a': failed, 'b': guarded}
+    out = execution.extract_execution(envelope, status='guardrail_paused')
+    assert [s['status'] for s in out['trajectory']['steps']] == ['error', 'paused']
+    assert out['metrics']['tool_errors'] == 1
+
+
+def test_unpaused_run_keeps_its_tool_errors(execution):
+    entry = _tool('delete_branch', '2026-10-06T06:00:01+00:00', finish_reason='error')
+    entry['error'] = 'boom'
+    out = execution.extract_execution({'result': {'tool_calls_dict': {'a': entry}}}, status='ok')
+    assert out['trajectory']['steps'][0]['status'] == 'error'
+    assert out['metrics']['tool_errors'] == 1
+
+
 def test_run_agent_pause_fails_the_case_even_with_text(runner):
     """Text before the pause used to pass as ``ok``; nobody answers the prompt in a batch run."""
     out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'},

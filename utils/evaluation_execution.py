@@ -39,6 +39,9 @@ _ENVELOPE_KEYS = ('thinking_steps', 'tool_calls_dict')
 # The tool result the SDK's sensitive-tool guard returns when the user declined a call
 # (``runtime/tools/llm.py`` SENSITIVE_TOOL_BLOCKED_RESULT_TYPE). The agent keeps going after it.
 _BLOCKED_RESULT_TYPE = 'sensitive_tool_blocked'
+# A tool that pauses the graph (``ask_user``, a HITL guard) surfaces LangGraph's interrupt as its error.
+_INTERRUPT_MARKER = 'GraphInterrupt'
+TOOL_STEP_PAUSED = 'paused'
 # How a run that ran out of steps shows up: the SDK tool loop appends a fixed warning as the last
 # AI message (``runtime/tools/llm.py``), and the LangGraph recursion limit raises an error.
 _STEP_LIMIT_MARKERS = ('maximum tool execution iterations', 'recursion limit', 'graphrecursionerror')
@@ -149,17 +152,20 @@ def _is_blocked(tool_output) -> bool:
 
 
 def tool_step_status(entry: dict) -> str:
-    """``ok`` | ``error`` | ``action_required`` | ``blocked`` for one ``tool_calls_dict`` entry.
+    """``ok`` | ``error`` | ``action_required`` | ``blocked`` | ``paused`` for one ``tool_calls_dict`` entry.
 
     ``action_required`` is the MCP-auth pause the indexer writes on the call; ``blocked`` is a
-    sensitive tool the guard refused (design §4.5). Neither is a tool failure. A HITL pause is not a
-    step status: it ends the run and is recorded once, on the trajectory (:func:`pause_details`).
+    sensitive tool the guard refused (design §4.5); ``paused`` is the call that raised the run's HITL
+    pause. None of them is a tool failure. The pause itself is recorded once, on the trajectory
+    (:func:`pause_details`).
     """
     finish_reason = entry.get('finish_reason')
     if finish_reason == 'action_required':
         return 'action_required'
     if _is_blocked(entry.get('tool_output')):
         return 'blocked'
+    if _INTERRUPT_MARKER in str(entry.get('error') or ''):
+        return TOOL_STEP_PAUSED
     if finish_reason == 'error' or entry.get('error'):
         return 'error'
     return 'ok'
@@ -182,7 +188,8 @@ def _tool_step(entry: dict) -> dict:
         'tool_output': _cap_text(entry.get('tool_output')),
         'status': status,
         'is_error': status == 'error',
-        'error': _cap_text(entry.get('error')),
+        # A paused call's "error" is the interrupt traceback; the pause keeps the identities.
+        'error': None if status == TOOL_STEP_PAUSED else _cap_text(entry.get('error')),
         'finish_reason': entry.get('finish_reason'),
         'call_id': None if parent_agent else call_id,
         'parent_agent': parent_agent,
@@ -279,6 +286,20 @@ def pause_details(predict_result) -> Optional[dict]:
     }
 
 
+def _mark_paused_steps(trajectory: dict) -> None:
+    """When no call carried the interrupt marker, relabel the paused tool's last errored call.
+
+    A guard pause can leave the error on the paused tool's own entry without a traceback. It is not
+    a tool failure, so it must not count in ``tool_errors`` or ``retries``."""
+    steps = [s for s in trajectory['steps'] if s.get('kind') == 'tool']
+    tool_name = (trajectory.get('pause') or {}).get('tool_name')
+    if not tool_name or any(s.get('status') == TOOL_STEP_PAUSED for s in steps):
+        return
+    errored = [s for s in steps if s.get('status') == 'error' and s.get('tool_name') == tool_name]
+    if errored:
+        errored[-1].update(status=TOOL_STEP_PAUSED, is_error=False)
+
+
 def _final_assistant_text(predict_result) -> Optional[str]:
     inner = _inner(predict_result) or {}
     history = inner.get('chat_history')
@@ -357,6 +378,7 @@ def extract_execution(predict_result: Any, *, status: str, latency_ms: Optional[
     pause = pause_details(predict_result)
     if pause is not None:
         trajectory['pause'] = pause
+        _mark_paused_steps(trajectory)
     return {
         'trajectory_state': TRAJECTORY_RECORDED,
         'trajectory_state_reason': None,
