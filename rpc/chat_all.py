@@ -39,6 +39,8 @@ from ..utils.attachments import NotSupportableProcessorExtension, read_file_cont
 from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.conversation_access import check_post_access
 from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
+from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
+    pop_skill_dispatch, skill_attachment_llm_settings
 from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation,
@@ -80,6 +82,7 @@ CHAT_PREDICT_MAPPER = {
     ParticipantTypes.llm: 'applications_predict_sio_llm',
     ParticipantTypes.application: 'applications_predict_sio',
     ParticipantTypes.toolkit: 'applications_test_toolkit_tool_sio',
+    ParticipantTypes.skill: 'applications_predict_sio',
     # ParticipantTypes.pipeline: 'applications_predict_sio',
 }
 
@@ -559,6 +562,15 @@ def generate_toolkit_participant_payload(
     return result
 
 
+def attachment_llm_settings(session, parsed, conversation_id: int, skill_participant) -> Optional[dict]:
+    if parsed.llm_settings:
+        return parsed.llm_settings.dict()
+    if skill_participant is None:
+        return None
+    # A skill turn carries no model unless the user overrides it; document text extraction still needs one
+    return skill_attachment_llm_settings(session, conversation_id, skill_participant, parsed.project_id)
+
+
 def resolve_turn_runtime_context(msg_group: ConversationMessageGroup, predict_payload) -> dict | None:
     """The runtime context governing this turn.
 
@@ -903,6 +915,14 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
             # Get persona from conversation settings (user's saved preference), default to 'generic'
             result['persona'] = msg_group.conversation.meta.get('persona', 'generic')
 
+        case ParticipantTypes.skill:
+            try:
+                skill_payload = build_skill_participant_payload(
+                    session, msg_group, predict_payload, participant_chat_settings.entity_settings,
+                )
+            except SkillParticipantError as e:
+                raise PayloadGenerationError(str(e)) from e
+            result.update(skill_payload)
         case ParticipantTypes.toolkit:
             # Toolkit participant: generate payload for toolkit tool call
             toolkit_payload = generate_toolkit_participant_payload(
@@ -1262,10 +1282,13 @@ class RPC:
             # graph-state handling further down.
             target_is_pipeline = False
             target_version_internal_tools = []
+            target_skill_participant = None
             if parsed.participant_id:
                 target_participant = session.query(Participant).filter(
                     Participant.id == parsed.participant_id
                 ).first()
+                if target_participant is not None and target_participant.entity_name == ParticipantTypes.skill.value:
+                    target_skill_participant = target_participant
                 if (
                     target_participant is not None
                     and str(target_participant.entity_name) == ParticipantTypes.application.value
@@ -1278,7 +1301,7 @@ class RPC:
 
             conversation_internal_tools = (conversation.meta or {}).get('internal_tools', [])
             turn_internal_tools = list(conversation_internal_tools) + target_version_internal_tools
-            if should_inject_runtime_context(turn_internal_tools, target_is_pipeline):
+            if target_skill_participant is None and should_inject_runtime_context(turn_internal_tools, target_is_pipeline):
                 effective_runtime_context = dict(parsed.runtime_context) if parsed.runtime_context else {}
 
                 # Always set server-side truth values
@@ -1325,7 +1348,9 @@ class RPC:
                         message_id=str(response_msg.uuid) if response_msg else None,
                         user_id=current_user['id'],
                         sid=sid,
-                        llm_settings=parsed.llm_settings.dict() if parsed.llm_settings else None,
+                        llm_settings=attachment_llm_settings(
+                            session, parsed, conversation.id, target_skill_participant,
+                        ),
                         pipeline_mode=is_pipeline,
                     )
                     # Collect attachment filepaths from pipeline text chunks for graph state injection
@@ -1459,20 +1484,22 @@ class RPC:
                     payload['message_id'] = str(response_msg.uuid)
                     payload[EXECUTION_GENERATION_KEY] = execution_generation
 
+                    skill_rpc_kwargs, start_event_content = pop_skill_dispatch(payload, {
+                        'participant_id': msg_group.sent_to_id,
+                        'question_id': str(msg_group.uuid),
+                    })
                     # returns result only for applications
                     try:
                         result = getattr(self.context.rpc_manager.call, rpc_func)(
                             sid, payload, SioEvents.chat_predict.value,
-                            start_event_content={
-                                'participant_id': msg_group.sent_to_id,
-                                'question_id': str(msg_group.uuid),
-                            },
+                            start_event_content=start_event_content,
                             chat_project_id=parsed.project_id,
                             await_task_timeout=await_task_timeout,
                             user_id=current_user['id'],
                             return_chat_history=return_chat_history,
                             eligible_for_autoapproval=eligible_for_autoapproval,
                             routing_projection=payload.pop('_routing_projection', None),
+                            **skill_rpc_kwargs,
                         )
                     except (PoolSaturationError, SioValidationError):
                         # Mark the response placeholder as not streaming to avoid stuck chat entry
@@ -2292,16 +2319,18 @@ class RPC:
                     session.add(response_msg)
                     session.commit()
 
+                skill_rpc_kwargs, start_event_content = pop_skill_dispatch(payload, {
+                    'participant_id': response_msg.author_participant_id,
+                    'question_id': str(msg_group.uuid),
+                })
                 result = getattr(self.context.rpc_manager.call, rpc_func)(
                     sid, payload, SioEvents.chat_predict.value,
-                    start_event_content={
-                        'participant_id': response_msg.author_participant_id,
-                        'question_id': str(msg_group.uuid),
-                    },
+                    start_event_content=start_event_content,
                     chat_project_id=parsed.project_id,
                     await_task_timeout=await_task_timeout,
                     user_id=current_user['id'],
                     routing_projection=payload.pop('_routing_projection', None),
+                    **skill_rpc_kwargs,
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout

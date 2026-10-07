@@ -20,7 +20,7 @@ from ...utils.conversation_utils import (
     _message_group_columns, fetch_guarded_message_groups, _serialize_guarded_groups,
 )
 from ...models.participants import Participant, ParticipantMapping
-from ...models.enums.all import ParticipantTypes
+from ...models.enums.all import SELF_MODELLED_PARTICIPANTS
 from ...utils.sio_utils import get_chat_room
 
 from ...utils.constants import PROMPT_LIB_MODE
@@ -241,13 +241,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                             Conversation, Conversation.id == ParticipantMapping.conversation_id
                         ).filter(
                             ParticipantMapping.participant_id == participant_id,
-                            Participant.entity_name == ParticipantTypes.application,
+                            Participant.entity_name.in_(SELF_MODELLED_PARTICIPANTS),
                             Conversation.uuid == conversation_uuid,
                         ).first()
                         if mapping:
-                            # Application LLM settings are resolved from version_details at
-                            # prediction time (see generate_payload in chat_all.py).
-                            # Do NOT inject a default here — it would override the app's model.
+                            # Agent and skill LLM settings are resolved at prediction time
+                            # (see generate_payload in chat_all.py).
+                            # Do NOT inject a default here — it would override their own model.
                             llm_settings_resolved = True
                 except Exception as e:
                     log.warning(f"Failed to resolve participant llm_settings: {e}")

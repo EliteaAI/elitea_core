@@ -125,6 +125,11 @@ def participant_utils_module():
         EntitySettingsUser=type("EntitySettingsUser", (), {}),
     )
     _stub("plugins.elitea_core.utils.authors", get_authors_data=lambda *a, **k: [])
+    _stub(
+        "plugins.elitea_core.utils.skill_participant_utils",
+        load_skill_participant_target=lambda *a, **k: None,
+        skill_participant_details=lambda *a, **k: {},
+    )
 
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.participant_utils",

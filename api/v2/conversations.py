@@ -10,6 +10,7 @@ from ...models.pd.conversation import ConversationCreate, ConversationDetails
 from ...models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ...utils.conversation_utils import get_conversation_details, resolve_persona_instructions
 from ...utils.participant_utils import add_participant_to_conversation
+from ...utils.skill_participant_utils import SkillParticipantError, validate_skill_participants
 from ...utils.chat_feature_flags import get_context_manager_feature_flag
 from ...utils.context_analytics import set_context_strategy
 from ...utils.constants import PROMPT_LIB_MODE
@@ -52,6 +53,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Filter by participant entity meta ID (agent/toolkit ID)."},
             {"name": "entity_name", "in": "query", "required": False, "schema": {"type": "string"},
              "description": "Filter by participant entity name (e.g. 'application', 'llm')."},
+            {"name": "entity_meta_project_id", "in": "query", "required": False, "schema": {"type": "integer"},
+             "description": "Owner project of a 'skill' participant; separates own skills from Catalog skills."},
         ],
         available_to_users=True,
     )
@@ -84,6 +87,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             is_admin=user_is_admin,
             participant_id=entity_meta_id,
             entity_name=request.args.get('entity_name'),
+            entity_project_id=request.args.get('entity_meta_project_id', type=int),
         )
 
         return result, 200
@@ -135,6 +139,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not parsed.is_private and public_project_id == project_id:
             return {"error": "Public conversation can not exist in public project"}, 400
 
+        # Adding a participant commits, so a skill rejected mid-loop would leave the conversation behind
+        try:
+            validate_skill_participants(parsed.participants, project_id)
+        except SkillParticipantError as e:
+            return {'error': str(e)}, 400
+
         # Fetch user's personalization settings
         user_personalization = None
         user_context_defaults = None
@@ -182,13 +192,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
             session.add(new_conversation)
             session.flush()
             for p_data in parsed.participants:
-                add_participant_to_conversation(
-                    project_id=project_id,
-                    session=session,
-                    participant=p_data,
-                    conversation=new_conversation,
-                    initiator_id=user_id
-                )
+                try:
+                    add_participant_to_conversation(
+                        project_id=project_id,
+                        session=session,
+                        participant=p_data,
+                        conversation=new_conversation,
+                        initiator_id=user_id
+                    )
+                except SkillParticipantError as e:
+                    session.rollback()
+                    return {'error': str(e)}, 400
                 session.flush()
 
             context_strategy = None
