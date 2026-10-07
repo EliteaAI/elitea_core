@@ -12,6 +12,7 @@ from tools import auth, rpc_tools, VaultClient, serialize, context
 from .llm_settings import normalize_runtime_max_tokens
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_utils import consume_invoked_skills, resolve_runtime_skills
+from .subagent_prefetch import attach_subagent_prefetch
 from ..models.elitea_tools import EliteATool
 from ..models.enums.all import AgentTypes
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
@@ -514,6 +515,8 @@ def generate_predict_payload(
                 resolve_internal_mcp_tools(tool_list, user_id, parsed.project_id)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
+
+        attach_subagent_prefetch(payload, parsed.project_id, user_id)
 
     return payload
 
