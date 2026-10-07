@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from pylon.core.tools import log
 from tools import rpc_tools
@@ -9,6 +9,7 @@ from ..models.pd.skill_run_settings import SkillRunSettingsWriteModel
 
 
 MODEL_BINDING_FIELDS = ('model_name', 'model_project_id', 'selection')
+PROJECT_CONTEXT_TOGGLE = TypeAdapter(bool)
 SHARED_MODEL_REQUIRED = 'Select a shared model or clear the model to publish this skill'
 
 
@@ -68,15 +69,33 @@ def rebind_llm_settings(project_id: int, llm_settings: dict) -> dict:
     return rebound
 
 
-def validated_run_settings(raw) -> Optional[dict]:
+def validated_llm_settings(llm_settings) -> Optional[dict]:
+    if not llm_settings:
+        return None
     try:
-        return SkillRunSettingsWriteModel.model_validate(raw).model_dump(exclude_none=True)
+        settings = SkillRunSettingsWriteModel.model_validate({'llm_settings': llm_settings})
     except ValidationError as exc:
         log.warning('Skill run settings: invalid model settings were dropped: %s', exc.errors())
-    ignore_project_context = raw.get('ignore_project_context') if isinstance(raw, dict) else None
-    if isinstance(ignore_project_context, bool):
-        return {'ignore_project_context': ignore_project_context}
-    return None
+        return None
+    return settings.model_dump(exclude_none=True).get('llm_settings')
+
+
+def validated_project_context_toggle(value) -> bool:
+    try:
+        return PROJECT_CONTEXT_TOGGLE.validate_python(value)
+    except ValidationError:
+        log.warning('Skill run settings: unreadable ignore_project_context %r; project context stays on', value)
+        return False
+
+
+def validated_run_settings(raw) -> Optional[dict]:
+    if not isinstance(raw, dict):
+        return None
+    settings = {'ignore_project_context': validated_project_context_toggle(raw.get('ignore_project_context', False))}
+    llm_settings = validated_llm_settings(raw.get('llm_settings'))
+    if llm_settings:
+        settings['llm_settings'] = llm_settings
+    return settings
 
 
 def portable_run_settings(project_id: int, raw) -> Optional[dict]:

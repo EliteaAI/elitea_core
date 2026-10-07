@@ -252,3 +252,16 @@ class TestSkillMd:
         frontmatter = {'elitea_run_settings': {'ignore_project_context': flag}}
         raw = env.md.run_settings_from_frontmatter(frontmatter)
         assert env.utils.portable_run_settings(TARGET_PROJECT_ID, raw)['ignore_project_context'] is ignored
+
+    @pytest.mark.parametrize('frontmatter_block, expected', [
+        ({'temperature': 5, 'ignore_project_context': 'true'}, {'ignore_project_context': True}),
+        ({'temperature': 5, 'ignore_project_context': True}, {'ignore_project_context': True}),
+        ({'model_name': 'gpt-4.1', 'ignore_project_context': None},
+         {'llm_settings': {'model_name': 'gpt-4.1', 'model_project_id': PUBLIC_PROJECT_ID}, 'ignore_project_context': False}),
+        ({'model_name': 'gpt-4.1', 'ignore_project_context': 'maybe'},
+         {'llm_settings': {'model_name': 'gpt-4.1', 'model_project_id': PUBLIC_PROJECT_ID}, 'ignore_project_context': False}),
+    ])
+    def test_a_bad_half_drops_only_itself(self, env, frontmatter_block, expected):
+        FakeRpc.available = {(PUBLIC_PROJECT_ID, 'gpt-4.1'): {}}
+        raw = env.md.run_settings_from_frontmatter({'elitea_run_settings': frontmatter_block})
+        assert env.utils.portable_run_settings(TARGET_PROJECT_ID, raw) == expected
