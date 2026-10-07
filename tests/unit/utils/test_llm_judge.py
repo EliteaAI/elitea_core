@@ -171,6 +171,31 @@ def test_unparseable_when_text_not_json(judge_env):
     assert out['status'] == 'unparseable' and out['data'] is None
 
 
+def test_sdk_llm_error_message_is_a_predict_error(judge_env):
+    # The SDK's LLM node returns a failed model call as an assistant 'Error: ...' message;
+    # reporting it as unparseable hid the provider error (e.g. an unroutable judge model).
+    mod, this = judge_env
+    _set_predict(this, result=_assistant('Error: NotFoundError: Unknown provider=None, model=gpt-x'))
+    out = mod.run_llm_judge(1, {}, 's', '{}', 10)
+    assert out['status'] == 'predict_error' and out['data'] is None
+    assert out['error'] == 'NotFoundError: Unknown provider=None, model=gpt-x'
+
+
+def test_sdk_llm_error_message_truncated(judge_env):
+    mod, this = judge_env
+    _set_predict(this, result=_assistant('Error: ' + 'x' * 600))
+    out = mod.run_llm_judge(1, {}, 's', '{}', 10)
+    assert out['status'] == 'predict_error'
+    assert out['error'].endswith('…') and len(out['error']) == 501
+
+
+def test_json_answer_starting_with_error_word_still_parses(judge_env):
+    mod, this = judge_env
+    _set_predict(this, result=_assistant('Error: none found. {"scores": []}'))
+    out = mod.run_llm_judge(1, {}, 's', '{}', 10)
+    assert out['status'] == 'ok' and out['data'] == {'scores': []}
+
+
 def test_parse_wins_over_error_key(judge_env):
     # A valid assistant JSON response takes precedence even if an 'error' key is present.
     mod, this = judge_env
