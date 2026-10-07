@@ -32,3 +32,19 @@ def test_declared_applied_skills_reach_the_payload_ahead_of_invoked_ones():
     declared, invoked = assignment.value.elts
     assert ast.unparse(declared) == '*applied_skills'
     assert ast.unparse(invoked) == "*payload.get('applied_skills', [])"
+
+
+def test_socket_membership_is_checked_in_the_run_project_unless_the_caller_names_one():
+    predict_sio = _predict_sio()
+    assert 'sid_project_id' in [arg.arg for arg in predict_sio.args.args]
+    fallback = next(
+        node for node in ast.walk(predict_sio)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name) and node.targets[0].id == 'sid_project_id'
+    )
+    assert ast.unparse(fallback.value) == 'sid_project_id or parsed.project_id'
+    membership_checks = [
+        ast.unparse(node) for node in ast.walk(predict_sio)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == 'auth.is_sio_user_in_project'
+    ]
+    assert membership_checks == ['auth.is_sio_user_in_project(sid, sid_project_id)']

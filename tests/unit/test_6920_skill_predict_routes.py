@@ -31,12 +31,22 @@ def _load(relative_path, module_name):
     return module
 
 
+class FullRequest:
+    pass
+
+
+class McpRequest:
+    pass
+
+
 class Harness:
     def __init__(self):
         self.user_permissions = set()
         self.folder_denied = set()
         self.runs = []
         self.openapi = {}
+        self.environ = {}
+        self.args = {}
 
     def check_api(self, descriptor):
         required = set(descriptor['permissions'])
@@ -66,6 +76,16 @@ class Harness:
             return wrapper
         return decorator
 
+    def resolve_version_id(self, path_version_id, name='version_id', **kwargs):
+        if path_version_id is not None:
+            return path_version_id, None
+        raw = self.args.get(name)
+        if raw is None:
+            return None, None
+        if not raw.isdigit():
+            return None, ({'error': f'{name} must be an integer'}, 400)
+        return int(raw), None
+
     def execute_skill_predict(self, module, body, **kwargs):
         self.runs.append(kwargs)
         return {'ok': True}, 200
@@ -79,7 +99,9 @@ def harness(isolated_sys_modules):
         _package(name)
 
     flask = types.ModuleType('flask')
-    flask.request = types.SimpleNamespace(get_json=lambda silent=False: {'user_input': 'hi'}, args={})
+    flask.request = types.SimpleNamespace(
+        get_json=lambda silent=False: {'user_input': 'hi'}, args=harness.args, environ=harness.environ,
+    )
     sys.modules['flask'] = flask
 
     tools = types.ModuleType('tools')
@@ -98,14 +120,16 @@ def harness(isolated_sys_modules):
     sys.modules['tools'] = tools
 
     stubs = {
-        'models.pd.skill_predict': {'SkillPredictRequest': object},
+        'models.pd.skill_predict': {'SkillPredictRequest': FullRequest, 'SkillPredictMcpRequest': McpRequest},
         'utils.constants': {'PROMPT_LIB_MODE': 'prompt_lib'},
         'utils.folder_access': {'require_folder_access': harness.require_folder_access},
         'utils.skill_run_utils': {
             'execute_skill_predict': harness.execute_skill_predict,
             'is_async_query': lambda args: False,
+            'request_model_for': lambda environ: McpRequest if environ.get('mcp') else FullRequest,
         },
         'utils.utils': {'get_public_project_id': lambda: PUBLIC_PROJECT_ID},
+        'api.v2.skill': {'resolve_version_id': harness.resolve_version_id},
     }
     for name, attrs in stubs.items():
         module = types.ModuleType(f'{PACKAGE}.{name}')
@@ -171,6 +195,7 @@ def test_own_skill_is_read_from_the_caller_project(harness):
         'published_only': False,
         'user_id': 42,
         'async_requested': False,
+        'request_model': FullRequest,
     }]
 
 
@@ -195,6 +220,7 @@ def test_catalog_skill_is_read_from_the_public_project_and_billed_to_the_caller(
         'published_only': True,
         'user_id': 42,
         'async_requested': False,
+        'request_model': FullRequest,
     }]
 
 
@@ -209,8 +235,36 @@ def test_routes_accept_an_optional_trailing_version(harness):
     ]
 
 
-def test_run_routes_are_published_to_users_but_not_as_mcp_tools(harness):
+def test_run_routes_are_mcp_tools_with_the_narrowed_body(harness):
     for module in (harness.own, harness.catalog):
         meta = harness.openapi[module.__name__]
         assert meta['available_to_users'] is True
-        assert not meta.get('mcp_tool', False)
+        assert meta['mcp_tool'] is True
+        assert meta['request_body'] is FullRequest
+        assert meta['mcp_request_body'] is McpRequest
+
+
+@pytest.mark.parametrize('post', [_own_post, _catalog_post])
+def test_mcp_requests_are_validated_with_the_narrowed_model(harness, post):
+    harness.user_permissions = {PREDICT, SKILL_READ, CATALOG_READ}
+    harness.environ['mcp'] = True
+    post(harness)
+    assert harness.runs[0]['request_model'] is McpRequest
+
+
+@pytest.mark.parametrize('post, permissions', [
+    (_own_post, {PREDICT, SKILL_READ}),
+    (_catalog_post, {PREDICT, CATALOG_READ}),
+])
+def test_version_can_be_selected_by_query_for_mcp_clients(harness, post, permissions):
+    harness.user_permissions = permissions
+    harness.args['version_id'] = '57'
+    post(harness)
+    assert harness.runs[0]['version_id'] == 57
+
+
+def test_malformed_query_version_is_a_400_without_a_run(harness):
+    harness.user_permissions = {PREDICT, SKILL_READ}
+    harness.args['version_id'] = 'abc'
+    _, status = _own_post(harness)
+    assert status == 400 and harness.runs == []

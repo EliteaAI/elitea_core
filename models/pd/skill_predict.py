@@ -18,7 +18,27 @@ class SkillRunLLMSettings(BaseModel):
     reasoning_effort: Optional[str] = None
 
 
-class SkillPredictRequest(BaseModel):
+class SkillPredictMcpRequest(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+        json_schema_extra={
+            'example': {
+                'user_input': 'Review this paragraph for tone.',
+                'llm_settings': {'model_name': 'gpt-5-mini', 'temperature': 0.2},
+            }
+        },
+    )
+
+    user_input: str | List[dict] = Field(description="User message: text or content blocks")
+    chat_history: List[dict] = Field(default_factory=list, description="Prior turns, oldest first")
+    llm_settings: Optional[SkillRunLLMSettings] = Field(
+        default=None,
+        description="Overrides the skill's saved model settings; the caller project's default model is used when neither is set",
+    )
+    return_chat_history: bool = False
+
+
+class SkillPredictRequest(SkillPredictMcpRequest):
     model_config = ConfigDict(
         extra='forbid',
         json_schema_extra={
@@ -31,13 +51,10 @@ class SkillPredictRequest(BaseModel):
         },
     )
 
-    user_input: str | List[dict] = Field(description="User message: text or content blocks")
-    chat_history: List[dict] = Field(default_factory=list, description="Prior turns, oldest first")
-    llm_settings: Optional[SkillRunLLMSettings] = Field(
-        default=None,
-        description="Overrides the skill's saved model settings; the caller project's default model is used when neither is set",
-    )
     async_mode: bool = False
     callback_url: Optional[str] = None
     callback_headers: Optional[Dict[str, str]] = None
-    return_chat_history: bool = False
+    sid: Optional[str] = Field(
+        default=None,
+        description="Socket.IO session of the caller. When set, the run streams to that socket and the call returns a task_id and stream_id at once.",
+    )

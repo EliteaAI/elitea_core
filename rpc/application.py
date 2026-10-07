@@ -184,6 +184,7 @@ class RPC:
                     routing_projection: Optional[dict] = None,
                     trigger_source: Optional[str] = None,
                     applied_skills: Optional[list] = None,
+                    sid_project_id: Optional[int] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -207,8 +208,9 @@ class RPC:
                 message_id=data.get("message_id")
             )
 
-        if sid and not auth.is_sio_user_in_project(sid, parsed.project_id):
-            log.warning("Sid %s is not in project %s", sid, parsed.project_id)
+        sid_project_id = sid_project_id or parsed.project_id
+        if sid and not auth.is_sio_user_in_project(sid, sid_project_id):
+            log.warning("Sid %s is not in project %s", sid, sid_project_id)
             return  # FIXME: need some proper error?
 
         if parsed.version_id:

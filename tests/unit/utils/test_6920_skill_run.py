@@ -87,6 +87,11 @@ class SkillIdColumn:
         return other
 
 
+SOCKET_OWNER = {'socket-of-42': 42, 'socket-of-99': 99}
+SOCKET_PROJECTS = {'socket-of-42': {CALLER_PROJECT_ID}, 'socket-of-99': {CALLER_PROJECT_ID}}
+NO_OUTCOME = object()
+
+
 class FakeModule:
     def __init__(self, outcome=None, raises=None):
         self.outcome = {'result': {'chat_history': []}} if outcome is None else outcome
@@ -102,7 +107,7 @@ class FakeModule:
         self.calls.append(kwargs)
         if self.raises is not None:
             raise self.raises
-        return self.outcome
+        return None if self.outcome is NO_OUTCOME else self.outcome
 
 
 @pytest.fixture
@@ -125,6 +130,11 @@ def env(isolated_sys_modules):
 
     tools = types.ModuleType('tools')
     tools.db = types.SimpleNamespace(with_project_schema_session=with_project_schema_session)
+    tools.auth = types.SimpleNamespace(
+        sio_users={sid: {'user': owner} for sid, owner in SOCKET_OWNER.items()},
+        current_user=lambda auth_data: {'id': auth_data['user']},
+        is_sio_user_in_project=lambda sid, project_id: project_id in SOCKET_PROJECTS.get(sid, set()),
+    )
     sys.modules['tools'] = tools
 
     sqlalchemy_orm = types.ModuleType('sqlalchemy.orm')
@@ -148,7 +158,7 @@ def env(isolated_sys_modules):
 
     _load('models/enums/all.py', f'{PACKAGE}.models.enums.all')
     _load('models/pd/skill_predict.py', f'{PACKAGE}.models.pd.skill_predict')
-    for name in ('exceptions', 'sio_utils', 'project_context_utils', 'usage_attribution'):
+    for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution'):
         _load(f'utils/{name}.py', f'{PACKAGE}.utils.{name}')
     module = _load('utils/skill_run_utils.py', f'{PACKAGE}.utils.skill_run_utils')
     return types.SimpleNamespace(mod=module, schemas=schemas, project_context=project_context)
@@ -469,3 +479,133 @@ class TestErrorMapping:
         module = FakeModule(raises=RuntimeError('boom'))
         _, status = _run(env, module, {'user_input': 'hi'})
         assert status == 500 and module.events == ['clear', 'set']
+
+
+def _raised_while_handling(handled, raised):
+    try:
+        try:
+            raise handled
+        except type(handled):
+            raise raised
+    except type(raised) as caught:
+        return caught
+
+
+class TestResponseMeta:
+    def test_sync_response_carries_invoked_skills_and_skill_run(self, env, own_skill):
+        body, status = _run(env, FakeModule(), {'user_input': 'hi'})
+        assert status == 200
+        assert body['meta'] == {
+            'invoked_skills': [{'skill_id': 10, 'name': 'Reviewer', 'icon_meta': {'url': 'i.png'}}],
+            'skill_run': {'skill_id': 10, 'skill_version_id': 100, 'version_name': 'base'},
+        }
+
+    def test_async_response_carries_the_same_meta(self, env, own_skill):
+        body, _ = _run(env, FakeModule(outcome={'task_id': 't-1'}), {'user_input': 'hi', 'async_mode': True})
+        assert body['meta']['skill_run'] == {'skill_id': 10, 'skill_version_id': 100, 'version_name': 'base'}
+
+    def test_start_event_carries_the_meta_to_the_stream(self, env, own_skill):
+        module = FakeModule()
+        body, _ = _run(env, module, {'user_input': 'hi'})
+        assert module.calls[0]['start_event_content'] == body['meta']
+
+    def test_stream_id_names_the_message_of_the_run(self, env, own_skill):
+        module = FakeModule()
+        body, _ = _run(env, module, {'user_input': 'hi'})
+        data = module.calls[0]['data']
+        assert body['stream_id'] == data['stream_id'] == data['message_id']
+
+
+class TestSocketStreaming:
+    def test_own_socket_streams_without_waiting(self, env, own_skill):
+        module = FakeModule(outcome={'task_id': 't-1'})
+        body, status = _run(env, module, {'user_input': 'hi', 'sid': 'socket-of-42'})
+        call = module.calls[0]
+        assert status == 200 and body['task_id'] == 't-1' and body['stream_id'] == call['data']['stream_id']
+        assert call['sid'] == 'socket-of-42' and call['await_task_timeout'] == -1
+        assert call['sid_project_id'] == CALLER_PROJECT_ID
+
+    def test_catalog_run_checks_the_socket_against_the_caller_project(self, env):
+        env.schemas[PUBLIC_PROJECT_ID] = [FakeSkill(10, 'C', [FakeVersion(301, status='published')])]
+        module = FakeModule(outcome={'task_id': 't-1'})
+        _, status = _run(env, module, {'user_input': 'hi', 'sid': 'socket-of-42'},
+                         skill_project_id=PUBLIC_PROJECT_ID, published_only=True)
+        assert status == 200
+        assert module.calls[0]['sid_project_id'] == CALLER_PROJECT_ID
+        assert module.calls[0]['data']['project_id'] == PUBLIC_PROJECT_ID
+
+    def test_another_users_socket_is_refused(self, env, own_skill):
+        module = FakeModule()
+        body, status = _run(env, module, {'user_input': 'hi', 'sid': 'socket-of-99'})
+        assert status == 403 and body['error'] == env.mod.SOCKET_NOT_OWNED_ERROR
+        assert module.calls == []
+
+    def test_unknown_socket_is_refused(self, env, own_skill):
+        module = FakeModule()
+        _, status = _run(env, module, {'user_input': 'hi', 'sid': 'forged'})
+        assert status == 403 and module.calls == []
+
+    def test_socket_outside_the_caller_project_is_refused(self, env, own_skill):
+        SOCKET_PROJECTS['socket-of-42'] = set()
+        try:
+            module = FakeModule()
+            body, status = _run(env, module, {'user_input': 'hi', 'sid': 'socket-of-42'})
+        finally:
+            SOCKET_PROJECTS['socket-of-42'] = {CALLER_PROJECT_ID}
+        assert status == 403 and body['error'] == env.mod.SOCKET_NOT_IN_PROJECT_ERROR
+        assert module.calls == []
+
+    def test_silent_refusal_from_predict_is_a_403(self, env, own_skill):
+        body, status = _run(env, FakeModule(outcome=NO_OUTCOME), {'user_input': 'hi', 'sid': 'socket-of-42'})
+        assert status == 403 and body['error'] == env.mod.SOCKET_NOT_IN_PROJECT_ERROR
+
+    def test_budget_refused_on_the_socket_path_is_still_a_429(self, env, own_skill):
+        exceptions = sys.modules[f'{PACKAGE}.utils.exceptions']
+        sio_utils = sys.modules[f'{PACKAGE}.utils.sio_utils']
+        error = _raised_while_handling(
+            exceptions.BudgetDoorClosedError(project_id=CALLER_PROJECT_ID),
+            sio_utils.SioValidationError(sio=None, sid=None, event='e', error='budget exceeded'),
+        )
+        body, status = _run(env, FakeModule(raises=error), {'user_input': 'hi', 'sid': 'socket-of-42'})
+        assert status == 429 and body['error']['type'] == 'budget_exceeded'
+
+    def test_maintenance_on_the_socket_path_is_a_503(self, env, own_skill):
+        exceptions = sys.modules[f'{PACKAGE}.utils.exceptions']
+        sio_utils = sys.modules[f'{PACKAGE}.utils.sio_utils']
+        error = _raised_while_handling(
+            exceptions.MaintenanceInProgressError('indexer_agent'),
+            sio_utils.SioValidationError(sio=None, sid=None, event='e', error='maintenance'),
+        )
+        body, status = _run(env, FakeModule(raises=error), {'user_input': 'hi', 'sid': 'socket-of-42'})
+        assert status == 503 and body['error'] == 'maintenance_in_progress'
+
+
+class TestMcpRequest:
+    @pytest.mark.parametrize('extra', [
+        {'callback_url': 'http://169.254.169.254/latest'},
+        {'callback_headers': {'A': 'b'}},
+        {'sid': 'socket-of-42'},
+        {'async_mode': True},
+    ])
+    def test_mcp_calls_cannot_reach_callbacks_sockets_or_async(self, env, own_skill, extra):
+        module = FakeModule()
+        _, status = env.mod.execute_skill_predict(
+            module, {'user_input': 'hi', **extra},
+            caller_project_id=CALLER_PROJECT_ID, skill_project_id=CALLER_PROJECT_ID, skill_id=10,
+            version_id=None, published_only=False, user_id=42,
+            request_model=env.mod.request_model_for({env.mod.INTERNAL_MCP_ENVIRON_KEY: True}),
+        )
+        assert status == 400 and module.calls == [] and module.callback_tasks == {}
+
+    def test_mcp_call_runs_synchronously(self, env, own_skill):
+        module = FakeModule()
+        body, status = env.mod.execute_skill_predict(
+            module, {'user_input': 'hi'},
+            caller_project_id=CALLER_PROJECT_ID, skill_project_id=CALLER_PROJECT_ID, skill_id=10,
+            version_id=None, published_only=False, user_id=42,
+            request_model=env.mod.request_model_for({env.mod.INTERNAL_MCP_ENVIRON_KEY: True}),
+        )
+        assert status == 200 and module.calls[0]['await_task_timeout'] > 0 and module.calls[0]['sid'] is None
+
+    def test_plain_http_keeps_the_full_request_model(self, env):
+        assert env.mod.request_model_for({}) is sys.modules[f'{PACKAGE}.models.pd.skill_predict'].SkillPredictRequest

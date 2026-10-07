@@ -6,16 +6,17 @@ from pydantic import ValidationError
 from sqlalchemy.orm import selectinload
 
 from pylon.core.tools import log
-from tools import db
+from tools import auth, db
 
 from .application_utils import validate_and_resolve_llm_settings
-from .exceptions import BudgetDoorClosedError, PoolSaturationError
+from .exceptions import BudgetDoorClosedError, MaintenanceInProgressError, PoolSaturationError
+from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 from .predict_utils import get_project_context
 from .project_context_utils import prepare_project_context_delivery
 from .sio_utils import SioValidationError
 from .usage_attribution import skill_attribution
 from ..models.enums.all import PublishStatus
-from ..models.pd.skill_predict import SkillPredictRequest
+from ..models.pd.skill_predict import SkillPredictMcpRequest, SkillPredictRequest
 from ..models.skill import Skill
 
 
@@ -24,6 +25,8 @@ SKILL_RUN_TIMEOUT_SECONDS = 60 * 60
 NO_MODEL_ERROR = 'No LLM model is configured for this project'
 NOT_PUBLISHED_ERROR = 'Skill version is not published'
 EMPTY_INSTRUCTIONS_ERROR = 'Skill version has no instructions'
+SOCKET_NOT_OWNED_ERROR = 'Socket session does not belong to the caller'
+SOCKET_NOT_IN_PROJECT_ERROR = 'Socket session is not authorized for this project. Please refresh the page and try again.'
 
 
 class SkillRunError(Exception):
@@ -50,13 +53,25 @@ class SkillRun:
     usage_entity: dict
     applied_skills: list
     platform_run_id: str
+    stream_id: str
     target: SkillRunTarget
     llm_settings: dict
     model_fallback: bool
 
+    def meta(self) -> dict:
+        return {
+            'invoked_skills': self.applied_skills,
+            'skill_run': {
+                'skill_id': self.target.skill_id,
+                'skill_version_id': self.target.version_id,
+                'version_name': self.target.version_name,
+            },
+        }
+
     def describe(self) -> dict:
         return {
             'run_id': self.platform_run_id,
+            'stream_id': self.stream_id,
             'skill_id': self.target.skill_id,
             'skill_version_id': self.target.version_id,
             'version_name': self.target.version_name,
@@ -65,6 +80,7 @@ class SkillRun:
                 'model_project_id': self.llm_settings.get('model_project_id'),
             },
             'model_fallback': self.model_fallback,
+            'meta': self.meta(),
         }
 
 
@@ -167,8 +183,11 @@ def build_skill_run(
             target.instructions, get_project_context(caller_project_id),
         )
 
+    stream_id = str(uuid4())
     data = {
         'project_id': skill_project_id,
+        'stream_id': stream_id,
+        'message_id': stream_id,
         'application_name': target.skill_name,
         'version_name': target.version_name,
         'version_details': {
@@ -196,18 +215,35 @@ def build_skill_run(
             'icon_meta': target.icon_meta,
         }],
         platform_run_id=str(uuid4()),
+        stream_id=stream_id,
         target=target,
         llm_settings=llm_settings,
         model_fallback=model_fallback,
     )
 
 
+def socket_owner_id(sid: str) -> Optional[int]:
+    auth_data = auth.sio_users.get(sid)
+    if auth_data is None:
+        return None
+    return auth.current_user(auth_data=auth_data).get('id')
+
+
+def check_socket_access(sid: str, user_id: int, project_id: int) -> None:
+    if socket_owner_id(sid) != user_id:
+        raise SkillRunError(SOCKET_NOT_OWNED_ERROR, 403)
+    if not auth.is_sio_user_in_project(sid, project_id):
+        raise SkillRunError(SOCKET_NOT_IN_PROJECT_ERROR, 403)
+
+
 def dispatch_skill_run(
     module, run: SkillRun, *, caller_project_id: int, user_id: int, wait: bool, return_chat_history: bool,
+    sid: Optional[str] = None,
 ) -> dict:
-    return module.predict_sio(
-        sid=None,
+    outcome = module.predict_sio(
+        sid=sid,
         data=run.data,
+        start_event_content=run.meta(),
         chat_project_id=caller_project_id,
         await_task_timeout=SKILL_RUN_TIMEOUT_SECONDS if wait else -1,
         user_id=user_id,
@@ -215,7 +251,11 @@ def dispatch_skill_run(
         platform_run_id=run.platform_run_id,
         usage_entity=run.usage_entity,
         applied_skills=run.applied_skills,
+        sid_project_id=caller_project_id,
     )
+    if outcome is None:
+        raise SkillRunError(SOCKET_NOT_IN_PROJECT_ERROR, 403)
+    return outcome
 
 
 def json_safe_validation_errors(errors: list) -> list:
@@ -233,6 +273,15 @@ def sio_error_message(error: SioValidationError):
     return str(error.error)
 
 
+def sio_error_response(error: SioValidationError) -> tuple[dict | list, int]:
+    refusal = error.__context__
+    if isinstance(refusal, BudgetDoorClosedError):
+        return refusal.body(), 429
+    if isinstance(refusal, MaintenanceInProgressError):
+        return {'error': 'maintenance_in_progress', 'message': sio_error_message(error)}, 503
+    return {'error': sio_error_message(error)}, 400
+
+
 def run_response(run: SkillRun, outcome: dict, wait: bool) -> tuple[dict, int]:
     if outcome.get('error') == 'maintenance_in_progress':
         return outcome, 503
@@ -244,6 +293,10 @@ def run_response(run: SkillRun, outcome: dict, wait: bool) -> tuple[dict, int]:
     if isinstance(result, dict) and result.get('error') is not None:
         return {'result': result, 'error': str(result['error']), **run.describe()}, 400
     return {'result': result, **run.describe()}, 200
+
+
+def request_model_for(environ) -> type[SkillPredictMcpRequest]:
+    return SkillPredictMcpRequest if environ.get(INTERNAL_MCP_ENVIRON_KEY) else SkillPredictRequest
 
 
 def is_async_query(args) -> bool:
@@ -261,15 +314,20 @@ def execute_skill_predict(
     published_only: bool,
     user_id: int,
     async_requested: bool = False,
+    request_model: type[SkillPredictMcpRequest] = SkillPredictRequest,
 ) -> tuple[dict | list, int]:
     try:
-        request = SkillPredictRequest.model_validate(body if body is not None else {})
+        request = request_model.model_validate(body if body is not None else {})
     except ValidationError as e:
         return e.errors(include_url=False, include_context=False), 400
 
-    wait = not (request.async_mode or request.callback_url is not None or async_requested)
+    sid = getattr(request, 'sid', None)
+    callback_url = getattr(request, 'callback_url', None)
+    wait = not (getattr(request, 'async_mode', False) or callback_url is not None or async_requested or sid)
     module.not_starting_task_event.clear()
     try:
+        if sid:
+            check_socket_access(sid, user_id, caller_project_id)
         target = load_skill_run_target(skill_project_id, skill_id, version_id, published_only)
         run = build_skill_run(
             caller_project_id=caller_project_id,
@@ -285,16 +343,17 @@ def execute_skill_predict(
             user_id=user_id,
             wait=wait,
             return_chat_history=request.return_chat_history,
+            sid=sid,
         )
-        if request.callback_url is not None and outcome.get('task_id'):
+        if callback_url is not None and outcome.get('task_id'):
             module.callback_tasks[outcome['task_id']] = {
-                'callback_url': request.callback_url,
+                'callback_url': callback_url,
                 'callback_headers': request.callback_headers,
             }
     except SkillRunError as e:
         return {'error': e.message}, e.status_code
     except SioValidationError as e:
-        return {'error': sio_error_message(e)}, 400
+        return sio_error_response(e)
     except BudgetDoorClosedError as e:
         return e.body(), 429
     except PoolSaturationError as e:
