@@ -11,6 +11,7 @@ from tools import auth, rpc_tools, VaultClient, serialize, context
 
 from .llm_settings import normalize_runtime_max_tokens
 from .next_input_suggestion_utils import next_input_suggestion_config
+from .skill_mentions import merge_mention_candidates
 from .skill_utils import consume_message_skills, resolve_runtime_skills
 from .subagent_prefetch import attach_subagent_prefetch
 from ..models.elitea_tools import EliteATool
@@ -412,7 +413,7 @@ def generate_predict_payload(
 
         disclosable_skills = resolve_runtime_skills(version_details)
 
-        mention_candidates = attached_skills or version_details.get('mention_skills') or []
+        mention_candidates = merge_mention_candidates(attached_skills, version_details.get('mention_skills') or [])
         payload['user_input'], message_skills = consume_message_skills(payload.get('user_input'), mention_candidates)
         payload['invoked_skills'] = message_skills
 

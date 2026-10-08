@@ -8,6 +8,9 @@ from tools import db
 
 from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTarget, build_skill_run, load_skill_run_target, \
     resolve_skill_llm_settings, select_skill_version
+from .skill_llm_override import select_llm_override
+from .skill_mentions import resolves_mentions_in_predict
+from .skill_utils import consume_message_skills
 from .utils import get_public_project_id
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
@@ -86,11 +89,6 @@ def load_skill_participant_details(entity_meta) -> dict:
             'name': skill.name,
             'icon_meta': ((default_version.meta or {}) if default_version else {}).get('icon_meta') or {},
         }
-
-
-def select_llm_override(entity_settings: dict, predict_payload) -> Optional[dict]:
-    message_override = predict_payload.llm_settings.dict(exclude_none=True) if predict_payload.llm_settings else None
-    return message_override or entity_settings.get('llm_settings') or None
 
 
 def find_previous_thread_id(session, msg_group) -> Optional[str]:
@@ -274,3 +272,17 @@ def participant_skill_mention_candidates(session, msg_group, chat_project_id: in
             continue
         candidates.append(mention_candidate(target))
     return candidates
+
+
+def apply_participant_skill_mentions(session, msg_group, result: dict, chat_project_id: int) -> None:
+    participant = msg_group.sent_to
+    is_dummy = participant.entity_name == ParticipantTypes.dummy
+    if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, result.get('version_details'))):
+        return
+    if not has_skill_mention(result.get('user_input')):
+        return
+    candidates = participant_skill_mention_candidates(session, msg_group, chat_project_id)
+    if is_dummy:
+        result['user_input'], result['invoked_skills'] = consume_message_skills(result['user_input'], candidates)
+        return
+    result['version_details']['mention_skills'] = candidates

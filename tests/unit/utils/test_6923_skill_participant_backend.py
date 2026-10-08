@@ -608,7 +608,7 @@ class TestSkillParticipantMentionsInPredict:
         assert result['invoked_skills'] == [CANDIDATE]
         assert 'attached_skills' not in result
 
-    def test_attached_agent_skills_win_over_mention_candidates(self, builder):
+    def test_attached_agent_skills_come_before_mention_candidates(self, builder):
         build, llm, rpc = builder
         consumed = []
         build.__globals__['consume_message_skills'] = lambda content, candidates: consumed.append(candidates) or (content, [])
@@ -617,4 +617,4 @@ class TestSkillParticipantMentionsInPredict:
         attached = [{**CANDIDATE, 'name': 'Attached'}]
         request.version_details.update(skills=attached, mention_skills=[CANDIDATE])
         build(request, 2, skip_expansion=True)
-        assert consumed == [attached]
+        assert consumed == [[*attached, CANDIDATE]]
