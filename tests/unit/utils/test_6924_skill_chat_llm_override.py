@@ -2,31 +2,20 @@ import types
 
 import pytest
 
-from fixtures.helpers import load_module_with_stubs
+from fixtures.helpers import load_module_with_stubs, load_utils_module
 
 PACKAGE = 'plugins.elitea_core'
 
 
-def _package(name):
-    module = types.ModuleType(name)
-    module.__path__ = []
-    return module
-
-
 @pytest.fixture
-def modules(isolated_sys_modules, plugin_root):
-    packages = {name: _package(name) for name in (
-        'plugins', PACKAGE, f'{PACKAGE}.utils', f'{PACKAGE}.models', f'{PACKAGE}.models.pd',
-        f'{PACKAGE}.models.enums',
-    )}
-    load_module_with_stubs(plugin_root / 'models/enums/all.py', f'{PACKAGE}.models.enums.all', packages)
-    load_module_with_stubs(plugin_root / 'models/pd/llm.py', f'{PACKAGE}.models.pd.llm')
+def modules(isolated_sys_modules, models_path, utils_path):
+    enums = load_module_with_stubs(models_path / 'enums/all.py', 'test_6924_enums')
+    llm = load_module_with_stubs(models_path / 'pd/llm.py', 'test_6924_llm')
     settings = load_module_with_stubs(
-        plugin_root / 'models/pd/participant_settings.py', f'{PACKAGE}.models.pd.participant_settings',
+        models_path / 'pd/participant_settings.py', f'{PACKAGE}.models.pd.participant_settings',
+        {f'{PACKAGE}.models.enums.all': enums, f'{PACKAGE}.models.pd.llm': llm},
     )
-    override = load_module_with_stubs(
-        plugin_root / 'utils/skill_llm_override.py', f'{PACKAGE}.utils.skill_llm_override',
-    )
+    override = load_utils_module(utils_path, 'skill_llm_override')
     return types.SimpleNamespace(EntitySettingsLlm=settings.EntitySettingsLlm, override=override)
 
 

@@ -1,25 +1,14 @@
-import types
-
 import pytest
 
-from fixtures.helpers import load_module_with_stubs
+from fixtures.helpers import load_module_with_stubs, load_utils_module
 
 PACKAGE = 'plugins.elitea_core'
 
 
-def _package(name):
-    module = types.ModuleType(name)
-    module.__path__ = []
-    return module
-
-
 @pytest.fixture
-def mentions(isolated_sys_modules, plugin_root):
-    packages = {name: _package(name) for name in (
-        'plugins', PACKAGE, f'{PACKAGE}.utils', f'{PACKAGE}.models', f'{PACKAGE}.models.enums',
-    )}
-    load_module_with_stubs(plugin_root / 'models/enums/all.py', f'{PACKAGE}.models.enums.all', packages)
-    return load_module_with_stubs(plugin_root / 'utils/skill_mentions.py', f'{PACKAGE}.utils.skill_mentions')
+def mentions(isolated_sys_modules, models_path, utils_path):
+    enums = load_module_with_stubs(models_path / 'enums/all.py', 'test_6924_enums')
+    return load_utils_module(utils_path, 'skill_mentions', extra_stubs={f'{PACKAGE}.models.enums.all': enums})
 
 
 ATTACHED = {'skill_id': 9, 'name': 'Tester'}

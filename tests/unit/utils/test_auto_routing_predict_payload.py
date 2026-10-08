@@ -33,8 +33,6 @@ def builder(models_path):
             assert node.module == 'models.pd.llm'
             return None
     function = Imports().visit(function)
-    mentions_path = models_path.parent/'utils/skill_mentions.py'
-    merge = next(n for n in ast.parse(mentions_path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == 'merge_mention_candidates')
     rpc = Mock()
     rpc.configurations_get_auto_routing_settings.return_value = {'enabled': True}
     rpc.configurations_get_configuration_model.return_value = {'supports_reasoning': True, 'max_output_tokens': 16000}
@@ -50,8 +48,8 @@ def builder(models_path):
         'serialize': lambda value: value,
         'AgentTypes': NS(pipeline=NS(value='pipeline')), 'resolve_application_name': lambda p: 'fixture',
         'resolve_runtime_skills': lambda version: [], 'consume_message_skills': lambda text, skills: (text, []),
+        'merge_mention_candidates': lambda attached, chat: [*attached, *chat],
     }
-    exec(compile(ast.Module([merge], []), str(mentions_path), 'exec'), namespace)
     exec(compile(ast.Module([function], []), str(path), 'exec'), namespace)
     return namespace['generate_predict_payload'], llm, rpc
 
