@@ -268,6 +268,73 @@ class TestDispatchMayUseLlm(unittest.TestCase):
         self.assertTrue(module.schema_may_use_llm("pipeline", None))
 
 
+def model_dispatch(model_project_id, model_name="gemini-3.1-pro-preview", selection=None):
+    llm_settings = {"model_name": model_name, "model_project_id": model_project_id}
+    if selection is not None:
+        llm_settings["selection"] = selection
+    return {"meta": {"project_id": 25}, "kwargs": {
+        "application": {"version_details": {"agent_type": "openai", "llm_settings": llm_settings}},
+    }}
+
+
+class TestDispatchUsesOwnModel(unittest.TestCase):
+    """A project's own (BYO) model is billed to the customer by the provider, so an exhausted
+    shared-model budget must not refuse it at the door. Only an explicit match exempts:
+    an unset model_project_id may still resolve to a public (shared) model."""
+
+    def test_an_own_model_dispatch_passes_a_closed_door(self):
+        module, _ = door()
+        #
+        self.assertTrue(module.dispatch_uses_own_model(model_dispatch(25), 25))
+
+    def test_a_string_project_id_still_matches(self):
+        module, _ = door()
+        #
+        self.assertTrue(module.dispatch_uses_own_model(model_dispatch("25"), 25))
+
+    def test_a_shared_model_dispatch_keeps_the_door(self):
+        module, _ = door()
+        #
+        self.assertFalse(module.dispatch_uses_own_model(model_dispatch(1), 25))
+
+    def test_an_unset_model_project_keeps_the_door(self):
+        module, _ = door()
+        #
+        self.assertFalse(module.dispatch_uses_own_model(model_dispatch(None), 25))
+
+    def test_auto_selection_keeps_the_door(self):
+        # The router may pick a shared deployment whatever the stamped placeholder says
+        module, _ = door()
+        #
+        self.assertFalse(module.dispatch_uses_own_model(
+            model_dispatch(25, selection={"mode": "auto"}), 25,
+        ))
+
+    def test_a_dispatch_without_version_details_keeps_the_door(self):
+        module, _ = door()
+        #
+        self.assertFalse(module.dispatch_uses_own_model({"kwargs": {}}, 25))
+        self.assertFalse(module.dispatch_uses_own_model({}, 25))
+
+    def test_an_llm_chat_predict_reads_the_client_kwargs(self):
+        # predict_llm ships no version_details; the model sits on payload["llm"]["kwargs"]
+        module, _ = door()
+        chat = lambda pid: {"kwargs": {  # noqa: E731
+            "application": {"instructions": ""},
+            "llm": {"kwargs": {"model": "gemini-3.1-pro-preview", "model_project_id": pid}},
+        }}
+        #
+        self.assertTrue(module.dispatch_uses_own_model(chat(25), 25))
+        self.assertFalse(module.dispatch_uses_own_model(chat(1), 25))
+        self.assertFalse(module.dispatch_uses_own_model(chat(None), 25))
+
+    def test_no_model_name_or_no_project_keeps_the_door(self):
+        module, _ = door()
+        #
+        self.assertFalse(module.dispatch_uses_own_model(model_dispatch(25, model_name=None), 25))
+        self.assertFalse(module.dispatch_uses_own_model(model_dispatch(25), None))
+
+
 class TestErrorContract(unittest.TestCase):
     """The refusal has to be recognisable as the same budget refusal the proxy returns."""
 
