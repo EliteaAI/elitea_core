@@ -20,7 +20,7 @@ from ...utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, retire_all_interrupts,
 )
 from ...utils.sio_utils import SioEvents
-from ...utils.skill_participant_utils import pop_skill_dispatch
+from ...utils.skill_participant_utils import pop_skill_dispatch, record_skill_run
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -76,6 +76,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 predict_payload = SioPredictModel.model_validate(raw_predict_payload)
             except ValidationError as e:
                 return {'error': 'Invalid prediction payload', 'details': e.errors()}, 400
+            if msg_group.author_participant.entity_name == ParticipantTypes.skill.value:
+                predict_payload.project_id = project_id
 
             if predict_payload.attachments_info:
                 existing_filepaths = {
@@ -186,6 +188,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     'participant_id': msg_group.author_participant_id,
                     'question_id': parsed.question_id,
                 })
+                record_skill_run(session, msg_group, start_event_content)
                 getattr(self.module.context.rpc_manager.call, rpc_func)(
                     parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
                     routing_projection=regenerate_payload.pop('_routing_projection', None),

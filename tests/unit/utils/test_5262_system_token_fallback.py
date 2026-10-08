@@ -185,7 +185,7 @@ def predict_utils(package_graph, internal_tools):
             "next_input_suggestion_config": lambda project_id: {},
         },
         f"{PACKAGE}.utils.skill_utils": {
-            "consume_invoked_skills": lambda message, skills: (message, []),
+            "consume_message_skills": lambda message, skills: (message, []),
             "resolve_runtime_skills": lambda details: [],
         },
         f"{PACKAGE}.utils.application_tools": {

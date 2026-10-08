@@ -78,8 +78,13 @@ class FakeQuery:
     def options(self, *args):
         return self
 
-    def filter(self, wanted_id):
+    def filter(self, wanted_id, *conditions):
+        if isinstance(wanted_id, frozenset):
+            return FakeQuery([row for row in self.rows if row.id in wanted_id])
         return FakeQuery([row for row in self.rows if row.id == wanted_id])
+
+    def all(self):
+        return list(self.rows)
 
     def where(self, *args):
         return self
@@ -97,6 +102,9 @@ class FakeQuery:
 class IdColumn:
     def __eq__(self, other):
         return other
+
+    def in_(self, values):
+        return frozenset(values)
 
 
 class Column:
@@ -154,13 +162,14 @@ def env(isolated_sys_modules):
     _stub('utils.application_utils', validate_and_resolve_llm_settings=fake_resolve)
     _stub('utils.predict_utils', get_project_context=lambda project_id: {'enabled': False, 'content': ''})
     _stub('utils.utils', get_public_project_id=lambda: PUBLIC_PROJECT_ID)
-    _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None))
+    _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None),
+          SkillVersion=types.SimpleNamespace(id=IdColumn(), skill_id=Column()))
     _stub('models.message_group', ConversationMessageGroup=types.SimpleNamespace(
         author_participant_id=Column(), conversation_id=Column(), created_at=Column(),
     ))
     _stub('models.participants', ParticipantMapping=types.SimpleNamespace(
         entity_settings=None, participant_id=Column(), conversation_id=Column(),
-    ))
+    ), Participant=types.SimpleNamespace(id=Column(), entity_name=Column()))
 
     _load('models/enums/all.py', f'{PACKAGE}.models.enums.all')
     for name in ('skill_predict', 'llm', 'skill_run_settings', 'participant'):

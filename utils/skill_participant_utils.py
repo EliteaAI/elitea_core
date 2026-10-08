@@ -1,15 +1,17 @@
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy import desc
+from sqlalchemy.orm import selectinload
 from tools import db
 
-from .skill_run_utils import SkillRunError, SkillRunTarget, build_skill_run, load_skill_run_target, \
-    resolve_skill_llm_settings
+from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTarget, build_skill_run, load_skill_run_target, \
+    resolve_skill_llm_settings, select_skill_version
 from .utils import get_public_project_id
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
-from ..models.participants import ParticipantMapping
+from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.participant import ParticipantEntitySkill
 from ..models.skill import Skill
 
@@ -55,6 +57,18 @@ def load_skill_participant_target(
     return source, target
 
 
+def pinned_skill_version_id(session, participant, conversation_id: int, chat_project_id: int,
+                            requested_version_id: Optional[int]) -> int:
+    if requested_version_id is None:
+        mapping = session.query(ParticipantMapping.entity_settings).where(
+            ParticipantMapping.participant_id == participant.id,
+            ParticipantMapping.conversation_id == conversation_id,
+        ).first()
+        requested_version_id = ((mapping.entity_settings if mapping else None) or {}).get('version_id')
+    _, target = load_skill_participant_target(participant.entity_meta, chat_project_id, requested_version_id)
+    return target.version_id
+
+
 def validate_skill_participants(participants, chat_project_id: int) -> None:
     for participant in participants:
         if participant.entity_name == ParticipantTypes.skill:
@@ -92,9 +106,22 @@ def previous_thread_id(session, msg_group) -> Optional[str]:
     return (last_skill_message.meta or {}).get('thread_id') if last_skill_message else None
 
 
+def load_pinned_skill_target(
+    entity_meta, chat_project_id: int, version_id: Optional[int],
+) -> tuple[SkillParticipantSource, SkillRunTarget]:
+    try:
+        return load_skill_participant_target(entity_meta, chat_project_id, version_id)
+    except SkillParticipantError as e:
+        if version_id is None or str(e) in (FOREIGN_SKILL_ERROR, SKILL_NOT_FOUND_ERROR, EMPTY_INSTRUCTIONS_ERROR):
+            raise
+        raise SkillParticipantError(
+            unavailable_version_error(f'#{version_id}')
+        ) from e
+
+
 def build_skill_participant_payload(session, msg_group, predict_payload, entity_settings: dict) -> dict:
     chat_project_id = predict_payload.project_id
-    source, target = load_skill_participant_target(
+    source, target = load_pinned_skill_target(
         msg_group.sent_to.entity_meta, chat_project_id, entity_settings.get('version_id'),
     )
     try:
@@ -130,6 +157,14 @@ def pop_skill_dispatch(payload: dict, start_event_content: dict) -> tuple[dict, 
     return rpc_kwargs, {**start_event_content, **dispatch['start_event_content']}
 
 
+def record_skill_run(session, response_msg, start_event_content: dict) -> None:
+    skill_run = start_event_content.get('skill_run')
+    if skill_run is None:
+        return
+    response_msg.meta = {**(response_msg.meta or {}), 'skill_run': skill_run}
+    session.commit()
+
+
 def skill_attachment_llm_settings(session, conversation_id: int, participant, chat_project_id: int) -> Optional[dict]:
     mapping = session.query(ParticipantMapping.entity_settings).where(
         ParticipantMapping.participant_id == participant.id,
@@ -146,3 +181,99 @@ def skill_attachment_llm_settings(session, conversation_id: int, participant, ch
     except (SkillParticipantError, SkillRunError):
         return None
     return llm_settings
+
+
+def unavailable_version_error(version_name) -> str:
+    return (
+        f"Skill version {version_name} is no longer available. "
+        "Choose another version or remove the participant."
+    )
+
+
+def skill_icon_meta(version) -> dict:
+    return ((version.meta or {}) if version else {}).get('icon_meta') or {}
+
+
+def describe_pinned_version(skill, version_id: Optional[int], published_only: bool) -> dict:
+    try:
+        version = select_skill_version(skill, version_id, published_only)
+    except SkillRunError:
+        return {'name': skill.name, 'icon_meta': skill_icon_meta(skill.get_default_version()),
+                'version_name': None, 'is_available': False}
+    return {
+        'name': skill.name,
+        'icon_meta': skill_icon_meta(version),
+        'version_name': version.name,
+        'is_available': bool((version.instructions or '').strip()),
+    }
+
+
+def describe_skill_participants(participants: list, chat_project_id: int) -> dict:
+    public_project_id = get_public_project_id()
+    details = {participant['id']: {'is_available': False, 'version_name': None} for participant in participants}
+    by_owner = defaultdict(list)
+    for participant in participants:
+        owner_id = (participant.get('entity_meta') or {}).get('project_id')
+        if owner_id in (chat_project_id, public_project_id):
+            by_owner[owner_id].append(participant)
+
+    for owner_id, owned in by_owner.items():
+        skill_ids = {participant['entity_meta']['id'] for participant in owned}
+        with db.with_project_schema_session(owner_id) as session:
+            skills = {
+                skill.id: skill for skill in session.query(Skill).options(
+                    selectinload(Skill.versions)
+                ).filter(Skill.id.in_(skill_ids)).all()
+            }
+            for participant in owned:
+                skill = skills.get(participant['entity_meta']['id'])
+                if skill is not None:
+                    details[participant['id']] = describe_pinned_version(
+                        skill,
+                        (participant.get('entity_settings') or {}).get('version_id'),
+                        published_only=owner_id == public_project_id,
+                    )
+    return details
+
+
+def mention_candidate(target: SkillRunTarget) -> dict:
+    return {
+        'skill_id': target.skill_id,
+        'skill_version_id': target.version_id,
+        'name': target.skill_name,
+        'version_name': target.version_name,
+        'icon_meta': target.icon_meta,
+        'instructions': target.instructions,
+    }
+
+
+def has_skill_mention(user_input) -> bool:
+    if isinstance(user_input, str):
+        return '~' in user_input
+    if isinstance(user_input, list):
+        return any(
+            isinstance(block, dict) and '~' in (block.get('text') or '')
+            for block in user_input
+        )
+    return False
+
+
+def participant_skill_mention_candidates(session, msg_group, chat_project_id: int) -> list:
+    rows = session.query(Participant, ParticipantMapping.entity_settings).join(
+        ParticipantMapping, ParticipantMapping.participant_id == Participant.id,
+    ).filter(
+        ParticipantMapping.conversation_id == msg_group.conversation_id,
+        Participant.entity_name == ParticipantTypes.skill.value,
+    ).all()
+    candidates = []
+    for participant, entity_settings in rows:
+        if participant.id == msg_group.sent_to_id:
+            continue
+        try:
+            _, target = load_skill_participant_target(
+                participant.entity_meta, chat_project_id, (entity_settings or {}).get('version_id'),
+            )
+        except SkillParticipantError:
+            continue
+        candidates.append(mention_candidate(target))
+    return candidates

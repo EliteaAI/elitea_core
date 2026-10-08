@@ -88,7 +88,7 @@ _module(
 _module('utils.next_input_suggestion_utils', next_input_suggestion_config=lambda _project_id: {'enabled': False})
 _module(
     'utils.skill_utils',
-    consume_invoked_skills=lambda message, _skills: (message, []),
+    consume_message_skills=lambda message, _skills: (message, []),
     resolve_runtime_skills=lambda _details: [],
 )
 _module('utils.application_tools', expand_toolkit_settings=lambda tools, *_args: tools)

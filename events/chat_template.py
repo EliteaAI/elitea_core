@@ -13,6 +13,7 @@ from ..utils.utils import get_public_project_id
 _APP_ENTITY_NAMES = ['application', 'pipeline']
 _TOOLKIT_ENTITY_NAMES = ['toolkit', 'mcp']
 _USER_ENTITY_NAMES = ['user']
+_SKILL_ENTITY_NAMES = ['skill']
 
 
 def _affected_projects(context, owner_id: int) -> list:
@@ -74,6 +75,31 @@ class Event:
         for project_id in _affected_projects(context, owner_id):
             update_entity_name_in_templates(
                 project_id, _TOOLKIT_ENTITY_NAMES, entity_id, owner_id, new_name
+            )
+
+    @web.event(ApplicationEvents.skill_deleted)
+    def on_skill_deleted(self, context, event, skill_data: dict):
+        owner_id = skill_data['owner_id']
+        for project_id in _affected_projects(context, owner_id):
+            delete_entity_from_templates(project_id, _SKILL_ENTITY_NAMES, skill_data['id'], owner_id)
+
+    @web.event(ApplicationEvents.skill_unpublished)
+    def on_skill_unpublished(self, context, event, skill_data: dict):
+        if not skill_data.get('catalog_emptied'):
+            return
+        owner_id = skill_data['owner_id']
+        for project_id in _affected_projects(context, owner_id):
+            delete_entity_from_templates(project_id, _SKILL_ENTITY_NAMES, skill_data['id'], owner_id)
+
+    @web.event(ApplicationEvents.skill_updated)
+    def on_skill_updated(self, context, event, skill_data: dict):
+        owner_id = skill_data['owner_id']
+        new_name = (skill_data.get('data') or {}).get('name')
+        if not new_name:
+            return
+        for project_id in _affected_projects(context, owner_id):
+            update_entity_name_in_templates(
+                project_id, _SKILL_ENTITY_NAMES, skill_data['id'], owner_id, new_name
             )
 
     @web.event('user_removed_from_project')
