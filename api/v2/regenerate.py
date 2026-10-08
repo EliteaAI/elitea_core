@@ -12,9 +12,9 @@ from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
 from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items, \
-    attachment_llm_settings
+    resolve_attachment_llm_settings
 from ...utils.chat_history import generate_chat_history
-from ...models.enums.all import ChatHistoryRole, AgentTypes, ParticipantTypes
+from ...models.enums.all import ChatHistoryRole, AgentTypes
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, retire_all_interrupts,
@@ -71,7 +71,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 session.commit()
                 session.refresh(reply_msg)
 
-            raw_predict_payload = {**parsed.model_dump(), **parsed.payload}
+            raw_predict_payload = {**parsed.model_dump(), **parsed.payload, 'project_id': project_id}
             try:
                 predict_payload = SioPredictModel.model_validate(raw_predict_payload)
             except ValidationError as e:
@@ -96,10 +96,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
                             predict_payload.project_id,
                             reply_msg,
                             new_attachments,
-                            llm_settings=attachment_llm_settings(
-                                session, predict_payload, reply_msg.conversation_id,
-                                msg_group.author_participant
-                                if msg_group.author_participant.entity_name == ParticipantTypes.skill.value else None,
+                            llm_settings=resolve_attachment_llm_settings(
+                                session, predict_payload, reply_msg.conversation_id, msg_group.author_participant,
                             ),
                         )
                         session.commit()

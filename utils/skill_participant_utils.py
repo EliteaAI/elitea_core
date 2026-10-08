@@ -33,9 +33,7 @@ class SkillParticipantSource:
 
 
 def resolve_skill_participant(entity_meta, chat_project_id: int) -> SkillParticipantSource:
-    meta = ParticipantEntitySkill.model_validate(
-        entity_meta if isinstance(entity_meta, dict) else entity_meta.model_dump()
-    )
+    meta = ParticipantEntitySkill.model_validate(entity_meta)
     public_project_id = get_public_project_id()
     if meta.project_id not in (chat_project_id, public_project_id):
         raise SkillParticipantError(FOREIGN_SKILL_ERROR)
@@ -77,10 +75,8 @@ def validate_skill_participants(participants, chat_project_id: int) -> None:
             )
 
 
-def skill_participant_details(entity_meta) -> dict:
-    meta = ParticipantEntitySkill.model_validate(
-        entity_meta if isinstance(entity_meta, dict) else entity_meta.model_dump()
-    )
+def load_skill_participant_details(entity_meta) -> dict:
+    meta = ParticipantEntitySkill.model_validate(entity_meta)
     with db.with_project_schema_session(meta.project_id) as session:
         skill = session.query(Skill).filter(Skill.id == meta.id).first()
         if skill is None:
@@ -92,18 +88,17 @@ def skill_participant_details(entity_meta) -> dict:
         }
 
 
-def conversation_llm_override(entity_settings: dict, predict_payload) -> Optional[dict]:
+def select_llm_override(entity_settings: dict, predict_payload) -> Optional[dict]:
     message_override = predict_payload.llm_settings.dict(exclude_none=True) if predict_payload.llm_settings else None
     return message_override or entity_settings.get('llm_settings') or None
 
 
-def previous_thread_id(session, msg_group) -> Optional[str]:
-    # offset(1) skips the response row created for this turn
-    last_skill_message = session.query(ConversationMessageGroup).where(
+def find_previous_thread_id(session, msg_group) -> Optional[str]:
+    answer_before_this_turn = session.query(ConversationMessageGroup).where(
         ConversationMessageGroup.author_participant_id == msg_group.sent_to_id,
         ConversationMessageGroup.conversation_id == msg_group.conversation_id,
     ).order_by(desc(ConversationMessageGroup.created_at)).offset(1).first()
-    return (last_skill_message.meta or {}).get('thread_id') if last_skill_message else None
+    return (answer_before_this_turn.meta or {}).get('thread_id') if answer_before_this_turn else None
 
 
 def load_pinned_skill_target(
@@ -130,7 +125,7 @@ def build_skill_participant_payload(session, msg_group, predict_payload, entity_
             skill_project_id=source.project_id,
             target=target,
             user_input=None,
-            llm_override=conversation_llm_override(entity_settings, predict_payload),
+            llm_override=select_llm_override(entity_settings, predict_payload),
         )
     except SkillRunError as e:
         raise SkillParticipantError(e.message) from e
@@ -138,7 +133,7 @@ def build_skill_participant_payload(session, msg_group, predict_payload, entity_
     chat_owned_keys = ('stream_id', 'message_id', 'user_input', 'chat_history')
     payload = {key: value for key, value in run.data.items() if key not in chat_owned_keys}
     payload['entity_name'] = target.skill_name
-    payload['thread_id'] = previous_thread_id(session, msg_group)
+    payload['thread_id'] = find_previous_thread_id(session, msg_group)
     payload['_routing_projection'] = {'instructions': target.instructions}
     payload[SKILL_DISPATCH_KEY] = {
         'usage_entity': run.usage_entity,
@@ -165,7 +160,9 @@ def record_skill_run(session, response_msg, start_event_content: dict) -> None:
     session.commit()
 
 
-def skill_attachment_llm_settings(session, conversation_id: int, participant, chat_project_id: int) -> Optional[dict]:
+def resolve_skill_attachment_llm_settings(
+    session, conversation_id: int, participant, chat_project_id: int,
+) -> Optional[dict]:
     mapping = session.query(ParticipantMapping.entity_settings).where(
         ParticipantMapping.participant_id == participant.id,
         ParticipantMapping.conversation_id == conversation_id,

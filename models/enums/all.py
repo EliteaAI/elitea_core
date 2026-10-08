@@ -107,7 +107,6 @@ class ParticipantTypes(StrEnum):
     # pipeline = 'pipeline'
 
 
-# Participants that resolve their own model at prediction time, so no chat default is injected for them
 SELF_MODELLED_PARTICIPANTS = (ParticipantTypes.application, ParticipantTypes.skill)
 
 

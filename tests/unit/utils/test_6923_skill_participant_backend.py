@@ -26,7 +26,7 @@ PUBLIC_PROJECT_ID = _harness.PUBLIC_PROJECT_ID
 FakePredictPayload = _harness.FakePredictPayload
 FakeQuery = _harness.FakeQuery
 FakeVersion = _harness.FakeVersion
-_msg_group = _harness._msg_group
+build_msg_group = _harness.build_msg_group
 env = _harness.env
 
 
@@ -67,7 +67,7 @@ class TestConversationDetailsAvailability:
 
 class TestUnavailablePinnedVersion:
     def _build(self, env, project_id, version_id):
-        session, msg_group = _msg_group(project_id)
+        session, msg_group = build_msg_group(project_id)
         return env.mod.build_skill_participant_payload(
             session, msg_group, FakePredictPayload(), {'version_id': version_id},
         )
@@ -114,7 +114,7 @@ class TestSkillRunRecord:
         assert session.commits == 0
 
     def test_skill_payload_dispatch_carries_the_skill_run_for_the_reply(self, env):
-        session, msg_group = _msg_group(CHAT_PROJECT_ID)
+        session, msg_group = build_msg_group(CHAT_PROJECT_ID)
         payload = env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {'version_id': 101})
         _, start_event_content = env.mod.pop_skill_dispatch(payload, {'question_id': 'q'})
         assert start_event_content['skill_run']['skill_version_id'] == 101

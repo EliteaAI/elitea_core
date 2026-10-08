@@ -39,7 +39,7 @@ def _stub(name, **attrs):
     return module
 
 
-def fake_resolve(project_id, llm_settings, **kwargs):
+def resolve_fake_llm_settings(project_id, llm_settings, **kwargs):
     settings = dict(llm_settings or {})
     name, project = settings.get('model_name'), settings.get('model_project_id')
     if name and project is None:
@@ -159,7 +159,7 @@ def env(isolated_sys_modules):
     sqlalchemy.orm = sqlalchemy_orm
     sys.modules['sqlalchemy.orm'] = sqlalchemy_orm
 
-    _stub('utils.application_utils', validate_and_resolve_llm_settings=fake_resolve)
+    _stub('utils.application_utils', validate_and_resolve_llm_settings=resolve_fake_llm_settings)
     _stub('utils.predict_utils', get_project_context=lambda project_id: {'enabled': False, 'content': ''})
     _stub('utils.utils', get_public_project_id=lambda: PUBLIC_PROJECT_ID)
     _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None),
@@ -192,7 +192,7 @@ def env(isolated_sys_modules):
     return types.SimpleNamespace(mod=module, schemas=schemas)
 
 
-def _msg_group(project_id, previous_messages=()):
+def build_msg_group(project_id, previous_messages=()):
     participant = types.SimpleNamespace(id=55, entity_meta={'id': 10, 'project_id': project_id})
     rows = [types.SimpleNamespace(id=0, meta={})] + list(previous_messages)
     session = types.SimpleNamespace(query=lambda model: FakeQuery(rows))
@@ -223,13 +223,13 @@ class TestParticipantSource:
             env.mod.load_skill_participant_target({'id': 10, 'project_id': CHAT_PROJECT_ID}, CHAT_PROJECT_ID, 999)
 
     def test_details_name_the_skill_for_the_participant_row(self, env):
-        details = env.mod.skill_participant_details({'id': 10, 'project_id': CHAT_PROJECT_ID})
+        details = env.mod.load_skill_participant_details({'id': 10, 'project_id': CHAT_PROJECT_ID})
         assert details == {'name': 'Reviewer', 'icon_meta': {'url': 'own.png'}}
 
 
 class TestPayload:
     def test_pinned_version_becomes_the_tool_less_system_prompt(self, env):
-        session, msg_group = _msg_group(CHAT_PROJECT_ID)
+        session, msg_group = build_msg_group(CHAT_PROJECT_ID)
         payload = env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {'version_id': 101})
         details = payload['version_details']
         assert details['instructions'] == 'Own v2.'
@@ -237,17 +237,17 @@ class TestPayload:
         assert 'application_id' not in payload and 'version_id' not in payload
 
     def test_chat_owns_stream_identity_and_history(self, env):
-        session, msg_group = _msg_group(CHAT_PROJECT_ID)
+        session, msg_group = build_msg_group(CHAT_PROJECT_ID)
         payload = env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {})
         assert not {'stream_id', 'message_id', 'user_input', 'chat_history'} & payload.keys()
 
     def test_saved_run_settings_pick_the_model_without_an_override(self, env):
-        session, msg_group = _msg_group(CHAT_PROJECT_ID)
+        session, msg_group = build_msg_group(CHAT_PROJECT_ID)
         payload = env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {'version_id': 100})
         assert payload['llm_settings']['model_name'] == 'saved-model'
 
     def test_message_override_beats_conversation_override(self, env):
-        session, msg_group = _msg_group(CHAT_PROJECT_ID)
+        session, msg_group = build_msg_group(CHAT_PROJECT_ID)
         payload = env.mod.build_skill_participant_payload(
             session, msg_group, FakePredictPayload({'model_name': 'override-model', 'model_project_id': 3}),
             {'version_id': 100, 'llm_settings': {'model_name': 'conversation-model', 'model_project_id': 3}},
@@ -255,7 +255,7 @@ class TestPayload:
         assert payload['llm_settings']['model_name'] == 'override-model'
 
     def test_conversation_override_applies_without_a_message_override(self, env):
-        session, msg_group = _msg_group(CHAT_PROJECT_ID)
+        session, msg_group = build_msg_group(CHAT_PROJECT_ID)
         payload = env.mod.build_skill_participant_payload(
             session, msg_group, FakePredictPayload(),
             {'version_id': 100, 'llm_settings': {'model_name': 'conversation-model', 'model_project_id': 3}},
@@ -263,13 +263,13 @@ class TestPayload:
         assert payload['llm_settings']['model_name'] == 'conversation-model'
 
     def test_catalog_skill_keeps_its_own_project_as_the_attribution_root(self, env):
-        session, msg_group = _msg_group(PUBLIC_PROJECT_ID)
+        session, msg_group = build_msg_group(PUBLIC_PROJECT_ID)
         payload = env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {})
         assert payload['project_id'] == PUBLIC_PROJECT_ID
         assert payload['version_details']['instructions'] == 'Catalog published.'
 
     def test_dispatch_carries_attribution_and_the_chat_project_socket_check(self, env):
-        session, msg_group = _msg_group(PUBLIC_PROJECT_ID)
+        session, msg_group = build_msg_group(PUBLIC_PROJECT_ID)
         payload = env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {})
         rpc_kwargs, start_event = env.mod.pop_skill_dispatch(payload, {'participant_id': 55, 'question_id': 'q'})
         assert env.mod.SKILL_DISPATCH_KEY not in payload
@@ -280,7 +280,7 @@ class TestPayload:
         assert start_event['skill_run']['skill_version_id'] == 200
 
     def test_follow_up_turn_resumes_the_previous_thread(self, env):
-        session, msg_group = _msg_group(
+        session, msg_group = build_msg_group(
             CHAT_PROJECT_ID, [types.SimpleNamespace(id=1, meta={'thread_id': 'thread-1'})],
         )
         payload = env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {})
@@ -288,7 +288,7 @@ class TestPayload:
 
     def test_unrunnable_version_surfaces_as_a_participant_error(self, env):
         env.schemas[CHAT_PROJECT_ID][0].versions[1].instructions = '   '
-        session, msg_group = _msg_group(CHAT_PROJECT_ID)
+        session, msg_group = build_msg_group(CHAT_PROJECT_ID)
         with pytest.raises(env.mod.SkillParticipantError, match='no instructions'):
             env.mod.build_skill_participant_payload(session, msg_group, FakePredictPayload(), {'version_id': 101})
 
@@ -308,14 +308,14 @@ class TestAttachmentModel:
 
     def test_document_extraction_uses_the_skill_model(self, env):
         participant = types.SimpleNamespace(id=55, entity_meta={'id': 10, 'project_id': CHAT_PROJECT_ID})
-        settings = env.mod.skill_attachment_llm_settings(
+        settings = env.mod.resolve_skill_attachment_llm_settings(
             self._session({'version_id': 100}), 3, participant, CHAT_PROJECT_ID,
         )
         assert settings['model_name'] == 'saved-model'
 
     def test_unavailable_skill_leaves_extraction_without_a_model(self, env):
         participant = types.SimpleNamespace(id=55, entity_meta={'id': 10, 'project_id': FOREIGN_PROJECT_ID})
-        assert env.mod.skill_attachment_llm_settings(self._session({}), 3, participant, CHAT_PROJECT_ID) is None
+        assert env.mod.resolve_skill_attachment_llm_settings(self._session({}), 3, participant, CHAT_PROJECT_ID) is None
 
 
 class TestCreateValidation:

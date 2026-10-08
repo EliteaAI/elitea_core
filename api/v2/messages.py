@@ -245,9 +245,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                             Conversation.uuid == conversation_uuid,
                         ).first()
                         if mapping:
-                            # Agent and skill LLM settings are resolved at prediction time
-                            # (see generate_payload in chat_all.py).
-                            # Do NOT inject a default here — it would override their own model.
+                            # Application LLM settings are resolved from version_details at
+                            # prediction time (see generate_payload in chat_all.py).
+                            # Do NOT inject a default here — it would override the app's model.
                             llm_settings_resolved = True
                 except Exception as e:
                     log.warning(f"Failed to resolve participant llm_settings: {e}")

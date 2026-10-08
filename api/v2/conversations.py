@@ -139,7 +139,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not parsed.is_private and public_project_id == project_id:
             return {"error": "Public conversation can not exist in public project"}, 400
 
-        # Adding a participant commits, so a skill rejected mid-loop would leave the conversation behind
         try:
             validate_skill_participants(parsed.participants, project_id)
         except SkillParticipantError as e:
