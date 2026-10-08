@@ -128,7 +128,7 @@ def participant_utils_module():
     _stub(
         "plugins.elitea_core.utils.skill_participant_utils",
         load_skill_participant_target=lambda *a, **k: None,
-        skill_participant_details=lambda *a, **k: {},
+        load_skill_participant_details=lambda *a, **k: {},
     )
 
     spec = importlib.util.spec_from_file_location(

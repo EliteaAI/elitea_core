@@ -396,8 +396,7 @@ class RPC:
 
         Args:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
-            entity_project_id: Optional owner project of a skill single_participant; own and Catalog
-                skills share ids, so their histories are told apart by project
+            entity_project_id: Optional owner project of a skill single_participant
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)

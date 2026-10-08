@@ -40,7 +40,7 @@ from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.conversation_access import check_post_access
 from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
-    pop_skill_dispatch, skill_attachment_llm_settings
+    pop_skill_dispatch, resolve_skill_attachment_llm_settings
 from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation,
@@ -562,13 +562,12 @@ def generate_toolkit_participant_payload(
     return result
 
 
-def attachment_llm_settings(session, parsed, conversation_id: int, skill_participant) -> Optional[dict]:
+def resolve_attachment_llm_settings(session, parsed, conversation_id: int, target_participant) -> Optional[dict]:
     if parsed.llm_settings:
         return parsed.llm_settings.dict()
-    if skill_participant is None:
+    if target_participant is None or target_participant.entity_name != ParticipantTypes.skill.value:
         return None
-    # A skill turn carries no model unless the user overrides it; document text extraction still needs one
-    return skill_attachment_llm_settings(session, conversation_id, skill_participant, parsed.project_id)
+    return resolve_skill_attachment_llm_settings(session, conversation_id, target_participant, parsed.project_id)
 
 
 def resolve_turn_runtime_context(msg_group: ConversationMessageGroup, predict_payload) -> dict | None:
@@ -1282,13 +1281,11 @@ class RPC:
             # graph-state handling further down.
             target_is_pipeline = False
             target_version_internal_tools = []
-            target_skill_participant = None
+            target_participant = None
             if parsed.participant_id:
                 target_participant = session.query(Participant).filter(
                     Participant.id == parsed.participant_id
                 ).first()
-                if target_participant is not None and target_participant.entity_name == ParticipantTypes.skill.value:
-                    target_skill_participant = target_participant
                 if (
                     target_participant is not None
                     and str(target_participant.entity_name) == ParticipantTypes.application.value
@@ -1299,9 +1296,12 @@ class RPC:
                         )
                     )
 
+            targets_skill = (
+                target_participant is not None and target_participant.entity_name == ParticipantTypes.skill.value
+            )
             conversation_internal_tools = (conversation.meta or {}).get('internal_tools', [])
             turn_internal_tools = list(conversation_internal_tools) + target_version_internal_tools
-            if target_skill_participant is None and should_inject_runtime_context(turn_internal_tools, target_is_pipeline):
+            if not targets_skill and should_inject_runtime_context(turn_internal_tools, target_is_pipeline):
                 effective_runtime_context = dict(parsed.runtime_context) if parsed.runtime_context else {}
 
                 # Always set server-side truth values
@@ -1348,8 +1348,8 @@ class RPC:
                         message_id=str(response_msg.uuid) if response_msg else None,
                         user_id=current_user['id'],
                         sid=sid,
-                        llm_settings=attachment_llm_settings(
-                            session, parsed, conversation.id, target_skill_participant,
+                        llm_settings=resolve_attachment_llm_settings(
+                            session, parsed, conversation.id, target_participant,
                         ),
                         pipeline_mode=is_pipeline,
                     )

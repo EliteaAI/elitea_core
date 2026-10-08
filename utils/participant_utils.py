@@ -18,7 +18,7 @@ from ..models.pd.participant_settings import EntitySettingsApplication, \
 from ..models.enums.all import NotificationEventTypes
 from ..utils.authors import get_authors_data
 from ..utils.sio_utils import SioEvents
-from .skill_participant_utils import load_skill_participant_target, skill_participant_details
+from .skill_participant_utils import load_skill_participant_target, load_skill_participant_details
 
 REASONING_EFFORT_OFF = 'none'
 
@@ -380,7 +380,7 @@ def get_entity_details(
                 toolkit_id=meta.id
             )
         case ParticipantTypes.skill:
-            return skill_participant_details(entity_meta)
+            return load_skill_participant_details(entity_meta)
     return None
 
 
