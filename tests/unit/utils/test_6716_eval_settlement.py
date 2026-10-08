@@ -165,11 +165,12 @@ def _row(usage, index, role, *, tokens=(100, 10), cost='0.01', state='recorded',
             'settled': False}
 
 
-def _ledger(role, index, *, calls=1, inp=120, out=12, nano=15_000_000, unpriced=0, uid='a1b2c3d4e5f6'):
+def _ledger(role, index, *, calls=1, inp=120, out=12, nano=15_000_000, unpriced=0, unparsed=0,
+            uid='a1b2c3d4e5f6'):
     return {'conversation_id': f'eval_{role}_{PRID}_{index}_{uid}', 'llm_calls': calls,
             'input_tokens': inp, 'output_tokens': out, 'cache_read_tokens': 5,
             'cache_creation_tokens': 0, 'reasoning_tokens': 0, 'cost_nano_usd': nano,
-            'unpriced_calls': unpriced, 'model_name': 'gpt-4o-2024'}
+            'unpriced_calls': unpriced, 'unparsed_calls': unparsed, 'model_name': 'gpt-4o-2024'}
 
 
 def test_ledger_figures_replace_the_runtime_ones(usage):
@@ -183,7 +184,7 @@ def test_ledger_figures_replace_the_runtime_ones(usage):
     assert agent['model_name'] == 'gpt-4o'  # the runtime's most-used model is kept
     assert judge_row['cost'] == Decimal('0.000001')
     assert settlement == {'state': 'settled', 'settled_rows': 2, 'expected_rows': 2,
-                          'ledger_calls': 2, 'unmatched_ledger_rows': 0}
+                          'ledger_calls': 2, 'unparsed_rows': 0, 'unmatched_ledger_rows': 0}
 
 
 def test_several_calls_of_one_case_are_summed(usage):
@@ -198,6 +199,35 @@ def test_several_calls_of_one_case_are_summed(usage):
 def test_an_unpriced_call_leaves_the_cost_unknown(usage):
     rows, _ = usage.settle_usage_rows([_row(usage, 0, 'agent')], [_ledger('agent', 0, unpriced=1)], PRID)
     assert (rows[0]['cost'], rows[0]['cost_source'], rows[0]['settled']) == (None, 'unpriced', True)
+
+
+def test_an_unparsed_call_keeps_the_runtime_figures(usage):
+    # The proxy could not read a response, so the ledger's 0/0 for it is not a reading (#6809 Gap 2).
+    original = [_row(usage, 0, 'judge'), _row(usage, 1, 'judge')]
+    rows, settlement = usage.settle_usage_rows(
+        original, [_ledger('judge', 0, inp=0, out=0, nano=0, unparsed=1), _ledger('judge', 1)], PRID)
+    assert rows[0] == original[0]
+    assert rows[1]['settled'] is True
+    assert (settlement['state'], settlement['settled_rows'], settlement['expected_rows'],
+            settlement['unparsed_rows'], settlement['unmatched_ledger_rows']) == ('partial', 1, 2, 1, 0)
+
+
+def test_one_unparsed_call_among_several_keeps_the_runtime_figures(usage):
+    """The parsed calls' sum would understate the case, so the runtime figure stands."""
+    original = [_row(usage, 0, 'agent')]
+    rows, settlement = usage.settle_usage_rows(
+        original, [_ledger('agent', 0, uid='aaaaaaaaaaaa'),
+                   _ledger('agent', 0, uid='bbbbbbbbbbbb', inp=0, out=0, nano=0, unparsed=1)], PRID)
+    assert rows == original
+    assert (settlement['state'], settlement['unparsed_rows']) == ('unavailable', 1)
+
+
+def test_breakdown_without_unparsed_counts_still_settles(usage):
+    """An older usage plugin sends no unparsed_calls; settlement behaves as before."""
+    entry = _ledger('agent', 0)
+    del entry['unparsed_calls']
+    rows, _ = usage.settle_usage_rows([_row(usage, 0, 'agent')], [entry], PRID)
+    assert rows[0]['settled'] is True
 
 
 def test_ledger_settles_a_row_the_runtime_did_not_record(usage):

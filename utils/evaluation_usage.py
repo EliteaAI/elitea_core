@@ -416,7 +416,8 @@ def settle_usage_rows(rows: List[dict], breakdown: Iterable[dict], platform_run_
     ``breakdown`` is ``usage_eval_run_breakdown``: llm rows summed per ``conversation_id``. A
     row the ledger has calls for takes the ledger's tokens and cost and is marked ``settled``. An
     unpriced call keeps the cost unknown rather than summing the priced part. A row the ledger has
-    nothing for keeps its runtime figure, unsettled. This is the degraded mode when the calls did
+    nothing for keeps its runtime figure, unsettled, and so does one with a call the proxy could not
+    read (``unparsed_calls``): that call's 0 tokens are a missing reading, not a measurement. This is the degraded mode when the calls did
     not go through a metered interface. ``settlement`` says how far that got."""
     ledger: dict = {}
     for entry in breakdown or []:
@@ -424,18 +425,22 @@ def settle_usage_rows(rows: List[dict], breakdown: Iterable[dict], platform_run_
         if key is None or not _count(entry.get('llm_calls')):
             continue
         bucket = ledger.setdefault(key, {'llm_calls': 0, 'cost_nano_usd': 0, 'unpriced_calls': 0,
-                                         'model_name': None, **_empty_bucket()})
+                                         'unparsed_calls': 0, 'model_name': None, **_empty_bucket()})
         _add(bucket, entry)
-        for field in ('llm_calls', 'cost_nano_usd', 'unpriced_calls'):
+        for field in ('llm_calls', 'cost_nano_usd', 'unpriced_calls', 'unparsed_calls'):
             bucket[field] += _count(entry.get(field))
         bucket['model_name'] = bucket['model_name'] or entry.get('model_name')
 
-    settled_rows, expected, matched = [], 0, set()
+    settled_rows, expected, matched, unparsed = [], 0, set(), set()
     for row in rows:
         expected += _expects_ledger(row)
         key = (row.get('case_index'), row.get('role'))
         bucket = ledger.get(key)
         if bucket is None:
+            settled_rows.append(row)
+            continue
+        if bucket['unparsed_calls']:
+            unparsed.add(key)
             settled_rows.append(row)
             continue
         matched.add(key)
@@ -461,7 +466,8 @@ def settle_usage_rows(rows: List[dict], breakdown: Iterable[dict], platform_run_
         state = SETTLEMENT_UNAVAILABLE
     return settled_rows, {'state': state, 'settled_rows': count, 'expected_rows': expected,
                           'ledger_calls': sum(b['llm_calls'] for b in ledger.values()),
-                          'unmatched_ledger_rows': len(set(ledger) - matched)}
+                          'unparsed_rows': len(unparsed),
+                          'unmatched_ledger_rows': len(set(ledger) - matched - unparsed)}
 
 
 def ledger_calls(breakdown: Iterable[dict]) -> int:
