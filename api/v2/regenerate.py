@@ -76,8 +76,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 predict_payload = SioPredictModel.model_validate(raw_predict_payload)
             except ValidationError as e:
                 return {'error': 'Invalid prediction payload', 'details': e.errors()}, 400
-            if msg_group.author_participant.entity_name == ParticipantTypes.skill.value:
-                predict_payload.project_id = project_id
 
             if predict_payload.attachments_info:
                 existing_filepaths = {
