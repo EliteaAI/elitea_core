@@ -1783,6 +1783,7 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
             description = f"{(description or '').strip()} {INSTRUCTION_REFERENCED_HINT}".strip()
         disclosable.append({
             'skill_id': s.get('skill_id'),
+            'skill_version_id': s.get('skill_version_id'),
             'name': s.get('name'),
             'description': description,
             'icon_meta': s.get('icon_meta'),
