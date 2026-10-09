@@ -21,7 +21,7 @@ from ...utils.constants import PROMPT_LIB_MODE
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Update an eval dataset case",
-        description="Updates a case's input / variables / expected_output / meta. source_type is immutable.",
+        description="Updates a case's input / variables / expected_output / expected_trajectory / meta ({} clears expected_trajectory). source_type is immutable.",
         request_body=EvalDatasetCaseUpdateModel,
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},

@@ -112,3 +112,62 @@ def get_run_results(
             'limit': page_size,
             'offset': max(offset, 0),
         }
+
+
+def _execution_row(row) -> dict:
+    return {
+        'id': row.id,
+        'run_id': row.run_id,
+        'dataset_case_id': row.dataset_case_id,
+        'case_index': row.case_index,
+        'status': row.status,
+        'trajectory_state': row.trajectory_state,
+        'trajectory_state_reason': row.trajectory_state_reason,
+        'trajectory': row.trajectory,
+        'metrics': row.metrics or {},
+        'created_at': row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def get_case_executions(
+    project_id: int,
+    run_id: int,
+    session=None,
+    case_index: Optional[int] = None,
+    include_trajectory: bool = True,
+    dataset_case_id: Optional[int] = None,
+) -> dict:
+    """A run's per-case executions (#6809 P1): trajectory state, counters and, unless
+    ``include_trajectory`` is false, the trajectory itself — which can be hundreds of KB per case,
+    so a list view asks without it and the drill-down asks for one case, by ``dataset_case_id`` (the
+scorecard's case key) or ``case_index``.
+
+    ``usage`` lists the same cases' ``eval_case_usage`` rows, agent and judge (#6716).
+
+    An on-demand run (output supplied, no agent executed) has no execution rows; ``executions`` is
+    then an empty list, not an error. Raises :class:`EvalRunNotFoundError` when the run is absent."""
+    from ..models.evaluation import EvalRun, EvalCaseExecution, EvalCaseUsage
+    from .evaluation_usage import case_usage_view
+
+    with _session(session, project_id) as s:
+        if not s.query(EvalRun.id).filter(EvalRun.id == run_id).first():
+            raise EvalRunNotFoundError(run_id)
+        query = s.query(EvalCaseExecution).filter(EvalCaseExecution.run_id == run_id)
+        usage_query = s.query(EvalCaseUsage).filter(EvalCaseUsage.run_id == run_id)
+        if case_index is not None:
+            query = query.filter(EvalCaseExecution.case_index == case_index)
+            usage_query = usage_query.filter(EvalCaseUsage.case_index == case_index)
+        if dataset_case_id is not None:
+            query = query.filter(EvalCaseExecution.dataset_case_id == dataset_case_id)
+            usage_query = usage_query.filter(EvalCaseUsage.dataset_case_id == dataset_case_id)
+        rows = [_execution_row(r) for r in query.order_by(EvalCaseExecution.case_index).all()]
+        # Agent and judge usage of the same cases (#6716). An on-demand run has judge rows and no
+        # executions, so these are listed beside the executions rather than inside them.
+        usage = [
+            case_usage_view(r.to_json())
+            for r in usage_query.order_by(EvalCaseUsage.case_index, EvalCaseUsage.role).all()
+        ]
+    if not include_trajectory:
+        for row in rows:
+            row['trajectory'] = None
+    return {'run_id': run_id, 'executions': rows, 'usage': usage}

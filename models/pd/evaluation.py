@@ -24,18 +24,29 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator, model_valida
 from ..evaluation import (
     EvalTier, EvalEngine, EvalScaleType, EvalPolarity, EvalCaseSource, EvalRunTrigger,
 )
+from ...utils.evaluation_expected_trajectory import normalize_expected_trajectory
 
 _ENGINES = {EvalEngine.ai, EvalEngine.human, EvalEngine.code}
 _SCALE_TYPES = {EvalScaleType.binary, EvalScaleType.ordinal, EvalScaleType.continuous}
 _POLARITIES = {EvalPolarity.higher_better, EvalPolarity.lower_better}
 _OPERATORS = {'>=', '>', '<=', '<', '=='}
 _RETURN_CONTRACTS = {'bool', 'number'}
-_EVIDENCE_KEYS = {'structure', 'input', 'output', 'expected'}
+_EVIDENCE_KEYS = {'structure', 'input', 'output', 'expected', 'trajectory', 'usage'}
+# Scope flags that make a binding score something. ``trajectory`` / ``usage`` (#6809, #6716) are
+# opt-in like ``structure`` and, unlike it, need the agent to run (see is_structure_only_binding).
+_SCORED_EVIDENCE_KEYS = ('structure', 'input', 'output', 'trajectory', 'usage')
 # project library is home (§16); platform tier is seeded via the admin console, not this API.
 _PROJECT_WRITABLE_TIERS = {EvalTier.project, EvalTier.agent_adhoc}
 _CASE_SOURCES = {EvalCaseSource.manual, EvalCaseSource.import_, EvalCaseSource.conversation}
-_IMPORT_FORMATS = {'csv', 'json'}
+_IMPORT_FORMATS = {'csv', 'json', 'jsonl'}
 _RUN_TRIGGERS = {EvalRunTrigger.offline_batch, EvalRunTrigger.on_demand}
+
+
+# Upper bound for a suite's ``meta.steps_limit``; the SDK default is 25.
+MAX_SUITE_STEPS_LIMIT = 100
+CONSUMPTION_BUDGET_SCOPES = ('per_case', 'per_run')
+#: What reaching ``per_run.tokens`` does: stop starting cases (default) or only report the breach.
+BUDGET_ON_BREACH = ('stop', 'report')
 
 
 def _check_evidence_scope(v: dict) -> dict:
@@ -44,8 +55,9 @@ def _check_evidence_scope(v: dict) -> dict:
         raise ValueError(f'evidence_scope keys must be a subset of {sorted(_EVIDENCE_KEYS)}')
     if any(not isinstance(val, bool) for val in v.values()):
         raise ValueError('evidence_scope values must be booleans')
-    if not any(v.get(key, False) for key in ('structure', 'input', 'output')):
-        raise ValueError('evidence_scope must have at least one of structure/input/output set to true')
+    if not any(v.get(key, False) for key in _SCORED_EVIDENCE_KEYS):
+        raise ValueError(
+            f'evidence_scope must have at least one of {"/".join(_SCORED_EVIDENCE_KEYS)} set to true')
     return v
 
 
@@ -337,6 +349,44 @@ class EvalSuiteBaseModel(BaseModel):
     trigger_config: dict = Field(default_factory=dict)
     meta: dict = Field(default_factory=dict)
 
+    @field_validator('meta')
+    @classmethod
+    def _check_steps_limit(cls, v: dict) -> dict:
+        # ``meta.steps_limit`` caps the agent's steps on every case of a batch run (#6809 §4.5);
+        # absent or null keeps the agent's own limit.
+        limit = (v or {}).get('steps_limit')
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
+                                  or not 1 <= limit <= MAX_SUITE_STEPS_LIMIT):
+            raise ValueError(f'meta.steps_limit must be an integer 1..{MAX_SUITE_STEPS_LIMIT} or null')
+        return v
+
+    @field_validator('meta')
+    @classmethod
+    def _check_consumption_budget(cls, v: dict) -> dict:
+        # ``meta.consumption_budget = {per_case: {tokens, cost}, per_run: {tokens, cost}}`` (#6716,
+        # design §5.4). Every limit is optional and null means no limit; tokens are integers, cost USD.
+        # ``per_run.on_breach`` ('stop' | 'report') says whether the run token limit stops the run.
+        budget = (v or {}).get('consumption_budget')
+        if budget is None:
+            return v
+        if not isinstance(budget, dict) or set(budget) - set(CONSUMPTION_BUDGET_SCOPES):
+            raise ValueError('meta.consumption_budget must be an object with per_case and/or per_run')
+        for scope, limits in budget.items():
+            if limits is None:
+                continue
+            allowed = {'tokens', 'cost', 'on_breach'} if scope == 'per_run' else {'tokens', 'cost'}
+            if not isinstance(limits, dict) or set(limits) - allowed:
+                raise ValueError(f'meta.consumption_budget.{scope} must be an object with tokens and/or cost')
+            on_breach = limits.get('on_breach')
+            if on_breach is not None and on_breach not in BUDGET_ON_BREACH:
+                raise ValueError(f'meta.consumption_budget.per_run.on_breach must be one of {BUDGET_ON_BREACH}')
+            tokens, cost = limits.get('tokens'), limits.get('cost')
+            if tokens is not None and (isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0):
+                raise ValueError(f'meta.consumption_budget.{scope}.tokens must be a non-negative integer or null')
+            if cost is not None and (isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0):
+                raise ValueError(f'meta.consumption_budget.{scope}.cost must be a non-negative number or null')
+        return v
+
 
 class EvalSuiteCreateModel(EvalSuiteBaseModel):
     application_id: int
@@ -407,13 +457,20 @@ class EvalHumanScoreDetailModel(BaseModel):
 
 class EvalDatasetCaseBaseModel(BaseModel):
     """A single golden case (§17.1). ``expected_output`` present → the case supports
-    reference-based validations; absent → reference-free only (§17.5)."""
+    reference-based validations; absent → reference-free only (§17.5). ``expected_trajectory``
+    (#6809 item 4) is the optional tool-call reference, stored normalized; ``{}`` clears it."""
     variables: dict = Field(default_factory=dict)
     expected_output: Optional[str] = None
+    expected_trajectory: Optional[dict] = None
     source_type: str = EvalCaseSource.manual
     source_ref: Optional[str] = Field(None, max_length=256)
     order_index: int = 0
     meta: dict = Field(default_factory=dict)
+
+    @field_validator('expected_trajectory', mode='before')
+    @classmethod
+    def _validate_expected_trajectory(cls, v):
+        return normalize_expected_trajectory(v)
 
     @field_validator('source_type')
     @classmethod
@@ -449,6 +506,7 @@ class EvalDatasetCaseDetailModel(BaseModel):
     input: str
     variables: dict = Field(default_factory=dict)
     expected_output: Optional[str] = None
+    expected_trajectory: Optional[dict] = None
     source_type: str
     source_ref: Optional[str] = None
     meta: dict = Field(default_factory=dict)
@@ -532,9 +590,9 @@ class EvalDatasetDetailModel(BaseModel):
 
 
 class EvalDatasetImportModel(BaseModel):
-    """Bulk case import (§17.2 CSV/JSON). ``content`` is the raw file text; rows are parsed
+    """Bulk case import (§17.2 CSV/JSON, plus JSONL for #6809). ``content`` is the raw file text; rows are parsed
     and validated per-row by the import util, which returns an accepted-count + error report."""
-    format: str = Field(..., description="csv | json")
+    format: str = Field(..., description="csv | json | jsonl")
     # Capped at the API boundary so a huge body is rejected before it is parsed and held in memory
     # twice (raw text + parsed rows); the parser applies its own per-row and per-cell caps.
     content: str = Field(..., min_length=1, max_length=20_000_000)
@@ -550,7 +608,8 @@ class EvalDatasetImportModel(BaseModel):
 
 class EvalDatasetPromoteModel(BaseModel):
     """Promote-from-conversations (§17.2, §8.3). Each user turn → a case ``input``; the agent
-    reply becomes ``expected_output`` when ``include_expected`` (else the case is reference-free).
+    reply becomes ``expected_output`` when ``include_expected`` (else the case is reference-free),
+    and that reply's recorded tool calls pre-fill ``expected_trajectory`` (#6809 item 4).
     ``source_type=conversation`` + ``source_ref=<conversation_id>`` links back to the origin."""
     conversation_id: int
     include_expected: bool = True

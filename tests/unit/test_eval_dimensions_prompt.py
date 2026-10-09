@@ -155,3 +155,70 @@ def test_single_braced_json_raises_service_prompt_template_error(utils):
     """The most likely admin mis-edit: forgetting to double the braces in the schema block."""
     with pytest.raises(utils.ServicePromptTemplateError):
         _build(utils, template='{application_name} must return {"dimensions": []}.')
+
+
+# --- #6809 item 7: the agent's tools ------------------------------------------------------
+
+_TOOLS = [
+    {'toolkit': 'repo', 'type': 'github', 'names': ['read_file', 'list_files']},
+    {'toolkit': 'REPRO900 Child Writer', 'type': 'application', 'names': ['REPRO900ChildWriter']},
+    {'toolkit': 'jira-mcp', 'type': 'mcp', 'names': []},
+]
+
+
+def test_tool_groups_use_recorded_names(utils):
+    groups = utils.agent_tool_groups([
+        {'type': 'github', 'toolkit_name': 'repo',
+         'settings': {'selected_tools': ['read_file', 'list_files']}},
+        {'type': 'application', 'name': 'REPRO900 Child.Writer!', 'settings': {}},
+        {'type': 'mcp', 'name': 'jira-mcp', 'settings': {'selected_tools': None}},
+        'not a dict',
+    ])
+    assert groups == [
+        {'toolkit': 'repo', 'type': 'github', 'names': ['read_file', 'list_files']},
+        {'toolkit': 'REPRO900 Child.Writer!', 'type': 'application',
+         'names': ['REPRO900Child_Writer']},
+        {'toolkit': 'jira-mcp', 'type': 'mcp', 'names': []},
+    ]
+
+
+def test_tools_clause_closes_the_prompt_without_a_placeholder(utils):
+    out = _build(utils, agent_tools=_TOOLS)
+
+    # After the whole template, not inside the instructions block the model reads as context only.
+    clause_at = out.index('## Agent tools (extends the response schema above)')
+    assert clause_at > out.index('Return ONLY JSON')
+    assert out.count('The agent can call these tools') == 1
+    assert '- toolkit "repo": read_file, list_files' in out
+    assert '- sub-agent: REPRO900ChildWriter' in out
+    assert '- toolkit "jira-mcp": tools not listed' in out
+    assert '"trajectory": true' in out
+
+
+def test_tools_clause_fills_an_explicit_placeholder(utils):
+    template = TEMPLATE.replace('{existing_dimensions}', '{existing_dimensions}\n\n{agent_tools}')
+    out = _build(utils, template=template, agent_tools=_TOOLS)
+
+    assert out.count('The agent can call these tools') == 1
+    assert out.index('The agent can call these tools') > out.index('dimension library')
+
+
+def test_no_tools_says_so(utils):
+    out = _build(utils, agent_tools=[])
+
+    assert 'This agent has no tools' in out
+    assert 'The agent can call these tools' not in out
+
+
+def test_tools_left_out_when_not_given(utils):
+    out = _build(utils)
+
+    assert 'tools' not in out.lower()
+
+
+def test_tool_names_are_capped(utils):
+    names = [f't{i}' for i in range(utils._MAX_AGENT_TOOLS + 10)]
+    out = _build(utils, agent_tools=[{'toolkit': 'big', 'type': 'x', 'names': names}])
+
+    assert f't{utils._MAX_AGENT_TOOLS - 1} (+10 more)' in out
+    assert f't{utils._MAX_AGENT_TOOLS}' not in out

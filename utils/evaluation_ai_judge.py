@@ -29,7 +29,15 @@ _CONTINUOUS = 'continuous'
 _NO_RATIONALE = 'No rationale provided by judge.'
 
 
-def build_judge_system_prompt(dimensions: List[dict]) -> str:
+_EXTRA_FIELD_HINTS = (
+    ('trajectory', "`trajectory` (the agent's recorded steps in order: each LLM call and each tool "
+                   'call with its inputs, status and an output excerpt, plus run counters)'),
+    ('expected_trajectory', '`expected_trajectory` (the reference tool usage the case expects)'),
+    ('usage', '`usage` (the tokens the agent spent on this case)'),
+)
+
+
+def build_judge_system_prompt(dimensions: List[dict], evidence_keys=()) -> str:
     """System prompt instructing the judge to score each dimension on its own native scale and
     return a strict JSON object ``{"scores": [{"dimension_id", "score", "rationale"}, ...]}``.
 
@@ -37,7 +45,10 @@ def build_judge_system_prompt(dimensions: List[dict]) -> str:
     ``expected_output`` — whichever the binding's evidence_scope selected (§19.4). A key's total
     absence from the payload means it was deliberately excluded from scope, not that it is empty;
     the judge must be told this explicitly, or it penalizes e.g. a structure-only binding for
-    having "no output" when output was never meant to be part of the evidence at all."""
+    having "no output" when output was never meant to be part of the evidence at all.
+
+    ``evidence_keys`` names the payload's fields; the trajectory/usage fields (design §5.1) are
+    described only when present, so the prompt for an output/input/structure binding is unchanged."""
     lines = [
         'You are an impartial evaluator. The payload below carries only the evidence fields that '
         'were selected in scope for this evaluation, which may be any subset of: `input` (the '
@@ -48,6 +59,11 @@ def build_judge_system_prompt(dimensions: List[dict]) -> str:
         'field that simply was not included. Score each dimension below strictly using only the '
         "field(s) actually present in the payload, on that dimension's own native scale. Judge "
         'each dimension independently.',
+    ]
+    extra = [hint for key, hint in _EXTRA_FIELD_HINTS if key in (evidence_keys or ())]
+    if extra:
+        lines += ['', 'This payload also carries: ' + '; '.join(extra) + '.']
+    lines += [
         '',
         'For every dimension, the rationale must justify the score by explaining what specifically '
         'kept it from the highest end of the scale (or, if it scored at or near the lowest end, why '
@@ -94,6 +110,9 @@ def build_case_payload(evidence: dict, dimensions: List[dict]) -> str:
         payload['structure'] = evidence.get('structure')
     if 'expected_output' in evidence:
         payload['expected_output'] = evidence.get('expected_output')
+    for key in ('trajectory', 'expected_trajectory', 'usage'):
+        if key in evidence:
+            payload[key] = evidence.get(key)
     payload['dimension_ids'] = [d['id'] for d in dimensions]
     return json.dumps(payload, ensure_ascii=False)
 
@@ -174,7 +193,7 @@ def estimate_group_tokens(evidence: dict, dims: List[dict], model: Optional[str]
     Builds the exact prompt/payload :func:`evaluate_case` would send and measures it with the
     shared :mod:`context_manager` estimator (model-aware; falls back to a ``len // 4`` heuristic
     when that plugin/RPC is unavailable, e.g. in this module's unit tests)."""
-    text = build_judge_system_prompt(dims) + build_case_payload(evidence, dims)
+    text = build_judge_system_prompt(dims, evidence.keys()) + build_case_payload(evidence, dims)
     try:
         from context_manager.utils.token_estimation import estimate_tokens
         return estimate_tokens(text, model)
@@ -208,7 +227,58 @@ def split_dimensions_for_budget(
     return batches
 
 
-_TRUNCATE_ORDER = ('output', 'input', 'structure', 'expected_output')
+_TRUNCATE_ORDER = ('trajectory', 'output', 'input', 'structure', 'expected_output')
+
+TRAJECTORY_EXCERPT_CHARS = 600
+
+
+def _excerpt(value, limit: int = TRAJECTORY_EXCERPT_CHARS) -> str:
+    """Head and tail of a long value: a tool's answer is often at either end."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f'{text[:half]} … [{len(text) - limit} chars omitted] … {text[-half:]}'
+
+
+def render_trajectory(trajectory: dict) -> str:
+    """Compact text of a recorded trajectory for the judge (design §5.1): one line per step,
+    tool inputs/outputs as excerpts. A string so budget truncation can trim it like any other
+    evidence field."""
+    lines = []
+    for number, step in enumerate(trajectory.get('steps') or [], 1):
+        scope = f"[in {step['parent_agent']}] " if step.get('parent_agent') else ''
+        if step.get('kind') == 'llm':
+            tokens = step.get('tokens') or {}
+            line = f"{number}. {scope}LLM {step.get('model') or ''}".rstrip()
+            if tokens:
+                line += f" (in {tokens.get('in')} / out {tokens.get('out')} tokens)"
+            if step.get('planned_tools'):
+                line += ' → plans: ' + ', '.join(step['planned_tools'])
+            lines.append(line)
+            continue
+        lines.append(f"{number}. {scope}TOOL {step.get('tool_name')} [{step.get('status') or 'unknown'}]")
+        if step.get('tool_inputs') is not None:
+            lines.append('   inputs: ' + _excerpt(step['tool_inputs']))
+        if step.get('tool_output') is not None:
+            lines.append('   output: ' + _excerpt(step['tool_output']))
+        if step.get('error'):
+            lines.append('   error: ' + _excerpt(step['error']))
+    if not lines:
+        lines.append('(no steps recorded)')
+    if trajectory.get('truncated'):
+        lines.append('(trajectory was truncated when recorded; later steps are missing)')
+    pause = trajectory.get('pause')
+    if isinstance(pause, dict):
+        lines.append(f"Run paused: {pause.get('pause_type') or 'pause'}"
+                     + (f" on {pause['tool_name']}" if pause.get('tool_name') else ''))
+    metrics = trajectory.get('metrics') or {}
+    if metrics:
+        counters = ', '.join(f'{k}={v}' for k, v in sorted(metrics.items())
+                             if isinstance(v, (int, float, bool, str)))
+        if counters:
+            lines.append('Counters: ' + counters)
+    return '\n'.join(lines)
 
 
 def _shrink_longest_definition(dims: List[dict], mark: str) -> bool:
@@ -285,12 +355,18 @@ def evaluate_case(
     user_id: Optional[int] = None,
     platform_run_id: Optional[str] = None,
     usage_entity: Optional[dict] = None,
+    usage_sink: Optional[Callable[[dict], None]] = None,
+    case_index: Optional[int] = None,
 ) -> List[dict]:
     """Score ``case`` against ``dimensions`` with one batched judge call.
 
     Returns one result dict per dimension (order preserved):
     ``{dimension_id, dimension_name, native_score: float|None, rationale: str,
        status: 'scored'|'error', error: str|None}``. Never raises for a judge-level failure.
+
+    ``usage_sink``, when given, receives the call's usage (#6716) whatever its outcome: a judge
+    that returned unparseable output still spent its tokens. ``case_index`` names the case in the
+    call's stream id so settlement can match its ledger rows.
     """
     if not dimensions:
         return []
@@ -298,11 +374,18 @@ def evaluate_case(
         from .llm_judge import run_llm_judge
         judge = run_llm_judge
 
-    system_prompt = build_judge_system_prompt(dimensions)
+    from .evaluation_usage import ROLE_JUDGE, case_stream_key
+    system_prompt = build_judge_system_prompt(dimensions, case.keys())
     payload = build_case_payload(case, dimensions)
     outcome = judge(project_id, judge_llm_settings, system_prompt, payload, timeout,
-                    stream_key='eval_judge', user_id=user_id,
+                    stream_key=case_stream_key(ROLE_JUDGE, platform_run_id, case_index),
+                    user_id=user_id,
                     platform_run_id=platform_run_id, usage_entity=usage_entity)
+    if usage_sink is not None:
+        from .evaluation_usage import envelope_usage
+        status = outcome.get('status')
+        usage_sink(envelope_usage(outcome.get('raw'),
+                                  status=status if status in ('timeout', 'predict_exception') else None))
 
     if outcome.get('status') != 'ok':
         return _error_results(

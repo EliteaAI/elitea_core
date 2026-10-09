@@ -28,6 +28,7 @@ The DB/dispatch wrapper (:func:`execute_run`) keeps every ORM/SDK import lazy in
 function so this module loads by source with no ``tools``/SDK present — the pure core is
 unit-tested here; the wrapper's live behavior is exercised end-to-end (E2E-09 / E2E-11).
 """
+import hashlib
 import json
 import time
 from typing import Any, Callable, List, Optional
@@ -51,8 +52,17 @@ STATUS_PENDING_HUMAN = 'pending_human'
 
 # Why a run stopped short of its last case. Both keep the partial scorecard, but the user needs to
 # know which one happened: one is something they asked for, the other is the platform giving up.
+# Persisted as ``EvalRun.meta.stop_reason`` (G3, design §13), so the strings are API.
 STOP_CANCEL_REQUESTED = 'cancel_requested'
-STOP_TIME_BUDGET = 'time_budget_exceeded'
+STOP_TIME_BUDGET = 'time_budget'
+#: The agent's summed runtime tokens reached the suite's ``consumption_budget.per_run.tokens``.
+STOP_BUDGET_EXHAUSTED = 'budget_exhausted'
+#: ``consumption_budget.per_run.on_breach`` value that keeps the run going past ``per_run.tokens``.
+ON_BREACH_REPORT = 'report'
+#: The project/member budget gate refused a case (``budget_blocked``); ``stop_scope`` says which.
+STOP_GATE_CLOSED = 'gate_closed'
+#: Orchestration-level failure; the run is ``errored``.
+STOP_FAILURE = 'failure'
 
 #: Wall-clock ceiling on a whole run, checked at case boundaries. Distinct from the reaper's
 #: ``RUN_STALE_AFTER_SECONDS``, which bounds the *quiet gap between two cases* — a run that keeps
@@ -60,7 +70,7 @@ STOP_TIME_BUDGET = 'time_budget_exceeded'
 #: slow agent) can hold a pool slot and heartbeat indefinitely. 6h is far longer than any sane
 #: dataset needs and short enough that a stuck run frees its slot within a working day.
 RUN_TIME_BUDGET_SECONDS = 6 * 60 * 60
-STATUS_SKIPPED = 'skipped'          # a code validation's own script returned 'na' (not scope-driven)
+STATUS_SKIPPED = 'skipped'          # a code script returned 'na', or a trajectory/usage scope had nothing recorded
 
 TRIGGER_OFFLINE_BATCH = 'offline_batch'
 TRIGGER_ON_DEMAND = 'on_demand'
@@ -144,6 +154,12 @@ def _snapshot_cases(cases: List[dict]) -> List[dict]:
                 truncated = True
             case[field] = value
             spent += len(value) if isinstance(value, str) else 0
+        # #6809 item 4: already normalized and size-capped at write time, so it is carried whole
+        # (never clipped mid-JSON) but still spends budget and goes with the text once dropped.
+        expected_trajectory = c.get('expected_trajectory')
+        if expected_trajectory is not None and not dropped:
+            case['expected_trajectory'] = expected_trajectory
+            spent += len(json.dumps(expected_trajectory, default=str))
         if dropped:
             case['truncated'] = True
             case['dropped'] = True
@@ -178,6 +194,10 @@ def build_run_snapshot(
             'id': suite.get('id'),
             'name': suite.get('name'),
             'judge_model': suite.get('judge_model'),
+            # null = the agent's own limit (§4.5); frozen so a later suite edit cannot change it.
+            'steps_limit': suite.get('steps_limit'),
+            # {per_case, per_run} x {tokens, cost}; checked on the agent role only (§5.4).
+            'consumption_budget': suite.get('consumption_budget'),
         },
         'application_id': application_id,
         'application_version_id': application_version_id,
@@ -253,9 +273,13 @@ def is_structure_only_binding(binding: dict) -> bool:
     purely from the agent's structure/instructions with no per-case data at all. Used to allow an
     offline-batch run with no dataset (§19.4 follow-up): if every binding in the suite is
     structure-only, there is nothing case-shaped left to iterate over, so the run needs neither a
-    dataset nor a live agent call to produce evidence."""
+    dataset nor a live agent call to produce evidence.
+
+    ``trajectory`` and ``usage`` (opt-in, default off) are evidence of what the agent *did*, so a
+    binding with either in scope needs the agent run even with ``input``/``output`` off (#6809 G2)."""
     scope = binding.get('evidence_scope') or {}
-    return not scope.get('input', True) and not scope.get('output', True)
+    return (not scope.get('input', True) and not scope.get('output', True)
+            and not scope.get('trajectory', False) and not scope.get('usage', False))
 
 
 def all_bindings_structure_only(bindings: List[dict]) -> bool:
@@ -309,6 +333,8 @@ def evidence_scope_key(scope: dict) -> tuple:
         bool(scope.get('structure', False)),
         bool(scope.get('input', True)),
         bool(scope.get('output', True)),
+        bool(scope.get('trajectory', False)),
+        bool(scope.get('usage', False)),
     )
 
 
@@ -331,7 +357,94 @@ def select_evidence(case: dict, scope: dict) -> dict:
         evidence['input'] = case.get('input')
     if scope.get('structure', False):
         evidence['structure'] = case.get('structure')
+    if scope.get('trajectory', False):
+        evidence['trajectory'] = trajectory_evidence(case)
+        expected_trajectory = case.get('expected_trajectory')
+        if expected_trajectory:
+            evidence['expected_trajectory'] = expected_trajectory
+    if scope.get('usage', False):
+        evidence['usage'] = usage_evidence(case)
     return evidence
+
+
+def trajectory_evidence(case: dict) -> Optional[dict]:
+    """What a trajectory-scoped binding sees (design §5.1): the recorded steps, tool sequence,
+    pause and counters of this case's agent run. ``None`` when no trajectory was recorded — an
+    on-demand case, a ``not_recorded``/``not_applicable`` run — so the binding is skipped rather
+    than scored on empty data."""
+    execution = case.get('_execution') or {}
+    trajectory = execution.get('trajectory')
+    if execution.get('trajectory_state') != 'recorded' or not isinstance(trajectory, dict):
+        return None
+    return {
+        'steps': trajectory.get('steps') or [],
+        'tool_sequence': trajectory.get('tool_sequence') or [],
+        'truncated': bool(trajectory.get('truncated')),
+        'pause': trajectory.get('pause'),
+        'metrics': execution.get('metrics') or {},
+        'case_index': execution.get('case_index'),
+    }
+
+
+USAGE_EVIDENCE_KEYS = (
+    'model_name', 'models', 'token_source', 'input_tokens', 'output_tokens',
+    'cache_read_tokens', 'cache_creation_tokens', 'reasoning_tokens',
+)
+
+
+def usage_evidence(case: dict) -> Optional[dict]:
+    """What a usage-scoped binding sees: the agent's own tokens for this case, as the runtime
+    reported them. ``None`` when usage was not recorded. Cost is not included — it is priced only
+    at settlement, after scoring (design §6 defers usage-scoped scoring to settle; runtime figures
+    are used until then)."""
+    agent = (case.get('_usage') or {}).get('agent') or {}
+    if agent.get('usage_state') != 'recorded':
+        return None
+    evidence = {k: agent.get(k) for k in USAGE_EVIDENCE_KEYS}
+    # Same total as the run's Consumption card: input + output + reasoning.
+    evidence['total_tokens'] = sum(agent.get(k) or 0
+                                   for k in ('input_tokens', 'output_tokens', 'reasoning_tokens'))
+    return evidence
+
+
+_MISSING_EVIDENCE_NOTES = {
+    'trajectory': 'Skipped: no trajectory was recorded for this case.',
+    'usage': 'Skipped: no token usage was recorded for this case.',
+}
+
+
+def missing_evidence_note(evidence: dict) -> Optional[str]:
+    """The skip reason when a scope the binding asked for has nothing recorded, else ``None``."""
+    for key, note in _MISSING_EVIDENCE_NOTES.items():
+        if key in evidence and evidence[key] is None:
+            return note
+    return None
+
+
+def stored_evidence(evidence: dict) -> dict:
+    """Evidence as frozen on the result row. The trajectory is already stored once per case in
+    ``eval_case_execution``, so the row keeps a reference plus a digest of exactly what was scored
+    rather than a second copy (design §5.1)."""
+    trajectory = evidence.get('trajectory')
+    if not isinstance(trajectory, dict):
+        return evidence
+    digest = hashlib.sha256(
+        json.dumps(trajectory, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+    return {**evidence, 'trajectory': {
+        'ref': 'eval_case_execution',
+        'case_index': trajectory.get('case_index'),
+        'digest': digest,
+        'steps': len(trajectory.get('steps') or []),
+    }}
+
+
+def judge_evidence(evidence: dict) -> dict:
+    """The judge reads the trajectory as compact text, which its budget truncation can trim."""
+    trajectory = evidence.get('trajectory')
+    if not isinstance(trajectory, dict):
+        return evidence
+    from .evaluation_ai_judge import render_trajectory
+    return {**evidence, 'trajectory': render_trajectory(trajectory)}
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +517,7 @@ def _result_row(
         'native_score': native_score,
         'normalized_score': normalized_score,
         'verdict': cap_envelope(verdict or {}),
-        'evidence': cap_envelope(evidence),
+        'evidence': cap_envelope(stored_evidence(evidence)),
     }
 
 
@@ -592,10 +705,18 @@ def assemble_case_results(
     for _key, group in ai_groups.items():
         scope = group[0].get('evidence_scope') or {}
         evidence = select_evidence(case, scope)
+        skip_note = missing_evidence_note(evidence)
+        if skip_note:
+            for b in group:
+                results.append(_result_row(
+                    case['id'], engine=ENGINE_AI, status=STATUS_SKIPPED, evidence=evidence,
+                    dimension_id=b.get('dimension_id'), verdict={'note': skip_note}))
+            continue
         dims = _dimension_specs(group, snapshot)
         try:
             scored = (
-                _score_ai_group_with_budget(evidence, dims, ai_scorer, judge_budget_tokens, judge_model_name)
+                _score_ai_group_with_budget(judge_evidence(evidence), dims, ai_scorer,
+                                            judge_budget_tokens, judge_model_name)
                 if ai_scorer else []
             )
         except Exception as exc:  # noqa: BLE001 - fail-closed (E4): a scorer crash is per-group error
@@ -616,6 +737,13 @@ def assemble_case_results(
             continue
         scope = b.get('evidence_scope') or {}
         evidence = select_evidence(case, scope)
+        skip_note = missing_evidence_note(evidence)
+        if skip_note:
+            results.append(_result_row(
+                case['id'], engine=ENGINE_CODE, status=STATUS_SKIPPED, evidence=evidence,
+                dimension_id=b.get('dimension_id'), platform_key=b.get('platform_key'),
+                verdict={'note': skip_note}))
+            continue
         try:
             verdict = code_scorer(b, evidence) if code_scorer else {
                 'status': 'error', 'error': 'No code executor configured.'}
@@ -646,24 +774,62 @@ def run_one_case(
     code_scorer: Optional[Callable[[dict, dict], dict]] = None,
     judge_budget_tokens: Optional[int] = None,
     judge_model_name: Optional[str] = None,
+    case_index: Optional[int] = None,
 ) -> tuple:
     """Resolve one case's output (H4) then score it → ``(resolved_case, result_rows)``.
 
     Everything a single case needs, touching no shared state, so :func:`orchestrate_run` can call
     it either in-line or on a worker thread without the two paths diverging.
+
+    The case's usage goes on ``_usage`` (``agent``: the agent outcome's usage, ``judge``: the sum
+    of its judge calls). ``execute_run`` turns it into ``eval_case_usage`` rows, never storing it
+    on the snapshot. Judge usage is collected only from a scorer marked ``accepts_usage_sink``.
+
+    ``case_index`` reaches a runner or scorer marked ``accepts_case_index``, which names the case
+    in its calls' stream ids so settlement can match the ledger rows (#6716).
     """
+    usage: dict = {}
     if agent_runner is not None and case.get('output') is None:
-        outcome = agent_runner(case)
+        if getattr(agent_runner, 'accepts_case_index', False):
+            outcome = agent_runner(case, case_index=case_index)
+        else:
+            outcome = agent_runner(case)
+        if outcome.get('usage') is not None:
+            usage.update(agent=outcome['usage'], case_status=outcome.get('status'),
+                         budget_scope=outcome.get('budget_scope'))
         if outcome.get('status') == 'ok':
             case = {**case, 'output': outcome.get('output'), 'structure': outcome.get('structure')}
         else:
             case = {**case, 'structure': outcome.get('structure'),
                     '_agent_error':
                     outcome.get('error') or f"agent execution {outcome.get('status')}"}
-    return case, assemble_case_results(
-        case, snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
+        if outcome.get('execution') is not None:
+            # Persisted as an eval_case_execution row by execute_run, never on the snapshot.
+            case['_execution'] = {**outcome['execution'], 'status': outcome.get('status'),
+                                  'case_index': case_index}
+        if usage:
+            # Usage-scoped bindings read the agent's tokens while scoring (design §5.1).
+            case = {**case, '_usage': usage}
+    judge_calls: List[dict] = []
+    scorer = ai_scorer
+    scorer_kwargs: dict = {}
+    if ai_scorer is not None and getattr(ai_scorer, 'accepts_usage_sink', False):
+        scorer_kwargs['usage_sink'] = judge_calls.append
+    if ai_scorer is not None and getattr(ai_scorer, 'accepts_case_index', False):
+        scorer_kwargs['case_index'] = case_index
+    if scorer_kwargs:
+        def scorer(evidence, dims):
+            return ai_scorer(evidence, dims, **scorer_kwargs)
+    results = assemble_case_results(
+        case, snapshot, ai_scorer=scorer, code_scorer=code_scorer,
         judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name,
     )
+    if judge_calls:
+        from .evaluation_usage import merge_usage
+        usage['judge'] = merge_usage(judge_calls)
+    if usage:
+        case = {**case, '_usage': usage}
+    return case, results
 
 
 def orchestrate_run(
@@ -729,6 +895,11 @@ def orchestrate_run(
     resolved: dict = {}
     results_by_index: dict = {}
     stop_reason: Optional[str] = None
+    stop_scope: Optional[str] = None
+    run_budget = ((snapshot.get('suite') or {}).get('consumption_budget') or {}).get('per_run') or {}
+    # A 'report' limit is only checked after the run, in the budget verdict.
+    run_token_limit = None if run_budget.get('on_breach') == ON_BREACH_REPORT else run_budget.get('tokens')
+    run_tokens_spent = 0
     deadline = (
         time.monotonic() + max(1, int(time_budget_seconds))
         if time_budget_seconds else None
@@ -760,6 +931,23 @@ def orchestrate_run(
             stop_reason = STOP_CANCEL_REQUESTED
         return stop_reason is not None
 
+    def _account(case: dict) -> None:
+        """Stop on what a finished case reports: a closed budget gate, or the run's token budget
+        spent (§5.4). Runtime tokens, not cost: cost reaches the ledger seconds later. Called from
+        the submitting thread only, like ``_should_stop``. An earlier stop reason is kept."""
+        nonlocal stop_reason, stop_scope, run_tokens_spent
+        usage = case.get('_usage') if isinstance(case, dict) else None
+        if not usage:
+            return
+        from .evaluation_usage import STATUS_BUDGET_BLOCKED, run_tokens
+        run_tokens_spent += run_tokens(usage.get('agent'))
+        if stop_reason is not None:
+            return
+        if usage.get('case_status') == STATUS_BUDGET_BLOCKED:
+            stop_reason, stop_scope = STOP_GATE_CLOSED, usage.get('budget_scope')
+        elif run_token_limit is not None and run_tokens_spent >= run_token_limit:
+            stop_reason = STOP_BUDGET_EXHAUSTED
+
     if workers == 1:
         # Kept as a real in-line loop, not a one-worker pool: this is the default path, and running
         # it on the calling thread means the common case never inherits thread-affinity surprises
@@ -770,7 +958,9 @@ def orchestrate_run(
             resolved[index], results_by_index[index] = run_one_case(
                 cases[index], snapshot, agent_runner=agent_runner,
                 ai_scorer=ai_scorer, code_scorer=code_scorer,
-                judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name)
+                judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name,
+                case_index=index)
+            _account(resolved[index])
             _report(len(resolved))
     else:
         import threading
@@ -796,7 +986,7 @@ def orchestrate_run(
                         run_one_case, cases[next_index], snapshot, agent_runner=agent_runner,
                         ai_scorer=ai_scorer, code_scorer=code_scorer,
                         judge_budget_tokens=judge_budget_tokens,
-                        judge_model_name=judge_model_name)] = next_index
+                        judge_model_name=judge_model_name, case_index=next_index)] = next_index
                     next_index += 1
                 if not pending:
                     break
@@ -810,9 +1000,14 @@ def orchestrate_run(
                     # A raise here propagates once the `with` drains the rest, marking the run
                     # errored exactly as the sequential path would.
                     resolved[index], results_by_index[index] = future.result()
+                    _account(resolved[index])
                     _report(_count_done())
 
     scored_case_count = len(resolved)
+    if stop_reason not in (None, STOP_GATE_CLOSED) and scored_case_count == total:
+        # The limit was reached on the last case, so nothing was skipped: the run is complete and
+        # must not read as stopped. A closed gate is kept — the case that hit it was not run.
+        stop_reason = stop_scope = None
     # The caller writes `cases` back onto the frozen snapshot, so any case never reached has to be
     # carried through verbatim — dropping it would rewrite history and shrink the run's case set to
     # whatever happened to be scored before the stop.
@@ -837,6 +1032,8 @@ def orchestrate_run(
         # thing the terminal status has to express. `stop_reason` carries the distinction.
         'cancelled': stop_reason is not None,
         'stop_reason': stop_reason,
+        # `project` | `member` for STOP_GATE_CLOSED, else None.
+        'stop_scope': stop_scope,
         # On an early stop the count is the cases actually scored, so the progress bar keeps telling
         # the truth about how far the run got instead of jumping to N/N.
         'progress': {'done': scored_case_count, 'total': total},
@@ -859,12 +1056,126 @@ def _make_ai_scorer(project_id: int, judge_settings: dict, *, user_id: Optional[
     """Bind :func:`evaluation_ai_judge.evaluate_case` into the ``ai_scorer`` contract."""
     from .evaluation_ai_judge import evaluate_case
 
-    def _score(evidence: dict, dimensions: List[dict]) -> List[dict]:
+    def _score(evidence: dict, dimensions: List[dict], usage_sink=None,
+               case_index: Optional[int] = None) -> List[dict]:
         return evaluate_case(project_id, judge_settings, evidence, dimensions,
                              timeout=timeout, judge=judge, user_id=user_id,
-                             platform_run_id=platform_run_id, usage_entity=usage_entity)
+                             platform_run_id=platform_run_id, usage_entity=usage_entity,
+                             usage_sink=usage_sink, case_index=case_index)
 
+    # run_one_case passes a per-case sink and index only to a scorer that says it takes them.
+    _score.accepts_usage_sink = True
+    _score.accepts_case_index = True
     return _score
+
+
+def split_case_executions(cases: List[dict]) -> tuple:
+    """``(execution_rows, cases_without_execution)`` from orchestrate_run's resolved cases.
+
+    The trajectory can be hundreds of KB per case, so it lives in ``eval_case_execution`` (one row
+    per run × case, design §3.1) rather than on ``EvalRun.snapshot``. A case that never reached the
+    agent (on-demand output, or never run because the run stopped early) has no row."""
+    rows, stripped = [], []
+    for index, case in enumerate(cases):
+        execution = case.get('_execution') if isinstance(case, dict) else None
+        if execution is None:
+            stripped.append(case)
+            continue
+        stripped.append({k: v for k, v in case.items() if k != '_execution'})
+        rows.append({
+            'dataset_case_id': case.get('id'),
+            'case_index': index,
+            'status': execution.get('status'),
+            'trajectory_state': execution.get('trajectory_state'),
+            'trajectory_state_reason': execution.get('trajectory_state_reason'),
+            'trajectory': execution.get('trajectory'),
+            'metrics': execution.get('metrics') or {},
+        })
+    return rows, stripped
+
+
+def split_case_usage(cases: List[dict], pricer: Optional[Callable[..., dict]] = None) -> tuple:
+    """``(usage_rows, cases_without_usage)`` from orchestrate_run's resolved cases (#6716).
+
+    One ``eval_case_usage`` row per case and role that has a figure: ``agent`` for every case that
+    reached the agent, ``judge`` for every case an AI judge scored. Each row is priced at runtime
+    through ``pricer`` (``costs_compute_llm_cost``); settlement later replaces the cost with the
+    ledger's. A case never reached (early stop) has no row, which is how the rollup tells
+    "not run" from "ran and recorded nothing"."""
+    from .evaluation_usage import ROLE_AGENT, ROLE_JUDGE, price_usage, usage_row
+    rows, stripped = [], []
+    for index, case in enumerate(cases):
+        usage = case.get('_usage') if isinstance(case, dict) else None
+        if not usage:
+            stripped.append(case)
+            continue
+        stripped.append({k: v for k, v in case.items() if k != '_usage'})
+        status = usage.get('case_status')
+        for role in (ROLE_AGENT, ROLE_JUDGE):
+            if usage.get(role) is None:
+                continue
+            rows.append(usage_row(
+                dataset_case_id=case.get('id'), case_index=index, role=role, usage=usage[role],
+                priced=price_usage(usage[role], pricer), case_status=status,
+            ))
+    return rows, stripped
+
+
+def usage_meta(rows: List[dict], budget: Optional[dict]) -> dict:
+    """``EvalRun.meta`` keys for the run's usage: one rollup per role that has rows, and the
+    budget verdict when the suite sets a limit. Keys with nothing to say are left out."""
+    from .evaluation_usage import ROLE_AGENT, ROLE_JUDGE, budget_verdict, usage_rollup
+    agent = [r for r in rows if r['role'] == ROLE_AGENT]
+    judge = [r for r in rows if r['role'] == ROLE_JUDGE]
+    meta = {}
+    if agent:
+        meta['agent_usage'] = usage_rollup(agent)
+    if judge:
+        meta['judge_usage'] = usage_rollup(judge)
+    verdict = budget_verdict(agent, budget)
+    if verdict is not None:
+        meta['budget_verdict'] = verdict
+    return meta
+
+
+def trajectory_meta(rows: List[dict]) -> dict:
+    """``EvalRun.meta`` key for the run's trajectory rollup, left out when no case reached the
+    agent. Written once at the terminal write; settlement does not touch trajectories."""
+    from .evaluation_execution import trajectory_rollup
+    rollup = trajectory_rollup(rows)
+    return {'trajectory_rollup': rollup} if rollup is not None else {}
+
+
+#: The usage queue flushes every 5 s (``queue_flush_interval_seconds``); the first read waits a
+#: little longer, then re-reads until the ledger stops growing (design §4.3).
+SETTLE_FIRST_WAIT_SECONDS = 7
+SETTLE_POLL_SECONDS = 3
+SETTLE_MAX_WAIT_SECONDS = 60
+
+
+def poll_ledger_breakdown(fetch: Callable[[], List[dict]], *, sleep: Callable[[float], None] = None,
+                          clock: Callable[[], float] = None,
+                          first_wait: float = SETTLE_FIRST_WAIT_SECONDS,
+                          interval: float = SETTLE_POLL_SECONDS,
+                          max_wait: float = SETTLE_MAX_WAIT_SECONDS) -> List[dict]:
+    """Read the run's ledger breakdown once it has stopped growing.
+
+    Two reads in a row with the same llm call count end the wait, and so does ``max_wait``,
+    which returns the latest read. A run whose calls never reached the ledger reads 0 twice and
+    returns quickly. ``fetch`` errors propagate; the caller degrades to the runtime figures."""
+    from .evaluation_usage import ledger_calls
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    started = clock()
+    sleep(first_wait)
+    breakdown = fetch()
+    while clock() - started < max_wait:
+        sleep(interval)
+        latest = fetch()
+        if ledger_calls(latest) == ledger_calls(breakdown):
+            return latest
+        breakdown = latest
+    return breakdown
 
 
 def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: int = 120,
@@ -877,6 +1188,7 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
     degrades every case to an ``unsupported``/``error`` outcome (E4) rather than raising, so the run
     still finishes with error rows the UI can show."""
     from .evaluation_agent_runner import run_agent, agent_type_supported, agent_structure_snapshot
+    from .evaluation_execution import not_applicable_execution, extract_execution
 
     application_id = snapshot.get('application_id')
     version_id = snapshot.get('application_version_id')
@@ -889,7 +1201,8 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
         message = f'could not load agent version {version_id}: {exc}'
 
         def _unavailable(_case: dict) -> dict:
-            return {'status': 'error', 'output': None, 'error': message, 'structure': None}
+            return {'status': 'error', 'output': None, 'error': message, 'structure': None,
+                    'execution': extract_execution(None, status='error')}
 
         return _unavailable
 
@@ -900,21 +1213,26 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
     # `create_batch_run`) — there is no real case input to run the agent against, and `structure`
     # is already fully known from `version_details`, so skip the live LLM call entirely.
     structure_only_run = snapshot.get('dataset_id') is None
+    step_limit = (snapshot.get('suite') or {}).get('steps_limit')
 
-    def _run(case: dict) -> dict:
+    def _run(case: dict, case_index: Optional[int] = None) -> dict:
         if structure_only_run:
-            return {'status': 'ok', 'output': None, 'structure': structure}
+            return {'status': 'ok', 'output': None, 'structure': structure,
+                    'execution': not_applicable_execution('structure_only')}
         if not supported:
             agent_type = version_details.get('agent_type')
             return {'status': 'unsupported', 'output': None,
                     'error': f"agent_type '{agent_type}' is not supported for live batch execution "
                              '(P1 scope: single-turn agents only, pipelines deferred)',
-                    'structure': structure}
+                    'structure': structure,
+                    'execution': not_applicable_execution('unsupported')}
         outcome = run_agent(project_id, version_details, case,
                             user_id=user_id, timeout=timeout,
-                            platform_run_id=platform_run_id, usage_entity=usage_entity)
+                            platform_run_id=platform_run_id, usage_entity=usage_entity,
+                            step_limit=step_limit, case_index=case_index)
         return {**outcome, 'structure': structure}
 
+    _run.accepts_case_index = True
     return _run
 
 
@@ -938,6 +1256,10 @@ def _make_code_scorer(snapshot: dict, executor):
             if 'input' in evidence else _RESULT_SENTINEL,
             structure=evidence.get('structure', _RESULT_SENTINEL)
             if 'structure' in evidence else _RESULT_SENTINEL,
+            trajectory=evidence['trajectory'] if 'trajectory' in evidence else _RESULT_SENTINEL,
+            expected_trajectory=evidence['expected_trajectory']
+            if 'expected_trajectory' in evidence else _RESULT_SENTINEL,
+            usage=evidence['usage'] if 'usage' in evidence else _RESULT_SENTINEL,
             return_contract=spec.get('return_contract', 'bool'),
             executor=executor,
         )
@@ -957,6 +1279,7 @@ def execute_run(
     executor=None,
     progress_publisher: Optional[Callable[[dict], None]] = None,
     platform_run_id: Optional[str] = None,
+    settle_sleep: Optional[Callable[[float], None]] = None,
 ) -> dict:
     """Execute a persisted ``created`` run to completion and persist its results + headline.
 
@@ -972,6 +1295,13 @@ def execute_run(
       * ``judge_llm_settings`` — resolved by the caller (suite override §18.7, else project
         default); falls back to the snapshot's frozen ``suite.judge_model``.
       * ``judge`` / ``executor`` — optional overrides for tests. Live path (E2E-09/E2E-11).
+      * ``settle_sleep`` — the settlement wait, injectable for tests.
+
+    After the terminal write the run's usage rows are **settled** against the usage ledger: the
+    ledger's tokens and cost replace the runtime figures where it has the case's calls, and
+    ``meta.settlement`` says how far that got. The run is already terminal and pushed by then, so
+    a slow or failed settlement leaves the runtime figures in place (``unavailable``) and never
+    changes the outcome.
 
     **Sessions are per checkpoint, never held across the run.** A run lasts as long as its dataset
     takes — minutes to hours of blocking agent and judge calls — so a single session spanning it
@@ -981,7 +1311,9 @@ def execute_run(
     therefore opens its own short session and closes it: claim, one per progress heartbeat, one per
     cancel poll, and one for the terminal write. Nothing ORM-mapped is carried between phases —
     only the plain snapshot dict and ``owner_id`` — so there are no detached instances."""
-    from ..models.evaluation import EvalRun, EvalResult, EvalRunStatus
+    from ..models.evaluation import (
+        EvalRun, EvalResult, EvalRunStatus, EvalCaseExecution, EvalCaseUsage,
+    )
     from .code_validation import make_task_node_executor
     from tools import db  # pylint: disable=E0401
     from datetime import datetime
@@ -994,7 +1326,8 @@ def execute_run(
         snapshot = run.snapshot or {}
         owner_id = run.owner_id
 
-        claim_values = {EvalRun.status: EvalRunStatus.running, EvalRun.started_at: datetime.utcnow()}
+        started_at = datetime.utcnow()
+        claim_values = {EvalRun.status: EvalRunStatus.running, EvalRun.started_at: started_at}
         if platform_run_id:
             # Lets usage analytics resolve eval_run_id -> usage_event.run_id
             from sqlalchemy import cast, func as sa_func
@@ -1075,6 +1408,7 @@ def execute_run(
                 if row is not None:
                     row.status = EvalRunStatus.errored
                     row.error = message
+                    row.meta = {**(row.meta or {}), 'stop_reason': STOP_FAILURE}
                     row.finished_at = datetime.utcnow()
                     s.commit()
         except Exception:  # noqa: BLE001 - never mask the original failure
@@ -1162,6 +1496,24 @@ def execute_run(
         _mark_errored(str(exc))
         raise
 
+    # --- usage (priced before the session: one RPC per case × role × model) ----------------
+    usage_rows, cases = [], outcome['cases']
+    try:
+        from tools import context as pylon_context  # pylint: disable=E0401
+
+        def _pricer(**kwargs):
+            return pylon_context.rpc_manager.timeout(10).costs_compute_llm_cost(**kwargs)
+    except Exception:  # noqa: BLE001 - no pricing: every row stays `pending` for settlement
+        _pricer = None
+    try:
+        usage_rows, cases = split_case_usage(cases, _pricer)
+    except Exception:  # noqa: BLE001 - usage is evidence about the run, never a reason to lose it
+        from pylon.core.tools import log  # local: this module loads without pylon present
+        log.exception('Eval run %s: could not build usage rows', run_id)
+        cases = [{k: v for k, v in c.items() if k != '_usage'} if isinstance(c, dict) else c
+                 for c in cases]
+    budget = (snapshot.get('suite') or {}).get('consumption_budget')
+
     # --- terminal write --------------------------------------------------------------------
     try:
         with db.get_session(project_id) as s:
@@ -1170,11 +1522,23 @@ def execute_run(
                 raise ValueError(f'Eval run {run_id} disappeared while executing')
             for row in outcome['results']:
                 s.add(EvalResult(run_id=run.id, **row))
+            executions, cases = split_case_executions(cases)
+            for row in executions:
+                s.add(EvalCaseExecution(run_id=run.id, **row))
+            for row in usage_rows:
+                s.add(EvalCaseUsage(run_id=run.id, **row))
+            run.meta = {
+                **(run.meta or {}),
+                **usage_meta(usage_rows, budget),
+                **trajectory_meta(executions),
+                **{k: outcome[k] for k in ('stop_reason', 'stop_scope') if outcome.get(k)},
+                **({'settlement': {'state': 'pending'}} if usage_rows and platform_run_id else {}),
+            }
             run.headline_score = outcome['headline_score']
             run.progress = outcome['progress']
             # Reassign (not mutate in place) so SQLAlchemy detects the JSONB column changed —
             # the drill-down reads `snapshot.cases[i].output`, which is only known post-execution.
-            run.snapshot = {**snapshot, 'cases': outcome['cases']}
+            run.snapshot = {**snapshot, 'cases': cases}
             # A run stopped early keeps the cases it did score (partial scorecard) but must not be
             # read as a completed evaluation of the whole dataset.
             run.status = (
@@ -1189,13 +1553,83 @@ def execute_run(
                     f"{outcome['progress']['done']} of {outcome['progress']['total']} cases scored. "
                     'The scores below cover only those cases. Split the dataset into smaller runs.'
                 )
+            elif outcome.get('stop_reason') == STOP_BUDGET_EXHAUSTED:
+                limit = ((budget or {}).get('per_run') or {}).get('tokens')
+                run.error = (
+                    f'Run stopped when the agent reached the suite\'s {limit} token budget with '
+                    f"{outcome['progress']['done']} of {outcome['progress']['total']} cases scored. "
+                    'The scores below cover only those cases.'
+                )
+            elif outcome.get('stop_reason') == STOP_GATE_CLOSED:
+                who = 'your' if outcome.get('stop_scope') == 'member' else 'the project\'s'
+                run.error = (
+                    f'Run stopped because {who} monthly budget is used up, with '
+                    f"{outcome['progress']['done']} of {outcome['progress']['total']} cases scored. "
+                    'The scores below cover only those cases.'
+                )
             run.finished_at = datetime.utcnow()
             s.commit()
             result = {'run_id': run.id, 'status': run.status,
                       'headline_score': run.headline_score, 'progress': run.progress}
             terminal_error = run.error
         _push({**result, 'project_id': project_id, 'error': terminal_error})
-        return result
     except Exception as exc:  # noqa: BLE001 - results are lost, but the row must not stay `running`
         _mark_errored(f'Run completed but its results could not be saved: {exc}')
         raise
+
+    # --- settlement (after the run is terminal: never changes its outcome) ------------------
+    if usage_rows and platform_run_id:
+        settle_run_usage(project_id, run_id, platform_run_id, usage_rows, budget,
+                         started_at=started_at, sleep=settle_sleep)
+    return result
+
+
+def settle_run_usage(project_id: int, run_id: int, platform_run_id: str, usage_rows: List[dict],
+                     budget: Optional[dict], *, started_at, sleep=None, fetch=None) -> dict:
+    """Settle a finished run's ``eval_case_usage`` rows against the ledger (design §4.3).
+
+    Reads ``usage_eval_run_breakdown`` once it has stopped growing, takes the ledger's figures
+    for each case and role it has calls for, and rewrites the rollups, the budget verdict and
+    ``meta.settlement``. Never raises: a ledger that cannot be read leaves the runtime figures
+    and marks the settlement ``unavailable``. Returns the settlement summary."""
+    from datetime import datetime, timedelta, timezone
+    from .evaluation_usage import SETTLEMENT_UNAVAILABLE, TOKEN_FIELDS, settle_usage_rows
+    from ..models.evaluation import EvalRun, EvalCaseUsage
+    from tools import db  # pylint: disable=E0401
+    from pylon.core.tools import log  # local: this module loads without pylon present
+
+    try:
+        if fetch is None:
+            from tools import context as pylon_context  # pylint: disable=E0401
+            margin = timedelta(minutes=5)
+            date_from = started_at.replace(tzinfo=timezone.utc) - margin
+
+            def fetch():
+                return pylon_context.rpc_manager.timeout(10).usage_eval_run_breakdown(
+                    project_id=project_id, platform_run_id=platform_run_id,
+                    date_from=date_from, date_to=datetime.now(timezone.utc) + margin)
+        breakdown = poll_ledger_breakdown(fetch, sleep=sleep)
+        rows, settlement = settle_usage_rows(usage_rows, breakdown, platform_run_id)
+    except Exception:  # noqa: BLE001 - G6: the runtime figures stand
+        log.exception('Eval run %s: usage settlement could not read the ledger', run_id)
+        rows, settlement = usage_rows, {'state': SETTLEMENT_UNAVAILABLE, 'reason': 'ledger_unreadable'}
+
+    fields = (*TOKEN_FIELDS, 'cost', 'cost_source', 'usage_state', 'usage_state_reason',
+              'token_source', 'model_name', 'settled')
+    try:
+        with db.get_session(project_id) as s:
+            settled = {(r['case_index'], r['role']): r for r in rows if r.get('settled')}
+            if settled:
+                for record in s.query(EvalCaseUsage).filter(EvalCaseUsage.run_id == run_id).all():
+                    row = settled.get((record.case_index, record.role))
+                    if row is not None:
+                        for field in fields:
+                            setattr(record, field, row.get(field))
+            run = s.query(EvalRun).filter(EvalRun.id == run_id).first()
+            if run is not None:
+                run.meta = {**(run.meta or {}), **usage_meta(rows, budget), 'settlement': settlement}
+            s.commit()
+    except Exception:  # noqa: BLE001 - the terminal write already holds the runtime figures
+        log.exception('Eval run %s: usage settlement could not be saved', run_id)
+        settlement = {'state': SETTLEMENT_UNAVAILABLE, 'reason': 'write_failed'}
+    return settlement

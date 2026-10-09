@@ -1,6 +1,7 @@
 """Eval dataset **cases** — nested collection endpoint (list + add) for EVAL-P1-B3 (§17.4).
 
-Cases carry ``input`` + optional ``variables`` + optional ``expected_output`` (§17.1). Read is
+Cases carry ``input`` + optional ``variables`` + optional ``expected_output`` (§17.1) + optional
+``expected_trajectory`` (#6809 item 4, validated by ``evaluation_expected_trajectory``). Read is
 viewer-visible; adding a case is editor-gated (dataset content mutation). New cases append to
 the end of the ordered set.
 """

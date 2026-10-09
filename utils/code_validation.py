@@ -39,12 +39,16 @@ def build_validation_prelude(
     expected: Any = _RESULT_SENTINEL,
     input: Any = _RESULT_SENTINEL,  # noqa: A002 - matches the injected variable name
     structure: Any = _RESULT_SENTINEL,
+    trajectory: Any = _RESULT_SENTINEL,
+    expected_trajectory: Any = _RESULT_SENTINEL,
+    usage: Any = _RESULT_SENTINEL,
 ) -> str:
     """Assemble ``prelude + user script`` (§19.4).
 
     Evidence is injected as **plain Python literals** via ``repr`` (no client, no network).
-    ``output`` is always injected; ``expected`` / ``input`` / ``structure`` only when the
-    binding's evidence scope provided them (Axis-C). The untrusted script follows and must
+    ``output`` is always injected; ``expected`` / ``input`` / ``structure`` / ``trajectory`` /
+    ``expected_trajectory`` / ``usage`` only when the binding's evidence scope provided them
+    (Axis-C, design §5.1). The untrusted script follows and must
     assign ``result``. NOTE: injection is done by the trusted harness, so ``repr`` of the
     (JSON-safe) evidence values is a safe Python source literal here.
 
@@ -64,6 +68,12 @@ def build_validation_prelude(
         lines.append(f'input = {input!r}')
     if structure is not _RESULT_SENTINEL:
         lines.append(f'structure = {structure!r}')
+    if trajectory is not _RESULT_SENTINEL:
+        lines.append(f'trajectory = {trajectory!r}')
+    if expected_trajectory is not _RESULT_SENTINEL:
+        lines.append(f'expected_trajectory = {expected_trajectory!r}')
+    if usage is not _RESULT_SENTINEL:
+        lines.append(f'usage = {usage!r}')
     lines.append('# --- user script (untrusted) ---')
     lines.append(script)
     lines.append('# --- eval harness epilogue (trusted, generated) ---')
@@ -109,12 +119,21 @@ def _base_verdict(dimension_id: Optional[int], name: str) -> dict:
     }
 
 
-def na_verdict(dimension_id: Optional[int], name: str) -> dict:
+def na_verdict(dimension_id: Optional[int], name: str,
+               detail: str = 'Skipped: validation needs expected_output, case has none.') -> dict:
     """Reference-based validation skipped: case has no ``expected_output`` (§17.5).
     Excluded from the aggregate; never counts as pass or fail."""
     v = _base_verdict(dimension_id, name)
-    v.update(status=STATUS_NA, error='Skipped: validation needs expected_output, case has none.')
+    v.update(status=STATUS_NA, error=detail)
     return v
+
+
+# A script assigns ``result = 'na'`` when the case lacks the reference it needs (#6809 item 5,
+# e.g. no expected trajectory). A string was an error under both contracts before, so no existing
+# script changes meaning.
+NA_RESULT = 'na'
+NA_RESULT_DETAIL = 'Skipped: the check needs a reference the case does not have.'
+
 
 
 def unavailable_verdict(dimension_id: Optional[int], name: str,
@@ -153,6 +172,11 @@ def map_execution_result(
     if status != 'success':
         v = error_verdict(dimension_id, name,
                           exec_result.get('stderr') or f'Sandbox execution {status}.')
+        v.update(stdout=stdout, execution_time=exec_time)
+        return v
+
+    if exec_result.get('result') == NA_RESULT:
+        v = na_verdict(dimension_id, name, NA_RESULT_DETAIL)
         v.update(stdout=stdout, execution_time=exec_time)
         return v
 
@@ -217,6 +241,9 @@ def run_code_validation(
     expected: Any = _RESULT_SENTINEL,
     input: Any = _RESULT_SENTINEL,  # noqa: A002 - matches the injected variable name
     structure: Any = _RESULT_SENTINEL,
+    trajectory: Any = _RESULT_SENTINEL,
+    expected_trajectory: Any = _RESULT_SENTINEL,
+    usage: Any = _RESULT_SENTINEL,
     return_contract: str = 'bool',
     executor,
 ) -> dict:
@@ -243,6 +270,7 @@ def run_code_validation(
 
     prelude = build_validation_prelude(
         script, output=output, expected=expected, input=input, structure=structure,
+        trajectory=trajectory, expected_trajectory=expected_trajectory, usage=usage,
     )
     exec_result = executor(prelude)
 

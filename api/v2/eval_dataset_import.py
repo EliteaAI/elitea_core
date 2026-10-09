@@ -1,4 +1,4 @@
-"""Eval dataset **import** — bulk CSV/JSON case import for EVAL-P1-B3 (§17.2).
+"""Eval dataset **import** — bulk CSV/JSON/JSONL case import for EVAL-P1-B3 (§17.2).
 
 Appends valid rows as ``import`` cases and returns an accepted-count + per-row error report;
 invalid rows never abort the import. Editor-gated (dataset content mutation).

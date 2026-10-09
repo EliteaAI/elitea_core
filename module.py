@@ -492,6 +492,10 @@ class Module(module.ModuleModel):
             this.for_module("admin").module.register_admin_task(
                 "migrate_project_chat_config", self.migrate_project_chat_config, group="R-2.0.7",
             )
+            this.for_module("admin").module.register_admin_task(
+                "seed_eval_trajectory_dimensions", self.seed_eval_trajectory_dimensions,
+                group="R-2.0.7",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 

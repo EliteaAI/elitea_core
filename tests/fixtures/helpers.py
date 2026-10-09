@@ -31,6 +31,29 @@ def register_index_pd_module(plugin_root: pathlib.Path):
     return load_module_with_stubs(plugin_root / 'models' / 'pd' / 'index.py', name)
 
 
+def register_expected_trajectory_module(plugin_root: pathlib.Path):
+    """Make ``utils/evaluation_expected_trajectory.py`` importable under its real name.
+
+    ``models/pd/evaluation.py`` and ``utils/evaluation_dataset_import.py`` relative-import the
+    case ``expected_trajectory`` validator (#6809), and most suites load those files by path with
+    stubbed parent packages. The validator is stdlib only, so the genuine module is registered
+    once; a module already in ``sys.modules`` resolves without its parents. Idempotent.
+    """
+    name = 'plugins.elitea_core.utils.evaluation_expected_trajectory'
+    if name in sys.modules:
+        return sys.modules[name]
+    return load_module_with_stubs(plugin_root / 'utils' / 'evaluation_expected_trajectory.py', name)
+
+
+def register_trajectory_checks_module(plugin_root: pathlib.Path):
+    """Same, for ``utils/evaluation_trajectory_checks.py`` (the built-in trajectory checks, #6809
+    item 5): the registry pd models, the projection and the run snapshot import it. Stdlib only."""
+    name = 'plugins.elitea_core.utils.evaluation_trajectory_checks'
+    if name in sys.modules:
+        return sys.modules[name]
+    return load_module_with_stubs(plugin_root / 'utils' / 'evaluation_trajectory_checks.py', name)
+
+
 def load_module_with_stubs(
     module_path: pathlib.Path,
     module_name: str,

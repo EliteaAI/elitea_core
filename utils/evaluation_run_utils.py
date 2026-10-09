@@ -27,6 +27,7 @@ from .evaluation_suite_utils import (
 )
 from .evaluation_human_score_utils import EvalRunNotFoundError
 from .run_id import PREDICT_RUN_ID_KWARGS_KEY
+from .evaluation_trajectory_checks import builtin_code
 from .evaluation_run_orchestration import (
     build_run_snapshot,
     execute_run,
@@ -75,10 +76,17 @@ def _binding_dict(b) -> dict:
 
 
 def _dimension_dict(d) -> dict:
+    code, return_contract = d.code, d.return_contract
+    # A built-in platform check runs the script of the deployed plugin, not the copy projected
+    # when the project attached it, so an upgrade reaches the next run without a resync.
+    if d.tier == 'platform':
+        builtin = builtin_code(d.meta)
+        if builtin:
+            code, return_contract = builtin
     return {
         'id': d.id, 'name': d.name, 'description': d.description,
         'scale_type': d.scale_type, 'scale_min': d.scale_min, 'scale_max': d.scale_max,
-        'polarity': d.polarity, 'code': d.code, 'return_contract': d.return_contract,
+        'polarity': d.polarity, 'code': code, 'return_contract': return_contract,
         'tier': d.tier,
     }
 
@@ -89,6 +97,8 @@ def _suite_dict(suite, judge_model_override: Optional[dict] = None) -> dict:
     return {
         'id': suite.id, 'name': suite.name,
         'judge_model': judge_model_override or suite.judge_model,
+        'steps_limit': (suite.meta or {}).get('steps_limit'),
+        'consumption_budget': (suite.meta or {}).get('consumption_budget'),
     }
 
 
@@ -100,6 +110,7 @@ def _case_dict(c) -> dict:
     return {
         'id': c.id, 'input': c.input, 'output': None,
         'expected_output': c.expected_output, 'structure': None,
+        'expected_trajectory': c.expected_trajectory,
         'variables': c.variables or {},
         'order_index': c.order_index,
     }
@@ -488,3 +499,48 @@ def mark_run_unstarted(project_id: int, run_id: int, reason: str, session=None):
         s.commit()
         s.refresh(run)
         return run
+
+
+# ----------------------------------------------------------------------------
+# pre-run estimate (design Q-S6)
+# ----------------------------------------------------------------------------
+
+def suite_estimate_inputs(project_id: int, suite_id: int, *,
+                          application_version_id: Optional[int] = None, session=None) -> dict:
+    """What the estimate is computed from: how many cases a run would execute now, and the per-case
+    usage rows of the last finished run of this suite on the same version. ``history_run_id`` is
+    None when there is no such run — only that suite + version counts as history (#6716)."""
+    from ..models.evaluation import EvalRun, EvalDataset, EvalRunStatus, EvalCaseUsage
+
+    with _session(session, project_id) as s:
+        suite, bindings, _dimensions = _load_suite_config(s, suite_id)
+        version_id = _resolve_version(bindings, application_version_id)
+
+        if suite.dataset_id is None:
+            cases = 1 if all_bindings_structure_only(bindings) else 0
+        else:
+            dataset = s.query(EvalDataset).filter(EvalDataset.id == suite.dataset_id).first()
+            cases = len(effective_cases(dataset.cases, excluded_case_ids(s, suite_id))) if dataset else 0
+
+        run = (
+            s.query(EvalRun)
+            .filter(EvalRun.suite_id == suite_id,
+                    EvalRun.application_version_id == version_id,
+                    EvalRun.status == EvalRunStatus.finished)
+            .order_by(EvalRun.finished_at.desc().nullslast(), EvalRun.id.desc())
+            .first()
+        )
+        rows = []
+        if run is not None:
+            rows = [
+                {'case_index': r.case_index, 'role': r.role, 'usage_state': r.usage_state,
+                 'input_tokens': r.input_tokens, 'output_tokens': r.output_tokens, 'cost': r.cost}
+                for r in s.query(EvalCaseUsage).filter(EvalCaseUsage.run_id == run.id).all()
+            ]
+        return {
+            'application_version_id': version_id,
+            'cases': cases,
+            'history_run_id': run.id if run is not None else None,
+            'history_finished_at': run.finished_at.isoformat() if run is not None and run.finished_at else None,
+            'history_rows': rows,
+        }

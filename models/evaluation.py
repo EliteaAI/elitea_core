@@ -32,7 +32,7 @@ from typing import List, Optional
 
 from tools import db_tools, db, config as c
 from sqlalchemy import (
-    Integer, String, Text, DateTime, Float, Boolean, func, ForeignKey,
+    Integer, BigInteger, Numeric, String, Text, DateTime, Float, Boolean, func, ForeignKey,
     UniqueConstraint, Index, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -308,6 +308,9 @@ class EvalDatasetCase(db_tools.AbstractBaseMixin, db.Base):
     input: Mapped[str] = mapped_column(Text, nullable=False)
     variables: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     expected_output: Mapped[str] = mapped_column(Text, nullable=True)  # present -> reference-based
+    # #6809 item 4: optional tool-call reference, see utils/evaluation_expected_trajectory.py.
+    # none_as_null: a cleared reference is SQL NULL, not a JSON 'null' that IS NOT NULL matches.
+    expected_trajectory: Mapped[dict] = mapped_column(JSONB(none_as_null=True), nullable=True)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, default=EvalCaseSource.manual)
     source_ref: Mapped[str] = mapped_column(String(256), nullable=True)  # e.g. originating conversation_id
     meta: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSONB), default=dict)
@@ -411,6 +414,85 @@ class EvalResult(db_tools.AbstractBaseMixin, db.Base):
     verdict: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     # frozen evidence actually shown to the judge/code: structure/input/output
     evidence: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())
+
+
+class EvalCaseExecution(db_tools.AbstractBaseMixin, db.Base):
+    """What the agent did on one case of a run: its trajectory and counters (#6809, design §3.1).
+
+    One row per run × case, written only when the run executed the agent (offline batch). Kept
+    off ``EvalRun.snapshot`` because a trajectory can be hundreds of KB per case, and per case
+    rather than per ``EvalResult`` because every binding of the case shares one execution.
+    ``trajectory_state`` says whether ``trajectory`` is meaningful: ``recorded`` (possibly with
+    zero steps), ``not_recorded`` (``timeout`` / ``no_envelope``) or ``not_applicable``
+    (``structure_only`` / ``unsupported``). Token and cost totals belong to the usage table."""
+    __tablename__ = 'eval_case_execution'
+    __table_args__ = ({'schema': c.POSTGRES_TENANT_SCHEMA},)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.eval_run.id', ondelete='CASCADE'),
+        nullable=False, index=True,
+    )
+    dataset_case_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
+    case_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    # the agent outcome: ok | empty | timeout | predict_error | predict_exception | unsupported | error
+    status: Mapped[str] = mapped_column(String(32), nullable=True)
+    trajectory_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    trajectory_state_reason: Mapped[str] = mapped_column(String(32), nullable=True)
+    # {steps, tool_sequence, truncated, source}; see utils/evaluation_execution.py
+    trajectory: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    # llm_calls, tool_calls, distinct_tools, tool_errors, retries, redundant_calls,
+    # step_limit_hit, guardrail_events, latency_ms
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())
+
+
+class EvalCaseUsage(db_tools.AbstractBaseMixin, db.Base):
+    """Tokens and cost of one case of a run, for one role (#6716, design §3.4).
+
+    One row per run × case × role. ``agent`` and ``judge`` are separate rows, so the two are
+    never summed by accident. A row is written for every case that reached the agent, whatever
+    its outcome, including ``timeout`` and ``budget_blocked``. ``usage_state`` says whether the
+    token columns mean anything: ``recorded`` (zero is a real zero), ``not_recorded`` (+ reason)
+    or ``not_applicable``. ``cost`` is null until priced. ``cost_source`` says how it was priced:
+    ``pending``, ``runtime:costs-catalog``, ``usage_event`` (from the ledger) or ``unpriced``."""
+    __tablename__ = 'eval_case_usage'
+    __table_args__ = (
+        UniqueConstraint('run_id', 'case_index', 'role', name='uq_eval_case_usage_run_case_role'),
+        {'schema': c.POSTGRES_TENANT_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.eval_run.id', ondelete='CASCADE'),
+        nullable=False, index=True,
+    )
+    dataset_case_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
+    case_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)   # agent | judge
+
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cache_creation_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # USD, never rounded at storage
+    cost = mapped_column(Numeric(18, 8), nullable=True)
+    # the most-used model; the per-model split stays in the ledger
+    model_name: Mapped[str] = mapped_column(String(256), nullable=True)
+
+    usage_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    usage_state_reason: Mapped[str] = mapped_column(String(32), nullable=True)
+    token_source: Mapped[str] = mapped_column(String(32), nullable=True)
+    cost_source: Mapped[str] = mapped_column(String(32), nullable=False, default='pending')
+    # the agent outcome of the case, for every terminal status
+    case_status: Mapped[str] = mapped_column(String(32), nullable=True)
+    settled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True, onupdate=func.now())

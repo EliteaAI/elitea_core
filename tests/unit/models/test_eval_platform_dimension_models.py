@@ -173,3 +173,36 @@ def test_detail_coerces_uuid_to_str(pd_platform):
         default_weight=1.0, is_active=True,
     )
     assert m.uuid == str(value)
+
+
+# --- #6809 item 5: built-in code checks ----------------------------------------
+
+def test_code_engine_needs_a_known_builtin_check(pd_platform):
+    with pytest.raises(ValidationError, match='builtin_check'):
+        pd_platform.EvalPlatformDimensionCreateModel(name='x', allowed_engines=['code'])
+    with pytest.raises(ValidationError, match='builtin_check'):
+        pd_platform.EvalPlatformDimensionCreateModel(
+            name='x', allowed_engines=['code'], meta={'builtin_check': 'trajectory.nope'})
+
+
+def test_code_engine_cannot_mix_with_ai(pd_platform):
+    with pytest.raises(ValidationError):
+        pd_platform.EvalPlatformDimensionCreateModel(
+            name='x', allowed_engines=['ai', 'code'],
+            meta={'builtin_check': 'trajectory.tool_match'})
+
+
+def test_every_seed_row_is_a_valid_create(pd_platform):
+    checks = sys.modules['plugins.elitea_core.utils.evaluation_trajectory_checks']
+    for row in checks.registry_seed():
+        m = pd_platform.EvalPlatformDimensionCreateModel(**row)
+        assert m.allowed_engines == ['code']
+        assert m.meta['builtin_check'] == row['name']
+
+
+def test_update_to_code_engine_validates_meta_too(pd_platform):
+    with pytest.raises(ValidationError, match='builtin_check'):
+        pd_platform.EvalPlatformDimensionUpdateModel(allowed_engines=['code'])
+    m = pd_platform.EvalPlatformDimensionUpdateModel(
+        allowed_engines=['code'], meta={'builtin_check': 'trajectory.tool_errors'})
+    assert m.allowed_engines == ['code']
