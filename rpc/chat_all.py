@@ -34,6 +34,7 @@ from ..utils.chat_history import (
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.participant_utils import get_or_create_one, delete_entity_from_all_conversations, add_participant_to_conversation, notify_user_mentioned_in_conversation
 from ..utils.sio_utils import get_chat_room
+from ..utils.run_stop import is_live_run
 from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
@@ -2778,6 +2779,8 @@ class RPC:
             # Step 2: Mark chat run as stopped in Redis
             self.mark_chat_run_stopped(message_group_uuid)
 
+            was_live = is_live_run(msg_group.is_streaming, msg_group.meta)
+
             # Step 3: Set is_streaming = False in database
             msg_group.is_streaming = False
 
@@ -2785,7 +2788,8 @@ class RPC:
             if msg_group.meta:
                 msg_group.meta = retire_all_interrupts(msg_group.meta)
                 msg_group.meta = retire_all_authorization_requests(msg_group.meta)
-            msg_group.meta = {**(msg_group.meta or {}), RUN_STOPPED_META_KEY: True}
+            if was_live:
+                msg_group.meta = {**(msg_group.meta or {}), RUN_STOPPED_META_KEY: True}
             flag_modified(msg_group, 'meta')
 
             msg_group_deleted = False
