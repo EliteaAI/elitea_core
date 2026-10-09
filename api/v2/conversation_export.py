@@ -7,6 +7,13 @@ from sqlalchemy.orm import selectinload
 from tools import api_tools, auth, db, config as c, register_openapi
 
 from ...models.conversation import Conversation
+from ...utils.chat_crypto import (
+    CHAT_ENVELOPE,
+    ENVELOPE_MIMETYPE,
+    ENVELOPE_SUFFIX,
+    chat_master_key,
+    iter_file_chunks,
+)
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.conversation_access import check_conversation_access, NOT_FOUND
 from ...utils.conversation_export import (
@@ -104,12 +111,30 @@ class PromptLibAPI(api_tools.APIModeHandler):
             or f"{conversation_dict['name']}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
         )
 
+        master_key = chat_master_key()
+        if master_key is None:
+            log.warning(
+                "Chat export: SECRETS_MASTER_KEY is not set, exporting unencrypted (file will not be importable)"
+            )
+
         if not include_attachments:
+            body = json.dumps(strip_internal_refs(payload), ensure_ascii=False, indent=2).encode('utf-8')
+            if master_key is None:
+                return Response(
+                    body,
+                    mimetype='application/json; charset=utf-8',
+                    headers={
+                        'Content-Disposition': content_disposition_attachment(f'{file_name}.json'),
+                        'Access-Control-Expose-Headers': _EXPOSED_HEADERS,
+                    },
+                )
+            # direct_passthrough: stream as is, so after-request hooks don't buffer/decode the binary body
             return Response(
-                json.dumps(strip_internal_refs(payload), ensure_ascii=False, indent=2),
-                mimetype='application/json; charset=utf-8',
+                CHAT_ENVELOPE.iter_encrypt([body], master_key),
+                direct_passthrough=True,
+                mimetype=ENVELOPE_MIMETYPE,
                 headers={
-                    'Content-Disposition': content_disposition_attachment(f'{file_name}.json'),
+                    'Content-Disposition': content_disposition_attachment(f'{file_name}.json{ENVELOPE_SUFFIX}'),
                     'Access-Control-Expose-Headers': _EXPOSED_HEADERS,
                 },
             )
@@ -124,12 +149,26 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "Chat exported: project=%s conversation=%s messages=%s files=%s missing=%s",
             project_id, conversation_id, len(groups), len(attachments), missing_count,
         )
-        response = send_file(
-            zip_file,
-            mimetype='application/zip',
-            download_name=f'{file_name}.zip',
-            as_attachment=True,
-        )
+        if master_key is None:
+            response = send_file(
+                zip_file,
+                mimetype='application/zip',
+                download_name=f'{file_name}.zip',
+                as_attachment=True,
+            )
+        else:
+            def _encrypted_stream():
+                try:
+                    yield from CHAT_ENVELOPE.iter_encrypt(iter_file_chunks(zip_file), master_key)
+                finally:
+                    zip_file.close()
+
+            response = Response(
+                _encrypted_stream(),
+                direct_passthrough=True,
+                mimetype=ENVELOPE_MIMETYPE,
+                headers={'Content-Disposition': content_disposition_attachment(f'{file_name}.zip{ENVELOPE_SUFFIX}')},
+            )
         response.headers['X-Export-Missing-Files'] = str(missing_count)
         response.headers['Access-Control-Expose-Headers'] = _EXPOSED_HEADERS
         return response
