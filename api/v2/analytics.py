@@ -44,17 +44,12 @@ if _API_AVAILABLE:
 
     _USAGE_EVENT_TYPES = ("llm", "tool")
 
-    def _metered_rows(rows):
-        """A usage plugin that also returns skill rows (#6926) must not add zero-cost skill
-        activations to event totals or error rates."""
-        return [r for r in rows or [] if r["event_type"] in _USAGE_EVENT_TYPES]
-
     def _usage_health(project_id, dt_from, dt_to):
         """llm/tool rows from usage_event (Overview's source), or None to keep audit numbers."""
         try:
-            return _metered_rows(rpc_tools.RpcMixin().rpc.timeout(10).usage_event_type_health(
+            return rpc_tools.RpcMixin().rpc.timeout(10).usage_event_type_health(
                 project_id, date_from=dt_from, date_to=dt_to,
-            ))
+            )
         except Exception:  # pylint: disable=W0703
             log.warning("usage_event health lookup failed for project %s", project_id, exc_info=True)
             return None
@@ -91,9 +86,9 @@ if _API_AVAILABLE:
         if args.get("date_from") or args.get("date_to"):
             dt_from, dt_to = _parse_dates(args)
         try:
-            usage_rows = _metered_rows(rpc_tools.RpcMixin().rpc.timeout(10).usage_event_type_health(
+            usage_rows = rpc_tools.RpcMixin().rpc.timeout(10).usage_event_type_health(
                 project_id, date_from=dt_from, date_to=dt_to, **run_scope,
-            ))
+            )
         except LookupError as exc:
             return {"error": str(exc)}, 404
         #
