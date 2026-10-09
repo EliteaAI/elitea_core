@@ -19,8 +19,9 @@ from ..utils.conversation_utils import (
     resolve_persona_instructions,
     reresolve_persona_instructions
 )
+from ..utils.conversation_access import visible_conversation_ids
 from ..utils.participant_utils import add_participant_to_conversation
-from ..utils.skill_run_history import SkillRunHistory
+from ..utils.skill_run_history import list_skill_runs
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import set_context_strategy
 from ..utils.exceptions import PoolSaturationError
@@ -401,40 +402,31 @@ class RPC:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
             entity_project_id: Optional owner project of a skill single_participant
         """
+        if participant_id is not None and entity_name == ParticipantTypes.skill.value:
+            return list_skill_runs(
+                project_id=project_id,
+                user_id=user_id,
+                is_admin=is_admin,
+                skill_id=participant_id,
+                skill_project_id=entity_project_id,
+                filters=SkillRunFilters.model_validate(run_filters or {}),
+                text_query=query,
+                source=source,
+                include_hidden=include_hidden,
+                limit=limit,
+                offset=offset,
+                sort_order=sort_order,
+            )
+
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
             sorting = desc if sort_order == 'desc' else asc
 
-            participant_subquery_filters = [Participant.entity_name == ParticipantTypes.user.value]
-            if not is_admin:
-                participant_subquery_filters.append(
-                    Participant.entity_meta['id'].astext.cast(Integer) == user_id,
-                )
-
-            participant_subquery = session.query(Participant.id).filter(
-                *participant_subquery_filters
-            ).subquery()
-
-            distinct_conversation_subquery = session.query(Conversation.id).distinct().join(
-                ParticipantMapping,
-                Conversation.id == ParticipantMapping.conversation_id
-            ).join(
-                Participant,
-                Participant.id == ParticipantMapping.participant_id
-            ).filter(
-                or_(
-                    Conversation.is_private == False,
-                    Participant.id.in_(participant_subquery)
-                )
-            ).subquery()
-
             base_query = session.query(Conversation).where(
-                Conversation.id.in_(distinct_conversation_subquery)
+                Conversation.id.in_(visible_conversation_ids(session, user_id, is_admin))
             )
 
-            is_skill_history = participant_id is not None and entity_name == ParticipantTypes.skill.value
-
-            if query and not is_skill_history:
+            if query:
                 base_query = base_query.where(Conversation.name.ilike(f'%{query}%'))
 
             if source:
@@ -449,18 +441,7 @@ class RPC:
                     )
                 )
 
-            skill_history = None
-            facets = None
-            if is_skill_history:
-                skill_history = SkillRunHistory(
-                    session, project_id, participant_id, entity_project_id,
-                    SkillRunFilters.model_validate(run_filters or {}),
-                )
-                base_query = skill_history.restrict_to_runs(base_query)
-                if skill_history.offers_facets(offset, query):
-                    facets = skill_history.facets(base_query)
-                base_query = skill_history.apply_filters(base_query, text_query=query)
-            elif participant_id is not None:
+            if participant_id is not None:
                 filters = [
                     Conversation.meta.has_key('single_participant'),
                     Conversation.meta['single_participant']['entity_meta']['id'].astext.cast(Integer) == participant_id,
@@ -481,16 +462,11 @@ class RPC:
             total = base_query.count()
             conversations = base_query.limit(limit).offset(offset).all()
 
-            page_extras = {
-                'facets': facets,
-                'model_filter_unavailable': skill_history.model_filter_unavailable,
-            } if skill_history else {}
-
             if not conversations:
-                return {'total': total, 'rows': [], **page_extras}
+                return {'total': total, 'rows': []}
 
             conv_ids = [c.id for c in conversations]
-            is_chat_sidebar_listing = bool(source and 'elitea' in source) and skill_history is None
+            skip_duration = bool(source and 'elitea' in source)
 
             # Pre-aggregate per-conversation counts in two scalar GROUP BY queries
             # instead of N per-row .count()/list accesses (audit issue #1).
@@ -524,25 +500,22 @@ class RPC:
                     users_count[cid] = n
 
             durations = (
-                {} if is_chat_sidebar_listing
+                {} if skip_duration
                 else calculate_conversation_durations_batch(conv_ids, session)
             )
-
-            run_summaries = skill_history.summarize(conversations) if skill_history else {}
 
             rows = []
             for conv in conversations:
                 conv_dict = {
                     **serialize(conv),
-                    "duration": -1 if is_chat_sidebar_listing else durations.get(conv.id, 0.0),
+                    "duration": -1 if skip_duration else durations.get(conv.id, 0.0),
                     "participants_count": participants_count.get(conv.id, 0),
                     "message_groups_count": mg_counts.get(conv.id, 0),
                     "users_count": users_count.get(conv.id, 0),
-                    "run_summary": run_summaries.get(conv.id),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 
-            return {'total': total, 'rows': rows, **page_extras}
+            return {'total': total, 'rows': rows}
 
     @web.rpc("chat_get_conversation_by_uuid_rpc", "get_conversation_by_uuid_rpc")
     def get_conversation_by_uuid_rpc(
