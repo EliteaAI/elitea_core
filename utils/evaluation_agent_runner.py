@@ -39,6 +39,9 @@ UNSUPPORTED_AGENT_TYPES = frozenset({'pipeline'})
 DEFAULT_AGENT_TIMEOUT = 120  # agents run tools + may chain steps, so more headroom than the judge
 _ASSISTANT_ROLES = ('assistant', 'ai')
 _ERROR_TRUNCATE = 500
+# The SDK's fixed text for a run that finished without an answer (langraph_agent.py). It is
+# not agent output, so it must score ``empty`` rather than pass as a non-blank reply.
+_SDK_NO_OUTPUT_SENTINEL = 'Assistant run has been completed, but output is None.'
 
 
 def agent_type_supported(version_details: dict) -> bool:
@@ -138,7 +141,7 @@ def extract_agent_output(predict_result) -> Optional[str]:
             continue
         if msg.get('role', '') in _ASSISTANT_ROLES or msg.get('type', '') == 'ai':
             content = msg.get('content', '')
-            if isinstance(content, str) and content.strip():
+            if isinstance(content, str) and content.strip() and not content.startswith(_SDK_NO_OUTPUT_SENTINEL):
                 return content
     return None
 
