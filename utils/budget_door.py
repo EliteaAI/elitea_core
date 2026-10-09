@@ -68,6 +68,33 @@ def schema_may_use_llm(agent_type, instructions) -> bool:
     )
 
 
+def dispatch_uses_own_model(call_kwargs: dict, project_id) -> bool:
+    """True only when the main model is explicitly the caller project's own (BYO, never budgeted).
+
+    Unset model_project_id may still resolve to a public model, so it keeps the door.
+    """
+    if project_id is None:
+        return False
+    payload = call_kwargs.get("kwargs") or {}
+    version_details = (payload.get("application") or {}).get("version_details") or {}
+    llm_settings = dict(version_details.get("llm_settings") or {})
+    if not version_details:
+        # Plain LLM chat predicts carry the model on the LLM client kwargs instead
+        llm_kwargs = (payload.get("llm") or {}).get("kwargs") or {}
+        llm_settings = {
+            "model_name": llm_kwargs.get("model"),
+            "model_project_id": llm_kwargs.get("model_project_id"),
+        }
+    if not llm_settings.get("model_name"):
+        return False
+    if (llm_settings.get("selection") or {}).get("mode") == "auto":
+        return False
+    try:
+        return int(llm_settings.get("model_project_id")) == int(project_id)
+    except (TypeError, ValueError):
+        return False
+
+
 def dispatch_owner(call_kwargs: dict):
     """(project_id, user_id) of a start_task call — meta first, then the task payload."""
     meta = call_kwargs.get("meta") or {}
