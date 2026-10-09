@@ -48,6 +48,7 @@ def builder(models_path):
         'serialize': lambda value: value,
         'AgentTypes': NS(pipeline=NS(value='pipeline')), 'resolve_application_name': lambda p: 'fixture',
         'resolve_runtime_skills': lambda version: [], 'consume_message_skills': lambda text, skills: (text, []),
+        'merge_mention_candidates': lambda attached, chat: [*attached, *chat],
     }
     exec(compile(ast.Module([function], []), str(path), 'exec'), namespace)
     return namespace['generate_predict_payload'], llm, rpc

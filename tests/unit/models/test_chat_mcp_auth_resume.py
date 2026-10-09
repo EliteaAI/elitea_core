@@ -91,6 +91,7 @@ _module(
     consume_message_skills=lambda message, _skills: (message, []),
     resolve_runtime_skills=lambda _details: [],
 )
+_module('utils.skill_mentions', merge_mention_candidates=lambda attached, chat: [*attached, *chat])
 _module('utils.application_tools', expand_toolkit_settings=lambda tools, *_args: tools)
 _module(
     'utils.internal_tools',
@@ -105,7 +106,7 @@ for short_name in (
     'models.pd', 'models.pd.chat', 'models.pd.tool', 'models.pd.utils',
     'models.pd.version', 'utils', 'utils.application_tools',
     'utils.internal_tools', 'utils.llm_settings',
-    'utils.next_input_suggestion_utils', 'utils.skill_utils',
+    'utils.next_input_suggestion_utils', 'utils.skill_utils', 'utils.skill_mentions',
 ):
     sys.modules[f'plugins.elitea_core.{short_name}'] = sys.modules[short_name]
 predict_utils = importlib.import_module('plugins.elitea_core.utils.predict_utils')

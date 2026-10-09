@@ -186,6 +186,7 @@ def predict_utils(package_graph, internal_tools):
         },
         f"{PACKAGE}.utils.skill_utils": {
             "consume_message_skills": lambda message, skills: (message, []),
+            "merge_mention_candidates": lambda attached, chat: [*attached, *chat],
             "resolve_runtime_skills": lambda details: [],
         },
         f"{PACKAGE}.utils.application_tools": {

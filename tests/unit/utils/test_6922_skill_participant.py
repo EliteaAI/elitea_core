@@ -115,7 +115,7 @@ class Column:
 class FakePredictPayload:
     def __init__(self, llm_settings=None):
         self.project_id = CHAT_PROJECT_ID
-        self.llm_settings = types.SimpleNamespace(dict=lambda exclude_none=False: llm_settings) if llm_settings else None
+        self.llm_settings = types.SimpleNamespace(model_dump=lambda **kwargs: llm_settings) if llm_settings else None
 
 
 @pytest.fixture
@@ -162,6 +162,7 @@ def env(isolated_sys_modules):
     _stub('utils.application_utils', validate_and_resolve_llm_settings=resolve_fake_llm_settings)
     _stub('utils.predict_utils', get_project_context=lambda project_id: {'enabled': False, 'content': ''})
     _stub('utils.utils', get_public_project_id=lambda: PUBLIC_PROJECT_ID)
+    _stub('utils.skill_utils', consume_message_skills=lambda content, candidates: (content, list(candidates)))
     _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None),
           SkillVersion=types.SimpleNamespace(id=IdColumn(), skill_id=Column()))
     _stub('models.message_group', ConversationMessageGroup=types.SimpleNamespace(
@@ -175,7 +176,7 @@ def env(isolated_sys_modules):
     for name in ('skill_predict', 'llm', 'skill_run_settings', 'participant'):
         _load(f'models/pd/{name}.py', f'{PACKAGE}.models.pd.{name}')
     for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution',
-                 'skill_run_settings', 'skill_run_utils'):
+                 'skill_run_settings', 'skill_run_utils', 'skill_mentions', 'skill_llm_override'):
         _load(f'utils/{name}.py', f'{PACKAGE}.utils.{name}')
     module = _load('utils/skill_participant_utils.py', f'{PACKAGE}.utils.skill_participant_utils')
 

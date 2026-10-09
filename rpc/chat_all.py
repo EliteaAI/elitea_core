@@ -38,9 +38,9 @@ from ..models.message_items.attachment import AttachmentMessageItem
 from ..utils.attachments import NotSupportableProcessorExtension, read_file_content, process_single_attachment_file
 from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.conversation_access import check_post_access
-from ..utils.skill_utils import consume_message_skills, validate_agent_skills, SkillVersionDeletedError
+from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
-    has_skill_mention, participant_skill_mention_candidates, pop_skill_dispatch, record_skill_run, \
+    apply_participant_skill_mentions, pop_skill_dispatch, record_skill_run, \
     resolve_skill_attachment_llm_settings
 from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
@@ -950,20 +950,9 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
     # Add steps limit parameter if any
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
 
-    if participant.entity_name in (ParticipantTypes.dummy, ParticipantTypes.skill):
-        apply_participant_skill_mentions(session, msg_group, result, predict_payload.project_id)
+    apply_participant_skill_mentions(session, msg_group, result, predict_payload.project_id)
 
     return result
-
-
-def apply_participant_skill_mentions(session, msg_group, result: dict, chat_project_id: int) -> None:
-    if not has_skill_mention(result.get('user_input')):
-        return
-    candidates = participant_skill_mention_candidates(session, msg_group, chat_project_id)
-    if msg_group.sent_to.entity_name == ParticipantTypes.skill:
-        result['version_details']['mention_skills'] = candidates
-        return
-    result['user_input'], result['invoked_skills'] = consume_message_skills(result['user_input'], candidates)
 
 
 def resolve_target_application_context(
