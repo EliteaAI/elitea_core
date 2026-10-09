@@ -14,6 +14,7 @@ from ...models.pd.participant_settings import EntitySettingsLlm, EntitySettingsL
 from ...utils.entity_settings_utils import coerce_version_id
 from ...utils.participant_utils import make_query_filter_for_entity, invalid_llm_settings_for_reasoning_model
 from ...utils.sio_utils import get_chat_room
+from ...utils.skill_participant_utils import SkillParticipantError, pinned_skill_version_id
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.sio_utils import SioEvents
 from ...utils.utils import get_public_project_id
@@ -44,6 +45,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).first()
             if participant is None:
                 return {"error": "Participant was not found"}, 400
+
+            if participant.entity_name == ParticipantTypes.skill:
+                try:
+                    data['version_id'] = pinned_skill_version_id(
+                        session, participant, conversation_id, project_id, data.get('version_id'),
+                    )
+                except SkillParticipantError as e:
+                    return {"error": str(e)}, 400
 
             # Validate llm_settings based on participant type
             if llm_settings_data := data.get('llm_settings'):

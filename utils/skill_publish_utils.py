@@ -12,6 +12,7 @@ from tools import db, this, rpc_tools
 
 from ..models.all import Tag
 from ..models.enums.all import NotificationEventTypes, PublishStatus
+from ..models.enums.events import ApplicationEvents
 from ..models.pd.collection_base import TagBaseModel
 from ..models.pd.publish import VERSION_NAME_PATTERN
 from ..models.pd.skill_publish import SkillPublishAIResult
@@ -1175,6 +1176,16 @@ def delete_public_skill_version(
 
         session.commit()
 
+    rpc_tools.EventManagerMixin().event_manager.fire_event(
+        ApplicationEvents.skill_unpublished.value,
+        {
+            'id': public_skill_id,
+            'version_id': deleted_version_id,
+            'shell_deleted': shell_deleted,
+            'catalog_emptied': not remaining_versions,
+            'owner_id': public_project_id,
+        },
+    )
     return {"not_published": False, "shell_deleted": shell_deleted, **source_meta}
 
 

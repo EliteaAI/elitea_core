@@ -1,16 +1,12 @@
 from pylon.core.tools import web
 
 from ..models.enums.all import ParticipantTypes
+from ..models.enums.events import ApplicationEvents
 from ..utils.participant_utils import update_participant_meta
 from ..utils.utils import get_public_project_id
 
 
-def _delete_entity_participant_from_chats(module, context, entity_name, entity_data):
-    owner_id = entity_data['owner_id']
-    entity_meta = {
-        'project_id': owner_id,
-        'id': entity_data['id']
-    }
+def _owner_project_ids(context, owner_id):
     # when we deleting public entity, it might be shared in any chat of any project
     # so process and clean them all
     try:
@@ -19,10 +15,17 @@ def _delete_entity_participant_from_chats(module, context, entity_name, entity_d
         public_id = None
     if owner_id == public_id:
         projects = context.rpc_manager.call.project_list(filter_={'create_success': True})
-        project_ids = [p['id'] for p in projects]
-    else:
-        project_ids = [owner_id,]
-    for project_id in project_ids:
+        return [p['id'] for p in projects]
+    return [owner_id,]
+
+
+def _delete_entity_participant_from_chats(module, context, entity_name, entity_data):
+    owner_id = entity_data['owner_id']
+    entity_meta = {
+        'project_id': owner_id,
+        'id': entity_data['id']
+    }
+    for project_id in _owner_project_ids(context, owner_id):
         module.delete_entity_in_all_conversations(
             project_id,
             entity_name,
@@ -48,6 +51,33 @@ class Event:
         _delete_entity_participant_from_chats(
             self, context, ParticipantTypes.toolkit.name, toolkit_data
         )
+
+    @web.event(ApplicationEvents.skill_deleted)
+    def delete_skill_participant_handler(self, context, event, skill_data: dict):
+        _delete_entity_participant_from_chats(
+            self, context, ParticipantTypes.skill.name, skill_data
+        )
+
+    @web.event(ApplicationEvents.skill_unpublished)
+    def unpublish_skill_participant_handler(self, context, event, skill_data: dict):
+        if skill_data.get('catalog_emptied'):
+            _delete_entity_participant_from_chats(
+                self, context, ParticipantTypes.skill.name, skill_data
+            )
+
+    @web.event(ApplicationEvents.skill_updated)
+    def update_skill_participant_handler(self, context, event, skill_data: dict):
+        owner_id = skill_data['owner_id']
+        for project_id in _owner_project_ids(context, owner_id):
+            update_participant_meta(
+                project_id,
+                ParticipantTypes.skill,
+                entity_meta={
+                    'project_id': owner_id,
+                    'id': skill_data['id']
+                },
+                meta=skill_data['data']
+            )
 
     @web.event('application_updated')
     def update_application_participant_handler(self, context, event, application_data: dict):

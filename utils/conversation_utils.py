@@ -13,6 +13,7 @@ from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationDetailsOrm, ConversationDetails
 from ..utils.authors import get_authors_data
 from ..utils.meta_guard import strip_heavy_meta_expr
+from ..utils.skill_participant_utils import describe_skill_participants
 
 MESSAGES_DISPLAY_COUNT: int = 100
 
@@ -400,7 +401,24 @@ def get_conversation_details(
                     f"{participant['entity_settings'].get('version_id')}: {depth_err}"
                 )
 
+    enrich_skill_participants(conversation_dict['participants'], project_id)
     return ConversationDetails.model_validate(conversation_dict)
+
+
+def enrich_skill_participants(participants: list, project_id: int) -> None:
+    skill_participants = [
+        participant for participant in participants
+        if participant['entity_name'] == ParticipantTypes.skill.value
+    ]
+    if not skill_participants:
+        return
+    try:
+        details = describe_skill_participants(skill_participants, project_id)
+    except Exception as skill_err:
+        log.warning(f"Could not enrich skill participants: {skill_err}")
+        return
+    for participant in skill_participants:
+        participant['meta'] = {**(participant.get('meta') or {}), **details[participant['id']]}
 
 
 

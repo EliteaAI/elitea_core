@@ -44,6 +44,16 @@ def _load_pd_module():
     return mod
 
 
+def _load_events_enum_module():
+    spec = importlib.util.spec_from_file_location(
+        "elitea_core.models.enums.events",
+        os.path.join(PLUGIN_ROOT, "models", "enums", "events.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _pylon_stubs():
     """Return a dict of minimal pylon stubs."""
     pylon = types.ModuleType("pylon")
@@ -1026,13 +1036,7 @@ def _load_events_module(public_project_id=None):
     utils_utils_mod = types.ModuleType("elitea_core.utils.utils")
     utils_utils_mod.get_public_project_id = lambda: public_project_id
 
-    events_enums_mod = types.ModuleType("elitea_core.models.enums.events")
-    events_enums_mod.ApplicationEvents = types.SimpleNamespace(
-        application_deleted="application_deleted",
-        toolkit_deleted="toolkit_deleted",
-        application_updated="application_updated",
-        toolkit_updated="toolkit_updated",
-    )
+    events_enums_mod = _load_events_enum_module()
 
     stubs = {
         **_pylon_stubs(),
@@ -1276,9 +1280,12 @@ def _load_participant_events_module():
     participant_utils_mod = types.ModuleType("elitea_core.utils.participant_utils")
     participant_utils_mod.update_participant_meta = lambda *a, **kw: None
 
+    events_enum_mod = _load_events_enum_module()
+
     stubs = {
         **_pylon_stubs(),
         "elitea_core.models.enums.all": participant_types_mod,
+        "elitea_core.models.enums.events": events_enum_mod,
         "elitea_core.utils.utils": utils_utils_mod,
         "elitea_core.utils.participant_utils": participant_utils_mod,
     }
