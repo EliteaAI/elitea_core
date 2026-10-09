@@ -95,6 +95,8 @@ def history(isolated_sys_modules):
 
         def usage_root_entity_models(self, **kwargs):
             harness.usage_calls.append({'models': kwargs})
+            if harness.usage_error:
+                raise harness.usage_error
             return harness.models_answer
 
     tools = types.ModuleType('tools')
@@ -257,13 +259,23 @@ class TestFilters:
         assert str(kept).replace('-', '') in sql.replace('-', '')
         assert str(dropped).replace('-', '') not in sql.replace('-', '')
 
-    def test_unreachable_usage_matches_no_run_for_a_model_filter(self, history):
+    def test_unreachable_usage_reports_the_model_filter_as_unavailable(self, history):
         history.harness.usage_error = RuntimeError('usage down')
         query = RecordingQuery(history.Conversation, candidates=[uuid.uuid4()])
+        run_history = _history(history, {'model': 'm'})
 
-        sql = _history(history, {'model': 'm'}).apply_filters(query).sql()
+        sql = run_history.apply_filters(query).sql()
 
-        assert 'IN (NULL) AND (1 != 1)' in sql or '1 != 1' in sql
+        assert '1 != 1' in sql
+        assert run_history.model_filter_unavailable is True
+
+    def test_an_answered_model_filter_is_available(self, history):
+        query = RecordingQuery(history.Conversation, candidates=[uuid.uuid4()])
+        run_history = _history(history, {'model': 'm'})
+
+        run_history.apply_filters(query)
+
+        assert run_history.model_filter_unavailable is False
 
 
 class TestFilterValidation:
@@ -338,6 +350,24 @@ class TestPageSummary:
 
         assert len(history.harness.usage_calls) == 1
         assert summary['tokens'] == 9
+
+    def test_usage_is_asked_once_when_it_cannot_answer(self, history):
+        history.harness.usage_error = RuntimeError('usage down')
+        run_history = _history(history, session=SummarySession(versions=[], statuses=[]))
+
+        class VisibleRuns:
+            def with_entities(self, *_columns):
+                return self
+
+            def all(self):
+                return [(uuid.uuid4(), 3)]
+
+        facets = run_history.facets(VisibleRuns())
+        summary = run_history.summarize([_conversation(1)])[1]
+
+        assert len(history.harness.usage_calls) == 1
+        assert facets['models'] is None
+        assert summary['usage_available'] is False
 
     def test_unreachable_usage_leaves_usage_columns_empty(self, history):
         history.harness.usage_error = RuntimeError('usage down')

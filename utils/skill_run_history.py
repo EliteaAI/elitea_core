@@ -59,42 +59,36 @@ def skill_version_id_expression():
     return ParticipantMapping.entity_settings['version_id'].astext.cast(Integer)
 
 
-def fetch_usage_totals(
-        project_id: int, conversation_uuids: list, skill_id: int, skill_project_id: Optional[int],
-        model_name: Optional[str] = None,
-) -> Optional[dict]:
-    if not conversation_uuids:
-        return {}
-    try:
-        return rpc_tools.RpcMixin().rpc.timeout(USAGE_TOTALS_TIMEOUT).usage_conversation_totals(
-            project_id=project_id,
-            conversation_ids=conversation_uuids,
-            root_entity_type=ParticipantTypes.skill.value,
-            root_entity_id=skill_id,
-            root_entity_project_id=skill_project_id,
-            model_name=model_name,
-        )
-    except Exception:  # pylint: disable=W0703
-        log.warning('Skill run history: usage totals unavailable for project %s', project_id)
-        return None
+class SkillUsageReader:
+    def __init__(self, project_id: int, skill_id: int, skill_project_id: Optional[int]):
+        self.project_id = project_id
+        self.skill_scope = {
+            'root_entity_type': ParticipantTypes.skill.value,
+            'root_entity_id': skill_id,
+            'root_entity_project_id': skill_project_id,
+        }
+        self.is_unreachable = False
 
+    def conversation_totals(self, conversation_uuids: list, model_name: Optional[str] = None) -> Optional[dict]:
+        if not conversation_uuids:
+            return {}
+        return self._read('usage_conversation_totals', conversation_ids=conversation_uuids, model_name=model_name)
 
-def fetch_entity_models(
-        project_id: int, conversation_uuids: list, skill_id: int, skill_project_id: Optional[int],
-) -> Optional[list]:
-    if not conversation_uuids:
-        return []
-    try:
-        return rpc_tools.RpcMixin().rpc.timeout(USAGE_TOTALS_TIMEOUT).usage_root_entity_models(
-            project_id=project_id,
-            conversation_ids=conversation_uuids,
-            root_entity_type=ParticipantTypes.skill.value,
-            root_entity_id=skill_id,
-            root_entity_project_id=skill_project_id,
-        )
-    except Exception:  # pylint: disable=W0703
-        log.warning('Skill run history: run models unavailable for project %s', project_id)
-        return None
+    def entity_models(self, conversation_uuids: list) -> Optional[list]:
+        if not conversation_uuids:
+            return []
+        return self._read('usage_root_entity_models', conversation_ids=conversation_uuids)
+
+    def _read(self, rpc_name: str, **kwargs):
+        if self.is_unreachable:
+            return None
+        try:
+            rpc = getattr(rpc_tools.RpcMixin().rpc.timeout(USAGE_TOTALS_TIMEOUT), rpc_name)
+            return rpc(project_id=self.project_id, **kwargs, **self.skill_scope)
+        except Exception:  # pylint: disable=W0703
+            log.warning('Skill run history: %s unavailable for project %s', rpc_name, self.project_id)
+            self.is_unreachable = True
+            return None
 
 
 def fetch_authors(author_ids: set) -> dict:
@@ -138,8 +132,10 @@ class SkillRunHistory:
         self.run_conversation_ids = select(ConversationMessageGroup.conversation_id).where(
             ConversationMessageGroup.author_participant_id.in_(self.participant_ids),
         )
+        self.usage = SkillUsageReader(project_id, skill_id, skill_project_id)
         self.usage_totals = None
         self.usage_prefetched = False
+        self.model_filter_unavailable = False
 
     def restrict_to_runs(self, query):
         return query.where(Conversation.id.in_(self.run_conversation_ids))
@@ -157,10 +153,7 @@ class SkillRunHistory:
                  for author_id in author_ids),
                 key=lambda author: (author['name'] or '').lower(),
             ),
-            'models': fetch_entity_models(
-                self.project_id, [str(run_uuid) for (run_uuid, _author_id) in runs],
-                self.skill_id, self.skill_project_id,
-            ),
+            'models': self.usage.entity_models([str(run_uuid) for (run_uuid, _author_id) in runs]),
         }
 
     def apply_filters(self, query, text_query: Optional[str] = None):
@@ -206,11 +199,9 @@ class SkillRunHistory:
 
     def _apply_model_filter(self, query):
         candidate_uuids = [str(uuid) for (uuid,) in query.with_entities(Conversation.uuid).all()]
-        self.usage_totals = fetch_usage_totals(
-            self.project_id, candidate_uuids, self.skill_id, self.skill_project_id,
-            model_name=self.filters.model,
-        )
+        self.usage_totals = self.usage.conversation_totals(candidate_uuids, model_name=self.filters.model)
         self.usage_prefetched = True
+        self.model_filter_unavailable = self.usage_totals is None
         matching_uuids = [UUID(conversation_uuid) for conversation_uuid in self.usage_totals or {}]
         return query.where(Conversation.uuid.in_(matching_uuids))
 
@@ -227,11 +218,8 @@ class SkillRunHistory:
             select(statuses_query.c.conversation_id, statuses_query.c.status)
         ).all())
         authors = fetch_authors({conversation.author_id for conversation in conversations})
-        usage_totals = self.usage_totals if self.usage_prefetched else fetch_usage_totals(
-            self.project_id,
+        usage_totals = self.usage_totals if self.usage_prefetched else self.usage.conversation_totals(
             [str(conversation.uuid) for conversation in conversations],
-            self.skill_id,
-            self.skill_project_id,
         )
         return {
             conversation.id: build_run_summary(

@@ -481,7 +481,10 @@ class RPC:
             total = base_query.count()
             conversations = base_query.limit(limit).offset(offset).all()
 
-            page_extras = {'facets': facets} if skill_history else {}
+            page_extras = {
+                'facets': facets,
+                'model_filter_unavailable': skill_history.model_filter_unavailable,
+            } if skill_history else {}
 
             if not conversations:
                 return {'total': total, 'rows': [], **page_extras}
