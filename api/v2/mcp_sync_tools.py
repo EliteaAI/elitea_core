@@ -44,10 +44,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         available_to_users=True,
     )
     @auth.decorators.check_api({
-        "permissions": ["models.applications.tool.patch"],
+        "permissions": ["models.applications.mcp_auth.post"],
         "recommended_roles": {
-            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
-            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
+            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": True},
+            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
         }})
     @api_tools.endpoint_metrics
     def post(self, project_id: int, **kwargs):
