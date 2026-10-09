@@ -5,7 +5,7 @@ from sqlalchemy import desc, asc, Integer, or_, func
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
-from ..models.enums.all import ParticipantTypes
+from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationListExtended, ConversationDetails
 from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
@@ -385,6 +385,7 @@ class RPC:
         is_admin: bool = False,
         participant_id: int = None,
         entity_name: str = None,
+        entity_project_id: int = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -395,6 +396,7 @@ class RPC:
 
         Args:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
+            entity_project_id: Optional owner project of a skill single_participant
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -450,6 +452,11 @@ class RPC:
                 if entity_name:
                     filters.append(
                         Conversation.meta['single_participant']['entity_name'].astext == entity_name,
+                    )
+                if entity_name == ParticipantTypes.skill.value and entity_project_id is not None:
+                    filters.append(
+                        Conversation.meta['single_participant']['entity_meta']['project_id'].astext.cast(Integer)
+                        == entity_project_id,
                     )
                 base_query = base_query.filter(*filters)
 
@@ -845,7 +852,7 @@ class RPC:
                     Conversation, Conversation.id == ParticipantMapping.conversation_id
                 ).filter(
                     ParticipantMapping.participant_id == participant_id,
-                    Participant.entity_name == ParticipantTypes.application,
+                    Participant.entity_name.in_(SELF_MODELLED_PARTICIPANTS),
                     Conversation.uuid == conversation_uuid,
                 ).first()
                 if not mapping:

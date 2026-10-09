@@ -11,7 +11,8 @@ from ...models.message_items.attachment import AttachmentMessageItem
 from ...models.message_items.text import TextMessageItem
 from ...models.pd.message import MessageGroupDetail
 from ...models.pd.predict import SioRegenerateModel, SioPredictModel
-from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items
+from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, generate_payload, PayloadGenerationError, process_attachment_message_items, \
+    resolve_attachment_llm_settings
 from ...utils.chat_history import generate_chat_history
 from ...models.enums.all import ChatHistoryRole, AgentTypes
 from ...utils.constants import PROMPT_LIB_MODE
@@ -19,6 +20,7 @@ from ...utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, retire_all_interrupts,
 )
 from ...utils.sio_utils import SioEvents
+from ...utils.skill_participant_utils import pop_skill_dispatch
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -69,7 +71,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 session.commit()
                 session.refresh(reply_msg)
 
-            raw_predict_payload = {**parsed.model_dump(), **parsed.payload}
+            raw_predict_payload = {**parsed.model_dump(), **parsed.payload, 'project_id': project_id}
             try:
                 predict_payload = SioPredictModel.model_validate(raw_predict_payload)
             except ValidationError as e:
@@ -92,7 +94,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                             predict_payload.project_id,
                             reply_msg,
                             new_attachments,
-                            llm_settings=predict_payload.llm_settings.dict() if predict_payload.llm_settings else None,
+                            llm_settings=resolve_attachment_llm_settings(
+                                session, predict_payload, reply_msg.conversation_id, msg_group.author_participant,
+                            ),
                         )
                         session.commit()
                         session.refresh(reply_msg)
@@ -176,14 +180,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
             rpc_func = CHAT_PREDICT_MAPPER.get(msg_group.author_participant.entity_name)
             if rpc_func:
                 regenerate_payload[EXECUTION_GENERATION_KEY] = execution_generation
+                skill_rpc_kwargs, start_event_content = pop_skill_dispatch(regenerate_payload, {
+                    'participant_id': msg_group.author_participant_id,
+                    'question_id': parsed.question_id,
+                })
                 getattr(self.module.context.rpc_manager.call, rpc_func)(
                     parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
                     routing_projection=regenerate_payload.pop('_routing_projection', None),
-                    start_event_content={
-                        'participant_id': msg_group.author_participant_id,
-                        'question_id': parsed.question_id,
-                    },
-                    chat_project_id=project_id
+                    start_event_content=start_event_content,
+                    chat_project_id=project_id,
+                    **skill_rpc_kwargs,
                 )
                 # load new regenerated message items
                 session.refresh(msg_group)

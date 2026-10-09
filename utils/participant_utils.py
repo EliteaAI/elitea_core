@@ -18,6 +18,7 @@ from ..models.pd.participant_settings import EntitySettingsApplication, \
 from ..models.enums.all import NotificationEventTypes
 from ..utils.authors import get_authors_data
 from ..utils.sio_utils import SioEvents
+from .skill_participant_utils import load_skill_participant_target, load_skill_participant_details
 
 REASONING_EFFORT_OFF = 'none'
 
@@ -140,6 +141,8 @@ def get_or_create_one(
                     'user_name': entity_details.get('user_name'),
                     'user_avatar': entity_details.get('user_avatar'),
                 }
+            case ParticipantTypes.skill:
+                meta = {'name': entity_details.get('name'), 'icon_meta': entity_details.get('icon_meta')}
             case ParticipantTypes.toolkit:
                 meta = {
                     'name': entity_details.get('name') or entity_details.get('toolkit_name'),
@@ -176,6 +179,13 @@ def add_participant_to_conversation(
         project_id: int,
         initiator_id: Optional[int] = None
 ) -> ParticipantBase:
+    pinned_skill_version = None
+    if participant.entity_name == ParticipantTypes.skill:
+        _, skill_target = load_skill_participant_target(
+            participant.entity_meta, project_id, participant.entity_settings.get('version_id'),
+        )
+        pinned_skill_version = {'version_id': skill_target.version_id}
+
     participant_orm, entity_details = get_or_create_one(
         session,
         entity_name=participant.entity_name,
@@ -187,6 +197,8 @@ def add_participant_to_conversation(
         entity_details=entity_details,
     )
     entity_settings.update(participant.entity_settings)
+    if pinned_skill_version:
+        entity_settings.update(pinned_skill_version)
 
     try:
         conversation.participants.append(participant_orm)
@@ -367,6 +379,8 @@ def get_entity_details(
                 project_id=meta.project_id,
                 toolkit_id=meta.id
             )
+        case ParticipantTypes.skill:
+            return load_skill_participant_details(entity_meta)
     return None
 
 
@@ -519,7 +533,10 @@ def delete_entity_from_all_conversations(project_id, entity_name: ParticipantTyp
     with db.get_session(project_id) as session:
         participant = session.query(
             Participant
-        ).filter(Participant.entity_meta.contains(entity_meta.dict())).first()
+        ).filter(
+            Participant.entity_name == entity_name,
+            Participant.entity_meta.contains(entity_meta.dict()),
+        ).first()
         if participant:
             conversation_ids = []
             participant_maps = session.query(ParticipantMapping).filter(
