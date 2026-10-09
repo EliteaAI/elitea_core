@@ -8,6 +8,7 @@ from ...models.conversation import Conversation
 from ...models.enums.all import ParticipantTypes
 from ...models.pd.conversation import ConversationCreate, ConversationDetails
 from ...models.pd.participant import ParticipantCreate, ParticipantEntityUser
+from ...models.pd.skill_run_history import SkillRunFilters
 from ...utils.conversation_utils import get_conversation_details, resolve_persona_instructions
 from ...utils.participant_utils import add_participant_to_conversation
 from ...utils.skill_participant_utils import SkillParticipantError, validate_skill_participants
@@ -55,6 +56,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Filter by participant entity name (e.g. 'application', 'llm')."},
             {"name": "entity_meta_project_id", "in": "query", "required": False, "schema": {"type": "integer"},
              "description": "Owner project of a 'skill' participant; separates own skills from Catalog skills."},
+            {"name": "created_from", "in": "query", "required": False, "schema": {"type": "string", "format": "date-time"},
+             "description": "Skill run history only: runs started at or after this time."},
+            {"name": "created_to", "in": "query", "required": False, "schema": {"type": "string", "format": "date-time"},
+             "description": "Skill run history only: runs started at or before this time."},
+            {"name": "author_id", "in": "query", "required": False, "schema": {"type": "integer"},
+             "description": "Skill run history only: runs started by this user."},
+            {"name": "version_id", "in": "query", "required": False, "schema": {"type": "integer"},
+             "description": "Skill run history only: runs of this skill version."},
+            {"name": "status", "in": "query", "required": False,
+             "schema": {"type": "string", "enum": ["running", "success", "error", "stopped"]},
+             "description": "Skill run history only: status of the skill's latest reply."},
+            {"name": "model", "in": "query", "required": False, "schema": {"type": "string"},
+             "description": "Skill run history only: runs a given model answered in."},
         ],
         available_to_users=True,
     )
@@ -74,6 +88,19 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         entity_meta_id = request.args.get('entity_meta_id', type=int) or request.args.get('participant_id', type=int)
 
+        entity_name = request.args.get('entity_name')
+        run_filters = None
+        if entity_name == ParticipantTypes.skill.value:
+            try:
+                run_filters = SkillRunFilters.model_validate(request.args.to_dict()).model_dump(
+                    mode='json', exclude_none=True,
+                )
+            except ValidationError as e:
+                return {
+                    "error": "Invalid run history filter",
+                    "details": e.errors(include_url=False, include_context=False),
+                }, 400
+
         result = rpc.timeout(10).chat_list_conversations_rpc(
             project_id=project_id,
             user_id=user_id,
@@ -86,8 +113,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             include_hidden=False,
             is_admin=user_is_admin,
             participant_id=entity_meta_id,
-            entity_name=request.args.get('entity_name'),
+            entity_name=entity_name,
             entity_project_id=request.args.get('entity_meta_project_id', type=int),
+            run_filters=run_filters,
         )
 
         return result, 200

@@ -407,6 +407,7 @@ def test_regenerate_generation_allows_reused_id_and_rejects_old_callbacks():
         'budget_error_code': 'member_budget_exceeded',
         'is_error': True,
         'error': 'old failure',
+        'stopped': True,
     })
     fresh = begin_execution_generation(old, 'new-run')
 
@@ -416,6 +417,7 @@ def test_regenerate_generation_allows_reused_id_and_rejects_old_callbacks():
     assert 'budget_error_code' not in fresh
     assert 'is_error' not in fresh
     assert 'error' not in fresh
+    assert 'stopped' not in fresh
     assert is_current_execution(fresh, {'execution_generation': 'new-run'})
     assert not is_current_execution(fresh, {'execution_generation': 'old-run'})
     assert not is_current_execution(fresh, {})

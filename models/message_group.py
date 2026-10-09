@@ -5,9 +5,9 @@ from typing import List
 
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Integer, DateTime, func, ForeignKey, Boolean, UUID, String
+from sqlalchemy import Integer, DateTime, func, ForeignKey, Boolean, UUID, String, Index
 
-from . import db, config as c, CONVERSATION_MESSAGE_GROUP_TABLE_NAME
+from . import db, config as c, CONVERSATION_MESSAGE_GROUP_TABLE_NAME, MESSAGE_GROUP_AUTHOR_INDEX_NAME
 from .conversation import Conversation
 from .message_items.base import MessageItem
 from .participants import Participant
@@ -16,6 +16,7 @@ from .participants import Participant
 class ConversationMessageGroup(db.Base):
     __tablename__ = CONVERSATION_MESSAGE_GROUP_TABLE_NAME
     __table_args__ = (
+        Index(MESSAGE_GROUP_AUTHOR_INDEX_NAME, 'author_participant_id', 'conversation_id', 'created_at'),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

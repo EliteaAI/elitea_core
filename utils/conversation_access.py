@@ -1,6 +1,8 @@
 from pylon.core.tools import log
+from sqlalchemy import Integer, or_
 from tools import rpc_tools
 
+from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes
 from ..models.folder import ConversationFolder
 from ..models.participants import Participant, ParticipantMapping
@@ -10,6 +12,31 @@ from .support_utils import get_support_config
 NOT_FOUND = ({'error': 'Conversation not found'}, 404)
 NOT_PARTICIPANT = ({'error': 'Only conversation participants can do this'}, 403)
 NOT_PRIVILEGED = ({'error': 'Only the conversation author or a project admin can do this'}, 403)
+
+
+def visible_conversation_ids(session, user_id: int, is_admin: bool):
+    participant_subquery_filters = [Participant.entity_name == ParticipantTypes.user.value]
+    if not is_admin:
+        participant_subquery_filters.append(
+            Participant.entity_meta['id'].astext.cast(Integer) == user_id,
+        )
+
+    participant_subquery = session.query(Participant.id).filter(
+        *participant_subquery_filters
+    ).subquery()
+
+    return session.query(Conversation.id).distinct().join(
+        ParticipantMapping,
+        Conversation.id == ParticipantMapping.conversation_id
+    ).join(
+        Participant,
+        Participant.id == ParticipantMapping.participant_id
+    ).filter(
+        or_(
+            Conversation.is_private == False,
+            Participant.id.in_(participant_subquery)
+        )
+    ).subquery()
 
 
 def find_user_participant_id(participants, user_id: int) -> int | None:

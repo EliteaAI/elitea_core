@@ -17,6 +17,7 @@ from copy import deepcopy
 
 RESOLVED_INTERRUPT_IDS_KEY = 'resolved_hitl_interrupt_ids'
 EXECUTION_GENERATION_KEY = 'execution_generation'
+RUN_STOPPED_META_KEY = 'stopped'
 MAX_RESOLVED_INTERRUPT_IDS = 256
 SUPERVISOR_DECISIONS_KEY = 'parallel_hitl_decisions'
 SUPERVISOR_ROSTER_KEY = 'parallel_hitl_roster'
@@ -148,7 +149,7 @@ def begin_execution_generation(meta, generation):
     """
     updated = dict(meta or {})
     updated.pop(RESOLVED_INTERRUPT_IDS_KEY, None)
-    for key in ('continuation_error', 'budget_error_code', 'is_error', 'error'):
+    for key in ('continuation_error', 'budget_error_code', 'is_error', 'error', RUN_STOPPED_META_KEY):
         updated.pop(key, None)
     updated[EXECUTION_GENERATION_KEY] = generation
     return updated
