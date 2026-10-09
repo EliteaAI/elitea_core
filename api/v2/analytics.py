@@ -45,8 +45,8 @@ if _API_AVAILABLE:
     _USAGE_EVENT_TYPES = ("llm", "tool")
 
     def _metered_rows(rows):
-        """Only llm/tool buckets: a usage plugin that also returns skill rows (#6926) must not
-        add zero-cost skill activations to event totals or error rates."""
+        """A usage plugin that also returns skill rows (#6926) must not add zero-cost skill
+        activations to event totals or error rates."""
         return [r for r in rows or [] if r["event_type"] in _USAGE_EVENT_TYPES]
 
     def _usage_health(project_id, dt_from, dt_to):
