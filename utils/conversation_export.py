@@ -317,7 +317,11 @@ def collect_attachment_sizes(project_id: int, attachments: list[dict]) -> dict[s
     sizes = {}
     if not names_by_bucket:
         return sizes
-    mc = MinioClient.from_project_id(project_id)
+    try:
+        mc = MinioClient.from_project_id(project_id)
+    except Exception as e:  # pylint: disable=W0703
+        log.warning("Chat export: failed to init storage client for project %s: %s", project_id, e)
+        return sizes
     for bucket, names in names_by_bucket.items():
         try:
             for file_info in mc.list_files(bucket):
