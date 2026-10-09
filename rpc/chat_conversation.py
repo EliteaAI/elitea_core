@@ -8,6 +8,7 @@ from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationListExtended, ConversationDetails
+from ..models.pd.skill_run_history import SkillRunFilters
 from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
@@ -19,6 +20,7 @@ from ..utils.conversation_utils import (
     reresolve_persona_instructions
 )
 from ..utils.participant_utils import add_participant_to_conversation
+from ..utils.skill_run_history import SkillRunHistory
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import set_context_strategy
 from ..utils.exceptions import PoolSaturationError
@@ -386,6 +388,7 @@ class RPC:
         participant_id: int = None,
         entity_name: str = None,
         entity_project_id: int = None,
+        run_filters: dict = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -429,7 +432,9 @@ class RPC:
                 Conversation.id.in_(distinct_conversation_subquery)
             )
 
-            if query:
+            is_skill_history = participant_id is not None and entity_name == ParticipantTypes.skill.value
+
+            if query and not is_skill_history:
                 base_query = base_query.where(Conversation.name.ilike(f'%{query}%'))
 
             if source:
@@ -444,7 +449,18 @@ class RPC:
                     )
                 )
 
-            if participant_id is not None:
+            skill_history = None
+            facets = None
+            if is_skill_history:
+                skill_history = SkillRunHistory(
+                    session, project_id, participant_id, entity_project_id,
+                    SkillRunFilters.model_validate(run_filters or {}),
+                )
+                base_query = skill_history.restrict_to_runs(base_query)
+                if skill_history.offers_facets(offset, query):
+                    facets = skill_history.facets(base_query)
+                base_query = skill_history.apply_filters(base_query, text_query=query)
+            elif participant_id is not None:
                 filters = [
                     Conversation.meta.has_key('single_participant'),
                     Conversation.meta['single_participant']['entity_meta']['id'].astext.cast(Integer) == participant_id,
@@ -452,11 +468,6 @@ class RPC:
                 if entity_name:
                     filters.append(
                         Conversation.meta['single_participant']['entity_name'].astext == entity_name,
-                    )
-                if entity_name == ParticipantTypes.skill.value and entity_project_id is not None:
-                    filters.append(
-                        Conversation.meta['single_participant']['entity_meta']['project_id'].astext.cast(Integer)
-                        == entity_project_id,
                     )
                 base_query = base_query.filter(*filters)
 
@@ -470,11 +481,13 @@ class RPC:
             total = base_query.count()
             conversations = base_query.limit(limit).offset(offset).all()
 
+            page_extras = {'facets': facets} if skill_history else {}
+
             if not conversations:
-                return {'total': total, 'rows': []}
+                return {'total': total, 'rows': [], **page_extras}
 
             conv_ids = [c.id for c in conversations]
-            skip_duration = bool(source and 'elitea' in source)
+            is_chat_sidebar_listing = bool(source and 'elitea' in source) and skill_history is None
 
             # Pre-aggregate per-conversation counts in two scalar GROUP BY queries
             # instead of N per-row .count()/list accesses (audit issue #1).
@@ -508,22 +521,25 @@ class RPC:
                     users_count[cid] = n
 
             durations = (
-                {} if skip_duration
+                {} if is_chat_sidebar_listing
                 else calculate_conversation_durations_batch(conv_ids, session)
             )
+
+            run_summaries = skill_history.summarize(conversations) if skill_history else {}
 
             rows = []
             for conv in conversations:
                 conv_dict = {
                     **serialize(conv),
-                    "duration": -1 if skip_duration else durations.get(conv.id, 0.0),
+                    "duration": -1 if is_chat_sidebar_listing else durations.get(conv.id, 0.0),
                     "participants_count": participants_count.get(conv.id, 0),
                     "message_groups_count": mg_counts.get(conv.id, 0),
                     "users_count": users_count.get(conv.id, 0),
+                    "run_summary": run_summaries.get(conv.id),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 
-            return {'total': total, 'rows': rows}
+            return {'total': total, 'rows': rows, **page_extras}
 
     @web.rpc("chat_get_conversation_by_uuid_rpc", "get_conversation_by_uuid_rpc")
     def get_conversation_by_uuid_rpc(

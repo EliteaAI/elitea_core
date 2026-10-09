@@ -44,6 +44,7 @@ from ..utils.skill_participant_utils import SkillParticipantError, build_skill_p
     resolve_skill_attachment_llm_settings
 from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
+    RUN_STOPPED_META_KEY,
     EXECUTION_GENERATION_KEY, begin_execution_generation,
     claim_supervisor_decision_phase, decisions_for_child,
     INTERNAL_CONTINUE_TOKEN, decision_ack_key, interrupt_identity, pending_interrupts,
@@ -2784,7 +2785,8 @@ class RPC:
             if msg_group.meta:
                 msg_group.meta = retire_all_interrupts(msg_group.meta)
                 msg_group.meta = retire_all_authorization_requests(msg_group.meta)
-                flag_modified(msg_group, 'meta')
+            msg_group.meta = {**(msg_group.meta or {}), RUN_STOPPED_META_KEY: True}
+            flag_modified(msg_group, 'meta')
 
             msg_group_deleted = False
             room = get_chat_room(msg_group.conversation.uuid)
