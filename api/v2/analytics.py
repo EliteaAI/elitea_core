@@ -54,10 +54,13 @@ if _API_AVAILABLE:
             log.warning("usage_event health lookup failed for project %s", project_id, exc_info=True)
             return None
 
-    def _run_scope_args(args):
-        """{run_id, eval_run_id} as given, or None when the request is not run-scoped.
+    _ROOT_ENTITY_INT_KEYS = ("root_entity_id", "root_entity_project_id")
 
-        Raises ValueError for an id that is not a UUID.
+    def _run_scope_args(args):
+        """{run_id, eval_run_id, root_entity_*} as given, or None when the request is not run-scoped.
+
+        Raises ValueError for an id that is not a UUID or an integer, and for a root entity
+        without a run to narrow.
         """
         scope = {}
         for key in ("run_id", "eval_run_id"):
@@ -67,7 +70,20 @@ if _API_AVAILABLE:
                     scope[key] = str(uuid.UUID(value))
                 except ValueError as exc:
                     raise ValueError(f"{key} must be a UUID") from exc
-        return scope or None
+        root_entity = {}
+        root_entity_type = (args.get("root_entity_type") or "").strip()
+        if root_entity_type:
+            root_entity["root_entity_type"] = root_entity_type
+        for key in _ROOT_ENTITY_INT_KEYS:
+            value = (args.get(key) or "").strip()
+            if value:
+                try:
+                    root_entity[key] = int(value)
+                except ValueError as exc:
+                    raise ValueError(f"{key} must be an integer") from exc
+        if root_entity and not scope:
+            raise ValueError("root_entity_type/root_entity_id need run_id or eval_run_id")
+        return {**scope, **root_entity} or None
 
     def _usage_health_row(row):
         return {
@@ -91,6 +107,8 @@ if _API_AVAILABLE:
             )
         except LookupError as exc:
             return {"error": str(exc)}, 404
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
         #
         health = [_usage_health_row(r) for r in usage_rows or []]
         total_events = sum(h["total"] for h in health)
@@ -189,6 +207,30 @@ if _API_AVAILABLE:
                     "required": False,
                     "schema": {"type": "string", "format": "uuid"},
                     "description": "Scope to one evaluation run by its uuid.",
+                },
+                {
+                    "name": "root_entity_type",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": (
+                        "With run_id and root_entity_id: count only that root entity's rows "
+                        "(one participant of a multi-participant conversation)."
+                    ),
+                },
+                {
+                    "name": "root_entity_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer"},
+                    "description": "Root entity id; required with root_entity_type.",
+                },
+                {
+                    "name": "root_entity_project_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer"},
+                    "description": "Project the root entity lives in (the public project for Catalog entities).",
                 },
             ],
             responses={
