@@ -1728,8 +1728,14 @@ _TWIN_PARENT_VERSION_ID = 'agent_publish_parent_version_id'
 _TWIN_PARENT_AUTHOR_ID = 'agent_publish_parent_author_id'
 
 
-def _skill_content_sha(instructions: str) -> str:
-    return hashlib.sha256((instructions or '').encode()).hexdigest()
+def _skill_content_sha(instructions: str, run_settings: Optional[dict] = None) -> str:
+    if not run_settings:
+        return hashlib.sha256((instructions or '').encode()).hexdigest()
+    raw = json.dumps(
+        {'instructions': instructions or '', 'run_settings': run_settings},
+        sort_keys=True, separators=(',', ':'),
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def _resolve_or_fork_skill_twin(
@@ -1749,7 +1755,7 @@ def _resolve_or_fork_skill_twin(
     duplicate until its mappings are unpublished, then GC collects it —
     harmless, same self-healing stance as attach_public_skill_to_agents.
     """
-    content_sha = _skill_content_sha(skill_info.get('instructions'))
+    content_sha = _skill_content_sha(skill_info.get('instructions'), skill_info.get('run_settings'))
     with db.get_session(public_project_id) as session:
         twin = (
             session.query(SkillVersion.skill_id, SkillVersion.id)
@@ -1844,7 +1850,10 @@ def publish_attached_skills(
                 .all()
             )
             # skill/skill_version are lazy='joined' — loaded in-session.
-            source_skills = build_skill_mappings_list(mappings)
+            source_skills = [
+                {**entry, 'run_settings': mapping.skill_version.run_settings if mapping.skill_version else None}
+                for entry, mapping in zip(build_skill_mappings_list(mappings), mappings)
+            ]
     except Exception as exc:
         log.error(
             "[PUBLISH] Failed to read attached skills of source version %d: %s",

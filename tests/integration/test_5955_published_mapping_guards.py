@@ -15,6 +15,7 @@ import importlib.util
 import pathlib
 import sys
 import types
+from typing import Optional
 
 import pytest
 
@@ -400,6 +401,7 @@ def skill_utils_module():
 
     class _PdBase(BaseModel):
         model_config = ConfigDict(extra="allow")
+        run_settings: Optional[dict] = None
 
     models_pd_skill = types.ModuleType("plugins.elitea_core.models.pd.skill")
     for cls_name in (
@@ -420,6 +422,13 @@ def skill_utils_module():
     ):
         setattr(models_pd_skill_version, cls_name, type(cls_name, (_PdBase,), {}))
     _register("plugins.elitea_core.models.pd.skill_version", models_pd_skill_version)
+
+    _register("plugins.elitea_core.models.pd.skill_run_settings", types.SimpleNamespace(
+        dump_run_settings=lambda settings: settings,
+    ))
+    _register("plugins.elitea_core.utils.skill_run_settings", types.SimpleNamespace(
+        portable_run_settings=lambda project_id, raw: raw,
+    ))
 
     folder_access = types.ModuleType("plugins.elitea_core.utils.folder_access")
     folder_access.folder_exclusion_clause = lambda *a, **k: None

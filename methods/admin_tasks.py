@@ -47,6 +47,7 @@ from ..utils.embedding_migration_utils import (
     migrate_toolkit_embedding_models,
 )
 from ..utils.trace_step_backfill_utils import parse_backfill_params, backfill_project
+from ..utils.skill_publish_schema import apply_skill_run_settings_column
 from ..utils.utils import get_public_project_id, make_yield_to_hub
 
 
@@ -560,6 +561,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return {"migrated": 0, "error": "failed to list projects"}
 
         migrated, failed = apply_skill_publish_columns(project_ids)
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
+
+    @web.method()
+    def migrate_skill_run_settings_column(self, *args, **kwargs):
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, kwargs.get("param"))
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_skill_run_settings_column: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_skill_run_settings_column(project_ids)
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
@@ -3934,3 +3946,24 @@ def _run_ado_project_migration(  # pylint: disable=R0913,R0914
             session.commit()
 
     return results
+
+
+def _requested_project_id(param):
+    for segment in (param or "").split(";"):
+        key, _, value = segment.partition("=")
+        value = value.strip()
+        if key.strip().lower() != "project_id" or value.lower() == "all":
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            log.warning("invalid project_id '%s', scanning all projects", value)
+    return None
+
+
+def _target_project_ids(rpc_manager, param):
+    project_id = _requested_project_id(param)
+    if project_id is not None:
+        return [project_id]
+    projects = rpc_manager.call.project_list(filter_={"create_success": True}) or []
+    return [project["id"] for project in projects]

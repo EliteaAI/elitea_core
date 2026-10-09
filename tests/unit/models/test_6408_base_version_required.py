@@ -70,6 +70,8 @@ def pd_skill():
 
     _load(f'{PKG}.models.pd.collection_base', 'models/pd/collection_base.py')
     _load(f'{PKG}.models.pd.tag', 'models/pd/tag.py')
+    _load(f'{PKG}.models.pd.llm', 'models/pd/llm.py')
+    _load(f'{PKG}.models.pd.skill_run_settings', 'models/pd/skill_run_settings.py')
     _load(f'{PKG}.models.pd.skill_version', 'models/pd/skill_version.py')
 
     return _load(f'{PKG}.models.pd.skill', 'models/pd/skill.py')

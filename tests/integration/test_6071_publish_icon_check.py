@@ -156,6 +156,10 @@ def spu(pu):
         'plugins.elitea_core.models.pd.skill_publish': {'SkillPublishAIResult': object},
         'plugins.elitea_core.models.pd.skill_version': {'SkillVersionCreateModel': object},
         'plugins.elitea_core.utils.constants': {'DEFAULT_FALLBACK_CATEGORY': 'Other'},
+        'plugins.elitea_core.utils.skill_run_settings': {
+            'SHARED_MODEL_REQUIRED': 'shared model required',
+            'unshared_model_issue': lambda run_settings, public_project_id: None,
+        },
         'plugins.elitea_core.utils.skill_category_utils': {
             'apply_skill_category_to_tag_dicts': lambda tags, cat: tags,
             'get_active_skill_categories': lambda: ['Other'],

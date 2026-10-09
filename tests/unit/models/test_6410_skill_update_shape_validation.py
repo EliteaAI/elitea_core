@@ -67,6 +67,8 @@ def pd_module():
     # Real, dependency-free modules - no reason to fake these.
     _load_real('models/pd/collection_base.py', f'{PKG}.models.pd.collection_base')
     _load_real('models/pd/tag.py', f'{PKG}.models.pd.tag')
+    _load_real('models/pd/llm.py', f'{PKG}.models.pd.llm')
+    _load_real('models/pd/skill_run_settings.py', f'{PKG}.models.pd.skill_run_settings')
     _load_real('models/enums/all.py', f'{PKG}.models.enums.all')
     constants = _load_real('utils/constants.py', f'{PKG}.utils.constants')
 

@@ -649,6 +649,9 @@ def _make_migration_stubs(sessions):
     backfill.parse_backfill_params = lambda *a, **kw: None
     backfill.backfill_project = lambda *a, **kw: None
 
+    skill_schema = types.ModuleType("elitea_core.utils.skill_publish_schema")
+    skill_schema.apply_skill_run_settings_column = lambda *a, **kw: ([], [])
+
     utils_utils = types.ModuleType("elitea_core.utils.utils")
     utils_utils.get_public_project_id = lambda *a, **kw: None
     utils_utils.make_yield_to_hub = lambda *a, **kw: None
@@ -666,6 +669,7 @@ def _make_migration_stubs(sessions):
         "elitea_core.utils.llm_migration_utils": llm_mig,
         "elitea_core.utils.embedding_migration_utils": emb_mig,
         "elitea_core.utils.trace_step_backfill_utils": backfill,
+        "elitea_core.utils.skill_publish_schema": skill_schema,
         "elitea_core.utils.utils": utils_utils,
         "elitea_core.models.chat_template": ct_orm,
     }

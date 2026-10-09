@@ -14,8 +14,10 @@ from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 from .predict_utils import get_project_context
 from .project_context_utils import prepare_project_context_delivery
 from .sio_utils import SioValidationError
+from .skill_run_settings import is_requested_model_usable, selection_mode, without_model_binding
 from .usage_attribution import skill_attribution
 from ..models.enums.all import PublishStatus
+from ..models.pd.llm import merge_llm_selection_override
 from ..models.pd.skill_predict import SkillPredictMcpRequest, SkillPredictRequest
 from ..models.skill import Skill
 
@@ -25,6 +27,7 @@ SKILL_RUN_TIMEOUT_SECONDS = 60 * 60
 NO_MODEL_ERROR = 'No LLM model is configured for this project'
 NOT_PUBLISHED_ERROR = 'Skill version is not published'
 EMPTY_INSTRUCTIONS_ERROR = 'Skill version has no instructions'
+AUTO_EFFORT_NONE_ERROR = "Auto model selection needs a reasoning effort; 'none' is not supported"
 SOCKET_NOT_OWNED_ERROR = 'Socket session does not belong to the caller'
 SOCKET_NOT_IN_PROJECT_ERROR = 'Socket session is not authorized for this project. Please refresh the page and try again.'
 
@@ -65,6 +68,7 @@ class SkillRun:
                 'skill_id': self.target.skill_id,
                 'skill_version_id': self.target.version_id,
                 'version_name': self.target.version_name,
+                'model_fallback': self.model_fallback,
             },
         }
 
@@ -140,7 +144,21 @@ def merge_llm_override(saved: Optional[dict], override: Optional[dict]) -> dict:
     overrides_model_only = 'model_name' in override and 'model_project_id' not in override
     if overrides_model_only:
         saved = {key: value for key, value in saved.items() if key != 'model_project_id'}
-    return {**saved, **override}
+    if 'reasoning_effort' in override and selection_mode(saved) == 'fixed':
+        saved = {key: value for key, value in saved.items() if key != 'selection'}
+    return merge_llm_selection_override(saved, override)
+
+
+def auto_effort_override(requested: dict, override: Optional[dict]) -> dict:
+    if 'reasoning_effort' not in (override or {}) or selection_mode(requested) != 'auto':
+        return requested
+    effort = override['reasoning_effort']
+    if effort == 'none':
+        raise SkillRunError(AUTO_EFFORT_NONE_ERROR)
+    reasoning = {'mode': 'explicit', 'preset': effort} if effort else {'mode': 'auto'}
+    folded = {key: value for key, value in requested.items() if key != 'reasoning_effort'}
+    folded['selection'] = {**folded['selection'], 'reasoning': reasoning}
+    return folded
 
 
 def is_model_replaced(requested: dict, resolved: dict) -> bool:
@@ -157,10 +175,18 @@ def resolve_skill_llm_settings(
     caller_project_id: int, saved: Optional[dict], override: Optional[dict],
 ) -> tuple[dict, bool]:
     requested = merge_llm_override(saved, override)
-    resolved = validate_and_resolve_llm_settings(caller_project_id, requested) or {}
-    if not resolved.get('model_name'):
+    model_fallback = not is_requested_model_usable(caller_project_id, requested)
+    if model_fallback:
+        requested = without_model_binding(requested)
+    else:
+        requested = auto_effort_override(requested, override)
+    try:
+        resolved = validate_and_resolve_llm_settings(caller_project_id, requested) or {}
+    except ValueError as e:
+        raise SkillRunError(f'Invalid LLM settings: {e}') from e
+    if not resolved.get('model_name') and selection_mode(resolved) != 'auto':
         raise SkillRunError(NO_MODEL_ERROR)
-    return resolved, is_model_replaced(requested, resolved)
+    return resolved, model_fallback or is_model_replaced(requested, resolved)
 
 
 def build_skill_run(
