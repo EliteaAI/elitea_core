@@ -33,7 +33,26 @@ from ..models.pd.skill_version import (
 from ..models.pd.skill_run_settings import dump_run_settings
 
 
-MAX_SKILLS_PER_AGENT = 5
+DEFAULT_MAX_SKILLS_PER_AGENT = 50
+DEFAULT_MAX_INVOKED_SKILLS_PER_TURN = 5
+
+
+def _skill_limit(key: str, default: int) -> int:
+    # A bad admin value must never take attach or chat down, so it falls back to the default.
+    try:
+        value = int((this.descriptor.config.get('skills') or {}).get(key, default))
+    except Exception:  # pylint: disable=W0703
+        return default
+    return value if value >= 1 else default
+
+
+def get_max_skills_per_agent() -> int:
+    return _skill_limit('max_skills_per_agent', DEFAULT_MAX_SKILLS_PER_AGENT)
+
+
+def get_max_invoked_skills_per_turn() -> int:
+    return _skill_limit('max_invoked_skills_per_turn', DEFAULT_MAX_INVOKED_SKILLS_PER_TURN)
+
 
 _SKILL_SORT_WHITELIST = frozenset({'created_at', 'name', 'id'})
 
@@ -106,13 +125,14 @@ class SkillPublishedError(SkillError):
 class SkillLimitExceededError(SkillError):
     http_status = 400
 
-    def __init__(self, entity_version_id: int, current_count: int):
+    def __init__(self, entity_version_id: int, current_count: int, max_allowed: int):
         super().__init__(
             f"Agent version {entity_version_id} already has {current_count} skills attached. "
-            f"Maximum allowed is {MAX_SKILLS_PER_AGENT}."
+            f"Maximum allowed is {max_allowed}."
         )
         self.entity_version_id = entity_version_id
         self.current_count = current_count
+        self.max_allowed = max_allowed
 
 
 class SkillAlreadyAttachedError(SkillError):
@@ -1286,8 +1306,9 @@ def validate_agent_skill_limit(
         EntitySkillMapping.entity_type == entity_type,
     ).count()
 
-    if current_count >= MAX_SKILLS_PER_AGENT:
-        raise SkillLimitExceededError(entity_version_id, current_count)
+    max_allowed = get_max_skills_per_agent()
+    if current_count >= max_allowed:
+        raise SkillLimitExceededError(entity_version_id, current_count, max_allowed)
 
     return True
 
@@ -1304,10 +1325,13 @@ def attach_skill_to_public_copy(
 
     That copy is already published or embedded. The guard that stops a user
     editing a public version would therefore reject the publish run itself.
+    The attach cap is skipped too: the copy must carry every skill of its
+    source, even after an admin lowered the limit below the source's count.
     """
     with _skill_session(session, project_id) as s:
         return _create_skill_mapping(
             s, entity_version_id, skill_id, skill_version_id, entity_type,
+            enforce_limit=False,
         )
 
 
@@ -1350,8 +1374,10 @@ def _create_skill_mapping(
     skill_id: int,
     skill_version_id: int,
     entity_type: str,
+    enforce_limit: bool = True,
 ) -> dict:
-    validate_agent_skill_limit(s, entity_version_id, entity_type)
+    if enforce_limit:
+        validate_agent_skill_limit(s, entity_version_id, entity_type)
 
     skill = s.query(Skill).filter(Skill.id == skill_id).first()
     if not skill:
@@ -1455,8 +1481,8 @@ def copy_skill_mappings(
     skills (and their selected skill versions) carry over to the new version.
 
     The copy is intentionally verbatim:
-    - No cap re-check — the source set already respects MAX_SKILLS_PER_AGENT, so a
-      source at the limit copies all of its rows.
+    - No cap re-check — the source set was accepted when it was attached, so a
+      source at or above the current limit copies all of its rows.
     - Deleted/soft-deleted skill_version rows are preserved as-is — the INSERT reuses
       the same skill_version_id FK the source references, so there is no IntegrityError;
       the source set is already valid.
@@ -1629,8 +1655,12 @@ def _find_skill_mention_spans(
 def consume_invoked_skills(
     text: Optional[str],
     attached_skills: List[dict],
+    cap: Optional[int] = None,
 ) -> Tuple[Optional[str], List[dict]]:
-    """Resolve ``~skill`` control tokens AND consume them from ``text``."""
+    """Resolve ``~skill`` control tokens AND consume them from ``text``.
+
+    ``cap`` bounds how many skills resolve; ``None`` resolves every match.
+    """
     # Fast path: the overwhelming majority of turns/instructions contain no
     # ``~`` token, so return the original text object unchanged (identity).
     if not text or not attached_skills or '~' not in text:
@@ -1686,17 +1716,16 @@ def consume_invoked_skills(
             'icon_meta': skill.get('icon_meta'),
             'instructions': instructions,
         })
-        # Unreachable while attach-time validate_agent_skill_limit enforces the
-        # same bound; kept so the two limits can diverge safely.
-        if len(invoked) >= MAX_SKILLS_PER_AGENT:
+        if cap is not None and len(invoked) >= cap:
             break
 
     return cleaned_text, invoked
 
 
 def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[object, List[dict]]:
+    cap = get_max_invoked_skills_per_turn()
     if isinstance(message_content, str):
-        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates)
+        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates, cap)
         return cleaned_message or 'continue', message_skills
     if not isinstance(message_content, list):
         return message_content, []
@@ -1705,8 +1734,10 @@ def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[obj
     rebuilt_blocks: list = []
     for block in message_content:
         if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
-            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates)
+            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates, cap)
             for skill in block_skills:
+                if len(message_skills) >= cap:
+                    break
                 if not any(existing.get('skill_id') == skill.get('skill_id') for existing in message_skills):
                     message_skills.append(skill)
             if cleaned_text.strip():
@@ -1719,15 +1750,6 @@ def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[obj
     ):
         rebuilt_blocks.append({'type': 'text', 'text': 'continue'})
     return rebuilt_blocks, message_skills
-
-
-# Deterministic text: the rendered <available_skills> block must stay
-# byte-stable for prompt caching.
-INSTRUCTION_REFERENCED_HINT = (
-    'Referenced by name in your agent instructions: load this skill whenever '
-    'the situation those instructions specify for it applies — never follow '
-    'the reference from its name alone, load it first.'
-)
 
 
 def apply_runtime_skills(version_details: dict) -> None:
@@ -1769,6 +1791,8 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
     instructions = version_details.get('instructions')
     instruction_skills = []
     if isinstance(instructions, str) and instructions:
+        # Uncapped: instructions may reference every attached skill, which the
+        # attach limit already bounds.
         cleaned, instruction_skills = consume_invoked_skills(instructions, attached_skills)
         if cleaned != instructions:
             version_details['instructions'] = cleaned
@@ -1778,14 +1802,14 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
     for s in attached_skills:
         if not s.get('name') or not (s.get('instructions') or '').strip():
             continue
-        description = s.get('description')
-        if s.get('skill_id') in referenced_ids:
-            description = f"{(description or '').strip()} {INSTRUCTION_REFERENCED_HINT}".strip()
+        # A flag, not text appended to the description: the SDK shortens long
+        # descriptions to fit the registry budget, and the hint must survive that.
         disclosable.append({
             'skill_id': s.get('skill_id'),
             'skill_version_id': s.get('skill_version_id'),
             'name': s.get('name'),
-            'description': description,
+            'description': s.get('description'),
+            'instruction_referenced': s.get('skill_id') in referenced_ids,
             'icon_meta': s.get('icon_meta'),
             'instructions': s.get('instructions'),
         })

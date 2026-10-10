@@ -2,7 +2,7 @@ from tools import api_tools, config as c, auth, register_openapi
 
 from ...utils.skill_utils import (
     get_available_skills_for_agent,
-    MAX_SKILLS_PER_AGENT,
+    get_max_skills_per_agent,
     SkillError,
 )
 from ...utils.constants import PROMPT_LIB_MODE
@@ -34,7 +34,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         return {
             'skills': skills,
-            'max_skills': MAX_SKILLS_PER_AGENT,
+            'max_skills': get_max_skills_per_agent(),
         }, 200
 
 

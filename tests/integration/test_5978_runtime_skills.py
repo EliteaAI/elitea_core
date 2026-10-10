@@ -229,7 +229,9 @@ class TestReferencedSkillsStayLoadable:
         assert version_details['instructions'] == 'Answer briefly. Follow shout in every reply.'
         assert [s['name'] for s in version_details['attached_skills']] == ['shout', 'terse']
 
-    def test_referenced_skill_description_carries_the_hint(self, skill_utils_module):
+    def test_referenced_skill_is_flagged_and_keeps_its_description(self, skill_utils_module):
+        """#6930: the SDK shortens descriptions to fit the registry budget, so the
+        reference hint travels as a flag the SDK renders after the cut."""
         version_details = {
             'instructions': 'Follow ~shout in every reply.',
             'skills': [UPPERCASE, TERSE],
@@ -238,9 +240,10 @@ class TestReferencedSkillsStayLoadable:
         skill_utils_module.apply_runtime_skills(version_details)
 
         by_name = {s['name']: s for s in version_details['attached_skills']}
-        hint = skill_utils_module.INSTRUCTION_REFERENCED_HINT
-        assert by_name['shout']['description'] == f"{UPPERCASE['description']} {hint}"
+        assert by_name['shout']['description'] == UPPERCASE['description']
+        assert by_name['shout']['instruction_referenced'] is True
         assert by_name['terse']['description'] == TERSE['description']
+        assert by_name['terse']['instruction_referenced'] is False
 
     def test_unreferenced_skills_stay_loadable(self, skill_utils_module):
         version_details = {'instructions': 'Answer briefly.', 'skills': [UPPERCASE, TERSE]}
