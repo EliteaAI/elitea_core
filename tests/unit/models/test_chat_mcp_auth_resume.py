@@ -192,6 +192,7 @@ def test_generate_predict_payload_forwards_toolkit_authorization_resume(monkeypa
         predict_utils, 'get_predict_base_url',
         lambda _project_id: 'https://llm.example',
     )
+    monkeypatch.setattr(predict_utils, 'get_public_base_url', lambda: 'https://public.example')
     monkeypatch.setattr(predict_utils.rpc_tools, 'RpcMixin', lambda: FakeRpc())
     monkeypatch.setattr(
         predict_utils, 'next_input_suggestion_config',

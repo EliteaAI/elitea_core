@@ -42,6 +42,7 @@ def builder(models_path):
                  'rpc_tools': NS(RpcMixin=lambda: NS(rpc=NS(call=rpc))),
                  'get_predict_token_and_session': lambda *a: ('fixture-only', None),
                  'get_predict_base_url': lambda *a: 'https://unit.invalid',
+                 'get_public_base_url': lambda: 'https://public.invalid',
                  'normalize_runtime_max_tokens': lambda value: None if value in (None, -1) else value,
                  'next_input_suggestion_config': lambda *a: {'enabled': False},
                  'serialize': lambda value: value,

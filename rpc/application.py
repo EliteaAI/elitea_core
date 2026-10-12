@@ -45,7 +45,7 @@ from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
 from ..utils.skill_utils import detach_skills_for_entity_versions
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, get_predict_base_url, \
-    get_predict_token_and_session, get_session_cookie_name, resolve_request_user_id, \
+    get_public_base_url, get_predict_token_and_session, get_session_cookie_name, resolve_request_user_id, \
     load_context_settings_from_conversation, user_input_preview
 from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
@@ -1486,6 +1486,7 @@ class RPC:
             data['project_auth_token'], data['auth_session'] = get_predict_token_and_session(project_id, data['user_id'], sid)
             data['session_cookie_name'] = get_session_cookie_name() if data['auth_session'] else None
             data['deployment_url'] = get_predict_base_url(project_id)
+            data['public_url'] = get_public_base_url()
         except Exception as e:
             log.warning(f"Failed to retrieve project secrets: {e}")
 
@@ -1786,6 +1787,7 @@ class RPC:
             data['project_auth_token'], data['auth_session'] = get_predict_token_and_session(project_id, data['user_id'], sid)
             data['session_cookie_name'] = get_session_cookie_name() if data['auth_session'] else None
             data['deployment_url'] = get_predict_base_url(project_id)
+            data['public_url'] = get_public_base_url()
         except Exception as e:
             log.warning(f"Failed to retrieve project secrets: {e}")
 
