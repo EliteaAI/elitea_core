@@ -80,30 +80,6 @@ SKILL_ARGS = {
 }
 
 
-class TestRunScopeArgs:
-    def test_the_root_entity_rides_along_with_the_run(self, analytics):
-        assert analytics._run_scope_args(SKILL_ARGS) == {
-            'run_id': CONVERSATION, 'root_entity_type': 'skill', 'root_entity_id': 174,
-            'root_entity_project_id': 2,
-        }
-
-    def test_an_agent_run_carries_no_root_entity(self, analytics):
-        assert analytics._run_scope_args({'run_id': CONVERSATION}) == {'run_id': CONVERSATION}
-
-    def test_no_run_is_no_scope(self, analytics):
-        assert analytics._run_scope_args({}) is None
-
-    @pytest.mark.parametrize('args', [
-        {'root_entity_type': 'skill', 'root_entity_id': '174'},
-        {'run_id': CONVERSATION, 'root_entity_type': 'skill', 'root_entity_id': 'abc'},
-        {'run_id': CONVERSATION, 'root_entity_type': 'skill', 'root_entity_id': '1',
-         'root_entity_project_id': 'x'},
-    ])
-    def test_a_root_entity_without_a_run_or_with_a_bad_id_is_rejected(self, analytics, args):
-        with pytest.raises(ValueError):
-            analytics._run_scope_args(args)
-
-
 class TestRunScopedHealth:
     def test_health_is_read_for_the_root_entity_only(self, analytics):
         analytics.recording_rpc.result = [
@@ -111,21 +87,29 @@ class TestRunScopedHealth:
         ]
         scope = analytics._run_scope_args(SKILL_ARGS)
 
-        body, status = analytics._run_scoped_analytics(2, {}, scope)
+        body, status = analytics._run_scoped_analytics(2, SKILL_ARGS, scope)
 
         assert status == 200
         assert analytics.recording_rpc.calls == [(2, {
             'date_from': None, 'date_to': None, 'run_id': CONVERSATION,
-            'root_entity_type': 'skill', 'root_entity_id': 174, 'root_entity_project_id': 2,
+            'root_entity_type': 'skill', 'root_entity_id': '174', 'root_entity_project_id': '2',
         })]
         assert body['health'] == [
             {'event_type': 'llm', 'total': 2, 'errors': 1, 'error_rate': 50.0, 'avg_duration_ms': 750.0},
         ]
 
-    def test_a_root_entity_usage_rejects_is_a_400_not_a_500(self, analytics):
-        analytics.recording_rpc.error = ValueError('root_entity_type must be one of application, skill')
+    def test_an_agent_run_sends_no_root_entity(self, analytics):
+        args = {'run_id': CONVERSATION}
 
-        body, status = analytics._run_scoped_analytics(2, {}, {'run_id': CONVERSATION, 'root_entity_type': 'x'})
+        analytics._run_scoped_analytics(2, args, analytics._run_scope_args(args))
+
+        assert analytics.recording_rpc.calls == [(2, {'date_from': None, 'date_to': None, 'run_id': CONVERSATION})]
+
+    def test_a_root_entity_usage_rejects_is_a_400_not_a_500(self, analytics):
+        analytics.recording_rpc.error = ValueError('root_entity_type must be one of application, pipeline, skill')
+        args = {'run_id': CONVERSATION, 'root_entity_type': 'x', 'root_entity_id': '1'}
+
+        body, status = analytics._run_scoped_analytics(2, args, analytics._run_scope_args(args))
 
         assert status == 400
         assert 'root_entity_type' in body['error']

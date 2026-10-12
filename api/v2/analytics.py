@@ -54,13 +54,12 @@ if _API_AVAILABLE:
             log.warning("usage_event health lookup failed for project %s", project_id, exc_info=True)
             return None
 
-    _ROOT_ENTITY_INT_KEYS = ("root_entity_id", "root_entity_project_id")
+    _ROOT_ENTITY_KEYS = ("root_entity_type", "root_entity_id", "root_entity_project_id")
 
     def _run_scope_args(args):
-        """{run_id, eval_run_id, root_entity_*} as given, or None when the request is not run-scoped.
+        """{run_id, eval_run_id} as given, or None when the request is not run-scoped.
 
-        Raises ValueError for an id that is not a UUID or an integer, and for a root entity
-        without a run to narrow.
+        Raises ValueError for an id that is not a UUID.
         """
         scope = {}
         for key in ("run_id", "eval_run_id"):
@@ -70,20 +69,10 @@ if _API_AVAILABLE:
                     scope[key] = str(uuid.UUID(value))
                 except ValueError as exc:
                     raise ValueError(f"{key} must be a UUID") from exc
-        root_entity = {}
-        root_entity_type = (args.get("root_entity_type") or "").strip()
-        if root_entity_type:
-            root_entity["root_entity_type"] = root_entity_type
-        for key in _ROOT_ENTITY_INT_KEYS:
-            value = (args.get(key) or "").strip()
-            if value:
-                try:
-                    root_entity[key] = int(value)
-                except ValueError as exc:
-                    raise ValueError(f"{key} must be an integer") from exc
-        if root_entity and not scope:
-            raise ValueError("root_entity_type/root_entity_id need run_id or eval_run_id")
-        return {**scope, **root_entity} or None
+        return scope or None
+
+    def _root_entity_args(args):
+        return {key: args.get(key) for key in _ROOT_ENTITY_KEYS if args.get(key)}
 
     def _usage_health_row(row):
         return {
@@ -103,7 +92,7 @@ if _API_AVAILABLE:
             dt_from, dt_to = _parse_dates(args)
         try:
             usage_rows = rpc_tools.RpcMixin().rpc.timeout(10).usage_event_type_health(
-                project_id, date_from=dt_from, date_to=dt_to, **run_scope,
+                project_id, date_from=dt_from, date_to=dt_to, **run_scope, **_root_entity_args(args),
             )
         except LookupError as exc:
             return {"error": str(exc)}, 404
