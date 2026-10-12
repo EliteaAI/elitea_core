@@ -36,6 +36,77 @@ def resolve_persona_instructions(user_personalization: dict, persona: str) -> st
         return instructions_map.get(persona) or '' if persona else ''
     return user_personalization.get('default_instructions') or ''
 
+
+def create_conversation(session, project_id: int, user_id: int, parsed) -> tuple:
+    """Insert a conversation with the user's personalization defaults plus user and dummy participants.
+
+    Not committed here (participant helpers commit on their own). Raises SkillParticipantError.
+    Returns (conversation, context_strategy).
+    """
+    from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser  # pylint: disable=C0415
+    from .participant_utils import add_participant_to_conversation  # pylint: disable=C0415
+    from .chat_feature_flags import get_context_manager_feature_flag  # pylint: disable=C0415
+    from .context_analytics import set_context_strategy  # pylint: disable=C0415
+    from .model_defaults import creation_llm_settings  # pylint: disable=C0415
+
+    user_personalization = None
+    user_context_defaults = None
+    user_summarization_defaults = None
+    try:
+        social_user = rpc_tools.RpcMixin().rpc.timeout(2).social_get_user(user_id)
+        if social_user:
+            user_personalization = social_user.get('personalization')
+            user_context_defaults = social_user.get('default_context_management')
+            user_summarization_defaults = social_user.get('default_summarization')
+    except Exception:
+        pass  # Continue with defaults if fetching user settings fails
+
+    if parsed.meta is None:
+        parsed.meta = {}
+    if user_personalization:
+        # Set persona directly (not default_persona) - this is what the chat system expects
+        persona = user_personalization.get('persona')
+        if persona:
+            parsed.meta['persona'] = persona
+        # Resolve the instructions for the selected persona (#5392); '' means no override.
+        selected_instructions = resolve_persona_instructions(user_personalization, persona)
+        if selected_instructions:
+            parsed.meta['default_instructions'] = selected_instructions
+            # Initialize instructions from default_instructions when not explicitly provided
+            if not parsed.instructions:
+                parsed.instructions = selected_instructions
+
+    parsed.participants.append(ParticipantCreate(
+        entity_name=ParticipantTypes.user,
+        entity_meta=ParticipantEntityUser(id=user_id),
+        entity_settings={'llm_settings': creation_llm_settings(project_id, surface='chat')},
+    ))
+    parsed.participants.append(ParticipantCreate(entity_name=ParticipantTypes.dummy, entity_meta={}))
+
+    new_conversation = Conversation(**parsed.model_dump(exclude={'participants'}))
+    session.add(new_conversation)
+    session.flush()
+    for p_data in parsed.participants:
+        add_participant_to_conversation(
+            project_id=project_id,
+            session=session,
+            participant=p_data,
+            conversation=new_conversation,
+            initiator_id=user_id
+        )
+        session.flush()
+
+    context_strategy = None
+    if get_context_manager_feature_flag(project_id):
+        context_strategy = set_context_strategy(
+            project_id=project_id,
+            conversation_id=new_conversation.id,
+            user_context_defaults=user_context_defaults,
+            user_summarization_defaults=user_summarization_defaults,
+        )
+    return new_conversation, context_strategy
+
+
 def reresolve_persona_instructions(session, conversation, persona) -> None:
     """Re-derive conversation.meta['default_instructions'] for a new persona (#5392).
 
