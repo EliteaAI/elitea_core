@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -34,8 +34,9 @@ class CanvasLeavePayload(BaseModel):
 
 
 class TestToolkitEnterRoomPayload(BaseModel):
-    stream_id: UUID | str
-    event_name: Optional[str] = "test_toolkit_tool"
+    stream_id: UUID
+    # Only toolkit-test rooms; free text here used to reach chat/eval rooms
+    event_name: Literal["test_toolkit_tool"] = "test_toolkit_tool"
 
 class EvalRunRoomPayload(BaseModel):
     project_id: int

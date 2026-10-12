@@ -64,6 +64,7 @@ from ..utils.vectorstore import get_pgvector_connection_string
 from ..utils.run_id import PREDICT_RUN_ID_KWARGS_KEY
 from ..utils.usage_attribution import ENTITY_KWARGS_KEY, ROOT_ENTITY_KWARGS_KEY
 from ..utils.validator_cache import make_validator_cache_key, toolkit_validator_cache
+from ..utils.toolkit_test_rooms import guard_test_stream
 
 
 def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
@@ -182,6 +183,8 @@ class RPC:
                     usage_entity: Optional[dict] = None,
                     routing_projection: Optional[dict] = None,
                     trigger_source: Optional[str] = None,
+                    applied_skills: Optional[list] = None,
+                    sid_project_id: Optional[int] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -205,8 +208,9 @@ class RPC:
                 message_id=data.get("message_id")
             )
 
-        if sid and not auth.is_sio_user_in_project(sid, parsed.project_id):
-            log.warning("Sid %s is not in project %s", sid, parsed.project_id)
+        sid_project_id = sid_project_id or parsed.project_id
+        if sid and not auth.is_sio_user_in_project(sid, sid_project_id):
+            log.warning("Sid %s is not in project %s", sid, sid_project_id)
             return  # FIXME: need some proper error?
 
         if parsed.version_id:
@@ -261,6 +265,10 @@ class RPC:
             # Set application_name AFTER merge to prevent client override (security)
             parsed.application_name = application_name
 
+        # The schema the application lives in (the public project for a public agent), kept
+        # for usage attribution (#6902) before it is swapped for the chat project below
+        application_project_id = parsed.project_id
+
         # TODO: fragile code: app itself and toolkits may be in different projects
         # in generated version_details payload
         # so try using chat project_id where toolkit participants expected to be
@@ -314,9 +322,13 @@ class RPC:
             payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
+            if isinstance(payload.get('application'), dict) and application_project_id:
+                payload['application']['project_id'] = application_project_id
             # Usage analytics separates automated runs from human ones (#6881)
             if trigger_source:
                 payload['trigger_source'] = trigger_source
+            if applied_skills:
+                payload['applied_skills'] = [*applied_skills, *payload.get('applied_skills', [])]
         except PredictPayloadError as e:
             raise SioValidationError(
                 sio=self.context.sio,
@@ -364,7 +376,9 @@ class RPC:
             if usage_entity.get("entity"):
                 payload[ENTITY_KWARGS_KEY] = usage_entity["entity"]
             if usage_entity.get("root"):
-                payload[ROOT_ENTITY_KWARGS_KEY] = usage_entity["root"]
+                payload[ROOT_ENTITY_KWARGS_KEY] = {
+                    "project_id": application_project_id, **usage_entity["root"],
+                }
 
         try:
             task_id = self.task_node.start_task(
@@ -911,8 +925,10 @@ class RPC:
 
             try:
                 application = create_application(application_data, session, project_id)
-            except Exception as e:
-                errors.append(str(e))
+            except Exception:
+                log.exception('[IMPORT] Failed to create application in project %s', project_id)
+                errors.append('Import function has been failed')
+                return '', errors
 
             # Stamp resolved model_project_id for versions that arrived with null.
             # validate_and_resolve_llm_settings returns a copy with model_project_id
@@ -1506,6 +1522,7 @@ class RPC:
         )
 
         if sid:
+            guard_test_stream(self, sid, sio_event, data)
             self.context.sio.enter_room(sid, room)
 
         # Log the parameters being passed to indexer for debugging
@@ -1779,6 +1796,7 @@ class RPC:
         )
 
         if sid:
+            guard_test_stream(self, sid, sio_event, data)
             self.context.sio.enter_room(sid, room)
 
         # Prepare kwargs without stream_id and message_id since they're passed as args

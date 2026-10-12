@@ -2,12 +2,16 @@ from sqlalchemy.orm import joinedload
 
 from .sio_utils import SioEvents
 from ..models.message_group import ConversationMessageGroup
+from ..models.enums.all import ParticipantTypes
 from ..models.pd.message import MessageGroupDetail
 
 from tools import db, context, serialize, auth
 from pylon.core.tools import log
 
 from ..rpc.chat_all import CHAT_PREDICT_MAPPER
+
+
+SKILL_CONTINUE_UNSUPPORTED_ERROR = 'Skill answers are continued through the chat, not this event'
 
 
 def continue_message(sid: str, payload: dict):
@@ -27,6 +31,9 @@ def continue_message(sid: str, payload: dict):
 
         if not msg_group:
             return {'error': f'No such message group with id {message_group_uuid}'}, 400
+
+        if msg_group.author_participant.entity_name == ParticipantTypes.skill.value:
+            return {'error': SKILL_CONTINUE_UNSUPPORTED_ERROR}, 400
 
         msg_entity_meta = msg_group.author_participant.entity_meta
 

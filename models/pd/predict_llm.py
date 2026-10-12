@@ -115,3 +115,7 @@ class LLMPredictRequest(BaseModel):
         default=False,
         description="Include chat_history in response (only needed for blocking callers that read the result)"
     )
+    include_project_context: bool = Field(
+        default=False,
+        description="Deliver the project's context with the instructions, the same way agents and skill runs receive it"
+    )

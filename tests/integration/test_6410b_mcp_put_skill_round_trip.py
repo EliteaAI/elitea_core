@@ -156,6 +156,8 @@ def _install_package(openapi_tools):
 
     _load_real('models/pd/collection_base.py', f'{PKG}.models.pd.collection_base')
     _load_real('models/pd/tag.py', f'{PKG}.models.pd.tag')
+    _load_real('models/pd/llm.py', f'{PKG}.models.pd.llm')
+    _load_real('models/pd/skill_run_settings.py', f'{PKG}.models.pd.skill_run_settings')
     _load_real('models/enums/all.py', f'{PKG}.models.enums.all')
     _load_real('utils/constants.py', f'{PKG}.utils.constants')
 

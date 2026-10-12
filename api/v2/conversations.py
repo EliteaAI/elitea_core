@@ -4,16 +4,10 @@ from tools import serialize
 
 from pydantic import ValidationError
 
-from ...models.conversation import Conversation
-from ...models.enums.all import ParticipantTypes
 from ...models.pd.conversation import ConversationCreate, ConversationDetails
-from ...models.pd.participant import ParticipantCreate, ParticipantEntityUser
-from ...utils.conversation_utils import get_conversation_details, resolve_persona_instructions
-from ...utils.participant_utils import add_participant_to_conversation
-from ...utils.chat_feature_flags import get_context_manager_feature_flag
-from ...utils.context_analytics import set_context_strategy
+from ...utils.conversation_utils import create_conversation, get_conversation_details
+from ...utils.skill_participant_utils import SkillParticipantError, validate_skill_participants
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.model_defaults import creation_llm_settings
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -52,6 +46,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Filter by participant entity meta ID (agent/toolkit ID)."},
             {"name": "entity_name", "in": "query", "required": False, "schema": {"type": "string"},
              "description": "Filter by participant entity name (e.g. 'application', 'llm')."},
+            {"name": "entity_meta_project_id", "in": "query", "required": False, "schema": {"type": "integer"},
+             "description": "Owner project of a 'skill' participant; separates own skills from Catalog skills."},
         ],
         available_to_users=True,
     )
@@ -84,6 +80,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             is_admin=user_is_admin,
             participant_id=entity_meta_id,
             entity_name=request.args.get('entity_name'),
+            entity_project_id=request.args.get('entity_meta_project_id', type=int),
         )
 
         return result, 200
@@ -135,72 +132,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not parsed.is_private and public_project_id == project_id:
             return {"error": "Public conversation can not exist in public project"}, 400
 
-        # Fetch user's personalization settings
-        user_personalization = None
-        user_context_defaults = None
-        user_summarization_defaults = None
         try:
-            social_user = rpc_tools.RpcMixin().rpc.timeout(2).social_get_user(user_id)
-            if social_user:
-                user_personalization = social_user.get('personalization')
-                user_context_defaults = social_user.get('default_context_management')
-                user_summarization_defaults = social_user.get('default_summarization')
-        except Exception:
-            pass  # Continue with defaults if fetching user settings fails
-
-        # Apply user's personalization defaults to conversation meta
-        if parsed.meta is None:
-            parsed.meta = {}
-        if user_personalization:
-            # Set persona directly (not default_persona) - this is what the chat system expects
-            persona = user_personalization.get('persona')
-            if persona:
-                parsed.meta['persona'] = persona
-            # Resolve the instructions for the selected persona (#5392); '' means no override.
-            selected_instructions = resolve_persona_instructions(user_personalization, persona)
-            if selected_instructions:
-                parsed.meta['default_instructions'] = selected_instructions
-                # Initialize instructions from default_instructions when not explicitly provided
-                if not parsed.instructions:
-                    parsed.instructions = selected_instructions
-
-        user_participant_data = ParticipantCreate(
-            entity_name=ParticipantTypes.user,
-            entity_meta=ParticipantEntityUser(id=user_id),
-            entity_settings={'llm_settings': creation_llm_settings(project_id, surface='chat')},
-        )
-        dummy_participant_data = ParticipantCreate(
-            entity_name=ParticipantTypes.dummy,
-            entity_meta={}
-        )
-        parsed.participants.append(user_participant_data)
-        parsed.participants.append(dummy_participant_data)
+            validate_skill_participants(parsed.participants, project_id)
+        except SkillParticipantError as e:
+            return {'error': str(e)}, 400
 
         with db.get_session(project_id) as session:
-            conversation_dict = parsed.model_dump(exclude={'participants'})
-            new_conversation = Conversation(**conversation_dict)
-            session.add(new_conversation)
-            session.flush()
-            for p_data in parsed.participants:
-                add_participant_to_conversation(
-                    project_id=project_id,
-                    session=session,
-                    participant=p_data,
-                    conversation=new_conversation,
-                    initiator_id=user_id
-                )
-                session.flush()
-
-            context_strategy = None
-            if get_context_manager_feature_flag(
-                project_id,
-            ):
-                context_strategy = set_context_strategy(
-                    project_id=project_id,
-                    conversation_id=new_conversation.id,
-                    user_context_defaults=user_context_defaults,
-                    user_summarization_defaults=user_summarization_defaults,
-                )
+            try:
+                new_conversation, context_strategy = create_conversation(session, project_id, user_id, parsed)
+            except SkillParticipantError as e:
+                session.rollback()
+                return {'error': str(e)}, 400
 
             session.commit()
             # Expire all cached objects to ensure we get fresh data from DB

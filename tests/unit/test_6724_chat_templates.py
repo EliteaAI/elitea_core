@@ -44,6 +44,16 @@ def _load_pd_module():
     return mod
 
 
+def _load_events_enum_module():
+    spec = importlib.util.spec_from_file_location(
+        "elitea_core.models.enums.events",
+        os.path.join(PLUGIN_ROOT, "models", "enums", "events.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _pylon_stubs():
     """Return a dict of minimal pylon stubs."""
     pylon = types.ModuleType("pylon")
@@ -226,7 +236,11 @@ class FakeSession:
 # API handler loader
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _load_handler(session, module_name="chat_templates"):
+def _accept_participants(participants, stored_participants, template_project_id):
+    return None
+
+
+def _load_handler(session, module_name="chat_templates", validate_participants=_accept_participants):
     """Load api/v2/<module_name>.py with all deps stubbed.
 
     After loading, callers patch mod.request before calling handler methods.
@@ -282,10 +296,13 @@ def _load_handler(session, module_name="chat_templates"):
         ct_pd.ChatTemplateUpdate = pd_mod.ChatTemplateUpdate
         constants = types.ModuleType("elitea_core.utils.constants")
         constants.PROMPT_LIB_MODE = "prompt_lib"
+        validation = types.ModuleType("elitea_core.utils.chat_template_validation")
+        validation.validate_template_participants = validate_participants
         sys.modules.update({
             "elitea_core.models.chat_template": ct_orm,
             "elitea_core.models.pd.chat_template": ct_pd,
             "elitea_core.utils.constants": constants,
+            "elitea_core.utils.chat_template_validation": validation,
         })
 
         spec = importlib.util.spec_from_file_location(
@@ -299,9 +316,10 @@ def _load_handler(session, module_name="chat_templates"):
     return handler_mod
 
 
-def _call(session, request_json, method, module_name="chat_templates", **kwargs):
+def _call(session, request_json, method, module_name="chat_templates", validate_participants=_accept_participants,
+          **kwargs):
     """Load handler, patch request, call method, return (body, status)."""
-    mod = _load_handler(session, module_name)
+    mod = _load_handler(session, module_name, validate_participants)
     # Patch the module-level `request` name; handler methods read it from globals
     mod.request = types.SimpleNamespace(json=request_json)
     return getattr(mod.PromptLibAPI(), method)(project_id=1, **kwargs)
@@ -591,6 +609,38 @@ class TestApiPut(unittest.TestCase):
         self.assertEqual(status, 400)
 
 
+def _reject_participants(participants, stored_participants, template_project_id):
+    raise ValueError("Unsupported participant type: prompt")
+
+
+class TestApiParticipantValidation(unittest.TestCase):
+
+    def test_post_with_rejected_participants_returns_400_and_stores_nothing(self):
+        session = FakeSession([])
+        body, status = _call(session, {"name": "T", "participants": [{"id": 1, "entity_name": "prompt"}]},
+                             "post", validate_participants=_reject_participants)
+        self.assertEqual(status, 400)
+        self.assertEqual(body, {"error": "Unsupported participant type: prompt"})
+        self.assertEqual(session.added, [])
+
+    def test_put_with_rejected_participants_returns_400_and_keeps_the_template(self):
+        stored = [{"id": 7, "entity_name": "application", "project_id": 1}]
+        tpl = FakeChatTemplate(id=1, name="Old", participants=stored)
+        _, status = _call(FakeSession([tpl]), {"name": "New", "participants": [{"id": 1, "entity_name": "prompt"}]},
+                          "put", template_id=1, validate_participants=_reject_participants)
+        self.assertEqual(status, 400)
+        self.assertEqual((tpl.name, tpl.participants), ("Old", stored))
+
+    def test_put_validates_against_the_stored_participants_of_the_template_project(self):
+        seen = []
+        stored = [{"id": 7, "entity_name": "mcp", "project_id": 1}]
+        tpl = FakeChatTemplate(id=1, name="Old", participants=stored)
+        _call(FakeSession([tpl]), {"name": "New", "participants": stored}, "put", template_id=1,
+              validate_participants=lambda participants, stored_participants, project_id: seen.append(
+                  ([p.entity_name for p in participants], stored_participants, project_id)))
+        self.assertEqual(seen, [(["mcp"], stored, 1)])
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 3. Migration task — migrate_project_chat_config
 # ──────────────────────────────────────────────────────────────────────────────
@@ -649,6 +699,9 @@ def _make_migration_stubs(sessions):
     backfill.parse_backfill_params = lambda *a, **kw: None
     backfill.backfill_project = lambda *a, **kw: None
 
+    skill_schema = types.ModuleType("elitea_core.utils.skill_publish_schema")
+    skill_schema.apply_skill_run_settings_column = lambda *a, **kw: ([], [])
+
     utils_utils = types.ModuleType("elitea_core.utils.utils")
     utils_utils.get_public_project_id = lambda *a, **kw: None
     utils_utils.make_yield_to_hub = lambda *a, **kw: None
@@ -666,6 +719,7 @@ def _make_migration_stubs(sessions):
         "elitea_core.utils.llm_migration_utils": llm_mig,
         "elitea_core.utils.embedding_migration_utils": emb_mig,
         "elitea_core.utils.trace_step_backfill_utils": backfill,
+        "elitea_core.utils.skill_publish_schema": skill_schema,
         "elitea_core.utils.utils": utils_utils,
         "elitea_core.models.chat_template": ct_orm,
     }
@@ -1022,13 +1076,7 @@ def _load_events_module(public_project_id=None):
     utils_utils_mod = types.ModuleType("elitea_core.utils.utils")
     utils_utils_mod.get_public_project_id = lambda: public_project_id
 
-    events_enums_mod = types.ModuleType("elitea_core.models.enums.events")
-    events_enums_mod.ApplicationEvents = types.SimpleNamespace(
-        application_deleted="application_deleted",
-        toolkit_deleted="toolkit_deleted",
-        application_updated="application_updated",
-        toolkit_updated="toolkit_updated",
-    )
+    events_enums_mod = _load_events_enum_module()
 
     stubs = {
         **_pylon_stubs(),
@@ -1272,9 +1320,12 @@ def _load_participant_events_module():
     participant_utils_mod = types.ModuleType("elitea_core.utils.participant_utils")
     participant_utils_mod.update_participant_meta = lambda *a, **kw: None
 
+    events_enum_mod = _load_events_enum_module()
+
     stubs = {
         **_pylon_stubs(),
         "elitea_core.models.enums.all": participant_types_mod,
+        "elitea_core.models.enums.events": events_enum_mod,
         "elitea_core.utils.utils": utils_utils_mod,
         "elitea_core.utils.participant_utils": participant_utils_mod,
     }

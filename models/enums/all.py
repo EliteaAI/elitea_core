@@ -103,7 +103,11 @@ class ParticipantTypes(StrEnum):
     llm = 'llm'
     dummy = 'dummy'
     toolkit = 'toolkit'
+    skill = 'skill'
     # pipeline = 'pipeline'
+
+
+SELF_MODELLED_PARTICIPANTS = (ParticipantTypes.application, ParticipantTypes.skill)
 
 
 class CanvasTypes(StrEnum):

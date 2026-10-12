@@ -9,6 +9,7 @@ from pydantic import parse_obj_as, ValidationError
 from ...models.conversation import Conversation
 from ...models.pd.participant import ParticipantBase, ParticipantCreate
 from ...utils.participant_utils import add_participant_to_conversation
+from ...utils.skill_participant_utils import SkillParticipantError, validate_skill_participants
 from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.conversation_access import check_conversation_access
@@ -20,9 +21,9 @@ from pylon.core.tools import log
 class PromptLibAPI(api_tools.APIModeHandler):
     @register_openapi(
         name="Add Participants",
-        description="Add one or more participants (users, agents, pipelines, LLMs, toolkits) to an existing conversation",
+        description="Add one or more participants (users, agents, pipelines, LLMs, toolkits, skills) to an existing conversation",
         mcp_description="""
-        USE to add agents, pipelines, LLMs, toolkits, or other users to an existing conversation so they can
+        USE to add agents, pipelines, LLMs, toolkits, skills, or other users to an existing conversation so they can
         participate in the chat.
 
         DO NOT USE when creating a conversation from scratch with initial participants → use create_conversation
@@ -37,6 +38,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         2. Add an LLM: [{ 'entity_name': 'llm', 'entity_meta': { 'model_name': 'gpt-4o' } }]
         3. Add multiple participants: send array with multiple objects in one call.
         4. Add a toolkit: [{ 'entity_name': 'toolkit', 'entity_meta': { 'id': 3, 'project_id': 42 } }]
+        5. Add a skill (pinned to its default version unless entity_settings.version_id is set):
+           [{ 'entity_name': 'skill', 'entity_meta': { 'id': 5, 'project_id': 42 } }]
+           A skill must come from this project or be published in the public catalog.
         """,
         request_body=ParticipantCreate,
         mcp_tool=True,
@@ -82,6 +86,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             denied = check_conversation_access(project_id, conversation, current_user_id)
             if denied:
                 return denied
+
+            try:
+                validate_skill_participants(participants, project_id)
+            except SkillParticipantError as e:
+                return {'error': str(e)}, 400
             room = get_chat_room(conversation.uuid)
 
             result_details = list()

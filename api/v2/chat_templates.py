@@ -4,6 +4,7 @@ from tools import api_tools, auth, config as c, db
 
 from ...models.chat_template import ChatTemplate
 from ...models.pd.chat_template import ChatTemplateCreate, ChatTemplateRead, ChatTemplateUpdate
+from ...utils.chat_template_validation import validate_template_participants
 from ...utils.constants import PROMPT_LIB_MODE
 
 MAX_TEMPLATES_PER_PROJECT = 5
@@ -52,6 +53,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if name_conflict:
                 return {'error': 'A template with this name already exists.'}, 400
 
+            try:
+                validate_template_participants(payload.participants, [], project_id)
+            except ValueError as e:
+                return {'error': str(e)}, 400
+
             # A new template is never default on its own — the user sets it explicitly
             template = ChatTemplate(
                 name=payload.name,
@@ -89,6 +95,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
             )
             if name_conflict:
                 return {'error': 'A template with this name already exists.'}, 400
+
+            try:
+                validate_template_participants(payload.participants, template.participants, project_id)
+            except ValueError as e:
+                return {'error': str(e)}, 400
 
             template.name = payload.name
             template.participants = [p.model_dump() for p in payload.participants]

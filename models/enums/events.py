@@ -8,3 +8,5 @@ class ApplicationEvents(str, Enum):
     toolkit_updated = 'toolkit_updated'
     toolkit_deleted = 'toolkit_deleted'
     skill_deleted = 'skill_deleted'
+    skill_updated = 'skill_updated'
+    skill_unpublished = 'skill_unpublished'

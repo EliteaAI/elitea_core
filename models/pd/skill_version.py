@@ -10,6 +10,7 @@ from pydantic import (
 )
 
 from .collection_base import TagBaseModel, AuthorBaseModel, PromptTagUpdateModel, VersionAuthorMixin
+from .skill_run_settings import SkillRunSettingsModel, SkillRunSettingsWriteModel
 from .tag import TagDetailModel
 from ...utils.authors import get_authors_data
 
@@ -20,6 +21,7 @@ class SkillVersionCreateModel(BaseModel):
     author_id: Optional[int] = Field(None, exclude=True)
     tags: Optional[List[TagBaseModel]] = None
     meta: Optional[dict] = None
+    run_settings: Optional[SkillRunSettingsWriteModel] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -48,6 +50,7 @@ class SkillVersionDetailModel(BaseModel):
     tags: List[TagDetailModel] = Field(default_factory=list)
     created_at: datetime
     meta: Optional[dict] = None
+    run_settings: Optional[SkillRunSettingsModel] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -76,6 +79,13 @@ class SkillVersionUpdateModel(BaseModel):
     instructions: Optional[str] = Field(None, min_length=1, max_length=5000)
     tags: Optional[List[PromptTagUpdateModel]] = None
     meta: Optional[dict] = None
+    run_settings: Optional[SkillRunSettingsWriteModel] = Field(
+        None,
+        description=(
+            "Model, LLM settings and project-context toggle used when the skill runs on its own. "
+            "Send null to clear them back to the running project's defaults; omit to keep them."
+        ),
+    )
 
     # #6410: every field here defaults to None, so a body shaped for the nested
     # SkillUpdateModel (e.g. {"version": {...}}) used to validate cleanly into an
@@ -104,6 +114,7 @@ class SkillVersionExportModel(BaseModel):
     instructions: str
     tags: List[TagBaseModel] = Field(default_factory=list)
     meta: Optional[dict] = None
+    run_settings: Optional[dict] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -113,5 +124,6 @@ class SkillVersionImportModel(BaseModel):
     instructions: str = Field(min_length=1, max_length=5000)
     tags: Optional[List[TagBaseModel]] = None
     meta: Optional[dict] = None
+    run_settings: Optional[dict] = None
 
     model_config = ConfigDict(from_attributes=True)

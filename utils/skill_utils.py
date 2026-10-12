@@ -13,6 +13,7 @@ from .authors import get_authors_data
 from .utils import set_columns_as_attrs, get_public_project_id, parse_ids_filter
 from .like_utils import add_likes, add_my_liked, add_trending_likes, get_like_model
 from .folder_access import folder_exclusion_clause
+from .skill_run_settings import portable_run_settings
 from ..models.skill import Skill, SkillVersion, EntitySkillMapping
 from ..models.all import Tag, ApplicationVersion, Application
 from ..models.enums.all import SkillEntityTypes, PublishStatus, AgentTypes
@@ -29,6 +30,7 @@ from ..models.pd.skill_version import (
     SkillVersionUpdateModel,
     SkillVersionDetailModel,
 )
+from ..models.pd.skill_run_settings import dump_run_settings
 
 
 MAX_SKILLS_PER_AGENT = 5
@@ -879,6 +881,7 @@ def create_skill(
             instructions=version_data.instructions,
             author_id=version_data.author_id or skill.author_id,
             meta=version_data.meta or {},
+            run_settings=dump_run_settings(version_data.run_settings),
         )
         session.add(version)
         session.flush()
@@ -936,6 +939,7 @@ def update_skill(
         if not skill:
             raise SkillNotFoundError(skill_id)
 
+        chip_before = participant_chip(skill)
         version = None
         if update_data.version:
             if update_data.version.id is not None:
@@ -962,8 +966,28 @@ def update_skill(
         if version:
             _update_version_fields(s, version, update_data.version)
 
+        chip_after = participant_chip(skill)
         authors_map = _build_authors_map(skill)
-        return serialize(SkillDetailModel.model_validate(skill, context={'authors_map': authors_map}))
+        result = serialize(SkillDetailModel.model_validate(skill, context={'authors_map': authors_map}))
+
+    if chip_after != chip_before:
+        fire_skill_updated(project_id, skill_id, chip_after)
+    return result
+
+
+def participant_chip(skill) -> dict:
+    default_version = skill.get_default_version()
+    return {
+        'name': skill.name,
+        'icon_meta': ((default_version.meta or {}) if default_version else {}).get('icon_meta') or {},
+    }
+
+
+def fire_skill_updated(project_id: int, skill_id: int, chip: dict) -> None:
+    context.event_manager.fire_event(
+        ApplicationEvents.skill_updated.value,
+        {'id': skill_id, 'owner_id': project_id, 'data': chip},
+    )
 
 
 def delete_skill(
@@ -999,7 +1023,7 @@ def delete_skill(
 
     context.event_manager.fire_event(
         ApplicationEvents.skill_deleted.value,
-        {'id': skill_id, 'name': skill_name, 'project_id': project_id}
+        {'id': skill_id, 'name': skill_name, 'project_id': project_id, 'owner_id': project_id}
     )
     return None
 
@@ -1031,6 +1055,7 @@ def create_skill_version(
             instructions=version_data.instructions,
             author_id=version_data.author_id or auth.current_user().get('id'),
             meta=version_data.meta or {},
+            run_settings=dump_run_settings(version_data.run_settings),
         )
         s.add(version)
         s.flush()
@@ -1064,9 +1089,15 @@ def update_skill_version(
         _ensure_version_updatable(version)
         _ensure_version_renamable(s, skill_id, version, update_data.name)
 
+        skill = s.query(Skill).filter(Skill.id == skill_id).first()
+        chip_before = participant_chip(skill)
         _update_version_fields(s, version, update_data)
+        chip_after = participant_chip(skill)
+        result = serialize(SkillVersionDetailModel.model_validate(version))
 
-        return serialize(SkillVersionDetailModel.model_validate(version))
+    if chip_after != chip_before:
+        fire_skill_updated(project_id, skill_id, chip_after)
+    return result
 
 
 def delete_skill_version(
@@ -1215,6 +1246,7 @@ def import_skill(
             'author_id': v.get('author_id', author_id),
             'tags': v.get('tags') or None,
             'meta': v.get('meta') or None,
+            'run_settings': portable_run_settings(project_id, v.get('run_settings')),
         }
         for v in versions
     ]
@@ -1662,6 +1694,33 @@ def consume_invoked_skills(
     return cleaned_text, invoked
 
 
+def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[object, List[dict]]:
+    if isinstance(message_content, str):
+        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates)
+        return cleaned_message or 'continue', message_skills
+    if not isinstance(message_content, list):
+        return message_content, []
+
+    message_skills: List[dict] = []
+    rebuilt_blocks: list = []
+    for block in message_content:
+        if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
+            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates)
+            for skill in block_skills:
+                if not any(existing.get('skill_id') == skill.get('skill_id') for existing in message_skills):
+                    message_skills.append(skill)
+            if cleaned_text.strip():
+                rebuilt_blocks.append({**block, 'text': cleaned_text})
+        else:
+            rebuilt_blocks.append(block)
+    if not any(
+        isinstance(b, dict) and b.get('type') == 'text' and (b.get('text') or '').strip()
+        for b in rebuilt_blocks
+    ):
+        rebuilt_blocks.append({'type': 'text', 'text': 'continue'})
+    return rebuilt_blocks, message_skills
+
+
 # Deterministic text: the rendered <available_skills> block must stay
 # byte-stable for prompt caching.
 INSTRUCTION_REFERENCED_HINT = (
@@ -1724,6 +1783,7 @@ def resolve_runtime_skills(version_details: dict) -> List[dict]:
             description = f"{(description or '').strip()} {INSTRUCTION_REFERENCED_HINT}".strip()
         disclosable.append({
             'skill_id': s.get('skill_id'),
+            'skill_version_id': s.get('skill_version_id'),
             'name': s.get('name'),
             'description': description,
             'icon_meta': s.get('icon_meta'),
@@ -1810,6 +1870,8 @@ def _update_version_fields(session, version: SkillVersion, update_data: SkillVer
         version.instructions = update_data.instructions
     if update_data.meta is not None:
         version.meta = {**(version.meta or {}), **update_data.meta}
+    if 'run_settings' in update_data.model_fields_set:
+        version.run_settings = dump_run_settings(update_data.run_settings)
 
     # Handle tags
     if update_data.tags is not None:

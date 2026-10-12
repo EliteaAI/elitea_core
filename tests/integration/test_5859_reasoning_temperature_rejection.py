@@ -125,6 +125,11 @@ def participant_utils_module():
         EntitySettingsUser=type("EntitySettingsUser", (), {}),
     )
     _stub("plugins.elitea_core.utils.authors", get_authors_data=lambda *a, **k: [])
+    _stub(
+        "plugins.elitea_core.utils.skill_participant_utils",
+        load_skill_participant_target=lambda *a, **k: None,
+        load_skill_participant_details=lambda *a, **k: {},
+    )
 
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.participant_utils",
@@ -141,6 +146,11 @@ def participant_utils_module():
 
 REASONING = {"supports_reasoning": True}
 NON_REASONING = {"supports_reasoning": False}
+GPT_WITH_OFF = {"supports_reasoning": True, "supported_efforts": ["none", "low", "medium", "high", "xhigh"]}
+CLAUDE_ADAPTIVE = {
+    "supports_reasoning": True, "thinking_type": "adaptive",
+    "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+}
 
 
 class TestInvalidLlmSettingsForReasoningModel:
@@ -160,10 +170,44 @@ class TestInvalidLlmSettingsForReasoningModel:
         }
         assert m.invalid_llm_settings_for_reasoning_model(1, settings) is True
 
-    def test_rejects_none_string_effort_on_reasoning_model(self, participant_utils_module):
+    def test_rejects_none_string_effort_on_reasoning_model_without_levels(self, participant_utils_module):
         m = participant_utils_module
         m._test_configs["claude-sonnet-4-5"] = REASONING
         settings = {"reasoning_effort": "none", "model_name": "claude-sonnet-4-5", "model_project_id": 1}
+        assert m.invalid_llm_settings_for_reasoning_model(1, settings) is True
+
+    def test_rejects_none_effort_when_levels_do_not_offer_it(self, participant_utils_module):
+        m = participant_utils_module
+        m._test_configs["claude-sonnet-5"] = CLAUDE_ADAPTIVE
+        settings = {"reasoning_effort": "none", "model_name": "claude-sonnet-5", "model_project_id": 1}
+        assert m.invalid_llm_settings_for_reasoning_model(1, settings) is True
+
+    def test_allows_none_effort_when_levels_offer_it(self, participant_utils_module):
+        m = participant_utils_module
+        m._test_configs["global.openai.gpt-5.6-sol"] = GPT_WITH_OFF
+        settings = {
+            "temperature": None, "reasoning_effort": "none",
+            "model_name": "global.openai.gpt-5.6-sol", "model_project_id": 1,
+        }
+        assert m.invalid_llm_settings_for_reasoning_model(1, settings) is False
+        assert m._test_calls == [(1, "global.openai.gpt-5.6-sol")]
+
+    def test_rejects_null_effort_even_when_levels_offer_none(self, participant_utils_module):
+        m = participant_utils_module
+        m._test_configs["global.openai.gpt-5.6-sol"] = GPT_WITH_OFF
+        settings = {
+            "temperature": None, "reasoning_effort": None,
+            "model_name": "global.openai.gpt-5.6-sol", "model_project_id": 1,
+        }
+        assert m.invalid_llm_settings_for_reasoning_model(1, settings) is True
+
+    def test_rejects_temperature_with_none_effort_even_when_levels_offer_it(self, participant_utils_module):
+        m = participant_utils_module
+        m._test_configs["global.openai.gpt-5.6-sol"] = GPT_WITH_OFF
+        settings = {
+            "temperature": 0.6, "reasoning_effort": "none",
+            "model_name": "global.openai.gpt-5.6-sol", "model_project_id": 1,
+        }
         assert m.invalid_llm_settings_for_reasoning_model(1, settings) is True
 
     def test_allows_active_effort_no_temperature_on_reasoning_model(self, participant_utils_module):

@@ -27,7 +27,8 @@ from tools import api_tools, auth, config as c, register_openapi  # pylint: disa
 
 from ...models.pd.predict_llm import LLMPredictRequest  # pylint: disable=E0402
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
-from ...utils.predict_utils import PredictPayloadError
+from ...utils.predict_utils import PredictPayloadError, get_project_context
+from ...utils.project_context_utils import prepare_project_context_delivery
 from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError
 
 
@@ -90,8 +91,16 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
 
         # Convert to dict for RPC call
-        request_json = predict_request.model_dump(exclude_unset=False, exclude={"return_chat_history"})
+        request_json = predict_request.model_dump(
+            exclude_unset=False, exclude={"return_chat_history", "include_project_context"},
+        )
         request_json['project_id'] = project_id
+        if predict_request.include_project_context:
+            request_json['instructions'], runtime_project_context = prepare_project_context_delivery(
+                request_json.get('instructions') or '', get_project_context(project_id),
+            )
+            if runtime_project_context:
+                request_json['project_context'] = runtime_project_context
 
         # Extract for RPC call
         await_task_timeout = request_json.get("await_task_timeout", 30)

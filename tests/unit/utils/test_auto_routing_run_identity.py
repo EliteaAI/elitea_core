@@ -75,7 +75,8 @@ def test_regenerate_forwards_server_projection_outside_public_payload():
     namespace={'self':SimpleNamespace(module=SimpleNamespace(context=SimpleNamespace(rpc_manager=SimpleNamespace(call=rpc)))),
                'rpc_func':'applications_predict_sio_llm','parsed':SimpleNamespace(sid='socket',question_id=1),
                'regenerate_payload':payload,'SioEvents':SimpleNamespace(chat_predict=SimpleNamespace(value='chat_predict')),
-               'msg_group':SimpleNamespace(author_participant_id=2),'project_id':7}
+               'msg_group':SimpleNamespace(author_participant_id=2),'project_id':7,
+               'start_event_content':{'participant_id':2,'question_id':1},'skill_rpc_kwargs':{}}
     eval(compile(ast.Expression(call),str(path),'eval'),namespace)
     sent=rpc.applications_predict_sio_llm.call_args
     assert sent.kwargs['routing_projection']==projection

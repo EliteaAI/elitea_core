@@ -269,7 +269,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "the target version (default version when omitted). "
             "With a version selector (the version_id query parameter or the /{version_id} path "
             "form), updates ONLY that version: send {\"version\": {...}} with every field you "
-            "are writing inside it, or the flat version shape (name, instructions, tags, meta). "
+            "are writing inside it, or the flat version shape (name, instructions, tags, meta, run_settings). "
             "A top-level name/meta is an ALTERNATIVE spelling that applies to that VERSION rather "
             "than to the skill — do not send both — and description is not accepted. "
             "Identity fields (project_id, user_id) are resolved by the server. "
@@ -302,6 +302,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         Version content example:
         { 'project_id': 2, 'skill_id': 147, 'version_id': 204,
           'version': { 'instructions': 'new text', 'tags': [{'name': 'aqa'}] } }
+
+        Run settings example (model used when the skill runs on its own; null clears it):
+        { 'project_id': 2, 'skill_id': 147, 'version_id': 204,
+          'version': { 'run_settings': { 'llm_settings': { 'model_name': 'gpt-4.1', 'model_project_id': 1,
+            'temperature': 0.3, 'max_tokens': 4096 }, 'ignore_project_context': false } } }
         """,
         parameters=[
             {"name": "project_id", "in": "path", "schema": {"type": "integer"}},

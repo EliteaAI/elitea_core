@@ -71,6 +71,10 @@ def pu():
         'plugins.elitea_core.utils.application_utils': {'build_skill_mappings_list': None},
         'plugins.elitea_core.utils.skill_export_import': {'build_skill_fork_payload': None},
         'plugins.elitea_core.utils.skill_utils': {'attach_skill_to_public_copy': None},
+        'plugins.elitea_core.utils.export_import': {
+            'PUBLISHED_TOOLKITS_META_KEY': 'fork_toolkits', 'export_version_toolkit': None,
+        },
+        'plugins.elitea_core.utils.toolkit_meta': {'drop_index_schedules': None},
     }.items():
         mod = types.ModuleType(modname)
         for k, v in attrs.items():
@@ -80,6 +84,8 @@ def pu():
     sys.modules['plugins.elitea_core.models.all'] = models_all
     sys.modules['plugins.elitea_core.models.elitea_tools'] = elitea_tools
     sys.modules['plugins.elitea_core.models.enums.all'] = enums
+    if not hasattr(sys.modules['tools'], 'serialize'):
+        sys.modules['tools'].serialize = lambda value: value
 
     spec = importlib.util.spec_from_file_location(
         'plugins.elitea_core.utils.publish_utils',

@@ -356,6 +356,15 @@
       "section": "runtime",
       "default": "centry.user"
     },
+    "prefetch_subagents": {
+      "type": "boolean",
+      "title": "Prefetch Sub-agents On Predict",
+      "description": "Send expanded sub-agent version details with the predict task so the runtime does not fetch each sub-agent over HTTP. Disable to fall back to per-sub-agent fetching.",
+      "path": "predict.prefetch_subagents",
+      "section": "runtime",
+      "default": true,
+      "requires_restart": false
+    },
     "cancel_on_timeout": {
       "type": "boolean",
       "title": "Cancel Task On Timeout",

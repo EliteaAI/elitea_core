@@ -18,6 +18,9 @@ from ..models.pd.participant_settings import EntitySettingsApplication, \
 from ..models.enums.all import NotificationEventTypes
 from ..utils.authors import get_authors_data
 from ..utils.sio_utils import SioEvents
+from .skill_participant_utils import load_skill_participant_target, load_skill_participant_details
+
+REASONING_EFFORT_OFF = 'none'
 
 
 class UnknownEntityError(Exception):
@@ -39,16 +42,18 @@ def invalid_llm_settings_for_reasoning_model(
 
     A reasoning model (Anthropic extended thinking, OpenAI o1/gpt-5) must run with a non-null
     reasoning_effort and no temperature. Both a stale temperature and a null effort silently run
-    it thinking-off, which triggers the write-tool fabrication of #5826. The already-valid shape
-    (no temperature + an active effort) needs no model lookup, so a clean write pays no RPC. Fails
-    open (returns False) if the model can't be resolved — availability is enforced elsewhere; this
-    check must not block a write on a transient RPC error.
+    it thinking-off, which triggers the write-tool fabrication of #5826. An explicit 'none' is
+    allowed only on a model whose admin-configured levels offer it (#6819 GPT-5.x/GPT-6); a model
+    without an off path (Claude) keeps rejecting it. The already-valid shape (no temperature + an
+    active effort) needs no model lookup, so a clean write pays no RPC. Fails open (returns False)
+    if the model can't be resolved — availability is enforced elsewhere; this check must not block
+    a write on a transient RPC error.
     """
     if not llm_settings:
         return False
     has_temperature = llm_settings.get('temperature') is not None
     effort = llm_settings.get('reasoning_effort')
-    has_active_effort = effort not in (None, 'none')
+    has_active_effort = effort not in (None, REASONING_EFFORT_OFF)
     # Valid for a reasoning model (and harmless for a non-reasoning one) — skip the lookup.
     if not has_temperature and has_active_effort:
         return False
@@ -66,7 +71,11 @@ def invalid_llm_settings_for_reasoning_model(
             f"reasoning-family llm_settings: {exc}"
         )
         return False
-    return bool(config and config.get('supports_reasoning', False))
+    if not (config and config.get('supports_reasoning', False)):
+        return False
+    if has_temperature or effort is None:
+        return True
+    return REASONING_EFFORT_OFF not in (config.get('supported_efforts') or ())
 
 
 def make_query_filter_for_entity(entity_name: ParticipantTypes, entity_meta: EntityMetaType) -> list:
@@ -132,6 +141,8 @@ def get_or_create_one(
                     'user_name': entity_details.get('user_name'),
                     'user_avatar': entity_details.get('user_avatar'),
                 }
+            case ParticipantTypes.skill:
+                meta = {'name': entity_details.get('name'), 'icon_meta': entity_details.get('icon_meta')}
             case ParticipantTypes.toolkit:
                 meta = {
                     'name': entity_details.get('name') or entity_details.get('toolkit_name'),
@@ -168,6 +179,13 @@ def add_participant_to_conversation(
         project_id: int,
         initiator_id: Optional[int] = None
 ) -> ParticipantBase:
+    pinned_skill_version = None
+    if participant.entity_name == ParticipantTypes.skill:
+        _, skill_target = load_skill_participant_target(
+            participant.entity_meta, project_id, participant.entity_settings.get('version_id'),
+        )
+        pinned_skill_version = {'version_id': skill_target.version_id}
+
     participant_orm, entity_details = get_or_create_one(
         session,
         entity_name=participant.entity_name,
@@ -179,6 +197,8 @@ def add_participant_to_conversation(
         entity_details=entity_details,
     )
     entity_settings.update(participant.entity_settings)
+    if pinned_skill_version:
+        entity_settings.update(pinned_skill_version)
 
     try:
         conversation.participants.append(participant_orm)
@@ -359,6 +379,8 @@ def get_entity_details(
                 project_id=meta.project_id,
                 toolkit_id=meta.id
             )
+        case ParticipantTypes.skill:
+            return load_skill_participant_details(entity_meta)
     return None
 
 
@@ -511,7 +533,10 @@ def delete_entity_from_all_conversations(project_id, entity_name: ParticipantTyp
     with db.get_session(project_id) as session:
         participant = session.query(
             Participant
-        ).filter(Participant.entity_meta.contains(entity_meta.dict())).first()
+        ).filter(
+            Participant.entity_name == entity_name,
+            Participant.entity_meta.contains(entity_meta.dict()),
+        ).first()
         if participant:
             conversation_ids = []
             participant_maps = session.query(ParticipantMapping).filter(

@@ -32,6 +32,8 @@ class ApplicationForkModel(ApplicationBaseModel, ApplicationArgsForwardingModel)
     import_uuid: str = None
     owner_id: int
     versions: List[ApplicationVersionForkModel]
+    shared_id: Optional[int] = Field(None, exclude=True)
+    shared_owner_id: Optional[int] = Field(None, exclude=True)
     webhook_secret: Any = Field(None, exclude=True)  # Override parent to exclude
 
     @model_validator(mode='after')

@@ -7,103 +7,14 @@ client, so dropping either one lets an authenticated socket name someone else's 
 their evaluation — including the exception text a failed run carries. Nothing else in the stack
 would notice, so both are pinned here.
 
-``sio/all.py`` pulls in the whole chat surface (redis, ORM, SDK utils), so everything except the
-two dependency-free modules the eval handlers actually need — ``utils/sio_utils.py`` and the
-pydantic payloads in ``models/pd/sio.py`` — is stubbed out with mocks.
+``sio/all.py`` is loaded through the shared ``sio_all`` fixture (``fixtures/sio_harness.py``).
 """
-import importlib.abc
-import importlib.util
-import pathlib
 import sys
 import types
 from unittest.mock import MagicMock
 
 import pytest
-
-PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
-
-PKG = 'evalsiopkg_room_test'
-
-# Import roots that must resolve to mocks for `sio/all.py` to load at all.
-_STUBBED = ('redis', 'tools', 'sqlalchemy', 'pylon', f'{PKG}.models.conversation',
-            f'{PKG}.models.enums', f'{PKG}.models.message_items', f'{PKG}.models.pd.participant',
-            f'{PKG}.models.pd.predict', f'{PKG}.utils.continue_message',
-            f'{PKG}.utils.participant_utils', f'{PKG}.utils.canvas_utils',
-            f'{PKG}.utils.chat_constants')
-
-
-class _MockFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    """Hand back a MagicMock for anything under `_STUBBED`, leaving real imports alone."""
-
-    def find_spec(self, fullname, path=None, target=None):  # noqa: ARG002
-        if any(fullname == root or fullname.startswith(root + '.') for root in _STUBBED):
-            return importlib.util.spec_from_loader(fullname, self)
-        return None
-
-    def create_module(self, spec):
-        mock = MagicMock()
-        mock.__name__ = spec.name
-        mock.__spec__ = spec
-        mock.__path__ = []
-        if spec.name == 'pylon.core.tools':
-            # `web.sio(event)` is used as a decorator: a MagicMock would replace every handler
-            # with a mock, so this one attribute has to behave.
-            mock.web.sio = lambda *a, **k: (lambda f: f)
-        return mock
-
-    def exec_module(self, module):
-        pass
-
-
-def _load_sio_module():
-    finder = _MockFinder()
-    sys.meta_path.insert(0, finder)
-
-    pkg = types.ModuleType(PKG)
-    pkg.__path__ = []
-    for name, path in {
-        f'{PKG}.models': None,
-        f'{PKG}.models.pd': None,
-        f'{PKG}.utils': None,
-        f'{PKG}.sio': None,
-    }.items():
-        mod = types.ModuleType(name)
-        mod.__path__ = [] if path is None else [path]
-        sys.modules[name] = mod
-    sys.modules[PKG] = pkg
-
-    # The handler imports this lazily at call time, after the finder is gone, so it has to be
-    # sitting in sys.modules already. `_call` swaps in the verdict it wants per test.
-    run_utils = types.ModuleType(f'{PKG}.utils.evaluation_run_utils')
-    run_utils.run_in_project = MagicMock(return_value=True)
-    sys.modules[f'{PKG}.utils.evaluation_run_utils'] = run_utils
-
-    try:
-        for full, relpath in (
-            (f'{PKG}.utils.sio_utils', 'utils/sio_utils.py'),
-            (f'{PKG}.models.pd.sio', 'models/pd/sio.py'),
-            (f'{PKG}.sio.all', 'sio/all.py'),
-        ):
-            spec = importlib.util.spec_from_file_location(full, PLUGIN_ROOT / relpath)
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[full] = module
-            spec.loader.exec_module(module)
-    finally:
-        sys.meta_path.remove(finder)
-
-    return sys.modules[f'{PKG}.sio.all']
-
-
-@pytest.fixture
-def sio_all():
-    module = _load_sio_module()
-    yield module
-    # `tools.auth` is a process-wide stub shared with every other test.
-    if hasattr(module.auth, 'is_sio_user_in_project'):
-        del module.auth.is_sio_user_in_project
-    for name in list(sys.modules):
-        if name.startswith(PKG):
-            del sys.modules[name]
+from fixtures.sio_harness import SIO_PKG
 
 
 class _Handler:
@@ -116,7 +27,7 @@ class _Handler:
 def _call(sio_all, name, data, *, allowed, run_in_project=True):
     # `tools.auth` comes from the runner's pylon stubs, which do not carry this method.
     sio_all.auth.is_sio_user_in_project = MagicMock(return_value=allowed)
-    sys.modules[f'{PKG}.utils.evaluation_run_utils'].run_in_project = MagicMock(
+    sys.modules[f'{SIO_PKG}.utils.evaluation_run_utils'].run_in_project = MagicMock(
         return_value=run_in_project)
     handler = _Handler()
     getattr(sio_all.SIO, name)(handler, 'sid-1', data)
@@ -162,7 +73,7 @@ def test_enter_room_refuses_a_run_that_lives_in_another_project(sio_all):
 
 def test_enter_room_checks_the_run_against_the_claimed_project(sio_all):
     _call(sio_all, 'eval_run_enter_room', {'project_id': 42, 'run_id': 7}, allowed=True)
-    sys.modules[f'{PKG}.utils.evaluation_run_utils'].run_in_project.assert_called_once_with(42, 7)
+    sys.modules[f'{SIO_PKG}.utils.evaluation_run_utils'].run_in_project.assert_called_once_with(42, 7)
 
 
 def test_enter_room_rejects_a_payload_without_a_run_id(sio_all):

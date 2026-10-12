@@ -175,14 +175,15 @@ class TestResumedTurnKeepsItsScope:
 
 class TestSubAgentPathIsScoped:
     """A sub-agent whose own version meta enables builder tools gets its toolkits from
-    api/v2/version.py, not from generate_toolkit_payload. Unscoped there, delegating to such a
+    utils/subagent_prefetch.py (PATCH version and the predict-time prefetch, #6913), not from
+    generate_toolkit_payload. Unscoped there, delegating to such a
     sub-agent is a way out of a clamped conversation."""
 
     def test_every_injection_site_passes_a_scope(self):
         import ast
         plugin_root = TESTS_DIR.parent
         calls = []
-        for path in ((plugin_root / 'api' / 'v2' / 'version.py'),
+        for path in ((plugin_root / 'utils' / 'subagent_prefetch.py'),
                      (plugin_root / 'rpc' / 'chat_all.py')):
             for node in ast.walk(ast.parse(path.read_text())):
                 if not isinstance(node, ast.Call):
