@@ -42,6 +42,7 @@ class Deps:
             FOREIGN_UUID: {"uuid": FOREIGN_UUID, "project_id": OTHER, "type": "tavily", "shared": False},
         }
         self.notified, self.ledgered, self.priced = [], [], []
+        self.lookups = []
 
     def features(self):
         return features_mod.build_feature_map(self.schemas)
@@ -50,6 +51,7 @@ class Deps:
         return self.cfg
 
     def configuration(self, project_id, uuid):
+        self.lookups.append("configuration")
         cfg = self.configs.get(uuid)
         return cfg if cfg and cfg["project_id"] == project_id else None
 
@@ -57,6 +59,7 @@ class Deps:
         return PUBLIC
 
     def personal_project_id(self, user_id):  # pylint: disable=W0613
+        self.lookups.append("personal_project")
         return PERSONAL
 
     def hmac_key(self):
@@ -66,11 +69,13 @@ class Deps:
         return self._mode
 
     def limits(self, project_id, user_id, feature):  # pylint: disable=W0613
+        self.lookups.append("limits")
         if self.limits_raise:
             raise RuntimeError("db down")
         return self._limits or {"project_limit_usd": None, "member_limit_usd": None, "feature_enabled": True}
 
     def spend(self, project_id, user_id, feature):  # pylint: disable=W0613
+        self.lookups.append("spend")
         return self._spend or {"available": True, "project_spent_nano": 0, "member_spent_nano": 0}
 
     def limit_reached(self, *args):
@@ -151,6 +156,35 @@ class TestCheck:
         out = check(deps, body(uuid=OWN_UUID, owner=PROJECT))
         assert out["allowed"] and out["exempt"] and out["permit"]
 
+    @pytest.mark.parametrize("shared", [False, True])
+    def test_public_project_credential_is_limited_whether_or_not_it_is_shared(self, shared):
+        # The platform key is offered through a shared toolkit and stays shared=False
+        deps = Deps()
+        deps.configs[SHARED_UUID]["shared"] = shared
+        out = check(deps)
+        assert out["allowed"] and out["exempt"] is False and out["permit"]
+
+    def test_unshared_public_credential_is_denied_when_over_the_limit(self):
+        deps = Deps(limits={"project_limit_usd": 1.0, "feature_enabled": True},
+                    spend={"available": True, "project_spent_nano": 10**9, "member_spent_nano": 0})
+        deps.configs[SHARED_UUID]["shared"] = False
+        assert check(deps)["code"] == svc.CODE_LIMIT
+
+    def test_unshared_public_credential_is_denied_when_the_switch_is_off(self):
+        deps = Deps(config={})
+        deps.configs[SHARED_UUID]["shared"] = False
+        assert check(deps)["code"] == svc.CODE_DISABLED
+
+    def test_public_rule_wins_for_a_caller_inside_the_public_project(self):
+        # Admins working in the public project must still be limited on the platform key
+        deps = Deps()
+        deps.configs[SHARED_UUID]["shared"] = False
+        out = svc.ToolSpendService(deps).check(PUBLIC, 7, body(), now=NOW)
+        assert out["allowed"] and out["exempt"] is False
+
+    def test_another_projects_unshared_credential_stays_forbidden(self):
+        assert status_of(lambda: check(Deps(), body(uuid=FOREIGN_UUID, owner=OTHER))) == 403
+
     def test_personal_project_credential_is_own(self):
         deps = Deps()
         deps.configs[OWN_UUID]["project_id"] = PERSONAL
@@ -174,6 +208,43 @@ class TestCheck:
         deps = Deps(mode=mode, limits={"project_limit_usd": 0.0, "feature_enabled": True},
                     spend={"available": True, "project_spent_nano": 10**12, "member_spent_nano": 0})
         assert check(deps)["allowed"] is True
+
+    def test_off_mode_with_the_feature_on_skips_every_lookup(self):
+        # A slow configurations/projects/usage RPC must not refuse a tool when nothing is metered
+        deps = Deps(mode="off")
+        out = check(deps)
+        assert out["allowed"] is True and out["permit"] is None
+        assert deps.lookups == []
+
+    def test_off_mode_fast_path_does_not_need_the_credential_to_resolve(self):
+        deps = Deps(mode="off", configs={})
+        assert check(deps)["allowed"] is True
+
+    def test_off_mode_keeps_the_platform_switch_for_the_shared_key(self):
+        # The switch is off by default and protects the platform key, whatever the usage mode
+        deps = Deps(mode="off", config={})
+        assert check(deps)["code"] == svc.CODE_DISABLED
+        assert "configuration" in deps.lookups
+
+    def test_off_mode_with_the_switch_off_still_denies_an_unshared_platform_key(self):
+        deps = Deps(mode="off", config={})
+        deps.configs[SHARED_UUID]["shared"] = False
+        assert check(deps)["code"] == svc.CODE_DISABLED
+
+    def test_off_mode_with_the_switch_on_allows_the_unshared_platform_key_without_lookups(self):
+        deps = Deps(mode="off")
+        deps.configs[SHARED_UUID]["shared"] = False
+        out = check(deps)
+        assert out["allowed"] and out["permit"] is None and deps.lookups == []
+
+    def test_off_mode_with_the_switch_off_still_lets_an_own_key_through(self):
+        out = check(Deps(mode="off", config={}), body(uuid=OWN_UUID, owner=PROJECT))
+        assert out["allowed"] and out["exempt"] and out["permit"]
+
+    def test_observe_still_resolves_the_credential_and_records(self):
+        deps = Deps(mode="observe")
+        out = check(deps)
+        assert out["allowed"] and out["permit"] and "configuration" in deps.lookups
 
     def test_project_denied_before_member(self):
         deps = Deps(limits={"project_limit_usd": 1.0, "member_limit_usd": 0.5, "feature_enabled": True},

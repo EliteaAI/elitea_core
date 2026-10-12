@@ -72,7 +72,9 @@ class ToolSpendService:
         if not cfg or cfg.get("type") != spec["configuration_type"]:
             raise ToolSpendError(400, "Configuration not found for this backend")
         owner = int(cfg["project_id"])
-        if owner == self.deps.public_project_id() and cfg.get("shared"):
+        # Public-project credentials are platform money whether or not they are shared; they reach
+        # a caller only through a shared toolkit, so the key itself is never readable here
+        if owner == self.deps.public_project_id():
             return cfg, False
         if owner == int(project_id) or owner == self.deps.personal_project_id(user_id):
             return cfg, True
@@ -91,8 +93,13 @@ class ToolSpendService:
         body = _parse(ToolSpendCheckBody, body)
         feature, backend, op = body["feature"], body["backend"], body["op"]
         info, spec = self._spec(feature, backend, op)
-        cfg, own = self._credential(project_id, user_id, spec, body)
         label = info.get("label") or feature
+        mode = self.deps.mode()
+        defaults = feature_defaults(self.deps.config(), feature)
+        if mode == MODE_OFF and defaults.get("enabled", False):
+            # Nothing is metered or limited, so skip the lookups: a slow dependency must not refuse the tool
+            return {"allowed": True, "exempt": False, "period_kind": "month", "permit": None}
+        cfg, own = self._credential(project_id, user_id, spec, body)
         #
         def allowed(exempt, **extra):
             return dict({"allowed": True, "exempt": exempt, "period_kind": "month",
@@ -102,10 +109,8 @@ class ToolSpendService:
         if own:
             return allowed(True)
         #
-        defaults = feature_defaults(self.deps.config(), feature)
         if not defaults.get("enabled", False):
             return _deny(CODE_DISABLED, f"{label} is disabled by your administrator.")
-        mode = self.deps.mode()
         #
         try:
             limits = self.deps.limits(project_id, user_id, feature)
@@ -194,7 +199,7 @@ class PylonDeps:
         return self.module.descriptor.config
 
     def configuration(self, project_id, uuid):
-        return self.rpc.timeout(10).configurations_get_by_uuid(project_id, uuid)
+        return self.rpc.timeout(2).configurations_get_by_uuid(project_id, uuid)
 
     def public_project_id(self):
         from .utils import get_public_project_id  # pylint: disable=C0415
@@ -202,7 +207,7 @@ class PylonDeps:
 
     def personal_project_id(self, user_id):
         try:
-            value = self.rpc.timeout(5).projects_get_personal_project_id(user_id)
+            value = self.rpc.timeout(1).projects_get_personal_project_id(user_id)
         except Exception:  # pylint: disable=W0703
             log.exception("tool spend: personal project lookup failed for user %s", user_id)
             return None
@@ -213,14 +218,14 @@ class PylonDeps:
         return (this.for_module("worker_client").descriptor.config.get("event_node") or {}).get("hmac_key")
 
     def mode(self):
-        return self.rpc.timeout(5).usage_mode()
+        return self.rpc.timeout(2).usage_mode()
 
     def limits(self, project_id, user_id, feature):
         return self.module.get_effective_feature_limits(project_id, user_id, feature, "month")
 
     def spend(self, project_id, user_id, feature):
         try:
-            return self.rpc.timeout(10).usage_get_feature_spend(project_id, user_id, feature)
+            return self.rpc.timeout(2).usage_get_feature_spend(project_id, user_id, feature)
         except Exception:  # pylint: disable=W0703
             log.exception("tool spend: spend read failed for project %s feature %s", project_id, feature)
             return {"available": False}
