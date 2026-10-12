@@ -6,6 +6,7 @@ from ...utils.constants import PROMPT_LIB_MODE
 
 from pylon.core.tools import log
 from ...utils.folder_access import fork_payload_access_error
+from ...utils.permissions import ProjectPermissionChecker
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -17,6 +18,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def post(self, project_id: int, **kwargs):
+        denied, status_code = ProjectPermissionChecker(project_id).check_permissions(
+            ["models.applications.export_import.import"]
+        )
+        if status_code != 200:
+            return denied, status_code
+
         # Work exactly like import_wizard, but set fork parent metadata
         fork_data = copy.copy(request.json)
         author_id = auth.current_user().get("id")
