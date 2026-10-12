@@ -44,6 +44,11 @@ def feature_message(kind, label, period_kind, pct, project_name, limit_usd, is_m
     return f'{label}: {subject} has been reached. {link}'
 
 
+def _is_admin_role(role):
+    """Mirror of the platform's own admin test, which matches on the role name."""
+    return 'admin' in str(role).lower()
+
+
 class RPC:
     @web.rpc("elitea_core_get_project_admin_ids", "get_project_admin_ids")
     def get_project_admin_ids(self, project_id: int, **kwargs):

@@ -31,7 +31,7 @@ def _ensure_pylon():
         sys.modules["pylon.core.tools"] = tools
 
 
-def load(relative):
+def load(relative, fresh=False):
     """relative like 'utils/tool_spend.py' → plugins.elitea_core.utils.tool_spend"""
     _ensure_pylon()
     if relative not in DEPENDENCIES:
@@ -41,7 +41,7 @@ def load(relative):
                  "plugins.elitea_core.models", "plugins.elitea_core.models.pd"):
         _package(name)
     dotted = "plugins.elitea_core." + relative[:-3].replace("/", ".")
-    if dotted in sys.modules:
+    if dotted in sys.modules and not fresh:
         return sys.modules[dotted]
     spec = importlib.util.spec_from_file_location(dotted, PLUGIN_ROOT / relative)
     module = importlib.util.module_from_spec(spec)
