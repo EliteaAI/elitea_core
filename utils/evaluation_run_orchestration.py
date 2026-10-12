@@ -198,6 +198,8 @@ def build_run_snapshot(
             'steps_limit': suite.get('steps_limit'),
             # {per_case, per_run} x {tokens, cost}; checked on the agent role only (§5.4).
             'consumption_budget': suite.get('consumption_budget'),
+            # False drops tool outputs from the stored trajectories (Q-S5); absent/null keeps them.
+            'store_tool_outputs': suite.get('store_tool_outputs') is not False,
         },
         'application_id': application_id,
         'application_version_id': application_version_id,
@@ -1214,6 +1216,8 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
     # is already fully known from `version_details`, so skip the live LLM call entirely.
     structure_only_run = snapshot.get('dataset_id') is None
     step_limit = (snapshot.get('suite') or {}).get('steps_limit')
+    # A snapshot frozen before the flag existed has no key: it stored outputs then, so keep doing so.
+    store_tool_outputs = (snapshot.get('suite') or {}).get('store_tool_outputs') is not False
 
     def _run(case: dict, case_index: Optional[int] = None) -> dict:
         if structure_only_run:
@@ -1229,7 +1233,8 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
         outcome = run_agent(project_id, version_details, case,
                             user_id=user_id, timeout=timeout,
                             platform_run_id=platform_run_id, usage_entity=usage_entity,
-                            step_limit=step_limit, case_index=case_index)
+                            step_limit=step_limit, case_index=case_index,
+                            store_tool_outputs=store_tool_outputs)
         return {**outcome, 'structure': structure}
 
     _run.accepts_case_index = True

@@ -362,6 +362,16 @@ class EvalSuiteBaseModel(BaseModel):
 
     @field_validator('meta')
     @classmethod
+    def _check_store_tool_outputs(cls, v: dict) -> dict:
+        # ``meta.store_tool_outputs = false`` keeps tool outputs out of stored trajectories (#6809
+        # Q-S5); absent or null stores them.
+        flag = (v or {}).get('store_tool_outputs')
+        if flag is not None and not isinstance(flag, bool):
+            raise ValueError('meta.store_tool_outputs must be a boolean or null')
+        return v
+
+    @field_validator('meta')
+    @classmethod
     def _check_consumption_budget(cls, v: dict) -> dict:
         # ``meta.consumption_budget = {per_case: {tokens, cost}, per_run: {tokens, cost}}`` (#6716,
         # design §5.4). Every limit is optional and null means no limit; tokens are integers, cost USD.

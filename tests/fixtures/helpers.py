@@ -54,6 +54,15 @@ def register_trajectory_checks_module(plugin_root: pathlib.Path):
     return load_module_with_stubs(plugin_root / 'utils' / 'evaluation_trajectory_checks.py', name)
 
 
+def register_masking_module(plugin_root: pathlib.Path):
+    """Same, for ``utils/evaluation_masking.py`` (trajectory secret masking, #6809 Q-S5):
+    ``evaluation_execution`` imports it at the top. Stdlib only."""
+    name = 'plugins.elitea_core.utils.evaluation_masking'
+    if name in sys.modules:
+        return sys.modules[name]
+    return load_module_with_stubs(plugin_root / 'utils' / 'evaluation_masking.py', name)
+
+
 def load_module_with_stubs(
     module_path: pathlib.Path,
     module_name: str,

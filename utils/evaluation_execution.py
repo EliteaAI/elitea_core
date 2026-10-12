@@ -19,11 +19,14 @@ locked by unit tests against recorded envelopes.
 steps is a real "the agent answered without tools", while a missing envelope is ``not_recorded``
 with a reason, and a case where no agent ran is ``not_applicable``.
 """
+import hashlib
 import json
 import math
 import re
 from datetime import datetime
 from typing import Any, List, Optional
+
+from .evaluation_masking import mask_payload, mask_text
 
 TRAJECTORY_RECORDED = 'recorded'
 TRAJECTORY_NOT_RECORDED = 'not_recorded'
@@ -132,7 +135,7 @@ def _llm_step(step: dict) -> dict:
         'token_source': step.get('token_source'),
         'planned_tools': [c.get('name') for c in tool_calls if isinstance(c, dict) and c.get('name')],
         'finish_reason': generation_info.get('finish_reason'),
-        'text': _cap_text(step.get('text') or None),
+        'text': _cap_text(mask_text(step['text']) if isinstance(step.get('text'), str) and step['text'] else None),
         'parent_agent': step.get('parent_agent_name'),
         'parent_call_id': step.get('parent_agent_call_id'),
         'started_at': step.get('timestamp_start'),
@@ -172,7 +175,16 @@ def tool_step_status(entry: dict) -> str:
     return 'ok'
 
 
-def _tool_step(entry: dict) -> dict:
+def _identity(tool_inputs) -> str:
+    """A digest of the unmasked inputs, so ``redundant_calls`` can tell apart two calls whose
+    inputs differ only under a masked key. Dropped before the trajectory is stored."""
+    return hashlib.sha256(_canonical(tool_inputs).encode('utf-8')).hexdigest()[:16]
+
+
+def _tool_step(entry: dict, store_tool_outputs: bool = True) -> dict:
+    """One tool step. Inputs, output and error are masked before they are capped (Q-S5), so a cap
+    cannot cut a secret in half and leave the visible half unmasked. ``store_tool_outputs=False``
+    (the suite opt-out) drops the output and flags the step ``output_omitted``."""
     metadata = entry.get('metadata') if isinstance(entry.get('metadata'), dict) else {}
     status = tool_step_status(entry)
     # The orchestrator's own sub-agent call carries ``parent_agent_call_id`` too — its *own* call
@@ -180,24 +192,28 @@ def _tool_step(entry: dict) -> dict:
     # makes the step a child; without one the id identifies this call.
     parent_agent = metadata.get('parent_agent_name') or None
     call_id = metadata.get('parent_agent_call_id') or None
-    return {
+    step = {
         'kind': 'tool',
         'tool_name': entry.get('tool_name'),
         'toolkit': metadata.get('toolkit_name') or None,
         'toolkit_type': metadata.get('toolkit_type') or None,
-        'tool_inputs': _cap_inputs(entry.get('tool_inputs')),
-        'tool_output': _cap_text(entry.get('tool_output')),
+        'tool_inputs': _cap_inputs(mask_payload(entry.get('tool_inputs'))),
+        'tool_output': _cap_text(mask_payload(entry.get('tool_output'))) if store_tool_outputs else None,
         'status': status,
         'is_error': status == 'error',
         # A paused call's "error" is the interrupt traceback; the pause keeps the identities.
-        'error': None if status == TOOL_STEP_PAUSED else _cap_text(entry.get('error')),
+        'error': None if status == TOOL_STEP_PAUSED else _cap_text(mask_payload(entry.get('error'))),
         'finish_reason': entry.get('finish_reason'),
         'call_id': None if parent_agent else call_id,
         'parent_agent': parent_agent,
         'parent_call_id': call_id if parent_agent else None,
         'started_at': entry.get('timestamp_start'),
         'duration_ms': _duration_ms(entry.get('timestamp_start'), entry.get('timestamp_finish')),
+        '_identity': _identity(entry.get('tool_inputs')),
     }
+    if not store_tool_outputs:
+        step['output_omitted'] = True
+    return step
 
 
 def _fit(trajectory: dict) -> dict:
@@ -222,8 +238,11 @@ def _fit(trajectory: dict) -> dict:
     return trajectory
 
 
-def build_trajectory(predict_result) -> Optional[dict]:
+def build_trajectory(predict_result, *, store_tool_outputs: bool = True) -> Optional[dict]:
     """The normalized trajectory (§3.3) of one ``predict_sio`` envelope, or None without one.
+
+    Tool steps carry a private ``_identity`` for :func:`trajectory_metrics`;
+    :func:`extract_execution` drops it before the trajectory is stored.
 
     Steps are ordered by ``started_at``; LLM steps come before tool steps on a tie, and insertion
     order breaks the rest. A step with no timestamp keeps its insertion position at the end."""
@@ -238,7 +257,7 @@ def build_trajectory(predict_result) -> Optional[dict]:
     tool_calls = inner.get('tool_calls_dict')
     for entry in (tool_calls.values() if isinstance(tool_calls, dict) else []):
         if isinstance(entry, dict):
-            raw.append(_tool_step(entry))
+            raw.append(_tool_step(entry, store_tool_outputs))
 
     def _order(item):
         seq, step = item
@@ -253,6 +272,7 @@ def build_trajectory(predict_result) -> Optional[dict]:
         'tool_sequence': [s['tool_name'] for s in steps if s['kind'] == 'tool'],
         'truncated': False,
         'source': 'predict_result',
+        'tool_outputs_stored': store_tool_outputs,
     })
 
 
@@ -336,7 +356,7 @@ def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] 
     succeeded, redundant, retries = set(), 0, 0
     previous = None
     for step in tools:
-        key = (step.get('tool_name'), _canonical(step.get('tool_inputs')))
+        key = (step.get('tool_name'), step.get('_identity') or _canonical(step.get('tool_inputs')))
         if key in succeeded:
             redundant += 1
         if step.get('status') == 'ok':
@@ -361,14 +381,16 @@ def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] 
 
 
 def extract_execution(predict_result: Any, *, status: str, latency_ms: Optional[int] = None,
-                      error: Optional[str] = None) -> dict:
+                      error: Optional[str] = None, store_tool_outputs: bool = True) -> dict:
     """``{trajectory_state, trajectory_state_reason, trajectory, metrics}`` for one agent outcome.
 
     The one place ``run_agent`` reads evidence from the envelope. ``status`` is the outcome
-    ``run_agent`` already decided; it only matters when there is no envelope to read."""
+    ``run_agent`` already decided; it only matters when there is no envelope to read.
+    ``store_tool_outputs`` is the suite's frozen opt-out (Q-S5)."""
     if status == 'unsupported':
         return not_applicable_execution('unsupported')
-    trajectory = build_trajectory(predict_result) if status not in _NO_ENVELOPE_REASONS else None
+    trajectory = (build_trajectory(predict_result, store_tool_outputs=store_tool_outputs)
+                  if status not in _NO_ENVELOPE_REASONS else None)
     if trajectory is None:
         return {
             'trajectory_state': TRAJECTORY_NOT_RECORDED,
@@ -380,12 +402,15 @@ def extract_execution(predict_result: Any, *, status: str, latency_ms: Optional[
     if pause is not None:
         trajectory['pause'] = pause
         _mark_paused_steps(trajectory)
+    metrics = trajectory_metrics(trajectory, latency_ms=latency_ms, error=error,
+                                 final_text=_final_assistant_text(predict_result))
+    for step in trajectory['steps']:
+        step.pop('_identity', None)
     return {
         'trajectory_state': TRAJECTORY_RECORDED,
         'trajectory_state_reason': None,
         'trajectory': trajectory,
-        'metrics': trajectory_metrics(trajectory, latency_ms=latency_ms, error=error,
-                                      final_text=_final_assistant_text(predict_result)),
+        'metrics': metrics,
     }
 
 

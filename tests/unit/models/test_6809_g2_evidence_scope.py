@@ -141,6 +141,21 @@ def test_suite_rejects_bad_steps_limit(pd, limit):
         pd.EvalSuiteCreateModel(application_id=1, meta={'steps_limit': limit})
 
 
+# --- Q-S5: suite meta.store_tool_outputs ----------------------------------------------------------
+
+@pytest.mark.parametrize('meta', [{}, {'store_tool_outputs': None}, {'store_tool_outputs': True},
+                                  {'store_tool_outputs': False, 'steps_limit': 3}])
+def test_suite_accepts_store_tool_outputs(pd, meta):
+    assert pd.EvalSuiteCreateModel(application_id=1, meta=meta).meta == meta
+    assert pd.EvalSuiteUpdateModel(meta=meta).meta == meta
+
+
+@pytest.mark.parametrize('flag', ['false', 0, 1, {}])
+def test_suite_rejects_bad_store_tool_outputs(pd, flag):
+    with pytest.raises(ValidationError, match='store_tool_outputs'):
+        pd.EvalSuiteCreateModel(application_id=1, meta={'store_tool_outputs': flag})
+
+
 # --- #6716: suite meta.consumption_budget -------------------------------------------------------
 
 @pytest.mark.parametrize('budget', [

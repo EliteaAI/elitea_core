@@ -56,7 +56,11 @@ def _metric(t, key, fallback):
     return fallback() if value is None else value
 '''
 
+# ``evaluation_masking.MASK_VALUE``, inlined: the sandboxed script cannot import plugin code.
 _TOOL_MATCH = '''
+_MASKED = '***MASKED***'
+
+
 def _args_ok(spec, actual):
     if 'args' not in spec:
         return True
@@ -68,10 +72,13 @@ def _args_ok(spec, actual):
             return False
     if not isinstance(actual, dict):
         return False
+    # A value masked when the trajectory was stored (Q-S5) can only be checked for presence.
+    def _same(key, value):
+        return actual[key] == _MASKED or actual[key] == value
     if spec.get('args_match') == 'exact':
-        return actual == want
+        return set(actual) == set(want) and all(_same(k, v) for k, v in want.items())
     for key, value in want.items():
-        if key not in actual or actual[key] != value:
+        if key not in actual or not _same(key, value):
             return False
     return True
 
@@ -244,8 +251,9 @@ CHECKS = {
             "its `match` mode: exact (same calls, same order; 1 or 0), in_order (expected calls in "
             "order, extras allowed), any_order (F1 of expected vs actual calls), subset (share of "
             "actual calls that were expected), superset (share of expected calls made; the default). "
-            "Expected `args` are compared per `args_match` (subset by default, or exact). Skipped "
-            "when the case has no expected trajectory."),
+            "Expected `args` are compared per `args_match` (subset by default, or exact); an "
+            "argument masked as a secret when stored matches on presence only. Skipped when the "
+            "case has no expected trajectory."),
         'body': _TOOL_MATCH, 'return_contract': 'number',
         'scale_type': 'continuous', 'scale_min': 0.0, 'scale_max': 1.0,
         'polarity': 'higher_better', 'default_weight': 1.0,

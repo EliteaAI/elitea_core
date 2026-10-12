@@ -186,6 +186,7 @@ def run_agent(
     usage_entity: Optional[dict] = None,
     step_limit: Optional[int] = None,
     case_index: Optional[int] = None,
+    store_tool_outputs: bool = True,
 ) -> dict:
     """Run the pinned agent over one case's input and return a structured outcome (never raises).
 
@@ -202,7 +203,10 @@ def run_agent(
     a batch run, so that text is not the agent's answer (design §4.5).
 
     ``case_index`` with ``platform_run_id`` makes the stream id, which the ledger keeps as the
-    row's ``conversation_id``, name this case, so settlement can find its ledger rows."""
+    row's ``conversation_id``, name this case, so settlement can find its ledger rows.
+
+    ``store_tool_outputs`` is the suite's frozen opt-out (design Q-S5): False keeps tool names and
+    masked inputs in the trajectory but not the outputs."""
     # Lazy: keeps this module importable with no package context (sibling preloaded in tests).
     from .evaluation_execution import extract_execution, is_parked, pause_details
     from .evaluation_usage import ROLE_AGENT, case_stream_key, envelope_usage, not_applicable_usage
@@ -210,7 +214,8 @@ def run_agent(
     def _outcome(status, output, error, result=None, latency_ms=None):
         return {'status': status, 'output': output, 'error': error,
                 'execution': extract_execution(result, status=status, latency_ms=latency_ms,
-                                               error=error or _predict_error_text(result)),
+                                               error=error or _predict_error_text(result),
+                                               store_tool_outputs=store_tool_outputs),
                 'usage': (not_applicable_usage('unsupported') if status == 'unsupported'
                           else envelope_usage(result, status=status))}
 

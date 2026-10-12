@@ -99,6 +99,7 @@ def _suite_dict(suite, judge_model_override: Optional[dict] = None) -> dict:
         'judge_model': judge_model_override or suite.judge_model,
         'steps_limit': (suite.meta or {}).get('steps_limit'),
         'consumption_budget': (suite.meta or {}).get('consumption_budget'),
+        'store_tool_outputs': (suite.meta or {}).get('store_tool_outputs'),
     }
 
 

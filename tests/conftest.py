@@ -15,11 +15,12 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(PLUGIN_ROOT / "tests"))
 from fixtures.helpers import (  # noqa: E402
-    register_expected_trajectory_module, register_trajectory_checks_module,
+    register_expected_trajectory_module, register_masking_module, register_trajectory_checks_module,
 )
 
 register_expected_trajectory_module(PLUGIN_ROOT)
 register_trajectory_checks_module(PLUGIN_ROOT)
+register_masking_module(PLUGIN_ROOT)
 
 
 @pytest.fixture(scope="session")

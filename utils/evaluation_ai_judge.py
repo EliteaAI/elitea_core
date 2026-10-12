@@ -262,6 +262,9 @@ def render_trajectory(trajectory: dict) -> str:
             lines.append('   inputs: ' + _excerpt(step['tool_inputs']))
         if step.get('tool_output') is not None:
             lines.append('   output: ' + _excerpt(step['tool_output']))
+        elif step.get('output_omitted') and trajectory.get('tool_outputs_stored') is False:
+            # The suite opts out of storing outputs (Q-S5); say so rather than imply an empty result.
+            lines.append('   output: (not stored for this suite)')
         if step.get('error'):
             lines.append('   error: ' + _excerpt(step['error']))
     if not lines:
