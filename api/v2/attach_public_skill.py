@@ -7,6 +7,7 @@ from tools import api_tools, config as c, db, auth
 from ...models.enums.all import SkillEntityTypes
 from ...utils.skill_utils import attach_public_skill_to_agents
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.permissions import ProjectPermissionChecker
 
 from pylon.core.tools import log
 
@@ -23,6 +24,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def post(self, project_id: int, **kwargs):
+        denied, status_code = ProjectPermissionChecker(project_id).check_permissions(
+            ["models.applications.export_import.import"]
+        )
+        if status_code != 200:
+            return denied, status_code
+
         body = request.json or {}
         public_skill_id = body.get('public_skill_id')
         public_version_id = body.get('public_version_id')
