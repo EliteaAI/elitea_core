@@ -15,6 +15,34 @@ MEMBER_USAGE_LINK = '[View my usage]()'
 # Budgets are monthly only, so the period reads as a constant rather than a placeholder
 BUDGET_PERIOD = 'monthly'
 
+PERIOD_WORDS = {'month': 'monthly', 'week': 'weekly', 'day': 'daily'}
+
+
+def feature_event(kind, is_member):
+    """Tool Spend notification type for a scope and kind."""
+    if is_member:
+        return (NotificationEventTypes.member_tool_spend_threshold_reached if kind == 'threshold'
+                else NotificationEventTypes.member_tool_spend_limit_reached)
+    return (NotificationEventTypes.tool_spend_threshold_reached if kind == 'threshold'
+            else NotificationEventTypes.tool_spend_limit_reached)
+
+
+def usd(value):
+    """Dollars for messages; sub-cent limits keep their digits instead of rounding to $0.01."""
+    return f'${value:.2f}' if value >= 0.01 else f'${value:.4f}'.rstrip('0')
+
+
+def feature_message(kind, label, period_kind, pct, project_name, limit_usd, is_member):
+    """Text for a Tool Spend alert; the period is an argument so #6006 only adds kinds."""
+    period = PERIOD_WORDS.get(period_kind, period_kind)
+    limit = f' of {usd(limit_usd)}' if limit_usd is not None else ''
+    subject = f'your {period} limit{limit} in {project_name}' if is_member \
+        else f'the {period} limit{limit} for {project_name}'
+    link = MEMBER_USAGE_LINK if is_member else PROJECT_USAGE_LINK
+    if kind == 'threshold':
+        return f'{label}: {pct}% of {subject} is used. {link}'
+    return f'{label}: {subject} has been reached. {link}'
+
 
 def _is_admin_role(role):
     """Mirror of the platform's own admin test, which matches on the role name."""
@@ -57,8 +85,18 @@ class RPC:
             project_name = project.get('name') or f'project {project_id}'
             #
             is_member = user_id is not None
+            feature = kwargs.get('feature')
             #
-            if is_member:
+            if feature:
+                event_type = feature_event(kind, is_member)
+                message = feature_message(
+                    kind, kwargs.get('feature_label') or feature, kwargs.get('period_kind', 'month'),
+                    pct, project_name, kwargs.get('limit_usd'), is_member,
+                )
+                recipients = [user_id] if is_member else self.get_project_admin_ids(project_id)
+                if not recipients and not is_member and project.get('owner_id') is not None:
+                    recipients = [int(project['owner_id'])]
+            elif is_member:
                 event_type = (
                     NotificationEventTypes.member_budget_threshold_reached if kind == 'threshold'
                     else NotificationEventTypes.member_budget_limit_reached
@@ -114,6 +152,8 @@ class RPC:
                             'budget_period': BUDGET_PERIOD,
                             'threshold_pct': pct,
                             'message': message,
+                            **({'feature': feature, 'period_kind': kwargs.get('period_kind', 'month')}
+                               if feature else {}),
                         },
                     },
                 )

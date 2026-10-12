@@ -50,3 +50,13 @@ cost_budgets:
     project_monthly_limit: null              # team/shared projects
     personal_project_monthly_limit: null     # each user's own project
     user_monthly_limit: null                 # one member's slice inside a project
+  # Tool Spend features (#6980), keyed by toolkit metadata `tool_spend.feature`. Separate from
+  # the LLM defaults above; the platform switch is off and every limit unlimited by default.
+  features:
+    web_search:
+      enabled: false
+      enabled_team: true
+      enabled_personal: true
+      project_monthly_limit: null
+      personal_project_monthly_limit: null
+      user_monthly_limit: null

@@ -55,6 +55,10 @@ class NotificationEventTypes(StrEnum):
     budget_limit_reached = 'budget_limit_reached'
     member_budget_threshold_reached = 'member_budget_threshold_reached'
     member_budget_limit_reached = 'member_budget_limit_reached'
+    tool_spend_threshold_reached = 'tool_spend_threshold_reached'
+    tool_spend_limit_reached = 'tool_spend_limit_reached'
+    member_tool_spend_threshold_reached = 'member_tool_spend_threshold_reached'
+    member_tool_spend_limit_reached = 'member_tool_spend_limit_reached'
 
 
 class IndexDataStatus(StrEnum):

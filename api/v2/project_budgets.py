@@ -154,6 +154,15 @@ class AdminAPI(api_tools.APIModeHandler):
         sort_order = request.args.get("sort_order", "asc")
         #
         sort_by = _safe_sort_field(request.args.get("sort_by", DEFAULT_SORT_FIELD))
+        # A Tool Spend feature reads its own tables and counters; without one this is the LLM listing
+        feature = request.args.get("feature") or None
+        if feature:
+            from ...utils.tool_spend_features import validate_feature_period  # pylint: disable=C0415
+            try:
+                validate_feature_period(feature, "month")
+            except ValueError as error:
+                return {"error": str(error)}, 400
+        spend_scope = {"model_name": feature} if feature else {}
         #
         # Owner ids are OR'd into the project search, so resolve them only for personal
         # projects. Doing it always would let a team project match on its owner's email.
@@ -172,7 +181,10 @@ class AdminAPI(api_tools.APIModeHandler):
         projects = listing.get("rows") or []
         project_ids = [p["id"] for p in projects]
         #
-        budgets = rpc.timeout(10).elitea_core_list_project_budgets() or {}
+        budgets = (
+            rpc.timeout(10).elitea_core_list_project_feature_budgets(feature=feature) if feature
+            else rpc.timeout(10).elitea_core_list_project_budgets()
+        ) or {}
         #
         # A personal project is really that user's own budget, so resolve the owner
         # to label it by identity rather than the opaque project_user_N name.
@@ -188,14 +200,18 @@ class AdminAPI(api_tools.APIModeHandler):
         # One spend call for the whole page rather than one per row
         try:
             spend_map = rpc.timeout(30).usage_get_projects_spend(
-                project_ids=project_ids,
+                project_ids=project_ids, **spend_scope,
             ) or {}
         except Exception:  # pylint: disable=W0703
             spend_map = {}
         #
         try:
-            limit_map = rpc.timeout(20).elitea_core_get_effective_project_limits(
-                project_ids=project_ids,
+            limit_map = (
+                rpc.timeout(20).elitea_core_get_effective_feature_project_limits(
+                    project_ids=project_ids, feature=feature,
+                ) if feature else rpc.timeout(20).elitea_core_get_effective_project_limits(
+                    project_ids=project_ids,
+                )
             ) or {}
         except Exception:  # pylint: disable=W0703
             limit_map = {}
@@ -233,6 +249,7 @@ class AdminAPI(api_tools.APIModeHandler):
                 "spend": spend,
                 "remaining": None if effective is None else max(0.0, effective - spend),
                 "percent_used": None if not effective else round(spend / effective * 100, 2),
+                **({"feature": feature, "feature_enabled": row.get("feature_enabled")} if feature else {}),
             })
         #
         return {

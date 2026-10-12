@@ -2,6 +2,7 @@ from flask import request
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.feature_budget_admin import feature_state, feature_write, request_feature
 
 OPENAPI_TAG = "elitea_core/usage"
 
@@ -189,6 +190,12 @@ class AdminAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int, **kwargs):
+        try:
+            feature = request_feature(request)
+        except ValueError as error:
+            return {"error": str(error)}, 400
+        if feature:
+            return feature_state(project_id, feature), 200
         return _budget_state(project_id), 200
 
     @register_openapi(
@@ -220,6 +227,12 @@ class AdminAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def put(self, project_id: int, **kwargs):
+        try:
+            feature = request_feature(request)
+            if feature:
+                return feature_write(project_id, feature, dict(request.json or {})), 200
+        except (TypeError, ValueError) as error:
+            return {"error": str(error)}, 400
         try:
             payload = _parse_payload(dict(request.json or {}))
         except (TypeError, ValueError) as error:
