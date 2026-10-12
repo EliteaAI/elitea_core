@@ -150,7 +150,14 @@ class ToolSpendService:
         except PermitError as exc:
             log.warning("tool spend: record rejected for project %s user %s: %s", project_id, user_id, exc)
             raise ToolSpendError(403, str(exc)) from exc
-        units = body["units"]
+        units, meta = body["units"], {key: value for key, value in body["meta"].items() if value is not None}
+        cap = spec["max_units_per_call"]
+        if units > cap:
+            # Sanity ceiling set in the toolkit code: keep the spend (capped) and leave a trail in the ledger
+            log.warning("tool spend: units %s over cap %s for %s/%s, project %s user %s, clamped",
+                        units, cap, backend, op, project_id, user_id)
+            meta.update(clamped=True, reported_units=units)
+            units = cap
         price = self.deps.price(backend, units, claims["unit"]) or {}
         record = {
             "ts": datetime.datetime.fromtimestamp(int(claims["iat"]), datetime.timezone.utc),
@@ -160,7 +167,7 @@ class ToolSpendService:
             "tool_name": body["tool_name"], "ok": body["ok"],
             "duration_ms": body["duration_ms"], "budget_exempt": bool(claims["exempt"]),
             "cost_usd": price.get("cost"), "cost_source": price.get("cost_source"),
-            "meta": {key: value for key, value in body["meta"].items() if value is not None},
+            "meta": meta,
         }
         try:
             result = self.deps.ledger(record, attribution) or {}

@@ -1,5 +1,6 @@
 """ Tool Spend feature list, derived from toolkit-schema metadata `metadata.tool_spend` (#6980) """
 
+import math
 import threading
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
@@ -8,7 +9,7 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 RESERVED_FEATURES = frozenset({"llm"})
 PERIOD_KINDS = ("month",)
 DEFAULT_UNIT = "credit"
-REQUIRED_KEYS = ("feature", "backend", "configuration_type", "operations")
+REQUIRED_KEYS = ("feature", "backend", "configuration_type", "operations", "max_units_per_call")
 
 _lock = threading.Lock()
 _cache = {"source": None, "map": {}}
@@ -25,11 +26,15 @@ def _valid_entry(title, spend):
     if not isinstance(operations, list) or not all(isinstance(op, str) and op for op in operations):
         log.error("tool_spend operations on toolkit %s is malformed, ignored", title)
         return False
+    cap = spend["max_units_per_call"]
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not math.isfinite(cap) or cap <= 0:
+        log.error("tool_spend max_units_per_call on toolkit %s must be a positive number, ignored", title)
+        return False
     return True
 
 
 def build_feature_map(schemas):
-    """{feature: {label, backends: {backend: {toolkit_type, configuration_type, unit, operations, chat_tools}}}}"""
+    """{feature: {label, backends: {backend: {toolkit_type, configuration_type, unit, operations, max_units_per_call, chat_tools}}}}"""
     features = {}
     for title, schema in (schemas or {}).items():
         spend = ((schema or {}).get("metadata") or {}).get("tool_spend")
@@ -43,6 +48,7 @@ def build_feature_map(schemas):
             "configuration_type": spend["configuration_type"],
             "unit": spend.get("unit") or DEFAULT_UNIT,
             "operations": list(spend["operations"]),
+            "max_units_per_call": float(spend["max_units_per_call"]),
             "chat_tools": list(spend.get("chat_tools") or []),
         }
     return features

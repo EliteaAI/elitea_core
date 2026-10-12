@@ -20,9 +20,9 @@ SHARED_UUID, OWN_UUID, FOREIGN_UUID = "11111111-0000-0000-0000-000000000001", \
 NOW = datetime.datetime(2026, 10, 9, 12, 0, tzinfo=datetime.timezone.utc)
 
 
-def schema(feature="web_search", backend="tavily", cfg_type="tavily", ops=None, **extra):
+def schema(feature="web_search", backend="tavily", cfg_type="tavily", ops=None, cap=250, **extra):
     spend = {"feature": feature, "label": "Web search", "backend": backend, "configuration_type": cfg_type,
-             "chat_tools": ["web_search", "web_extract"],
+             "chat_tools": ["web_search", "web_extract"], "max_units_per_call": cap,
              "operations": ops if ops is not None else ["search", "extract", "crawl", "map"]}
     spend.update(extra)
     return {"title": backend, "metadata": {"label": backend, "tool_spend": spend}}
@@ -108,6 +108,8 @@ class TestFeatureMap:
     def test_llm_and_malformed_entries_are_dropped(self):
         fmap = features_mod.build_feature_map({
             "a": schema(feature="llm"), "b": schema(backend="b", ops=[""]), "d": schema(backend="d", ops="search"),
+            "e": schema(backend="e", cap=0), "f": schema(backend="f", cap=-5), "g": schema(backend="g", cap=float("nan")),
+            "h": schema(backend="h", cap="250"), "i": schema(backend="i", cap=True),
             "c": {"metadata": {"tool_spend": {"feature": "x"}}},
         })
         assert fmap == {}
@@ -284,11 +286,19 @@ class TestRecordAndPermit:
             svc.ToolSpendService(deps).record(OTHER, 7, dict(body(), permit=permit, units=1))
         assert info.value.status == 403
 
-    def test_large_genuine_units_are_recorded(self):
-        # No per-call ceiling (Option C): a big legitimate spend lands in full
+    def test_units_up_to_the_cap_are_recorded_in_full(self):
         deps = Deps()
-        record(deps, allowed_permit(deps, op="crawl"), op="crawl", units=150)
-        assert deps.ledgered[0][0]["units"] == 150
+        record(deps, allowed_permit(deps, op="crawl"), op="crawl", units=250.0)
+        row = deps.ledgered[0][0]
+        assert row["units"] == 250 and "clamped" not in row["meta"]
+
+    def test_units_over_the_cap_are_clamped_flagged_and_still_recorded(self):
+        deps = Deps()
+        out = record(deps, allowed_permit(deps), units=100_000.0)
+        row = deps.ledgered[0][0]
+        assert out["recorded"] and row["units"] == 250
+        assert row["meta"]["clamped"] is True and row["meta"]["reported_units"] == 100_000
+        assert deps.priced == [("tavily", 250, "credit")]  # a fake $100 call is priced as at most the cap
 
     @pytest.mark.parametrize("units", [-100, -0.0001, float("nan"), float("inf"), float("-inf"),
                                        "NaN", "5", True, None, [1], {"a": 1}])
