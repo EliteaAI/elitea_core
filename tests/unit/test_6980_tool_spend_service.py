@@ -4,6 +4,8 @@ The service takes its wiring as `deps`, so every branch here runs the production
 against fakes for RPCs (configurations, usage, costs) and module state (toolkit schemas, config).
 """
 import datetime
+import hashlib
+import hmac
 import time
 
 import pytest
@@ -215,10 +217,22 @@ def allowed_permit(deps, **over):
     return out["permit"]
 
 
-def record(deps, permit, user_id=7, **over):
-    payload = dict(body(), permit=permit, units=1, ok=True, tool_name="web_search", duration_ms=10)
+def worker_sign(deps, payload, project_id=PROJECT):
+    """What the indexer's signer does; skipped when the payload would fail validation anyway."""
+    try:
+        message = permit_mod.record_signing_message(project_id, payload)
+    except (KeyError, TypeError, ValueError):
+        return payload
+    key = permit_mod.record_signing_key(deps.hmac_key())
+    return dict(payload, signature=hmac.new(key, message, hashlib.sha256).hexdigest())
+
+
+def record(deps, permit, user_id=7, sign=True, **over):
+    payload = dict(body(), permit=permit, units=1.0, ok=True, tool_name="web_search", duration_ms=10)
     payload.pop("configuration_project_id")
     payload.update(over)
+    if sign and isinstance(payload.get("permit"), str):
+        payload = worker_sign(deps, payload)
     return svc.ToolSpendService(deps).record(PROJECT, user_id, payload, attribution="hdr")
 
 
@@ -267,7 +281,7 @@ class TestRecordAndPermit:
         later = time.time() + permit_mod.PERMIT_TTL_SECONDS + 1
         with pytest.raises(svc.ToolSpendError) as info:
             svc.ToolSpendService(deps).record(
-                PROJECT, 7, dict(body(), permit=permit, units=1), now=later)
+                PROJECT, 7, dict(body(), permit=permit, units=1.0), now=later)
         assert info.value.status == 403
 
     @pytest.mark.parametrize("mismatch", [
@@ -283,7 +297,7 @@ class TestRecordAndPermit:
         permit = allowed_permit(deps)
         assert status_of(lambda: record(deps, permit, user_id=8)) == 403
         with pytest.raises(svc.ToolSpendError) as info:
-            svc.ToolSpendService(deps).record(OTHER, 7, dict(body(), permit=permit, units=1))
+            svc.ToolSpendService(deps).record(OTHER, 7, dict(body(), permit=permit, units=1.0))
         assert info.value.status == 403
 
     def test_units_up_to_the_cap_are_recorded_in_full(self):
@@ -333,6 +347,55 @@ class TestRecordAndPermit:
             permit_mod.permit_key("")
 
 
+# Twinned with elitea-sdk tests/tools/utils/test_6980_metering.py RECORD_VECTOR — both sides must agree
+RECORD_VECTOR_KEY = b"k" * 32
+RECORD_VECTOR_PAYLOAD = {"feature": "web_search", "backend": "tavily", "op": "search", "configuration_uuid": "u-1",
+                         "permit": "P1", "units": 2.0, "ok": True, "duration_ms": 15}
+RECORD_VECTOR_SIG = "43646bedcb2b154ed310f0a96213b099788909601e653e4e6879579f14fb0551"
+
+
+class TestWorkerSignature:
+    """Only a platform worker holds the key: a member with their own token cannot forge a record."""
+
+    def test_signing_message_matches_the_shared_vector(self):
+        message = permit_mod.record_signing_message(3, RECORD_VECTOR_PAYLOAD)
+        assert hmac.new(RECORD_VECTOR_KEY, message, hashlib.sha256).hexdigest() == RECORD_VECTOR_SIG
+
+    def test_key_is_the_attribution_key(self):
+        assert permit_mod.record_signing_key("base") == \
+            hmac.new(b"base", b"usage-attribution-v1", hashlib.sha256).digest()
+
+    def test_unsigned_record_is_403_and_nothing_recorded(self):
+        deps = Deps()
+        assert status_of(lambda: record(deps, allowed_permit(deps), sign=False)) == 403
+        assert deps.ledgered == []
+
+    def test_wrong_key_is_403(self):
+        deps = Deps()
+        payload = dict(body(), permit=allowed_permit(deps), units=1.0, ok=True, duration_ms=10)
+        payload.pop("configuration_project_id")
+        message = permit_mod.record_signing_message(PROJECT, payload)
+        payload["signature"] = hmac.new(b"member-guess", message, hashlib.sha256).hexdigest()
+        assert status_of(lambda: svc.ToolSpendService(deps).record(PROJECT, 7, payload)) == 403
+
+    @pytest.mark.parametrize("field,value", [("units", 2.0), ("ok", False), ("duration_ms", 11)])
+    def test_changing_a_signed_value_after_signing_is_403(self, field, value):
+        deps = Deps()
+        payload = dict(body(), permit=allowed_permit(deps), units=1.0, ok=True, duration_ms=10)
+        payload.pop("configuration_project_id")
+        payload = worker_sign(deps, payload)
+        payload[field] = value
+        assert status_of(lambda: svc.ToolSpendService(deps).record(PROJECT, 7, payload)) == 403
+        assert deps.ledgered == []
+
+    def test_signature_is_bound_to_the_project(self):
+        deps = Deps()
+        payload = dict(body(), permit=allowed_permit(deps), units=1.0, ok=True, duration_ms=10)
+        payload.pop("configuration_project_id")
+        payload = worker_sign(deps, payload, project_id=OTHER)
+        assert status_of(lambda: svc.ToolSpendService(deps).record(PROJECT, 7, payload)) == 403
+
+
 class TestSecondBackendByMetadataOnly:
     """AC10: a new backend needs only toolkit metadata (and config), no core code."""
 
@@ -344,7 +407,9 @@ class TestSecondBackendByMetadataOnly:
         payload = dict(body(uuid="55555555-0000-0000-0000-000000000005", op="query"), backend="fakeprov")
         out = svc.ToolSpendService(deps).check(PROJECT, 7, payload, now=NOW)
         assert out["allowed"]
-        svc.ToolSpendService(deps).record(PROJECT, 7, dict(payload, permit=out["permit"], units=1))
+        signed = worker_sign(deps, {k: v for k, v in dict(payload, permit=out["permit"], units=1.0, ok=True).items()
+                                    if k != "configuration_project_id"})
+        svc.ToolSpendService(deps).record(PROJECT, 7, signed)
         assert deps.priced == [("fakeprov", 1.0, "request")]
         assert status_of(lambda: svc.ToolSpendService(deps).check(
             PROJECT, 7, dict(payload, op="search"), now=NOW)) == 400

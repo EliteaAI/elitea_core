@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from ..models.pd.tool_spend import ToolSpendCheckBody, ToolSpendRecordBody
 from .tool_spend_features import backend_spec, feature_defaults
-from .tool_spend_permit import PermitError, issue_permit, permit_key, verify_permit
+from .tool_spend_permit import PermitError, issue_permit, permit_key, verify_permit, verify_record_signature
 
 NANO = 1_000_000_000
 MODE_OFF, MODE_OBSERVE, MODE_ENFORCE = "off", "observe", "enforce"
@@ -147,6 +147,7 @@ class ToolSpendService:
                 "pid": int(project_id), "uid": int(user_id), "feature": feature, "backend": backend,
                 "op": op, "cfg_uuid": str(body.get("configuration_uuid")),
             }, now=now)
+            verify_record_signature(self.deps.hmac_key(), project_id, body)
         except PermitError as exc:
             log.warning("tool spend: record rejected for project %s user %s: %s", project_id, user_id, exc)
             raise ToolSpendError(403, str(exc)) from exc

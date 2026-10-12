@@ -34,6 +34,8 @@ class ToolSpendRecordBody(BaseModel):
 
     # Optional here so a missing permit is the permit check's 403, not a 400
     permit: Optional[str] = Field(None, max_length=4096)
+    # HMAC-SHA256 hex from the indexer; optional here so a missing one is the signature check's 403
+    signature: Optional[str] = Field(None, max_length=128)
     feature: str = Name
     backend: str = Name
     op: str = Name
