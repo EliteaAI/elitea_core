@@ -156,6 +156,13 @@ def get_predict_base_url(project_id: int) -> str:
     return base_url
 
 
+def get_public_base_url() -> Optional[str]:
+    """User-facing host for links the runtime hands back; get_predict_base_url may be in-cluster only (#6985)."""
+    from tools import constants as c  # pylint: disable=E0401,C0415
+
+    return c.APP_HOST.rstrip('/') if c.APP_HOST else None
+
+
 def load_context_settings_from_conversation(project_id: int, conversation_id: str) -> Optional[dict]:
     """
     Load context_settings from conversation.meta.context_strategy.
@@ -299,6 +306,7 @@ def generate_predict_payload(
         "llm": {
             "kwargs": {
                 "base_url": base_url,
+                "public_url": get_public_base_url(),
                 "model": parsed.llm_settings.model_name,
                 "api_key": token,
                 "auth_session": auth_session,
@@ -563,6 +571,7 @@ def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, t
             }
         },
         "deployment_url": base_url,
+        "public_url": get_public_base_url(),
         "project_auth_token": token,
         "auth_session": auth_session,
         "session_cookie_name": get_session_cookie_name() if auth_session else None,
