@@ -188,6 +188,7 @@ def build_run_snapshot(
     is mandatory (D3, §21.6)."""
     if application_version_id is None:
         raise ValueError('application_version_id is required (D3, §21.6 version pin)')
+    from .evaluation_execution import PAUSE_POLICY_FAIL_CASE
 
     return {
         'suite': {
@@ -200,6 +201,8 @@ def build_run_snapshot(
             'consumption_budget': suite.get('consumption_budget'),
             # False drops tool outputs from the stored trajectories (Q-S5); absent/null keeps them.
             'store_tool_outputs': suite.get('store_tool_outputs') is not False,
+            # What an approval nobody can answer does to the case (§4.5, Q-S10); fixed in P1.
+            'pause_policy': PAUSE_POLICY_FAIL_CASE,
         },
         'application_id': application_id,
         'application_version_id': application_version_id,

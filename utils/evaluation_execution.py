@@ -32,6 +32,11 @@ TRAJECTORY_RECORDED = 'recorded'
 TRAJECTORY_NOT_RECORDED = 'not_recorded'
 TRAJECTORY_NOT_APPLICABLE = 'not_applicable'
 
+# What a batch run does with an approval nobody can answer (design §4.5, Q-S10). P1 has one policy:
+# the case fails. It is written on the case's pause and frozen into the run snapshot, so a later
+# opt-in (deny-and-continue, P3) cannot change how an older run is read.
+PAUSE_POLICY_FAIL_CASE = 'fail_case'
+
 # Field caps. A tool output can be a 50 KB essay (a sub-agent's whole reply), and a case may run
 # dozens of tools, so both the step and the whole trajectory are bounded. The trajectory cap
 # mirrors ``MAX_ENVELOPE_BYTES``.
@@ -400,7 +405,7 @@ def extract_execution(predict_result: Any, *, status: str, latency_ms: Optional[
         }
     pause = pause_details(predict_result)
     if pause is not None:
-        trajectory['pause'] = pause
+        trajectory['pause'] = {**pause, 'policy': PAUSE_POLICY_FAIL_CASE}
         _mark_paused_steps(trajectory)
     metrics = trajectory_metrics(trajectory, latency_ms=latency_ms, error=error,
                                  final_text=_final_assistant_text(predict_result))

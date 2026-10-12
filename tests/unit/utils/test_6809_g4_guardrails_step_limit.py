@@ -130,6 +130,13 @@ def test_paused_run_records_pause_and_counts_it(execution):
     assert out['metrics']['guardrail_events'] == 1
 
 
+def test_pause_records_the_fail_case_policy(execution):
+    """Q-S10: the case says what was done with the pause, so a later opt-in cannot reread it."""
+    pause = execution.extract_execution(_paused_envelope(), status='guardrail_paused')['trajectory']['pause']
+    assert pause['policy'] == execution.PAUSE_POLICY_FAIL_CASE == 'fail_case'
+    assert {k: v for k, v in pause.items() if k != 'policy'} == execution.pause_details(_paused_envelope())
+
+
 ASK_USER_TRACEBACK = ('Traceback (most recent call last):\n  ...\n'
                       "langgraph.errors.GraphInterrupt: (Interrupt(value={'type': 'hitl', "
                       "'guardrail_type': 'clarifying_question', 'tool_name': 'ask_user'}),)")
@@ -266,6 +273,12 @@ def test_snapshot_freezes_the_suite_limit(orchestration):
     assert orchestration.build_run_snapshot(
         suite={'id': 1, 'name': 's', 'steps_limit': 3}, **common)['suite']['steps_limit'] == 3
     assert orchestration.build_run_snapshot(suite={'id': 1, 'name': 's'}, **common)['suite']['steps_limit'] is None
+
+
+def test_snapshot_freezes_the_pause_policy(orchestration):
+    common = dict(dimensions=[], bindings=[], cases=[], application_id=1, application_version_id=2)
+    assert orchestration.build_run_snapshot(
+        suite={'id': 1, 'name': 's'}, **common)['suite']['pause_policy'] == 'fail_case'
 
 
 # --- redundant calls (design §5.2) -----------------------------------------------------------
