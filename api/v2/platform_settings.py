@@ -55,6 +55,31 @@ def _usage_mode_settings():
     ) is not False
 
 
+def _tool_spend_availability():
+    """Per-feature availability; project-level resolution needs ?project_id (TS2 adds the Default config)."""
+    from flask import request  # pylint: disable=C0415
+    from ...utils.tool_spend_features import feature_defaults, feature_map  # pylint: disable=C0415
+    #
+    try:
+        features = feature_map(this.module.toolkit_schemas)
+        project_id = request.args.get("project_id", type=int)
+        user = auth.current_user() or {}
+        result = {}
+        for feature in features:
+            if not feature_defaults(this.module.descriptor.config, feature).get("enabled", False):
+                result[feature] = {"available": False, "reason": "disabled_platform"}
+                continue
+            if project_id is not None:
+                limits = this.module.get_effective_feature_limits(project_id, user.get("id"), feature)
+                if not limits.get("feature_enabled"):
+                    result[feature] = {"available": False, "reason": "disabled_project"}
+                    continue
+            result[feature] = {"available": True, "reason": None}
+        return result
+    except Exception:  # pylint: disable=W0703
+        return {}
+
+
 class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, **kwargs):
@@ -94,6 +119,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "skill_catalog_new_item_days": _get_catalog_new_item_days(
                 'skill_publishing_guardrail'
             ),
+            "tool_spend": _tool_spend_availability(),
         }, 200
 
 

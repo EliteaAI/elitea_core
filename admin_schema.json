@@ -797,6 +797,110 @@
         "field": "cost_budgets_defaults_enabled",
         "value": true
       }
+    },
+    "tool_spend_web_search_enabled": {
+      "type": "boolean",
+      "title": "Web search: enabled",
+      "description": "Platform switch for web search on the shared credential. Own (BYO) credentials are never limited.",
+      "path": "cost_budgets.features.web_search.enabled",
+      "section": "tool_spend",
+      "feature": "web_search",
+      "default": false,
+      "requires_restart": false
+    },
+    "tool_spend_web_search_enabled_team": {
+      "type": "boolean",
+      "title": "Web search: on for team projects",
+      "description": "Default for team projects without an explicit setting.",
+      "path": "cost_budgets.features.web_search.enabled_team",
+      "section": "tool_spend",
+      "feature": "web_search",
+      "default": true,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "tool_spend_web_search_enabled",
+        "value": true
+      }
+    },
+    "tool_spend_web_search_enabled_personal": {
+      "type": "boolean",
+      "title": "Web search: on for personal projects",
+      "description": "Default for personal projects without an explicit setting.",
+      "path": "cost_budgets.features.web_search.enabled_personal",
+      "section": "tool_spend",
+      "feature": "web_search",
+      "default": true,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "tool_spend_web_search_enabled",
+        "value": true
+      }
+    },
+    "tool_spend_web_search_project_monthly_limit": {
+      "type": "number",
+      "title": "Web search: default team project limit (USD / month)",
+      "description": "Leave empty for unlimited.",
+      "path": "cost_budgets.features.web_search.project_monthly_limit",
+      "section": "tool_spend",
+      "feature": "web_search",
+      "default": null,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "tool_spend_web_search_enabled",
+        "value": true
+      },
+      "minimum": 0,
+      "value_schema": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "minimum": 0
+      }
+    },
+    "tool_spend_web_search_personal_project_monthly_limit": {
+      "type": "number",
+      "title": "Web search: default personal project limit (USD / month)",
+      "description": "Leave empty for unlimited.",
+      "path": "cost_budgets.features.web_search.personal_project_monthly_limit",
+      "section": "tool_spend",
+      "feature": "web_search",
+      "default": null,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "tool_spend_web_search_enabled",
+        "value": true
+      },
+      "minimum": 0,
+      "value_schema": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "minimum": 0
+      }
+    },
+    "tool_spend_web_search_user_monthly_limit": {
+      "type": "number",
+      "title": "Web search: default member limit (USD / month)",
+      "description": "Per member of a team project. Leave empty for unlimited.",
+      "path": "cost_budgets.features.web_search.user_monthly_limit",
+      "section": "tool_spend",
+      "feature": "web_search",
+      "default": null,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "tool_spend_web_search_enabled",
+        "value": true
+      },
+      "minimum": 0,
+      "value_schema": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "minimum": 0
+      }
     }
-  }
+}
 }

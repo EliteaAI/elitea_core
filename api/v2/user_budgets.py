@@ -7,6 +7,7 @@ from ...utils.constants import (
     PROMPT_LIB_MODE, SYSTEM_USER_EMAILS, SYSTEM_USER_EMAIL_PATTERN,
 )
 from .project_budgets import _limit_source
+from ...utils.tool_spend_features import validate_feature_period
 
 OPENAPI_TAG = "elitea_core/usage"
 
@@ -143,7 +144,7 @@ def _system_row(project_spend, rows, currency):
     }
 
 
-def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_order):
+def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_order, feature=None):
     """Per-member spend and budget for a project's current month.
 
     Members come from recorded spend where that is available, so someone who spent and then
@@ -160,7 +161,9 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
         int(user_id): roles for user_id, roles in user_roles.items() if user_id is not None
     }
     #
-    spend_data = _safe_rpc(rpc, "usage_list_member_spend", 30, None, project_id=project_id)
+    # A Tool Spend feature reads its own counters and tables; without one this is the LLM listing
+    spend_scope = {"model_name": feature} if feature else {}
+    spend_data = _safe_rpc(rpc, "usage_list_member_spend", 30, None, project_id=project_id, **spend_scope)
     degraded = spend_data is None
     #
     if degraded:
@@ -195,13 +198,20 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
     if system_ids:
         member_ids = [user_id for user_id in member_ids if user_id not in system_ids]
     #
-    stored = _safe_rpc(rpc, "elitea_core_list_user_budgets", 10, [], project_id=project_id) or []
+    if feature:
+        stored = _safe_rpc(
+            rpc, "elitea_core_list_user_feature_budgets", 10, [], project_id=project_id, feature=feature,
+        ) or []
+        project_budget = _safe_rpc(
+            rpc, "elitea_core_get_project_feature_budget", 5, {}, project_id=project_id, feature=feature,
+        ) or {}
+    else:
+        stored = _safe_rpc(rpc, "elitea_core_list_user_budgets", 10, [], project_id=project_id) or []
+        # The value every member with no limit of their own inherits, shown as its own source
+        project_budget = _safe_rpc(
+            rpc, "elitea_core_get_project_budget", 5, {}, project_id=project_id,
+        ) or {}
     by_user = {row["user_id"]: row for row in stored}
-    #
-    # The value every member with no limit of their own inherits, shown as its own source
-    project_budget = _safe_rpc(
-        rpc, "elitea_core_get_project_budget", 5, {}, project_id=project_id,
-    ) or {}
     member_default = project_budget.get("member_default_limit")
     currency = project_budget.get("currency") or "USD"
     #
@@ -210,7 +220,7 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
             int(user_id): {"spend": float(spend or 0)}
             for user_id, spend in (_safe_rpc(
                 rpc, "usage_get_users_spend", 30, {},
-                project_id=project_id, user_ids=member_ids,
+                project_id=project_id, user_ids=member_ids, **spend_scope,
             ) or {}).items()
         }
     #
@@ -243,10 +253,15 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
     page = rows[offset:offset + limit]
     #
     # Limits are resolved for the page alone: this is the one call that costs per member
+    page_ids = [row["user_id"] for row in page]
     limit_map = _safe_rpc(
+        rpc, "elitea_core_get_effective_feature_member_limits", 20, {},
+        project_id=project_id, user_ids=page_ids, feature=feature,
+    ) if feature else _safe_rpc(
         rpc, "elitea_core_get_effective_member_limits", 20, {},
-        project_id=project_id, user_ids=[row["user_id"] for row in page],
-    ) or {}
+        project_id=project_id, user_ids=page_ids,
+    )
+    limit_map = limit_map or {}
     #
     for row in page:
         user_id = row["user_id"]
@@ -276,6 +291,7 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
         "system_row": system_row,
         "spend_source": "membership" if degraded else "spend_records",
         "degraded": degraded,
+        **({"feature": feature} if feature else {}),
     }
 
 
@@ -287,8 +303,12 @@ def _listing_from_request(project_id: int):
     except (TypeError, ValueError):
         limit, offset = DEFAULT_LIMIT, 0
     #
+    feature = request.args.get("feature") or None
+    if feature:
+        validate_feature_period(feature, "month")
+    #
     return _member_budget_rows(
-        project_id,
+        project_id, feature=feature,
         limit=limit,
         offset=offset,
         search=request.args.get("search") or None,
@@ -362,7 +382,10 @@ class AdminAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int, **kwargs):
-        return _listing_from_request(project_id), 200
+        try:
+            return _listing_from_request(project_id), 200
+        except ValueError as error:
+            return {"error": str(error)}, 400
 
 
 class API(api_tools.APIBase):
