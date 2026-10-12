@@ -72,7 +72,9 @@ class ToolSpendService:
         if not cfg or cfg.get("type") != spec["configuration_type"]:
             raise ToolSpendError(400, "Configuration not found for this backend")
         owner = int(cfg["project_id"])
-        if owner == self.deps.public_project_id() and cfg.get("shared"):
+        # Public-project credentials are platform money whether or not they are shared; they reach
+        # a caller only through a shared toolkit, so the key itself is never readable here
+        if owner == self.deps.public_project_id():
             return cfg, False
         if owner == int(project_id) or owner == self.deps.personal_project_id(user_id):
             return cfg, True

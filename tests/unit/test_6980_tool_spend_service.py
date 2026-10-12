@@ -151,6 +151,35 @@ class TestCheck:
         out = check(deps, body(uuid=OWN_UUID, owner=PROJECT))
         assert out["allowed"] and out["exempt"] and out["permit"]
 
+    @pytest.mark.parametrize("shared", [False, True])
+    def test_public_project_credential_is_limited_whether_or_not_it_is_shared(self, shared):
+        # The platform key is offered through a shared toolkit and stays shared=False
+        deps = Deps()
+        deps.configs[SHARED_UUID]["shared"] = shared
+        out = check(deps)
+        assert out["allowed"] and out["exempt"] is False and out["permit"]
+
+    def test_unshared_public_credential_is_denied_when_over_the_limit(self):
+        deps = Deps(limits={"project_limit_usd": 1.0, "feature_enabled": True},
+                    spend={"available": True, "project_spent_nano": 10**9, "member_spent_nano": 0})
+        deps.configs[SHARED_UUID]["shared"] = False
+        assert check(deps)["code"] == svc.CODE_LIMIT
+
+    def test_unshared_public_credential_is_denied_when_the_switch_is_off(self):
+        deps = Deps(config={})
+        deps.configs[SHARED_UUID]["shared"] = False
+        assert check(deps)["code"] == svc.CODE_DISABLED
+
+    def test_public_rule_wins_for_a_caller_inside_the_public_project(self):
+        # Admins working in the public project must still be limited on the platform key
+        deps = Deps()
+        deps.configs[SHARED_UUID]["shared"] = False
+        out = svc.ToolSpendService(deps).check(PUBLIC, 7, body(), now=NOW)
+        assert out["allowed"] and out["exempt"] is False
+
+    def test_another_projects_unshared_credential_stays_forbidden(self):
+        assert status_of(lambda: check(Deps(), body(uuid=FOREIGN_UUID, owner=OTHER))) == 403
+
     def test_personal_project_credential_is_own(self):
         deps = Deps()
         deps.configs[OWN_UUID]["project_id"] = PERSONAL
