@@ -15,7 +15,7 @@ def _package(name):
 
 
 # Leaf modules first: relative imports resolve through sys.modules, not the filesystem
-DEPENDENCIES = ("utils/tool_spend_features.py", "utils/tool_spend_permit.py")
+DEPENDENCIES = ("models/pd/tool_spend.py", "utils/tool_spend_features.py", "utils/tool_spend_permit.py")
 
 
 def _ensure_pylon():
@@ -37,7 +37,8 @@ def load(relative):
     if relative not in DEPENDENCIES:
         for dependency in DEPENDENCIES:
             load(dependency)
-    for name in ("plugins", "plugins.elitea_core", "plugins.elitea_core.utils", "plugins.elitea_core.rpc"):
+    for name in ("plugins", "plugins.elitea_core", "plugins.elitea_core.utils", "plugins.elitea_core.rpc",
+                 "plugins.elitea_core.models", "plugins.elitea_core.models.pd"):
         _package(name)
     dotted = "plugins.elitea_core." + relative[:-3].replace("/", ".")
     if dotted in sys.modules:

@@ -9,7 +9,7 @@ import uuid
 
 PERMIT_TTL_SECONDS = 600
 PERMIT_CONTEXT = b"tool-spend-permit-v1"
-CLAIM_KEYS = ("pid", "uid", "feature", "backend", "op", "cfg_uuid", "exempt", "max_units", "unit",
+CLAIM_KEYS = ("pid", "uid", "feature", "backend", "op", "cfg_uuid", "exempt", "unit",
               "run_id", "nonce", "iat", "exp")
 
 

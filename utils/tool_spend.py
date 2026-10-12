@@ -4,6 +4,9 @@ import datetime
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
+from pydantic import ValidationError
+
+from ..models.pd.tool_spend import ToolSpendCheckBody, ToolSpendRecordBody
 from .tool_spend_features import backend_spec, feature_defaults
 from .tool_spend_permit import PermitError, issue_permit, permit_key, verify_permit
 
@@ -26,6 +29,14 @@ class ToolSpendError(Exception):
 def _next_period_start(now, period_kind="month"):
     first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return (first + datetime.timedelta(days=32)).replace(day=1)
+
+
+def _parse(model, body):
+    try:
+        return model.model_validate(body).model_dump()
+    except ValidationError as exc:
+        fields = sorted({".".join(str(part) for part in error["loc"]) for error in exc.errors()})
+        raise ToolSpendError(400, f"Invalid request fields: {', '.join(fields)}") from exc
 
 
 def _deny(code, message, **extra):
@@ -52,15 +63,12 @@ class ToolSpendService:
         spec = backend_spec(features, feature, backend)
         if spec is None:
             raise ToolSpendError(400, f"Unknown tool spend feature/backend: {feature}/{backend}")
-        if op not in spec["max_units_per_call"]:
+        if op not in spec["operations"]:
             raise ToolSpendError(400, f"Unknown operation {op!r} for {backend}")
         return features[feature], spec
 
     def _credential(self, project_id, user_id, spec, body):
-        uuid, owner = body.get("configuration_uuid"), body.get("configuration_project_id")
-        if not uuid or owner in (None, ""):
-            raise ToolSpendError(400, "configuration_uuid and configuration_project_id are required")
-        cfg = self.deps.configuration(int(owner), uuid)
+        cfg = self.deps.configuration(body["configuration_project_id"], body["configuration_uuid"])
         if not cfg or cfg.get("type") != spec["configuration_type"]:
             raise ToolSpendError(400, "Configuration not found for this backend")
         owner = int(cfg["project_id"])
@@ -74,14 +82,14 @@ class ToolSpendService:
         token, _claims = issue_permit(
             permit_key(self.deps.hmac_key()),
             pid=int(project_id), uid=int(user_id), feature=feature, backend=backend, op=op,
-            cfg_uuid=str(cfg["uuid"]), exempt=bool(exempt), max_units=spec["max_units_per_call"][op],
-            unit=spec["unit"], run_id=run_id,
+            cfg_uuid=str(cfg["uuid"]), exempt=bool(exempt), unit=spec["unit"], run_id=run_id,
         )
         return token
 
     def check(self, project_id, user_id, body, run_id=None, now=None):
         now = now or datetime.datetime.now(datetime.timezone.utc)
-        feature, backend, op = body.get("feature"), body.get("backend"), body.get("op")
+        body = _parse(ToolSpendCheckBody, body)
+        feature, backend, op = body["feature"], body["backend"], body["op"]
         info, spec = self._spec(feature, backend, op)
         cfg, own = self._credential(project_id, user_id, spec, body)
         label = info.get("label") or feature
@@ -131,7 +139,8 @@ class ToolSpendService:
         return allowed(False)
 
     def record(self, project_id, user_id, body, attribution=None, now=None):
-        feature, backend, op = body.get("feature"), body.get("backend"), body.get("op")
+        body = _parse(ToolSpendRecordBody, body)
+        feature, backend, op = body["feature"], body["backend"], body["op"]
         _info, spec = self._spec(feature, backend, op)
         try:
             claims = verify_permit(permit_key(self.deps.hmac_key()), body.get("permit"), {
@@ -141,29 +150,23 @@ class ToolSpendService:
         except PermitError as exc:
             log.warning("tool spend: record rejected for project %s user %s: %s", project_id, user_id, exc)
             raise ToolSpendError(403, str(exc)) from exc
-        try:
-            units = float(body.get("units") or 0)
-        except (TypeError, ValueError) as exc:
-            raise ToolSpendError(400, "units must be a number") from exc
-        if units < 0:
-            raise ToolSpendError(400, "units must not be negative")
-        if units > float(claims["max_units"]):
-            log.warning("tool spend: SECURITY units %s over permit max %s, project %s user %s",
-                        units, claims["max_units"], project_id, user_id)
-            raise ToolSpendError(422, "units exceed the permit's max_units")
-        #
+        units = body["units"]
         price = self.deps.price(backend, units, claims["unit"]) or {}
         record = {
             "ts": datetime.datetime.fromtimestamp(int(claims["iat"]), datetime.timezone.utc),
             "idempotency_key": f"tool_cost:{claims['nonce']}",
             "project_id": int(project_id), "user_id": int(user_id), "run_id": claims.get("run_id"),
             "feature": feature, "backend": backend, "op": op, "units": units, "unit": claims["unit"],
-            "tool_name": body.get("tool_name"), "ok": bool(body.get("ok", True)),
-            "duration_ms": body.get("duration_ms"), "budget_exempt": bool(claims["exempt"]),
+            "tool_name": body["tool_name"], "ok": body["ok"],
+            "duration_ms": body["duration_ms"], "budget_exempt": bool(claims["exempt"]),
             "cost_usd": price.get("cost"), "cost_source": price.get("cost_source"),
-            "meta": body.get("meta") or {},
+            "meta": {key: value for key, value in body["meta"].items() if value is not None},
         }
-        result = self.deps.ledger(record, attribution) or {}
+        try:
+            result = self.deps.ledger(record, attribution) or {}
+        except Exception as exc:  # pylint: disable=W0703
+            log.warning("tool spend: ledger rejected a record for project %s user %s: %s", project_id, user_id, exc)
+            raise ToolSpendError(422, "record rejected by the ledger") from exc
         return {"recorded": bool(result.get("recorded")), "duplicate": bool(result.get("duplicate")),
                 "cost_usd": price.get("cost")}
 

@@ -8,7 +8,7 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 RESERVED_FEATURES = frozenset({"llm"})
 PERIOD_KINDS = ("month",)
 DEFAULT_UNIT = "credit"
-REQUIRED_KEYS = ("feature", "backend", "configuration_type", "max_units_per_call")
+REQUIRED_KEYS = ("feature", "backend", "configuration_type", "operations")
 
 _lock = threading.Lock()
 _cache = {"source": None, "map": {}}
@@ -21,17 +21,15 @@ def _valid_entry(title, spend):
     if spend["feature"] in RESERVED_FEATURES:
         log.error("toolkit %s declares reserved tool_spend feature %s, ignored", title, spend["feature"])
         return False
-    caps = spend["max_units_per_call"]
-    if not isinstance(caps, dict) or not all(
-            isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
-            for value in caps.values()):
-        log.error("tool_spend max_units_per_call on toolkit %s is malformed, ignored", title)
+    operations = spend["operations"]
+    if not isinstance(operations, list) or not all(isinstance(op, str) and op for op in operations):
+        log.error("tool_spend operations on toolkit %s is malformed, ignored", title)
         return False
     return True
 
 
 def build_feature_map(schemas):
-    """{feature: {label, backends: {backend: {toolkit_type, configuration_type, unit, max_units_per_call, chat_tools}}}}"""
+    """{feature: {label, backends: {backend: {toolkit_type, configuration_type, unit, operations, chat_tools}}}}"""
     features = {}
     for title, schema in (schemas or {}).items():
         spend = ((schema or {}).get("metadata") or {}).get("tool_spend")
@@ -44,7 +42,7 @@ def build_feature_map(schemas):
             "toolkit_type": title,
             "configuration_type": spend["configuration_type"],
             "unit": spend.get("unit") or DEFAULT_UNIT,
-            "max_units_per_call": dict(spend["max_units_per_call"]),
+            "operations": list(spend["operations"]),
             "chat_tools": list(spend.get("chat_tools") or []),
         }
     return features

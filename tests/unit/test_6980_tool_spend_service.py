@@ -20,10 +20,10 @@ SHARED_UUID, OWN_UUID, FOREIGN_UUID = "11111111-0000-0000-0000-000000000001", \
 NOW = datetime.datetime(2026, 10, 9, 12, 0, tzinfo=datetime.timezone.utc)
 
 
-def schema(feature="web_search", backend="tavily", cfg_type="tavily", caps=None, **extra):
+def schema(feature="web_search", backend="tavily", cfg_type="tavily", ops=None, **extra):
     spend = {"feature": feature, "label": "Web search", "backend": backend, "configuration_type": cfg_type,
              "chat_tools": ["web_search", "web_extract"],
-             "max_units_per_call": caps or {"search": 2, "extract": 2, "crawl": 12, "map": 10}}
+             "operations": ops if ops is not None else ["search", "extract", "crawl", "map"]}
     spend.update(extra)
     return {"title": backend, "metadata": {"label": backend, "tool_spend": spend}}
 
@@ -102,12 +102,12 @@ class TestFeatureMap:
     def test_built_from_metadata(self):
         fmap = features_mod.build_feature_map({"tavily": schema(), "github": {"metadata": {"label": "x"}}})
         assert set(fmap) == {"web_search"}
-        assert fmap["web_search"]["backends"]["tavily"]["max_units_per_call"]["crawl"] == 12
+        assert fmap["web_search"]["backends"]["tavily"]["operations"] == ["search", "extract", "crawl", "map"]
         assert fmap["web_search"]["backends"]["tavily"]["unit"] == "credit"
 
     def test_llm_and_malformed_entries_are_dropped(self):
         fmap = features_mod.build_feature_map({
-            "a": schema(feature="llm"), "b": schema(backend="b", caps={"search": "x"}),
+            "a": schema(feature="llm"), "b": schema(backend="b", ops=[""]), "d": schema(backend="d", ops="search"),
             "c": {"metadata": {"tool_spend": {"feature": "x"}}},
         })
         assert fmap == {}
@@ -129,6 +129,9 @@ class TestCheck:
         (dict(body(), backend="brave"), 400),
         (body(uuid="44444444-0000-0000-0000-000000000004"), 400),
         (dict(body(), configuration_project_id=None), 400),
+        (dict(body(), configuration_project_id="abc"), 400),
+        (dict(body(), feature=["web_search"]), 400),
+        (dict(body(), op="x" * 65), 400),
         (body(uuid=FOREIGN_UUID, owner=OTHER), 403),
     ])
     def test_bad_requests(self, payload, status):
@@ -212,6 +215,7 @@ def allowed_permit(deps, **over):
 
 def record(deps, permit, user_id=7, **over):
     payload = dict(body(), permit=permit, units=1, ok=True, tool_name="web_search", duration_ms=10)
+    payload.pop("configuration_project_id")
     payload.update(over)
     return svc.ToolSpendService(deps).record(PROJECT, user_id, payload, attribution="hdr")
 
@@ -280,20 +284,39 @@ class TestRecordAndPermit:
             svc.ToolSpendService(deps).record(OTHER, 7, dict(body(), permit=permit, units=1))
         assert info.value.status == 403
 
-    def test_units_over_max_units_is_422_and_nothing_recorded(self):
+    def test_large_genuine_units_are_recorded(self):
+        # No per-call ceiling (Option C): a big legitimate spend lands in full
         deps = Deps()
-        assert status_of(lambda: record(deps, allowed_permit(deps), units=3)) == 422
-        assert deps.ledgered == []
+        record(deps, allowed_permit(deps, op="crawl"), op="crawl", units=150)
+        assert deps.ledgered[0][0]["units"] == 150
 
-    def test_max_units_is_the_metadata_ceiling_per_op(self):
+    @pytest.mark.parametrize("units", [-100, -0.0001, float("nan"), float("inf"), float("-inf"),
+                                       "NaN", "5", True, None, [1], {"a": 1}])
+    def test_units_can_never_lower_or_poison_spend(self, units):
         deps = Deps()
-        permit = allowed_permit(deps, op="crawl")
-        claims = permit_mod.verify_permit(permit_mod.permit_key(deps.hmac_key()), permit, {})
-        assert claims["max_units"] == 12 and claims["run_id"] == "run-1"
+        assert status_of(lambda: record(deps, allowed_permit(deps), units=units)) == 400
+        assert deps.ledgered == [] and deps.priced == []
 
-    def test_negative_units(self):
+    @pytest.mark.parametrize("field,value", [
+        ("ok", "yes"), ("ok", 1), ("duration_ms", -5), ("duration_ms", 2**40), ("tool_name", "x" * 300),
+        ("meta", {"depth": "x" * 10_000}), ("meta", {"results_count": -1}),
+    ])
+    def test_other_reported_fields_are_typed_and_bounded(self, field, value):
         deps = Deps()
-        assert status_of(lambda: record(deps, allowed_permit(deps), units=-1)) == 400
+        assert status_of(lambda: record(deps, allowed_permit(deps), **{field: value})) == 400
+
+    def test_meta_keeps_only_typed_scalars(self):
+        deps = Deps()
+        record(deps, allowed_permit(deps), meta={"credits_source": "reported", "results_count": 3,
+                                                 "query": "secret", "nested": {"big": "x" * 10_000}})
+        assert deps.ledgered[0][0]["meta"] == {"credits_source": "reported", "results_count": 3}
+
+    def test_ledger_rejection_is_a_controlled_422(self):
+        deps = Deps()
+        def boom(*_a):
+            raise ValueError("bad row")
+        deps.ledger = boom
+        assert status_of(lambda: record(deps, allowed_permit(deps))) == 422
 
     def test_permit_key_required(self):
         with pytest.raises(permit_mod.PermitError):
@@ -305,7 +328,7 @@ class TestSecondBackendByMetadataOnly:
 
     def test_fake_backend_gets_check_record_and_permit(self):
         deps = Deps(schemas={"tavily": schema(), "fakeprov": schema(
-            backend="fakeprov", cfg_type="fakeprov", caps={"query": 1}, unit="request")})
+            backend="fakeprov", cfg_type="fakeprov", ops=["query"], unit="request")})
         deps.configs["55555555-0000-0000-0000-000000000005"] = {
             "uuid": "55555555-0000-0000-0000-000000000005", "project_id": PUBLIC, "type": "fakeprov", "shared": True}
         payload = dict(body(uuid="55555555-0000-0000-0000-000000000005", op="query"), backend="fakeprov")
@@ -313,5 +336,5 @@ class TestSecondBackendByMetadataOnly:
         assert out["allowed"]
         svc.ToolSpendService(deps).record(PROJECT, 7, dict(payload, permit=out["permit"], units=1))
         assert deps.priced == [("fakeprov", 1.0, "request")]
-        assert status_of(lambda: svc.ToolSpendService(deps).record(
-            PROJECT, 7, dict(payload, permit=out["permit"], units=2))) == 422
+        assert status_of(lambda: svc.ToolSpendService(deps).check(
+            PROJECT, 7, dict(payload, op="search"), now=NOW)) == 400
