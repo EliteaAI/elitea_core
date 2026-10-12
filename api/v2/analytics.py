@@ -54,6 +54,8 @@ if _API_AVAILABLE:
             log.warning("usage_event health lookup failed for project %s", project_id, exc_info=True)
             return None
 
+    _ROOT_ENTITY_KEYS = ("root_entity_type", "root_entity_id", "root_entity_project_id")
+
     def _run_scope_args(args):
         """{run_id, eval_run_id} as given, or None when the request is not run-scoped.
 
@@ -68,6 +70,9 @@ if _API_AVAILABLE:
                 except ValueError as exc:
                     raise ValueError(f"{key} must be a UUID") from exc
         return scope or None
+
+    def _root_entity_args(args):
+        return {key: args.get(key) for key in _ROOT_ENTITY_KEYS if args.get(key)}
 
     def _usage_health_row(row):
         return {
@@ -87,10 +92,12 @@ if _API_AVAILABLE:
             dt_from, dt_to = _parse_dates(args)
         try:
             usage_rows = rpc_tools.RpcMixin().rpc.timeout(10).usage_event_type_health(
-                project_id, date_from=dt_from, date_to=dt_to, **run_scope,
+                project_id, date_from=dt_from, date_to=dt_to, **run_scope, **_root_entity_args(args),
             )
         except LookupError as exc:
             return {"error": str(exc)}, 404
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
         #
         health = [_usage_health_row(r) for r in usage_rows or []]
         total_events = sum(h["total"] for h in health)
@@ -189,6 +196,30 @@ if _API_AVAILABLE:
                     "required": False,
                     "schema": {"type": "string", "format": "uuid"},
                     "description": "Scope to one evaluation run by its uuid.",
+                },
+                {
+                    "name": "root_entity_type",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": (
+                        "With run_id and root_entity_id: count only that root entity's rows "
+                        "(one participant of a multi-participant conversation)."
+                    ),
+                },
+                {
+                    "name": "root_entity_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer"},
+                    "description": "Root entity id; required with root_entity_type.",
+                },
+                {
+                    "name": "root_entity_project_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer"},
+                    "description": "Project the root entity lives in (the public project for Catalog entities).",
                 },
             ],
             responses={
