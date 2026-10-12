@@ -39,7 +39,14 @@ def _applications(project_id: int, application_ids) -> dict:
     }
 
 
-def _skills(project_id: int, skill_ids) -> dict:
+def pick_default_version(skill_meta: dict, versions: list):
+    default_id = (skill_meta or {}).get("default_version_id")
+    return next((v for v in versions if v[0] == default_id), None) or next(
+        (v for v in versions if v[1] == "base"), None,
+    )
+
+
+def fetch_skills(project_id: int, skill_ids) -> dict:
     if not skill_ids:
         return {}
     with db.get_session(project_id) as session:
@@ -53,10 +60,7 @@ def _skills(project_id: int, skill_ids) -> dict:
     result = {}
     for skill_id, name, meta in skills:
         skill_versions = versions_by_skill.get(skill_id, [])
-        default_id = (meta or {}).get("default_version_id")
-        default = next((v for v in skill_versions if v[0] == default_id), None) or next(
-            (v for v in skill_versions if v[1] == "base"), None,
-        )
+        default = pick_default_version(meta, skill_versions)
         result[skill_id] = {
             "id": skill_id,
             "project_id": project_id,
@@ -67,13 +71,34 @@ def _skills(project_id: int, skill_ids) -> dict:
     return result
 
 
-def _conversation_ids(project_id: int, conversation_uuids) -> list:
-    wanted = set()
-    for value in conversation_uuids or []:
+def collect_skill_refs(skill_refs) -> set:
+    return {
+        (int(ref_project), int(skill_id))
+        for ref_project, skill_id in skill_refs or []
+        if ref_project is not None and skill_id is not None
+    }
+
+
+def fetch_scoped_skills(project_id: int, public_project_id: int, skill_refs: set) -> list:
+    scoped = []
+    for skill_project_id in sorted({p for p, _ in skill_refs} & {project_id, public_project_id}):
+        found = fetch_skills(skill_project_id, {i for p, i in skill_refs if p == skill_project_id})
+        scoped.extend({**meta, "is_public": skill_project_id == public_project_id} for meta in found.values())
+    return scoped
+
+
+def parse_uuids(values) -> set:
+    parsed = set()
+    for value in values or []:
         try:
-            wanted.add(uuid.UUID(str(value)))
+            parsed.add(uuid.UUID(str(value)))
         except (TypeError, ValueError):
             continue
+    return parsed
+
+
+def resolve_conversation_ids(project_id: int, conversation_uuids) -> list:
+    wanted = parse_uuids(conversation_uuids)
     if not wanted:
         return []
     with db.get_session(project_id) as session:
@@ -99,10 +124,6 @@ class RPC:
         project and the public project are read. application_ids carry no schema (legacy rows).
         Either way an id this project's schema lacks is retried in the public project's schema:
         a public agent run here predates the column, at the price of a same-id collision.
-
-        skill_refs are (schema project, skill id) pairs and come back under "scoped_skills" with
-        is_public; a skill missing from its schema is deleted. conversation_uuids resolve to this
-        project's conversation ids under "conversations".
         """
         application_ids = {int(i) for i in application_ids or [] if i is not None}
         version_ids = sorted({int(i) for i in version_ids or [] if i is not None})
@@ -111,28 +132,22 @@ class RPC:
             for ref_project, app_id in application_refs or []
             if ref_project is not None and app_id is not None
         }
-        wanted_skills = {
-            (int(ref_project), int(skill_id))
-            for ref_project, skill_id in skill_refs or []
-            if ref_project is not None and skill_id is not None
-        }
+        wanted_skills = collect_skill_refs(skill_refs)
+        wants_applications = bool(application_ids or version_ids or refs)
         result = {"applications": [], "versions": [], "scoped_applications": []}
         if skill_refs is not None:
             result["scoped_skills"] = []
         if conversation_uuids is not None:
             result["conversations"] = []
-        if not application_ids and not version_ids and not refs and not wanted_skills and not conversation_uuids:
+        if not wants_applications and not wanted_skills and not conversation_uuids:
             return result
         try:
             public_project_id = get_public_project_id()
-            for skill_project_id in sorted({p for p, _ in wanted_skills} & {project_id, public_project_id}):
-                found = _skills(skill_project_id, {i for p, i in wanted_skills if p == skill_project_id})
-                result["scoped_skills"].extend(
-                    {**meta, "is_public": skill_project_id == public_project_id} for meta in found.values()
-                )
+            if wanted_skills:
+                result["scoped_skills"] = fetch_scoped_skills(project_id, public_project_id, wanted_skills)
             if conversation_uuids:
-                result["conversations"] = _conversation_ids(project_id, conversation_uuids)
-            if not application_ids and not version_ids and not refs:
+                result["conversations"] = resolve_conversation_ids(project_id, conversation_uuids)
+            if not wants_applications:
                 return result
             #
             local_ids = application_ids | {i for p, i in refs if p == project_id}
