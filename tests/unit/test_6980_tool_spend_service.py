@@ -226,6 +226,17 @@ class TestCheck:
         assert check(deps)["code"] == svc.CODE_DISABLED
         assert "configuration" in deps.lookups
 
+    def test_off_mode_with_the_switch_off_still_denies_an_unshared_platform_key(self):
+        deps = Deps(mode="off", config={})
+        deps.configs[SHARED_UUID]["shared"] = False
+        assert check(deps)["code"] == svc.CODE_DISABLED
+
+    def test_off_mode_with_the_switch_on_allows_the_unshared_platform_key_without_lookups(self):
+        deps = Deps(mode="off")
+        deps.configs[SHARED_UUID]["shared"] = False
+        out = check(deps)
+        assert out["allowed"] and out["permit"] is None and deps.lookups == []
+
     def test_off_mode_with_the_switch_off_still_lets_an_own_key_through(self):
         out = check(Deps(mode="off", config={}), body(uuid=OWN_UUID, owner=PROJECT))
         assert out["allowed"] and out["exempt"] and out["permit"]
