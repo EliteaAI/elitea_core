@@ -13,7 +13,9 @@ import tempfile
 import time
 import uuid
 import zipfile
+from base64 import b64encode
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
@@ -36,7 +38,7 @@ from ..models.pd.conversation_import import (
     ImportTextItem,
 )
 from ..models.pd.participant import ParticipantCreate
-from .attachments import parse_filepath
+from .attachments import FileToAIProcessorCollector, NotSupportableProcessorExtension, parse_filepath
 from .chat_crypto import (
     CHAT_ENVELOPE,
     ENVELOPE_SUFFIX,
@@ -66,6 +68,8 @@ _EXPORT_SUFFIX_RE = re.compile(r'_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}(-\d{2})?$')
 _FILE_EXTENSIONS = ('.json', '.zip')
 _ZIP_MAGIC = b'PK\x03\x04'
 _CANVAS_TYPES = {t.value for t in CanvasTypes}
+_THUMBNAIL_MAX_PX = 512
+_THUMBNAIL_JPEG_QUALITY = 75
 
 MSG_NOT_ENCRYPTED = 'Invalid file: only encrypted chat files exported from ELITEA can be imported.'
 MSG_NO_KEY = 'Chat import is not available: encryption key is not configured.'
@@ -472,6 +476,25 @@ def _create_canvas(group, order_index: int, item: ImportCanvasItem):
     )
 
 
+def _create_thumbnail(data: bytes) -> str | None:
+    """JPEG data URL preview, same format the indexer produces for chat uploads."""
+    try:
+        from PIL import Image  # pylint: disable=C0415
+        with Image.open(BytesIO(data)) as img:
+            img.thumbnail((_THUMBNAIL_MAX_PX, _THUMBNAIL_MAX_PX), Image.LANCZOS)
+            if img.mode in ('RGBA', 'LA'):
+                rgb = Image.new('RGB', img.size, (255, 255, 255))
+                rgb.paste(img, mask=img.split()[-1])
+            else:
+                rgb = img.convert('RGB')
+            buf = BytesIO()
+            rgb.save(buf, format='JPEG', quality=_THUMBNAIL_JPEG_QUALITY, optimize=True)
+        return f"data:image/jpeg;base64,{b64encode(buf.getvalue()).decode('ascii')}"
+    except Exception as exc:  # pylint: disable=W0703
+        log.warning("Chat import: failed to create thumbnail: %s", exc)
+        return None
+
+
 class _AttachmentUploader:
     """Uploads selected archive members once per export_path into the new conversation folder."""
 
@@ -484,6 +507,7 @@ class _AttachmentUploader:
         self.bucket = get_default_attachment_bucket(project_id)
         self.members = {info.filename: info for info in zf.infolist()} if zf is not None else {}
         self.uploaded: dict[str, tuple[str, str]] = {}
+        self.thumbnails: dict[str, str] = {}
         self.failed: dict[str, str] = {}
         self.names: list[str] = []
 
@@ -516,6 +540,10 @@ class _AttachmentUploader:
             )
             self.names.append(file_name)
             self.uploaded[path] = parse_filepath(result['filepath'])
+            if is_image_name(item.name):
+                thumbnail = _create_thumbnail(data)
+                if thumbnail:
+                    self.thumbnails[path] = thumbnail
             return self.uploaded[path]
         except Exception as exc:  # pylint: disable=W0703
             log.warning("Chat import: failed to upload %s: %s", path, exc)
@@ -541,13 +569,26 @@ def _create_attachment(group, order_index: int, item: ImportAttachmentItem, uplo
             meta={'import_placeholder': True, 'original_name': item.name},
         )
     bucket, name = stored
+    attachment_type = item.attachment_type or ('image' if is_image_name(item.name) else 'document')
+    content = []
+    try:
+        processed = FileToAIProcessorCollector().process_file(
+            filename=name,
+            bucket_name=bucket,
+            filepath=f'/{bucket}/{name}',
+            image_url=uploader.thumbnails.get(item.export_path),
+        )
+        if 'error' not in processed:
+            attachment_type, content = processed['type'], processed['content']
+    except NotSupportableProcessorExtension:
+        log.warning("Chat import: no processor for %s, storing attachment without content", name)
     return AttachmentMessageItem(
         message_group=group,
         item_type=AttachmentMessageItem.__mapper_args__['polymorphic_identity'],
         name=name,
         bucket=bucket,
-        attachment_type=item.attachment_type or ('image' if is_image_name(item.name) else 'document'),
-        content=[],
+        attachment_type=attachment_type,
+        content=content,
         order_index=order_index,
         meta={},
     )
