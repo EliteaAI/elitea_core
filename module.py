@@ -501,6 +501,7 @@ class Module(module.ModuleModel):
 
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
+        self._ensure_message_group_author_index()
 
         self.handle_pylon_modules_initialized()
 
@@ -558,6 +559,22 @@ class Module(module.ModuleModel):
             )
         except Exception as e:
             log.warning('Failed to register provider RPC method: %s', e)
+
+    def _ensure_message_group_author_index(self):
+        def _run():
+            try:
+                from .utils.message_group_index_schema import apply_author_index
+                migrated, failed = apply_author_index()
+                if not migrated and not failed:
+                    return
+                log.info(
+                    "message group author index: built (migrated=%s failed=%s)",
+                    len(migrated), len(failed),
+                )
+            except Exception:  # pylint: disable=W0703
+                log.exception("message group author index: build failed")
+
+        Thread(target=_run, daemon=True).start()
 
     def _ensure_share_token_schema(self):
         """Startup safety net: create share-token tables in any project schema (and

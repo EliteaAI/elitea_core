@@ -8,6 +8,7 @@ config = config
 CONVERSATION_TABLE_NAME = 'chat_conversations'
 PARTICIPANT_TABLE_NAME = 'chat_participants'
 CONVERSATION_MESSAGE_GROUP_TABLE_NAME = 'chat_message_group'
+MESSAGE_GROUP_AUTHOR_INDEX_NAME = 'ix_chat_message_group_author_conversation_created'
 CONVERSATION_MESSAGE_ITEM_TABLE_NAME = 'chat_message_item'
 MESSAGE_ITEMS_TABLE_NAME = 'chat_message_items'
 MESSAGE_TRACE_STEP_TABLE_NAME = 'chat_message_trace_step'

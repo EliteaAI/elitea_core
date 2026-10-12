@@ -120,9 +120,16 @@ def _duration_expression(span):
     )
 
 
+def replies_authored_by(reply_author_ids) -> list:
+    if reply_author_ids is None:
+        return []
+    return [ConversationMessageGroup.author_participant_id.in_(reply_author_ids)]
+
+
 def calculate_conversation_durations_batch(
     conversation_ids: list[int],
     session: Session,
+    reply_author_ids=None,
 ) -> dict[int, float]:
     """Return {conversation_id: duration_seconds} in a single GROUP BY query.
 
@@ -142,6 +149,7 @@ def calculate_conversation_durations_batch(
         .filter(
             ConversationMessageGroup.conversation_id.in_(conversation_ids),
             ConversationMessageGroup.reply_to_id.isnot(None),
+            *replies_authored_by(reply_author_ids),
         )
         .group_by(ConversationMessageGroup.conversation_id)
         .all()

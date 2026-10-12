@@ -8,6 +8,7 @@ from ..models.conversation import Conversation
 from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
 from ..models.pd.conversation import ConversationListExtended, ConversationDetails
+from ..models.pd.skill_run_history import SkillRunFilters
 from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
@@ -18,7 +19,9 @@ from ..utils.conversation_utils import (
     resolve_persona_instructions,
     reresolve_persona_instructions
 )
+from ..utils.conversation_access import visible_conversation_ids
 from ..utils.participant_utils import add_participant_to_conversation
+from ..utils.skill_run_history import list_skill_runs
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import set_context_strategy
 from ..utils.exceptions import PoolSaturationError
@@ -386,6 +389,7 @@ class RPC:
         participant_id: int = None,
         entity_name: str = None,
         entity_project_id: int = None,
+        run_filters: dict = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -398,35 +402,28 @@ class RPC:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
             entity_project_id: Optional owner project of a skill single_participant
         """
+        if participant_id is not None and entity_name == ParticipantTypes.skill.value:
+            return list_skill_runs(
+                project_id=project_id,
+                user_id=user_id,
+                is_admin=is_admin,
+                skill_id=participant_id,
+                skill_project_id=entity_project_id,
+                filters=SkillRunFilters.model_validate(run_filters or {}),
+                text_query=query,
+                source=source,
+                include_hidden=include_hidden,
+                limit=limit,
+                offset=offset,
+                sort_order=sort_order,
+            )
+
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
             sorting = desc if sort_order == 'desc' else asc
 
-            participant_subquery_filters = [Participant.entity_name == ParticipantTypes.user.value]
-            if not is_admin:
-                participant_subquery_filters.append(
-                    Participant.entity_meta['id'].astext.cast(Integer) == user_id,
-                )
-
-            participant_subquery = session.query(Participant.id).filter(
-                *participant_subquery_filters
-            ).subquery()
-
-            distinct_conversation_subquery = session.query(Conversation.id).distinct().join(
-                ParticipantMapping,
-                Conversation.id == ParticipantMapping.conversation_id
-            ).join(
-                Participant,
-                Participant.id == ParticipantMapping.participant_id
-            ).filter(
-                or_(
-                    Conversation.is_private == False,
-                    Participant.id.in_(participant_subquery)
-                )
-            ).subquery()
-
             base_query = session.query(Conversation).where(
-                Conversation.id.in_(distinct_conversation_subquery)
+                Conversation.id.in_(visible_conversation_ids(session, user_id, is_admin))
             )
 
             if query:
@@ -452,11 +449,6 @@ class RPC:
                 if entity_name:
                     filters.append(
                         Conversation.meta['single_participant']['entity_name'].astext == entity_name,
-                    )
-                if entity_name == ParticipantTypes.skill.value and entity_project_id is not None:
-                    filters.append(
-                        Conversation.meta['single_participant']['entity_meta']['project_id'].astext.cast(Integer)
-                        == entity_project_id,
                     )
                 base_query = base_query.filter(*filters)
 
