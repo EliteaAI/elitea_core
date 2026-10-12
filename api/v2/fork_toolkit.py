@@ -24,6 +24,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         }})
     @api_tools.endpoint_metrics
     def post(self, project_id: int, **kwargs) -> Tuple[dict, int]:
+        denied, status_code = ProjectPermissionChecker(project_id).check_permissions(
+            ["models.applications.export_import.import"]
+        )
+        if status_code != 200:
+            return denied, status_code
+
         fork_data = request.json
         author_id = auth.current_user().get("id")
         results, errors = {'toolkits': []}, {'toolkits': []}
