@@ -59,9 +59,10 @@ class FakeVersion:
 
 
 class FakeSkill:
-    def __init__(self, id, name, versions, default_version_id=None):
+    def __init__(self, id, name, versions, default_version_id=None, description=None):
         self.id = id
         self.name = name
+        self.description = description
         self.versions = versions
         self.default_version_id = default_version_id
 

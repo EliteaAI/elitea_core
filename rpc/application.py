@@ -183,6 +183,8 @@ class RPC:
                     usage_entity: Optional[dict] = None,
                     routing_projection: Optional[dict] = None,
                     trigger_source: Optional[str] = None,
+                    chat_skills: Optional[list] = None,
+                    invoked_skills: Optional[list] = None,
                     applied_skills: Optional[list] = None,
                     sid_project_id: Optional[int] = None,
                     ) -> dict:
@@ -319,7 +321,7 @@ class RPC:
             user_id = resolve_request_user_id()
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval, chat_skills=chat_skills, invoked_skills=invoked_skills)
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
             if isinstance(payload.get('application'), dict) and application_project_id:
@@ -485,6 +487,8 @@ class RPC:
                         non_interactive: Optional[bool] = None,
                         eligible_for_autoapproval: bool = False,
                         routing_projection: Optional[dict] = None,
+                        chat_skills: Optional[list] = None,
+                        invoked_skills: Optional[list] = None,
                         ) -> dict:
         """
         LLM predict with dual behavior based on parameters
@@ -585,7 +589,7 @@ class RPC:
             user_id = resolve_request_user_id()
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history)
+            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, chat_skills=chat_skills, invoked_skills=invoked_skills)
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
         except PredictPayloadError as e:

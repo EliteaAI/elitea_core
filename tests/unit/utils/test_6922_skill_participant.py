@@ -62,9 +62,10 @@ class FakeVersion:
 
 
 class FakeSkill:
-    def __init__(self, id, name, versions):
+    def __init__(self, id, name, versions, description=None):
         self.id = id
         self.name = name
+        self.description = description
         self.versions = versions
 
     def get_default_version(self):
@@ -125,7 +126,9 @@ def env(isolated_sys_modules):
         _package(name)
 
     pylon_tools = types.ModuleType('pylon.core.tools')
-    pylon_tools.log = types.SimpleNamespace(exception=lambda *a, **k: None, warning=lambda *a, **k: None)
+    pylon_tools.log = types.SimpleNamespace(
+        exception=lambda *a, **k: None, warning=lambda *a, **k: None, debug=lambda *a, **k: None,
+    )
     _package('pylon').core = _package('pylon.core')
     sys.modules['pylon.core'].tools = pylon_tools
     sys.modules['pylon.core.tools'] = pylon_tools

@@ -11,7 +11,7 @@ from tools import auth, rpc_tools, VaultClient, serialize, context
 
 from .llm_settings import normalize_runtime_max_tokens
 from .next_input_suggestion_utils import next_input_suggestion_config
-from .skill_mentions import merge_mention_candidates
+from .skill_mentions import merge_disclosable_skills, merge_mention_candidates
 from .skill_utils import consume_message_skills, resolve_runtime_skills
 from .subagent_prefetch import attach_subagent_prefetch
 from ..models.elitea_tools import EliteATool
@@ -206,6 +206,8 @@ def generate_predict_payload(
     eligible_for_autoapproval: bool = False,
     return_chat_history: bool = False,
     skip_expansion: bool = False,
+    chat_skills: Optional[list] = None,
+    invoked_skills: Optional[list] = None,
 ) -> dict:
     """
     :param parsed: payload
@@ -360,7 +362,7 @@ def generate_predict_payload(
         'context_settings': parsed.context_settings.dict() if parsed.context_settings else {},
         'supports_vision': supports_vision,
         'return_chat_history': return_chat_history,
-        'invoked_skills': getattr(parsed, 'invoked_skills', None) or [],
+        'invoked_skills': invoked_skills or [],
         # Non-interactive predicts (scheduled/webhook/blocking REST) pass sid=None,
         # so bool(sid) alone gates this off for them without a separate flag.
         'next_input_suggestion': {
@@ -369,6 +371,9 @@ def generate_predict_payload(
             'sid': sid,
         },
     }
+
+    if chat_skills and not isinstance(parsed, ApplicationChatRequest):
+        payload['attached_skills'] = merge_disclosable_skills([], chat_skills)
 
     # Only the raw LLM chat shape stops here; every agent-backed shape reaches
     # the branch below, which recomputes this.
@@ -417,11 +422,13 @@ def generate_predict_payload(
         }
 
         attached_skills = version_details.get('skills') or []
+        chat_skills = chat_skills or []
         is_pipeline = version_details.get('agent_type') == AgentTypes.pipeline.value
 
-        disclosable_skills = resolve_runtime_skills(version_details)
+        own_disclosable_skills = resolve_runtime_skills(version_details)
+        disclosable_skills = merge_disclosable_skills(own_disclosable_skills, chat_skills)
 
-        mention_candidates = merge_mention_candidates(attached_skills, version_details.get('mention_skills') or [])
+        mention_candidates = merge_mention_candidates(attached_skills, chat_skills)
         payload['user_input'], message_skills = consume_message_skills(payload.get('user_input'), mention_candidates)
         payload['invoked_skills'] = message_skills
 
@@ -438,10 +445,10 @@ def generate_predict_payload(
         ]
 
         # Pipelines are excluded so deterministic nodes gain no autonomous tool.
-        if attached_skills and not is_pipeline:
+        if (attached_skills or chat_skills) and not is_pipeline:
             if disclosable_skills:
                 payload['attached_skills'] = disclosable_skills
-            dropped = len(attached_skills) - len(disclosable_skills)
+            dropped = len(attached_skills) - len(own_disclosable_skills)
             if dropped:
                 log.debug(
                     '[Skills] Progressive disclosure dropped %d of %d attached skills '

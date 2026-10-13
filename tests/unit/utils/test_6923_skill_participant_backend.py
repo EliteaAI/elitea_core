@@ -169,7 +169,9 @@ class ParticipantRowsSession:
 
     def query(self, *models):
         return types.SimpleNamespace(
-            join=lambda *a: types.SimpleNamespace(filter=lambda *b: types.SimpleNamespace(all=lambda: self.rows)),
+            join=lambda *a: types.SimpleNamespace(filter=lambda *b: types.SimpleNamespace(
+                order_by=lambda *c: types.SimpleNamespace(all=lambda: self.rows),
+            )),
         )
 
 
@@ -599,14 +601,15 @@ class TestSkillParticipantMentionsInPredict:
         build.__globals__['consume_message_skills'] = (
             lambda content, candidates: consumed.append(candidates) or ('ask Tester', [CANDIDATE])
         )
+        build.__globals__['merge_disclosable_skills'] = lambda own, chat: [*own, *chat]
+        build.__globals__['log'] = types.SimpleNamespace(debug=lambda *a, **k: None)
         request = _predict_harness.parsed(llm, agent=True, auto=False)
         request.user_input = 'ask ~Tester'
-        request.version_details['mention_skills'] = [CANDIDATE]
-        result = build(request, 2, skip_expansion=True)
+        result = build(request, 2, skip_expansion=True, chat_skills=[CANDIDATE])
         assert consumed == [[CANDIDATE]]
         assert result['user_input'] == 'ask Tester'
         assert result['invoked_skills'] == [CANDIDATE]
-        assert 'attached_skills' not in result
+        assert result['attached_skills'] == [CANDIDATE]
 
     def test_attached_agent_skills_come_before_mention_candidates(self, builder):
         build, llm, rpc = builder
@@ -615,6 +618,6 @@ class TestSkillParticipantMentionsInPredict:
         build.__globals__['log'] = types.SimpleNamespace(debug=lambda *a, **k: None)
         request = _predict_harness.parsed(llm, agent=True, auto=False)
         attached = [{**CANDIDATE, 'name': 'Attached'}]
-        request.version_details.update(skills=attached, mention_skills=[CANDIDATE])
-        build(request, 2, skip_expansion=True)
+        request.version_details.update(skills=attached)
+        build(request, 2, skip_expansion=True, chat_skills=[CANDIDATE])
         assert consumed == [[*attached, CANDIDATE]]

@@ -2,11 +2,13 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
+from pylon.core.tools import log
 from sqlalchemy import desc
 from sqlalchemy.orm import selectinload
 from tools import db
 
-from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTarget, build_skill_run, load_skill_run_target, \
+from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTarget, build_skill_run, \
+    build_skill_run_target, load_skill_run_target, \
     resolve_skill_llm_settings, select_skill_version
 from .skill_llm_override import select_llm_override
 from .skill_mentions import resolves_mentions_in_predict
@@ -20,6 +22,8 @@ from ..models.skill import Skill
 
 
 SKILL_DISPATCH_KEY = '_skill_dispatch'
+CHAT_SKILLS_KEY = '_chat_skills'
+INVOKED_SKILLS_KEY = '_invoked_skills'
 FOREIGN_SKILL_ERROR = 'A skill participant must come from this project or the public catalog'
 SKILL_NOT_FOUND_ERROR = 'Skill not found'
 
@@ -231,11 +235,13 @@ def describe_skill_participants(participants: list, chat_project_id: int) -> dic
     return details
 
 
-def mention_candidate(target: SkillRunTarget) -> dict:
+def mention_candidate(target: SkillRunTarget, skill_project_id: int) -> dict:
     return {
         'skill_id': target.skill_id,
         'skill_version_id': target.version_id,
+        'skill_project_id': skill_project_id,
         'name': target.skill_name,
+        'description': target.description,
         'version_name': target.version_name,
         'icon_meta': target.icon_meta,
         'instructions': target.instructions,
@@ -259,18 +265,40 @@ def participant_skill_mention_candidates(session, msg_group, chat_project_id: in
     ).filter(
         ParticipantMapping.conversation_id == msg_group.conversation_id,
         Participant.entity_name == ParticipantTypes.skill.value,
-    ).all()
-    candidates = []
+    ).order_by(Participant.id).all()
+    pins_by_owner = defaultdict(dict)
     for participant, entity_settings in rows:
         if participant.id == msg_group.sent_to_id:
             continue
         try:
-            _, target = load_skill_participant_target(
-                participant.entity_meta, chat_project_id, (entity_settings or {}).get('version_id'),
-            )
-        except SkillParticipantError:
+            source = resolve_skill_participant(participant.entity_meta, chat_project_id)
+        except SkillParticipantError as e:
+            log.debug('[Skills] Chat skill participant %s skipped: %s', participant.id, e)
             continue
-        candidates.append(mention_candidate(target))
+        owner = (source.project_id, source.published_only)
+        pins_by_owner[owner][participant.id] = (source.skill_id, (entity_settings or {}).get('version_id'))
+    candidates = {}
+    for (owner_id, published_only), pins in pins_by_owner.items():
+        candidates.update(owner_skill_candidates(owner_id, published_only, pins))
+    return [candidates[participant.id] for participant, _ in rows if participant.id in candidates]
+
+
+def owner_skill_candidates(owner_id: int, published_only: bool, pins: dict) -> dict:
+    skill_ids = {skill_id for skill_id, _ in pins.values()}
+    candidates = {}
+    with db.with_project_schema_session(owner_id) as session:
+        skills = {
+            skill.id: skill for skill in session.query(Skill).options(
+                selectinload(Skill.versions)
+            ).filter(Skill.id.in_(skill_ids)).all()
+        }
+        for participant_id, (skill_id, version_id) in pins.items():
+            try:
+                target = build_skill_run_target(skills.get(skill_id), version_id, published_only)
+            except SkillRunError as e:
+                log.debug('[Skills] Chat skill participant %s skipped: %s', participant_id, e.message)
+                continue
+            candidates[participant_id] = mention_candidate(target, owner_id)
     return candidates
 
 
@@ -279,10 +307,16 @@ def apply_participant_skill_mentions(session, msg_group, result: dict, chat_proj
     is_dummy = participant.entity_name == ParticipantTypes.dummy
     if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, result.get('version_details'))):
         return
-    if not has_skill_mention(result.get('user_input')):
-        return
     candidates = participant_skill_mention_candidates(session, msg_group, chat_project_id)
-    if is_dummy:
-        result['user_input'], result['invoked_skills'] = consume_message_skills(result['user_input'], candidates)
+    if not candidates:
         return
-    result['version_details']['mention_skills'] = candidates
+    result[CHAT_SKILLS_KEY] = candidates
+    if is_dummy and has_skill_mention(result.get('user_input')):
+        result['user_input'], result[INVOKED_SKILLS_KEY] = consume_message_skills(result['user_input'], candidates)
+
+
+def pop_chat_skills(payload: dict) -> dict:
+    return {
+        'chat_skills': payload.pop(CHAT_SKILLS_KEY, None),
+        'invoked_skills': payload.pop(INVOKED_SKILLS_KEY, None),
+    }

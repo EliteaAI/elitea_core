@@ -7,7 +7,7 @@ import ast
 import copy
 from pathlib import Path
 from types import SimpleNamespace as NS
-from typing import Union
+from typing import Optional, Union
 from unittest.mock import Mock
 import pytest
 from pydantic import BaseModel
@@ -36,7 +36,7 @@ def builder(models_path):
     rpc = Mock()
     rpc.configurations_get_auto_routing_settings.return_value = {'enabled': True}
     rpc.configurations_get_configuration_model.return_value = {'supports_reasoning': True, 'max_output_tokens': 16000}
-    namespace = {'Union': Union, 'LLMChatRequest': Chat, 'ApplicationChatRequest': Agent,
+    namespace = {'Union': Union, 'Optional': Optional, 'LLMChatRequest': Chat, 'ApplicationChatRequest': Agent,
         'validate_model_selection_surface': llm.validate_model_selection_surface,
         '_normalize_llm_settings_family': llm._normalize_llm_settings_family,
         'PredictPayloadError': ValueError, 'VaultClient': lambda project: NS(get_all_secrets=lambda: {}),
@@ -50,6 +50,7 @@ def builder(models_path):
         'AgentTypes': NS(pipeline=NS(value='pipeline')), 'resolve_application_name': lambda p: 'fixture',
         'resolve_runtime_skills': lambda version: [], 'consume_message_skills': lambda text, skills: (text, []),
         'merge_mention_candidates': lambda attached, chat: [*attached, *chat],
+        'merge_disclosable_skills': lambda own, chat: [*own, *chat],
     }
     exec(compile(ast.Module([function], []), str(path), 'exec'), namespace)
     return namespace['generate_predict_payload'], llm, rpc
