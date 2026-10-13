@@ -73,6 +73,38 @@ def _validate_daily_floor(cron_expr: str) -> str:
     return cron_expr
 
 
+MISSING_INDEX_GRACE = timedelta(hours=24)
+_TICK_JITTER_SLACK = timedelta(minutes=5)
+
+MISSING_SINCE_KEY = 'missing_since'
+
+
+class MissingIndexVerdict:
+    START_GRACE = 'start_grace'
+    WAIT = 'wait'
+    PRUNE = 'prune'
+
+
+def missing_index_verdict(index_entry: dict, now: datetime) -> str:
+    """Schedules go only after the index row stays missing for the whole grace, so a briefly mis-pointed pgvector config costs nothing."""
+    started = _parse_missing_since(index_entry.get(MISSING_SINCE_KEY))
+    if started is None or started > now:
+        return MissingIndexVerdict.START_GRACE
+    if now - started < MISSING_INDEX_GRACE - _TICK_JITTER_SLACK:
+        return MissingIndexVerdict.WAIT
+    return MissingIndexVerdict.PRUNE
+
+
+def _parse_missing_since(value) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        started = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return started if started.tzinfo else started.replace(tzinfo=timezone.utc)
+
+
 def compute_schedule_expiration(cron_expr: str, from_dt: datetime) -> datetime:
     """When a schedule saved at ``from_dt`` stops running unless somebody renews it.
 
