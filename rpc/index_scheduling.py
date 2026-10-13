@@ -10,7 +10,7 @@ from ..models.elitea_tools import EliteATool
 from ..models.indexer import EmbeddingStore
 from ..models.enums import InitiatorType
 from ..models.enums.indexer import IndexingSchedule
-from ..models.pd.index import ToolkitIndexingSchedule
+from ..models.pd.index import MISSING_SINCE_KEY, ToolkitIndexingSchedule
 from ..utils.application_tools import (DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC, get_pending_index_run_heartbeat,
                                       get_session_for_schema, resolve_index_staleness,
                                       should_trigger_scheduled_index, start_index_task,
@@ -24,6 +24,8 @@ from ..utils.index_scheduling import (
     index_log_context,
     stamp_schedule_last_run,
     stamp_schedule_retry_since,
+    handle_missing_index_row,
+    clear_index_missing_since,
     clear_schedule_retry_since,
     retry_escalation_due,
     describe_grace,
@@ -65,7 +67,7 @@ class RPC:
         # 'last_project' well below the highest project id is the starvation signal.
         stats = {
             'projects': 0, 'toolkits': 0, 'due': 0, 'expired': 0,
-            'dispatched': 0, 'failed': 0, 'last_project': None,
+            'dispatched': 0, 'failed': 0, 'pruned': 0, 'last_project': None,
         }
         try:
             yield_to_hub = make_yield_to_hub(self.context.web_runtime)
@@ -294,6 +296,9 @@ class RPC:
                                     continue
 
                                 log.debug(f"{ctx} checking index_meta")
+                                entry_before_lookup = deepcopy(
+                                    toolkit.meta.get('indexes_meta', {}).get(index_meta_id)
+                                )
 
                                 try:
                                     with get_session_for_schema(connection_string, str(toolkit.id)) as session:
@@ -306,16 +311,23 @@ class RPC:
                                         ).first()
 
                                         if not index:
-                                            log.warning(f"{ctx} index not found in database")
-                                            # A manual run would create this row, but re-running
-                                            # the vault read and this query every 60s to notice
-                                            # that is not worth it.
+                                            if handle_missing_index_row(
+                                                project_session, toolkit, index_meta_id,
+                                                entry_before_lookup, ctx,
+                                            ):
+                                                stats['pruned'] += 1
+                                                break
                                             stamp_schedule_last_run(
                                                 project_session, toolkit, index_meta_id,
                                                 user_id, ctx,
                                             )
                                             stats['failed'] += 1
                                             continue
+
+                                        if MISSING_SINCE_KEY in (entry_before_lookup or {}):
+                                            clear_index_missing_since(
+                                                project_session, toolkit, index_meta_id, ctx,
+                                            )
 
                                         running_state = index.cmetadata.get('state')
 
@@ -431,6 +443,6 @@ class RPC:
                 f"projects={stats['projects']}/{stats.get('total_projects', '?')} "
                 f"last_project={stats['last_project']} toolkits={stats['toolkits']} "
                 f"due={stats['due']} dispatched={stats['dispatched']} failed={stats['failed']} "
-                f"expired={stats['expired']}"
+                f"expired={stats['expired']} pruned={stats['pruned']}"
             )
             _check_index_scheduling_lock.release()
