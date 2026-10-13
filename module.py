@@ -500,6 +500,10 @@ class Module(module.ModuleModel):
                 "migrate_skill_run_settings_column", self.migrate_skill_run_settings_column,
                 group="R-2.0.7",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_eval_case_usage_columns", self.migrate_eval_case_usage_columns,
+                group="R-2.0.7",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 

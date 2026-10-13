@@ -617,6 +617,48 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
+    def migrate_eval_case_usage_columns(self, *args, **kwargs):
+        """Admin task: widen ``eval_case_usage.cost`` to NUMERIC(18,9) on each project schema.
+
+        The column was first created as NUMERIC(18,8), which drops the last digit of the
+        nano-USD ledger figure it is settled from (#6716). Skip on fresh environments:
+        ``create_all`` already provisions NUMERIC(18,9). Idempotent (only alters a column whose
+        scale is not 9; projects without the table are skipped): safe to run multiple times.
+
+        Param format (optional):
+            "project_id=<all|N>"
+        """
+        from ..utils.eval_case_usage_schema import apply_eval_case_usage_columns
+
+        param = kwargs.get("param", "") or ""
+        project_id_filter = None
+        for seg in [s.strip() for s in param.split(";")]:
+            if seg.lower().startswith("project_id="):
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.warning(
+                            "migrate_eval_case_usage_columns: invalid project_id '%s', scanning all", value)
+
+        try:
+            if project_id_filter is not None:
+                project_ids = [project_id_filter]
+            else:
+                project_ids = [
+                    p["id"] for p in (
+                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                    )
+                ]
+        except Exception:  # pylint: disable=W0703
+            log.exception("migrate_eval_case_usage_columns: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_eval_case_usage_columns(project_ids)
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
+
+    @web.method()
     def migrate_eval_suite_columns(self, *args, **kwargs):
         """Admin task: add the ``description`` column to ``eval_suite`` on each
         project schema. Idempotent (``ADD COLUMN IF NOT EXISTS``): safe to run

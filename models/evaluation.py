@@ -481,8 +481,8 @@ class EvalCaseUsage(db_tools.AbstractBaseMixin, db.Base):
     cache_read_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     cache_creation_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     reasoning_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    # USD, never rounded at storage
-    cost = mapped_column(Numeric(18, 8), nullable=True)
+    # USD, never rounded at storage: 9 places is the ledger's nano-USD
+    cost = mapped_column(Numeric(18, 9), nullable=True)
     # the most-used model; the per-model split stays in the ledger
     model_name: Mapped[str] = mapped_column(String(256), nullable=True)
 
