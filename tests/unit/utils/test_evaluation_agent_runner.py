@@ -212,6 +212,41 @@ def test_run_agent_empty_output_maps_empty(runner):
     assert out['output'] is None
 
 
+def test_run_agent_blank_assistant_message_maps_empty(runner):
+    # A model reply of content=[] reaches eval as a blank assistant message once the
+    # SDK normalizes it to '' (it used to arrive as the literal "[]" and score ok).
+    def predict(**kwargs):
+        return {'result': {'chat_history': [
+            {'role': 'user', 'content': 'q'},
+            {'type': 'ai', 'role': 'assistant', 'content': '', 'tool_calls': []},
+        ]}}
+
+    out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=predict)
+    assert out['status'] == 'empty'
+    assert out['output'] is None
+
+
+def test_run_agent_sdk_no_output_sentinel_maps_empty(runner):
+    # The SDK reports a run with no answer as fixed sentinel text, not a blank message.
+    sentinel = ("Assistant run has been completed, but output is None.\n"
+                "Adding last message if any: content='' tool_calls=[]")
+
+    def predict(**kwargs):
+        return {'result': {'chat_history': [
+            {'role': 'user', 'content': 'q'},
+            {'type': 'ai', 'role': 'assistant', 'content': sentinel},
+        ]}}
+
+    out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=predict)
+    assert out['status'] == 'empty'
+    assert out['output'] is None
+
+
+def test_answer_mentioning_the_sentinel_is_kept(runner):
+    text = 'The log said: Assistant run has been completed, but output is None.'
+    assert runner.extract_agent_output(_wrap([{'role': 'assistant', 'content': text}])) == text
+
+
 # --- usage_entity forwarding (#6677) ------------------------------------------
 
 def test_usage_entity_forwarded_to_predict(runner):
