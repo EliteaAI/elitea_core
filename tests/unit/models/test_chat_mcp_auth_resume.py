@@ -91,7 +91,11 @@ _module(
     consume_message_skills=lambda message, _skills: (message, []),
     resolve_runtime_skills=lambda _details: [],
 )
-_module('utils.skill_mentions', merge_mention_candidates=lambda attached, chat: [*attached, *chat])
+_module(
+    'utils.skill_mentions',
+    merge_mention_candidates=lambda attached, chat: [*attached, *chat],
+    merge_disclosable_skills=lambda own, chat: [*own, *chat],
+)
 _module('utils.application_tools', expand_toolkit_settings=lambda tools, *_args: tools)
 _module(
     'utils.internal_tools',

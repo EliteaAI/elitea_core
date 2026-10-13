@@ -1711,6 +1711,7 @@ def consume_invoked_skills(
         invoked.append({
             'skill_id': skill.get('skill_id'),
             'skill_version_id': skill.get('skill_version_id'),
+            'skill_project_id': skill.get('skill_project_id'),
             'name': skill.get('name'),
             'version_name': skill.get('version_name'),
             'icon_meta': skill.get('icon_meta'),

@@ -48,6 +48,7 @@ class SkillRunTarget:
     instructions: str
     icon_meta: Optional[dict]
     run_settings: dict
+    description: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ def load_skill_run_target(
             instructions=version.instructions,
             icon_meta=(version.meta or {}).get('icon_meta'),
             run_settings=saved_run_settings(version),
+            description=skill.description,
         )
 
 

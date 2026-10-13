@@ -2,6 +2,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
+from pylon.core.tools import log
 from sqlalchemy import desc
 from sqlalchemy.orm import selectinload
 from tools import db
@@ -9,7 +10,7 @@ from tools import db
 from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTarget, build_skill_run, load_skill_run_target, \
     resolve_skill_llm_settings, select_skill_version
 from .skill_llm_override import select_llm_override
-from .skill_mentions import resolves_mentions_in_predict
+from .skill_mentions import merge_disclosable_skills, resolves_mentions_in_predict
 from .skill_utils import consume_message_skills
 from .utils import get_public_project_id
 from ..models.enums.all import ParticipantTypes
@@ -231,11 +232,13 @@ def describe_skill_participants(participants: list, chat_project_id: int) -> dic
     return details
 
 
-def mention_candidate(target: SkillRunTarget) -> dict:
+def mention_candidate(target: SkillRunTarget, skill_project_id: int) -> dict:
     return {
         'skill_id': target.skill_id,
         'skill_version_id': target.version_id,
+        'skill_project_id': skill_project_id,
         'name': target.skill_name,
+        'description': target.description,
         'version_name': target.version_name,
         'icon_meta': target.icon_meta,
         'instructions': target.instructions,
@@ -265,24 +268,33 @@ def participant_skill_mention_candidates(session, msg_group, chat_project_id: in
         if participant.id == msg_group.sent_to_id:
             continue
         try:
-            _, target = load_skill_participant_target(
+            source, target = load_skill_participant_target(
                 participant.entity_meta, chat_project_id, (entity_settings or {}).get('version_id'),
             )
-        except SkillParticipantError:
+        except SkillParticipantError as e:
+            log.debug('[Skills] Chat skill participant %s skipped: %s', participant.id, e)
             continue
-        candidates.append(mention_candidate(target))
+        candidates.append(mention_candidate(target, source.project_id))
     return candidates
 
 
 def apply_participant_skill_mentions(session, msg_group, result: dict, chat_project_id: int) -> None:
     participant = msg_group.sent_to
+    if participant.entity_name == ParticipantTypes.skill:
+        if has_skill_mention(result.get('user_input')):
+            result['version_details']['mention_skills'] = participant_skill_mention_candidates(
+                session, msg_group, chat_project_id,
+            )
+        return
     is_dummy = participant.entity_name == ParticipantTypes.dummy
     if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, result.get('version_details'))):
         return
-    if not has_skill_mention(result.get('user_input')):
-        return
     candidates = participant_skill_mention_candidates(session, msg_group, chat_project_id)
-    if is_dummy:
-        result['user_input'], result['invoked_skills'] = consume_message_skills(result['user_input'], candidates)
+    if not candidates:
         return
-    result['version_details']['mention_skills'] = candidates
+    if not is_dummy:
+        result['version_details']['chat_skills'] = candidates
+        return
+    if has_skill_mention(result.get('user_input')):
+        result['user_input'], result['invoked_skills'] = consume_message_skills(result['user_input'], candidates)
+    result['attached_skills'] = merge_disclosable_skills([], candidates)
