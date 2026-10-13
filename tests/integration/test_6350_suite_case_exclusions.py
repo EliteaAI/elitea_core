@@ -200,6 +200,8 @@ def _install_package():
         mod = types.ModuleType(f'{PKG}.utils.{stub}')
         mod.parse_import = lambda *a, **k: ([], [])
         mod.extract_conversation_turns = lambda *a, **k: []
+        mod.extract_conversation_cases = lambda *a, **k: []
+        mod.tool_calls_by_group = lambda *a, **k: {}
         sys.modules[f'{PKG}.utils.{stub}'] = mod
 
     loaded = {}

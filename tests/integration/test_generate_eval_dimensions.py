@@ -261,6 +261,9 @@ def _install_package():
         f'{PKG}.utils.exceptions': exceptions,
         f'{PKG}.utils.utils': utils_utils,
         f'{PKG}.utils.constants': constants,
+        # pd/evaluation.py imports the expected_trajectory normalizer; the conftest registered it.
+        f'{PKG}.utils.evaluation_expected_trajectory':
+            sys.modules['plugins.elitea_core.utils.evaluation_expected_trajectory'],
         'flask': flask,
         'pylon': pylon,
         'pylon.core': pylon_core,
@@ -710,3 +713,38 @@ def test_a_continued_run_is_not_blamed_on_max_tokens(api):
 
     assert status == 422
     assert payload['error'] == 'LLM returned unparseable output'
+
+
+def test_agent_tools_reach_the_prompt_builder(api):
+    """#6809 item 7: the agent's tools go to the builder so drafts can judge tool use."""
+    module, generate_app_utils, *_rest = api
+    tools = [{'toolkit': 'repo', 'type': 'github', 'names': ['read_file']}]
+    generate_app_utils.fetch_application_instructions = lambda *a, **k: {
+        'application_name': 'Support Bot', 'version_id': 1, 'instructions': 'x', 'tools': tools,
+    }
+    module.fetch_application_instructions = generate_app_utils.fetch_application_instructions
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    trajectory_draft = {'dimensions': [{
+        'name': 'Tool choice', 'description': 'Picks the right tool.',
+        'evidence_scope': {'trajectory': True}, 'weight': 1.0,
+    }]}
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(trajectory_draft)))
+
+    payload, status = handler.post(1)
+
+    assert status == 200
+    assert generate_app_utils.last_build_kwargs['agent_tools'] == tools
+    assert payload['dimensions'][0]['evidence_scope'] == {'trajectory': True}
+
+
+def test_an_agent_without_tools_passes_an_empty_list(api):
+    module, generate_app_utils, *_rest = api
+    module.request.json = {'application_id': 1}
+    handler = module.PromptLibAPI()
+    handler.module = _Handler(predict_result=_thinking_result(json.dumps(_VALID_DRAFT)))
+
+    _payload, status = handler.post(1)
+
+    assert status == 200
+    assert generate_app_utils.last_build_kwargs['agent_tools'] == []

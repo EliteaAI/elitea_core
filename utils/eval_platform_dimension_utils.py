@@ -39,6 +39,7 @@ from ..models.pd.eval_platform_dimension import (
     EvalPlatformDimensionUpdateModel,
 )
 from .evaluation_library_utils import EvalLibraryError
+from .evaluation_trajectory_checks import builtin_code, builtin_key
 
 _PROJECTED_FIELDS = (
     'name', 'description', 'allowed_engines', 'scale_type', 'scale_min', 'scale_max',
@@ -59,6 +60,16 @@ class EvalPlatformDimensionNameConflictError(EvalLibraryError):
 
     def __init__(self, name: str):
         super().__init__(f'A platform eval dimension named "{name}" already exists')
+        self.name = name
+
+
+class EvalPlatformDimensionBuiltinError(EvalLibraryError):
+    http_status = 400
+
+    def __init__(self, name: str):
+        super().__init__(
+            f'Platform eval dimension "{name}" is code-scored, so meta.builtin_check must keep '
+            'naming a shipped check')
         self.name = name
 
 
@@ -127,6 +138,11 @@ def update_registry(
             raise EvalPlatformDimensionNotFoundError(dimension_uuid)
         for key, value in data.model_dump(exclude_unset=True).items():
             setattr(row, key, value)
+        # The model judges the engine/builtin pairing only on what was sent; a meta-only edit of
+        # a code-scored entry must not orphan it from its script.
+        if list(row.allowed_engines or []) == ['code'] and builtin_key(row.meta) is None:
+            session.rollback()
+            raise EvalPlatformDimensionBuiltinError(row.name)
         try:
             session.commit()
         except IntegrityError:
@@ -173,6 +189,9 @@ def project_to(
         for entry in entries:
             values = {field: getattr(entry, field) for field in _PROJECTED_FIELDS}
             values['meta'] = dict(entry.meta or {})
+            # A built-in check's script comes from the plugin, never the registry (#6809 item 5).
+            code = builtin_code(entry.meta)
+            values['code'], values['return_contract'] = code if code else (None, None)
             row = existing.get(str(entry.uuid))
             if row is None and not insert_missing:
                 skipped += 1

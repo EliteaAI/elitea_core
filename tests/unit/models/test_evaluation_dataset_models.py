@@ -156,3 +156,42 @@ def test_promote_requires_conversation_id(pd_eval):
 def test_promote_defaults_include_expected_true(pd_eval):
     m = pd_eval.EvalDatasetPromoteModel(conversation_id=3781)
     assert m.conversation_id == 3781 and m.include_expected is True
+
+
+# --- #6809 item 4: expected_trajectory -------------------------------------------------------
+
+def test_case_create_normalizes_expected_trajectory(pd_eval):
+    m = pd_eval.EvalDatasetCaseCreateModel(input='q', expected_trajectory={'tools': ['jira_search']})
+    assert m.expected_trajectory == {'match': 'superset', 'tools': [{'name': 'jira_search'}],
+                                     'forbidden': [], 'allow_repeat': []}
+
+
+def test_case_create_without_expected_trajectory_is_none(pd_eval):
+    assert pd_eval.EvalDatasetCaseCreateModel(input='q').expected_trajectory is None
+
+
+@pytest.mark.parametrize('bad', [{'match': 'fuzzy'}, {'tools': [{'nme': 'x'}]}, ['x'],
+                                 {'max_tool_calls': -1}])
+def test_case_create_rejects_bad_expected_trajectory(pd_eval, bad):
+    with pytest.raises(ValidationError, match='expected_trajectory'):
+        pd_eval.EvalDatasetCaseCreateModel(input='q', expected_trajectory=bad)
+
+
+def test_case_update_empty_expected_trajectory_clears_it(pd_eval):
+    """``{}`` is set (so update_case writes it) and normalizes to None — the clear gesture."""
+    dumped = pd_eval.EvalDatasetCaseUpdateModel(expected_trajectory={}).model_dump(exclude_unset=True)
+    assert dumped == {'expected_trajectory': None}
+
+
+def test_case_update_without_expected_trajectory_leaves_it_alone(pd_eval):
+    dumped = pd_eval.EvalDatasetCaseUpdateModel(input='q2').model_dump(exclude_unset=True)
+    assert 'expected_trajectory' not in dumped
+
+
+def test_case_detail_carries_expected_trajectory(pd_eval):
+    fields = pd_eval.EvalDatasetCaseDetailModel.model_fields
+    assert 'expected_trajectory' in fields
+
+
+def test_import_accepts_jsonl(pd_eval):
+    assert pd_eval.EvalDatasetImportModel(format='JSONL', content='{"input": "q"}').format == 'jsonl'

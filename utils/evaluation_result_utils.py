@@ -112,3 +112,90 @@ def get_run_results(
             'limit': page_size,
             'offset': max(offset, 0),
         }
+
+
+# A page of executions without step lists is states and counters only, so it may hold a whole run
+# (the dataset import cap) — the list view reads every case. Each trajectory can be up to
+# MAX_TRAJECTORY_BYTES, so a page that carries them is kept small.
+MAX_EXECUTION_LIMIT = 5000
+MAX_TRAJECTORY_PAGE = 10
+
+
+def _execution_row(row, include_trajectory: bool) -> dict:
+    return {
+        'id': row.id,
+        'run_id': row.run_id,
+        'dataset_case_id': row.dataset_case_id,
+        'case_index': row.case_index,
+        'status': row.status,
+        'trajectory_state': row.trajectory_state,
+        'trajectory_state_reason': row.trajectory_state_reason,
+        # Not touched when deferred: reading it would lazy-load the column row by row.
+        'trajectory': row.trajectory if include_trajectory else None,
+        'metrics': row.metrics or {},
+        'created_at': row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def get_case_executions(
+    project_id: int,
+    run_id: int,
+    session=None,
+    case_index: Optional[int] = None,
+    include_trajectory: Optional[bool] = None,
+    dataset_case_id: Optional[int] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> dict:
+    """A run's per-case executions (#6809 P1): trajectory state, counters and the trajectory
+    itself, which can be hundreds of KB per case.
+
+    ``include_trajectory`` defaults to true only when one case is asked for, by ``dataset_case_id``
+    (the scorecard's case key) or ``case_index`` — the drill-down; a list view gets states and
+    counters, and the column is not even read. Rows are paged by ``case_index``: up to
+    :data:`MAX_EXECUTION_LIMIT` per page without trajectories, :data:`MAX_TRAJECTORY_PAGE` with.
+
+    ``usage`` lists the same cases' ``eval_case_usage`` rows, agent and judge (#6716). An on-demand
+    run (output supplied, no agent executed) has no execution rows; ``executions`` is then empty,
+    not an error, and ``usage`` covers the page's ``case_index`` window instead. Raises
+    :class:`EvalRunNotFoundError` when the run is absent."""
+    from sqlalchemy.orm import defer
+    from ..models.evaluation import EvalRun, EvalCaseExecution, EvalCaseUsage
+    from .evaluation_usage import case_usage_view
+
+    one_case = case_index is not None or dataset_case_id is not None
+    if include_trajectory is None:
+        include_trajectory = one_case
+    page_cap = MAX_TRAJECTORY_PAGE if include_trajectory else MAX_EXECUTION_LIMIT
+    page_size = min(limit or page_cap, page_cap)
+    offset = max(offset or 0, 0)
+
+    with _session(session, project_id) as s:
+        if not s.query(EvalRun.id).filter(EvalRun.id == run_id).first():
+            raise EvalRunNotFoundError(run_id)
+        query = s.query(EvalCaseExecution).filter(EvalCaseExecution.run_id == run_id)
+        usage_query = s.query(EvalCaseUsage).filter(EvalCaseUsage.run_id == run_id)
+        if case_index is not None:
+            query = query.filter(EvalCaseExecution.case_index == case_index)
+            usage_query = usage_query.filter(EvalCaseUsage.case_index == case_index)
+        if dataset_case_id is not None:
+            query = query.filter(EvalCaseExecution.dataset_case_id == dataset_case_id)
+            usage_query = usage_query.filter(EvalCaseUsage.dataset_case_id == dataset_case_id)
+        if not include_trajectory:
+            query = query.options(defer(EvalCaseExecution.trajectory))
+        total = query.count()
+        page = query.order_by(EvalCaseExecution.case_index).offset(offset).limit(page_size).all()
+        rows = [_execution_row(r, include_trajectory) for r in page]
+        # Agent and judge usage of the same cases (#6716). An on-demand run has judge rows and no
+        # executions, so these are listed beside the executions rather than inside them.
+        if rows:
+            usage_query = usage_query.filter(EvalCaseUsage.case_index.in_({r['case_index'] for r in rows}))
+        elif not one_case:
+            usage_query = usage_query.filter(EvalCaseUsage.case_index >= offset,
+                                             EvalCaseUsage.case_index < offset + page_size)
+        usage = [
+            case_usage_view(r.to_json())
+            for r in usage_query.order_by(EvalCaseUsage.case_index, EvalCaseUsage.role).all()
+        ]
+    return {'run_id': run_id, 'executions': rows, 'usage': usage,
+            'total': total, 'limit': page_size, 'offset': offset}

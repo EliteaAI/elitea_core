@@ -383,3 +383,21 @@ def test_resync_survives_one_broken_schema(clean_db, monkeypatch):
 
     assert [failure['project_id'] for failure in result['failures']] == [2]
     assert [item['project_id'] for item in result['synced']] == [1, 3]
+
+
+# --- #6809 item 5: built-in code checks are resolved, not stored ----------------
+
+def test_builtin_check_projects_its_script(clean_db):
+    checks = sys.modules['plugins.elitea_core.utils.evaluation_trajectory_checks']
+    meta = {'builtin_check': 'trajectory.tool_match'}
+    platform_dimensions.project_to(2, [_entry(allowed_engines=['code'], meta=meta)])
+    row = FAKE_DB.schemas[2][0]
+    assert row.allowed_engines == ['code']
+    assert row.code == checks.script_for('trajectory.tool_match')
+    assert row.return_contract == 'number'
+
+
+def test_plain_dimension_projects_no_code(clean_db):
+    platform_dimensions.project_to(2, [_entry()])
+    row = FAKE_DB.schemas[2][0]
+    assert row.code is None and row.return_contract is None

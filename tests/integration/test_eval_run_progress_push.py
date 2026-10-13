@@ -63,6 +63,14 @@ class EvalResult:
         self.__dict__.update(kwargs)
 
 
+class EvalCaseExecution(EvalResult):
+    pass
+
+
+class EvalCaseUsage(EvalResult):
+    pass
+
+
 class _FakeRow:
     def __init__(self, run_id, snapshot):
         self.id = run_id
@@ -139,6 +147,8 @@ def _install_package(row_holder, added):
     evaluation_models = types.ModuleType(f'{PKG}.models.evaluation')
     evaluation_models.EvalRun = EvalRun
     evaluation_models.EvalResult = EvalResult
+    evaluation_models.EvalCaseExecution = EvalCaseExecution
+    evaluation_models.EvalCaseUsage = EvalCaseUsage
     evaluation_models.EvalRunStatus = EvalRunStatus
 
     code_validation = types.ModuleType(f'{PKG}.utils.code_validation')
@@ -281,3 +291,54 @@ def test_the_resolved_judge_model_is_frozen_onto_the_run(harness):
 
     assert row_holder['row'].snapshot['resolved_judge_model'] == {
         'model_name': 'gpt-4o', 'integration_uid': 'u-1'}
+
+
+def _offline_snapshot(orch, case_count):
+    snapshot = _snapshot(orch, case_count)
+    snapshot['trigger_type'] = orch.TRIGGER_OFFLINE_BATCH
+    for case in snapshot['cases']:
+        case.pop('output', None)
+    return snapshot
+
+
+def _runner(case):
+    return {'status': 'ok', 'output': 'a', 'structure': None,
+            'execution': {'trajectory_state': 'recorded', 'trajectory_state_reason': None,
+                          'trajectory': {'steps': [case['id']]}, 'metrics': {'llm_calls': 1}}}
+
+
+def test_case_executions_are_written_as_cases_finish(harness, monkeypatch):
+    """#502 review: a run must not hold every trajectory until its terminal write."""
+    orch, row_holder, added = harness
+    row_holder['row'] = _FakeRow(9, _offline_snapshot(orch, 3))
+    monkeypatch.setattr(orch, '_make_agent_runner', lambda *a, **k: _runner)
+    written_by_progress = []
+
+    orch.execute_run(1, 9, task_node=object(), progress_publisher=lambda frame: written_by_progress.append(
+        sum(isinstance(o, EvalCaseExecution) for o in added)) if frame['status'] == 'running' else None)
+
+    executions = [o for o in added if isinstance(o, EvalCaseExecution)]
+    assert [(e.case_index, e.trajectory) for e in executions] == [(i, {'steps': [i]}) for i in range(3)]
+    assert written_by_progress == [1, 2, 3]  # each row is in before the case's progress frame
+    assert row_holder['row'].meta['trajectory_rollup']['recorded_cases'] == 3
+    assert all('_execution' not in c for c in row_holder['row'].snapshot['cases'])
+
+
+def test_a_failed_case_write_is_retried_at_the_terminal_write(harness, monkeypatch):
+    orch, row_holder, added = harness
+    row_holder['row'] = _FakeRow(10, _offline_snapshot(orch, 2))
+    monkeypatch.setattr(orch, '_make_agent_runner', lambda *a, **k: _runner)
+    real_add, failed = _Session.add, []
+
+    def _flaky_add(self, obj):
+        if isinstance(obj, EvalCaseExecution) and obj.case_index == 0 and not failed:
+            failed.append(obj)
+            raise RuntimeError('db blip')
+        real_add(self, obj)
+    monkeypatch.setattr(_Session, 'add', _flaky_add)
+
+    orch.execute_run(1, 10, task_node=object())
+
+    executions = [o for o in added if isinstance(o, EvalCaseExecution)]
+    assert sorted(e.case_index for e in executions) == [0, 1]
+    assert row_holder['row'].meta['trajectory_rollup']['recorded_cases'] == 2

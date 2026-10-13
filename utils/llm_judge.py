@@ -35,6 +35,9 @@ DEFAULT_JUDGE_STEP_LIMIT = 5
 _ASSISTANT_ROLES = ('assistant', 'ai')
 _JSON_FENCE_RE = re.compile(r'```(?:json)?\s*\n(.*?)\n\s*```', re.DOTALL)
 _ERROR_TRUNCATE = 500
+# The SDK's LLM node turns a failed model call into an assistant message with this prefix
+# (runtime/tools/llm.py), so the envelope has no 'error' key and the call looks like an answer.
+_SDK_LLM_ERROR_PREFIX = 'Error: '
 
 
 def _extract_chat_response(inner):
@@ -86,6 +89,10 @@ def _extract_json(text):
     return None
 
 
+def _truncate(text):
+    return text[:_ERROR_TRUNCATE] + '…' if len(text) > _ERROR_TRUNCATE else text
+
+
 def _predict_error_text(result):
     """Return the truncated error string if predict_sio surfaced an error envelope, else None.
 
@@ -96,10 +103,7 @@ def _predict_error_text(result):
         return None
     for container in (result, result.get('result')):
         if isinstance(container, dict) and container.get('error'):
-            text = str(container['error'])
-            if len(text) > _ERROR_TRUNCATE:
-                text = text[:_ERROR_TRUNCATE] + '…'
-            return text
+            return _truncate(str(container['error']))
     return None
 
 
@@ -191,6 +195,10 @@ def run_llm_judge(
     err = _predict_error_text(result)
     if err:
         log.error(f'llm_judge predict error: {err}')
+        return {'status': 'predict_error', 'data': None, 'error': err, 'raw': result}
+    if text is not None and text.startswith(_SDK_LLM_ERROR_PREFIX):
+        err = _truncate(text[len(_SDK_LLM_ERROR_PREFIX):])
+        log.error(f'llm_judge model call failed: {err}')
         return {'status': 'predict_error', 'data': None, 'error': err, 'raw': result}
     return {
         'status': 'unparseable', 'data': None,

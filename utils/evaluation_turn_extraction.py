@@ -34,7 +34,7 @@ Bracketed system markers (e.g. ``"[Scheduled execution triggered]"``,
 relabelling/filtering them is a promote-UI concern (B3), not an extraction concern.
 """
 
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 # mirrors models.enums.all.ParticipantTypes / MessageGroupItemTypes, kept as literals so this
 # module stays import-light (unit-testable without the ORM).
@@ -84,25 +84,39 @@ def pair_turns(
     its output. A user turn with no following agent turn yields ``(input, None)`` — a provisional
     case with no captured output. Leading agent turns (no preceding user turn) are skipped.
     """
-    pairs: List[Tuple[str, Optional[str]]] = []
+    return [(i, o) for i, o, _ in pair_turns_with_groups((r, t, None) for r, t in turns)]
+
+
+def pair_turns_with_groups(
+    turns: Iterable[Tuple[str, str, Optional[int]]],
+) -> List[Tuple[str, Optional[str], List[int]]]:
+    """:func:`pair_turns` over ``(role, text, group_id)``, also returning the ids of each case's
+    agent groups — the groups whose trace steps hold the reply's tool calls (#6809 item 4).
+    Agent groups count even when they carry no text: a reply can be tool calls only.
+    """
+    pairs: List[Tuple[str, Optional[str], List[int]]] = []
     pending_input: Optional[str] = None
     agent_buf: List[str] = []
+    agent_groups: List[int] = []
 
     def _flush():
         if pending_input is not None:
             output = _DEFAULT_SEP.join(a for a in agent_buf if a) or None
-            pairs.append((pending_input, output))
+            pairs.append((pending_input, output, agent_groups))
 
-    for role, text in turns:
+    for role, text, group_id in turns:
         if role == 'user':
             _flush()
             pending_input = text or ''
             agent_buf = []
+            agent_groups = []
         else:  # agent
             if pending_input is None:
                 continue  # leading agent turn with no user prompt — skip
             if text:
                 agent_buf.append(text)
+            if group_id is not None:
+                agent_groups.append(group_id)
     _flush()
     return pairs
 
@@ -118,6 +132,15 @@ def extract_conversation_turns(
 
     Kept import-local so the pure contract above stays ORM-free and unit-testable.
     """
+    return [(i, o) for i, o, _ in extract_conversation_cases(project_id, conversation_id, session)]
+
+
+def extract_conversation_cases(
+    project_id: int,
+    conversation_id: int,
+    session=None,
+) -> List[Tuple[str, Optional[str], List[int]]]:
+    """:func:`extract_conversation_turns` plus each case's agent group ids (same single read)."""
     from sqlalchemy.orm import selectinload
     from tools import db
     from ..models.conversation import Conversation
@@ -142,11 +165,36 @@ def extract_conversation_turns(
             .limit(MAX_GROUPS)
             .all()
         )
-        turns: List[Tuple[str, str]] = []
+        turns: List[Tuple[str, str, Optional[int]]] = []
         for g in groups:
             entity_name = g.author_participant.entity_name if g.author_participant else None
-            turns.append((classify_role(entity_name), group_text(g.message_items)))
-        return pair_turns(turns)
+            turns.append((classify_role(entity_name), group_text(g.message_items), g.id))
+        return pair_turns_with_groups(turns)
     finally:
         if owns:
             session.close()
+
+
+def tool_calls_by_group(session, group_ids: List[int]) -> Dict[int, List[str]]:
+    """``{group_id: [tool_name, ...]}`` for the groups' ``tool_call`` trace steps, in the order the
+    chat renders them (``started_at`` nulls last, then ``id``). One query; names only, so the
+    ``tool_output`` blobs are never read. Includes sub-agent calls, as the run's ``tool_sequence``
+    does.
+    """
+    if not group_ids:
+        return {}
+    from sqlalchemy import asc
+    from ..models.message_trace_step import MessageTraceStep
+
+    rows = (
+        session.query(MessageTraceStep.message_group_id, MessageTraceStep.tool_name)
+        .filter(MessageTraceStep.message_group_id.in_(list(group_ids)),
+                MessageTraceStep.kind == 'tool_call')
+        .order_by(asc(MessageTraceStep.started_at).nullslast(), asc(MessageTraceStep.id))
+        .all()
+    )
+    calls: Dict[int, List[str]] = {}
+    for group_id, tool_name in rows:
+        if tool_name:
+            calls.setdefault(group_id, []).append(tool_name)
+    return calls

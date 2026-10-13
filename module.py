@@ -493,6 +493,10 @@ class Module(module.ModuleModel):
                 "migrate_project_chat_config", self.migrate_project_chat_config, group="R-2.0.7",
             )
             this.for_module("admin").module.register_admin_task(
+                "seed_eval_trajectory_dimensions", self.seed_eval_trajectory_dimensions,
+                group="R-2.0.7",
+            )
+            this.for_module("admin").module.register_admin_task(
                 "migrate_skill_run_settings_column", self.migrate_skill_run_settings_column,
                 group="R-2.0.7",
             )
