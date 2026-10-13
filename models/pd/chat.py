@@ -164,10 +164,6 @@ class LLMChatRequest(MergeUpdateBase):
         default=None,
         description="Per-turn resolved skill bodies (from ~skill refs) injected at the LLM node",
     )
-    attached_skills: Optional[List[dict]] = Field(
-        default=None,
-        description="Chat skill participants offered to the model for on-demand loading via load_skill",
-    )
     mcp_tokens: Optional[Dict[str, str | Dict[str, Any]]] = Field(
         default_factory=dict,
         description="MCP OAuth tokens by server URL (string for legacy, dict with access_token/session_id for new format)"

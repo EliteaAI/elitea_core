@@ -70,17 +70,21 @@ def test_regenerate_forwards_server_projection_outside_public_payload():
               and isinstance(n.func,ast.Call) and getattr(n.func.func,'id',None)=='getattr'
               and any(k.arg=='routing_projection' for k in n.keywords))
     projection={'task':[{'type':'text','text':'Hi'}],'instructions':''}
-    payload={'user_input':'server context. Hi','_routing_projection':projection}
+    chat_skills=[{'skill_id':5,'name':'ui-review'}]
+    payload={'user_input':'server context. Hi','_routing_projection':projection,'_chat_skills':chat_skills}
     rpc=Mock()
     namespace={'self':SimpleNamespace(module=SimpleNamespace(context=SimpleNamespace(rpc_manager=SimpleNamespace(call=rpc)))),
                'rpc_func':'applications_predict_sio_llm','parsed':SimpleNamespace(sid='socket',question_id=1),
                'regenerate_payload':payload,'SioEvents':SimpleNamespace(chat_predict=SimpleNamespace(value='chat_predict')),
                'msg_group':SimpleNamespace(author_participant_id=2),'project_id':7,
-               'start_event_content':{'participant_id':2,'question_id':1},'skill_rpc_kwargs':{}}
+               'start_event_content':{'participant_id':2,'question_id':1},'skill_rpc_kwargs':{},
+               'pop_chat_skills':lambda p:{'chat_skills':p.pop('_chat_skills',None),'invoked_skills':p.pop('_invoked_skills',None)}}
     eval(compile(ast.Expression(call),str(path),'eval'),namespace)
     sent=rpc.applications_predict_sio_llm.call_args
     assert sent.kwargs['routing_projection']==projection
     assert '_routing_projection' not in sent.args[1]
+    assert sent.kwargs['chat_skills']==chat_skills
+    assert '_chat_skills' not in sent.args[1]
     assert sent.args[1]['user_input']=='server context. Hi'
 
 

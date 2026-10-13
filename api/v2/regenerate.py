@@ -20,7 +20,7 @@ from ...utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, retire_all_interrupts,
 )
 from ...utils.sio_utils import SioEvents
-from ...utils.skill_participant_utils import pop_skill_dispatch, record_skill_run
+from ...utils.skill_participant_utils import pop_chat_skills, pop_skill_dispatch, record_skill_run
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -188,6 +188,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 getattr(self.module.context.rpc_manager.call, rpc_func)(
                     parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
                     routing_projection=regenerate_payload.pop('_routing_projection', None),
+                    **pop_chat_skills(regenerate_payload),
                     start_event_content=start_event_content,
                     chat_project_id=project_id,
                     **skill_rpc_kwargs,

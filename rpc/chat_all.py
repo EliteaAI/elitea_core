@@ -40,7 +40,7 @@ from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.conversation_access import check_post_access
 from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
-    apply_participant_skill_mentions, pop_skill_dispatch, record_skill_run, \
+    apply_participant_skill_mentions, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
     resolve_skill_attachment_llm_settings
 from ..utils.exceptions import PoolSaturationError
 from ..utils.parallel_hitl import (
@@ -1503,6 +1503,7 @@ class RPC:
                             return_chat_history=return_chat_history,
                             eligible_for_autoapproval=eligible_for_autoapproval,
                             routing_projection=payload.pop('_routing_projection', None),
+                            **pop_chat_skills(payload),
                             **skill_rpc_kwargs,
                         )
                     except (PoolSaturationError, SioValidationError):
@@ -2335,6 +2336,7 @@ class RPC:
                     await_task_timeout=await_task_timeout,
                     user_id=current_user['id'],
                     routing_projection=payload.pop('_routing_projection', None),
+                    **pop_chat_skills(payload),
                     **skill_rpc_kwargs,
                 )
                 self.finalize_timed_out_response(

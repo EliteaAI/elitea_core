@@ -8,7 +8,7 @@ import ast
 import copy
 from pathlib import Path
 from types import SimpleNamespace as NS
-from typing import Union
+from typing import Optional, Union
 from unittest.mock import Mock
 
 import pytest
@@ -36,7 +36,7 @@ def builder(models_path):
 
     function = Imports().visit(function)
     rpc = Mock()
-    namespace = {'Union': Union, 'LLMChatRequest': Chat, 'ApplicationChatRequest': Chat,
+    namespace = {'Union': Union, 'Optional': Optional, 'LLMChatRequest': Chat, 'ApplicationChatRequest': Chat,
                  '_normalize_llm_settings_family': llm._normalize_llm_settings_family,
                  'PredictPayloadError': ValueError, 'VaultClient': lambda project: NS(get_all_secrets=lambda: {}),
                  'rpc_tools': NS(RpcMixin=lambda: NS(rpc=NS(call=rpc))),

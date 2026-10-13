@@ -124,21 +124,25 @@ def load_skill_run_target(
         skill = session.query(Skill).options(
             selectinload(Skill.versions)
         ).filter(Skill.id == skill_id).first()
-        if skill is None:
-            raise SkillRunError('Skill not found', 404)
-        version = select_skill_version(skill, version_id, published_only)
-        if not (version.instructions or '').strip():
-            raise SkillRunError(EMPTY_INSTRUCTIONS_ERROR)
-        return SkillRunTarget(
-            skill_id=skill.id,
-            skill_name=skill.name,
-            version_id=version.id,
-            version_name=version.name,
-            instructions=version.instructions,
-            icon_meta=(version.meta or {}).get('icon_meta'),
-            run_settings=saved_run_settings(version),
-            description=skill.description,
-        )
+        return build_skill_run_target(skill, version_id, published_only)
+
+
+def build_skill_run_target(skill, version_id: Optional[int], published_only: bool) -> SkillRunTarget:
+    if skill is None:
+        raise SkillRunError('Skill not found', 404)
+    version = select_skill_version(skill, version_id, published_only)
+    if not (version.instructions or '').strip():
+        raise SkillRunError(EMPTY_INSTRUCTIONS_ERROR)
+    return SkillRunTarget(
+        skill_id=skill.id,
+        skill_name=skill.name,
+        version_id=version.id,
+        version_name=version.name,
+        instructions=version.instructions,
+        icon_meta=(version.meta or {}).get('icon_meta'),
+        run_settings=saved_run_settings(version),
+        description=skill.description,
+    )
 
 
 def merge_llm_override(saved: Optional[dict], override: Optional[dict]) -> dict:

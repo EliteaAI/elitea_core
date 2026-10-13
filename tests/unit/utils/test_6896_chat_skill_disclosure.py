@@ -1,4 +1,5 @@
 """#6896 - chat skill participants are offered to agent and model replies for on-demand loading."""
+import ast
 import importlib.util
 import pathlib
 import types
@@ -8,6 +9,7 @@ import pytest
 from fixtures.helpers import load_module_with_stubs, load_utils_module
 
 PACKAGE = 'plugins.elitea_core'
+PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
 def _load_sibling(file_name, module_name):
@@ -62,6 +64,17 @@ def _recipient(entity_name):
     return types.SimpleNamespace(id=55, entity_name=entity_name)
 
 
+class CountingRowsSession(ParticipantRowsSession):
+    def __init__(self, rows):
+        super().__init__(rows)
+        self.ordered_by = []
+
+    def query(self, *models):
+        return types.SimpleNamespace(join=lambda *a: types.SimpleNamespace(filter=lambda *b: types.SimpleNamespace(
+            order_by=lambda *columns: self.ordered_by.extend(columns) or types.SimpleNamespace(all=lambda: self.rows),
+        )))
+
+
 def _apply(env, entity_name, user_input='analyze this screenshot', version_details=None):
     session = ParticipantRowsSession([participant_row(56, CHAT_PROJECT_ID, 101), participant_row(57, PUBLIC_PROJECT_ID, 200)])
     msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55, sent_to=_recipient(entity_name))
@@ -72,46 +85,37 @@ def _apply(env, entity_name, user_input='analyze this screenshot', version_detai
     return result
 
 
+def _pins(chat_skills):
+    return [(s['skill_project_id'], s['skill_id'], s['skill_version_id']) for s in chat_skills]
+
+
 class TestChatSkillsReachTheResponder:
-    def test_an_agent_gets_the_chat_skills_without_a_tilde(self, env):
-        result = _apply(env, 'application', version_details={'agent_type': 'openai'})
-        chat_skills = result['version_details']['chat_skills']
-        assert [(s['skill_project_id'], s['skill_id'], s['skill_version_id']) for s in chat_skills] == [
-            (CHAT_PROJECT_ID, 10, 101), (PUBLIC_PROJECT_ID, 10, 200),
-        ]
-        assert 'mention_skills' not in result['version_details']
+    @pytest.mark.parametrize('entity_name', ['application', 'skill'])
+    def test_agents_and_skills_get_the_chat_skills_without_a_tilde(self, env, entity_name):
+        version_details = {'agent_type': 'openai'}
+        result = _apply(env, entity_name, version_details=version_details)
+        assert _pins(result[env.mod.CHAT_SKILLS_KEY]) == [(CHAT_PROJECT_ID, 10, 101), (PUBLIC_PROJECT_ID, 10, 200)]
+        assert version_details == {'agent_type': 'openai'}
 
     def test_chat_skills_carry_their_description_for_the_registry(self, env):
         env.schemas[CHAT_PROJECT_ID][0].description = 'Use when reviewing UI screenshots.'
         result = _apply(env, 'application', version_details={'agent_type': 'openai'})
-        assert result['version_details']['chat_skills'][0]['description'] == 'Use when reviewing UI screenshots.'
+        assert result[env.mod.CHAT_SKILLS_KEY][0]['description'] == 'Use when reviewing UI screenshots.'
 
-    def test_a_model_chat_gets_the_chat_skills_as_its_registry(self, env):
+    def test_a_model_chat_gets_the_chat_skills_without_resolving_mentions(self, env):
         result = _apply(env, 'dummy')
-        assert [s['skill_version_id'] for s in result['attached_skills']] == [101, 200]
-        assert {s['instruction_referenced'] for s in result['attached_skills']} == {False}
+        assert [s['skill_version_id'] for s in result[env.mod.CHAT_SKILLS_KEY]] == [101, 200]
         assert result['user_input'] == 'analyze this screenshot'
-        assert 'invoked_skills' not in result
+        assert env.mod.INVOKED_SKILLS_KEY not in result
 
-    def test_a_model_chat_still_resolves_tilde_mentions(self, env):
+    def test_a_model_chat_resolves_tilde_mentions_into_the_internal_key(self, env):
         result = _apply(env, 'dummy', user_input='use ~Reviewer')
-        assert [s['skill_version_id'] for s in result['invoked_skills']] == [101, 200]
-        assert result['attached_skills']
-
-    def test_a_skill_recipient_never_gets_other_chat_skills_listed(self, env):
-        version_details = {'agent_type': 'openai'}
-        result = _apply(env, 'skill', version_details=version_details)
-        assert version_details == {'agent_type': 'openai'}
-        assert 'attached_skills' not in result
-
-    def test_a_skill_recipient_keeps_tilde_mentions(self, env):
-        result = _apply(env, 'skill', user_input='use ~Reviewer', version_details={'agent_type': 'openai'})
-        assert [s['skill_version_id'] for s in result['version_details']['mention_skills']] == [101, 200]
-        assert 'chat_skills' not in result['version_details']
+        assert [s['skill_version_id'] for s in result[env.mod.INVOKED_SKILLS_KEY]] == [101, 200]
+        assert 'invoked_skills' not in result
 
     def test_a_pipeline_gets_no_chat_skills(self, env):
         result = _apply(env, 'application', version_details={'agent_type': 'pipeline'})
-        assert result['version_details'] == {'agent_type': 'pipeline'}
+        assert env.mod.CHAT_SKILLS_KEY not in result
 
     def test_a_chat_without_usable_skill_participants_changes_nothing(self, env):
         session = ParticipantRowsSession([participant_row(56, PUBLIC_PROJECT_ID, 201)])
@@ -119,6 +123,41 @@ class TestChatSkillsReachTheResponder:
         result = {'user_input': 'hi'}
         env.mod.apply_participant_skill_mentions(session, msg_group, result, CHAT_PROJECT_ID)
         assert result == {'user_input': 'hi'}
+
+    def test_the_internal_keys_leave_the_payload_for_the_rpc_kwargs(self, env):
+        payload = {'user_input': 'hi', env.mod.CHAT_SKILLS_KEY: ['chat'], env.mod.INVOKED_SKILLS_KEY: ['invoked']}
+        assert env.mod.pop_chat_skills(payload) == {'chat_skills': ['chat'], 'invoked_skills': ['invoked']}
+        assert payload == {'user_input': 'hi'}
+
+
+class TestParticipantLookup:
+    def test_one_schema_session_per_owner_project(self, env, monkeypatch):
+        opened = []
+        sessions = env.mod.db.with_project_schema_session
+
+        def counting_session(project_id):
+            opened.append(project_id)
+            return sessions(project_id)
+
+        monkeypatch.setattr(env.mod.db, 'with_project_schema_session', counting_session)
+        env.schemas[CHAT_PROJECT_ID].append(_backend._harness.FakeSkill(11, 'Writer', [_backend.FakeVersion(110)]))
+        session = ParticipantRowsSession([
+            participant_row(56, CHAT_PROJECT_ID, 101),
+            (types.SimpleNamespace(id=58, entity_meta={'id': 11, 'project_id': CHAT_PROJECT_ID}), {'version_id': 110}),
+            participant_row(57, PUBLIC_PROJECT_ID, 200),
+        ])
+        msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55)
+
+        candidates = env.mod.participant_skill_mention_candidates(session, msg_group, CHAT_PROJECT_ID)
+
+        assert sorted(opened) == sorted([CHAT_PROJECT_ID, PUBLIC_PROJECT_ID])
+        assert [c['skill_version_id'] for c in candidates] == [101, 110, 200]
+
+    def test_participants_are_read_in_a_stable_order(self, env):
+        session = CountingRowsSession([participant_row(56, CHAT_PROJECT_ID, 101)])
+        msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55)
+        env.mod.participant_skill_mention_candidates(session, msg_group, CHAT_PROJECT_ID)
+        assert session.ordered_by
 
 
 class TestPredictPayloadListsChatSkills:
@@ -129,41 +168,68 @@ class TestPredictPayloadListsChatSkills:
         build.__globals__['log'] = types.SimpleNamespace(debug=lambda *a, **k: None)
         return build, llm
 
-    def test_agent_registry_has_its_own_skills_then_the_chat_skills(self, build):
+    def test_agent_registry_has_its_own_skills_and_the_chat_skills(self, build):
         run, llm = build
         own = _skill('reviewer', 9)
         run.__globals__['resolve_runtime_skills'] = lambda version: [own]
         request = _predict.parsed(llm, agent=True, auto=False)
-        request.version_details.update(skills=[own], chat_skills=[_skill('reviewer', 4), _skill('ui-review', 5)])
-        result = run(request, 2, skip_expansion=True)
+        request.version_details.update(skills=[own])
+        result = run(request, 2, skip_expansion=True, chat_skills=[_skill('reviewer', 4), _skill('ui-review', 5)])
         assert [s['skill_id'] for s in result['attached_skills']] == [9, 5]
-        assert 'chat_skills' not in result['application']['version_details']
 
     def test_an_agent_without_own_skills_lists_the_chat_skills(self, build):
         run, llm = build
-        request = _predict.parsed(llm, agent=True, auto=False)
-        request.version_details['chat_skills'] = [_skill('ui-review', 5)]
-        result = run(request, 2, skip_expansion=True)
+        result = run(_predict.parsed(llm, agent=True, auto=False), 2, skip_expansion=True,
+                     chat_skills=[_skill('ui-review', 5)])
         assert [s['skill_id'] for s in result['attached_skills']] == [5]
 
     def test_chat_skills_are_tilde_candidates_for_the_agent(self, build):
         run, llm = build
         consumed = []
         run.__globals__['consume_message_skills'] = lambda content, candidates: consumed.append(candidates) or (content, [])
-        request = _predict.parsed(llm, agent=True, auto=False)
         chat_skill = _skill('ui-review', 5)
-        request.version_details['chat_skills'] = [chat_skill]
-        run(request, 2, skip_expansion=True)
+        run(_predict.parsed(llm, agent=True, auto=False), 2, skip_expansion=True, chat_skills=[chat_skill])
         assert consumed == [[chat_skill]]
 
-    def test_a_model_chat_passes_its_chat_skills_to_the_runtime(self, build):
+    def test_a_model_chat_lists_the_chat_skills_from_the_server_lookup(self, build):
         run, llm = build
-        request = _predict.parsed(llm, agent=False, auto=False)
-        request.attached_skills = [_skill('ui-review', 5)]
-        result = run(request, 2, skip_expansion=True)
+        result = run(_predict.parsed(llm, agent=False, auto=False), 2, skip_expansion=True,
+                     chat_skills=[_skill('ui-review', 5), _skill('UI-review', 6)])
         assert [s['skill_id'] for s in result['attached_skills']] == [5]
 
-    def test_a_model_chat_without_chat_skills_sends_no_registry(self, build):
+    def test_a_model_chat_injects_only_server_resolved_mentions(self, build):
         run, llm = build
-        result = run(_predict.parsed(llm, agent=False, auto=False), 2, skip_expansion=True)
+        resolved = _skill('ui-review', 5)
+        result = run(_predict.parsed(llm, agent=False, auto=False), 2, skip_expansion=True, invoked_skills=[resolved])
+        assert result['invoked_skills'] == [resolved]
+
+    @pytest.mark.parametrize('agent', [False, True])
+    def test_a_request_body_cannot_supply_skills(self, build, agent):
+        run, llm = build
+        request = _predict.parsed(llm, agent=agent, auto=False)
+        request.attached_skills = [_skill('forged', 99)]
+        request.invoked_skills = [_skill('forged', 99)]
+        if agent:
+            request.version_details['chat_skills'] = [_skill('forged', 99)]
+        result = run(request, 2, skip_expansion=True)
         assert 'attached_skills' not in result
+        assert result['invoked_skills'] == []
+
+
+def _predict_dispatches(path):
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and any(k.arg == 'routing_projection' and isinstance(k.value, ast.Call)
+                                              and getattr(k.value.func, 'attr', None) == 'pop' for k in node.keywords):
+            yield node
+
+
+@pytest.mark.parametrize('relative_path, expected', [('rpc/chat_all.py', 2), ('api/v2/regenerate.py', 1)])
+def test_every_predict_dispatch_hands_over_the_chat_skills(relative_path, expected):
+    dispatches = list(_predict_dispatches(PLUGIN_ROOT / relative_path))
+    assert len(dispatches) == expected
+    for call in dispatches:
+        assert any(
+            k.arg is None and isinstance(k.value, ast.Call) and getattr(k.value.func, 'id', None) == 'pop_chat_skills'
+            for k in call.keywords
+        )
