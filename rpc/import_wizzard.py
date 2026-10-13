@@ -260,7 +260,7 @@ def _resolve_and_attach_skill(
             session=session,
         )
     except SkillError as ex:
-        # max-5 exceeded / already attached / not found -> non-fatal warning.
+        # Limit exceeded / already attached / not found -> non-fatal warning.
         return (f"Skill not attached to agent '{agent_name}' version "
                 f"'{version_name}': {ex}")
     except Exception as ex:

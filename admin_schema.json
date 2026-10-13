@@ -374,6 +374,38 @@
       "default": true,
       "requires_restart": false
     },
+    "max_skills_per_agent": {
+      "type": "integer",
+      "title": "Max Skills Per Agent",
+      "description": "Maximum number of skills that can be attached to one agent version. Lowering it never removes skills already attached; it only blocks new attaches. Allowed range: 1–200.",
+      "path": "skills.max_skills_per_agent",
+      "section": "runtime",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 200,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200
+      }
+    },
+    "max_invoked_skills_per_turn": {
+      "type": "integer",
+      "title": "Max ~Skill Invocations Per Message",
+      "description": "Maximum number of skills one chat message can invoke with ~skill-name. Skills referenced in agent instructions are not limited by this. Allowed range: 1–50.",
+      "path": "skills.max_invoked_skills_per_turn",
+      "section": "runtime",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 50,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50
+      }
+    },
     "pipeline_scheduling_enabled": {
       "type": "boolean",
       "title": "Pipeline Scheduling Enabled",
