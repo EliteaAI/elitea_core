@@ -250,3 +250,49 @@ def test_exact_args_still_reject_a_missing_or_extra_key(cv):
 
 def test_the_script_mask_constant_is_the_helper_one():
     assert f"_MASKED = '{MASK}'" in checks.script_for('trajectory.tool_match')
+
+
+# --- key matching is by word (#502 review) -------------------------------------------------
+
+@pytest.mark.parametrize('key', [
+    'password', 'GitHub_Token', 'X-Api-Key', 'apiKey', 'XApiKey', 'refreshToken', 'Authorization',
+    'set-cookie', 'client_secret', 'PRIVATE_KEY', 'ssh_key', 'basic_auth', 'key', 'session',
+    'sessionToken', 'db_pwd', 'x-auth-token'])
+def test_sensitive_key_words_are_masked(key):
+    assert masking.is_sensitive_key(key)
+
+
+@pytest.mark.parametrize('key', [
+    'issue_key', 'issueKey', 'author', 'session_id', 'primary_key', 'sort_key', 'auth_type',
+    'cert_path', 'keyword', 'monkey', 'max_tokens', 'sessions', 'query', 'filename'])
+def test_keys_that_only_contain_a_sensitive_word_are_kept(key):
+    """Tracing matches by substring; here that would hide the values trajectory checks compare."""
+    assert not masking.is_sensitive_key(key)
+
+
+def test_kept_keys_stay_visible_in_a_trajectory(execution):
+    inputs = {'issue_key': 'EL-1', 'author': 'ann', 'session_id': 's-9', 'api_key': 'live'}
+    step = _tools(execution.extract_execution(_envelope(_entry('jira', inputs)), status='ok'))[0]
+    assert step['tool_inputs'] == {'issue_key': 'EL-1', 'author': 'ann', 'session_id': 's-9', 'api_key': MASK}
+
+
+# --- plain text is cut before masking (#502 review) ----------------------------------------
+
+def test_huge_plain_output_is_masked_and_marked_truncated(execution):
+    output = OPENAI_KEY + ' ' + 'b' * (execution._PRE_MASK_TEXT * 50)
+    step = _tools(execution.extract_execution(_envelope(_entry('read', output=output)), status='ok'))[0]
+    assert step['tool_output'].startswith(MASK)
+    assert step['tool_output'].endswith('[truncated]')
+    assert len(step['tool_output']) <= execution.MAX_STEP_TEXT + len('… [truncated]')
+
+
+def test_cut_text_is_marked_even_when_masking_shrinks_it_under_the_cap(execution):
+    output = ' '.join([OPENAI_KEY] * (execution._PRE_MASK_TEXT // len(OPENAI_KEY) + 10))
+    masked = execution._masked(output)
+    assert 'sk-' not in masked and masked.endswith('[truncated]')
+
+
+def test_json_text_is_still_masked_by_key_past_the_pre_cut(execution):
+    payload = json.dumps({'rows': ['r' * 100] * (execution._PRE_MASK_TEXT // 50), 'token': 'live'})
+    masked = execution._masked(payload)
+    assert 'live' not in masked and masked.endswith('[truncated]')

@@ -226,6 +226,28 @@ def price_usage(usage: Optional[dict], pricer: Optional[Callable[..., dict]]) ->
     return {'cost': total, 'cost_source': COST_RUNTIME}
 
 
+def failing_fast(pricer: Optional[Callable[..., dict]]) -> Optional[Callable[..., dict]]:
+    """``pricer`` that stops calling through after its first raise or timeout.
+
+    The pricer is one RPC per case × role × model, each with its own timeout: a costs plugin that
+    is down would otherwise hold the run's terminal write for that timeout times every row. Once it
+    has failed, the rest raise at once and :func:`price_usage` leaves them ``pending``, as it does
+    the first; settlement may still price them. An ``unpriced`` answer is not a failure."""
+    if pricer is None:
+        return None
+    failed = []
+
+    def _pricer(**kwargs):
+        if failed:
+            raise RuntimeError('pricer failed earlier in this run')
+        try:
+            return pricer(**kwargs)
+        except Exception:
+            failed.append(True)
+            raise
+    return _pricer
+
+
 def usage_row(*, dataset_case_id, case_index: int, role: str, usage: dict, priced: dict,
               case_status: Optional[str]) -> dict:
     """One ``eval_case_usage`` row (without ``run_id``)."""

@@ -43,6 +43,11 @@ PAUSE_POLICY_FAIL_CASE = 'fail_case'
 MAX_STEP_TEXT = 4_000
 MAX_TRAJECTORY_BYTES = 256_000
 _TRUNCATED_MARK = '… [truncated]'
+# Plain text is cut to this before masking, so a multi-MB tool output is not scanned in full only
+# to keep its first MAX_STEP_TEXT characters. The margin keeps the masking order safe: a secret cut
+# in half here could only reach the stored text if masking removed over 3/4 of what precedes it.
+# JSON text is parsed whole, since key masking needs the structure.
+_PRE_MASK_TEXT = 4 * MAX_STEP_TEXT
 
 _ENVELOPE_KEYS = ('thinking_steps', 'tool_calls_dict')
 # The tool result the SDK's sensitive-tool guard returns when the user declined a call
@@ -112,6 +117,15 @@ def _cap_text(value, limit: int = MAX_STEP_TEXT):
     return value
 
 
+def _masked(value):
+    """:func:`mask_payload` then :func:`_cap_text`, reading at most ``_PRE_MASK_TEXT`` of plain text."""
+    if isinstance(value, str) and len(value) > _PRE_MASK_TEXT and value.lstrip()[:1] not in ('{', '['):
+        masked = mask_text(value[:_PRE_MASK_TEXT])
+        # Masking may shorten the text below the cap; it was still cut.
+        return masked[:MAX_STEP_TEXT] + _TRUNCATED_MARK
+    return _cap_text(mask_payload(value))
+
+
 def _cap_inputs(value):
     """Keep ``tool_inputs`` structured when small (P2 matches on args), else a capped string."""
     if value is None:
@@ -140,7 +154,7 @@ def _llm_step(step: dict) -> dict:
         'token_source': step.get('token_source'),
         'planned_tools': [c.get('name') for c in tool_calls if isinstance(c, dict) and c.get('name')],
         'finish_reason': generation_info.get('finish_reason'),
-        'text': _cap_text(mask_text(step['text']) if isinstance(step.get('text'), str) and step['text'] else None),
+        'text': _masked(step['text']) if isinstance(step.get('text'), str) and step['text'] else None,
         'parent_agent': step.get('parent_agent_name'),
         'parent_call_id': step.get('parent_agent_call_id'),
         'started_at': step.get('timestamp_start'),
@@ -203,11 +217,11 @@ def _tool_step(entry: dict, store_tool_outputs: bool = True) -> dict:
         'toolkit': metadata.get('toolkit_name') or None,
         'toolkit_type': metadata.get('toolkit_type') or None,
         'tool_inputs': _cap_inputs(mask_payload(entry.get('tool_inputs'))),
-        'tool_output': _cap_text(mask_payload(entry.get('tool_output'))) if store_tool_outputs else None,
+        'tool_output': _masked(entry.get('tool_output')) if store_tool_outputs else None,
         'status': status,
         'is_error': status == 'error',
         # A paused call's "error" is the interrupt traceback; the pause keeps the identities.
-        'error': None if status == TOOL_STEP_PAUSED else _cap_text(mask_payload(entry.get('error'))),
+        'error': None if status == TOOL_STEP_PAUSED else _masked(entry.get('error')),
         'finish_reason': entry.get('finish_reason'),
         'call_id': None if parent_agent else call_id,
         'parent_agent': parent_agent,
@@ -224,22 +238,35 @@ def _tool_step(entry: dict, store_tool_outputs: bool = True) -> dict:
 def _fit(trajectory: dict) -> dict:
     """Shrink a trajectory over ``MAX_TRAJECTORY_BYTES``: drop tool outputs and LLM text from the
     last step backwards (the order and counts matter more than late payloads), then drop trailing
-    steps. Either way ``truncated`` is set, so a reader knows the view is partial."""
+    steps. Either way ``truncated`` is set, so a reader knows the view is partial.
+
+    Each step is serialized once, and again only when it is shrunk: re-serializing the whole
+    trajectory per step would be quadratic in the step count. The sum equals the full dump's
+    length (``json.dumps`` joins list items with ``', '``)."""
+    def _dump(value) -> int:
+        return len(json.dumps(value, ensure_ascii=False, default=str))
+
+    steps = trajectory['steps']
+    sizes = [_dump(step) for step in steps]
+
     def _size() -> int:
-        return len(json.dumps(trajectory, ensure_ascii=False, default=str))
+        return (_dump({**trajectory, 'steps': []}) + sum(sizes) + 2 * max(len(sizes) - 1, 0))
 
     if _size() <= MAX_TRAJECTORY_BYTES:
         return trajectory
     trajectory['truncated'] = True
-    for step in reversed(trajectory['steps']):
+    for index in range(len(steps) - 1, -1, -1):
+        step = steps[index]
         for key in ('tool_output', 'text', 'tool_inputs'):
             if step.get(key) is not None:
                 step[key] = None
                 step['output_omitted'] = True
+        sizes[index] = _dump(step)
         if _size() <= MAX_TRAJECTORY_BYTES:
             return trajectory
-    while trajectory['steps'] and _size() > MAX_TRAJECTORY_BYTES:
-        trajectory['steps'].pop()
+    while steps and _size() > MAX_TRAJECTORY_BYTES:
+        steps.pop()
+        sizes.pop()
     return trajectory
 
 

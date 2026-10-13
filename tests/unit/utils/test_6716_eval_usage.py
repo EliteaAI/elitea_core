@@ -167,6 +167,31 @@ def test_a_raising_pricer_leaves_the_cost_pending(usage):
     assert usage.price_usage(u, None)['cost_source'] == 'pending'
 
 
+def test_a_failed_pricer_is_not_called_again_in_the_run(usage):
+    """#502 review: a costs plugin that is down must cost one timeout, not one per row."""
+    calls = []
+
+    def pricer(**kw):
+        calls.append(kw['model_name'])
+        raise TimeoutError('rpc')
+    guarded = usage.failing_fast(pricer)
+    u = usage.envelope_usage(_envelope([_step('gpt-4o', 10, 1)], 10, 1))
+    assert [usage.price_usage(u, guarded)['cost_source'] for _ in range(5)] == ['pending'] * 5
+    assert calls == ['gpt-4o']
+
+
+def test_an_unpriced_answer_does_not_trip_the_pricer(usage):
+    calls = []
+
+    def pricer(model_name, **kw):
+        calls.append(model_name)
+        return {'cost': None}
+    guarded = usage.failing_fast(pricer)
+    u = usage.envelope_usage(_envelope([_step('mystery', 10, 1)], 10, 1))
+    assert [usage.price_usage(u, guarded)['cost_source'] for _ in range(3)] == ['unpriced'] * 3
+    assert len(calls) == 3 and usage.failing_fast(None) is None
+
+
 # --- rollup ---------------------------------------------------------------------------------------
 
 def _row(usage, *, tokens=(100, 10), cost=None, state='recorded', status='ok', cost_source=None):

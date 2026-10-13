@@ -382,3 +382,72 @@ def test_trajectory_rollup_is_none_without_rows(execution):
 def test_trajectory_meta_omits_the_key_without_rows(orchestration):
     assert orchestration.trajectory_meta([]) == {}
     assert orchestration.trajectory_meta([_exec_row('recorded')])['trajectory_rollup']['recorded_cases'] == 1
+
+
+def _sized(execution, total):
+    """A trajectory whose ``json.dumps(..., ensure_ascii=False)`` is exactly ``total`` long."""
+    import json
+    trajectory = {'version': 1, 'truncated': False,
+                  'steps': [{'kind': 'tool', 'tool_output': 'ü' * 100, 'text': None, 'tool_inputs': {}}
+                            for _ in range(5)]}
+    trajectory['steps'][0]['tool_output'] += 'x' * (total - len(json.dumps(trajectory, ensure_ascii=False)))
+    assert len(json.dumps(trajectory, ensure_ascii=False)) == total
+    return trajectory
+
+
+def test_fit_counts_the_size_exactly(execution, monkeypatch):
+    """The per-step sum must equal the real dump, or a trajectory at the cap is cut (or kept) wrongly."""
+    monkeypatch.setattr(execution, 'MAX_TRAJECTORY_BYTES', 2_000)
+    assert execution._fit(_sized(execution, 2_000))['truncated'] is False
+    over = execution._fit(_sized(execution, 2_001))
+    assert over['truncated'] is True
+    assert over['steps'][-1]['output_omitted'] is True and over['steps'][0].get('output_omitted') is None
+
+
+def test_fit_drops_steps_when_bare_steps_still_do_not_fit(execution, monkeypatch):
+    import json
+    monkeypatch.setattr(execution, 'MAX_TRAJECTORY_BYTES', 300)
+    trajectory = {'version': 1, 'truncated': False,
+                  'steps': [{'kind': 'tool', 'tool_name': 'n' * 40, 'tool_output': 'o'} for _ in range(20)]}
+    out = execution._fit(trajectory)
+    assert 0 < len(out['steps']) < 20
+    assert len(json.dumps(out, ensure_ascii=False)) <= 300
+
+
+# --- per-case persistence hook (#502 review) --------------------------------------------------
+
+def _agent_runner(case):
+    return {'status': 'ok', 'output': 'a', 'structure': None,
+            'execution': {'trajectory_state': 'recorded', 'trajectory_state_reason': None,
+                          'trajectory': {'steps': [case['id']]}, 'metrics': {'llm_calls': 1}}}
+
+
+@pytest.mark.parametrize('workers', [1, 3])
+def test_on_case_resolved_sees_each_case_before_progress_and_its_return_is_kept(orchestration, workers):
+    snapshot = {'bindings': [], 'cases': [{'id': i, 'input': f'q{i}'} for i in range(5)]}
+    seen, events = [], []
+
+    def _hook(index, case):
+        seen.append((index, case['_execution']['trajectory']))
+        events.append('resolved')
+        return {k: v for k, v in case.items() if k != '_execution'}
+
+    out = orchestration.orchestrate_run(snapshot, agent_runner=_agent_runner, on_case_resolved=_hook,
+                                        on_case_done=lambda d, t: events.append('done'),
+                                        case_concurrency=workers, time_budget_seconds=None)
+    assert sorted(seen) == [(i, {'steps': [i]}) for i in range(5)]
+    assert events == ['resolved', 'done'] * 5
+    assert all('_execution' not in c for c in out['cases']) and [c['id'] for c in out['cases']] == list(range(5))
+
+
+def test_a_failing_on_case_resolved_keeps_the_case_whole(orchestration):
+    snapshot = {'bindings': [], 'cases': [{'id': 1, 'input': 'q'}]}
+
+    def _hook(index, case):
+        raise RuntimeError('db down')
+
+    out = orchestration.orchestrate_run(snapshot, agent_runner=_agent_runner, on_case_resolved=_hook,
+                                        time_budget_seconds=None)
+    assert out['cases'][0]['_execution']['trajectory'] == {'steps': [1]}
+    rows, _ = orchestration.split_case_executions(out['cases'])
+    assert [r['case_index'] for r in rows] == [0]

@@ -844,6 +844,7 @@ def orchestrate_run(
     code_scorer: Optional[Callable[[dict, dict], dict]] = None,
     agent_runner: Optional[Callable[[dict], dict]] = None,
     on_case_done: Optional[Callable[[int, int], None]] = None,
+    on_case_resolved: Optional[Callable[[int, dict], dict]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     case_concurrency: int = 1,
     time_budget_seconds: Optional[int] = RUN_TIME_BUDGET_SECONDS,
@@ -866,6 +867,11 @@ def orchestrate_run(
     ``on_case_done(done, total)`` fires after each case so the caller can publish intermediate
     progress; without it the loop is synchronous end-to-end and a poller would only ever observe
     ``0/N`` then ``N/N``.
+
+    ``on_case_resolved(index, case)`` sees each case as soon as it is scored and returns the case
+    to keep — the caller persists the heavy ``_execution`` then and hands back the case without it,
+    so a run does not hold every trajectory until its terminal write. Called before
+    ``on_case_done``, from the submitting thread only; a failure keeps the case unchanged.
 
     ``should_cancel()`` is polled *before each case is started*: a case's agent call and judge
     dispatches are blocking and already carry their own timeouts, so the run stops at a case
@@ -920,6 +926,18 @@ def orchestrate_run(
             from pylon.core.tools import log  # local: this module loads without pylon present
             log.exception('Eval run progress callback failed')
 
+    def _resolved(index: int, case: dict) -> dict:
+        """Hand a scored case to ``on_case_resolved``; on failure keep it whole, so the terminal
+        write still persists what the hook could not."""
+        if on_case_resolved is None:
+            return case
+        try:
+            return on_case_resolved(index, case)
+        except Exception:  # noqa: BLE001
+            from pylon.core.tools import log  # local: this module loads without pylon present
+            log.exception('Eval run case %s: on_case_resolved failed', index)
+            return case
+
     def _should_stop() -> bool:
         """Should the run stop before starting another case, and why?
 
@@ -965,6 +983,7 @@ def orchestrate_run(
                 ai_scorer=ai_scorer, code_scorer=code_scorer,
                 judge_budget_tokens=judge_budget_tokens, judge_model_name=judge_model_name,
                 case_index=index)
+            resolved[index] = _resolved(index, resolved[index])
             _account(resolved[index])
             _report(len(resolved))
     else:
@@ -1005,6 +1024,7 @@ def orchestrate_run(
                     # A raise here propagates once the `with` drains the rest, marking the run
                     # errored exactly as the sequential path would.
                     resolved[index], results_by_index[index] = future.result()
+                    resolved[index] = _resolved(index, resolved[index])
                     _account(resolved[index])
                     _report(_count_done())
 
@@ -1082,21 +1102,29 @@ def split_case_executions(cases: List[dict]) -> tuple:
     agent (on-demand output, or never run because the run stopped early) has no row."""
     rows, stripped = [], []
     for index, case in enumerate(cases):
-        execution = case.get('_execution') if isinstance(case, dict) else None
-        if execution is None:
+        row = case_execution_row(case, index)
+        if row is None:
             stripped.append(case)
             continue
         stripped.append({k: v for k, v in case.items() if k != '_execution'})
-        rows.append({
-            'dataset_case_id': case.get('id'),
-            'case_index': index,
-            'status': execution.get('status'),
-            'trajectory_state': execution.get('trajectory_state'),
-            'trajectory_state_reason': execution.get('trajectory_state_reason'),
-            'trajectory': execution.get('trajectory'),
-            'metrics': execution.get('metrics') or {},
-        })
+        rows.append(row)
     return rows, stripped
+
+
+def case_execution_row(case, index: int) -> Optional[dict]:
+    """The ``eval_case_execution`` row for one resolved case, or None if it never reached the agent."""
+    execution = case.get('_execution') if isinstance(case, dict) else None
+    if execution is None:
+        return None
+    return {
+        'dataset_case_id': case.get('id'),
+        'case_index': index,
+        'status': execution.get('status'),
+        'trajectory_state': execution.get('trajectory_state'),
+        'trajectory_state_reason': execution.get('trajectory_state_reason'),
+        'trajectory': execution.get('trajectory'),
+        'metrics': execution.get('metrics') or {},
+    }
 
 
 def split_case_usage(cases: List[dict], pricer: Optional[Callable[..., dict]] = None) -> tuple:
@@ -1486,6 +1514,21 @@ def execute_run(
 
         # Live agent execution (H4) only for offline-batch: on-demand cases already carry the
         # stored conversation's output. ``owner_id`` is the acting user for detail resolution.
+        # Each case's execution row is written as soon as the case is scored, so the run holds
+        # one trajectory at a time rather than all of them (up to MAX_TRAJECTORY_BYTES each) until
+        # the terminal write. The rollup only needs the light fields, kept here.
+        persisted_executions: List[dict] = []
+
+        def _persist_execution(index: int, case: dict) -> dict:
+            row = case_execution_row(case, index)
+            if row is None:
+                return case
+            with db.get_session(project_id) as s:
+                s.add(EvalCaseExecution(run_id=run_id, **row))
+                s.commit()
+            persisted_executions.append({k: v for k, v in row.items() if k != 'trajectory'})
+            return {k: v for k, v in case.items() if k != '_execution'}
+
         agent_runner = None
         if snapshot.get('trigger_type') == TRIGGER_OFFLINE_BATCH:
             agent_runner = _make_agent_runner(project_id, snapshot, user_id=owner_id,
@@ -1495,6 +1538,7 @@ def execute_run(
         outcome = orchestrate_run(snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
                                   agent_runner=agent_runner,
                                   on_case_done=_publish_progress,
+                                  on_case_resolved=_persist_execution,
                                   should_cancel=_cancel_requested,
                                   case_concurrency=case_concurrency,
                                   time_budget_seconds=time_budget_seconds,
@@ -1514,7 +1558,8 @@ def execute_run(
     except Exception:  # noqa: BLE001 - no pricing: every row stays `pending` for settlement
         _pricer = None
     try:
-        usage_rows, cases = split_case_usage(cases, _pricer)
+        from .evaluation_usage import failing_fast
+        usage_rows, cases = split_case_usage(cases, failing_fast(_pricer))
     except Exception:  # noqa: BLE001 - usage is evidence about the run, never a reason to lose it
         from pylon.core.tools import log  # local: this module loads without pylon present
         log.exception('Eval run %s: could not build usage rows', run_id)
@@ -1530,6 +1575,7 @@ def execute_run(
                 raise ValueError(f'Eval run {run_id} disappeared while executing')
             for row in outcome['results']:
                 s.add(EvalResult(run_id=run.id, **row))
+            # Rows the per-case write could not persist are still on their cases.
             executions, cases = split_case_executions(cases)
             for row in executions:
                 s.add(EvalCaseExecution(run_id=run.id, **row))
@@ -1538,7 +1584,7 @@ def execute_run(
             run.meta = {
                 **(run.meta or {}),
                 **usage_meta(usage_rows, budget),
-                **trajectory_meta(executions),
+                **trajectory_meta(persisted_executions + executions),
                 **{k: outcome[k] for k in ('stop_reason', 'stop_scope') if outcome.get(k)},
                 **({'settlement': {'state': 'pending'}} if usage_rows and platform_run_id else {}),
             }

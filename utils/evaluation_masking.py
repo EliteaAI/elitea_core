@@ -12,8 +12,13 @@ Key masking does not catch every secret in free-text output. The per-step cap an
 ``store_tool_outputs`` opt-out are the actual mitigation.
 
 **Debt (#6886):** the key set and the patterns are copied from
-``tracing/utils/payload_capture.py``, not imported: plugins do not import each other. Two
+``tracing/utils/payload_capture.py``, not imported: elitea_core does not depend on tracing. Two
 matchers can drift. Replace both with one shared helper when #6886 lands (design §12).
+
+Matching is stricter than tracing's on purpose. Tracing masks a key that *contains* any entry, so
+``issue_key``, ``author``, ``session_id`` and ``primary_key`` are masked there. A stored trajectory
+is read for its arguments, and an expected-argument check accepts a masked value as present, so
+masking those would hide them and let any value pass. Here a key is split into words first.
 
 Stdlib only, no ORM.
 """
@@ -21,8 +26,8 @@ import json
 import re
 from typing import Any
 
-#: Copied from ``tracing/utils/payload_capture.py`` ``DEFAULT_SENSITIVE_KEYS``. Matching is
-#: case-insensitive and by substring, so ``github_token`` and ``X-Api-Key`` both match.
+#: Copied from ``tracing/utils/payload_capture.py`` ``DEFAULT_SENSITIVE_KEYS``. Matched by word, not
+#: substring (:func:`is_sensitive_key`), so ``github_token`` and ``X-Api-Key`` match, ``author`` does not.
 SENSITIVE_KEYS = frozenset({
     'password', 'passwd', 'pwd', 'secret', 'token', 'api_key', 'apikey',
     'api-key', 'auth', 'authorization', 'bearer', 'credential', 'credentials',
@@ -42,11 +47,49 @@ SECRET_PATTERNS = tuple(re.compile(p) for p in (
 _MAX_DEPTH = 20
 
 
+_CAMEL_BOUNDARY = re.compile(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])')
+_SEPARATORS = re.compile(r'[^a-z0-9]+')
+
+
+def _words(key: str) -> tuple:
+    """``'X-Api-Key'`` → ``('x', 'api', 'key')``; ``'issueKey'`` → ``('issue', 'key')``."""
+    return tuple(w for w in _SEPARATORS.split(_CAMEL_BOUNDARY.sub('_', key).lower()) if w)
+
+
+_SENSITIVE_WORDS = tuple(_words(k) for k in SENSITIVE_KEYS)
+#: Words too common to mask wherever they occur: ``key`` (``issue_key``, ``primary_key``), ``auth``
+#: (``auth_type``), ``session`` (``session_id``), ``cert`` (``cert_path``). Each is masked as the
+#: whole key, or as the last word after a qualifier that makes it a secret.
+_AMBIGUOUS_WORDS = {
+    'key': frozenset({'api', 'private', 'secret', 'access', 'signing', 'encryption', 'ssh', 'client',
+                      'master', 'license', 'account', 'subscription'}),
+    'auth': frozenset({'basic', 'http', 'proxy'}),
+    'session': frozenset(),
+    'cert': frozenset({'client', 'ssl', 'tls'}),
+}
+
+
 def is_sensitive_key(key) -> bool:
+    """Is ``key`` one of :data:`SENSITIVE_KEYS`, compared word by word?
+
+    The key's words must contain an entry's words in order (``refresh_token``, ``x-api-key``,
+    ``GitHub_Token``), except for :data:`_AMBIGUOUS_WORDS`, which need the whole key or a qualifier."""
     if not isinstance(key, str):
         return False
-    lowered = key.lower()
-    return any(sensitive in lowered for sensitive in SENSITIVE_KEYS)
+    words = _words(key)
+    if not words:
+        return False
+    for sensitive in _SENSITIVE_WORDS:
+        if len(sensitive) == 1 and sensitive[0] in _AMBIGUOUS_WORDS:
+            word = sensitive[0]
+            if words == sensitive or (len(words) >= 2 and words[-1] == word
+                                      and words[-2] in _AMBIGUOUS_WORDS[word]):
+                return True
+            continue
+        size = len(sensitive)
+        if any(words[i:i + size] == sensitive for i in range(len(words) - size + 1)):
+            return True
+    return False
 
 
 def mask_text(text: str) -> str:
