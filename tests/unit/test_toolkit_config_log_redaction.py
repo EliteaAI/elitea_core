@@ -83,6 +83,23 @@ def _toolkit_config_debug_calls():
     return calls
 
 
+def test_expanded_version_details_are_not_logged_whole():
+    # get_application_version_details_expanded returns tools with unsecreted settings; its debug
+    # log must name identifiers only, never the whole result dict.
+    utils_source = (APPLICATION_PY.parents[1] / "utils" / "application_utils.py").read_text()
+    func = next(n for n in ast.walk(ast.parse(utils_source))
+                if isinstance(n, ast.FunctionDef) and n.name == "get_application_version_details_expanded")
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "debug":
+            for arg in node.args[1:]:
+                assert not (isinstance(arg, ast.Name) and arg.id == "result"), f"line {node.lineno} logs result"
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.JoinedStr):
+                names = {v.value.id for v in first.values
+                         if isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name)}
+                assert "result" not in names, f"line {node.lineno} logs result"
+
+
 def test_toolkit_config_debug_logs_go_through_the_summary():
     calls = _toolkit_config_debug_calls()
     assert {c.args[0].value for c in calls} == {"Original toolkit_config: %s", "Expanded toolkit_config: %s"}
