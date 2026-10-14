@@ -346,6 +346,7 @@ def test_trajectory_rollup_averages_only_recorded_cases(execution):
     assert rollup['averages']['tool_calls'] == 2
     assert rollup['totals']['redundant_calls'] == 2
     assert rollup['step_limit_hits'] == 1
+    assert rollup['timed_out_cases'] == 1
     # The timed-out case's latency is not averaged in: it has no trajectory to compare against.
     assert rollup['average_latency_ms'] == 2000
     assert (rollup['p50_latency_ms'], rollup['p95_latency_ms']) == (1000, 3000)

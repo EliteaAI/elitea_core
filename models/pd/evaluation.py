@@ -44,6 +44,10 @@ _RUN_TRIGGERS = {EvalRunTrigger.offline_batch, EvalRunTrigger.on_demand}
 
 # Upper bound for a suite's ``meta.steps_limit``; the SDK default is 25.
 MAX_SUITE_STEPS_LIMIT = 100
+# ``meta.case_time_limit_seconds`` bounds (performance design §3.1). The ceiling stays well under
+# the run reaper's 30-minute quiet gap, which one case (agent + judge/code dispatches) must fit in.
+MIN_CASE_TIME_LIMIT_SECONDS = 10
+MAX_CASE_TIME_LIMIT_SECONDS = 900
 CONSUMPTION_BUDGET_SCOPES = ('per_case', 'per_run')
 #: What reaching ``per_run.tokens`` does: stop starting cases (default) or only report the breach.
 BUDGET_ON_BREACH = ('stop', 'report')
@@ -358,6 +362,18 @@ class EvalSuiteBaseModel(BaseModel):
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
                                   or not 1 <= limit <= MAX_SUITE_STEPS_LIMIT):
             raise ValueError(f'meta.steps_limit must be an integer 1..{MAX_SUITE_STEPS_LIMIT} or null')
+        return v
+
+    @field_validator('meta')
+    @classmethod
+    def _check_case_time_limit(cls, v: dict) -> dict:
+        # ``meta.case_time_limit_seconds`` stops the agent on a case of a batch run after that many
+        # seconds (performance design §3.1); absent or null keeps the 120 s default.
+        limit = (v or {}).get('case_time_limit_seconds')
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
+                                  or not MIN_CASE_TIME_LIMIT_SECONDS <= limit <= MAX_CASE_TIME_LIMIT_SECONDS):
+            raise ValueError('meta.case_time_limit_seconds must be an integer '
+                             f'{MIN_CASE_TIME_LIMIT_SECONDS}..{MAX_CASE_TIME_LIMIT_SECONDS} or null')
         return v
 
     @field_validator('meta')

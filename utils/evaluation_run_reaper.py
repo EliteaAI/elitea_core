@@ -15,9 +15,9 @@ which bumps ``updated_at``, and that commit is the heartbeat. A live run is neve
 longer than one case.
 
 :data:`RUN_STALE_AFTER_SECONDS` is therefore a *ceiling on one case*, not on a whole run.
-Worst case per case today is roughly the agent timeout (120s) plus a few 60s judge/code
-dispatches, so 30 minutes leaves a wide margin; a run of any length keeps itself alive by
-finishing cases.
+Worst case per case is the suite's agent time limit (120s by default, at most 900s, see
+``MAX_CASE_TIME_LIMIT_SECONDS``) plus a few 60s judge/code dispatches, so 30 minutes still leaves
+a margin; a run of any length keeps itself alive by finishing cases.
 
 Imports of pylon / ORM are local to the functions so the staleness decision itself stays
 importable and unit-testable without the platform present.

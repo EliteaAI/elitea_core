@@ -70,7 +70,11 @@ STOP_FAILURE = 'failure'
 #: slow agent) can hold a pool slot and heartbeat indefinitely. 6h is far longer than any sane
 #: dataset needs and short enough that a stuck run frees its slot within a working day.
 RUN_TIME_BUDGET_SECONDS = 6 * 60 * 60
-STATUS_SKIPPED = 'skipped'          # a code script returned 'na', or a trajectory/usage scope had nothing recorded
+# The agent's time on one case when the suite sets no ``case_time_limit_seconds``; equals
+# ``evaluation_agent_runner.DEFAULT_AGENT_TIMEOUT`` (not imported: this module stays import-light).
+DEFAULT_CASE_TIME_LIMIT_SECONDS = 120
+STATUS_SKIPPED = 'skipped'          # a code script returned 'na', a trajectory/usage scope had nothing recorded,
+                                    # or the agent reached the case time limit
 
 TRIGGER_OFFLINE_BATCH = 'offline_batch'
 TRIGGER_ON_DEMAND = 'on_demand'
@@ -197,6 +201,9 @@ def build_run_snapshot(
             'judge_model': suite.get('judge_model'),
             # null = the agent's own limit (§4.5); frozen so a later suite edit cannot change it.
             'steps_limit': suite.get('steps_limit'),
+            # Seconds the agent gets per case (performance §3.1); resolved, so the latency check
+            # always knows the cap it is scored against.
+            'case_time_limit_seconds': suite.get('case_time_limit_seconds') or DEFAULT_CASE_TIME_LIMIT_SECONDS,
             # {per_case, per_run} x {tokens, cost}; checked on the agent role only (§5.4).
             'consumption_budget': suite.get('consumption_budget'),
             # False drops tool outputs from the stored trajectories (Q-S5); absent/null keeps them.
@@ -680,9 +687,25 @@ def assemble_case_results(
 
     When live agent execution failed for this case (``_agent_error`` set by :func:`orchestrate_run`,
     H4), there is no output to score: every machine binding becomes an error row carrying that
-    reason and no judge/code call is dispatched; human bindings still emit their pending row."""
+    reason and no judge/code call is dispatched; human bindings still emit their pending row.
+
+    A case that reached the suite's time limit (``_agent_timeout``) is the exception: the agent was
+    too slow, not the platform broken, so every binding is skipped with a time-limit note instead
+    (performance §3.2) and the run counts the case in ``trajectory_rollup.timed_out_cases``."""
     bindings = sorted(snapshot.get('bindings') or [], key=lambda b: b.get('order_index', 0))
     results: List[dict] = []
+
+    time_limit = case.get('_agent_timeout')
+    if time_limit:
+        note = f'Skipped: the agent reached the case time limit ({time_limit} s).'
+        for b in bindings:
+            engine = effective_engine(b)
+            results.append(_result_row(
+                case['id'], engine=engine, status=STATUS_SKIPPED,
+                evidence=select_evidence(case, b.get('evidence_scope') or {}),
+                dimension_id=b.get('dimension_id'), platform_key=b.get('platform_key'),
+                verdict={'note': note}))
+        return results
 
     agent_error = case.get('_agent_error')
     if agent_error:
@@ -808,6 +831,9 @@ def run_one_case(
             case = {**case, 'structure': outcome.get('structure'),
                     '_agent_error':
                     outcome.get('error') or f"agent execution {outcome.get('status')}"}
+            if outcome.get('status') == 'timeout':
+                # An outcome of the agent under test, scored rather than errored (performance §3.2).
+                case['_agent_timeout'] = case_time_limit(snapshot)
         if outcome.get('execution') is not None:
             # Persisted as an eval_case_execution row by execute_run, never on the snapshot.
             case['_execution'] = {**outcome['execution'], 'status': outcome.get('status'),
@@ -856,7 +882,8 @@ def orchestrate_run(
     When ``agent_runner`` is supplied (offline-batch, H4) and a case has no recorded ``output``,
     the pinned agent is run over the case first to produce it (§14.2). A ``status='ok'`` outcome
     fills ``output``; any other outcome (unsupported/timeout/error) tags the case with
-    ``_agent_error`` so its machine bindings become error rows (E4). On-demand cases already carry
+    ``_agent_error`` so its machine bindings become error rows (E4), except a timeout, whose
+    bindings are skipped (performance §3.2). On-demand cases already carry
     their output and pass ``agent_runner=None``, so that path is unchanged.
 
     The headline goes through the one shared aggregation path (``aggregate_run_score``) over the
@@ -1211,7 +1238,13 @@ def poll_ledger_breakdown(fetch: Callable[[], List[dict]], *, sleep: Callable[[f
     return breakdown
 
 
-def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: int = 120,
+def case_time_limit(snapshot: dict) -> int:
+    """Seconds the agent gets on one case of this run (performance §3.1). A snapshot frozen before
+    ``case_time_limit_seconds`` existed ran with the fixed default, so it keeps it."""
+    return (snapshot.get('suite') or {}).get('case_time_limit_seconds') or DEFAULT_CASE_TIME_LIMIT_SECONDS
+
+
+def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: Optional[int] = None,
                        platform_run_id: Optional[str] = None, usage_entity: Optional[dict] = None):
     """Bind live agent execution (H4) into the ``agent_runner`` contract for an offline-batch run.
 
@@ -1247,6 +1280,7 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
     # is already fully known from `version_details`, so skip the live LLM call entirely.
     structure_only_run = snapshot.get('dataset_id') is None
     step_limit = (snapshot.get('suite') or {}).get('steps_limit')
+    timeout = timeout or case_time_limit(snapshot)
     # A snapshot frozen before the flag existed has no key: it stored outputs then, so keep doing so.
     store_tool_outputs = (snapshot.get('suite') or {}).get('store_tool_outputs') is not False
 

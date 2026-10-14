@@ -141,6 +141,22 @@ def test_suite_rejects_bad_steps_limit(pd, limit):
         pd.EvalSuiteCreateModel(application_id=1, meta={'steps_limit': limit})
 
 
+# --- performance §3.1: suite meta.case_time_limit_seconds ---------------------------------------
+
+@pytest.mark.parametrize('meta', [{}, {'case_time_limit_seconds': None}, {'case_time_limit_seconds': 10},
+                                  {'case_time_limit_seconds': 900},
+                                  {'case_time_limit_seconds': 300, 'steps_limit': 3}])
+def test_suite_accepts_case_time_limit(pd, meta):
+    assert pd.EvalSuiteCreateModel(application_id=1, meta=meta).meta == meta
+    assert pd.EvalSuiteUpdateModel(meta=meta).meta == meta
+
+
+@pytest.mark.parametrize('limit', [0, 9, 901, -1, 30.5, '60', True])
+def test_suite_rejects_bad_case_time_limit(pd, limit):
+    with pytest.raises(ValidationError, match='case_time_limit_seconds'):
+        pd.EvalSuiteCreateModel(application_id=1, meta={'case_time_limit_seconds': limit})
+
+
 # --- Q-S5: suite meta.store_tool_outputs ----------------------------------------------------------
 
 @pytest.mark.parametrize('meta', [{}, {'store_tool_outputs': None}, {'store_tool_outputs': True},
