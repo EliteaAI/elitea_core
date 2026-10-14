@@ -316,6 +316,12 @@ Run admin task migrate_eval_case_usage_columns with param: project_id=all
 # a same-named non-built-in entry is reported under "conflicts" and left alone.
 Run admin task seed_eval_trajectory_dimensions
 
+# Performance P-2: two built-in latency dimensions (performance.latency,
+# performance.final_answer_time) added to the same registry. Re-run the same task after
+# deploying this build; it inserts only the two new entries and reports the seven trajectory
+# checks as "present". No params. Idempotent.
+Run admin task seed_eval_trajectory_dimensions
+
 # Dimension tier=agent_adhoc scoping: eval_dimension gets an owning agent_id (nullable, for rows
 # created before this column existed, which stay visible everywhere). Fresh environments get it
 # from create_all; existing p_N schemas need the column backfilled. Per-project loop.

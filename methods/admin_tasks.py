@@ -879,9 +879,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Seven code-scored platform dimensions (trajectory.tool_match, .forbidden_tools,
         .tool_errors, .redundant_calls, .step_budget, .step_limit_hit, .guardrail_events; #6809
-        item 5). Their scripts ship with the plugin (utils/evaluation_trajectory_checks.py) and are
-        resolved at run time, so the registry rows carry only the definition and
-        meta.builtin_check.
+        item 5), plus the two latency dimensions performance.latency and .final_answer_time
+        (performance design §3.3). Their scripts ship with the plugin
+        (utils/evaluation_trajectory_checks.py) and are resolved at run time, so the registry rows
+        carry only the definition and meta.builtin_check.
 
         Insert-only and idempotent: an entry already present under its name is left as is, so an
         admin's weight/target edits survive a re-run. A same-named entry that is *not* the

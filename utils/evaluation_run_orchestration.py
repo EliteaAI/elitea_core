@@ -395,6 +395,8 @@ def trajectory_evidence(case: dict) -> Optional[dict]:
         'pause': trajectory.get('pause'),
         'metrics': execution.get('metrics') or {},
         'case_index': execution.get('case_index'),
+        # The cap the latency dimensions score against (performance §3.3).
+        'time_limit_seconds': case.get('_time_limit'),
     }
 
 
@@ -691,19 +693,34 @@ def assemble_case_results(
 
     A case that reached the suite's time limit (``_agent_timeout``) is the exception: the agent was
     too slow, not the platform broken, so every binding is skipped with a time-limit note instead
-    (performance §3.2) and the run counts the case in ``trajectory_rollup.timed_out_cases``."""
+    (performance §3.2) and the run counts the case in ``trajectory_rollup.timed_out_cases``. Only the
+    latency dimensions score it, at their worst value, ``exceeded`` (§3.3)."""
     bindings = sorted(snapshot.get('bindings') or [], key=lambda b: b.get('order_index', 0))
     results: List[dict] = []
+    case = {**case, '_time_limit': case_time_limit(snapshot)}
 
     time_limit = case.get('_agent_timeout')
     if time_limit:
+        from .evaluation_trajectory_checks import TIMEOUT_SCORED
         note = f'Skipped: the agent reached the case time limit ({time_limit} s).'
+        dims = snapshot.get('dimensions') or {}
         for b in bindings:
             engine = effective_engine(b)
+            evidence = select_evidence(case, b.get('evidence_scope') or {})
+            dim_id = b.get('dimension_id')
+            builtin = (dims.get(str(dim_id)) or {}).get('builtin_check')
+            if engine == ENGINE_CODE and builtin in TIMEOUT_SCORED:
+                # The worst value, scored without a dispatch: there is no trajectory to run on.
+                results.append(_result_row(
+                    case['id'], engine=engine, status=STATUS_OK, evidence=evidence,
+                    dimension_id=dim_id, platform_key=b.get('platform_key'),
+                    native_score=1.0, normalized_score=_normalize_code(1.0, snapshot, dim_id),
+                    verdict={'status': 'exceeded', 'passed': None,
+                             'note': f'Exceeded: the agent reached the case time limit ({time_limit} s).'}))
+                continue
             results.append(_result_row(
-                case['id'], engine=engine, status=STATUS_SKIPPED,
-                evidence=select_evidence(case, b.get('evidence_scope') or {}),
-                dimension_id=b.get('dimension_id'), platform_key=b.get('platform_key'),
+                case['id'], engine=engine, status=STATUS_SKIPPED, evidence=evidence,
+                dimension_id=dim_id, platform_key=b.get('platform_key'),
                 verdict={'note': note}))
         return results
 

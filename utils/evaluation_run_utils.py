@@ -27,7 +27,7 @@ from .evaluation_suite_utils import (
 )
 from .evaluation_human_score_utils import EvalRunNotFoundError
 from .run_id import PREDICT_RUN_ID_KWARGS_KEY
-from .evaluation_trajectory_checks import builtin_code
+from .evaluation_trajectory_checks import builtin_code, builtin_key
 from .evaluation_run_orchestration import (
     build_run_snapshot,
     execute_run,
@@ -76,18 +76,19 @@ def _binding_dict(b) -> dict:
 
 
 def _dimension_dict(d) -> dict:
-    code, return_contract = d.code, d.return_contract
+    code, return_contract, builtin_check = d.code, d.return_contract, None
     # A built-in platform check runs the script of the deployed plugin, not the copy projected
     # when the project attached it, so an upgrade reaches the next run without a resync.
     if d.tier == 'platform':
         builtin = builtin_code(d.meta)
         if builtin:
             code, return_contract = builtin
+            builtin_check = builtin_key(d.meta)
     return {
         'id': d.id, 'name': d.name, 'description': d.description,
         'scale_type': d.scale_type, 'scale_min': d.scale_min, 'scale_max': d.scale_max,
         'polarity': d.polarity, 'code': code, 'return_contract': return_contract,
-        'tier': d.tier,
+        'tier': d.tier, 'builtin_check': builtin_check,
     }
 
 

@@ -141,3 +141,52 @@ def test_timed_out_case_leaves_the_headline_to_the_others(orchestration):
     statuses = {r['dataset_case_id']: r['status'] for r in out['results']}
     assert statuses == {1: 'skipped', 2: 'ok'}
     assert out['headline_score'] is not None
+
+
+# --- P-2: the latency dimensions score a timed-out case as exceeded ------------------------
+
+def _latency_snapshot(limit):
+    dims = {'1': {'name': 'Accuracy'},
+            '2': {'name': 'trajectory.tool_errors', 'builtin_check': 'trajectory.tool_errors',
+                  'return_contract': 'number', 'scale_min': 0.0, 'scale_max': 10.0,
+                  'polarity': 'lower_better'},
+            '4': {'name': 'performance.latency', 'builtin_check': 'performance.latency',
+                  'return_contract': 'number', 'scale_min': 0.0, 'scale_max': 1.0,
+                  'polarity': 'lower_better'},
+            '5': {'name': 'performance.final_answer_time',
+                  'builtin_check': 'performance.final_answer_time', 'return_contract': 'number',
+                  'scale_min': 0.0, 'scale_max': 1.0, 'polarity': 'lower_better'}}
+    bindings = [*BINDINGS,
+                {'engine': 'code', 'dimension_id': 4, 'evidence_scope': {'trajectory': True}},
+                {'engine': 'code', 'dimension_id': 5, 'evidence_scope': {'trajectory': True}}]
+    return {'suite': {'case_time_limit_seconds': limit}, 'dimensions': dims,
+            'bindings': bindings, 'cases': []}
+
+
+def test_timed_out_case_is_exceeded_on_the_latency_dimensions(orchestration):
+    def boom(*a, **kw):
+        raise AssertionError('the exceeded rows are written without a dispatch')
+
+    _case, rows = orchestration.run_one_case(
+        {'id': 1, 'input': 'q'}, _latency_snapshot(45),
+        agent_runner=_outcome('timeout', 'agent timed out after 45s'), code_scorer=boom)
+    by_dim = {r['dimension_id']: r for r in rows}
+    for dim_id in (4, 5):
+        row = by_dim[dim_id]
+        assert (row['status'], row['native_score'], row['normalized_score']) == ('ok', 1.0, 0.0)
+        assert row['verdict']['status'] == 'exceeded'
+        assert '45 s' in row['verdict']['note']
+    assert [by_dim[d]['status'] for d in (1, 2, 3)] == ['skipped'] * 3
+
+
+def test_the_latency_script_sees_the_frozen_limit(orchestration):
+    seen = []
+    snapshot = _latency_snapshot(200)
+    case = {'id': 1, 'input': 'q', 'output': 'a',
+            '_execution': {'trajectory_state': 'recorded', 'trajectory': {'steps': []},
+                           'metrics': {'latency_ms': 50000}}}
+    orchestration.assemble_case_results(
+        case, snapshot,
+        code_scorer=lambda b, ev: seen.append(ev['trajectory']['time_limit_seconds'])
+        or {'status': 'na'})
+    assert seen == [200, 200, 200]
