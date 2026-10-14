@@ -307,6 +307,15 @@ Run admin task create_tables
 # Idempotent (alters only a column whose scale is not 9; projects without the table are skipped).
 Run admin task migrate_eval_case_usage_columns with param: project_id=all
 
+# Issue #6809 item 5: seven built-in code-scored trajectory checks (trajectory.tool_match,
+# .forbidden_tools, .tool_errors, .redundant_calls, .step_budget, .step_limit_hit,
+# .guardrail_events) added to the platform dimension registry centry.eval_platform_dimension.
+# Nothing seeds them at boot, so the platform catalog stays without them until this runs.
+# Projects get a copy only when someone attaches one from the catalog. Run after create_tables.
+# No params. Insert-only and idempotent: existing entries (and admin edits to them) are kept;
+# a same-named non-built-in entry is reported under "conflicts" and left alone.
+Run admin task seed_eval_trajectory_dimensions
+
 # Dimension tier=agent_adhoc scoping: eval_dimension gets an owning agent_id (nullable, for rows
 # created before this column existed, which stay visible everywhere). Fresh environments get it
 # from create_all; existing p_N schemas need the column backfilled. Per-project loop.
