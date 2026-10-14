@@ -300,6 +300,13 @@ Run admin task migrate_eval_dataset_columns with param: project_id=all
 # scorecard. No params. Idempotent: safe to run multiple times.
 Run admin task create_tables
 
+# Issue #6716: eval_case_usage.cost widened from NUMERIC(18,8) to NUMERIC(18,9), so the
+# nano-USD ledger figure it is settled from is stored without losing its last digit. SKIP on
+# fresh environments (create_all already uses NUMERIC(18,9)); REQUIRED on environments whose
+# eval_case_usage was created by an earlier build. Run it after create_tables. Per-project loop.
+# Idempotent (alters only a column whose scale is not 9; projects without the table are skipped).
+Run admin task migrate_eval_case_usage_columns with param: project_id=all
+
 # Dimension tier=agent_adhoc scoping: eval_dimension gets an owning agent_id (nullable, for rows
 # created before this column existed, which stay visible everywhere). Fresh environments get it
 # from create_all; existing p_N schemas need the column backfilled. Per-project loop.
