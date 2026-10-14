@@ -25,7 +25,8 @@ from ...utils.application_tools import (
     ConfigurationExpandError,
     wrap_provider_hub_secret_fields,
 )
-from ...utils.folder_access import require_folder_access, TOOLKIT_ENTITY_TYPES
+from ...utils.folder_access import require_folder_access, entity_access_error, TOOLKIT_ENTITY_TYPES
+from ...utils.permissions import ProjectPermissionChecker
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -40,6 +41,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, tool_id: int, **kwargs):
         # Check for expand parameter to return expanded credentials
         expand = request.args.get('expand', '').lower() == 'true'
+
+        if expand:
+            # Resolved secrets need edit rights; tool.details alone is granted to viewers.
+            denied, status_code = ProjectPermissionChecker(project_id).check_permissions(
+                ["models.applications.tool.update"]
+            )
+            if status_code != 200:
+                return denied, status_code
+            # Read-only folder access must not resolve secrets either.
+            error = entity_access_error(project_id, TOOLKIT_ENTITY_TYPES, tool_id, write=True)
+            if error is not None:
+                return error
 
         with db.with_project_schema_session(project_id) as session:
             result = session.query(EliteATool).filter(
