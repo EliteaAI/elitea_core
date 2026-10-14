@@ -84,6 +84,13 @@ def test_auto_request_reaches_worker_without_default_model_resolution(builder, a
         assert result['application']['version_details']['llm_settings']['selection'] == config['selection']
 
 
+def test_a_chat_request_can_route_as_an_agent_task(builder):
+    build, llm, rpc = builder
+    value = parsed(llm)
+    value.routing_surface = 'agent'
+    assert build(value, 2, skip_expansion=True)['llm']['kwargs']['routing_surface'] == 'agent'
+
+
 def test_fixed_predict_bypasses_auto_and_keeps_effort(builder):
     build, llm, rpc = builder
     result = build(parsed(llm, auto=False), 2, skip_expansion=True)
@@ -306,3 +313,13 @@ def test_all_existing_reload_merge_sites_use_the_application_request_class(model
         assert len(calls) == 1
         assert any(isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
                    and n.value.id == 'ApplicationChatRequest' and n.attr == 'from_orm' for n in ast.walk(tree))
+
+
+def test_predict_llm_routing_surface_survives_the_chat_request(builder, application_request_models):
+    build, llm, _ = builder
+    request = application_request_models.LLMChatRequest.model_validate({
+        'project_id': 7, 'user_input': 'Run the skill', 'routing_surface': 'agent',
+        'llm_settings': {'selection': {'mode': 'auto', 'profile_ref': {'id': 'v7-quality-cost', 'revision': 1},
+                                       'scope_mode': 'task_episode', 'reasoning': {'mode': 'auto'}}},
+    })
+    assert build(request, 2, skip_expansion=True)['llm']['kwargs']['routing_surface'] == 'agent'

@@ -280,7 +280,8 @@ def generate_predict_payload(
 
     if is_auto:
         model_parameters['selection'] = selection.model_dump()
-        model_parameters['routing_surface'] = 'agent' if isinstance(parsed, ApplicationChatRequest) else 'chat'
+        model_parameters['routing_surface'] = getattr(parsed, 'routing_surface', None) or (
+            'agent' if isinstance(parsed, ApplicationChatRequest) else 'chat')
     chat_history = [i.dict() for i in parsed.chat_history]
     user_input = parsed.user_input or 'continue'
 

@@ -1,5 +1,5 @@
 import uuid
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 
 from jinja2 import Environment, DebugUndefined
 from pydantic import BaseModel, Field, model_validator, ConfigDict
@@ -163,6 +163,10 @@ class LLMChatRequest(MergeUpdateBase):
     invoked_skills: Optional[List[dict]] = Field(
         default=None,
         description="Per-turn resolved skill bodies (from ~skill refs) injected at the LLM node",
+    )
+    routing_surface: Optional[Literal['chat', 'agent']] = Field(
+        default=None,
+        description="Auto routing hint; unset routes a plain chat request as a chat turn",
     )
     mcp_tokens: Optional[Dict[str, str | Dict[str, Any]]] = Field(
         default_factory=dict,
