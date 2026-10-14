@@ -202,14 +202,26 @@ class FakeQuery:
 class FakeSession:
     """SQLAlchemy session stub."""
 
-    def __init__(self, rows=None):
+    def __init__(self, rows=None, table_exists=True):
         self._rows = list(rows or [])
         self.added = []
         self.deleted = []
+        self.executed = []
         self.committed = False
+        self.table_exists = table_exists
 
     def query(self, _model):
         return FakeQuery(self._rows)
+
+    def execute(self, statement, params=None):
+        self.executed.append((str(statement), params))
+        if "to_regclass" in str(statement):
+            return types.SimpleNamespace(
+                scalar=lambda: params["name"] if self.table_exists else None
+            )
+        if "CREATE TABLE" in str(statement):
+            self.table_exists = True
+        return types.SimpleNamespace(scalar=lambda: None)
 
     def add(self, obj):
         self.added.append(obj)
@@ -835,8 +847,31 @@ class TestMigrationIdempotency(unittest.TestCase):
 
         self.assertEqual(result["templates_seeded"], 1)
 
+    def test_creates_missing_table_then_seeds(self):
+        rpc = _FakeRpc([{"id": 1}], existing_cfg=None)
+        session = FakeSession([], table_exists=False)
+
+        result = _load_migration_fn(rpc, {1: session})(param="project_id=1")
+
+        self.assertEqual(result["errors"], 0)
+        self.assertTrue(any("CREATE TABLE IF NOT EXISTS p_1.chat_templates" in sql
+                            for sql, _ in session.executed))
+        self.assertEqual(result["templates_seeded"], 1)
+        self.assertEqual(len(session.added), 1)
+        self.assertTrue(session.committed)
+
 
 class TestMigrationDryRun(unittest.TestCase):
+
+    def test_dry_run_does_not_create_missing_table(self):
+        rpc = _FakeRpc([{"id": 1}], existing_cfg=None)
+        session = FakeSession([], table_exists=False)
+
+        result = _load_migration_fn(rpc, {1: session})(param="project_id=1;dry_run")
+
+        self.assertEqual(result["templates_would_seed"], 1)
+        self.assertFalse(any("CREATE TABLE" in sql for sql, _ in session.executed))
+        self.assertEqual(len(session.added), 0)
 
     def test_dry_run_does_not_add_to_session(self):
         rpc = _FakeRpc([{"id": 1}], existing_cfg=None)

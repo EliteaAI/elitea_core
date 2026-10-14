@@ -51,6 +51,19 @@ from ..utils.skill_publish_schema import apply_skill_run_settings_column
 from ..utils.utils import get_public_project_id, make_yield_to_hub
 
 
+_CHAT_TEMPLATES_DDL = """
+CREATE TABLE IF NOT EXISTS p_{pid}.chat_templates (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(64) NOT NULL,
+    participants JSONB NOT NULL DEFAULT '[]'::jsonb,
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_chat_template_name_per_project UNIQUE (name)
+)
+"""
+
+
 class Method:  # pylint: disable=E1101,R0903,W0201
     """
         Method Resource
@@ -3519,6 +3532,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """
         import time as _time  # pylint: disable=C0415
         from tools import db  # pylint: disable=C0415
+        from sqlalchemy import text  # pylint: disable=C0415
         from ..models.chat_template import ChatTemplate  # pylint: disable=C0415
 
         param = kwargs.get("param", "") or ""
@@ -3613,6 +3627,22 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
                 # --- Step 2: seed chat_templates from legacy config ---
                 with db.get_session(project_id) as session:
+                    table_exists = session.execute(
+                        text("SELECT to_regclass(:name)"),
+                        {"name": f"p_{project_id}.chat_templates"},
+                    ).scalar() is not None
+                    if not table_exists:
+                        log.info(
+                            "%smigrate_project_chat_config: project %s — %s chat_templates table",
+                            prefix, project_id,
+                            "would create" if dry_run else "creating",
+                        )
+                        if dry_run:
+                            templates_seeded += 1
+                            continue
+                        session.execute(text(_CHAT_TEMPLATES_DDL.format(pid=project_id)))
+                        session.commit()
+
                     existing_count = session.query(ChatTemplate).count()
                     if existing_count > 0:
                         log.info(
@@ -3646,6 +3676,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                             participants=participants,
                             is_default=True,
                         ))
+                        session.commit()
                     templates_seeded += 1
 
             except Exception:  # pylint: disable=W0703
