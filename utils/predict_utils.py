@@ -356,6 +356,7 @@ def generate_predict_payload(
         'authorization_request_id': getattr(parsed, 'authorization_request_id', None),
         'execution_generation': getattr(parsed, 'execution_generation', None),
         'is_regenerate': getattr(parsed, 'is_regenerate', False),
+        'escalation': getattr(parsed, 'escalation', None),
         'meta': parsed.meta,
         'conversation_id': getattr(parsed, 'conversation_id', None) or parsed.stream_id,  # For planning toolkit scoping (fallback to stream_id)
         'persona': getattr(parsed, 'persona', 'generic'),  # Default persona for chat
