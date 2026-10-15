@@ -1,5 +1,5 @@
-from typing import Optional, List
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Any, Dict, Literal, Optional, List
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 class LLMSettingsRequest(BaseModel):
@@ -43,6 +43,31 @@ class LLMSettingsRequest(BaseModel):
     )
 
 
+class PredictLLMSettingsRequest(LLMSettingsRequest):
+    """/predict_llm settings: the model selection is honoured only on this endpoint."""
+    selection: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Model selection, the same shape agents and skill run settings store: "
+            "{'mode': 'auto', 'profile_ref': ..., 'scope_mode': ..., 'reasoning': ...} lets Auto pick the model "
+            "(leave model_name, model_project_id and reasoning_effort unset); {'mode': 'fixed', 'model_ref': ...} "
+            "pins one. Validated with the chat request."
+        )
+    )
+
+    @model_validator(mode='after')
+    def _drop_default_temperature_for_auto(self):
+        if (self.selection or {}).get('mode') == 'auto' and 'temperature' not in self.model_fields_set:
+            self.temperature = None
+        return self
+
+    @model_validator(mode='after')
+    def _drop_default_max_tokens_for_auto(self):
+        if (self.selection or {}).get('mode') == 'auto' and 'max_tokens' not in self.model_fields_set:
+            self.max_tokens = None
+        return self
+
+
 class ChatMessage(BaseModel):
     """Chat history message"""
     role: str = Field(description="Message role: 'user' or 'assistant'")
@@ -74,7 +99,7 @@ class LLMPredictRequest(BaseModel):
     user_input: str = Field(
         description="The message to send to the LLM"
     )
-    llm_settings: Optional[LLMSettingsRequest] = Field(
+    llm_settings: Optional[PredictLLMSettingsRequest] = Field(
         default=None,
         description="LLM model settings. If not provided, uses project's default model."
     )
@@ -115,7 +140,19 @@ class LLMPredictRequest(BaseModel):
         default=False,
         description="Include chat_history in response (only needed for blocking callers that read the result)"
     )
+    routing_surface: Literal['chat', 'agent'] = Field(
+        default='chat',
+        description=(
+            "How Auto model selection classifies the request: 'chat' for a chat turn, 'agent' for an agent task "
+            "(a skill run is an agent task). Only affects Auto."
+        )
+    )
     include_project_context: bool = Field(
         default=False,
         description="Deliver the project's context with the instructions, the same way agents and skill runs receive it"
     )
+
+    def routing_projection(self) -> Optional[dict]:
+        if not self.include_project_context:
+            return None
+        return {'instructions': self.instructions or '', 'task': self.user_input}
