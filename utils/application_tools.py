@@ -124,9 +124,10 @@ def _expand_toolkit_settings(credential_settings: dict, project_id: int, user_id
     if not credential_settings:
         return credential_settings
 
-    required_fields = {"elitea_title", "private"}
-    if set(credential_settings.keys()) != required_fields:
-        raise ValueError(f"Toolkit credential settings must contain only fields: {required_fields}")
+    allowed_fields = {"elitea_title", "private", "configuration_uuid", "configuration_project_id"}
+    keys = set(credential_settings.keys())
+    if not keys <= allowed_fields or not keys & {"elitea_title", "configuration_uuid"}:
+        raise ValueError(f"Toolkit credential settings must contain only fields: {allowed_fields}")
 
     credential_settings_expanded = context.rpc_manager.timeout(RPC_CALL_TIMEOUT).configurations_expand(
         project_id=project_id,
