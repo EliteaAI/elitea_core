@@ -33,6 +33,8 @@ def mods():
     env = load_module_with_stubs(
         PLUGIN_ROOT / "models" / "pd" / "task_envelope.py", f"{PKG}.models.pd.task_envelope")
     exc = load_module_with_stubs(PLUGIN_ROOT / "utils" / "exceptions.py", f"{PKG}.utils.exceptions")
+    load_module_with_stubs(
+        PLUGIN_ROOT / "utils" / "security_metrics_client.py", f"{PKG}.utils.security_metrics_client")
     caps = load_module_with_stubs(
         PLUGIN_ROOT / "utils" / "worker_capabilities.py", f"{PKG}.utils.worker_capabilities")
     yield types.SimpleNamespace(env=env, exc=exc, caps=caps)

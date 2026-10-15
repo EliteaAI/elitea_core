@@ -14,6 +14,7 @@ from ..models.pd.task_envelope import (
     PROFILE_GOVERNED, attach_envelope, read_envelope,
 )
 from .exceptions import WorkerCapabilityUnavailable
+from .security_metrics_client import SecurityCounter
 
 CAPABILITIES_EVENT = "task_node_capabilities"
 CAPABILITIES_REQUEST_EVENT = "task_node_capabilities_request"
@@ -32,28 +33,7 @@ ENVELOPED_TASKS = frozenset({
 })
 
 
-class _Counter:
-    """prometheus_client Counter when installed, always an in-process count as well."""
-
-    def __init__(self, name, documentation):
-        self._count = 0
-        self._prom = None
-        try:
-            from prometheus_client import Counter  # pylint: disable=C0415,E0401
-            self._prom = Counter(name, documentation)
-        except Exception:  # pylint: disable=W0718
-            pass
-
-    def inc(self):
-        self._count += 1
-        if self._prom is not None:
-            self._prom.inc()
-
-    def total(self):
-        return self._count
-
-
-GOVERNED_DISPATCH_UNAVAILABLE = _Counter(
+GOVERNED_DISPATCH_UNAVAILABLE = SecurityCounter(
     "governed_dispatch_unavailable_total",
     "Governed tasks refused at dispatch because no live worker supports them",
 )
