@@ -568,17 +568,35 @@ def get_project_context(project_id: int) -> dict:
     }
 
 
+def default_tool_llm_settings(model_name, model_project_id) -> dict:
+    """The worker reads only top-level llm_model/llm_settings; without them the SDK picks a model itself."""
+    if not model_name:
+        return {}
+    settings = {"model_name": model_name, "model_project_id": model_project_id, "max_tokens": 1024}
+    try:
+        configuration = rpc_tools.RpcMixin().rpc.call.configurations_get_configuration_model(
+            model_project_id, model_name
+        ) or {}
+        settings["openai_compatible"] = bool(configuration.get("openai_compatible", False))
+    except Exception as e:  # pylint: disable=W0703
+        log.warning(f"Failed to resolve openai_compatible for default model {model_name!r}: {e}")
+    return settings
+
+
 def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, tool_name: str, tool_params: dict, sid: str = None) -> dict:
     vault_client = VaultClient(project_id)
     token, auth_session = get_predict_token_and_session(project_id, user_id, sid)
     base_url = get_predict_base_url(project_id)
     llm_settings = this.for_module('configurations').module.get_default_model(project_id)
+    tool_llm_settings = default_tool_llm_settings(llm_settings.get("model_name"), llm_settings.get("model_project_id"))
     #
     # use default model settings
     llm_settings["max_tokens"] = 1024
     llm_settings["temperature"] = 0.7
     #
     payload = {
+        "llm_model": tool_llm_settings.get("model_name"),
+        "llm_settings": tool_llm_settings,
         "llm": {
             "kwargs": {
                 "model": llm_settings.get("model_name"),#llm_settings.model_name,
