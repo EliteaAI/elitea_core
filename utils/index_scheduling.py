@@ -4,7 +4,13 @@ from pylon.core.tools import web, log
 from sqlalchemy.orm.attributes import flag_modified
 from tools import db, VaultClient, rpc_tools, this
 from ..models.enums import InitiatorType
-from ..models.pd.index import compute_schedule_expiration
+from ..models.pd.index import (
+    MISSING_INDEX_GRACE,
+    MISSING_SINCE_KEY,
+    MissingIndexVerdict,
+    compute_schedule_expiration,
+    missing_index_verdict,
+)
 from ..utils.application_tools import (
     IndexMetaLockTimeoutError,
     update_toolkit_index_meta_history_with_failed_state,
@@ -123,6 +129,73 @@ def stamp_schedule_last_run(project_session, toolkit, index_meta_id, user_id, ct
     ):
         return current_time
     return None
+
+
+def handle_missing_index_row(project_session, toolkit, index_meta_id, observed_entry, ctx,
+                             now: datetime | None = None) -> bool:
+    """Start, wait out or conclude the missing-index grace. True once the index's schedules are removed."""
+    now = now or datetime.now(UTC)
+    try:
+        project_session.refresh(toolkit)
+        live_indexes_meta = toolkit.meta.get('indexes_meta', {})
+        live_entry = live_indexes_meta.get(index_meta_id)
+        if live_entry is None or live_entry != observed_entry:
+            log.info(f"{ctx} schedules changed mid-tick, keeping them")
+            return False
+        verdict = missing_index_verdict(live_entry, now)
+        if verdict == MissingIndexVerdict.WAIT:
+            log.warning(f"{ctx} index not found in database since {live_entry[MISSING_SINCE_KEY]}")
+            return False
+        if verdict == MissingIndexVerdict.START_GRACE:
+            live_entry[MISSING_SINCE_KEY] = now.isoformat()
+        else:
+            live_indexes_meta.pop(index_meta_id)
+        flag_modified(toolkit, 'meta')
+        project_session.commit()
+    except Exception as exc:  # pylint: disable=W0703
+        try:
+            project_session.rollback()
+        except Exception:  # pylint: disable=W0703
+            pass
+        log.exception(f"{ctx} failed to record the missing index: {exc!r}")
+        return False
+    if verdict == MissingIndexVerdict.START_GRACE:
+        log.warning(f"{ctx} index not found in database; its schedules are removed if it is "
+                    f"still missing after {describe_grace(MISSING_INDEX_GRACE)}")
+        return False
+    owners = sorted(observed_entry.get('schedules', {}))
+    log.warning(f"{ctx} index not found in database for {describe_grace(MISSING_INDEX_GRACE)}, "
+                f"removed its schedules (owners {owners})")
+    return True
+
+
+def clear_index_missing_since(project_session, toolkit, index_meta_id, ctx) -> None:
+    """End the missing-index grace for an index whose row is back."""
+    _write_index_entry_field(
+        project_session, toolkit, index_meta_id, ctx, MISSING_SINCE_KEY, None,
+        "a later miss may remove its schedules without the full grace",
+    )
+
+
+def _write_index_entry_field(project_session, toolkit, index_meta_id, ctx, key, value,
+                             consequence: str) -> None:
+    try:
+        project_session.refresh(toolkit)
+        live_entry = toolkit.meta.get('indexes_meta', {}).get(index_meta_id)
+        if live_entry is None:
+            return
+        if value is None:
+            live_entry.pop(key, None)
+        else:
+            live_entry[key] = value
+        flag_modified(toolkit, 'meta')
+        project_session.commit()
+    except Exception as exc:  # pylint: disable=W0703
+        try:
+            project_session.rollback()
+        except Exception:  # pylint: disable=W0703
+            pass
+        log.exception(f"{ctx} failed to write {key}: {exc!r}; {consequence}")
 
 
 # Distinguishes "compare against no stored deadline" from "do not compare at all", since a
