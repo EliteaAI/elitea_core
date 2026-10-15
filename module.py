@@ -14,6 +14,7 @@ from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
+from .utils.governance import init_governance
 from .utils.run_id import stamp_predict_run_id
 from .utils.scheduler_bindings import (
     advertised_bindings,
@@ -586,6 +587,9 @@ class Module(module.ModuleModel):
         Thread(target=_run, daemon=True).start()
 
     def init(self):
+        # Fail fast on a misconfigured governance flag, before anything can consult it
+        init_governance(self)
+        #
         self.bp = self.descriptor.init_all(url_prefix="/app")
 
         # Expose elitea_core config as a shared tool for cross-plugin access
