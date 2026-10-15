@@ -1218,12 +1218,17 @@ def usage_meta(rows: List[dict], budget: Optional[dict]) -> dict:
     return meta
 
 
-def trajectory_meta(rows: List[dict]) -> dict:
+def trajectory_meta(rows: List[dict], time_limit: Optional[int] = None) -> dict:
     """``EvalRun.meta`` key for the run's trajectory rollup, left out when no case reached the
-    agent. Written once at the terminal write; settlement does not touch trajectories."""
+    agent. Written once at the terminal write; settlement does not touch trajectories. The frozen
+    case time limit rides along so ``timed_out_cases`` can be read without the snapshot."""
     from .evaluation_execution import trajectory_rollup
     rollup = trajectory_rollup(rows)
-    return {'trajectory_rollup': rollup} if rollup is not None else {}
+    if rollup is None:
+        return {}
+    if time_limit is not None:
+        rollup['case_time_limit_seconds'] = time_limit
+    return {'trajectory_rollup': rollup}
 
 
 #: The usage queue flushes every 5 s (``queue_flush_interval_seconds``); the first read waits a
@@ -1638,7 +1643,7 @@ def execute_run(
             run.meta = {
                 **(run.meta or {}),
                 **usage_meta(usage_rows, budget),
-                **trajectory_meta(persisted_executions + executions),
+                **trajectory_meta(persisted_executions + executions, case_time_limit(snapshot)),
                 **{k: outcome[k] for k in ('stop_reason', 'stop_scope') if outcome.get(k)},
                 **({'settlement': {'state': 'pending'}} if usage_rows and platform_run_id else {}),
             }

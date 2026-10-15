@@ -385,6 +385,13 @@ def test_trajectory_meta_omits_the_key_without_rows(orchestration):
     assert orchestration.trajectory_meta([_exec_row('recorded')])['trajectory_rollup']['recorded_cases'] == 1
 
 
+def test_trajectory_meta_carries_the_case_time_limit(orchestration):
+    rollup = orchestration.trajectory_meta([_exec_row('recorded')], 10)['trajectory_rollup']
+    assert rollup['case_time_limit_seconds'] == 10
+    assert 'case_time_limit_seconds' not in orchestration.trajectory_meta([_exec_row('recorded')])['trajectory_rollup']
+    assert orchestration.trajectory_meta([], 10) == {}
+
+
 def _sized(execution, total):
     """A trajectory whose ``json.dumps(..., ensure_ascii=False)`` is exactly ``total`` long."""
     import json
