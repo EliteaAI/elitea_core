@@ -16,6 +16,14 @@ import arbiter  # pylint: disable=E0401
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.governance import init_governance
 from .utils.run_id import stamp_predict_run_id
+from .utils.worker_capabilities import (
+    CAPABILITIES_EVENT,
+    CAPABILITIES_REQUEST_EVENT,
+    DEFAULT_CAPABILITY_TTL_S,
+    WITHHOLD_EVENT,
+    WorkerCapabilityRegistry,
+    apply_envelope_gate,
+)
 from .utils.scheduler_bindings import (
     advertised_bindings,
     build_scheduler_sync_plan,
@@ -132,6 +140,10 @@ class Module(module.ModuleModel):
         self.active_index_tasks_lock = Lock()
         self.not_starting_task_event = Event()
         self.not_starting_task_event.set()
+        # Live worker capabilities (C-1009, #6940); only consulted for governed dispatch
+        self.worker_capabilities = WorkerCapabilityRegistry(
+            ttl_s=self.descriptor.config.get("capability_ttl_s", DEFAULT_CAPABILITY_TTL_S),
+        )
         # logs in-memory cache
         self.task_logs = {}
         #
@@ -661,6 +673,11 @@ class Module(module.ModuleModel):
                     closed_scope, project_id,
                 )
                 raise BudgetDoorClosedError(scope=closed_scope, project_id=project_id)
+            # Versioned worker envelope; a governed task with no capable worker is refused here
+            apply_envelope_gate(
+                args[0] if args else kwargs.get("name"),
+                kwargs, self.governance_profile, self.worker_capabilities,
+            )
             stamp_predict_run_id(kwargs)
             return _original_start_task(*args, **kwargs)
 
@@ -729,6 +746,10 @@ class Module(module.ModuleModel):
         self.mcp_prebuilt_configs = {}
         self.event_node.subscribe("application_mcp_prebuilt_config_collected", self.mcp_prebuilt_config_collected)
         self.event_node.emit("application_mcp_prebuilt_config_request", dict())
+        # Worker capabilities: listen first, then ask workers that are already running
+        self.event_node.subscribe(CAPABILITIES_EVENT, self.worker_capabilities.on_capabilities)
+        self.event_node.subscribe(WITHHOLD_EVENT, self.worker_capabilities.on_withhold)
+        self.event_node.emit(CAPABILITIES_REQUEST_EVENT, dict())
         #
         self.application_icon_path.mkdir(parents=True, exist_ok=True)
         self.skill_icon_path.mkdir(parents=True, exist_ok=True)
@@ -941,6 +962,8 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("application_toolkits_collected", self.toolkits_collected)
         self.event_node.unsubscribe("application_file_loaders_collected", self.index_types_collected)
         self.event_node.unsubscribe("application_mcp_prebuilt_config_collected", self.mcp_prebuilt_config_collected)
+        self.event_node.unsubscribe(CAPABILITIES_EVENT, self.worker_capabilities.on_capabilities)
+        self.event_node.unsubscribe(WITHHOLD_EVENT, self.worker_capabilities.on_withhold)
         # Voice TTS/ASR events
         self.event_node.unsubscribe("voice_tts_audio_chunk", self.voice_tts_audio_chunk)
         self.event_node.unsubscribe("voice_tts_done", self.voice_tts_done)

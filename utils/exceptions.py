@@ -67,6 +67,23 @@ class MaintenanceInProgressError(Exception):
         super().__init__(f"Maintenance mode active - task '{task_name}' rejected")
 
 
+class WorkerCapabilityUnavailable(Exception):
+    """Raised by task_node.start_task when a governed task has no live worker that supports it.
+
+    Governed dispatch never falls back to an incompatible worker (C-1009, #6940).
+    """
+
+    reason_code = "WORKER_CAPABILITY_UNAVAILABLE"
+
+    def __init__(self, task_name: str = "?", missing: tuple = ()):
+        self.task_name = task_name
+        self.missing = tuple(missing)
+        super().__init__(
+            f"{self.reason_code}: no live worker supports task '{task_name}' "
+            f"(required: {', '.join(self.missing) or '-'})"
+        )
+
+
 # Twinned with usage/hooks.py's BUDGET_ERROR_MESSAGE/BUDGET_ERROR_CODES — edit both together;
 # the SDK and the UI match on this body, never on the status code
 BUDGET_ERROR_MESSAGE = (
