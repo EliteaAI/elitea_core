@@ -226,6 +226,9 @@ def build_run_snapshot(
                 'code': d.get('code'),
                 'return_contract': d.get('return_contract', 'bool'),
                 'tier': d.get('tier'),
+                # Names the built-in check, so a timed-out case can score the latency dimensions
+                # as exceeded without a dispatch (performance §3.3).
+                'builtin_check': d.get('builtin_check'),
             }
             for d in dimensions
         },

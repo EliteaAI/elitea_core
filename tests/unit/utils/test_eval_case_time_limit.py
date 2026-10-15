@@ -190,3 +190,13 @@ def test_the_latency_script_sees_the_frozen_limit(orchestration):
         code_scorer=lambda b, ev: seen.append(ev['trajectory']['time_limit_seconds'])
         or {'status': 'na'})
     assert seen == [200, 200, 200]
+
+
+def test_snapshot_keeps_the_builtin_check(orchestration):
+    # The exceeded rows key on the frozen dimension's builtin_check, so the snapshot must carry it.
+    frozen = orchestration.build_run_snapshot(
+        suite={'id': 1, 'name': 's'}, **{**SNAPSHOT_COMMON, 'dimensions': [
+            {'id': 4, 'name': 'performance.latency', 'builtin_check': 'performance.latency'},
+            {'id': 1, 'name': 'Accuracy'}]})
+    assert frozen['dimensions']['4']['builtin_check'] == 'performance.latency'
+    assert frozen['dimensions']['1']['builtin_check'] is None
