@@ -10,7 +10,7 @@ from ..models.pd.skill_run_settings import SkillRunSettingsWriteModel
 
 MODEL_BINDING_FIELDS = ('model_name', 'model_project_id', 'selection')
 PROJECT_CONTEXT_TOGGLE = TypeAdapter(bool)
-SHARED_MODEL_REQUIRED = 'Select a shared model or clear the model to publish this skill'
+SHARED_MODEL_REQUIRED = 'Select a shared model to publish this skill'
 
 
 def selection_mode(llm_settings: Optional[dict]) -> Optional[str]:
