@@ -68,3 +68,23 @@ def test_a_skill_test_can_route_as_an_agent_task(predict_llm):
 def test_unknown_routing_surfaces_are_rejected(predict_llm):
     with pytest.raises(ValidationError):
         predict_llm.LLMPredictRequest(user_input='hi', routing_surface='pipeline')
+
+
+def test_auto_without_max_tokens_leaves_the_output_uncapped(predict_llm):
+    assert chat_llm_settings(predict_llm, {'selection': AUTO})['max_tokens'] is None
+
+
+def test_fixed_models_keep_the_default_max_tokens(predict_llm):
+    assert chat_llm_settings(predict_llm, {'model_name': 'gpt-4.1'})['max_tokens'] == 2048
+
+
+def test_project_context_requests_route_on_their_own_instructions(predict_llm):
+    request = predict_llm.LLMPredictRequest(
+        user_input='hi', instructions='Review it.', include_project_context=True,
+    )
+
+    assert request.routing_projection() == {'instructions': 'Review it.', 'task': 'hi'}
+
+
+def test_requests_without_project_context_route_on_the_full_prompt(predict_llm):
+    assert predict_llm.LLMPredictRequest(user_input='hi', instructions='Review it.').routing_projection() is None

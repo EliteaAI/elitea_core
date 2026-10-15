@@ -116,6 +116,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                 await_task_timeout=await_task_timeout,
                 user_id=auth.current_user().get("id"),
                 return_chat_history=predict_request.return_chat_history,
+                routing_projection=predict_request.routing_projection(),
             )
         except ValidationError as e:
             return e.errors(), 400

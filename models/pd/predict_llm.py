@@ -61,6 +61,12 @@ class PredictLLMSettingsRequest(LLMSettingsRequest):
             self.temperature = None
         return self
 
+    @model_validator(mode='after')
+    def _drop_default_max_tokens_for_auto(self):
+        if (self.selection or {}).get('mode') == 'auto' and 'max_tokens' not in self.model_fields_set:
+            self.max_tokens = None
+        return self
+
 
 class ChatMessage(BaseModel):
     """Chat history message"""
@@ -145,3 +151,8 @@ class LLMPredictRequest(BaseModel):
         default=False,
         description="Deliver the project's context with the instructions, the same way agents and skill runs receive it"
     )
+
+    def routing_projection(self) -> Optional[dict]:
+        if not self.include_project_context:
+            return None
+        return {'instructions': self.instructions or '', 'task': self.user_input}
