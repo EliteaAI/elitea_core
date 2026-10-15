@@ -60,3 +60,12 @@ cost_budgets:
       project_monthly_limit: null
       personal_project_monthly_limit: null
       user_monthly_limit: null
+
+# Enterprise credential governance (C-1009, #6754). Operator-owned: set it here in the
+# deployment config only. Deliberately NOT declared in admin_schema.json, so the admin
+# config editor cannot change it. Default off = legacy behaviour, nothing changes.
+# When enabled is true, policy_revision must be a non-empty string; a non-boolean
+# enabled value or a missing revision fails plugin startup.
+enterprise_credential_governance:
+  enabled: false
+  policy_revision: null
