@@ -13,7 +13,7 @@ from .llm_settings import normalize_runtime_max_tokens
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates
 from .skill_utils import consume_message_skills, resolve_runtime_skills
-from .subagent_prefetch import attach_subagent_prefetch
+from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
 from ..models.elitea_tools import EliteATool
 from ..models.enums.all import AgentTypes
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
@@ -99,6 +99,28 @@ def get_system_token(project_id: int) -> Optional[str]:
         create_if_not_exists=True
     )
     return system_token
+
+
+def get_expansion_user_id(project_id: int, user_id: int, is_system_user: bool) -> int:
+    # System-token runs expand as the project system user, exactly as the runtime's own fetch did
+    if not is_system_user:
+        return user_id
+    system_user = rpc_tools.RpcMixin().rpc.timeout(2).admin_get_project_system_user(project_id)
+    if not system_user:
+        raise PredictPayloadError(f"Project {project_id} has no system user")
+    return system_user['id']
+
+
+def expand_top_level_version(parsed: ApplicationChatRequest, expansion_user_id: int) -> Optional[dict]:
+    """Expanded details for a request that names a version but carries none, so the runtime needn't fetch them."""
+    if parsed.version_details or not (parsed.application_id and parsed.version_id):
+        return None
+    expanded = expand_version_for_runtime(
+        parsed.project_id, parsed.application_id, parsed.version_id, expansion_user_id,
+    )
+    if 'error' in expanded:
+        raise PredictPayloadError(expanded['error'])
+    return expanded
 
 
 def get_session_cookie_name() -> Optional[str]:
@@ -214,11 +236,20 @@ def generate_predict_payload(
     :param user_id: User ID
     :param sid: Socket.IO session id
     :param is_system_user: no real user behind the run (cron); implies skip_expansion
-    :param skip_expansion: skip tool/configuration expansion, but keep the real user's identity
+    :param skip_expansion: skip internal MCP resolution of request tools, but keep the real user's identity
     :return:
     """
     vault_client = VaultClient(parsed.project_id)
     skip_expansion = skip_expansion or is_system_user
+
+    expansion_user_id = user_id
+    if isinstance(parsed, ApplicationChatRequest) and parsed.application_id:
+        expansion_user_id = get_expansion_user_id(parsed.project_id, user_id, is_system_user)
+        expanded = expand_top_level_version(parsed, expansion_user_id)
+        if expanded is not None:
+            # Same shape chat sends: tools travel inside version_details, not the raw ORM rows
+            parsed.version_details = expanded
+            parsed.tools = []
 
     session_cookie_name = None
     if is_system_user:
@@ -500,7 +531,8 @@ def generate_predict_payload(
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
 
-        attach_subagent_prefetch(payload, parsed.project_id, user_id)
+    if isinstance(parsed, ApplicationChatRequest):
+        attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)
 
     return payload
 

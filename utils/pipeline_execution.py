@@ -15,7 +15,7 @@ This module consolidates that shared logic to eliminate duplication.
 from typing import Optional
 
 from pylon.core.tools import log
-from tools import db, rpc_tools
+from tools import db, rpc_tools, this
 
 from ..models.all import Application, ApplicationVersion
 from ..models.conversation import Conversation
@@ -174,6 +174,24 @@ def create_trigger_run_conversation(
             f"response_id={response_msg_group.uuid}"
         )
         return str(conversation.uuid), pipeline_participant.id, str(response_msg_group.uuid)
+
+
+def finish_trigger_run_with_error(project_id: int, response_message_id: str, error) -> None:
+    """End a triggered run's placeholder message with the dispatch error, so History shows why it failed."""
+    message = f"Pipeline run could not start: {error}"
+    try:
+        this.module.context.event_manager.fire_event('chat_message_stream_end', {
+            'message_id': response_message_id,
+            'content': message,
+            'response_metadata': {
+                'project_id': project_id,
+                'chat_project_id': project_id,
+                'is_error': True,
+                'error': message,
+            },
+        })
+    except Exception:  # pylint: disable=W0703
+        log.exception("Could not record trigger run failure: message_id=%s", response_message_id)
 
 
 def execute_pipeline_via_predict_sio(

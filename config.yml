@@ -15,9 +15,12 @@ max_published_versions_per_agent: 3
 # Stop the worker when a blocking predict exceeds await_task_timeout
 cancel_on_timeout: true
 
-# Send expanded sub-agent versions with the predict task (runtime falls back to fetching on a miss)
+# Bounds for expanding sub-agents before a predict; what is cut off is fetched by the runtime
 predict:
-  prefetch_subagents: true
+  subagent_prefetch:
+    max_nodes: 200
+    max_bytes: 15728640
+    max_seconds: 40
 
 scheduler:
   pipeline_scheduling:
