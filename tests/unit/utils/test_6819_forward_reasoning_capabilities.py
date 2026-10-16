@@ -49,7 +49,10 @@ def builder(models_path):
                  'AgentTypes': NS(pipeline=NS(value='pipeline')), 'resolve_application_name': lambda p: 'fixture',
                  'resolve_runtime_skills': lambda version: [], 'consume_message_skills': lambda text, skills: (text, []),
                  'merge_mention_candidates': lambda attached, chat: [*attached, *chat],
-                 'merge_disclosable_skills': lambda own, chat: [*own, *chat]}
+                 'merge_disclosable_skills': lambda own, chat: [*own, *chat],
+                 'get_expansion_user_id': lambda project_id, user_id, is_system_user: user_id,
+                 'expand_top_level_version': lambda parsed, user_id: None,
+                 'attach_subagent_prefetch': lambda payload, project_id, user_id: None}
     exec(compile(ast.Module([function], []), str(path), 'exec'), namespace)
 
     def build(model_row, **settings):

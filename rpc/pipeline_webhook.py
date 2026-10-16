@@ -18,6 +18,7 @@ from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
+    finish_trigger_run_with_error,
 )
 
 
@@ -93,6 +94,9 @@ def execute_pipeline_webhook(
     except PoolSaturationError:
         # Mark the response placeholder as not streaming to avoid stuck History entry
         _mark_response_failed(project_id, response_message_id)
+        raise
+    except Exception as exc:
+        finish_trigger_run_with_error(project_id, response_message_id, exc)
         raise
 
     log.info(

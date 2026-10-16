@@ -69,7 +69,7 @@ def _install_tree(sp, monkeypatch, tree, denied=(), failing=(), raising=(), real
             return {'error': 'not found'}
         return {'id': version_id, 'tools': tree.get((application_id, version_id), [])}
 
-    monkeypatch.setattr(sp, 'expand_version_for_sdk', fake_expand)
+    monkeypatch.setattr(sp, 'expand_version_for_runtime', fake_expand)
     if not real_permission_check:
         monkeypatch.setattr(sp, '_can_read_version_details', lambda project_id, user_id: True)
     monkeypatch.setattr(sp, '_denied_application_ids', lambda project_id, app_ids, user_id: set(denied))
@@ -265,7 +265,7 @@ def test_expand_calls_the_module_directly_not_rpc(sp, monkeypatch):
     monkeypatch.setitem(sys.modules, 'plugins.elitea_core.utils.internal_tools', internal_tools)
     monkeypatch.setitem(sys.modules, 'plugins.elitea_core.utils.skill_utils', skill_utils)
 
-    result = sp.expand_version_for_sdk(7, 1, 11, 5)
+    result = sp.expand_version_for_runtime(7, 1, 11, 5)
 
     assert result['id'] == 11
     assert calls == [{'project_id': 7, 'application_id': 1, 'version_id': 11, 'user_id': 5}]
@@ -275,4 +275,36 @@ def test_expand_returns_the_error_dict_unchanged(sp, monkeypatch):
     module = types.SimpleNamespace(get_application_version_details_expanded=lambda **kwargs: {'error': 'not found'})
     monkeypatch.setattr(sp, 'this', types.SimpleNamespace(module=module))
 
-    assert sp.expand_version_for_sdk(7, 1, 11, 5) == {'error': 'not found'}
+    assert sp.expand_version_for_runtime(7, 1, 11, 5) == {'error': 'not found'}
+
+
+def test_default_bounds_are_sanity_limits(sp):
+    # #7064: every predict path now prefetches, so the bounds only stop broken trees
+    assert sp.DEFAULT_MAX_NODES >= 1000
+    assert sp.DEFAULT_MAX_BYTES >= 20 * 1024 * 1024
+
+
+def test_attach_no_longer_reads_a_config_switch(sp, monkeypatch):
+    # #7064 removed predict.prefetch_subagents: the runtime should not have to fetch sub-agents itself
+    _install_tree(sp, monkeypatch, {})
+    monkeypatch.setattr(sp, 'log', types.SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None))
+    monkeypatch.setattr(sp, 'this', types.SimpleNamespace(
+        descriptor=types.SimpleNamespace(config={'predict': {'prefetch_subagents': False}})))
+    payload = {'application': {'id': 1, 'version_id': 11}, 'tools': [_app_tool(2, 22)]}
+
+    sp.attach_subagent_prefetch(payload, 7, 5)
+
+    assert list(payload['application']['subagent_version_details']) == ['2:22']
+
+
+def test_a_broken_sub_agent_never_stops_the_run(sp, monkeypatch):
+    # The runtime builds every sub-agent up front and skips one it cannot load, so a pipeline whose
+    # unused branch holds a broken sub-agent still runs. The prefetch must keep that, not fail the predict.
+    _install_tree(sp, monkeypatch, {}, failing={(2, 22)}, raising={(3, 33)})
+    monkeypatch.setattr(sp, 'log', types.SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None))
+    payload = {'application': {'id': 1, 'version_id': 11},
+               'tools': [_app_tool(2, 22), _app_tool(3, 33), _app_tool(4, 44)]}
+
+    sp.attach_subagent_prefetch(payload, 7, 5)
+
+    assert list(payload['application']['subagent_version_details']) == ['4:44']

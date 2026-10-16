@@ -29,7 +29,7 @@ from ...utils.mcp_versioning import (
     instructions_sha256,
     sanitize_mcp_settings_update,
 )
-from ...utils.subagent_prefetch import expand_version_for_sdk
+from ...utils.subagent_prefetch import expand_version_for_runtime
 from ...utils.utils import mask_secret
 from ....configurations.utils import expand_configuration
 from ...utils.constants import PROMPT_LIB_MODE
@@ -129,9 +129,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
         unsecret = check_secret_header(received_secret, project_id=project_id)
         if not unsecret:
             return {'error': 'Invalid secret header'}, 400
+        # Platform predicts send expanded details up front (#7064); anything here is an outside caller
+        log.info(
+            "[version_patch] expanded version fetch: project=%s application=%s version=%s user=%s",
+            project_id, application_id, version_id, user_id,
+        )
 
         # Shared with the predict-time sub-agent prefetch so both paths return identical details
-        version_details = expand_version_for_sdk(
+        version_details = expand_version_for_runtime(
             project_id=project_id,
             application_id=application_id,
             version_id=version_id,

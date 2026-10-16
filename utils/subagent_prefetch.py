@@ -8,15 +8,16 @@ from tools import this
 from .folder_access import APPLICATION_ENTITY_TYPES, resolve_entities_access
 
 VERSION_DETAILS_PERMISSION = 'models.applications.version.details'
-DEFAULT_MAX_NODES = 100
-DEFAULT_MAX_BYTES = 2 * 1024 * 1024
+# Real trees stay far below these; anything skipped is still fetched by the runtime itself
+DEFAULT_MAX_NODES = 1000
+DEFAULT_MAX_BYTES = 20 * 1024 * 1024
 
 
 def prefetch_key(application_id, version_id) -> str:
     return f"{application_id}:{version_id}"
 
 
-def expand_version_for_sdk(project_id: int, application_id: int, version_id: int, user_id: int) -> dict:
+def expand_version_for_runtime(project_id: int, application_id: int, version_id: int, user_id: int) -> dict:
     """Version details exactly as the SDK receives them from PATCH version; {'error': ...} on failure."""
     # Same-plugin call: go through the module, an RPC would be a pylon_main -> pylon_main round trip
     version_details = this.module.get_application_version_details_expanded(
@@ -134,7 +135,7 @@ def collect_subagent_version_details(
                 if len(result) >= max_nodes or app_id in denied or app_id not in summaries:
                     continue
                 try:
-                    details = expand_version_for_sdk(project_id, app_id, ver_id, user_id)
+                    details = expand_version_for_runtime(project_id, app_id, ver_id, user_id)
                 except Exception as e:
                     log.warning(f"[subagent_prefetch] skipping {app_id}/{ver_id}: {e}")
                     continue
@@ -159,8 +160,6 @@ def attach_subagent_prefetch(payload: dict, project_id: int, user_id: int) -> No
     application = payload.get('application')
     try:
         if not isinstance(application, dict):
-            return
-        if not (this.descriptor.config.get('predict') or {}).get('prefetch_subagents', True):
             return
         started = monotonic()
         application['subagent_version_details'] = collect_subagent_version_details(

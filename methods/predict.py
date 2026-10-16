@@ -13,6 +13,7 @@ from ..utils.budget_door import schema_may_use_llm
 from ..utils.utils import verify_signature
 from ..utils.exceptions import VerifySignatureError, PoolSaturationError
 from ..utils.sio_utils import SioEvents
+from ..utils.vectorstore import get_pgvector_connection_string
 
 class Method:
 
@@ -105,6 +106,15 @@ class Method:
                 parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
+        # Same as predict_sio: resolve {{secret.*}} and hand the worker its pgvector connstr pre-fork
+        payload = VaultClient(parsed.project_id).unsecret(payload)
+        try:
+            payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
+        except Exception as e:  # pylint: disable=W0703
+            log.warning(
+                "Failed to prefetch pgvector_connstr for project_id=%s: %s",
+                parsed.project_id, e
+            )
 
         user_context = {
             'user_id': user_id,

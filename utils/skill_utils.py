@@ -1760,9 +1760,7 @@ def apply_runtime_skills(version_details: dict) -> None:
     ``resolve_runtime_skills`` itself — it still needs the raw ``skills`` list
     afterwards to resolve ``~skill`` written in the user message.
     """
-    # Webhook, API and MCP requests carry no version_details. The SDK refetches
-    # them only while this stays empty. Adding a key here would stop the refetch,
-    # and the SDK would then fail on the missing llm_settings.
+    # Adding keys to an empty dict would make it look like a real version without llm_settings
     if not version_details:
         return
 
