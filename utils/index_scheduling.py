@@ -493,15 +493,7 @@ def resolve_credential_config_key(project_settings: dict, toolkit_type: str) -> 
 
 
 def resolve_index_llm_settings(project_id: int) -> tuple[dict | None, str | None, bool]:
-    """Resolve the LLM a scheduled run hands to the indexer, the way a manual run picks it.
-
-    Manual indexing has no model picker and always sends the project's default model, so the
-    schedule sends the same one. Without a model the SDK cannot describe images in the indexed
-    files, so the run must not start silently without one.
-
-    Returns ``(llm_settings, issue, retryable)``, following ``resolve_credentials``:
-    ``retryable`` is True only when the lookup itself raised.
-    """
+    """Returns ``(llm_settings, issue, retryable)``, following ``resolve_credentials``."""
     try:
         models = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_models(
             project_id=project_id, section='llm', include_shared=True

@@ -568,7 +568,7 @@ def get_project_context(project_id: int) -> dict:
     }
 
 
-def default_tool_llm_settings(model_name, model_project_id) -> dict:
+def default_tool_llm_settings(model_name, model_project_id, plain_model_temperature: Optional[float] = None) -> dict:
     """The worker reads only top-level llm_model/llm_settings; without them the SDK picks a model itself."""
     if not model_name:
         return {}
@@ -578,9 +578,27 @@ def default_tool_llm_settings(model_name, model_project_id) -> dict:
             model_project_id, model_name
         ) or {}
         settings["openai_compatible"] = bool(configuration.get("openai_compatible", False))
+        if plain_model_temperature is not None and not configuration.get("supports_reasoning"):
+            settings["temperature"] = plain_model_temperature
     except Exception as e:  # pylint: disable=W0703
         log.warning(f"Failed to resolve openai_compatible for default model {model_name!r}: {e}")
     return settings
+
+
+EXPLICIT_MODEL_TEST_LLM_SETTINGS = {"max_tokens": 1024, "temperature": 0.1}
+
+
+def resolve_test_tool_llm(project_id: int, llm_model: Optional[str], llm_settings: Optional[dict]) -> tuple:
+    requested = llm_settings or {}
+    if llm_model or requested.get("model_name") or requested.get("selection"):
+        return llm_model, dict(EXPLICIT_MODEL_TEST_LLM_SETTINGS) if llm_settings is None else llm_settings
+    caller_chose_sampling = requested.get("temperature") is not None or requested.get("reasoning_effort") is not None
+    default_model = this.for_module('configurations').module.get_default_model(project_id)
+    resolved = default_tool_llm_settings(
+        default_model.get("model_name"), default_model.get("model_project_id"),
+        plain_model_temperature=None if caller_chose_sampling else EXPLICIT_MODEL_TEST_LLM_SETTINGS["temperature"],
+    )
+    return resolved.get("model_name"), {**resolved, **requested}
 
 
 def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, tool_name: str, tool_params: dict, sid: str = None) -> dict:
