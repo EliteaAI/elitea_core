@@ -20,6 +20,7 @@ from ..utils.cron_utils import is_cron_due
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
 from ..utils.index_scheduling import (
     resolve_credentials,
+    resolve_index_llm_settings,
     handle_failed_index_schedule,
     index_log_context,
     stamp_schedule_last_run,
@@ -203,21 +204,29 @@ class RPC:
                                     if not init_issue and not credentials_ok:
                                         init_issue = credentials_issue
                                         init_issue_retryable = credentials_retryable
-                                        if init_issue_retryable and retry_escalation_due(
-                                            schedule_model.retry_since
-                                        ):
-                                            # Outlived a blip, so it is an outage. Demote it
-                                            # rather than reporting here, so the terminal path
-                                            # reports and stamps exactly as it always does.
-                                            # The owner reads this in a notification, and a
-                                            # raw timedelta renders as a clock time.
-                                            init_issue = (
-                                                f"{init_issue}; still failing for over "
-                                                f"{describe_grace()}"
-                                            )
-                                            init_issue_retryable = False
-                                    elif credentials_ok and schedule_model.retry_since:
-                                        # The lookup recovered. Clear here rather than on a
+
+                                    llm_settings = None
+                                    if not init_issue:
+                                        llm_settings, init_issue, init_issue_retryable = (
+                                            resolve_index_llm_settings(project_id)
+                                        )
+
+                                    if init_issue_retryable and retry_escalation_due(
+                                        schedule_model.retry_since
+                                    ):
+                                        # Outlived a blip, so it is an outage. Demote it
+                                        # rather than reporting here, so the terminal path
+                                        # reports and stamps exactly as it always does.
+                                        # The owner reads this in a notification, and a
+                                        # raw timedelta renders as a clock time.
+                                        init_issue = (
+                                            f"{init_issue}; still failing for over "
+                                            f"{describe_grace()}"
+                                        )
+                                        init_issue_retryable = False
+                                    elif (credentials_ok and not init_issue_retryable
+                                          and schedule_model.retry_since):
+                                        # The lookups recovered. Clear here rather than on a
                                         # cursor write: this tick may still hit contention and
                                         # never reach one, leaving a stale stamp to escalate
                                         # the next unrelated blip with no grace.
@@ -244,7 +253,7 @@ class RPC:
                                             log.warning(
                                                 f"{ctx} {init_issue}; retrying on the next scan. "
                                                 f"This index is not being updated while the "
-                                                f"credential lookup keeps failing; reporting it "
+                                                f"lookup keeps failing; reporting it "
                                                 f"if it outlives {describe_grace()}"
                                             )
                                         else:
@@ -400,8 +409,8 @@ class RPC:
                                                 "project_id": project_id,
                                                 "toolkit_config": toolkit_config,
                                                 "tool_params": index.cmetadata.get('index_configuration'),
-                                                # "llm_model": TODO get default,
-                                                # "llm_params": TODO get default,
+                                                "llm_model": llm_settings['model_name'],
+                                                "llm_settings": llm_settings,
                                                 "user_id": creator_id,
                                                 "project_auth_token": user_token,
                                                 "deployment_url": get_predict_base_url(project_id)

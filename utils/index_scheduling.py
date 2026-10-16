@@ -492,6 +492,24 @@ def resolve_credential_config_key(project_settings: dict, toolkit_type: str) -> 
     return None
 
 
+def resolve_index_llm_settings(project_id: int) -> tuple[dict | None, str | None, bool]:
+    """Returns ``(llm_settings, issue, retryable)``, following ``resolve_credentials``."""
+    try:
+        models = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_models(
+            project_id=project_id, section='llm', include_shared=True
+        ) or {}
+    except Exception as e:  # pylint: disable=W0703
+        return None, f"default LLM model lookup failed: {e!r}", True
+    default_model = next((model for model in models.get('items', []) if model.get('default')), None)
+    if not default_model:
+        return None, "no LLM model is available in this project to index with", False
+    return {
+        'model_name': default_model['name'],
+        'model_project_id': default_model.get('project_id'),
+        'openai_compatible': bool(default_model.get('openai_compatible', False)),
+    }, None, False
+
+
 def resolve_credentials(project_settings: dict, toolkit_type: str,
                                 user_config: dict, project_id: int,
                                 is_team_schedule: bool = False,
