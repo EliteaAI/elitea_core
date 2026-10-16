@@ -35,14 +35,11 @@ class TestToolkitToolInputModel(BaseModel):
     
     # LLM Configuration (simplified - elitea-sdk will handle the rest)
     llm_model: Optional[str] = Field(
-        default="gpt-4o-mini", 
-        description="LLM model name to use for testing"
+        default=None,
+        description="LLM model name to use for testing; the project's default LLM model when omitted"
     )
     llm_settings: Optional[Dict[str, Any]] = Field(
-        default_factory=lambda: {
-            "max_tokens": 1024,
-            "temperature": 0.1
-        },
+        default=None,
         description="Basic LLM settings (temperature, max_tokens, etc.)"
     )
     

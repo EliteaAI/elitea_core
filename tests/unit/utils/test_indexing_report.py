@@ -74,6 +74,30 @@ class TestSummarizeIndexingReport:
 
         assert summary == '179 pages indexed (4 attachments not indexed)'
 
+    def test_lost_images_are_named_as_images(self, indexing_report):
+        report = make_report(dependent_not_indexed=2)
+        report['categories'] = [{'kind': 'failed', 'count': 0, 'groups': [{
+            'reason': 'image_description_error', 'count': 2, 'dependent': True, 'counted': False,
+            'item_labels': {'singular': 'image', 'plural': 'images'},
+        }]}]
+
+        summary = indexing_report.summarize_indexing_report(report)
+
+        assert summary == '179 pages indexed (2 images not indexed)'
+
+    def test_attachments_and_images_are_counted_separately(self, indexing_report):
+        report = make_report(dependent_not_indexed=3)
+        report['categories'] = [{'kind': 'failed', 'count': 0, 'groups': [
+            {'reason': 'processing_error', 'count': 1, 'dependent': True, 'counted': False,
+             'item_labels': {'singular': 'attachment', 'plural': 'attachments'}},
+            {'reason': 'image_description_error', 'count': 2, 'dependent': True, 'counted': False,
+             'item_labels': {'singular': 'image', 'plural': 'images'}},
+        ]}]
+
+        summary = indexing_report.summarize_indexing_report(report)
+
+        assert summary == '179 pages indexed (1 attachment, 2 images not indexed)'
+
     def test_unchanged_items_are_not_reported_as_skipped(self, indexing_report):
         """An incremental reindex must not describe untouched documents as skipped —
         the chip beside this counts them as indexed."""

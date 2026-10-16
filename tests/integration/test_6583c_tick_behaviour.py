@@ -147,9 +147,12 @@ class Recorder:
     def __init__(self, tick, monkeypatch, *, schedule, index_state="completed",
                  credentials=(True, None, False), lock_timeout=False,
                  connection_string="postgresql://x", index_fresh=True,
-                 resolve_raises=False, pgvector_raises=False, stop_raises=False):
+                 resolve_raises=False, pgvector_raises=False, stop_raises=False,
+                 llm_resolution=None):
         self.tick, self.notifications, self.history_writes = tick, [], []
         self.dispatched = 0
+        self.dispatched_payloads = []
+        self._llm_resolution = llm_resolution or (dict(PROJECT_DEFAULT_LLM), None, False)
         # Witnesses. Every "never consumes the cron slot" assertion is an absence, and an
         # absence is also what you get from maintenance mode, a not-due schedule, or a raise
         # before the branch. These prove the tick actually arrived. pgvector_connects counts
@@ -232,6 +235,8 @@ class Recorder:
                 raise RuntimeError("vault unavailable")
             return rec._credentials
         monkeypatch.setattr(tick, "resolve_credentials", _resolve)
+        monkeypatch.setattr(tick, "resolve_index_llm_settings",
+                            lambda project_id: rec._llm_resolution)
         monkeypatch.setattr(tick, "get_system_user_token", lambda pid: "token")
 
         # Per-schedule on purpose. Counting the EliteATool query instead sits above
@@ -270,7 +275,7 @@ class Recorder:
         monkeypatch.setattr(tick, "VaultClient",
                             lambda pid: types.SimpleNamespace(get_secrets=lambda: {}))
         monkeypatch.setattr(tick, "start_index_task",
-                            lambda *a, **k: rec._count_dispatch())
+                            lambda task_node, data, *a, **k: rec._count_dispatch(data))
         monkeypatch.setattr(tick, "rpc_tools", types.SimpleNamespace(
             RpcMixin=lambda: types.SimpleNamespace(rpc=types.SimpleNamespace(
                 timeout=lambda t: types.SimpleNamespace(
@@ -303,8 +308,9 @@ class Recorder:
             raise RuntimeError("task node unreachable")
         self.events.append(("stopped", task_id))
 
-    def _count_dispatch(self):
+    def _count_dispatch(self, data):
         self.dispatched += 1
+        self.dispatched_payloads.append(data)
         self.events.append(("dispatched",))
         return "task-1"
 
@@ -325,6 +331,8 @@ def _due_schedule(**over):
     return base
 
 
+PROJECT_DEFAULT_LLM = {"model_name": "project-default", "model_project_id": 2,
+                       "openai_compatible": False}
 TERMINAL = (False, "credential 'cred' no longer exists", False)
 RETRYABLE = (False, "could not look up credential 'cred': TimeoutError", True)
 
