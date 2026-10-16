@@ -351,8 +351,6 @@ def generate_predict_payload(
                 #
                 "stream": True,  # hardcoded
                 "api_extra_headers": {
-                    'X-SECRET': all_secrets.get('secrets_header_value', 'secret'),
-                    'X-USERSESSION': auth_session if auth_session else '-',
                     'X-Project-Id': str(parsed.project_id),
                     # Runtime execution is already audited by the tracing plugin
                     # (LangChain/Langfuse generation spans) - tells the LLM proxy
@@ -621,7 +619,6 @@ def resolve_test_tool_llm(project_id: int, llm_model: Optional[str], llm_setting
 
 
 def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, tool_name: str, tool_params: dict, sid: str = None) -> dict:
-    vault_client = VaultClient(project_id)
     token, auth_session = get_predict_token_and_session(project_id, user_id, sid)
     base_url = get_predict_base_url(project_id)
     llm_settings = this.for_module('configurations').module.get_default_model(project_id)
@@ -640,10 +637,6 @@ def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, t
                 **llm_settings,
                 #
                 "stream": True,  # hardcoded
-                "api_extra_headers": {
-                    'X-SECRET': vault_client.get_all_secrets().get('secrets_header_value', 'secret'),
-                    'X-USERSESSION': auth_session if auth_session else '-',
-                }
             }
         },
         "deployment_url": base_url,
