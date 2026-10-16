@@ -57,10 +57,19 @@ DAILY_AT_0300 = "0 3 * * *"
 class TestTheRunaway:
     """The bug: a cursor that never advances leaves the schedule due on every tick."""
 
-    def test_a_stuck_cursor_is_still_due_on_every_repeated_check(self, cron_utils):
-        # Yesterday 03:00 UTC: the daily firing has passed and last_run never moved.
-        stuck = _iso(datetime.now(timezone.utc).replace(
-            hour=3, minute=0, second=0, microsecond=0) - timedelta(days=1))
+    def test_a_stuck_cursor_is_still_due_on_every_repeated_check(self, cron_utils, monkeypatch):
+        # Pin "now" to 12:00 UTC so the test is not sensitive to when CI runs.
+        # The stuck cursor is the previous day's 03:00 firing; next_run is today
+        # 03:00, which is firmly in the past at noon — so is_cron_due must be True.
+        pinned = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+
+        class _FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return pinned.astimezone(tz) if tz else pinned.replace(tzinfo=None)
+
+        monkeypatch.setattr(cron_utils, "datetime", _FixedDatetime)
+        stuck = _iso(datetime(2026, 3, 9, 3, 0, tzinfo=timezone.utc))
         # Five consecutive ticks, nothing changing in between - this is the loop.
         assert [cron_utils.is_cron_due(DAILY_AT_0300, stuck, "UTC") for _ in range(5)] \
             == [True] * 5
