@@ -11,6 +11,7 @@ class ImportParticipantRef(_ImportBase):
     participant_id: Optional[int] = None
     entity_name: Optional[str] = None
     name: Optional[str] = None
+    email: Optional[str] = None
 
 
 class ImportTextItem(_ImportBase):
@@ -47,6 +48,8 @@ class ImportMessage(_ImportBase):
     author: Optional[ImportParticipantRef] = None
     sent_to: Optional[ImportParticipantRef] = None
     reply_to_uuid: Optional[str] = None
+    is_error: bool = False
+    error: Optional[str] = None
     items: List[ImportItem] = []
 
 
