@@ -278,10 +278,70 @@ def test_expand_returns_the_error_dict_unchanged(sp, monkeypatch):
     assert sp.expand_version_for_runtime(7, 1, 11, 5) == {'error': 'not found'}
 
 
-def test_default_bounds_are_sanity_limits(sp):
-    # #7064: every predict path now prefetches, so the bounds only stop broken trees
-    assert sp.DEFAULT_MAX_NODES >= 1000
-    assert sp.DEFAULT_MAX_BYTES >= 20 * 1024 * 1024
+def test_default_bounds_cover_real_trees_without_unbounded_work(sp):
+    # #7064 review: dev's largest agent has 12 direct sub-agents; 1000/20 MB let one predict
+    # monopolise pylon_main, so the defaults stay modest and a time budget bounds the work
+    assert sp.DEFAULT_MAX_NODES == 200
+    assert sp.DEFAULT_MAX_BYTES == 15 * 1024 * 1024
+    assert sp.DEFAULT_MAX_SECONDS == 60.0
+
+
+def _config(monkeypatch, sp, **limits):
+    monkeypatch.setattr(sp, 'this', types.SimpleNamespace(
+        descriptor=types.SimpleNamespace(config={'predict': {'subagent_prefetch': limits}})))
+
+
+def test_configured_node_limit_is_used(sp, monkeypatch):
+    _install_tree(sp, monkeypatch, {})
+    _config(monkeypatch, sp, max_nodes=2)
+    root = [_app_tool(i, i * 10) for i in range(1, 6)]
+
+    assert len(sp.collect_subagent_version_details(7, root, user_id=5)) == 2
+
+
+def test_unset_limits_fall_back_to_the_defaults(sp, monkeypatch):
+    _config(monkeypatch, sp)
+
+    assert sp._prefetch_limit('max_nodes', sp.DEFAULT_MAX_NODES, int) == 200
+    assert sp._prefetch_limit('max_bytes', sp.DEFAULT_MAX_BYTES, int) == 15 * 1024 * 1024
+
+
+@pytest.mark.parametrize('bad', ['many', -5, 0, None])
+def test_a_bad_admin_value_falls_back_to_the_default(sp, monkeypatch, bad):
+    # A typo in the admin UI must not break every predict
+    _config(monkeypatch, sp, max_nodes=bad)
+
+    assert sp._prefetch_limit('max_nodes', sp.DEFAULT_MAX_NODES, int) == sp.DEFAULT_MAX_NODES
+
+
+def test_time_budget_stops_before_the_next_expansion(sp, monkeypatch):
+    # The byte cap is known only after a child is expanded; the clock must bound the work itself
+    expanded = _install_tree(sp, monkeypatch, {})
+    clock = iter([0.0, 1.0, 2.0, 99.0, 99.0, 99.0])
+    monkeypatch.setattr(sp, 'monotonic', lambda: next(clock))
+    root = [_app_tool(i, i * 10) for i in range(1, 6)]
+
+    result = sp.collect_subagent_version_details(7, root, user_id=5, max_seconds=10)
+
+    assert sorted(result) == ['1:10', '2:20']
+    assert len(expanded) == 2
+
+
+def test_the_hub_gets_a_turn_before_every_expansion(sp, monkeypatch):
+    expanded = _install_tree(sp, monkeypatch, {})
+    turns = []
+    monkeypatch.setattr(sp, '_yield_to_hub', lambda: (lambda: turns.append(len(expanded))))
+    root = [_app_tool(i, i * 10) for i in range(1, 4)]
+
+    sp.collect_subagent_version_details(7, root, user_id=5)
+
+    assert turns == [0, 1, 2]
+
+
+def test_yield_is_a_no_op_when_the_runtime_is_unknown(sp, monkeypatch):
+    monkeypatch.setattr(sp, 'this', types.SimpleNamespace(module=None))
+
+    sp._yield_to_hub()()
 
 
 def test_attach_no_longer_reads_a_config_switch(sp, monkeypatch):
@@ -289,7 +349,8 @@ def test_attach_no_longer_reads_a_config_switch(sp, monkeypatch):
     _install_tree(sp, monkeypatch, {})
     monkeypatch.setattr(sp, 'log', types.SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None))
     monkeypatch.setattr(sp, 'this', types.SimpleNamespace(
-        descriptor=types.SimpleNamespace(config={'predict': {'prefetch_subagents': False}})))
+        descriptor=types.SimpleNamespace(config={'predict': {'prefetch_subagents': False}}),
+        module=None))
     payload = {'application': {'id': 1, 'version_id': 11}, 'tools': [_app_tool(2, 22)]}
 
     sp.attach_subagent_prefetch(payload, 7, 5)

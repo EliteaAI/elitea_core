@@ -8,9 +8,29 @@ from tools import this
 from .folder_access import APPLICATION_ENTITY_TYPES, resolve_entities_access
 
 VERSION_DETAILS_PERMISSION = 'models.applications.version.details'
-# Real trees stay far below these; anything skipped is still fetched by the runtime itself
-DEFAULT_MAX_NODES = 1000
-DEFAULT_MAX_BYTES = 20 * 1024 * 1024
+# Overridable under predict.subagent_prefetch; whatever is cut off is still fetched by the runtime
+DEFAULT_MAX_NODES = 200
+DEFAULT_MAX_BYTES = 15 * 1024 * 1024
+DEFAULT_MAX_SECONDS = 60.0
+
+
+def _prefetch_limit(key: str, default, cast):
+    # A bad admin value must never break predicts, so it falls back to the default
+    try:
+        settings = (this.descriptor.config.get('predict') or {}).get('subagent_prefetch') or {}
+        value = cast(settings.get(key, default))
+    except Exception:  # pylint: disable=W0703
+        return default
+    return value if value > 0 else default
+
+
+def _yield_to_hub():
+    # Expansion is CPU-bound between DB calls; hand the gevent hub a turn per sub-agent
+    try:
+        from .utils import make_yield_to_hub
+        return make_yield_to_hub(this.module.context.web_runtime)
+    except Exception:  # pylint: disable=W0703
+        return lambda: None
 
 
 def prefetch_key(application_id, version_id) -> str:
@@ -103,8 +123,9 @@ def collect_subagent_version_details(
         project_id: int,
         root_tools: Optional[list],
         user_id: int,
-        max_nodes: int = DEFAULT_MAX_NODES,
-        max_bytes: int = DEFAULT_MAX_BYTES,
+        max_nodes: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+        max_seconds: Optional[float] = None,
 ) -> dict:
     """{"app_id:version_id": {name, description, version_details}} for reachable same-project sub-agents.
     Best effort: whatever is skipped here, the SDK fetches through PATCH version as before."""
@@ -117,6 +138,13 @@ def collect_subagent_version_details(
     # skipped those children, so return nothing and let it fall back rather than widen access
     if not _can_read_version_details(project_id, user_id):
         return {}
+
+    max_nodes = max_nodes or _prefetch_limit('max_nodes', DEFAULT_MAX_NODES, int)
+    max_bytes = max_bytes or _prefetch_limit('max_bytes', DEFAULT_MAX_BYTES, int)
+    max_seconds = max_seconds or _prefetch_limit('max_seconds', DEFAULT_MAX_SECONDS, float)
+    # The byte cap is only known after a child is expanded; the clock bounds the work itself
+    deadline = monotonic() + max_seconds
+    yield_to_hub = _yield_to_hub()
 
     result, seen, total_bytes = {}, set(), 0
     depth = 0
@@ -134,6 +162,10 @@ def collect_subagent_version_details(
             for app_id, ver_id in level:
                 if len(result) >= max_nodes or app_id in denied or app_id not in summaries:
                     continue
+                if monotonic() > deadline:
+                    log.info(f"[subagent_prefetch] time budget {max_seconds}s reached at {len(result)} sub-agents")
+                    return result
+                yield_to_hub()
                 try:
                     details = expand_version_for_runtime(project_id, app_id, ver_id, user_id)
                 except Exception as e:
