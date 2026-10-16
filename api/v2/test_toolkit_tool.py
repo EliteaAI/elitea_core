@@ -61,11 +61,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         except ValidationError as e:
             return {"error": e.errors()}, 400
         
-        test_data.llm_model, test_data.llm_settings = resolve_test_tool_llm(
-            project_id, test_data.llm_model, test_data.llm_settings
-        )
-        log.debug(f'Test toolkit tool request: {test_data.model_dump()}')
-        
         # SID is optional for async calls - it's only needed for Socket.IO streaming
         # If not provided, the caller will need to poll the task status
         
@@ -73,6 +68,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             test_data.sid = None
         
         try:
+            test_data.llm_model, test_data.llm_settings = resolve_test_tool_llm(
+                project_id, test_data.llm_model, test_data.llm_settings
+            )
+            log.debug(f'Test toolkit tool request: {test_data.model_dump()}')
             result = self.module.test_toolkit_tool_sio(
                 test_data.sid, test_data.model_dump(), "test_toolkit_tool",
                 await_task_timeout=timeout
