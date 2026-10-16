@@ -492,6 +492,17 @@ def resolve_credential_config_key(project_settings: dict, toolkit_type: str) -> 
     return None
 
 
+def select_indexing_model(models: dict) -> dict | None:
+    project_low_tier = (models.get('low_tier_default_model_name'), str(models.get('low_tier_default_model_project_id')))
+    preference_order = (
+        lambda model: (model.get('name'), str(model.get('project_id'))) == project_low_tier,
+        lambda model: model.get('default'),
+        lambda model: True,
+    )
+    items = models.get('items') or []
+    return next((model for preferred in preference_order for model in items if preferred(model)), None)
+
+
 def resolve_index_llm_settings(project_id: int) -> tuple[dict | None, str | None, bool]:
     """Returns ``(llm_settings, issue, retryable)``, following ``resolve_credentials``."""
     try:
@@ -500,13 +511,13 @@ def resolve_index_llm_settings(project_id: int) -> tuple[dict | None, str | None
         ) or {}
     except Exception as e:  # pylint: disable=W0703
         return None, f"default LLM model lookup failed: {e!r}", True
-    default_model = next((model for model in models.get('items', []) if model.get('default')), None)
-    if not default_model:
+    index_model = select_indexing_model(models)
+    if not index_model:
         return None, "no LLM model is available in this project to index with", False
     return {
-        'model_name': default_model['name'],
-        'model_project_id': default_model.get('project_id'),
-        'openai_compatible': bool(default_model.get('openai_compatible', False)),
+        'model_name': index_model['name'],
+        'model_project_id': index_model.get('project_id'),
+        'openai_compatible': bool(index_model.get('openai_compatible', False)),
     }, None, False
 
 
