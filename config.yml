@@ -20,7 +20,7 @@ predict:
   subagent_prefetch:
     max_nodes: 200
     max_bytes: 15728640
-    max_seconds: 60
+    max_seconds: 40
 
 scheduler:
   pipeline_scheduling:

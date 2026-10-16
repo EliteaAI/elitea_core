@@ -283,7 +283,7 @@ def test_default_bounds_cover_real_trees_without_unbounded_work(sp):
     # monopolise pylon_main, so the defaults stay modest and a time budget bounds the work
     assert sp.DEFAULT_MAX_NODES == 200
     assert sp.DEFAULT_MAX_BYTES == 15 * 1024 * 1024
-    assert sp.DEFAULT_MAX_SECONDS == 60.0
+    assert sp.DEFAULT_MAX_SECONDS == 40.0
 
 
 def _config(monkeypatch, sp, **limits):

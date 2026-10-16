@@ -392,7 +392,7 @@
       "description": "Seconds pylon_main may spend expanding sub-agents before a predict. When it runs out, the remaining sub-agents are fetched by the runtime itself.",
       "path": "predict.subagent_prefetch.max_seconds",
       "section": "runtime",
-      "default": 60,
+      "default": 40,
       "minimum": 1,
       "requires_restart": false,
       "value_schema": {

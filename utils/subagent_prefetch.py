@@ -11,7 +11,7 @@ VERSION_DETAILS_PERMISSION = 'models.applications.version.details'
 # Overridable under predict.subagent_prefetch; whatever is cut off is still fetched by the runtime
 DEFAULT_MAX_NODES = 200
 DEFAULT_MAX_BYTES = 15 * 1024 * 1024
-DEFAULT_MAX_SECONDS = 60.0
+DEFAULT_MAX_SECONDS = 40.0
 
 
 def _prefetch_limit(key: str, default, cast):
