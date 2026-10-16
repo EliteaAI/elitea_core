@@ -1,4 +1,5 @@
-"""Built-in trajectory checks: the platform-tier code dimensions of design §5.2 (#6809 item 5).
+"""Built-in trajectory checks: the platform-tier code dimensions of design §5.2 (#6809 item 5),
+plus the two latency dimensions of the performance design (§3.3).
 
 Each check is an ordinary code-engine validation script, run in the same sandbox and through the
 same bool/number contract as a user-authored one. What makes it *built-in* is where the script
@@ -222,6 +223,32 @@ else:
 '''
 
 
+# Performance (performance design §3.3): a share of the suite's case time limit, which the
+# orchestrator adds to the trajectory evidence as ``time_limit_seconds``. A case that hit the
+# limit has no trajectory; :data:`TIMEOUT_SCORED` rows are written for it without a dispatch.
+_LATENCY = '''
+limit = (_traj or {}).get('time_limit_seconds')
+latency = ((_traj or {}).get('metrics') or {}).get('latency_ms')
+if _traj is None or not limit or latency is None:
+    result = 'na'
+else:
+    print(f'{latency / 1000:.1f} s of the {limit} s limit')
+    result = round(min(max(latency / 1000 / limit, 0.0), 1.0), 4)
+'''
+
+_FINAL_ANSWER = '''
+limit = (_traj or {}).get('time_limit_seconds')
+answers = [s for s in ((_traj or {}).get('steps') or [])
+           if isinstance(s, dict) and s.get('kind') == 'llm' and not s.get('parent_agent')]
+duration = answers[-1].get('duration_ms') if answers else None
+if _traj is None or not limit or duration is None:
+    result = 'na'
+else:
+    print(f'{duration / 1000:.1f} s of the {limit} s limit')
+    result = round(min(max(duration / 1000 / limit, 0.0), 1.0), 4)
+'''
+
+
 def _count(name: str, description: str, body: str) -> dict:
     """A lower-is-better counter: informational (weight 0) with a "none at all" target."""
     return {
@@ -240,6 +267,16 @@ def _flag(name: str, description: str, body: str, weight: float) -> dict:
         'scale_type': 'binary', 'scale_min': 0.0, 'scale_max': 1.0,
         'polarity': 'higher_better', 'default_weight': weight,
         'default_target': None, 'default_target_operator': None, **target,
+    }
+
+
+def _share(name: str, description: str, body: str) -> dict:
+    """A lower-is-better share of the time limit: informational, soft target "under half"."""
+    return {
+        'name': name, 'description': description, 'body': body, 'return_contract': 'number',
+        'scale_type': 'continuous', 'scale_min': 0.0, 'scale_max': 1.0,
+        'polarity': 'lower_better', 'default_weight': 0.0,
+        'default_target': 0.5, 'default_target_operator': '<=',
     }
 
 
@@ -282,7 +319,20 @@ CHECKS = {
         'trajectory.guardrail_events',
         'Number of blocked or authorization-paused tool calls, plus a human-in-the-loop pause that '
         'ended the run. Informational; target: none.', _GUARDRAIL),
+    'performance.latency': _share(
+        'performance.latency',
+        "The agent's wall-clock time on the case as a share of the suite's case time limit, 0-1 "
+        '(the verdict shows the seconds). A case that reached the limit scores 1 (exceeded). '
+        'Informational; target: under half the limit.', _LATENCY),
+    'performance.final_answer_time': _share(
+        'performance.final_answer_time',
+        "Duration of the agent's last model call, the one that wrote the answer, as a share of "
+        "the suite's case time limit, 0-1. A case that reached the limit scores 1 (exceeded). "
+        'Informational; target: under half the limit.', _FINAL_ANSWER),
 }
+
+# Checks a timed-out case is scored on (worst value, "exceeded") rather than skipped.
+TIMEOUT_SCORED = frozenset({'performance.latency', 'performance.final_answer_time'})
 
 _SCALE_FIELDS = ('scale_type', 'scale_min', 'scale_max', 'polarity', 'default_weight',
                  'default_target', 'default_target_operator')

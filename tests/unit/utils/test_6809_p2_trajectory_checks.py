@@ -251,7 +251,9 @@ def _snapshot():
 
 def _case(expected=None):
     trajectory = _traj(_tool('a'), _tool('b'), _tool('b'), tool_calls=3, tool_errors=0,
-                       redundant_calls=1, step_limit_hit=False, guardrail_events=0)
+                       redundant_calls=1, step_limit_hit=False, guardrail_events=0,
+                       latency_ms=30000)
+    trajectory['steps'].append({'kind': 'llm', 'model': 'm', 'duration_ms': 6000})
     metrics = trajectory.pop('metrics')
     case = {'id': 7, 'input': 'i', 'output': 'o',
             '_execution': {'trajectory_state': 'recorded', 'trajectory': trajectory,
@@ -273,6 +275,10 @@ def test_orchestrated_rows_score_and_skip(orch):
     assert by_name['trajectory.tool_errors']['normalized_score'] == 100.0
     assert by_name['trajectory.redundant_calls']['normalized_score'] == 90.0
     assert by_name['trajectory.step_limit_hit']['normalized_score'] == 100.0
+    # 30 s and 6 s of the default 120 s limit, lower is better.
+    assert by_name['performance.latency']['native_score'] == 0.25
+    assert by_name['performance.latency']['normalized_score'] == 75.0
+    assert by_name['performance.final_answer_time']['native_score'] == 0.05
     for key in ('trajectory.tool_match', 'trajectory.forbidden_tools', 'trajectory.step_budget'):
         assert by_name[key]['status'] == 'skipped', key
 
@@ -307,3 +313,49 @@ def test_builtin_lookup_ignores_unknown_keys():
     assert checks.builtin_code({'builtin_check': 'trajectory.nope'}) is None
     code, contract = checks.builtin_code({'builtin_check': 'trajectory.tool_match'})
     assert contract == 'number' and 'result' in code
+
+
+# --- performance: latency as a share of the case time limit (performance §3.3) -----------
+
+def _timed(latency_ms=None, limit=60, *steps):
+    trajectory = _traj(*steps, **({} if latency_ms is None else {'latency_ms': latency_ms}))
+    trajectory['time_limit_seconds'] = limit
+    return trajectory
+
+
+@pytest.mark.parametrize('latency_ms,limit,share', [
+    (15000, 60, 0.25),
+    (0, 60, 0.0),
+    (90000, 60, 1.0),  # clamped: the wall clock can run a little past the limit
+])
+def test_latency_is_a_share_of_the_limit(cv, latency_ms, limit, share):
+    assert run(cv, 'performance.latency', _timed(latency_ms, limit)) == share
+
+
+def test_latency_is_na_without_a_figure_or_a_limit(cv):
+    assert run(cv, 'performance.latency', _timed(None)) == 'na'
+    assert run(cv, 'performance.latency', _timed(1000, None)) == 'na'
+
+
+def test_final_answer_time_reads_the_last_top_level_model_call(cv):
+    trajectory = _timed(None, 100)
+    trajectory['steps'] = [
+        {'kind': 'llm', 'duration_ms': 4000},
+        _tool('a'),
+        {'kind': 'llm', 'duration_ms': 20000},
+        # A sub-agent's own model call is not the agent's answer.
+        {'kind': 'llm', 'duration_ms': 90000, 'parent_agent': 'sub'},
+    ]
+    assert run(cv, 'performance.final_answer_time', trajectory) == 0.2
+
+
+def test_final_answer_time_is_na_without_a_duration(cv):
+    assert run(cv, 'performance.final_answer_time', _timed(None, 60)) == 'na'
+
+
+def test_performance_checks_are_informational_with_a_soft_target():
+    for key in ('performance.latency', 'performance.final_answer_time'):
+        check = checks.CHECKS[key]
+        assert (check['polarity'], check['default_weight']) == ('lower_better', 0.0)
+        assert (check['default_target'], check['default_target_operator']) == (0.5, '<=')
+    assert checks.TIMEOUT_SCORED <= set(checks.CHECKS)

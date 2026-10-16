@@ -474,7 +474,9 @@ def trajectory_rollup(rows: List[dict]) -> Optional[dict]:
 
     Totals and averages come from recorded cases only. A case with no trajectory to read is
     counted in ``excluded_cases``, split by why, so an average never silently covers fewer cases
-    than the run had (G7). ``None`` when the run has no execution rows."""
+    than the run had (G7). ``timed_out_cases`` counts the cases stopped at the suite's time limit:
+    their scores are skipped, so this is what keeps them visible next to the headline
+    (performance §3.2). ``None`` when the run has no execution rows."""
     if not rows:
         return None
     recorded = [r for r in rows if r.get('trajectory_state') == TRAJECTORY_RECORDED]
@@ -500,6 +502,7 @@ def trajectory_rollup(rows: List[dict]) -> Optional[dict]:
         'totals': totals,
         'averages': {key: (totals[key] / n if n else None) for key in ROLLUP_COUNTERS},
         'step_limit_hits': sum(1 for m in metrics if m.get('step_limit_hit')),
+        'timed_out_cases': sum(1 for r in rows if r.get('status') == 'timeout'),
         'average_latency_ms': sum(latencies) / len(latencies) if latencies else None,
         'p50_latency_ms': _percentile(latencies, 50),
         'p95_latency_ms': _percentile(latencies, 95),

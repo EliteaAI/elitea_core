@@ -148,3 +148,27 @@ def test_oversized_cell_is_a_row_error_not_a_stored_case(imp):
 
     rows, errors = imp.parse_json(json.dumps([{'input': 'q', 'expected_output': huge}]))
     assert rows == [] and 'expected_output' in errors[0]['error']
+
+
+# --- performance P-5: a case's own time limit ---------------------------------
+
+def test_csv_time_limit_is_a_reserved_column(imp):
+    rows, errors = imp.parse_csv('input,time_limit_seconds,city\nslow one,300,Oslo\nfast,,Rome\n')
+    assert errors == []
+    assert rows[0]['time_limit_seconds'] == 300
+    assert rows[0]['variables'] == {'city': 'Oslo'}
+    assert 'time_limit_seconds' not in rows[1]
+
+
+def test_json_time_limit(imp):
+    rows, errors = imp.parse_json(json.dumps([{'input': 'q', 'time_limit_seconds': 45}]))
+    assert errors == []
+    assert rows[0]['time_limit_seconds'] == 45
+
+
+@pytest.mark.parametrize('value', [5, 901, 'abc', '30.5', True, 12.0])
+def test_time_limit_out_of_range_rejects_the_row(imp, value):
+    rows, errors = imp.parse_json(json.dumps([{'input': 'q', 'time_limit_seconds': value}]))
+    assert rows == []
+    assert errors[0]['row'] == 1
+    assert 'time_limit_seconds' in errors[0]['error']
