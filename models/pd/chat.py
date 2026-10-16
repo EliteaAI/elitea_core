@@ -2,7 +2,7 @@ import uuid
 from typing import Optional, List, Dict, Any, Literal
 
 from jinja2 import Environment, DebugUndefined
-from pydantic import BaseModel, Field, model_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 # from .tool import ToolUpdateModel
 from .tool import ToolChatModel
 from .utils import MergeUpdateBase
@@ -26,6 +26,45 @@ class ChatHistory(BaseModel):
 
 
 ChatHistoryMessage = ChatHistory
+
+
+# Auto-routing escalation signal (#6722): the platform tells the agent run that the user
+# rejected the previous Auto answer. The SDK forwards it to the router, which picks the
+# next admitted tier; no model selection happens here.
+ESCALATION_EVENTS = ('regenerate', 'upgrade_control')
+
+
+def normalize_escalation(value):
+    """Validate an escalation signal and return the canonical {event, from_message_id} dict."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("escalation must be an object with 'event' and optional 'from_message_id'")
+    unknown = set(value) - {'event', 'from_message_id'}
+    if unknown:
+        raise ValueError(f"escalation has unknown fields: {sorted(unknown)}")
+    event = value.get('event')
+    if event not in ESCALATION_EVENTS:
+        raise ValueError(f"escalation.event must be one of {list(ESCALATION_EVENTS)}")
+    from_message_id = value.get('from_message_id')
+    if from_message_id is not None and not isinstance(from_message_id, str):
+        raise ValueError("escalation.from_message_id must be a string or null")
+    return {'event': event, 'from_message_id': from_message_id}
+
+
+def build_regenerate_escalation(client_value, message_id: str) -> dict:
+    """Escalation for a regenerate request.
+
+    The regenerated message id is always server-owned. A client may upgrade the event to
+    `upgrade_control` (the "Upgrade this answer" action); anything else, including a
+    malformed value, is a plain `regenerate`.
+    """
+    try:
+        client = normalize_escalation(client_value)
+    except ValueError:
+        client = None
+    event = 'upgrade_control' if client and client['event'] == 'upgrade_control' else 'regenerate'
+    return {'event': event, 'from_message_id': message_id}
 
 
 class ContextStrategyModel(BaseModel):
@@ -100,6 +139,16 @@ class ApplicationChatRequest(MergeUpdateBase):
         description="Context settings for the LLM"
     )
     is_regenerate: Optional[bool] = False
+    escalation: Optional[dict] = Field(
+        default=None,
+        description="Auto-routing escalation signal: {event: regenerate|upgrade_control, from_message_id}.",
+    )
+
+    @field_validator('escalation', mode='before')
+    @classmethod
+    def _validate_escalation(cls, value):
+        return normalize_escalation(value)
+
     truncated_content: Optional[str] = Field(
         default='',
         description="Partial response content from a token-limit truncated run; "
@@ -203,6 +252,20 @@ class LLMChatRequest(MergeUpdateBase):
         default=None,
         description="Context settings for the LLM"
     )
+    # Regenerate marker and Auto escalation signal. Both must be declared here: an
+    # undeclared field is silently dropped by pydantic, which is exactly what hid the
+    # regenerate signal from the LLM path (the one Auto chat uses).
+    is_regenerate: Optional[bool] = False
+    escalation: Optional[dict] = Field(
+        default=None,
+        description="Auto-routing escalation signal: {event: regenerate|upgrade_control, from_message_id}.",
+    )
+
+    @field_validator('escalation', mode='before')
+    @classmethod
+    def _validate_escalation(cls, value):
+        return normalize_escalation(value)
+
     truncated_content: Optional[str] = Field(
         default='',
         description="Visible partial response from a token-limit continuation",

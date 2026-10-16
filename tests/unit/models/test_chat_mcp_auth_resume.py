@@ -166,7 +166,7 @@ def test_application_and_llm_models_preserve_visible_token_continuation():
         assert parsed.model_dump(include=set(TOKEN_CONTINUATION_FIELDS)) == TOKEN_CONTINUATION_FIELDS
 
 
-def test_generate_predict_payload_forwards_toolkit_authorization_resume(monkeypatch):
+def _patch_predict_env(monkeypatch):
     class FakeVaultClient:
         def __init__(self, _project_id):
             pass
@@ -203,7 +203,9 @@ def test_generate_predict_payload_forwards_toolkit_authorization_resume(monkeypa
         lambda _project_id: {'enabled': False},
     )
 
-    parsed = SimpleNamespace(
+
+def _parsed_namespace(**overrides):
+    fields = dict(
         project_id=2,
         llm_settings=SimpleNamespace(
             model_name='test-model', model_project_id=None,
@@ -233,9 +235,83 @@ def test_generate_predict_payload_forwards_toolkit_authorization_resume(monkeypa
         stream_id='stream-1',
         **AUTH_FIELDS,
     )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def test_generate_predict_payload_forwards_toolkit_authorization_resume(monkeypatch):
+    _patch_predict_env(monkeypatch)
+    parsed = _parsed_namespace()
 
     payload = predict_utils.generate_predict_payload(parsed, user_id=3, sid='sid-1')
 
     assert {key: payload[key] for key in AUTH_FIELDS} == AUTH_FIELDS
     assert 'max_tokens' not in payload['llm']['kwargs']
     assert payload['llm']['kwargs']['max_output_tokens'] == 64000
+
+
+ESCALATION = {'event': 'regenerate', 'from_message_id': 'msg-uuid-1'}
+
+
+def test_llm_and_application_models_declare_regenerate_and_escalation():
+    # LLMChatRequest used to lack is_regenerate, so the real (non-permissive) model dropped it.
+    for model in (ApplicationChatRequest, LLMChatRequest):
+        assert {'is_regenerate', 'escalation'} <= set(model.model_fields)
+
+    common = {'project_id': 2, 'user_input': 'again', 'llm_settings': {'model_name': 'test-model'},
+              'is_regenerate': True, 'escalation': ESCALATION}
+    llm = LLMChatRequest.model_validate(common)
+    application = ApplicationChatRequest.model_validate({**common, 'version_details': {'agent_type': 'agent'}})
+    for parsed in (llm, application):
+        assert parsed.is_regenerate is True
+        assert parsed.escalation == ESCALATION
+
+
+def test_escalation_absent_defaults_to_none_and_validates_shape():
+    import pytest
+    from pydantic import ValidationError
+    common = {'project_id': 2, 'user_input': 'hi', 'llm_settings': {'model_name': 'test-model'}}
+    for model, extra in ((LLMChatRequest, {}), (ApplicationChatRequest, {'version_details': {'agent_type': 'agent'}})):
+        assert model.model_validate({**common, **extra}).escalation is None
+        assert model.model_validate({**common, **extra, 'escalation': None}).escalation is None
+        upgrade = model.model_validate({**common, **extra, 'escalation': {'event': 'upgrade_control'}})
+        assert upgrade.escalation == {'event': 'upgrade_control', 'from_message_id': None}
+        for bad in ({'event': 'correction'}, {}, {'from_message_id': 'm'}, 'regenerate',
+                    {'event': 'regenerate', 'from_message_id': 5},
+                    {'event': 'regenerate', 'extra': 1}):
+            with pytest.raises(ValidationError):
+                model.model_validate({**common, **extra, 'escalation': bad})
+
+
+def test_generate_predict_payload_carries_escalation_on_llm_and_application_paths(monkeypatch):
+    _patch_predict_env(monkeypatch)
+    common = {'project_id': 2, 'user_input': 'again', 'llm_settings': {'model_name': 'test-model'},
+              'is_regenerate': True, 'escalation': ESCALATION}
+    llm = LLMChatRequest.model_validate(common)
+    application = ApplicationChatRequest.model_validate(
+        {**common, 'version_details': {'agent_type': 'agent', 'llm_settings': {}}})
+    for parsed in (llm, application):
+        # The real parsed model feeds the payload builder; only the LLM settings object is swapped
+        # for the namespace the builder reads attributes from.
+        parsed.llm_settings = _parsed_namespace().llm_settings
+        payload = predict_utils.generate_predict_payload(parsed, user_id=3, sid='sid-1')
+        assert payload['is_regenerate'] is True
+        assert payload['escalation'] == ESCALATION
+
+    plain = LLMChatRequest.model_validate({k: v for k, v in common.items() if k not in ('is_regenerate', 'escalation')})
+    plain.llm_settings = _parsed_namespace().llm_settings
+    payload = predict_utils.generate_predict_payload(plain, user_id=3, sid='sid-1')
+    assert payload['escalation'] is None
+    assert not payload['is_regenerate']
+
+
+def test_build_regenerate_escalation_owns_message_id_and_allows_upgrade_control():
+    build = chat.build_regenerate_escalation
+    expected = {'event': 'regenerate', 'from_message_id': 'server-uuid'}
+    assert build(None, 'server-uuid') == expected
+    assert build({'event': 'regenerate', 'from_message_id': 'forged'}, 'server-uuid') == expected
+    assert build({'event': 'bogus'}, 'server-uuid') == expected
+    assert build('garbage', 'server-uuid') == expected
+    assert build({'event': 'upgrade_control', 'from_message_id': 'forged'}, 'server-uuid') == {
+        'event': 'upgrade_control', 'from_message_id': 'server-uuid'}
+
