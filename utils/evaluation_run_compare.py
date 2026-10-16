@@ -15,9 +15,11 @@ Each metric then covers only the cases that both runs measured:
   both sides. A pending or unpriced case is counted in ``excluded`` rather than read as zero.
 
 A latency change within :data:`LATENCY_NOISE_RELATIVE` or :data:`LATENCY_NOISE_ABSOLUTE_MS`,
-whichever is larger, reads ``within_noise``. When the case time limit differs between the two
-runs, latency and timeout verdicts are withheld (``not_comparable``), since the cap decides which
-cases finish at all.
+whichever is larger, reads ``within_noise``. The time limit decides which cases finish at all, so a
+case whose effective limit (its own ``time_limit_seconds``, else the suite's, performance P-5)
+differs between the two runs is listed under ``coverage.limit_changed`` and left out of the latency
+figures and the timeout lists; its tokens, cost and tool calls are still compared. When that is
+every matched case, latency and timeout verdicts are withheld (``not_comparable``).
 
 The pure part (:func:`performance_diff`) takes plain dicts so it is unit-testable without a DB;
 :func:`compare_run_performance` loads the rows and resolves the reference.
@@ -66,6 +68,15 @@ def _case_fingerprint(case: dict) -> str:
 def case_fingerprints(snapshot: dict) -> Dict[int, str]:
     """``dataset_case_id`` → fingerprint of what the agent was asked, from a frozen snapshot."""
     return {c['id']: _case_fingerprint(c) for c in (snapshot or {}).get('cases') or []
+            if isinstance(c, dict) and c.get('id') is not None}
+
+
+def case_limits(side: dict) -> Dict[int, int]:
+    """``dataset_case_id`` → the seconds the agent had on it: the case's own frozen
+    ``time_limit_seconds``, else the side's suite limit."""
+    default = side.get('case_time_limit_seconds')
+    return {c['id']: c.get('time_limit_seconds') or default
+            for c in (side.get('snapshot') or {}).get('cases') or []
             if isinstance(c, dict) and c.get('id') is not None}
 
 
@@ -130,18 +141,28 @@ def _paired(pairs: List[tuple], field: str) -> tuple:
 
 def performance_diff(run: dict, reference: dict) -> dict:
     """The diff of two runs. Each argument is ``{snapshot, dataset_id, case_time_limit_seconds,
-    cases: {dataset_case_id: case_view(...)}}``."""
+    cases: {dataset_case_id: case_view(...)}}``, where ``case_time_limit_seconds`` is the suite
+    limit and a snapshot case may carry its own ``time_limit_seconds``."""
     run_cases, ref_cases = run['cases'], reference['cases']
     run_prints, ref_prints = case_fingerprints(run.get('snapshot')), case_fingerprints(reference.get('snapshot'))
     common = sorted(set(run_cases) & set(ref_cases))
     changed = [cid for cid in common if run_prints.get(cid) != ref_prints.get(cid)]
     matched = [cid for cid in common if cid not in changed]
     pairs = [(run_cases[cid], ref_cases[cid]) for cid in matched]
+    run_limits, ref_limits = case_limits(run), case_limits(reference)
+
+    def limit_of(limits, side, cid):
+        return limits.get(cid, side.get('case_time_limit_seconds'))
+
+    limit_changed = [cid for cid in matched
+                     if limit_of(run_limits, run, cid) != limit_of(ref_limits, reference, cid)]
+    timed = [cid for cid in matched if cid not in limit_changed]
+    latency_pairs = [(run_cases[cid], ref_cases[cid]) for cid in timed]
 
     reasons = []
     if run.get('dataset_id') != reference.get('dataset_id'):
         reasons.append(REASON_DIFFERENT_DATASET)
-    cap_changed = run.get('case_time_limit_seconds') != reference.get('case_time_limit_seconds')
+    cap_changed = bool(matched) and not timed
     if cap_changed:
         reasons.append(REASON_TIME_LIMIT_CHANGED)
     latency_block = REASON_TIME_LIMIT_CHANGED if cap_changed else None
@@ -149,9 +170,9 @@ def performance_diff(run: dict, reference: dict) -> dict:
     metrics = {}
     for key, field, percent in (('p50_latency_ms', 'latency_ms', 50), ('p95_latency_ms', 'latency_ms', 95),
                                 ('p50_final_answer_ms', 'final_answer_ms', 50)):
-        a, b, excluded = _paired(pairs, field)
-        metrics[key] = _metric(_percentile(a, percent), _percentile(b, percent), len(a), excluded,
-                               noisy=True, not_comparable=latency_block)
+        a, b, excluded = _paired(latency_pairs, field)
+        metrics[key] = _metric(_percentile(a, percent), _percentile(b, percent), len(a),
+                               excluded + len(limit_changed), noisy=True, not_comparable=latency_block)
     for key, field in (('tool_calls', 'tool_calls'), ('agent_tokens', 'tokens'), ('agent_cost', 'cost')):
         a, b, excluded = _paired(pairs, field)
         metrics[key] = _metric(sum(a) if a else None, sum(b) if b else None, len(a), excluded)
@@ -161,6 +182,7 @@ def performance_diff(run: dict, reference: dict) -> dict:
     cases = []
     for cid in matched:
         a, b = run_cases[cid], ref_cases[cid]
+        same_limit = cid not in limit_changed
         cases.append({
             'dataset_case_id': cid,
             'case_index': a['case_index'],
@@ -169,7 +191,10 @@ def performance_diff(run: dict, reference: dict) -> dict:
             'reference_status': b['status'],
             'latency_ms': a['latency_ms'],
             'reference_latency_ms': b['latency_ms'],
-            'latency_verdict': None if latency_block else _verdict(a['latency_ms'], b['latency_ms'], noisy=True),
+            'time_limit_seconds': limit_of(run_limits, run, cid),
+            'reference_time_limit_seconds': limit_of(ref_limits, reference, cid),
+            'latency_verdict': (_verdict(a['latency_ms'], b['latency_ms'], noisy=True)
+                                if same_limit else None),
             'tokens': a['tokens'],
             'reference_tokens': b['tokens'],
         })
@@ -184,14 +209,15 @@ def performance_diff(run: dict, reference: dict) -> dict:
             'changed': changed,
             'only_in_run': sorted(set(run_cases) - set(ref_cases)),
             'only_in_reference': sorted(set(ref_cases) - set(run_cases)),
+            'limit_changed': limit_changed,
         },
         'metrics': metrics,
         'timeouts': {
             'not_comparable': latency_block,
             'run': len(timed_out),
             'reference': len(ref_timed_out),
-            'newly_timed_out': [cid for cid in matched if cid in timed_out and cid not in ref_timed_out],
-            'no_longer_timed_out': [cid for cid in matched if cid in ref_timed_out and cid not in timed_out],
+            'newly_timed_out': [cid for cid in timed if cid in timed_out and cid not in ref_timed_out],
+            'no_longer_timed_out': [cid for cid in timed if cid in ref_timed_out and cid not in timed_out],
         },
         'slower_than_reference': bool(slower),
         'cases': cases,
@@ -203,7 +229,7 @@ def performance_diff(run: dict, reference: dict) -> dict:
 # ----------------------------------------------------------------------------
 
 def _run_header(run, source: Optional[str] = None) -> dict:
-    from .evaluation_run_orchestration import case_time_limit
+    from .evaluation_run_orchestration import suite_time_limit
 
     header = {
         'id': run.id,
@@ -213,7 +239,7 @@ def _run_header(run, source: Optional[str] = None) -> dict:
         'application_version_id': run.application_version_id,
         'finished_at': run.finished_at.isoformat() if run.finished_at else None,
         'headline_score': run.headline_score,
-        'case_time_limit_seconds': case_time_limit(run.snapshot or {}),
+        'case_time_limit_seconds': suite_time_limit(run.snapshot or {}),
     }
     if source:
         header['source'] = source

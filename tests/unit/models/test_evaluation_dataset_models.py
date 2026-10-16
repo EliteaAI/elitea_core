@@ -195,3 +195,25 @@ def test_case_detail_carries_expected_trajectory(pd_eval):
 
 def test_import_accepts_jsonl(pd_eval):
     assert pd_eval.EvalDatasetImportModel(format='JSONL', content='{"input": "q"}').format == 'jsonl'
+
+
+# --- performance P-5: a case's own time limit ---------------------------------
+
+def test_case_time_limit_defaults_to_the_suite(pd_eval):
+    assert pd_eval.EvalDatasetCaseCreateModel(input='q').time_limit_seconds is None
+
+
+@pytest.mark.parametrize('value', [10, 300, 900])
+def test_case_time_limit_accepts_the_range(pd_eval, value):
+    assert pd_eval.EvalDatasetCaseCreateModel(input='q', time_limit_seconds=value).time_limit_seconds == value
+
+
+@pytest.mark.parametrize('value', [9, 901, 0, True, '30', 30.5])
+def test_case_time_limit_rejects_out_of_range(pd_eval, value):
+    with pytest.raises(ValidationError):
+        pd_eval.EvalDatasetCaseCreateModel(input='q', time_limit_seconds=value)
+
+
+def test_case_update_null_time_limit_clears_it(pd_eval):
+    dumped = pd_eval.EvalDatasetCaseUpdateModel(time_limit_seconds=None).model_dump(exclude_unset=True)
+    assert dumped == {'time_limit_seconds': None}

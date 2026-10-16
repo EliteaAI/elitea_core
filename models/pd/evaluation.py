@@ -19,7 +19,7 @@ the allowed strings stay single-sourced.
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, StrictInt, field_validator, model_validator
 
 from ..evaluation import (
     EvalTier, EvalEngine, EvalScaleType, EvalPolarity, EvalCaseSource, EvalRunTrigger,
@@ -488,6 +488,8 @@ class EvalDatasetCaseBaseModel(BaseModel):
     variables: dict = Field(default_factory=dict)
     expected_output: Optional[str] = None
     expected_trajectory: Optional[dict] = None
+    # Performance P-5: overrides the suite's case time limit for this case; null keeps the suite's.
+    time_limit_seconds: Optional[StrictInt] = None
     source_type: str = EvalCaseSource.manual
     source_ref: Optional[str] = Field(None, max_length=256)
     order_index: int = 0
@@ -497,6 +499,14 @@ class EvalDatasetCaseBaseModel(BaseModel):
     @classmethod
     def _validate_expected_trajectory(cls, v):
         return normalize_expected_trajectory(v)
+
+    @field_validator('time_limit_seconds')
+    @classmethod
+    def _validate_time_limit(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not MIN_CASE_TIME_LIMIT_SECONDS <= v <= MAX_CASE_TIME_LIMIT_SECONDS:
+            raise ValueError('time_limit_seconds must be an integer '
+                             f'{MIN_CASE_TIME_LIMIT_SECONDS}..{MAX_CASE_TIME_LIMIT_SECONDS} or null')
+        return v
 
     @field_validator('source_type')
     @classmethod
@@ -533,6 +543,7 @@ class EvalDatasetCaseDetailModel(BaseModel):
     variables: dict = Field(default_factory=dict)
     expected_output: Optional[str] = None
     expected_trajectory: Optional[dict] = None
+    time_limit_seconds: Optional[int] = None
     source_type: str
     source_ref: Optional[str] = None
     meta: dict = Field(default_factory=dict)

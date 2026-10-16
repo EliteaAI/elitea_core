@@ -593,7 +593,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Adds ``agent_id`` (owning agent, nullable) and ``is_shared`` (opt-in
         sharing flag) to ``eval_dataset``, and ``expected_trajectory`` (JSONB,
-        nullable, #6809) to ``eval_dataset_case``, on every project schema. Idempotent
+        nullable, #6809) and ``time_limit_seconds`` (integer, nullable, performance P-5) to
+        ``eval_dataset_case``, on every project schema. Idempotent
         (``ADD COLUMN IF NOT EXISTS``): safe to run multiple times.
 
         Param format (optional):

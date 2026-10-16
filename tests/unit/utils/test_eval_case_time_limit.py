@@ -63,6 +63,33 @@ def test_snapshot_from_before_the_key_runs_with_the_default(orchestration):
     assert orchestration.case_time_limit({'suite': {'case_time_limit_seconds': 45}}) == 45
 
 
+def test_case_override_wins_over_the_suite(orchestration):
+    snapshot = {'suite': {'case_time_limit_seconds': 60}}
+    assert orchestration.case_time_limit(snapshot, {'time_limit_seconds': 300}) == 300
+    assert orchestration.case_time_limit(snapshot, {'time_limit_seconds': None}) == 60
+    assert orchestration.case_time_limit(snapshot, {}) == 60
+    assert orchestration.case_time_limit({}, {'time_limit_seconds': 15}) == 15
+
+
+def test_snapshot_freezes_a_case_override(orchestration):
+    frozen = orchestration.build_run_snapshot(
+        suite={'id': 1, 'name': 's'}, **{**SNAPSHOT_COMMON, 'cases': [
+            {'id': 1, 'input': 'a', 'time_limit_seconds': 300}, {'id': 2, 'input': 'b',
+                                                               'time_limit_seconds': None}]})
+    assert frozen['cases'][0]['time_limit_seconds'] == 300
+    assert 'time_limit_seconds' not in frozen['cases'][1]
+
+
+def test_run_time_limit_is_none_when_cases_differ(orchestration):
+    suite = {'case_time_limit_seconds': 60}
+    assert orchestration.run_time_limit({'suite': suite, 'cases': [{'id': 1}, {'id': 2}]}) == 60
+    assert orchestration.run_time_limit({'suite': suite, 'cases': []}) == 60
+    assert orchestration.run_time_limit(
+        {'suite': suite, 'cases': [{'id': 1, 'time_limit_seconds': 60}]}) == 60
+    assert orchestration.run_time_limit(
+        {'suite': suite, 'cases': [{'id': 1}, {'id': 2, 'time_limit_seconds': 300}]}) is None
+
+
 def test_agent_runner_passes_the_frozen_limit(orchestration, monkeypatch):
     seen = []
     runner_mod = sys.modules['plugins.elitea_core.utils.evaluation_agent_runner']
@@ -76,7 +103,8 @@ def test_agent_runner_passes_the_frozen_limit(orchestration, monkeypatch):
             1, {'suite': suite, 'application_id': 1, 'application_version_id': 2, 'dataset_id': 3},
             user_id=1)
         run({'input': 'q'})
-    assert seen == [600, 120]
+        run({'input': 'q', 'time_limit_seconds': 30})
+    assert seen == [600, 30, 120, 30]
 
 
 def test_run_agent_stops_at_the_limit(runner):
@@ -200,3 +228,25 @@ def test_snapshot_keeps_the_builtin_check(orchestration):
             {'id': 1, 'name': 'Accuracy'}]})
     assert frozen['dimensions']['4']['builtin_check'] == 'performance.latency'
     assert frozen['dimensions']['1']['builtin_check'] is None
+
+
+def test_timed_out_case_reports_its_own_limit(orchestration):
+    snapshot = {'suite': {'case_time_limit_seconds': 300}, 'bindings': BINDINGS, 'cases': []}
+    case, rows = orchestration.run_one_case(
+        {'id': 1, 'input': 'q', 'time_limit_seconds': 20}, snapshot,
+        agent_runner=_outcome('timeout', 'agent timed out after 20s'))
+    assert case['_agent_timeout'] == 20
+    assert {r['verdict']['note'] for r in rows} == {
+        'Skipped: the agent reached the case time limit (20 s).'}
+
+
+def test_the_latency_script_sees_the_case_limit(orchestration):
+    seen = []
+    case = {'id': 1, 'input': 'q', 'output': 'a', 'time_limit_seconds': 600,
+            '_execution': {'trajectory_state': 'recorded', 'trajectory': {'steps': []},
+                           'metrics': {'latency_ms': 50000}}}
+    orchestration.assemble_case_results(
+        case, _latency_snapshot(200),
+        code_scorer=lambda b, ev: seen.append(ev['trajectory']['time_limit_seconds'])
+        or {'status': 'na'})
+    assert seen == [600, 600, 600]

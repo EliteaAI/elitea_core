@@ -38,9 +38,11 @@ def _usage(tokens=(100, 50), cost=0.01, *, source='runtime:costs-catalog', state
             'cost': cost, 'cost_source': source}
 
 
-def _side(compare, cases, *, limit=120, dataset_id=7, inputs=None):
-    inputs = inputs or {}
-    snapshot = {'cases': [{'id': cid, 'input': inputs.get(cid, f'q{cid}'), 'variables': {}} for cid in cases]}
+def _side(compare, cases, *, limit=120, dataset_id=7, inputs=None, case_limits=None):
+    inputs, case_limits = inputs or {}, case_limits or {}
+    snapshot = {'cases': [{'id': cid, 'input': inputs.get(cid, f'q{cid}'), 'variables': {},
+                           **({'time_limit_seconds': case_limits[cid]} if cid in case_limits else {})}
+                          for cid in cases]}
     return {'snapshot': snapshot, 'dataset_id': dataset_id, 'case_time_limit_seconds': limit,
             'cases': {cid: compare.case_view(*pair) for cid, pair in cases.items()}}
 
@@ -150,3 +152,38 @@ def test_different_dataset_is_flagged(compare):
     run = _side(compare, {1: (_execution(1_000), _usage())}, dataset_id=1)
     ref = _side(compare, {1: (_execution(1_000), _usage())}, dataset_id=2)
     assert 'different_dataset' in compare.performance_diff(run, ref)['not_comparable']
+
+
+# --- P-5: a case's own time limit ----------------------------------------------------------
+
+def test_changed_case_limit_leaves_only_that_case_out_of_latency(compare):
+    run = _side(compare, {1: (_execution(50_000), _usage()), 2: (_execution(10_000), _usage()),
+                          3: (_execution(30_000, status='timeout', recorded=False), _usage())},
+                case_limits={1: 300, 3: 30})
+    ref = _side(compare, {1: (_execution(10_000), _usage()), 2: (_execution(10_000), _usage()),
+                          3: (_execution(20_000, status='ok'), _usage())},
+                case_limits={3: 30})
+    diff = compare.performance_diff(run, ref)
+
+    assert diff['not_comparable'] == []
+    assert diff['coverage']['limit_changed'] == [1]
+    p50 = diff['metrics']['p50_latency_ms']
+    assert (p50['cases'], p50['excluded'], p50['verdict']) == (1, 2, 'unchanged')
+    assert diff['metrics']['agent_tokens']['cases'] == 3  # still compared on every matched case
+    assert diff['timeouts']['newly_timed_out'] == [3]  # same 30 s override on both sides
+    by_id = {c['dataset_case_id']: c for c in diff['cases']}
+    assert (by_id[1]['time_limit_seconds'], by_id[1]['reference_time_limit_seconds']) == (300, 120)
+    assert by_id[1]['latency_verdict'] is None
+    assert by_id[2]['latency_verdict'] == 'unchanged'
+
+
+def test_suite_change_matched_by_a_case_override_stays_comparable(compare):
+    # The suite moved 120 -> 300, but case 1 pins 120 in the new run: it had the same time.
+    run = _side(compare, {1: (_execution(10_000), _usage()), 2: (_execution(10_000), _usage())},
+                limit=300, case_limits={1: 120})
+    ref = _side(compare, {1: (_execution(10_000), _usage()), 2: (_execution(10_000), _usage())})
+    diff = compare.performance_diff(run, ref)
+
+    assert diff['not_comparable'] == []
+    assert diff['coverage']['limit_changed'] == [2]
+    assert diff['metrics']['p50_latency_ms']['cases'] == 1

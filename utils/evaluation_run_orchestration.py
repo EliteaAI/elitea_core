@@ -146,6 +146,8 @@ def _snapshot_cases(cases: List[dict]) -> List[dict]:
             'variables': c.get('variables') or {},
             'order_index': c.get('order_index', 0),
         }
+        if c.get('time_limit_seconds'):
+            case['time_limit_seconds'] = c['time_limit_seconds']  # performance P-5
         dropped = spent > MAX_CASES_BYTES
         truncated = False
         for field in _CASE_TEXT_FIELDS:
@@ -700,7 +702,7 @@ def assemble_case_results(
     latency dimensions score it, at their worst value, ``exceeded`` (§3.3)."""
     bindings = sorted(snapshot.get('bindings') or [], key=lambda b: b.get('order_index', 0))
     results: List[dict] = []
-    case = {**case, '_time_limit': case_time_limit(snapshot)}
+    case = {**case, '_time_limit': case_time_limit(snapshot, case)}
 
     time_limit = case.get('_agent_timeout')
     if time_limit:
@@ -853,7 +855,7 @@ def run_one_case(
                     outcome.get('error') or f"agent execution {outcome.get('status')}"}
             if outcome.get('status') == 'timeout':
                 # An outcome of the agent under test, scored rather than errored (performance §3.2).
-                case['_agent_timeout'] = case_time_limit(snapshot)
+                case['_agent_timeout'] = case_time_limit(snapshot, case)
         if outcome.get('execution') is not None:
             # Persisted as an eval_case_execution row by execute_run, never on the snapshot.
             case['_execution'] = {**outcome['execution'], 'status': outcome.get('status'),
@@ -1221,7 +1223,8 @@ def usage_meta(rows: List[dict], budget: Optional[dict]) -> dict:
 def trajectory_meta(rows: List[dict], time_limit: Optional[int] = None) -> dict:
     """``EvalRun.meta`` key for the run's trajectory rollup, left out when no case reached the
     agent. Written once at the terminal write; settlement does not touch trajectories. The frozen
-    case time limit rides along so ``timed_out_cases`` can be read without the snapshot."""
+    case time limit rides along so ``timed_out_cases`` can be read without the snapshot; it is left
+    out when case overrides gave the cases different limits (:func:`run_time_limit`)."""
     from .evaluation_execution import trajectory_rollup
     rollup = trajectory_rollup(rows)
     if rollup is None:
@@ -1263,10 +1266,25 @@ def poll_ledger_breakdown(fetch: Callable[[], List[dict]], *, sleep: Callable[[f
     return breakdown
 
 
-def case_time_limit(snapshot: dict) -> int:
-    """Seconds the agent gets on one case of this run (performance §3.1). A snapshot frozen before
+def suite_time_limit(snapshot: dict) -> int:
+    """The run's default seconds per case (performance §3.1). A snapshot frozen before
     ``case_time_limit_seconds`` existed ran with the fixed default, so it keeps it."""
     return (snapshot.get('suite') or {}).get('case_time_limit_seconds') or DEFAULT_CASE_TIME_LIMIT_SECONDS
+
+
+def case_time_limit(snapshot: dict, case: Optional[dict] = None) -> int:
+    """Seconds the agent gets on ``case``: its own frozen ``time_limit_seconds`` (performance P-5),
+    else the suite's limit."""
+    return (case or {}).get('time_limit_seconds') or suite_time_limit(snapshot)
+
+
+def run_time_limit(snapshot: dict) -> Optional[int]:
+    """The one limit every case of the run had, or ``None`` when case overrides make them differ
+    (performance P-5), so the timeout banner does not name a single limit that some cases lacked."""
+    limits = {case_time_limit(snapshot, c) for c in snapshot.get('cases') or [] if isinstance(c, dict)}
+    if not limits:
+        return suite_time_limit(snapshot)
+    return limits.pop() if len(limits) == 1 else None
 
 
 def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: Optional[int] = None,
@@ -1305,7 +1323,7 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
     # is already fully known from `version_details`, so skip the live LLM call entirely.
     structure_only_run = snapshot.get('dataset_id') is None
     step_limit = (snapshot.get('suite') or {}).get('steps_limit')
-    timeout = timeout or case_time_limit(snapshot)
+    # A fixed ``timeout`` wins; otherwise each case gets its own limit (performance P-5).
     # A snapshot frozen before the flag existed has no key: it stored outputs then, so keep doing so.
     store_tool_outputs = (snapshot.get('suite') or {}).get('store_tool_outputs') is not False
 
@@ -1321,7 +1339,7 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
                     'structure': structure,
                     'execution': not_applicable_execution('unsupported')}
         outcome = run_agent(project_id, version_details, case,
-                            user_id=user_id, timeout=timeout,
+                            user_id=user_id, timeout=timeout or case_time_limit(snapshot, case),
                             platform_run_id=platform_run_id, usage_entity=usage_entity,
                             step_limit=step_limit, case_index=case_index,
                             store_tool_outputs=store_tool_outputs)
@@ -1643,7 +1661,7 @@ def execute_run(
             run.meta = {
                 **(run.meta or {}),
                 **usage_meta(usage_rows, budget),
-                **trajectory_meta(persisted_executions + executions, case_time_limit(snapshot)),
+                **trajectory_meta(persisted_executions + executions, run_time_limit(snapshot)),
                 **{k: outcome[k] for k in ('stop_reason', 'stop_scope') if outcome.get(k)},
                 **({'settlement': {'state': 'pending'}} if usage_rows and platform_run_id else {}),
             }

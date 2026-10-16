@@ -114,6 +114,7 @@ def _case_dict(c) -> dict:
         'id': c.id, 'input': c.input, 'output': None,
         'expected_output': c.expected_output, 'structure': None,
         'expected_trajectory': c.expected_trajectory,
+        'time_limit_seconds': c.time_limit_seconds,
         'variables': c.variables or {},
         'order_index': c.order_index,
     }
