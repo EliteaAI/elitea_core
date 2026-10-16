@@ -30,6 +30,7 @@ def build(models_path):
         'VaultClient': lambda project: NS(get_all_secrets=lambda: {}),
         'get_predict_token_and_session': lambda *a: ('token', None),
         'get_predict_base_url': lambda *a: 'https://unit.invalid',
+        'get_public_base_url': lambda: 'https://public.unit.invalid',
         'this': NS(for_module=lambda name: NS(module=configurations)),
         'rpc_tools': NS(RpcMixin=lambda: NS(rpc=NS(call=rpc))),
         'get_session_cookie_name': lambda: None,
