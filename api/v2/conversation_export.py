@@ -76,7 +76,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).filter(Conversation.id == conversation_id).first()
             if conversation is None:
                 return NOT_FOUND
-            denied = check_conversation_access(project_id, conversation, current_user['id'])
+            denied = check_conversation_access(
+                project_id, conversation, current_user['id'], needs_privilege=True,
+            )
             if denied:
                 return denied
             conversation_dict, participants, groups = load_conversation_export_data(
