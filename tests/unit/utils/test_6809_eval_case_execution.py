@@ -196,8 +196,11 @@ def test_metrics_from_recorded_run(execution):
     assert metrics == {
         'llm_calls': 3, 'tool_calls': 1, 'distinct_tools': 1, 'tool_errors': 0,
         'retries': 0, 'redundant_calls': 0, 'step_limit_hit': False,
-        'guardrail_events': 0, 'latency_ms': 47_000,
+        'guardrail_events': 0, 'latency_ms': 47_000, 'final_answer_ms': metrics['final_answer_ms'],
     }
+    # The run diff reads this stored value instead of the trajectory (performance §3.4).
+    trajectory = execution.extract_execution(_envelope(), status='ok', latency_ms=47_000)['trajectory']
+    assert metrics['final_answer_ms'] == execution.final_answer_ms(trajectory)
 
 
 def test_redundant_retries_and_guardrails(execution):

@@ -28,7 +28,7 @@ The pure part (:func:`performance_diff`) takes plain dicts so it is unit-testabl
 import json
 from typing import Dict, List, Optional
 
-from .evaluation_execution import TRAJECTORY_RECORDED, _percentile
+from .evaluation_execution import TRAJECTORY_RECORDED, _percentile, final_answer_ms  # noqa: F401 - re-exported
 from .evaluation_usage import COST_PENDING, COST_UNPRICED, ROLE_AGENT, USAGE_RECORDED, _count
 
 
@@ -50,15 +50,6 @@ SOURCE_BASELINE = 'baseline'
 SOURCE_PREVIOUS = 'previous'
 
 _LATENCY_METRICS = ('p50_latency_ms', 'p95_latency_ms', 'p50_final_answer_ms')
-
-
-def final_answer_ms(trajectory: Optional[dict]) -> Optional[float]:
-    """``duration_ms`` of the last top-level LLM step: the same step ``performance.final_answer_time``
-    scores, so the diff and the dimension never disagree on which step is the answer."""
-    steps = (trajectory or {}).get('steps') or []
-    answers = [s for s in steps if isinstance(s, dict) and s.get('kind') == 'llm' and not s.get('parent_agent')]
-    duration = answers[-1].get('duration_ms') if answers else None
-    return duration if isinstance(duration, (int, float)) else None
 
 
 def _case_fingerprint(case: dict) -> str:
@@ -90,12 +81,19 @@ def case_view(execution: Optional[dict], usage: Optional[dict]) -> dict:
     priced = (usage_recorded and usage.get('cost') is not None
               and usage.get('cost_source') not in (COST_PENDING, COST_UNPRICED))
     latency = metrics.get('latency_ms')
+    # Stored in metrics since the diff stopped loading trajectories; older rows carry it as the
+    # column the loader extracts in SQL, and a plain dict (the unit tests) may still carry the trajectory.
+    answer = metrics.get('final_answer_ms')
+    if answer is None:
+        answer = execution.get('final_answer_ms')
+    if answer is None:
+        answer = final_answer_ms(execution.get('trajectory'))
     return {
         'case_index': execution.get('case_index', usage.get('case_index')),
         'status': execution.get('status') or usage.get('case_status'),
         'recorded': recorded,
         'latency_ms': latency if recorded and isinstance(latency, (int, float)) else None,
-        'final_answer_ms': final_answer_ms(execution.get('trajectory')) if recorded else None,
+        'final_answer_ms': answer if recorded and isinstance(answer, (int, float)) else None,
         'tool_calls': _count(metrics.get('tool_calls')) if recorded else None,
         'tokens': (_count(usage.get('input_tokens')) + _count(usage.get('output_tokens'))
                    if usage_recorded else None),
@@ -199,6 +197,7 @@ def performance_diff(run: dict, reference: dict) -> dict:
             'reference_tokens': b['tokens'],
         })
     slower = [m for m in _LATENCY_METRICS[:2] if metrics[m]['verdict'] == VERDICT_WORSE]
+    newly_timed_out = [cid for cid in timed if cid in timed_out and cid not in ref_timed_out]
     return {
         'not_comparable': reasons,
         'noise': {'relative': LATENCY_NOISE_RELATIVE, 'absolute_ms': LATENCY_NOISE_ABSOLUTE_MS},
@@ -216,10 +215,11 @@ def performance_diff(run: dict, reference: dict) -> dict:
             'not_comparable': latency_block,
             'run': len(timed_out),
             'reference': len(ref_timed_out),
-            'newly_timed_out': [cid for cid in timed if cid in timed_out and cid not in ref_timed_out],
+            'newly_timed_out': newly_timed_out,
             'no_longer_timed_out': [cid for cid in timed if cid in ref_timed_out and cid not in timed_out],
         },
-        'slower_than_reference': bool(slower),
+        # A case that newly times out leaves the percentiles, so it must raise the flag on its own.
+        'slower_than_reference': bool(slower) or bool(newly_timed_out),
         'cases': cases,
     }
 
@@ -282,13 +282,32 @@ def resolve_reference(s, run, reference_run_id: Optional[int] = None):
     return (previous, SOURCE_PREVIOUS) if previous is not None else (None, None)
 
 
+#: The last top-level LLM step's ``duration_ms``, matching :func:`final_answer_ms`.
+_TOP_LEVEL_LLM_STEPS = ('$.steps[*] ? (@.kind == "llm" && (!exists(@.parent_agent) || @.parent_agent == null'
+                        ' || @.parent_agent == ""))')
+
+
 def _load_cases(s, run_id: int) -> Dict[int, dict]:
+    from sqlalchemy import case, func
+
     from ..models.evaluation import EvalCaseExecution, EvalCaseUsage
 
+    # Only the columns the diff reads: a trajectory can be megabytes. Rows written before
+    # ``final_answer_ms`` was stored in metrics get it extracted in SQL instead.
+    stored = EvalCaseExecution.metrics['final_answer_ms']
+    legacy_answer = case(
+        (stored.is_(None), func.jsonb_path_query_array(EvalCaseExecution.trajectory, _TOP_LEVEL_LLM_STEPS)
+         .op('->')(-1).op('->')('duration_ms')),
+        else_=None,
+    )
     executions = {
         r.dataset_case_id: {'case_index': r.case_index, 'status': r.status, 'metrics': r.metrics,
-                            'trajectory_state': r.trajectory_state, 'trajectory': r.trajectory}
-        for r in s.query(EvalCaseExecution).filter(EvalCaseExecution.run_id == run_id).all()
+                            'trajectory_state': r.trajectory_state, 'final_answer_ms': r.final_answer_ms}
+        for r in s.query(EvalCaseExecution.dataset_case_id, EvalCaseExecution.case_index,
+                         EvalCaseExecution.status, EvalCaseExecution.metrics,
+                         EvalCaseExecution.trajectory_state,
+                         legacy_answer.label('final_answer_ms'))
+        .filter(EvalCaseExecution.run_id == run_id).all()
         if r.dataset_case_id is not None
     }
     usage = {

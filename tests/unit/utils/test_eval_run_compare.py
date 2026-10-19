@@ -116,6 +116,33 @@ def test_timeouts_stay_out_of_percentiles_and_are_listed(compare):
     assert diff['metrics']['p50_latency_ms']['verdict'] is None
 
 
+def test_a_newly_timed_out_case_marks_the_run_slower(compare):
+    # Case 2 times out only in the run, so it leaves the percentiles and case 1 alone reads as noise.
+    run = _side(compare, {1: (_execution(10_000), _usage()),
+                          2: (_execution(120_000, status='timeout', recorded=False), _usage())})
+    ref = _side(compare, {1: (_execution(10_000), _usage()), 2: (_execution(8_000), _usage())})
+    diff = compare.performance_diff(run, ref)
+    assert diff['metrics']['p95_latency_ms']['verdict'] == 'unchanged'
+    assert diff['timeouts']['newly_timed_out'] == [2]
+    assert diff['slower_than_reference'] is True
+
+
+def test_no_longer_timed_out_does_not_mark_the_run_slower(compare):
+    run = _side(compare, {1: (_execution(10_000), _usage()), 2: (_execution(8_000), _usage())})
+    ref = _side(compare, {1: (_execution(10_000), _usage()),
+                          2: (_execution(120_000, status='timeout', recorded=False), _usage())})
+    assert compare.performance_diff(run, ref)['slower_than_reference'] is False
+
+
+def test_stored_final_answer_time_is_read_without_the_trajectory(compare):
+    stored = {'case_index': 0, 'status': 'ok', 'trajectory_state': 'recorded',
+              'metrics': {'latency_ms': 5_000, 'tool_calls': 1, 'final_answer_ms': 700}}
+    assert compare.case_view(stored, _usage())['final_answer_ms'] == 700
+    # A row written before the value was stored: the loader extracts it in SQL instead.
+    legacy = {**stored, 'metrics': {'latency_ms': 5_000, 'tool_calls': 1}, 'final_answer_ms': 650}
+    assert compare.case_view(legacy, _usage())['final_answer_ms'] == 650
+    assert compare.case_view({**legacy, 'trajectory_state': 'not_recorded'}, _usage())['final_answer_ms'] is None
+
 def test_time_limit_change_withholds_latency_verdicts(compare):
     run = _side(compare, {1: (_execution(50_000), _usage())}, limit=300)
     ref = _side(compare, {1: (_execution(10_000), _usage())}, limit=120)
