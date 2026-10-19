@@ -190,7 +190,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         user_id = auth.current_user()['id']
         from ...utils.web_search import shared_toolkit_error
-        if share_error := shared_toolkit_error(project_id, user_id, tool_data.settings, tool_data.meta):
+        if share_error := shared_toolkit_error(
+                project_id, user_id, tool_data.type, tool_data.settings, tool_data.meta):
             return {"ok": False, "error": share_error}, 403
         if tool_data.type in get_mcp_schemas(project_id, user_id):
             tool_data.meta['mcp'] = True
@@ -205,6 +206,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 )
                 session.add(application_tool)
                 session.commit()
+                if tool_data.meta.get('shared'):
+                    from ...utils.web_search import invalidate_web_search_cache
+                    invalidate_web_search_cache()
                 result = ToolDetails.from_orm(application_tool)
                 result.fix_name(project_id)
                 result.set_online(project_id)

@@ -15,7 +15,10 @@ load("utils/tool_spend_features.py")
 ws = load("utils/web_search.py")
 
 PUBLIC, PROJECT, OTHER = 1, 3, 99
-TAVILY_SCHEMA = {"title": "tavily", "metadata": {"tool_spend": {
+TAVILY_SCHEMA = {"title": "tavily", "properties": {
+    "tavily_configuration": {"type": "object", "configuration_types": ["tavily"]},
+    "max_results": {"type": "integer"},
+}, "metadata": {"tool_spend": {
     "feature": "web_search", "label": "Web search", "backend": "tavily", "configuration_type": "tavily",
     "operations": ["search", "extract", "crawl", "map"], "max_units_per_call": 12,
     "chat_tools": ["web_search", "web_extract"],
@@ -45,6 +48,7 @@ class World:
 
 @pytest.fixture
 def world(monkeypatch):
+    ws.invalidate_web_search_cache()
     w = World()
     module = types.SimpleNamespace(
         toolkit_schemas=w.schemas,
@@ -54,7 +58,12 @@ def world(monkeypatch):
     )
     monkeypatch.setattr(ws, "this", types.SimpleNamespace(module=module))
     monkeypatch.setattr(ws, "_public_project_id", lambda: PUBLIC)
-    monkeypatch.setattr(ws, "_settings_toolkit_id", lambda pid: w.picks.get(pid))
+    w.lookups = []
+
+    def pick(pid):
+        w.lookups.append(pid)
+        return w.picks.get(pid)
+    monkeypatch.setattr(ws, "_settings_toolkit_id", pick)
 
     def row(pid, tid):
         r = w.rows.get((pid, tid))
@@ -205,6 +214,7 @@ def test_availability_reports_resolved_toolkit(world):
     world.picks[PUBLIC] = 10
     world.add(PUBLIC, 10, shared=True, name="Platform Tavily")
     got = ws.web_search_availability(PROJECT, 5)
+    got.pop("resolved")  # internal hand-off to the injector; platform_settings strips it
     assert got == {"available": True, "reason": None, "toolkit": {"id": 10, "name": "Platform Tavily"}}
 
 
@@ -223,34 +233,62 @@ PRIVATE_REF = {"tavily_configuration": {"elitea_title": "t", "private": True}}
 PROJECT_REF = {"tavily_configuration": {"elitea_title": "t", "private": False}}
 
 
+def share(world, settings, pid=PUBLIC, meta=None, was_shared=False, type_="tavily"):
+    return ws.shared_toolkit_error(pid, 5, type_, settings, {"shared": True} if meta is None else meta,
+                                   was_shared=was_shared)
+
+
 def test_unshared_toolkit_needs_no_checks(world):
-    assert ws.shared_toolkit_error(OTHER, 5, PRIVATE_REF, {}) is None
+    assert share(world, PRIVATE_REF, pid=OTHER, meta={}) is None
 
 
 def test_only_public_project_toolkits_can_be_shared(world):
     world.admin_roles[(OTHER, 5)] = ["admin"]
-    assert "public project" in ws.shared_toolkit_error(OTHER, 5, PROJECT_REF, {"shared": True})
+    assert "public project" in share(world, PROJECT_REF, pid=OTHER)
 
 
 def test_only_public_admins_can_share(world):
     world.admin_roles[(PUBLIC, 5)] = ["editor"]
-    assert "admins" in ws.shared_toolkit_error(PUBLIC, 5, PROJECT_REF, {"shared": True})
+    assert "admins" in share(world, PROJECT_REF)
 
 
 def test_role_names_merely_containing_admin_do_not_count(world):
     world.admin_roles[(PUBLIC, 5)] = ["billing-admin"]
-    assert ws.shared_toolkit_error(PUBLIC, 5, PROJECT_REF, {"shared": True}) is not None
+    assert share(world, PROJECT_REF) is not None
 
 
 def test_shared_toolkit_needs_a_project_credential(world):
     world.admin_roles[(PUBLIC, 5)] = ["admin"]
-    assert "private" in ws.shared_toolkit_error(PUBLIC, 5, PRIVATE_REF, {"shared": True})
-    assert ws.shared_toolkit_error(PUBLIC, 5, PROJECT_REF, {"shared": True}) is None
+    assert "private" in share(world, PRIVATE_REF)
+    assert share(world, PROJECT_REF) is None
+
+
+@pytest.mark.parametrize("ref", [
+    # Review: the old shape check only saw refs with exactly {elitea_title, private}
+    {"elitea_title": "t", "private": True, "configuration_uuid": "u"},
+    {"elitea_title": "t", "private": "false"},
+    {"elitea_title": "t"},
+    "t",
+])
+def test_any_credential_field_that_is_not_explicitly_project_scoped_is_refused(world, ref):
+    world.admin_roles[(PUBLIC, 5)] = ["admin"]
+    assert "private" in share(world, {"tavily_configuration": ref})
+
+
+def test_credential_fields_come_from_the_schema_not_the_shape(world):
+    # A dict named like a credential but not marked in the schema is just a setting
+    world.admin_roles[(PUBLIC, 5)] = ["admin"]
+    assert share(world, {**PROJECT_REF, "max_results": {"elitea_title": "x", "private": True}}) is None
+
+
+def test_unknown_schema_fails_closed(world):
+    world.admin_roles[(PUBLIC, 5)] = ["admin"]
+    assert "schema" in share(world, PROJECT_REF, type_="no_such_toolkit")
 
 
 def test_non_admin_cannot_unshare_by_omitting_the_flag(world):
     world.admin_roles[(PUBLIC, 5)] = ["editor"]
-    assert ws.shared_toolkit_error(PUBLIC, 5, PROJECT_REF, {}, was_shared=True) is not None
+    assert share(world, PROJECT_REF, meta={}, was_shared=True) is not None
 
 
 def test_is_public_admin_uses_exact_role_names(world):
@@ -258,3 +296,39 @@ def test_is_public_admin_uses_exact_role_names(world):
     assert ws.is_public_admin(PUBLIC, 5) is False
     world.admin_roles[(PUBLIC, 5)] = ["viewer", "admin"]
     assert ws.is_public_admin(PUBLIC, 5) is True
+
+
+# --- hot path: resolve once, short TTL cache --------------------------------
+
+def test_one_predict_resolves_the_platform_pick_once(world):
+    world.picks[PUBLIC] = 10
+    world.add(PUBLIC, 10, shared=True)
+    assert inject() is not None
+    assert world.lookups == [PUBLIC]
+
+
+def test_resolution_is_cached_across_predicts_until_invalidated(world):
+    world.picks[PUBLIC] = 10
+    world.add(PUBLIC, 10, shared=True)
+    inject(); inject(); inject()
+    assert world.lookups == [PUBLIC]
+    ws.invalidate_web_search_cache()
+    inject()
+    assert world.lookups == [PUBLIC, PUBLIC]
+
+
+def test_cache_expires_after_the_ttl(world, monkeypatch):
+    world.picks[PUBLIC] = 10
+    world.add(PUBLIC, 10, shared=True)
+    clock = [1000.0]
+    monkeypatch.setattr(ws.time, "monotonic", lambda: clock[0])
+    inject()
+    clock[0] += ws.RESOLVE_TTL_SECONDS + 1
+    inject()
+    assert world.lookups == [PUBLIC, PUBLIC]
+
+
+def test_availability_does_not_leak_the_internal_resolution(world):
+    world.picks[PUBLIC] = 10
+    world.add(PUBLIC, 10, shared=True)
+    assert "owner_project_id" not in ws.web_search_availability(PROJECT, 5)["toolkit"]

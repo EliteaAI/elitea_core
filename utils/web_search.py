@@ -1,5 +1,7 @@
 """ Web Search toggle: toolkit resolution, availability and injection (#6982) """
 
+import threading
+import time
 from typing import Optional
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
@@ -13,6 +15,10 @@ WEB_SEARCH_TOOLKIT_NAME = "Web Search"
 SETTINGS_TYPE = "web_search_settings"
 _RPC_TIMEOUT = 3
 _ADMIN_ROLE_NAMES = frozenset({"admin", "super_admin", "system"})
+# The platform pick rarely changes; a short TTL keeps the configurations RPC and DB read off every predict
+RESOLVE_TTL_SECONDS = 30
+_resolve_lock = threading.Lock()
+_resolve_cache = {"at": None, "value": None}
 
 
 def _public_project_id() -> int:
@@ -38,8 +44,7 @@ def _load_toolkit_row(project_id: int, toolkit_id: int) -> Optional[dict]:
         return {"id": row.id, "name": row.name, "type": row.type, "meta": dict(row.meta or {})}
 
 
-def resolve_web_search_toolkit() -> Optional[dict]:
-    """{owner_project_id, toolkit_id, name, type}: the public project's shared pick, else None."""
+def _resolve_uncached() -> Optional[dict]:
     public_id = _public_project_id()
     toolkit_id = _settings_toolkit_id(public_id)
     if toolkit_id is None:
@@ -57,6 +62,23 @@ def resolve_web_search_toolkit() -> Optional[dict]:
     return {"owner_project_id": public_id, "toolkit_id": toolkit_id, "name": row["name"], "type": row["type"]}
 
 
+def resolve_web_search_toolkit() -> Optional[dict]:
+    """{owner_project_id, toolkit_id, name, type}: the public project's shared pick, else None (TTL-cached)."""
+    now = time.monotonic()
+    with _resolve_lock:
+        if _resolve_cache["at"] is not None and now - _resolve_cache["at"] < RESOLVE_TTL_SECONDS:
+            return _resolve_cache["value"]
+    value = _resolve_uncached()
+    with _resolve_lock:
+        _resolve_cache.update(at=now, value=value)
+    return value
+
+
+def invalidate_web_search_cache() -> None:
+    with _resolve_lock:
+        _resolve_cache.update(at=None, value=None)
+
+
 def web_search_availability(project_id: Optional[int], user_id: Optional[int]) -> dict:
     """{available, reason, toolkit}; reason in disabled_platform, disabled_project, no_toolkit, not_ready."""
     if not feature_defaults(this.module.descriptor.config, WEB_SEARCH_FEATURE).get("enabled", False):
@@ -72,7 +94,8 @@ def web_search_availability(project_id: Optional[int], user_id: Optional[int]) -
         return {"available": False, "reason": "no_toolkit", "toolkit": None}
     if resolved["type"] not in (this.module.toolkit_schemas or {}):
         return {"available": False, "reason": "not_ready", "toolkit": None}
-    return {"available": True, "reason": None, "toolkit": {"id": resolved["toolkit_id"], "name": resolved["name"]}}
+    return {"available": True, "reason": None, "resolved": resolved,
+            "toolkit": {"id": resolved["toolkit_id"], "name": resolved["name"]}}
 
 
 def _chat_tools(toolkit_type: str) -> list:
@@ -96,9 +119,7 @@ def inject_internal_web_search_tool(
         if not availability["available"]:
             log.info("web_search: unavailable for project %s (%s)", project_id, availability["reason"])
             return None
-        resolved = resolve_web_search_toolkit()
-        if resolved is None:
-            return None
+        resolved = availability["resolved"]
         from .application_tools import ValidatorNotSupportedError  # pylint: disable=C0415
         from .predict_utils import get_toolkit_config  # pylint: disable=C0415
         try:
@@ -141,7 +162,26 @@ def is_public_admin(project_id: int, user_id: int) -> bool:
         return False
 
 
-def shared_toolkit_error(project_id: int, user_id: int, settings: dict, meta: dict,
+def credential_fields(schema: Optional[dict]) -> list:
+    """Settings keys the toolkit schema marks as credential references (same rule as expansion)."""
+    return [k for k, v in ((schema or {}).get("properties") or {}).items()
+            if isinstance(v, dict) and (v.get("configuration_types") or v.get("configuration_sections"))]
+
+
+def private_credential_error(settings: dict, schema: Optional[dict]) -> Optional[str]:
+    if schema is None:
+        return "Toolkit schema is not available, so sharing cannot be checked"
+    for field in credential_fields(schema):
+        ref = (settings or {}).get(field)
+        if ref in (None, {}):
+            continue
+        # Only an explicit private=False resolves in the public project; anything else may hit a personal one
+        if not isinstance(ref, dict) or ref.get("private") is not False:
+            return "A shared toolkit must use a project credential, not a private one"
+    return None
+
+
+def shared_toolkit_error(project_id: int, user_id: int, toolkit_type: str, settings: dict, meta: dict,
                          was_shared: bool = False) -> Optional[str]:
     """Why this toolkit may not carry meta.shared, or None when it may."""
     shared = bool((meta or {}).get("shared"))
@@ -152,7 +192,5 @@ def shared_toolkit_error(project_id: int, user_id: int, settings: dict, meta: di
     if not is_public_admin(project_id, user_id):
         return "Only public project admins can change sharing"
     if shared:
-        for value in (settings or {}).values():
-            if isinstance(value, dict) and set(value.keys()) == {"elitea_title", "private"} and value.get("private"):
-                return "A shared toolkit must use a project credential, not a private one"
+        return private_credential_error(settings, (this.module.toolkit_schemas or {}).get(toolkit_type))
     return None

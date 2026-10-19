@@ -68,7 +68,9 @@ def _tool_spend_availability():
         result = {}
         for feature in features:
             if feature == WEB_SEARCH_FEATURE:
-                result[feature] = web_search_availability(project_id, user.get("id"))
+                availability = web_search_availability(project_id, user.get("id"))
+                availability.pop("resolved", None)
+                result[feature] = availability
                 continue
             if not feature_defaults(this.module.descriptor.config, feature).get("enabled", False):
                 result[feature] = {"available": False, "reason": "disabled_platform"}
