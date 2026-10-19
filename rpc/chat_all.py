@@ -274,6 +274,14 @@ def generate_toolkit_payload(
         # Log but don't fail the entire payload generation for optional feature
         log.warning(f"Failed to inject internal ImageGen tool: {e}")
 
+    from ..utils.web_search import inject_internal_web_search_tool
+    web_search_tool = inject_internal_web_search_tool(
+        internal_tools=internal_tools or [], user_id=user_id,
+        project_id=conversation_project_id, existing_tools=tools,
+    )
+    if web_search_tool:
+        tools.append(web_search_tool)
+
     # Inject internal attachment tool:
     # - For LLM/dummy chats: always inject (is_llm_chat=True)
     # - For agent chats: inject only if 'attachments' in internal_tools from agent version
