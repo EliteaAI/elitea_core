@@ -322,6 +322,12 @@ Run admin task seed_eval_trajectory_dimensions
 # checks as "present". No params. Idempotent.
 Run admin task seed_eval_trajectory_dimensions
 
+# Performance P-5: eval_dataset_case gets an optional time_limit_seconds (integer 10..900,
+# nullable, no backfill; null means the suite's limit). Fresh environments get it from
+# create_all; existing p_N schemas get it from the same dataset-columns task, so re-run it once
+# on upgrade. Idempotent (ADD COLUMN IF NOT EXISTS).
+Run admin task migrate_eval_dataset_columns with param: project_id=all
+
 # Dimension tier=agent_adhoc scoping: eval_dimension gets an owning agent_id (nullable, for rows
 # created before this column existed, which stay visible everywhere). Fresh environments get it
 # from create_all; existing p_N schemas need the column backfilled. Per-project loop.
