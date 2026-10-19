@@ -69,3 +69,9 @@ cost_budgets:
 enterprise_credential_governance:
   enabled: false
   policy_revision: null
+  # Admission settings (#6756), validated only when enabled is true. Governed startup also needs
+  # auth.auth_mode "rpc", auth identity_verifier.session_user configured, and tracing security audit.
+  allow_runtime_domain_binding: false   # explicit allow for runtime_domain_binding bindings
+  admit_legacy_pat: false               # let a legacy PAT through identity verification (it still needs a mandate)
+  context_ttl_s: 3600                   # how long an admitted run may start or restart (60..86400)
+  environment: null                     # label recorded on contexts and audit events

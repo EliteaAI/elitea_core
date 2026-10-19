@@ -32,6 +32,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     """
 
     @web.method()
+    def validate_execution_context(self, project_id, context_ref, caller):
+        """ Worker bus: does this run still hold the admission it was dispatched under? (#6756) """
+        from ..utils.admission import validate_context  # pylint: disable=C0415
+        #
+        return validate_context(self, project_id, context_ref, caller)
+
+    @web.method()
     def get_provider_api_info(self, user_id, project_id, provider_name):
         """ Method """
         provider = self.lookup_provider(user_id, project_id, provider_name)

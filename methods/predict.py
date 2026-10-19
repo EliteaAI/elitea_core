@@ -9,6 +9,7 @@ from tools import VaultClient, db, serialize
 from ..models.pd.chat import ApplicationChatRequest, ContextStrategyModel
 from ..utils.predict_utils import generate_predict_payload, load_context_settings_from_conversation, user_input_preview
 from ..models.all import ApplicationVersion
+from ..models.pd.admission import admission_request_from
 from ..utils.budget_door import schema_may_use_llm
 from ..utils.utils import verify_signature
 from ..utils.exceptions import VerifySignatureError, PoolSaturationError
@@ -111,11 +112,19 @@ class Method:
             'project_id': parsed.project_id,
         }
 
+        # Governed runs are admitted from the authenticated HTTP caller and the version row loaded above, never
+        # from the user_id argument or the payload; a webhook has no person behind it. None when governance is off
+        admission = admission_request_from(
+            self, sid=None, project_id=parsed.project_id, binding_project_id=project_id,
+            version_row=application_version, run_kind="system" if webhook_signature is not None else "interactive",
+            entry_point="predict_api",
+        )
         task_id = self.task_node.start_task(
             "indexer_agent",
             args=[None, None],
             kwargs=payload,
             pool="agents",
+            admission=admission,
             meta={
                 "task_name": "indexer_agent",
                 "project_id": parsed.project_id,

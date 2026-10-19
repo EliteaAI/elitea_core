@@ -652,6 +652,30 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed, "dry_run": dry_run}
 
     @web.method()
+    def manage_agent_identity_binding(self, *args, **kwargs):
+        """Admin task: create a binding for one agent version and move it through its lifecycle (R-2.0.8, #6756, C-1009).
+
+        Works with credential governance off, so bindings can be prepared before it is switched on.
+        Every change is audited in the same transaction. Suspend and retire revoke the binding's live runs.
+
+        Param format (required):
+            "project_id=N;application_id=A;version_id=V;mode=<m>;action=<a>[;approval_ref=...][;policy_revision=...][;dry_run]"
+
+        Modes: dedicated_agent, runtime_domain_binding, elitea_native.
+        Actions: create (draft, digest of the current definition), submit (draft -> pending_approval),
+        activate (needs approval_ref and policy_revision), suspend, resume, retire.
+
+        Examples:
+            "project_id=3;application_id=7;version_id=21;mode=elitea_native;action=create"
+            "project_id=3;application_id=7;version_id=21;mode=elitea_native;action=activate;approval_ref=CHG-12;policy_revision=2026-10-1"
+        """
+        from ..utils.binding_admin import manage_binding  # pylint: disable=C0415
+
+        result = manage_binding(self, kwargs.get("param", "") or "", kwargs.get("_executing_user_id") or 0)
+        log.info("manage_agent_identity_binding: %s", {k: v for k, v in result.items() if k != "definition_digest"})
+        return result
+
+    @web.method()
     def migrate_eval_dataset_columns(self, *args, **kwargs):
         """Admin task: add the dataset-scoping columns to each project schema.
 
