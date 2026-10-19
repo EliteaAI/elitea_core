@@ -588,6 +588,70 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
+    def create_agent_identity_tables(self, *args, **kwargs):
+        """Admin task: create the agent identity tables in each project schema (R-2.0.8, #6756, C-1009).
+
+        Creates ``agent_identity_binding`` and ``execution_security_context`` where they are missing.
+        New projects get them from ``create_all`` and a startup guard covers the rest, so this is the
+        operator's way to report (dry run) and re-run. Idempotent; schemas that have both are left alone.
+
+        Param format (required):
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - report which projects lack the tables (``migrated`` = would create)
+            "project_id=all"          - create them everywhere they are missing
+            "project_id=3"            - project 3 only
+        """
+        from ..utils.agent_identity_schema import (  # pylint: disable=C0415
+            apply_identity_tables, project_ids_missing_identity_tables,
+        )
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("create_agent_identity_tables: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error("create_agent_identity_tables: project_id= is required. Format: project_id=<all|N>[;dry_run]")
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        try:
+            if project_id_filter is not None:
+                project_ids = [project_id_filter]
+            else:
+                project_ids = [
+                    p["id"] for p in (
+                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                    )
+                ]
+            missing = set(project_ids_missing_identity_tables())
+        except Exception:  # pylint: disable=W0703
+            log.exception("create_agent_identity_tables: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_identity_tables([pid for pid in project_ids if pid in missing], dry_run=dry_run)
+        log.info(
+            "%screate_agent_identity_tables: migrated=%s failed=%s",
+            "[DRY RUN] " if dry_run else "", len(migrated), len(failed),
+        )
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed, "dry_run": dry_run}
+
+    @web.method()
     def migrate_eval_dataset_columns(self, *args, **kwargs):
         """Admin task: add the dataset-scoping columns to each project schema.
 

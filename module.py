@@ -517,11 +517,16 @@ class Module(module.ModuleModel):
                 "migrate_eval_case_usage_columns", self.migrate_eval_case_usage_columns,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "create_agent_identity_tables", self.create_agent_identity_tables,
+                group="R-2.0.8",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
+        self._ensure_agent_identity_schema()
 
         self.handle_pylon_modules_initialized()
 
@@ -595,6 +600,30 @@ class Module(module.ModuleModel):
                     )
             except Exception:  # pylint: disable=W0703
                 log.exception("share token schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
+
+    def _ensure_agent_identity_schema(self):
+        """Startup safety net: create the agent identity tables in any project schema that predates
+        them (#6756). Runs off-thread; guarded by a catalog check so steady-state boots issue no DDL.
+        New projects are already covered by create_all."""
+        def _run():
+            try:
+                from .utils.agent_identity_schema import (
+                    project_ids_missing_identity_tables,
+                    apply_identity_tables,
+                )
+                pending = project_ids_missing_identity_tables()
+                if not pending:
+                    return
+                log.info("agent identity schema: auto-migrating %s project(s)", len(pending))
+                migrated, failed = apply_identity_tables(pending)
+                log.info(
+                    "agent identity schema: auto-migration done (migrated=%s failed=%s)",
+                    len(migrated), len(failed),
+                )
+            except Exception:  # pylint: disable=W0703
+                log.exception("agent identity schema: auto-migration failed")
 
         Thread(target=_run, daemon=True).start()
 
@@ -1048,6 +1077,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "set_index_schedule_expiration", self.set_index_schedule_expiration
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "create_agent_identity_tables", self.create_agent_identity_tables
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)

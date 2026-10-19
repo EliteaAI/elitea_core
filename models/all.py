@@ -11,6 +11,7 @@ from sqlalchemy.ext.mutable import MutableDict
 from .enums.all import AgentTypes, PublishStatus, ToolEntityTypes, SkillEntityTypes
 from ..models.elitea_tools import EliteATool, EntityToolMapping
 from ..models.skill import Skill, EntitySkillMapping
+from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext  # noqa: F401  (create_all)
 from .mixins import AbstractLikesMixin
 
 
