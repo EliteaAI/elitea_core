@@ -331,6 +331,20 @@ CHECKS = {
         'Informational; target: under half the limit.', _FINAL_ANSWER),
 }
 
+# Why a built-in check skipped a case, shown on the result card. A case with no trajectory at all is
+# skipped before dispatch (``missing_evidence_note``), so these name the reference the case lacks.
+SKIP_NOTES = {
+    'trajectory.tool_match': 'Skipped: the case has no expected trajectory, or it requires no tool calls.',
+    'trajectory.forbidden_tools': 'Skipped: the case lists no forbidden tools.',
+    'trajectory.tool_errors': 'Skipped: no trajectory was recorded for this case.',
+    'trajectory.redundant_calls': 'Skipped: no trajectory was recorded for this case.',
+    'trajectory.step_budget': 'Skipped: the case sets no tool-call budget (max_tool_calls).',
+    'trajectory.step_limit_hit': 'Skipped: the trajectory does not record whether the step limit was reached.',
+    'trajectory.guardrail_events': 'Skipped: no trajectory was recorded for this case.',
+    'performance.latency': 'Skipped: no latency or case time limit was recorded for this case.',
+    'performance.final_answer_time': 'Skipped: no final model call or case time limit was recorded for this case.',
+}
+
 # Checks a timed-out case is scored on (worst value, "exceeded") rather than skipped.
 TIMEOUT_SCORED = frozenset({'performance.latency', 'performance.final_answer_time'})
 

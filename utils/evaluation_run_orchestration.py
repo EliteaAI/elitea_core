@@ -607,9 +607,17 @@ def _map_code_verdict(case_id, binding: dict, verdict: dict, snapshot: dict, evi
             normalized_score=_normalize_code(native, snapshot, dim_id),
             verdict=base_verdict,
         )
-    status = STATUS_SKIPPED if vstatus == 'na' else STATUS_ERROR
+    if vstatus == 'na':
+        # The card shows the note: a built-in check names the reference the case lacks, a user
+        # script keeps the contract's generic reason (what it printed stays in stdout).
+        from .evaluation_trajectory_checks import SKIP_NOTES
+        builtin = ((snapshot.get('dimensions') or {}).get(str(dim_id)) or {}).get('builtin_check')
+        return _result_row(
+            case_id, engine=ENGINE_CODE, status=STATUS_SKIPPED, evidence=evidence,
+            dimension_id=dim_id, verdict={**base_verdict, 'note': SKIP_NOTES.get(builtin) or verdict.get('error')},
+        )
     return _result_row(
-        case_id, engine=ENGINE_CODE, status=status, evidence=evidence,
+        case_id, engine=ENGINE_CODE, status=STATUS_ERROR, evidence=evidence,
         dimension_id=dim_id, verdict=base_verdict,
     )
 

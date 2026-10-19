@@ -243,7 +243,8 @@ def _snapshot():
         code, contract = checks.builtin_code({'builtin_check': key})
         dims[str(i)] = {'name': key, 'scale_type': check['scale_type'],
                         'scale_min': check['scale_min'], 'scale_max': check['scale_max'],
-                        'polarity': check['polarity'], 'code': code, 'return_contract': contract}
+                        'polarity': check['polarity'], 'code': code, 'return_contract': contract,
+                        'builtin_check': key}
         bindings.append({'dimension_id': i, 'engine': 'code', 'weight': check['default_weight'],
                          'evidence_scope': dict(checks.TRAJECTORY_SCOPE)})
     return {'dimensions': dims, 'bindings': bindings}
@@ -281,6 +282,8 @@ def test_orchestrated_rows_score_and_skip(orch):
     assert by_name['performance.final_answer_time']['native_score'] == 0.05
     for key in ('trajectory.tool_match', 'trajectory.forbidden_tools', 'trajectory.step_budget'):
         assert by_name[key]['status'] == 'skipped', key
+        # The card shows why: the reference this check needs and the case lacks.
+        assert by_name[key]['verdict']['note'] == checks.SKIP_NOTES[key], key
 
     expected = ref('a', 'c', forbidden=['b'], max_tool_calls=5, allow_repeat=['b'])
     rows = orch.assemble_case_results(_case(expected), snapshot, code_scorer=scorer)
@@ -306,6 +309,20 @@ def test_registry_seed_shape():
         assert row['meta']['default_evidence_scope']['trajectory'] is True
         if not row['default_weight']:
             assert row['default_target'] is not None and row['default_target_operator']
+
+
+def test_every_check_has_a_skip_note():
+    assert set(checks.SKIP_NOTES) == set(checks.CHECKS)
+    assert all(note.startswith('Skipped: ') for note in checks.SKIP_NOTES.values())
+
+
+def test_user_script_na_keeps_the_generic_note(orch, cv):
+    verdict = cv.map_execution_result({'status': 'success', 'result': 'na', 'stdout': 'no ref'},
+                                      dimension_id=1, name='d', return_contract='bool')
+    row = orch._map_code_verdict(7, {'dimension_id': 1}, verdict, {'dimensions': {'1': {}}}, {})
+    assert row['status'] == 'skipped'
+    assert row['verdict']['note'] == cv.NA_RESULT_DETAIL
+    assert row['verdict']['stdout'] == 'no ref'
 
 
 def test_builtin_lookup_ignores_unknown_keys():
