@@ -68,6 +68,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             tool_data = result.model_dump(mode='json')
 
+            # Every user is a public-project viewer, and viewers there hold tool.update
+            if expand and (tool_data.get('meta') or {}).get('shared'):
+                from ...utils.web_search import is_public_admin
+                if not is_public_admin(project_id, auth.current_user()['id']):
+                    return {'error': 'Expanding a shared toolkit requires project admin rights'}, 403
+
             # Expand credential configurations if requested
             if expand and tool_data.get('settings') and tool_data.get('type'):
                 try:
@@ -207,6 +213,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ), 400
 
         update_data.fix_name(project_id)
+
+        from ...utils.web_search import shared_toolkit_error
+        with db.with_project_schema_session(project_id) as session:
+            current = session.query(EliteATool.meta).filter(EliteATool.id == tool_id).first()
+        was_shared = bool(current and (current.meta or {}).get('shared'))
+        share_error = shared_toolkit_error(
+            project_id, payload['user_id'], update_data.settings, update_data.meta, was_shared=was_shared,
+        )
+        if share_error:
+            return {'error': share_error}, 403
 
         with db.with_project_schema_session(project_id) as session:
             from tools import serialize, store_secrets

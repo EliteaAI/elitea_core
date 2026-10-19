@@ -66,6 +66,15 @@ def expand_version_for_runtime(project_id: int, application_id: int, version_id:
     except Exception as e:
         log.warning(f"[#5267] Failed to inject MCP toolkits into version details: {e}")
 
+    # #6982: from this version's own toggle only, never a parent's
+    from .web_search import inject_internal_web_search_tool
+    web_search_tool = inject_internal_web_search_tool(
+        internal_tools=(version_details.get('meta') or {}).get('internal_tools', []),
+        user_id=user_id, project_id=project_id, existing_tools=version_details.get('tools'),
+    )
+    if web_search_tool:
+        version_details.setdefault('tools', []).append(web_search_tool)
+
     try:
         from .internal_tools import dedupe_internal_mcp_tools, resolve_internal_mcp_tools
         dedupe_internal_mcp_tools(version_details.get('tools'))

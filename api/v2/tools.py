@@ -189,6 +189,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         tool_data.fix_name(project_id)
 
         user_id = auth.current_user()['id']
+        from ...utils.web_search import shared_toolkit_error
+        if share_error := shared_toolkit_error(project_id, user_id, tool_data.settings, tool_data.meta):
+            return {"ok": False, "error": share_error}, 403
         if tool_data.type in get_mcp_schemas(project_id, user_id):
             tool_data.meta['mcp'] = True
 
