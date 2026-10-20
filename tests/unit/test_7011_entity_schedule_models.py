@@ -123,7 +123,7 @@ def test_7011_r3_1_principal_kind_check(entity_schedule_models):
     ddl = _ddl(entity_schedule_models.EntitySchedule)
     assert (
         "CONSTRAINT ck_entity_schedules_principal_kind "
-        "CHECK (principal->>'kind' IN ('mandate', 'delegation', 'legacy_system'))"
+        "CHECK (principal->>'kind' IS NOT NULL AND principal->>'kind' IN ('mandate', 'delegation', 'legacy_system'))"
     ) in ddl
 
 
