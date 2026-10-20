@@ -121,6 +121,8 @@ def _resolve_entity(rows: list[dict], raw: dict, locked: dict | None, out: dict,
             return
         out['application_id'] = rows[0]['application_id']
     else:
+        if raw.get('version_name') is not None:
+            warn('version_id', 'A version needs an agent or pipeline name')
         return
     if raw.get('version_name') is not None:
         version = next((row for row in rows if _same_name(row['version_name'], raw['version_name'])), None)
@@ -176,6 +178,8 @@ def validate_schedule_draft(
     raw = dict(raw)
     if isinstance(raw.get('variables'), dict):  # the service prompt answers {name: value}
         raw['variables'] = [{'name': name, 'value': value} for name, value in raw['variables'].items()]
+    if isinstance(raw.get('expires_at'), str):  # the service prompt asks for an ISO date-time; the form keeps the date
+        raw['expires_at'] = raw['expires_at'][:10]
     out: dict = {}
     for field in PLAIN_FIELDS:
         if raw.get(field) is None:

@@ -210,3 +210,15 @@ def test_el_7011_p3_a_given_roster_is_used_instead_of_a_new_read(monkeypatch):
     monkeypatch.setattr(module, 'schedule_roster', lambda project_id: pytest.fail('roster read twice'))
     draft, _ = module.validate_schedule_draft(1, AGENT, None, ROSTER)
     assert draft.application_id == 42
+
+
+def test_el_7011_r2_1_a_stop_date_time_keeps_its_date(validate):
+    stop = date.today() + timedelta(days=30)
+    draft, warnings = validate({'cron': '0 9 * * *', 'timezone': 'UTC', 'expires_at': f'{stop.isoformat()}T23:59:00Z'})
+    assert (draft.expires_at, warnings) == (stop, [])
+
+
+def test_el_7011_r2_2_a_version_without_an_entity_name_is_warned(validate):
+    draft, warnings = validate({'entity_type': 'agent', 'version_name': 'base'})
+    assert (draft.application_id, draft.version_id) == (None, None)
+    assert _fields(warnings) == ['version_id']
