@@ -1,9 +1,10 @@
 """Pre-run admission of a schedule run as its owner (EL-7011 US-09, ADR-0002)."""
-import re
+import json
 from queue import Empty
 from types import SimpleNamespace
 from typing import NamedTuple
 
+from pylon.core.tools import log
 from tools import rpc_tools
 
 AUTH_TIMEOUT = 3  # seconds; a check never hangs the starter thread
@@ -13,13 +14,26 @@ ACCESS_CHECK_UNAVAILABLE = 'access check unavailable'
 DISABLED_OWNER_LOST_ACCESS = 'owner_lost_access'
 NO_TOKEN = 'no token for the owner'
 VERSION_NOT_EXPANDED = 'version could not be expanded for the owner'
-# Error types of application_tools.expand_toolkit_settings; they reach us as JSON inside the error text
+PRERUN_FAILED = 'the pre-run check failed'
+# Error types of application_tools.expand_toolkit_settings
 CREDENTIAL_REASONS = {
     'private_credential_not_found': 'private credential {} not found',
     'credential_not_found': 'credential {} not found',
     'credential_type_mismatch': 'credential {} has the wrong type',
 }
-_CREDENTIAL_ERROR = re.compile(r'"error_type": "(\w+)", "credential_id": "([^"]*)"')
+
+
+def credential_errors_of(error) -> list[dict]:
+    """The credential entries of an expansion ValidationError: type and name only, never the input values."""
+    found = []
+    for entry in error.errors(include_input=False):
+        try:
+            detail = json.loads((entry.get('ctx') or {}).get('error', ''))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(detail, dict) and detail.get('error_type') in CREDENTIAL_REASONS:
+            found.append({'error_type': detail['error_type'], 'credential_id': detail.get('credential_id', 'unknown')})
+    return found
 
 
 def check_principal(schedule) -> str | None:
@@ -42,7 +56,10 @@ def check_owner_access(project_id: int, owner_id: int) -> str | None:
         return OWNER_LOST_ACCESS if str(error).startswith('No such user found') else ACCESS_CHECK_UNAVAILABLE
     except Empty:  # the RPC timed out: keep the schedule enabled
         return ACCESS_CHECK_UNAVAILABLE
-    return OWNER_LOST_ACCESS if user.get('suspended') else None
+    except Exception:  # noqa: BLE001 -- any other auth failure must not leave the run running
+        log.exception('Owner %s of project %s: the access check failed', owner_id, project_id)
+        return ACCESS_CHECK_UNAVAILABLE
+    return OWNER_LOST_ACCESS if not user or user.get('suspended') else None
 
 
 def check_owner_credentials(project_id: int, schedule) -> str | None:
@@ -59,10 +76,11 @@ def check_owner_credentials(project_id: int, schedule) -> str | None:
     expanded = expand_version_for_runtime(project_id, schedule.application_id, schedule.version_id, owner_id)
     if 'error' not in expanded:
         return None
-    match = _CREDENTIAL_ERROR.search(str(expanded['error']))
-    if match and match[1] in CREDENTIAL_REASONS:
-        return CREDENTIAL_REASONS[match[1]].format(match[2])
-    return VERSION_NOT_EXPANDED
+    reasons = [
+        CREDENTIAL_REASONS[entry['error_type']].format(entry['credential_id'])
+        for entry in expanded.get('credential_errors') or []
+    ]
+    return '; '.join(reasons) or VERSION_NOT_EXPANDED
 
 
 class PreRunResult(NamedTuple):
@@ -82,9 +100,13 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
     from .schedule_runs import disable_schedule, fail_schedule_run
 
     owner_id = schedule.created_by
-    reason = (check_principal(schedule)
-              or check_owner_access(project_id, owner_id)
-              or check_owner_credentials(project_id, schedule))
+    try:
+        reason = (check_principal(schedule)
+                  or check_owner_access(project_id, owner_id)
+                  or check_owner_credentials(project_id, schedule))
+    except Exception:  # noqa: BLE001 -- a run left running would block the schedule (R2.5)
+        log.exception('Schedule %s run %s: the pre-run check failed', schedule.id, run_id)
+        reason = PRERUN_FAILED
     if reason is None:
         return PreRunResult(True, owner_id)
     fail_schedule_run(project_id, run_id, reason)
@@ -93,5 +115,5 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
         disable_schedule(project_id, schedule.id, DISABLED_OWNER_LOST_ACCESS)
         event = Types.schedule_disabled
     run = SimpleNamespace(id=run_id, reason=reason, conversation_id=None)
-    notify_schedule_event(project_id, owner_id, event, schedule, run)
+    notify_schedule_event(project_id, owner_id, event, schedule, run)  # logs its own failure, never raises
     return PreRunResult(False, None, reason)

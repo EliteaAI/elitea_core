@@ -75,6 +75,17 @@ def test_7011_r1_1_auth_call_failure_is_unavailable_not_lost(prerun, monkeypatch
     assert _access(prerun, monkeypatch, rpc) == UNAVAILABLE
 
 
+def test_7011_r1_2_an_empty_user_answer_loses_access(prerun, monkeypatch):
+    rpc = FakeRpc()
+    rpc.answers["auth_get_user"] = None
+    assert _access(prerun, monkeypatch, rpc) == LOST
+
+
+def test_7011_r1_1_any_other_auth_error_is_unavailable(prerun, monkeypatch):
+    rpc = FakeRpc(member=ConnectionError("rpc node down"))
+    assert _access(prerun, monkeypatch, rpc) == UNAVAILABLE
+
+
 def _schedule(kind="delegation", ref=12, created_by=12):
     return SimpleNamespace(principal={"kind": kind, "ref": ref}, created_by=created_by)
 

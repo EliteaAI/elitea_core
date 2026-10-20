@@ -2328,9 +2328,13 @@ class RPC:
         except (ApplicationVersionNonFoundError, ApplicationToolExpandedError) as e:
             return {'error': str(e)}
         except ValidationError as e:
-            # Keeps the credential error entries (type and name) that a schedule run reports (EL-7011 US-09 R2.4)
-            log.warning("Expansion of application version details failed: %s", e)
-            return {'error': str(e)}
+            # Credential type and name only (EL-7011 US-09 R2.4); the input values may hold secrets
+            from ..utils.schedule_prerun import credential_errors_of
+            credential_errors = credential_errors_of(e)
+            log.warning("Expansion of application version details failed: %s", credential_errors or e.error_count())
+            if credential_errors:
+                return {'error': 'A credential of the version cannot be used', 'credential_errors': credential_errors}
+            return {'error': f'Can not get application details for {version_id=}'}
         except Exception as e:
             log.error("Expanssion of application version details failed")
             log.error(e)

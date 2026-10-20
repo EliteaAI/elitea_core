@@ -106,3 +106,18 @@ def test_7011_r3_1_the_effects_touch_only_the_given_schedule_and_run(apply):
     apply(recorder)
     assert [call for call in recorder.calls if call[0] == "disable"] == [("disable", 34, 5, "owner_lost_access")]
     assert [call[2] for call in recorder.calls if call[0] == "fail"] == [RUN_ID]
+
+
+def test_7011_r2_5_an_unexpected_error_fails_the_run_and_keeps_the_schedule(apply):
+    recorder = Recorder()
+
+    def broken(*args):
+        raise ConnectionError("expansion RPC down")
+
+    recorder.step = lambda name: broken if name == "credentials" else Recorder.step(recorder, name)
+    result = apply(recorder)
+    assert (result.ok, result.reason) == (False, "the pre-run check failed")
+    assert recorder.calls[-2:] == [
+        ("fail", 34, RUN_ID, "the pre-run check failed"),
+        ("notify", OWNER, "schedule_run_failed", RUN_ID, "the pre-run check failed"),
+    ]
