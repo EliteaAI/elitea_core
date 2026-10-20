@@ -34,9 +34,9 @@ def claim_schedule(session, schedule_id: int, seen_next_run: datetime, new_next_
     return result.rowcount == 1
 
 
-def insert_cron_run(session, schedule_id: int) -> int | None:
-    """Insert a running cron run; None when the active-run unique index already holds one."""
-    run = EntityScheduleRun(schedule_id=schedule_id, trigger='cron', status='running')
+def insert_run(session, schedule_id: int, trigger: str, requested_by: int | None = None) -> int | None:
+    """Insert a running run; None when the active-run unique index already holds one."""
+    run = EntityScheduleRun(schedule_id=schedule_id, trigger=trigger, status='running', requested_by=requested_by)
     try:
         # A savepoint, so the conflict rolls back the insert only and the claim stays
         with session.begin_nested():
@@ -44,6 +44,11 @@ def insert_cron_run(session, schedule_id: int) -> int | None:
     except IntegrityError:
         return None
     return run.id
+
+
+def insert_cron_run(session, schedule_id: int) -> int | None:
+    """Insert a running cron run; None when the active-run unique index already holds one."""
+    return insert_run(session, schedule_id, 'cron')
 
 
 def fail_run(session, run_id: int, reason: str) -> int | None:
