@@ -1,7 +1,8 @@
 """Schedule permission family, endpoint check spec and caller scope (EL-7011, ADR-0004)."""
 from dataclasses import dataclass
 
-from tools import auth, config as c
+from tools import auth
+from tools import config as c
 
 _PREFIX = "models.applications.schedules."
 _VERBS = ("list", "details", "create", "update", "delete", "run")
