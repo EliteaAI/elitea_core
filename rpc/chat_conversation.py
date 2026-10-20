@@ -1,7 +1,7 @@
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, or_, func
+from sqlalchemy import desc, asc, Integer, String, or_, func
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
@@ -386,6 +386,7 @@ class RPC:
         participant_id: int = None,
         entity_name: str = None,
         entity_project_id: int = None,
+        schedule_id: int | None = None,
     ) -> dict:
         """
         List conversations with filtering, sorting, and pagination.
@@ -397,6 +398,7 @@ class RPC:
         Args:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
             entity_project_id: Optional owner project of a skill single_participant
+            schedule_id: Optional schedule ID to filter by meta.schedule_id
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -459,6 +461,11 @@ class RPC:
                         == entity_project_id,
                     )
                 base_query = base_query.filter(*filters)
+
+            if schedule_id is not None:
+                base_query = base_query.filter(
+                    Conversation.meta['schedule_id'].astext.cast(String) == str(schedule_id),  # text compare: a non-numeric row cannot raise
+                )
 
             base_query = base_query.order_by(sorting(sorting_by))
 
