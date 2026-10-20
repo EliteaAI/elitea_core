@@ -31,6 +31,24 @@ def validate_new_owner(project_id: int, owner_id: int) -> str | None:
     return None if SCHEDULE_PERMISSIONS['list'] in permissions else CANNOT_USE_SCHEDULES
 
 
+def change_schedule_owner(session, row, owner_id: int, admin_id: int) -> dict | None:
+    """Move created_by and the principal to `owner_id` in one commit (R1.1, R1.2); enabled stays (R1.4).
+
+    Returns the old and new owner ids for the notices, or None when `owner_id` already owns the row.
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: When the commit fails; closing the session rolls both fields back.
+    """
+    old_owner_id = row.created_by
+    if old_owner_id == owner_id:
+        return None
+    row.created_by = owner_id
+    row.principal = {'kind': 'delegation', 'ref': owner_id}  # a new dict: JSONB is not mutation-tracked
+    row.updated_by = admin_id
+    session.commit()
+    return {'old_owner_id': old_owner_id, 'new_owner_id': owner_id}
+
+
 def mark_owner_change_span(schedule) -> None:
     """Name the schedule on the request span, so the tracing trail writes one audit record (R3.1)."""
     from .schedule_service import (
