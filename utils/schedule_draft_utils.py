@@ -1,4 +1,7 @@
 """Check the fields of a Build with AI schedule draft one by one (EL-7011, US-21)."""
+import json
+from datetime import date
+
 from pydantic import ValidationError
 
 from ..models.pd.entity_schedule import ScheduleTiming
@@ -30,6 +33,39 @@ def _roster(project_id: int) -> list[dict]:
          'version_id': version_id, 'version_name': version_name}
         for app_id, name, agent_type, version_id, version_name in rows
     ]
+
+
+class _KeepUnknown(dict):
+    """An admin may edit the service prompt; a placeholder this helper does not know stays as it is."""
+
+    def __missing__(self, key):
+        return '{' + key + '}'
+
+
+def _entity_lines(roster: list[dict], pipeline: bool) -> str:
+    names: dict[str, list[str]] = {}
+    for row in roster:
+        if (row['agent_type'] == 'pipeline') == pipeline:
+            names.setdefault(row['name'], []).append(row['version_name'])
+    return '\n'.join(f"- {name} (versions: {', '.join(versions)})" for name, versions in names.items()) or '(none)'
+
+
+def build_schedule_draft_prompt(
+        template: str, current: dict, roster: list[dict], timezone: str | None, locked_entity: dict | None = None,
+) -> str:
+    """Fill the placeholders of the generate_schedule_draft service prompt (US-20) with this request's data."""
+    locked = 'none'
+    if locked_entity:
+        name = next((row['name'] for row in roster if row['application_id'] == locked_entity['application_id']), None)
+        locked = f"{locked_entity['entity_type']} {name or locked_entity['application_id']}"
+    return template.format_map(_KeepUnknown(
+        today=date.today().isoformat(),
+        timezone=timezone or 'UTC',
+        agents=_entity_lines(roster, pipeline=False),
+        pipelines=_entity_lines(roster, pipeline=True),
+        current_values=json.dumps(current or {}, ensure_ascii=False, default=str),
+        locked_entity=locked,
+    ))
 
 
 def _allows_run_without_asking(project_id: int) -> bool:
