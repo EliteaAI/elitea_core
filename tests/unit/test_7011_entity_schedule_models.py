@@ -25,53 +25,29 @@ def _pkg(name):
 
 @pytest.fixture(scope="function")
 def entity_schedule_models(isolated_sys_modules):
-    """Load entity_schedule.py with minimal stubs for sqlalchemy and db_tools."""
-    # Stub sqlalchemy components
-    sqlalchemy = _pkg("sqlalchemy")
-    sqlalchemy.Boolean = bool
-    sqlalchemy.DateTime = type(None)
-    sqlalchemy.Integer = int
-    sqlalchemy.String = str
-    sqlalchemy.Text = str
-    sqlalchemy.func = types.SimpleNamespace(now=lambda: None)
-    sqlalchemy.CheckConstraint = lambda *a, **k: None
-    sqlalchemy.ForeignKey = lambda *a, **k: None
-    sqlalchemy.Index = lambda *a, **k: None
-    sqlalchemy.UniqueConstraint = lambda *a, **k: None
-    sys.modules["sqlalchemy"] = sqlalchemy
+    """Load entity_schedule.py on real SQLAlchemy with a fresh declarative base."""
+    from sqlalchemy import Column, Integer, Table
+    from sqlalchemy.orm import DeclarativeBase
 
-    sqlalchemy_dialects = _pkg("sqlalchemy.dialects")
-    sqlalchemy_postgresql = _pkg("sqlalchemy.dialects.postgresql")
-    sqlalchemy_postgresql.JSONB = dict
-    sys.modules["sqlalchemy.dialects"] = sqlalchemy_dialects
-    sys.modules["sqlalchemy.dialects.postgresql"] = sqlalchemy_postgresql
+    class _Base(DeclarativeBase):
+        pass
 
-    sqlalchemy_orm = _pkg("sqlalchemy.orm")
-
-    # Mapped needs to be subscriptable
-    class _Mapped:
-        def __getitem__(self, item):
-            return self
-        def __class_getitem__(cls, item):
-            return cls
-
-    sqlalchemy_orm.Mapped = _Mapped()
-    sqlalchemy_orm.mapped_column = lambda *a, **k: None
-    sys.modules["sqlalchemy.orm"] = sqlalchemy_orm
+    # Parent tables the foreign keys point at, so the DDL compiles.
+    for parent in ("applications", "application_versions"):
+        Table(parent, _Base.metadata, Column("id", Integer, primary_key=True), schema="tenant")
 
     # Stub tools package
     tools = _pkg("tools")
 
     class _FakeDB:
-        class Base:
-            pass
+        Base = _Base
 
     class _FakeDBTools:
         class AbstractBaseMixin:
             pass
 
     class _FakeConfig:
-        POSTGRES_TENANT_SCHEMA = "public"
+        POSTGRES_TENANT_SCHEMA = "tenant"
 
     tools.db = _FakeDB()
     tools.db_tools = _FakeDBTools()
@@ -237,3 +213,78 @@ def test_entity_schedule_has_timestamps(entity_schedule_models):
     assert hasattr(EntitySchedule, "updated_at")
     assert "created_at" in EntitySchedule.__annotations__
     assert "updated_at" in EntitySchedule.__annotations__
+
+
+def _ddl(model):
+    """PostgreSQL CREATE TABLE text of a model, whitespace collapsed."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+
+    return " ".join(str(CreateTable(model.__table__).compile(dialect=postgresql.dialect())).split())
+
+
+def _index(model, name):
+    return next(ix for ix in model.__table__.indexes if ix.name == name)
+
+
+# TC-US01-04 / TC-US01-05 / R2.1: created_by and principal are NOT NULL, in the tenant schema
+def test_7011_r2_1_schedule_owner_columns_not_null(entity_schedule_models):
+    ddl = _ddl(entity_schedule_models.EntitySchedule)
+    assert "CREATE TABLE tenant.entity_schedules" in ddl
+    assert "created_by INTEGER NOT NULL" in ddl
+    assert "principal JSONB NOT NULL" in ddl
+
+
+# TC-US01-06 / TC-US01-07 / R2.6: description VARCHAR(2304) and run_mode nullable
+def test_7011_r2_6_description_and_run_mode_nullable(entity_schedule_models):
+    ddl = _ddl(entity_schedule_models.EntitySchedule)
+    assert "description VARCHAR(2304)," in ddl
+    assert "run_mode VARCHAR(16)," in ddl
+
+
+# TC-US01-08 / R2.3: no tag column in any of the three tables
+def test_7011_r2_3_no_tag_columns(entity_schedule_models):
+    m = entity_schedule_models
+    for model in (m.EntitySchedule, m.EntityScheduleRun, m.EntitySchedulePreference):
+        assert not [col for col in model.__table__.columns if "tag" in col.name]
+
+
+# R1.3: the same timestamp type as the R-2.0.8 SQL block (TIMESTAMPTZ)
+def test_7011_r1_3_timestamps_are_timezone_aware(entity_schedule_models):
+    ddl = _ddl(entity_schedule_models.EntitySchedule)
+    assert "next_run TIMESTAMP WITH TIME ZONE," in ddl
+    assert "created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL" in ddl
+
+
+# TC-US01-13 / R3.1: named principal kind check
+def test_7011_r3_1_principal_kind_check(entity_schedule_models):
+    ddl = _ddl(entity_schedule_models.EntitySchedule)
+    assert (
+        "CONSTRAINT ck_entity_schedules_principal_kind "
+        "CHECK (principal->>'kind' IN ('mandate', 'delegation', 'legacy_system'))"
+    ) in ddl
+
+
+# TC-US01-14 / R3.4: named run mode check
+def test_7011_r3_4_run_mode_check(entity_schedule_models):
+    ddl = _ddl(entity_schedule_models.EntitySchedule)
+    assert (
+        "CONSTRAINT ck_entity_schedules_run_mode "
+        "CHECK (run_mode IS NULL OR run_mode IN ('entry_point', 'prompt'))"
+    ) in ddl
+
+
+# TC-US01-15 / R3.2: one active run per schedule, partial unique index
+def test_7011_r3_2_active_run_unique_index(entity_schedule_models):
+    index = _index(entity_schedule_models.EntityScheduleRun, "uq_entity_schedule_runs_active")
+    assert index.unique
+    assert [col.name for col in index.columns] == ["schedule_id"]
+    where = "status IN ('running', 'waiting_for_approval')"
+    assert str(index.dialect_options["postgresql"]["where"]) == where
+    assert str(index.dialect_options["sqlite"]["where"]) == where
+
+
+# R1.3: run rows cascade with their schedule
+def test_7011_r1_3_run_schedule_fk_cascades(entity_schedule_models):
+    ddl = _ddl(entity_schedule_models.EntityScheduleRun)
+    assert "FOREIGN KEY(schedule_id) REFERENCES tenant.entity_schedules (id) ON DELETE CASCADE" in ddl
