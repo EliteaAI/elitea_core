@@ -2,7 +2,7 @@
 import json
 
 from pylon.core.tools import log
-from tools import db
+from tools import VaultClient, db
 
 from ..models.all import ApplicationVersion
 from .application_tools import ConfigurationExpandError, expand_toolkit_settings
@@ -74,3 +74,16 @@ def scan_schedule_risks(project_id: int, version_id: int, owner_id: int) -> list
     except Exception:  # noqa: BLE001 - any failure hides the scan, the save still succeeds
         log.exception('Schedule risk scan failed for version %s', version_id)
         return [_warning('scan_incomplete', 'The version could not be fully checked for risks')]
+
+
+ALLOW_RUN_WITHOUT_ASKING_SECRET = 'schedules_allow_run_without_asking'
+
+
+def is_run_without_asking_allowed(project_id: int) -> bool:
+    """True when the project secret allows the "run without asking" rule. A store error refuses it (fail closed)."""
+    try:
+        value = VaultClient(project_id).get_all_secrets().get(ALLOW_RUN_WITHOUT_ASKING_SECRET, '')
+    except Exception:  # noqa: BLE001 - the rule stays off when the secret store fails
+        log.exception('Could not read %s for project %s', ALLOW_RUN_WITHOUT_ASKING_SECRET, project_id)
+        return False
+    return str(value).strip().lower() in ('true', '1', 'yes')
