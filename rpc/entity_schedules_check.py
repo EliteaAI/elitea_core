@@ -62,12 +62,19 @@ def _run_legacy_step(project_ids: list[int], yield_to_hub) -> None:
 
 
 def _sweep_stale_runs(project_ids: list[int], stale_minutes: int, yield_to_hub) -> None:
-    """R3.1 to R3.3: fail the running runs that went quiet, per project, before the claims."""
+    """R3.1 to R3.3: fail the running runs that went quiet, per project, before the claims.
+
+    US-19 R1.1: the waiting runs whose approval time ran out fail in the same loop, so a freed slot starts its cron run now.
+    """
     # Imported at call time, as in _dispatch_project
-    from ..utils.schedule_runs import fail_stale_runs
+    from ..utils.schedule_runs import expire_waiting_runs, fail_stale_runs
     for project_id in project_ids:
         yield_to_hub()
         end_ambient_transaction()
+        try:
+            expire_waiting_runs(project_id, datetime.now(UTC))
+        except Exception as exc:  # noqa: BLE001 -- a failed expiry must not skip the stale sweep
+            log.exception("entity_schedules_check: expiry sweep failed: project_id=%s exc=%r", project_id, exc)
         try:
             fail_stale_runs(project_id, datetime.now(UTC), stale_minutes)
         except Exception as exc:  # noqa: BLE001 -- one bad project must not stop the sweep
