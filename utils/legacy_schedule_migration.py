@@ -84,3 +84,20 @@ def migrated_row(
         'principal': {'kind': 'delegation', 'ref': owner}, 'last_run': _last_run(trigger.get('last_run')),
         'next_run': compute_next_run(cron, zone, now) if reason is None else None,
     }
+
+
+def migrate_version(session, version, row: dict) -> None:
+    """Add the EntitySchedule row and set the version trigger to chat_message in one commit.
+
+    On any error both are rolled back and the error is raised again for the caller's report.
+    """
+    # Imported here: the model module needs the plugin db package, which the row unit tests do not load
+    from ..models.entity_schedule import EntitySchedule
+
+    try:
+        session.add(EntitySchedule(**row))
+        version.pipeline_settings = {**(version.pipeline_settings or {}), 'trigger': {'type': 'chat_message'}}
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
