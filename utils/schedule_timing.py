@@ -34,8 +34,14 @@ def schedule_limits() -> ScheduleLimits:
 def compute_next_run(cron: str, timezone_name: str, after: datetime) -> datetime:
     """The next firing after `after` in the schedule timezone, as UTC."""
     # lean: trusts an aware `after` (naive reads as server time); check it when a caller may pass naive
-    local = croniter(cron, after.astimezone(ZoneInfo(timezone_name))).get_next(datetime)
-    return local.astimezone(UTC)
+    zone = ZoneInfo(timezone_name)
+    # Step in local wall time: croniter 1.4.1 (the runtime pin) keeps the start's UTC offset
+    # across a clock change, so an aware start gives a firing one hour off on that day
+    firings = croniter(cron, after.astimezone(zone).replace(tzinfo=None))
+    while True:
+        firing = firings.get_next(datetime).replace(tzinfo=zone).astimezone(UTC)
+        if firing > after:  # a repeated hour can map a wall time to an instant not after `after`
+            return firing
 
 
 def end_of_day(day: date, timezone_name: str) -> datetime:
