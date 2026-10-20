@@ -54,7 +54,8 @@ DAY = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
 
 
 def _filters(**overrides):
-    values = {"entity_type": None, "status": None, "enabled": None, "owner_ids": None, "entity_id": None, "search": None}
+    values = {"entity_type": None, "status": None, "enabled": None, "owner_ids": None, "entity_id": None, "search": None,
+              "sort_by": "next_run", "sort_order": "asc"}
     return types.SimpleNamespace(**{**values, **overrides})
 
 
@@ -219,3 +220,16 @@ def test_7011_r5_1_paging_order_and_total(env):
     assert (total, [r.name for r in first]) == (3, ["early", "late"])
     total, second = _list(env, OWNER, limit=2, offset=2)
     assert (total, [r.name for r in second]) == (3, ["none"])
+
+
+# Missed requirement (user review 2026-10-20): the table headers sort the list on the server
+@pytest.mark.parametrize("sort_by, sort_order, expected", [
+    ("name", "asc", ["early", "late", "none"]),
+    ("name", "desc", ["none", "late", "early"]),
+    ("next_run", "desc", ["late", "early", "none"]),
+])
+def test_7011_r5_1_sort_by_a_column_in_both_directions(env, sort_by, sort_order, expected):
+    _add(env, name="late", next_run=DAY + datetime.timedelta(days=2))
+    _add(env, name="none")
+    _add(env, name="early", next_run=DAY)
+    assert _names(_list(env, OWNER, sort_by=sort_by, sort_order=sort_order)) == expected

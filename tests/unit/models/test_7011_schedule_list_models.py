@@ -81,3 +81,16 @@ def test_r4_3_description_and_run_mode_kept(pd_list):
 def test_r5_3_no_tags_field(pd_list):
     dumped = pd_list.ScheduleListItem(**_item(tags=[{'name': 'x'}])).model_dump()
     assert 'tags' not in dumped
+
+
+def test_r5_1_sort_defaults_and_allowed_values(pd_list):
+    f = pd_list.ScheduleListFilters()
+    assert (f.sort_by, f.sort_order) == ('next_run', 'asc')
+    assert pd_list.ScheduleListFilters(sort_by='name', sort_order='desc').sort_by == 'name'
+
+
+@pytest.mark.parametrize('name, value', [('sort_by', 'created_by'), ('sort_order', 'up')])
+def test_r5_1_unknown_sort_value_names_parameter(pd_list, name, value):
+    with pytest.raises(ValidationError) as exc:
+        pd_list.ScheduleListFilters(**{name: value})
+    assert exc.value.errors()[0]['loc'] == (name,)
