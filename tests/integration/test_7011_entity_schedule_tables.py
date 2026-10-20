@@ -1,6 +1,6 @@
 """Schedule tables on SQLite (EL-7011 US-01): rows, cascade and the active run rule.
 
-Covers R2.2, R2.4, R2.5, R3.2, R3.3, R3.4. The model file is real; only the plugin
+Covers R2.1, R2.2, R2.4, R2.5, R3.1, R3.2, R3.3, R3.4. The model file is real; only the plugin
 package around it is stubbed. PostgreSQL-only DDL (JSONB, the `::jsonb` default, the
 tenant schema) is adapted for SQLite here; the manual run on the local stack covers it.
 
@@ -103,9 +103,9 @@ def test_7011_r2_2_many_schedules_on_one_version(tables, session, parents):
     assert sorted(r.created_by for r in rows) == [7, 7, 8]
 
 
-# TC-US01-12 / R2.2: a schedule row needs an owner and a principal
+# TC-US01-12 / R2.1: a schedule row needs an owner and a principal
 @pytest.mark.parametrize("missing", ["created_by", "principal"])
-def test_7011_r2_2_schedule_requires_owner_and_principal(tables, session, parents, missing):
+def test_7011_r2_1_schedule_requires_owner_and_principal(tables, session, parents, missing):
     session.add(_schedule(tables[0], **{missing: null()}))  # JSON None would store 'null', not NULL
     with pytest.raises(IntegrityError):
         session.flush()
@@ -173,3 +173,36 @@ def test_7011_r3_2_second_active_run_rejected(tables, session, parents, first, s
     _add_run(session, models, schedule.id, first)
     with pytest.raises(IntegrityError, match="entity_schedule_runs.schedule_id"):
         _add_run(session, models, schedule.id, second)
+
+
+# R3.1 (AC4): principal.kind accepts mandate, delegation and legacy_system only
+@pytest.mark.parametrize("kind", ["mandate", "delegation", "legacy_system"])
+def test_7011_r3_1_principal_kind_accepts_known_values(tables, session, parents, kind):
+    session.add(_schedule(tables[0], principal={"kind": kind}))
+    session.flush()
+
+
+_NULL_KIND = pytest.mark.xfail(
+    strict=True, reason="CHECK passes on NULL: principal->>'kind' IS NULL; the model needs a NOT NULL test (scope note)"
+)
+
+
+@pytest.mark.parametrize("principal", [
+    {"kind": "admin"},
+    pytest.param({}, marks=_NULL_KIND, id="missing-kind"),
+    pytest.param({"kind": None}, marks=_NULL_KIND, id="null-kind"),
+])
+def test_7011_r3_1_principal_kind_rejects_other_values(tables, session, parents, principal):
+    session.add(_schedule(tables[0], principal=principal))
+    with pytest.raises(IntegrityError, match="ck_entity_schedules_principal_kind"):
+        session.flush()
+
+
+# R3.3: final runs do not count as active, so several 'succeeded' runs of one schedule are kept
+def test_7011_r3_3_many_succeeded_runs_accepted(tables, session, parents):
+    models = tables[0]
+    schedule = _schedule(models)
+    session.add(schedule)
+    session.flush()
+    _add_run(session, models, schedule.id, "succeeded")
+    _add_run(session, models, schedule.id, "succeeded")
