@@ -77,6 +77,46 @@ class World:
         return [{"id": p} for p in self.projects]
 
 
+def _quiet(*_args, **_kwargs):
+    return None
+
+
+def load_tick(monkeypatch, stubs, *, db, project_list, schedules, log):
+    """A fresh tick module over the module stubs, wired to the db, project list and config.
+
+    Maintenance is off and the hub helpers do nothing unless `stubs` says otherwise.
+    Also used by test_7011_tick_skip_and_stale.
+    """
+    stubs = {
+        "utils.maintenance_gate": {"is_maintenance_active": lambda: False},
+        "utils.utils": {"make_yield_to_hub": lambda _runtime: _quiet, "end_ambient_transaction": _quiet},
+        **stubs,
+    }
+    for dotted, names in stubs.items():
+        module = types.ModuleType("plugins.elitea_core." + dotted)
+        vars(module).update(names)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    # Other suites leave a narrower pylon stub behind, so this one brings the decorator it needs
+    pylon_tools = types.ModuleType("pylon.core.tools")
+    pylon_tools.web = types.SimpleNamespace(rpc=lambda *a, **k: (lambda f: f))
+    pylon_tools.log = log
+    monkeypatch.setitem(sys.modules, "pylon.core.tools", pylon_tools)
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.rpc.entity_schedules_check", None)
+    tick = load("rpc/entity_schedules_check.py", fresh=True)
+    monkeypatch.setattr(tick, "db", db)
+    rpc = types.SimpleNamespace(timeout=lambda _n: types.SimpleNamespace(project_list=project_list))
+    monkeypatch.setattr(tick, "rpc_tools", types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=rpc)))
+    descriptor = types.SimpleNamespace(config={"scheduler": {"schedules": schedules}})
+    monkeypatch.setattr(tick, "this", types.SimpleNamespace(module=types.SimpleNamespace(descriptor=descriptor)))
+    return tick
+
+
+def tick_caller(tick):
+    """One call of the tick RPC, as the scheduler makes it."""
+    return lambda: tick.RPC().entity_schedules_check.__func__(
+        types.SimpleNamespace(context=types.SimpleNamespace(web_runtime="flask")))
+
+
 @pytest.fixture
 def world(monkeypatch):
     world = World()
@@ -93,25 +133,14 @@ def world(monkeypatch):
             "START_FAILED": "the run could not start",
         },
         "utils.schedule_timing": {"compute_next_run": lambda cron, zone, after: NEXT},
+        "utils.schedule_runs": {"record_skipped_run": lambda *a: 1, "fail_stale_runs": lambda *a: 0},
     }
-    for dotted, names in stubs.items():
-        module = types.ModuleType("plugins.elitea_core." + dotted)
-        vars(module).update(names)
-        monkeypatch.setitem(sys.modules, module.__name__, module)
-    # Other suites leave a narrower pylon stub behind, so this one brings the decorator it needs
-    pylon_tools = types.ModuleType("pylon.core.tools")
-    pylon_tools.web = types.SimpleNamespace(rpc=lambda *a, **k: (lambda f: f))
-    pylon_tools.log = types.SimpleNamespace(info=print, exception=print)
-    monkeypatch.setitem(sys.modules, "pylon.core.tools", pylon_tools)
-    monkeypatch.setitem(sys.modules, "plugins.elitea_core.rpc.entity_schedules_check", None)
-    tick = load("rpc/entity_schedules_check.py", fresh=True)
-    monkeypatch.setattr(tick, "db", types.SimpleNamespace(get_session=world.get_session))
-    rpc = types.SimpleNamespace(timeout=lambda _n: types.SimpleNamespace(project_list=world.project_list))
-    monkeypatch.setattr(tick, "rpc_tools", types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=rpc)))
-    descriptor = types.SimpleNamespace(config={"scheduler": {"schedules": world.config}})
-    monkeypatch.setattr(tick, "this", types.SimpleNamespace(module=types.SimpleNamespace(descriptor=descriptor)))
-    world.tick = lambda: tick.RPC().entity_schedules_check.__func__(
-        types.SimpleNamespace(context=types.SimpleNamespace(web_runtime="flask")))
+    tick = load_tick(
+        monkeypatch, stubs, db=types.SimpleNamespace(get_session=world.get_session),
+        project_list=lambda **kw: world.project_list(**kw), schedules=world.config,  # late, tests swap it
+        log=types.SimpleNamespace(info=print, exception=print),
+    )
+    world.tick = tick_caller(tick)
     world.starters = sys.modules["plugins.elitea_core.utils.schedule_dispatch"].RUN_STARTERS
     return world
 
