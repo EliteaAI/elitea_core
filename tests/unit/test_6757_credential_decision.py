@@ -779,4 +779,4 @@ def test_the_decision_runs_after_binding_and_subject_and_before_the_context_row(
     assert order == sorted(order)
     store = text[text.index("def _store_admission("):text.index("# --- autonomous mandates")]
     assert store.index("session.add(ExecutionSecurityContext(") < store.index("security_audit_record(session")
-    assert "payload=payload" in text[text.index("def admit_dispatch"):text.index("def _parent_covered")]
+    assert "payload=payload" in text[text.index("def admit_dispatch"):text.index("def _parent_entries")]

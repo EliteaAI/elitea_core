@@ -29,7 +29,20 @@ ENVELOPED_TASKS = frozenset({
     "indexer_configuration_check_connection",
     "indexer_test_mcp_connection",
     "indexer_mcp_sync_tools",
+    "indexer_governed_check_connection",   # the governed_ops pool: probes of a saved credential (#6946)
 })
+
+# What a worker must be able to do beyond the base envelope to run a governed task: resolve credential slots (a
+# governed payload carries slots, not material, #6946), and for the probe also be the governed_ops pool. Added here,
+# not in ``attach_envelope`` (its file is a byte-identical copy in the worker), and to an envelope already in the
+# payload too: a re-dispatched parent that predates this requirement is held to it as well.
+CAPABILITY_CREDENTIAL_SLOTS_V1 = "credential_slots.v1"
+CAPABILITY_GOVERNED_OPS_POOL_V1 = "governed_ops_pool.v1"
+GOVERNED_TASK_CAPABILITIES = {
+    "indexer_agent": (CAPABILITY_CREDENTIAL_SLOTS_V1,),
+    "indexer_predict_agent": (CAPABILITY_CREDENTIAL_SLOTS_V1,),
+    "indexer_governed_check_connection": (CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_GOVERNED_OPS_POOL_V1),
+}
 
 
 class _Counter:
@@ -106,10 +119,13 @@ def apply_envelope_gate(task_name, call_kwargs, profile, registry):
     envelope = read_envelope(payload)
     if envelope.security_profile != PROFILE_GOVERNED:
         return
-    if not registry.has_capable_worker(envelope.required_capabilities):
+    required = envelope.required_capabilities | frozenset(GOVERNED_TASK_CAPABILITIES.get(task_name, ()))
+    if required != envelope.required_capabilities:
+        payload["envelope"]["required_capabilities"] = sorted(required)
+    if not registry.has_capable_worker(required):
         GOVERNED_DISPATCH_UNAVAILABLE.inc()
         log.warning(
             "task_node.start_task: refused governed task %s - no live worker supports %s",
-            task_name, sorted(envelope.required_capabilities),
+            task_name, sorted(required),
         )
-        raise WorkerCapabilityUnavailable(task_name, tuple(sorted(envelope.required_capabilities)))
+        raise WorkerCapabilityUnavailable(task_name, tuple(sorted(required)))

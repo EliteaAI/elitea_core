@@ -11,11 +11,13 @@ The caller saves ``sys.modules`` before ``install`` and restores it after (see `
 the ``test_6756_*`` files): the stubs must not leak into other suites.
 """
 import ast
+import base64
 import importlib
 import json
 import os
 import sys
 import threading
+import time
 import types
 import uuid
 import warnings
@@ -26,6 +28,18 @@ import pytest
 
 from fixtures import identity
 from fixtures.helpers import load_module_with_stubs
+
+# The sealed transport (shared plugin) imports these; they must be in ``sys.modules`` before a suite saves it, or a
+# suite that restores it afterwards leaves the next one with a second copy of their classes (HashAlgorithm and co.)
+try:
+    import cryptography.exceptions  # noqa: F401
+    import cryptography.hazmat.primitives.asymmetric.x25519  # noqa: F401
+    import cryptography.hazmat.primitives.ciphers.aead  # noqa: F401
+    import cryptography.hazmat.primitives.hashes  # noqa: F401
+    import cryptography.hazmat.primitives.kdf.hkdf  # noqa: F401
+    import cryptography.hazmat.primitives.serialization  # noqa: F401
+except ImportError:   # the transport tests skip; everything else runs
+    pass
 
 PKG = identity.PKG
 TRACING_EVENT_MODEL = Path("tracing") / "models" / "security_audit_event.py"
@@ -39,6 +53,82 @@ def find_tracing_event_model(plugin_root: Path):
         if candidate.is_file():
             return candidate
     return None
+
+
+def find_secret_store_transport(plugin_root: Path):
+    """The shared plugin's sealed transport (``tools/secret_stores/transport.py``), found by walking up to the first
+    ancestor that holds the shared plugin with it: the plugin directory in a plain checkout, a ``wt/`` worktree of it
+    from a worktree. None when no checkout has it."""
+    for directory in (plugin_root, *plugin_root.parents):
+        shared = directory / "shared"
+        candidates = [shared / "tools" / "secret_stores" / "transport.py"]
+        candidates += sorted((shared / "wt").glob("*/tools/secret_stores/transport.py")) if (shared / "wt").is_dir() else []
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+class FakeRedis:
+    """The few commands the release counter and the probe ticket use, with the TTLs they set."""
+
+    def __init__(self):
+        self.values, self.ttls, self.calls, self.raises = {}, {}, [], None
+        self.lock = threading.Lock()   # MULTI/EXEC: a transaction pipeline runs its commands without interleaving
+
+    def _hit(self, name, *args):
+        self.calls.append((name, *args))
+        if self.raises:
+            raise self.raises
+
+    def set(self, key, value, ex=None):
+        self._hit("set", key)
+        self.values[key], self.ttls[key] = value, ex
+        return True
+
+    def get(self, key):
+        self._hit("get", key)
+        value = self.values.get(key)
+        time.sleep(0.001)   # lets a second reader in between a GET and a DEL that are not one transaction
+        return value
+
+    def delete(self, key):
+        self._hit("delete", key)
+        self.ttls.pop(key, None)
+        return 1 if self.values.pop(key, None) is not None else 0
+
+    def incr(self, key):
+        self._hit("incr", key)
+        self.values[key] = int(self.values.get(key, 0)) + 1
+        return self.values[key]
+
+    def expire(self, key, seconds):
+        self._hit("expire", key)
+        self.ttls[key] = seconds
+
+    def pipeline(self, transaction=False):
+        redis, queued = self, []
+
+        class _Pipe:
+            def get(self_inner, key):
+                queued.append(lambda: redis.get(key))
+
+            def delete(self_inner, key):
+                queued.append(lambda: redis.delete(key))
+
+            def incr(self_inner, key):
+                queued.append(lambda: redis.incr(key))
+
+            def expire(self_inner, key, seconds):
+                queued.append(lambda: redis.expire(key, seconds))
+
+            def execute(self_inner):
+                if not transaction:
+                    return [step() for step in queued]
+                with redis.lock:
+                    return [step() for step in queued]
+
+        return _Pipe()
 
 
 class RecordingLog:
@@ -119,6 +209,25 @@ class Env:  # pylint: disable=R0902,R0904
         self.secrets_raises = None
         self.permissions_raise = None
         self.schemas = {}               # toolkit type -> schema (provider hub), as `find_toolkit_schema_by_type_everywhere`
+        # credential release and probe fakes (#6946)
+        self.secret_fields = {}         # configuration type -> secret field paths (`configuration_secret_fields`)
+        self.unregistered_types = set() # types `configuration_secret_fields` leaves out
+        self.secret_field_calls = []
+        self.secret_fields_raises = None
+        self.material = {}              # credential ref id -> {field path: value}
+        self.release_calls = []         # (project_id, ref_id, generation, release_id, actor_ref, allow_validated)
+        self.release_reply = None       # a fixed answer of `release_credential_material`
+        self.release_raises = None
+        self.redis = FakeRedis()
+        self.capable = True             # does a live worker support the governed tasks
+        self.capability_asks = []
+        self.started = []               # (task_name, kwargs, pool, meta) of start_task
+        self.start_result = "task-1"
+        self.start_raises = None
+        self.task_result = None         # what join_task returns for the probe
+        self.stopped = []
+        self.at_start = ({}, {})
+        self.stored_configuration = None   # what the probe reads as the saved configuration (None: not found)
         self.schema_calls = []
         # digests
         self.digests = {}
@@ -226,8 +335,23 @@ class Env:  # pylint: disable=R0902,R0904
             _context_by_task=OrderedDict(),
             _context_lock=threading.Lock(),
             _mandate_tickets=self.ns.mandate_admission.TicketStore(),
-            task_node=types.SimpleNamespace(stop_task=lambda task_id: None),
+            task_node=types.SimpleNamespace(
+                stop_task=lambda task_id: self.stopped.append(task_id),
+                start_task=self._start_task, join_task=lambda task_id, timeout=None: self.task_result),
+            get_redis_client=lambda: self.redis,
+            worker_capabilities=types.SimpleNamespace(has_capable_worker=self._has_capable_worker),
         )
+
+    def _has_capable_worker(self, required):
+        self.capability_asks.append(frozenset(required))
+        return self.capable
+
+    def _start_task(self, name, **kwargs):
+        if self.start_raises:
+            raise self.start_raises
+        self.started.append((name, kwargs.get("kwargs"), kwargs.get("pool"), kwargs.get("meta")))
+        self.at_start = dict(self.redis.values), dict(self.redis.ttls)   # what Redis held when the task was started
+        return self.start_result
 
     def request(self, **over):
         values = dict(project_id=1, binding_project_id=1, application_id=7, version_id=70, run_kind="interactive",
@@ -335,9 +459,12 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.pd_admission = load("models/pd", "admission")
     ns.caps = load("utils", "worker_capabilities")
     ns.credential_decision = load("utils", "credential_decision")
+    ns.credential_slots = load("utils", "credential_slots")
     ns.mandate_state = load("utils", "mandate_state")
     ns.trigger_principal = load("utils", "trigger_principal")
     ns.adm = load("utils", "admission")
+    ns.credential_release = load("utils", "credential_release")
+    ns.credential_probe = load("utils", "credential_probe")
     ns.binding_admin = load("utils", "binding_admin")
     ns.mandate_admission = load("utils", "mandate_admission")
     ns.real_now = ns.adm._now  # pylint: disable=W0212
@@ -373,6 +500,36 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
         ns.event_model = None
     else:
         ns.event_model = load_module_with_stubs(event_model, "tracing_security_audit_event_6756")
+
+    # --- the sealed transport of the shared plugin (real code, found next to this plugin) -------
+    transport_file = None if os.environ.get("ELITEA_TEST_NO_SHARED") else find_secret_store_transport(plugin_root)
+    secret_stores = types.ModuleType("shared_secret_stores_6946")
+    secret_stores.__path__ = []
+    sys.modules[secret_stores.__name__] = secret_stores
+    try:
+        if transport_file is None:
+            raise ImportError("not found")
+        ns.transport = load_module_with_stubs(transport_file, f"{secret_stores.__name__}.transport")
+        ns.keypair = ns.transport.generate_recipient_keypair
+    except ImportError:   # CI checks out this plugin alone, or cryptography is not installed
+        warnings.warn(
+            "shared transport not found (or cryptography missing): the tests that seal or open a release are skipped"
+            " in this run; everything else runs", stacklevel=1)
+        ns.transport = None
+        # a stand-in that only has what startup checks look for; it cannot seal
+        standin = types.ModuleType(f"{secret_stores.__name__}.transport")
+        standin.seal = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no sealed transport in this run"))
+        sys.modules[standin.__name__] = standin
+        # a key that parses (32 bytes, base64) for the requests that are refused before anything is sealed
+        ns.keypair = lambda: (None, base64.b64encode(os.urandom(32)).decode("ascii"))
+    tools.secret_stores = secret_stores
+
+    def need_transport():
+        """Skip the calling test when this run has no sealed transport."""
+        if ns.transport is None:
+            pytest.skip("shared sealed transport not available in this run")
+
+    ns.need_transport = need_transport
 
     # --- fakes ---------------------------------------------------------------------------------
     flask = types.ModuleType("flask")
@@ -464,12 +621,36 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                                            else "user_delegation")
             return {"references": references, "grants": grants}
 
+        def configuration_secret_fields(types):
+            env.secret_field_calls.append(list(types))
+            if env.secret_fields_raises:
+                raise env.secret_fields_raises
+            return {name: list(env.secret_fields.get(name, ["token"])) for name in types if name not in env.unregistered_types}
+
+        def release_credential_material(project_id, ref_id, generation, release_id, actor_ref, allow_validated=False):
+            env.release_calls.append((project_id, ref_id, generation, release_id, actor_ref, allow_validated))
+            if env.release_raises:
+                raise env.release_raises
+            if env.release_reply is not None:
+                return env.release_reply
+            row = next((r for r in env.references if r["ref_id"] == str(ref_id) and r["project_id"] == project_id), None)
+            allowed = ("validated", "active") if allow_validated else ("active",)
+            if row is None or row["state"] not in allowed:
+                return {"ok": False, "reason_code": "CREDENTIAL_REFERENCE_INACTIVE"}
+            if row["generation"] != generation:
+                return {"ok": False, "reason_code": "CREDENTIAL_GENERATION_MISMATCH"}
+            from pydantic import SecretStr
+            fields = {path: SecretStr(value) for path, value in env.material.get(str(ref_id), {}).items()}
+            return {"ok": True, "value": types.SimpleNamespace(fields=fields, generation=generation)}
+
         def modules():
             return {
                 "tracing": tracing_module(),
-                "configurations": types.SimpleNamespace(configuration_credential_facts=configuration_credential_facts),
+                "configurations": types.SimpleNamespace(configuration_credential_facts=configuration_credential_facts,
+                                                        configuration_secret_fields=configuration_secret_fields),
                 "secrets": types.SimpleNamespace(credential_use_facts=credential_use_facts,
-                                                 credential_facts_version=lambda: env.facts_version),
+                                                 credential_facts_version=lambda: env.facts_version,
+                                                 release_credential_material=release_credential_material),
             }
 
         def for_module(name):

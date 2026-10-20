@@ -15,6 +15,7 @@ tasks this process dispatched and tracks are reached (children that inherit a ma
 revocation means no new starts, and a running child finishes or hits its parent's deadline), and the map is lost when
 Main restarts (the context ``expires_at`` still bounds any restart).
 """
+import importlib
 import re
 import threading
 import uuid
@@ -33,9 +34,10 @@ from ..models.pd.admission import AdmissionRequest, ExecutionSecurityContextView
 from ..models.pd.task_envelope import PROFILE_GOVERNED
 from .credential_decision import (
     ALLOWED as CREDENTIAL_USE_ALLOWED, WHOLE_TARGET, CredentialDecisionContext, CredentialDecisionError,
-    binding_ref, collect_credential_uses, decide_credential_uses, recheck_credentials, toolkit_secret_fields,
-    uncovered_credentials, user_may_use_credentials,
+    binding_ref, collect_credential_uses, decide_credential_uses, read_configuration_facts, recheck_credentials,
+    toolkit_secret_fields, user_may_use_credentials,
 )
+from .credential_slots import FREE_FORM_SECRET_MARK, seal_payload
 from .definition_digest import DigestError, digest_for_version
 from .exceptions import AdmissionDenied
 from .governance import CONFIG_SECTION, is_governed
@@ -98,6 +100,14 @@ MESSAGES = {
     "CREDENTIAL_CLASS_NOT_ALLOWED": "Personal credentials cannot be used by governed agents.",
     "DENIED_GRANT": "This agent is not allowed to use one of its credentials for you.",
     "DENIED_RBAC": "You do not have permission to use this agent's credentials.",
+    # the release of credential material to a worker (#6946); fixed per code, no titles, ids or field names
+    "RATE_LIMITED": "This run asked for its credentials too often and was stopped.",
+    "UNSUPPORTED_AUTH_MODE": "This toolkit cannot use a governed credential yet; the run was not started.",
+    "WORKER_CAPABILITY_UNAVAILABLE": "No worker can apply governed credentials right now; the run was not started.",
+    **dict.fromkeys(
+        ("STORE_DENIED", "STORE_SEALED", "STORE_UNAVAILABLE", "STORE_TLS_INVALID", "STORE_NOT_FOUND",
+         "STORE_VERSION_CONFLICT"),
+        "The credential store is unavailable; the run was not started. Try again later."),
 }
 GENERIC_MESSAGE = "The run was not started."
 
@@ -157,7 +167,9 @@ def check_governed_startup(module):
         audit_ready = False
     if not audit_ready:
         problems.append("the tracing plugin must provide security_audit_record")
-    for plugin, method in (("secrets", "credential_use_facts"), ("configurations", "configuration_credential_facts")):
+    for plugin, method in (
+            ("secrets", "credential_use_facts"), ("configurations", "configuration_credential_facts"),
+            ("secrets", "release_credential_material"), ("configurations", "configuration_secret_fields")):
         try:
             provided = callable(getattr(this.for_module(plugin).module, method, None))
         except Exception:  # pylint: disable=W0703
@@ -167,6 +179,13 @@ def check_governed_startup(module):
     for method in ("get_user_by_idp_subject", "get_user_permissions"):
         if not callable(getattr(auth, method, None)):   # the mandate owner proof and the owner's RBAC (#6947)
             problems.append(f"auth.{method} must be callable")
+    try:
+        from tools import secret_stores  # pylint: disable=C0415
+        sealed_transport = callable(importlib.import_module(".transport", secret_stores.__name__).seal)
+    except Exception:  # pylint: disable=W0703
+        sealed_transport = False
+    if not sealed_transport:   # the reply that carries released material is sealed to the worker (#6946)
+        problems.append("the shared plugin must provide secret_stores.transport")
     try:
         facts_version = this.for_module("secrets").module.credential_facts_version()
         facts_current = isinstance(facts_version, int) and not isinstance(facts_version, bool) and facts_version >= 2
@@ -446,6 +465,7 @@ def _store_admission(  # pylint: disable=R0913,R0914
         context_ref=str(context_id), run_id=run_id, attempt=attempt, project_id=request.project_id,
         application_id=request.application_id, version_id=request.version_id,
         agent_binding_ref=str(binding.id), policy_revision=policy_revision, expires_at=expires_at,
+        allowed_bindings=[binding_ref(d) for d in decisions],
     )
 
 
@@ -687,14 +707,21 @@ def admit_dispatch(module, task_name, call_kwargs, admission: Optional[Admission
     run_id = payload.get(PREDICT_RUN_ID_KWARGS_KEY)
     envelope = payload.get("envelope")
     meta.pop("context_deadline", None)   # Main-side only (below); never taken from the caller
+    free_form_secret = payload.pop(FREE_FORM_SECRET_MARK, False)   # set by the predict entry points (credential_slots)
     #
     if not isinstance(envelope, dict) or envelope.get("security_profile") != PROFILE_GOVERNED:
         # no governed envelope to carry the context (e.g. a parent started before governance was
         # switched on): the worker would not check it, so the run is not started
         return _refuse_dispatch(module, "STALE_CONTEXT", call_kwargs, run_id)
+    if free_form_secret:
+        # a {{secret.*}} outside a credential configuration would have been resolved into the payload, where no slot
+        # governs it: only credentials registered for governed use reach a governed run
+        _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "deny", "CREDENTIAL_REFERENCE_REQUIRED")
+        return _refuse_dispatch(module, "CREDENTIAL_REFERENCE_REQUIRED", call_kwargs, run_id)
     if envelope.get("context_ref"):
-        # a child or reconcile dispatch runs under its parent's admission, which decided the parent's credentials only
-        _refuse_uncovered_credentials(module, payload, envelope["context_ref"], call_kwargs, run_id)
+        # a child or reconcile dispatch runs under its parent's admission, which decided the parent's credentials
+        # only: its credentials are sealed against those decisions, any other credential is refused
+        _seal_inherited(module, payload, envelope["context_ref"], call_kwargs, run_id)
         meta.setdefault("context_ref", envelope["context_ref"])
         return None
     if admission is None:
@@ -703,6 +730,16 @@ def admit_dispatch(module, task_name, call_kwargs, admission: Optional[Admission
     if admission.trace_ref is None and isinstance(meta.get("traceparent"), str):
         admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
     view = admit_execution(module, admission, run_id=run_id, payload=payload)
+    try:
+        # admission decided every credential of this payload: those are sealed, anything else is not a credential
+        _seal_dispatch(payload, lambda: view.allowed_bindings, decided=True)
+    except AdmissionDenied as denied:
+        track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
+        _record_deny(
+            module, denied.reason_code, project_id=admission.project_id, application_id=admission.application_id,
+            caller_ref=_caller_ref(admission), run_id=run_id if isinstance(run_id, str) else None,
+            traceparent=admission.trace_ref, **denied.audit)
+        raise
     envelope["context_ref"] = view.context_ref
     meta["context_ref"] = view.context_ref
     if admission.run_kind == "mandate":
@@ -711,8 +748,8 @@ def admit_dispatch(module, task_name, call_kwargs, admission: Optional[Admission
     return view.context_ref
 
 
-def _parent_covered(project_id, context_ref) -> set:
-    """The configuration uuids the parent context decided credentials for."""
+def _parent_entries(project_id, context_ref) -> list:
+    """The credential-use decisions (``allowed_bindings``) of the parent context."""
     if isinstance(project_id, bool) or not isinstance(project_id, int):
         raise _denied("STALE_CONTEXT")
     try:
@@ -725,24 +762,37 @@ def _parent_covered(project_id, context_ref) -> set:
         ).scalar_one_or_none()
     if not isinstance(entries, list):
         raise _denied("STALE_CONTEXT")
-    return {entry.get("configuration_uuid") for entry in entries if isinstance(entry, dict)}
+    return entries
 
 
-def _refuse_uncovered_credentials(module, payload, context_ref, call_kwargs, run_id):
-    """Refuse a dispatch under a parent context whose payload carries a credential the parent was not
-    admitted for (a credential-bearing sub-agent, a conversation toolkit)."""
+def _seal_dispatch(payload, entries_of, decided=False) -> None:
+    """Replace the secret fields of the payload's credentials with slots (``credential_slots.seal_payload``).
+    ``decided``: admission just decided every credential of the run's own toolkits. ``AdmissionDenied`` for a
+    refusal; the credential decision counter takes the deny."""
+    try:
+        seal_payload(payload, entries_of, classify=read_configuration_facts, decided=decided)
+        return
+    except AdmissionDenied as exc:   # the parent context could not be read
+        _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "deny", exc.reason_code)
+        raise
+    except CredentialDecisionError as exc:
+        error = exc
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the credentials could not be sealed (%s)", type(exc).__name__)
+        error = CredentialDecisionError("DEPENDENCY_UNAVAILABLE")
+    _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "deny", error.reason_code)
+    raise _denied(error.reason_code, error.audit)
+
+
+def _seal_inherited(module, payload, context_ref, call_kwargs, run_id):
+    """A dispatch under a parent context: seal the credentials the parent was admitted for (exactly: toolkit, field
+    and configuration) and refuse any other credential (a credential-bearing sub-agent, a conversation toolkit). A
+    configuration without a decision of the parent must be shown not to be a credential."""
     project_id = (call_kwargs.get("meta") or {}).get("project_id") or payload.get("project_id")
     try:
-        code = "CREDENTIAL_REFERENCE_REQUIRED" if uncovered_credentials(
-            payload, lambda: _parent_covered(project_id, context_ref), project_id) else None
+        _seal_dispatch(payload, lambda: _parent_entries(project_id, context_ref))
     except AdmissionDenied as exc:
-        code = exc.reason_code
-    except Exception as exc:  # pylint: disable=W0703
-        log.error("admission: the inherited credentials could not be checked (%s)", type(exc).__name__)
-        code = "DEPENDENCY_UNAVAILABLE"
-    if code is not None:
-        _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "deny", code)
-        _refuse_dispatch(module, code, call_kwargs, run_id)
+        _refuse_dispatch(module, exc.reason_code, call_kwargs, run_id)
 
 
 def _refuse_dispatch(module, code, call_kwargs, run_id):
@@ -860,6 +910,30 @@ def _revoked_among(entries) -> set:
                         ExecutionSecurityContext.id.in_(ids[start:start + STOP_CHUNK]),
                         ExecutionSecurityContext.state == "revoked")).scalars())
     return revoked
+
+
+def reopen_contexts(module, project_id, context_refs) -> int:
+    """A parked parent stops when it fans out, which completes its context, but its children and the reconcile run
+    still run under that context: bring each one back to ``running`` when it is neither expired nor revoked. The
+    number reopened. Governed only; a failure is logged and the children then fail at ``validate_context``."""
+    if not is_governed(module):
+        return 0
+    reopened = 0
+    for context_ref in {ref for ref in context_refs if isinstance(ref, str) and ref}:
+        try:
+            with db.get_session(project_id) as session:
+                changed = session.execute(
+                    update(ExecutionSecurityContext)
+                    .where(ExecutionSecurityContext.id == uuid.UUID(context_ref),
+                           ExecutionSecurityContext.state == "completed",
+                           ExecutionSecurityContext.expires_at > _now())
+                    .values(state="running", ended_at=None).execution_options(synchronize_session=False)
+                ).rowcount
+                session.commit()
+            reopened += changed
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("admission: a context could not be reopened for its children (%s)", type(exc).__name__)
+    return reopened
 
 
 def enforce_run_deadlines(module, now=None) -> int:
