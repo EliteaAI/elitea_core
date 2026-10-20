@@ -59,69 +59,82 @@ def verify_rejection(code="IDENTITY_SIGNATURE_INVALID"):
     return {"ok": False, "reason_code": code, "message": "fixed text"}
 
 
-# --- settings ---------------------------------------------------------------------------------
+# --- settings and the preflight ----------------------------------------------------------------
 
-def config(**over):
-    section = {"enabled": True, "policy_revision": "rev-1", **over}
-    return {"enterprise_credential_governance": section}
+PREFLIGHT_IDS = ["identity_verifier", "auth_rpc_mode", "security_audit", "audit_schema", "audit_backlog",
+                 "credential_facts", "master_key", "settings_table", "corporate_vault", "governed_worker"]
 
 
-def test_defaults_when_the_section_is_absent_or_governance_is_off(ns):
+def failing(checks, blocking=True):
+    return sorted(check.id for check in checks if check.status == ("fail" if blocking else "warn"))
+
+
+def test_admission_settings_defaults(ns):
     defaults = ns.adm.AdmissionSettings()
     assert (defaults.allow_runtime_domain_binding, defaults.admit_legacy_pat, defaults.context_ttl_s,
             defaults.environment) == (False, False, 3600, None)
-    assert ns.adm.load_admission_settings({}) == defaults
-    assert ns.adm.load_admission_settings({"enterprise_credential_governance": None}) == defaults
-    # nothing is validated while the flag is off, so a half-edited section cannot stop a legacy platform
-    junk = {"enterprise_credential_governance": {"enabled": False, "context_ttl_s": "soon", "admit_legacy_pat": 5}}
-    assert ns.adm.load_admission_settings(junk) == defaults
 
 
-def test_enabled_settings_are_read(ns):
-    settings = ns.adm.load_admission_settings(config(
-        allow_runtime_domain_binding=True, admit_legacy_pat=True, context_ttl_s=60, environment="prod-eu"))
-    assert settings == ns.adm.AdmissionSettings(True, True, 60, "prod-eu")
-    assert ns.adm.load_admission_settings(config(context_ttl_s=86400)).context_ttl_s == 86400
-    # config.yml quotes the ${ELITEA_CREDENTIAL_GOVERNANCE_ENVIRONMENT:} expansion: unset arrives as ""
-    assert ns.adm.load_admission_settings(config(environment="")).environment is None
+def test_the_preflight_is_a_fixed_list_with_stable_ids(ns, env):
+    checks = ns.adm.governance_preflight(env.module())
+    assert [check.id for check in checks] == PREFLIGHT_IDS
+    assert [check.id for check in checks if not check.blocking] == ["audit_schema", "corporate_vault", "governed_worker"]
 
 
-@pytest.mark.parametrize("over", [
-    {"context_ttl_s": 59}, {"context_ttl_s": 86401}, {"context_ttl_s": "3600"}, {"context_ttl_s": True},
-    {"context_ttl_s": 60.5}, {"allow_runtime_domain_binding": "yes"}, {"admit_legacy_pat": 1},
-    {"environment": " "}, {"environment": "x" * 65}, {"environment": 7},
-])
-def test_invalid_settings_fail_startup_when_enabled(ns, over):
-    with pytest.raises(ValueError):
-        ns.adm.load_admission_settings(config(**over))
-
-
-def test_flag_off_startup_check_runs_nothing(ns, env):
-    env.poison()
-    ns.adm.check_governed_startup(env.module(governed=False))
-
-
-def test_governed_startup_passes_when_the_platform_can_prove_and_record(ns, env):
-    ns.adm.check_governed_startup(env.module())
+def test_the_preflight_passes_when_the_platform_can_prove_and_record(ns, env):
+    checks = ns.adm.governance_preflight(env.module())
+    assert failing(checks) == []
+    assert all(check.status == "ok" for check in checks if check.blocking)
 
 
 @pytest.mark.parametrize("break_it, expected", [
-    (lambda env: setattr(env, "auth_mode", "local"), "auth_mode"),
-    (lambda env: setattr(env, "verifier_configured", False), "identity_verifier"),
-    (lambda env: setattr(env, "has_audit_method", False), "security_audit_record"),
+    (lambda env: setattr(env, "auth_mode", "local"), ["auth_rpc_mode"]),
+    (lambda env: setattr(env, "verifier_configured", False), ["identity_verifier"]),
+    (lambda env: setattr(env, "has_audit_method", False), ["audit_backlog", "security_audit"]),   # no trail, no backlog to read
+    (lambda env: setattr(env, "audit_allowed", False), ["audit_backlog"]),
+    (lambda env: setattr(env, "audit_allowed_raises", True), ["audit_backlog"]),
+    (lambda env: setattr(env, "facts_version", 1), ["credential_facts"]),
+    (lambda env: setattr(env, "missing_modules", {"secrets"}), ["credential_facts"]),
 ])
-def test_governed_startup_refuses_what_it_cannot_prove(ns, env, break_it, expected):
+def test_the_preflight_reports_exactly_what_it_cannot_prove_and_does_not_raise(ns, env, break_it, expected):
     break_it(env)
     ns.install_fakes(env)
-    with pytest.raises(ValueError, match=expected):
-        ns.adm.check_governed_startup(env.module())
-    assert any(expected in line for line in env.log.lines)
+    assert failing(ns.adm.governance_preflight(env.module())) == expected   # a refusal at boot is gone (#7120)
 
 
-def test_governed_startup_refuses_when_the_verifier_is_missing_altogether(ns, env):
+def test_the_preflight_fails_the_verifier_check_when_the_verifier_is_missing_altogether(ns, env):
     ns.tools.auth.identity_verifier = None  # an auth plugin that predates the verifier
-    with pytest.raises(ValueError, match="identity_verifier"):
-        ns.adm.check_governed_startup(env.module())
+    assert failing(ns.adm.governance_preflight(env.module())) == ["identity_verifier"]
+
+
+def test_the_preflight_warns_without_blocking_when_a_feature_is_missing(ns, env):
+    env.capable = False
+    checks = ns.adm.governance_preflight(env.module())
+    assert failing(checks) == [] and failing(checks, blocking=False) == ["corporate_vault", "governed_worker"]
+
+
+@pytest.mark.parametrize("mode, status, blocking", [
+    ("audit_only", "fail", True), ("enforce", "warn", False), ("off", "warn", False), (None, "warn", False)])
+def test_an_audit_schema_without_would_deny_blocks_audit_only_and_only_warns_otherwise(ns, env, mode, status, blocking):
+    env.audit_has_would_deny = False
+    checks = {check.id: check for check in ns.adm.governance_preflight(env.module(), mode=mode)}
+    assert (checks["audit_schema"].status, checks["audit_schema"].blocking, checks["audit_schema"].code) == (
+        status, blocking, "OUTDATED")
+    assert [check.id for check in checks.values() if check.status == "fail"] == (["audit_schema"] if blocking else [])
+    env.audit_has_would_deny = True
+    assert {c.id: c for c in ns.adm.governance_preflight(env.module(), mode=mode)}["audit_schema"].status == "ok"
+
+
+def test_the_audit_schema_probe_writes_nothing(ns, env):
+    ns.adm.governance_preflight(env.module(), mode="audit_only")
+    assert env.recorded == [] and env.denied == []
+
+
+def test_the_settings_table_check_follows_what_the_read_found(ns, env):
+    by_id = lambda read: {c.id: c for c in ns.adm.governance_preflight(env.module(), table_read=read)}["settings_table"]
+    assert by_id("ok").status == "ok"
+    assert (by_id("missing_table").status, by_id("missing_table").code) == ("fail", "MISSING_TABLE")
+    assert by_id("error").status == "fail"
 
 
 # --- the request is built from the trusted caller only ----------------------------------------
@@ -748,17 +761,19 @@ def test_task_completion_closes_the_context_for_governed_runs_only():
     assert text.index("complete_context(self, task_id)") < text.index("self._maybe_handle_parallel_dispatch(task_id)")
 
 
-def test_module_registers_and_unregisters_the_worker_bus_handler_and_the_admin_task():
+def test_module_registers_the_worker_bus_handlers_lazily_and_the_admin_task():
     text = source_of("module.py")
-    assert text.count('name="restricted_validate_execution_context"') == 2
-    assert "rpc_node.register(\n                    self.validate_execution_context," in text
-    assert "rpc_node.unregister(\n                        self.validate_execution_context," in text
-    assert text.index("self._ensure_agent_identity_schema()\n        check_governed_startup(self)") > 0
+    assert text.count('"restricted_validate_execution_context"') == 2   # register and unregister share one table
+    assert 'this.for_module("worker_client").module.rpc_node.register(handler, name=name)' in text
+    assert 'this.for_module("worker_client").module.rpc_node.unregister(handler, name=name)' in text
+    ready = text[text.index("    def ready(self):"):text.index("    def preload(self):")]
+    assert "restricted_validate_execution_context" not in ready   # booting in off registers nothing
+    assert "self._ensure_agent_identity_schema()\n        self._start_governance()\n" in text
     for call in ("register_admin_task", "unregister_admin_task"):
         assert f'{call}(\n                "manage_agent_identity_binding", self.manage_agent_identity_binding' in text
     assert '"manage_agent_identity_binding", self.manage_agent_identity_binding,\n                group="R-2.0.8"' in text
-    assert "self.admission_settings = load_admission_settings(self.descriptor.config)" in text
-    assert "self._context_by_task = OrderedDict()" in text
+    assert "init_governance(self)" in text and "load_admission_settings" not in text
+
 
 
 def test_the_worker_bus_handler_delegates_to_validate_context():

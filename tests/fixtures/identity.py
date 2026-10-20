@@ -72,7 +72,7 @@ def install(plugin_root: Path) -> types.SimpleNamespace:
     tools = types.ModuleType("tools")
     tools.db = types.SimpleNamespace(Base=sa.declarative_base(), get_session=None)
     tools.db_tools = types.SimpleNamespace(AbstractBaseMixin=type("AbstractBaseMixin", (), {}))
-    tools.config = types.SimpleNamespace(POSTGRES_TENANT_SCHEMA="tenant")
+    tools.config = types.SimpleNamespace(POSTGRES_TENANT_SCHEMA="tenant", POSTGRES_SCHEMA="public")
     sys.modules["tools"] = tools
 
     def load(kind, name):

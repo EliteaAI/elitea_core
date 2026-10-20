@@ -47,11 +47,20 @@ TRACING_EVENT_MODEL = Path("tracing") / "models" / "security_audit_event.py"
 
 def find_tracing_event_model(plugin_root: Path):
     """The tracing plugin's audit event model, found by walking up to the first ancestor that holds it (the plugin
-    directory in a plain checkout, the same one from a ``wt/`` worktree), or None."""
+    directory in a plain checkout, the same one from a ``wt/`` worktree), or None. A checkout of a ``wt/`` worktree of
+    tracing whose model already has ``would_deny`` (#7120) wins over one that has not, so the audit-only events are
+    validated against the real schema as soon as it exists."""
     for directory in (plugin_root, *plugin_root.parents):
-        candidate = directory / TRACING_EVENT_MODEL
-        if candidate.is_file():
-            return candidate
+        candidates = [directory / TRACING_EVENT_MODEL]
+        tracing_wt = directory / "tracing" / "wt"
+        if tracing_wt.is_dir():
+            candidates += sorted(tracing_wt.glob("*/models/security_audit_event.py"))
+        candidates = [candidate for candidate in candidates if candidate.is_file()]
+        for candidate in candidates:
+            if "would_deny" in candidate.read_text():
+                return candidate
+        if candidates:
+            return candidates[0]
     return None
 
 
@@ -196,6 +205,7 @@ class Env:  # pylint: disable=R0902,R0904
         self.verifier_configured = True
         self.auth_mode = "rpc"
         self.has_audit_method = True
+        self.audit_has_would_deny = True   # the audit schema knows the would_deny field (tracing #7120)
         # credential governance fakes (the facts methods of `configurations` and `secrets`, #6757)
         self.configurations = {}        # (project_id, uuid) -> {id, project_id, type, section, generation}
         self.references = []            # rows as `credential_use_facts` returns them, plus project_id/configuration_id
@@ -253,9 +263,11 @@ class Env:  # pylint: disable=R0902,R0904
         self.ns.tools.db.get_session = boom
         self.ns.tools.this.for_module = boom
         self.ns.flask.has_request_context = boom
+        self.ns.tools.secret_stores.get_store = boom
 
     def unpoison(self):
         self.sio_users = {}
+        vars(self.ns.tools.secret_stores).pop("get_store", None)
         self.ns.install_fakes(self)
 
     # --- databases -----------------------------------------------------------------------------
@@ -268,6 +280,9 @@ class Env:  # pylint: disable=R0902,R0904
             # PostgreSQL's jsonb_array_length, used by a CHECK of the mandate table, for SQLite
             sa.event.listen(engine, "connect", lambda conn, _: conn.create_function(
                 "jsonb_array_length", 1, lambda value: len(json.loads(value)), deterministic=True))
+            if project_id is None:   # the public schema (the governance switch tables) is a database of its own
+                public = self.dir / "public.db"
+                sa.event.listen(engine, "connect", lambda conn, _: conn.execute(f"ATTACH DATABASE '{public}' AS public"))
             self.ns.Base.metadata.create_all(engine)
             self.engines[project_id] = engine
         return self.engines[project_id]
@@ -339,12 +354,19 @@ class Env:  # pylint: disable=R0902,R0904
                 tool_id=tool_id, entity_version_id=version_id, entity_type="agent", selected_tools=list(selected)))
             session.commit()
 
-    def module(self, *, governed=True, **settings):
-        adm = self.ns.adm
+    def module(self, *, governed=True, audit=False, unavailable=False, effective=None, **settings):
+        """The fake module. ``governed``: enforce; ``audit``: audit only (``governed`` is then False);
+        ``unavailable``: the mode is on and the preflight fails; ``effective``: a resolved state to run as."""
+        adm, gs = self.ns.adm, self.ns.governance_settings
+        mode = "enforce" if governed and not audit else ("audit_only" if audit else "off")
+        revision = "rev-1" if mode != "off" else None
+        effective = effective or gs.Effective(
+            mode=mode, policy_revision=revision, admit_legacy_pat=settings.get("admit_legacy_pat", False),
+            allow_runtime_domain_binding=settings.get("allow_runtime_domain_binding", False),
+            environment=settings.get("environment"), capped=False, unavailable=unavailable, read="ok")
         return types.SimpleNamespace(
-            governance_profile=types.SimpleNamespace(
-                enabled=governed, policy_revision="rev-1" if governed else None,
-                profile="governed" if governed else "legacy"),
+            governance_effective=effective,
+            governance_profile=effective.profile,
             admission_settings=adm.AdmissionSettings(**settings),
             _context_by_task=OrderedDict(),
             _context_lock=threading.Lock(),
@@ -473,6 +495,8 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
 
     ns.exceptions = load("utils", "exceptions")
     ns.governance = load("utils", "governance")
+    ns.settings_models = load("models", "governance_settings")
+    ns.governance_settings = load("utils", "governance_settings")
     ns.envelope = load("models/pd", "task_envelope")
     ns.run_id = load("utils", "run_id")
     ns.pd_admission = load("models/pd", "admission")
@@ -585,7 +609,11 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
 
         def validated(event):
             if ns.event_model is not None:
-                ns.event_model.SecurityAuditEventV1.model_validate(event)
+                model = ns.event_model.SecurityAuditEventV1
+                # a tracing checkout from before #7120 has no would_deny: validate the rest, the tests assert it
+                shown = event if "would_deny" in model.model_fields else {
+                    key: value for key, value in event.items() if key != "would_deny"}
+                model.model_validate(shown)
             return event
 
         def allowed_local():
@@ -595,6 +623,11 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             return env.audit_allowed
 
         def record(session, event):
+            if getattr(session, "is_probe", False):   # the preflight's schema probe: validates, writes nothing
+                validated(event)
+                if "would_deny" in event and not env.audit_has_would_deny:
+                    raise ValueError("invalid security audit event: would_deny: Extra inputs are not permitted")
+                return {"event_id": "probe"}
             env.tracing_calls += 1
             if env.record_raises:
                 raise env.record_raises
@@ -733,7 +766,14 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             env.list_users_calls.append(list(user_ids))
             if env.list_users_raises:
                 raise env.list_users_raises
-            return [{"id": uid, "email": env.users[uid], "name": "n"} for uid in user_ids if uid in env.users]
+            rows = []
+            known = getattr(ns, "users", None) or {}  # the governance-settings tests keep user dicts on ns.users
+            for uid in user_ids:
+                if uid in env.users:
+                    rows.append({"id": uid, "email": env.users[uid], "name": "n"})
+                else:
+                    rows.extend(dict(u) for u in known.values() if u.get("id") == uid)
+            return rows
 
         tools.auth.list_users = list_users
 

@@ -64,18 +64,15 @@ cost_budgets:
       personal_project_monthly_limit: null
       user_monthly_limit: null
 
-# Enterprise credential governance (C-1009, #6754). Operator-owned: set it in the
-# deployment config or through the environment variables below (Helm/compose), never from
-# the admin UI. Deliberately NOT declared in admin_schema.json, so the admin config editor
-# cannot change it. Default off = legacy behaviour, nothing changes.
-# When enabled is true, policy_revision must be a non-empty string; a non-boolean
-# enabled value or a missing revision fails plugin startup.
+# Enterprise credential governance (C-1009, #6754, #7120). The mode (off, audit_only, enforce), the policy revision and
+# both admission flags are set in the Admin UI (Governance) and stored in the database, not here. The deployment keeps
+# three environment variables, read from the process environment (never from this file):
+#   ELITEA_CREDENTIAL_GOVERNANCE_MAX_MODE     off | audit-only | enforce (default enforce): the highest mode allowed
+#   ELITEA_CREDENTIAL_GOVERNANCE_ENABLED      deprecated alias of the ceiling: true = enforce, false = off; it does not
+#                                             switch governance on. Setting both and disagreeing refuses startup
+#   ELITEA_CREDENTIAL_GOVERNANCE_ENVIRONMENT  label recorded on contexts and audit events; when set, it is read-only in the UI
+# Any other former key (enabled, policy_revision, environment, admit_legacy_pat, allow_runtime_domain_binding, or the
+# POLICY_REVISION, MODE, ADMIT_LEGACY_PAT and ALLOW_RUNTIME_DOMAIN_BINDING variables) is ignored with a warning.
+# Deliberately NOT declared in admin_schema.json, so the admin config editor cannot change it.
 enterprise_credential_governance:
-  enabled: ${ELITEA_CREDENTIAL_GOVERNANCE_ENABLED:false}
-  policy_revision: "${ELITEA_CREDENTIAL_GOVERNANCE_POLICY_REVISION:}"   # quoted: a revision like 2026-10-20 must stay a string
-  # Admission settings (#6756), validated only when enabled is true. Governed startup also needs
-  # auth.auth_mode "rpc", auth identity_verifier.session_user configured, and tracing security audit.
-  allow_runtime_domain_binding: false   # explicit allow for runtime_domain_binding bindings
-  admit_legacy_pat: false               # let a legacy PAT through identity verification (it still needs a mandate)
   context_ttl_s: 3600                   # how long an admitted run may start or restart (60..86400)
-  environment: "${ELITEA_CREDENTIAL_GOVERNANCE_ENVIRONMENT:}"   # label recorded on contexts and audit events

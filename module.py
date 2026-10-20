@@ -14,9 +14,10 @@ from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
-from .utils.admission import admit_dispatch, check_governed_startup, load_admission_settings, track_context
+from .utils.admission import AdmissionSettings, admit_dispatch, track_context
 from .utils.binding_api import PERMISSIONS as BINDING_PERMISSIONS, registration as binding_registration
 from .utils.governance import init_governance
+from .utils.governance_settings import has_live_contexts, record_boot_preflight
 from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
 from .utils.worker_capabilities import (
@@ -133,6 +134,13 @@ class Module(module.ModuleModel):
         # task_id -> (project_id, context_ref) of governed runs admitted by this process (#6756); bounded
         self._context_by_task = OrderedDict()
         self._context_lock = Lock()   # the map is read by the deadline sweep while dispatch threads change it
+        # Credential governance (#7120): the snapshot of the switch (built in init), and which of the two worker bus
+        # handlers of a governed run are registered. They are registered on the first move into enforce and stay until
+        # deinit, so runs admitted under enforce keep validating after a switch to off; booting in off registers none
+        self.governance_state = None
+        self.governed_handlers_registered = False
+        self._governed_handlers = {"validate": False, "release": False}
+        self._governed_handlers_lock = Lock()
         # single-use tickets of autonomous (mandate) runs, minted and taken in this process only; bounded (#6947)
         self._mandate_tickets = TicketStore()
         self.active_index_tasks = OrderedDict()
@@ -545,13 +553,17 @@ class Module(module.ModuleModel):
                 "report_trigger_principals", self.report_trigger_principals,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "create_governance_settings_tables", self.create_governance_settings_tables,
+                group="R-2.0.8",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
         self._ensure_agent_identity_schema()
-        check_governed_startup(self)
+        self._start_governance()
 
         self.handle_pylon_modules_initialized()
 
@@ -610,23 +622,74 @@ class Module(module.ModuleModel):
         except Exception as e:
             log.warning('Failed to register provider RPC method: %s', e)
 
-        # Workers prove a governed run still holds its admission over the worker bus (#6756)
-        if self.governance_profile.enabled:
-            try:
-                this.for_module("worker_client").module.rpc_node.register(
-                    self.validate_execution_context,
-                    name="restricted_validate_execution_context",
-                )
-            except Exception:  # pylint: disable=W0703
-                log.exception("Failed to register restricted_validate_execution_context")
-            # ... and ask Main for the material of a credential slot, sealed to the asking worker (#6946)
-            try:
-                this.for_module("worker_client").module.rpc_node.register(
-                    self.release_credential,
-                    name="restricted_release_credential",
-                )
-            except Exception:  # pylint: disable=W0703
-                log.exception("Failed to register restricted_release_credential")
+
+    # --- credential governance switch (#7120, C-1009) ---------------------------------------------------------------
+
+    @property
+    def governance_effective(self):
+        """What is in effect now (the snapshot; no I/O)."""
+        return self.governance_state.effective
+
+    @property
+    def governance_profile(self):
+        """``enabled`` is true under enforce only; audit only keeps the legacy profile."""
+        return self.governance_state.effective.profile
+
+    @property
+    def admission_settings(self):
+        effective = self.governance_state.effective
+        return AdmissionSettings(
+            allow_runtime_domain_binding=effective.allow_runtime_domain_binding,
+            admit_legacy_pat=effective.admit_legacy_pat, context_ttl_s=self.governance_state.context_ttl_s,
+            environment=effective.environment,
+        )
+
+    def _start_governance(self):
+        """Once every plugin is up: read the switch again (the first read ran in init, before the plugins it needs
+        were loaded), keep serving the runs admitted before this restart, start the refresher, and say so if the mode
+        is on and the platform cannot honour it."""
+        state = self.governance_state
+        state.refresh()
+        if not self.governed_handlers_registered and has_live_contexts():
+            # booting into off (or audit only) with governed runs still live: their workers still validate them and ask
+            # for their credentials, so the handlers (and the sweep of their deadlines) stay until the next restart
+            log.warning("Credential governance: governed runs admitted before this start are still live; "
+                        "their worker handlers are registered")
+            self._ensure_governed_handlers_registered()
+        state.start()
+        record_boot_preflight(self)
+
+    def _ensure_governed_handlers_registered(self):
+        """Register the worker bus handlers of a governed run: workers prove a run still holds its admission
+        (#6756), and ask Main for the material of a credential slot, sealed to the asking worker (#6946). Idempotent;
+        a handler that could not be registered is tried again at the next refresh of the switch. True when both are."""
+        with self._governed_handlers_lock:
+            for key, handler, name in (
+                    ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
+                    ("release", self.release_credential, "restricted_release_credential")):
+                if self._governed_handlers[key]:
+                    continue
+                try:
+                    this.for_module("worker_client").module.rpc_node.register(handler, name=name)
+                    self._governed_handlers[key] = True
+                except Exception:  # pylint: disable=W0703
+                    log.exception("Failed to register %s", name)
+            self.governed_handlers_registered = any(self._governed_handlers.values())
+            return all(self._governed_handlers.values())
+
+    def _unregister_governed_handlers(self):
+        with self._governed_handlers_lock:
+            for key, handler, name in (
+                    ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
+                    ("release", self.release_credential, "restricted_release_credential")):
+                if not self._governed_handlers[key]:
+                    continue
+                try:
+                    this.for_module("worker_client").module.rpc_node.unregister(handler, name=name)
+                except Exception:  # pylint: disable=W0703
+                    log.exception("Failed to unregister %s", name)
+                self._governed_handlers[key] = False
+            self.governed_handlers_registered = False
 
     def _ensure_share_token_schema(self):
         """Startup safety net: create share-token tables in any project schema (and
@@ -673,9 +736,8 @@ class Module(module.ModuleModel):
         Thread(target=_run, daemon=True).start()
 
     def init(self):
-        # Fail fast on a misconfigured governance flag, before anything can consult it
+        # Fail fast on a misconfigured governance ceiling, before anything can consult the switch
         init_governance(self)
-        self.admission_settings = load_admission_settings(self.descriptor.config)
         #
         self.bp = self.descriptor.init_all(url_prefix="/app")
 
@@ -722,6 +784,19 @@ class Module(module.ModuleModel):
                 }
             })
 
+        # The governance switch (#7120): anyone with `view` sees it; changing it needs `manage`, which the endpoint also
+        # pins to the super_admin role, so a role matrix edit cannot widen it. Nothing here is reachable in default mode.
+        for permission, roles in (
+                ("governance.settings.view", {"super_admin": True, "admin": True}),
+                ("governance.settings.manage", {"super_admin": True, "admin": False}),
+        ):
+            auth.register_permissions({
+                "permissions": [permission],
+                "recommended_roles": {
+                    "administration": {**roles, "viewer": False, "editor": False, "system": False},
+                    "default": {"super_admin": False, "admin": False, "viewer": False, "editor": False, "system": False},
+                }
+            })
         # Agent identity bindings (#7105, C-1009): the operator REST API. Platform administration only in this slice
         # (roles in binding_api.RECOMMENDED_ROLES). Registered whatever the governance flag says.
         for permission in BINDING_PERMISSIONS:
@@ -771,12 +846,15 @@ class Module(module.ModuleModel):
                 )
                 raise BudgetDoorClosedError(scope=closed_scope, project_id=project_id)
             # Versioned worker envelope; a governed task with no capable worker is refused here
+            # the state is read once, so a switch in the middle of a dispatch cannot give it a governed envelope and an
+            # ungoverned admission (or the other way round)
+            effective = self.governance_effective
             apply_envelope_gate(
                 args[0] if args else kwargs.get("name"),
-                kwargs, self.governance_profile, self.worker_capabilities,
+                kwargs, effective.profile, self.worker_capabilities,
             )
             stamp_predict_run_id(kwargs)
-            context_ref = admit_dispatch(self, args[0] if args else kwargs.get("name"), kwargs, admission)
+            context_ref = admit_dispatch(self, args[0] if args else kwargs.get("name"), kwargs, admission, effective)
             # a mandate run carries its time limit here (admit_dispatch); it is for Main only, the worker never sees it
             deadline = (kwargs.get("meta") or {}).pop("context_deadline", None) if context_ref else None
             task_id = _original_start_task(*args, **kwargs)
@@ -1079,25 +1157,13 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
 
         # TaskNode
+        if self.governance_state is not None:
+            self.governance_state.stop()
         self.eval_task_node.stop()
         self.task_node.stop()
         try:
             from tools import this
-            if self.governance_profile.enabled:
-                try:
-                    this.for_module("worker_client").module.rpc_node.unregister(
-                        self.validate_execution_context,
-                        name="restricted_validate_execution_context",
-                    )
-                except Exception:  # pylint: disable=W0703
-                    log.exception("Failed to unregister restricted_validate_execution_context")
-                try:
-                    this.for_module("worker_client").module.rpc_node.unregister(
-                        self.release_credential,
-                        name="restricted_release_credential",
-                    )
-                except Exception:  # pylint: disable=W0703
-                    log.exception("Failed to unregister restricted_release_credential")
+            self._unregister_governed_handlers()
             this.for_module("admin").module.unregister_admin_task(
                 "eliminate_prompts", prompt_2_agent_migration
             )
@@ -1181,6 +1247,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "report_trigger_principals", self.report_trigger_principals
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "create_governance_settings_tables", self.create_governance_settings_tables
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)

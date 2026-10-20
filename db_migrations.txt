@@ -397,3 +397,9 @@ Run admin task create_agent_identity_tables with param: project_id=all
 # safety net creates it for existing projects. Run the task to report (dry_run) or re-run. Idempotent.
 Run admin task create_mandate_tables with param: project_id=all;dry_run
 Run admin task create_mandate_tables with param: project_id=all
+
+# Issue #7120 (C-1009): the credential governance switch - credential_governance_settings and its history table in the
+# public schema. They are NOT created at startup (the switch reads as "no stored row", i.e. off, until they exist). Run
+# the task once per environment, then choose the mode under Admin UI -> Governance -> Overview. Idempotent.
+Run admin task create_governance_settings_tables with param: dry_run
+Run admin task create_governance_settings_tables
