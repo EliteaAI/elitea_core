@@ -115,9 +115,9 @@ def harness(isolated_sys_modules):
     tools.serialize = lambda value: value
     sys.modules['tools'] = tools
 
-    models_all = types.ModuleType(f'{PACKAGE}.models.all')
-    models_all.EntitySchedulePreference = FakePreference
-    sys.modules[models_all.__name__] = models_all
+    schedule_models = types.ModuleType(f'{PACKAGE}.models.entity_schedule')
+    schedule_models.EntitySchedulePreference = FakePreference
+    sys.modules[schedule_models.__name__] = schedule_models
 
     _load('utils/schedule_access.py', f'{PACKAGE}.utils.schedule_access')
     harness.module = _load('api/v2/schedule_preferences.py', f'{PACKAGE}.api.v2.schedule_preferences')
