@@ -6,6 +6,7 @@ admin config editor.
 """
 
 import json
+import re
 import types
 import sys
 from pathlib import Path
@@ -115,10 +116,40 @@ def test_profile_is_immutable(governance):
         profile.enabled = True
 
 
+_ENV_REF = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::(?P<default>[^}]*))?\}")
+
+
+def _shipped_section(env):
+    """config.yml as pylon loads it: ``${VAR:default}`` expanded from ``env`` before YAML parsing."""
+    text = (PLUGIN_ROOT / "config.yml").read_text()
+    expanded = _ENV_REF.sub(lambda m: env.get(m["name"], m["default"] if m["default"] is not None else m[0]), text)
+    return yaml.safe_load(expanded)[SECTION]
+
+
 def test_config_yml_ships_the_section_disabled():
-    config = yaml.safe_load((PLUGIN_ROOT / "config.yml").read_text())
-    assert config[SECTION]["enabled"] is False
-    assert config[SECTION]["policy_revision"] is None
+    section = _shipped_section({})
+
+    assert section["enabled"] is False
+    assert section["policy_revision"] == ""   # quoted expansion: empty, never a YAML date or number
+    assert section["environment"] == ""
+
+
+def test_config_yml_takes_the_flag_from_the_environment(governance):
+    section = _shipped_section({
+        "ELITEA_CREDENTIAL_GOVERNANCE_ENABLED": "true",
+        "ELITEA_CREDENTIAL_GOVERNANCE_POLICY_REVISION": "2026-10-20",
+        "ELITEA_CREDENTIAL_GOVERNANCE_ENVIRONMENT": "local-dev",
+    })
+
+    profile = governance.load_governance_profile({SECTION: section})
+    assert (profile.enabled, profile.policy_revision, section["environment"]) == (True, "2026-10-20", "local-dev")
+
+
+def test_config_yml_refuses_a_non_boolean_flag_from_the_environment(governance):
+    section = _shipped_section({"ELITEA_CREDENTIAL_GOVERNANCE_ENABLED": "yes"})
+
+    with pytest.raises(ValueError):
+        governance.load_governance_profile({SECTION: section})
 
 
 def test_flag_is_not_declared_in_the_admin_schema():

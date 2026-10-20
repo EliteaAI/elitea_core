@@ -82,12 +82,14 @@ def test_enabled_settings_are_read(ns):
         allow_runtime_domain_binding=True, admit_legacy_pat=True, context_ttl_s=60, environment="prod-eu"))
     assert settings == ns.adm.AdmissionSettings(True, True, 60, "prod-eu")
     assert ns.adm.load_admission_settings(config(context_ttl_s=86400)).context_ttl_s == 86400
+    # config.yml quotes the ${ELITEA_CREDENTIAL_GOVERNANCE_ENVIRONMENT:} expansion: unset arrives as ""
+    assert ns.adm.load_admission_settings(config(environment="")).environment is None
 
 
 @pytest.mark.parametrize("over", [
     {"context_ttl_s": 59}, {"context_ttl_s": 86401}, {"context_ttl_s": "3600"}, {"context_ttl_s": True},
     {"context_ttl_s": 60.5}, {"allow_runtime_domain_binding": "yes"}, {"admit_legacy_pat": 1},
-    {"environment": ""}, {"environment": "x" * 65}, {"environment": 7},
+    {"environment": " "}, {"environment": "x" * 65}, {"environment": 7},
 ])
 def test_invalid_settings_fail_startup_when_enabled(ns, over):
     with pytest.raises(ValueError):
