@@ -1,6 +1,6 @@
 """Pydantic models for the schedule list query arguments and rows."""
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -18,6 +18,8 @@ class ScheduleListFilters(BaseModel):
     search: str | None = None
     limit: int = Field(default=20, ge=1, le=100)
     offset: int = Field(default=0, ge=0, le=2**31 - 1)  # the database integer range
+    sort_by: Literal['name', 'entity_name', 'entity_type', 'next_run', 'last_run', 'enabled'] = 'next_run'
+    sort_order: Literal['asc', 'desc'] = 'asc'
 
     @field_validator('owner_ids', mode='before')
     @classmethod

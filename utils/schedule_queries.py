@@ -5,9 +5,14 @@ from ..models.all import Application, ApplicationVersion
 from ..models.entity_schedule import EntitySchedule as S
 from ..models.entity_schedule import EntityScheduleRun as Run
 
+SORT_COLUMNS = {
+    "name": S.name, "entity_name": Application.name, "entity_type": S.entity_type,
+    "next_run": S.next_run, "last_run": S.last_run, "enabled": S.enabled,
+}
+
 
 def list_schedules(session, scope, filters, limit: int, offset: int):
-    """Return `(total, rows)` of one page; rows come in `next_run` order, nulls last, then id.
+    """Return `(total, rows)` of one page, in `filters.sort_by` order (nulls last), then id.
 
     A caller without admin scope sees only own rows and `owner_ids` is ignored.
     """
@@ -43,7 +48,13 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
         .join(Application, Application.id == S.application_id)
         .outerjoin(ApplicationVersion, ApplicationVersion.id == S.version_id)
         .where(*conditions)
-        .order_by(S.next_run.asc().nulls_last(), S.id)
+        .order_by(_order(filters), S.id)
         .limit(limit).offset(offset)
     )
     return total, session.execute(page).all()
+
+
+def _order(filters):
+    column = SORT_COLUMNS[getattr(filters, "sort_by", "next_run")]
+    direction = column.desc() if getattr(filters, "sort_order", "asc") == "desc" else column.asc()
+    return direction.nulls_last()
