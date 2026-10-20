@@ -1,31 +1,27 @@
 """
-RPC module for Pipeline Scheduling.
+Legacy pipeline schedule check.
 
-Provides the scheduled execution checker for pipelines configured with
-schedule triggers. This RPC is called periodically (every minute) by the
-scheduling plugin to check if any pipelines need to be executed.
+Holds the per-project check for pipelines configured with schedule triggers.
+The generic tick `entity_schedules_check` calls it as its last step.
 """
 import threading
 import time
 from datetime import datetime, UTC
 
-from pylon.core.tools import web, log
+from pylon.core.tools import log
 from sqlalchemy.orm.attributes import flag_modified
-from tools import db, rpc_tools
+from tools import db
 
 from ..models.all import Application, ApplicationVersion
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
 from ..utils.cron_utils import is_cron_due
-from ..utils.maintenance_gate import is_maintenance_active
-from ..utils.utils import make_yield_to_hub, end_ambient_transaction
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
     finish_trigger_run_with_error,
 )
-
 
 # Re-entrancy guard: if a previous tick is still running (took >60s) we skip
 # this tick instead of letting the work overlap. The scheduler thread fires
@@ -243,81 +239,3 @@ def _execute_pipeline(
         raise
 
     return result
-
-
-class RPC:
-    """RPC methods for pipeline scheduling."""
-
-    @web.rpc("pipelines_check_scheduling", "check_pipeline_scheduling")
-    def check_pipeline_scheduling(self, **kwargs):
-        """
-        Check all pipelines with schedule triggers and execute those that are due.
-
-        This function is called by the scheduling plugin every minute.
-        It iterates through all projects, finds pipelines with schedule triggers,
-        checks if they should run based on their cron expression, and executes them.
-
-        Re-entrancy: an in-process lock prevents a slow tick from overlapping
-        with the next minute's tick on the same pylon_main instance. For
-        multi-replica deployments a Postgres advisory lock would be needed.
-        """
-        # Skip the tick while maintenance mode is on so no new pipeline runs
-        # are dispatched to task nodes that are rejecting/tearing down work.
-        if is_maintenance_active():
-            log.info(
-                "check_pipeline_scheduling: maintenance mode active, skipping tick"
-            )
-            return None
-        #
-        if not _check_pipeline_scheduling_lock.acquire(blocking=False):
-            log.warning(
-                "check_pipeline_scheduling: previous tick still running, "
-                "skipping this minute"
-            )
-            return None
-
-        tick_started = time.monotonic()
-        log.info(
-            f"check_pipeline_scheduling tick started at {datetime.now(UTC).isoformat()}"
-        )
-        try:
-            yield_to_hub = make_yield_to_hub(self.context.web_runtime)
-
-            try:
-                all_project_ids = [
-                    project_['id'] for project_ in rpc_tools.RpcMixin().rpc.timeout(3).project_list(
-                        filter_={'create_success': True}
-                    )
-                ]
-            except Exception as exc:  # pylint: disable=W0703
-                log.exception(
-                    "check_pipeline_scheduling: failed to enumerate projects: "
-                    "exc_type=%s exc=%r",
-                    type(exc).__name__, exc,
-                )
-                return None
-
-            for project_id in all_project_ids:
-                # Yield between projects so a long scheduler tick does not starve
-                # the gevent hub and stall request greenlets / EventNode.
-                yield_to_hub()
-                # Nested inline RPCs read on the scheduler thread's ambient session and
-                # nothing commits it until the tick ends, so it holds AccessShareLock on
-                # every table it touched for the whole tick, blocking DDL/migrations.
-                end_ambient_transaction()
-                try:
-                    _check_project_pipelines(project_id, yield_to_hub=yield_to_hub)
-                except Exception as exc:  # pylint: disable=W0703
-                    log.exception(
-                        "check_pipeline_scheduling: skipped project due to error: "
-                        "project_id=%s exc_type=%s exc=%r",
-                        project_id, type(exc).__name__, exc,
-                    )
-
-            return None
-        finally:
-            log.info(
-                f"check_pipeline_scheduling tick finished at {datetime.now(UTC).isoformat()} "
-                f"(total {time.monotonic() - tick_started:.3f}s)"
-            )
-            _check_pipeline_scheduling_lock.release()
