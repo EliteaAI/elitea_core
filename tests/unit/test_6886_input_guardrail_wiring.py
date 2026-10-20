@@ -81,11 +81,11 @@ def test_checkpoint_a_runs_before_an_injection_is_stored_or_forwarded():
 def test_webhook_history_preview_is_redacted_before_truncation():
     source = _source('rpc/pipeline_webhook.py')
 
-    assert source.index('redact_text(payload_str)') < source.index('[:500]')
+    assert source.index('redacted_input(payload_str)') < source.index('[:500]')
 
 
 def test_tracing_redactor_is_registered():
-    assert 'register_value_redactor(redact_text)' in _source('module.py')
+    assert 'register_value_redactor(redact_value)' in _source('module.py')
 
 
 def test_blocked_chat_turn_is_stored_redacted():

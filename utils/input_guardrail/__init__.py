@@ -8,6 +8,7 @@ Checkpoint C (the SDK middleware) skips every segment whose hash B lists in
 ``payload['input_guardrail_inspected']``, so one value produces one audit row.
 """
 
+import json
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
@@ -20,6 +21,7 @@ from .input_detector import (
     Segment,
     effective_action,
     inspect,
+    is_platform_context_block,
     policy_from_dict,
     segment_hash,
     summary,
@@ -30,10 +32,18 @@ INSPECTED_PAYLOAD_KEY = 'input_guardrail_inspected'
 VERDICT_PAYLOAD_KEY = 'input_guardrail'
 AUDIT_TRACER_NAME = 'audit-trail'
 AUDIT_OBSERVATION_TYPE = 'guardrail'
-# Platform-generated context blocks are not user input (format_context_for_llm)
-_PLATFORM_BLOCK_PREFIX = '<runtime_context'
+# Shown in place of a value that could not be fully inspected (see redact_value)
+UNCHECKED_PLACEHOLDER = '[REDACTED:unchecked]'
+# Shorter than any text a rule can match (the shortest is a 19-char phone number)
+_MIN_INSPECT_CHARS = 8
+_POLICY_CACHE_SIZE = 8
 # Keys of the summary that may reach the stored message, the payload and the UI
 VERDICT_KEYS = ('action', 'categories', 'rules', 'segments', 'detection_count', 'not_inspected', 'error')
+
+
+# Compiled policies by config content: the config is re-read on every call so an admin
+# change applies at once, but allow_patterns are only recompiled when the content changes
+_policy_cache: Dict[str, Policy] = {}
 
 
 def policy_from_config() -> Policy:
@@ -43,7 +53,16 @@ def policy_from_config() -> Policy:
         if not isinstance(raw, dict):
             log.error('[INPUT_GUARDRAIL] config is not a mapping; guardrail disabled')
             return Policy()
-        return policy_from_dict(raw)
+        if not raw:
+            return Policy()
+        key = json.dumps(raw, sort_keys=True, default=str)
+        policy = _policy_cache.get(key)
+        if policy is None:
+            policy = policy_from_dict(raw)
+            if len(_policy_cache) >= _POLICY_CACHE_SIZE:
+                _policy_cache.clear()
+            _policy_cache[key] = policy
+        return policy
     except Exception:  # pylint: disable=W0703
         log.error('[INPUT_GUARDRAIL] config unreadable; guardrail disabled')
         return Policy()
@@ -77,7 +96,12 @@ class _Slot:
 
 
 def _content_slots(kind: str, content, not_inspected: List[str], write_back) -> List[_Slot]:
-    """Slots for a str or a list of content blocks; non-text blocks are counted, not read."""
+    """Slots for a str or a list of content blocks; non-text blocks are counted, not read.
+
+    The platform's own ``<runtime_context>`` block is not user input, but only that exact
+    block, written as a separate text block after the first one, is skipped: a string
+    that merely starts with the tag is inspected.
+    """
     if isinstance(content, str):
         return [_Slot(kind, content, write_back)]
     slots = []
@@ -87,7 +111,10 @@ def _content_slots(kind: str, content, not_inspected: List[str], write_back) -> 
         if isinstance(block, str):
             slots.append(_Slot(kind, block, lambda text, i=i: content.__setitem__(i, text)))
         elif isinstance(block, dict) and block.get('type') == 'text':
-            slots.append(_Slot(kind, block.get('text') or '', lambda text, b=block: b.__setitem__('text', text)))
+            text = block.get('text') or ''
+            if i > 0 and is_platform_context_block(text):
+                continue
+            slots.append(_Slot(kind, text, lambda text, b=block: b.__setitem__('text', text)))
         elif isinstance(block, dict):
             not_inspected.append(str(block.get('type') or 'unknown'))
     return slots
@@ -112,10 +139,7 @@ def _payload_slots(payload: Dict[str, Any], not_inspected: List[str], kind: str 
             slots.append(_Slot(
                 'instructions', owner['instructions'], lambda text, o=owner: o.__setitem__('instructions', text),
             ))
-    return [
-        s for s in slots
-        if s.text and not s.text.lstrip().startswith(_PLATFORM_BLOCK_PREFIX)
-    ]
+    return [s for s in slots if s.text]
 
 
 def _segments(slots: List[_Slot]) -> List[Segment]:
@@ -128,19 +152,9 @@ def _segments(slots: List[_Slot]) -> List[Segment]:
     return segments
 
 
-def redact_text(text: str) -> str:
-    """Every detected value replaced, whatever the configured action.
-
-    For copies that are never meant to hold a value: the Active Tasks preview and the
-    tracing span payload. Fails to the input unchanged; callers that cannot accept
-    that (tracing) mask the whole value on top.
-    """
-    if not isinstance(text, str) or not text:
-        return text
-    policy = policy_from_config()
-    if not policy.active:
-        return text
-    strict = Policy(
+def _strict_policy(policy: Policy) -> Policy:
+    """The live policy with every category not off set to redact."""
+    return Policy(
         enabled=True,
         on_error=policy.on_error,
         timeout_ms=policy.timeout_ms,
@@ -148,21 +162,60 @@ def redact_text(text: str) -> str:
         categories={c: ('redact' if a != 'off' else 'off') for c, a in policy.categories.items()},
         allow_patterns=policy.allow_patterns,
     )
-    result = inspect([Segment('current_turn', 0, text)], strict)
+
+
+def redact_value(text: str) -> Optional[str]:
+    """The text with every detected value replaced, or None if it could not be fully inspected.
+
+    For copies that are never meant to hold a value, where the caller must not keep the
+    input when the check failed (tracing span payloads). None means the scan hit the
+    size budget, the deadline or an internal error: mask the whole value. A text that
+    needs no inspection (not a string, too short, guardrail off) is returned unchanged.
+    Never raises, and nothing it returns or logs carries a detected value.
+    """
+    if not isinstance(text, str) or len(text) < _MIN_INSPECT_CHARS:
+        return text
+    try:
+        policy = policy_from_config()
+        if not policy.active:
+            return text
+        result = inspect([Segment('current_turn', 0, text)], _strict_policy(policy))
+    except Exception:  # pylint: disable=W0703
+        return None
+    if result.error:
+        return None
     return result.redacted.get(('current_turn', 0), text)
+
+
+def redact_text(text: str) -> str:
+    """Every detected value replaced, whatever the configured action.
+
+    Fails to the input unchanged when the text could not be fully inspected; callers
+    that cannot accept that use ``redact_value`` and mask the whole value on None.
+    """
+    redacted = redact_value(text)
+    return text if redacted is None else redacted
+
+
+def _redact_or_mask(text: str) -> str:
+    """For stored and previewed copies: the redacted text, or a placeholder for the whole
+    value when it could not be inspected (a copy that keeps a value is the worse failure)."""
+    redacted = redact_value(text)
+    return UNCHECKED_PLACEHOLDER if redacted is None else redacted
 
 
 def redacted_input(user_input):
     """A copy of a chat input with every detected value replaced: the stored copy of a
-    blocked turn (plan D5). Text blocks of a list are rewritten in a new list."""
+    blocked turn (plan D5). Text blocks of a list are rewritten in a new list. A text
+    that could not be inspected is replaced whole."""
     if isinstance(user_input, list):
         return [
-            {**block, 'text': redact_text(block.get('text') or '')}
+            {**block, 'text': _redact_or_mask(block.get('text') or '')}
             if isinstance(block, dict) and block.get('type') == 'text'
-            else (redact_text(block) if isinstance(block, str) else block)
+            else (_redact_or_mask(block) if isinstance(block, str) else block)
             for block in user_input
         ]
-    return redact_text(user_input)
+    return _redact_or_mask(user_input)
 
 
 # --- audit ------------------------------------------------------------------------
@@ -172,8 +225,14 @@ def emit_audit_spans(
     entries: Iterable[Dict[str, Any]],
     user_id: Optional[int] = None,
     project_id: Optional[int] = None,
+    entity_type: Optional[str] = None,
+    entity_id: Optional[int] = None,
+    entity_name: Optional[str] = None,
 ) -> int:
     """One zero-length ``audit-trail`` span per entry; the tracing plugin writes the row.
+
+    ``entity_*`` name the agent the input was sent to (``entity.type`` 'application' or
+    'datasource', as tracing's own spans carry); the tracing plugin reads them for the row.
 
     Twin of indexer_worker's utils/input_guardrail.py emit_audit_spans. Never raises.
     """
@@ -192,6 +251,15 @@ def emit_audit_spans(
                 base[key] = int(value)
         except (TypeError, ValueError):
             pass
+    if entity_type:
+        base['entity.type'] = str(entity_type)[:32]
+        try:
+            if entity_id is not None:
+                base['entity.id'] = int(entity_id)
+        except (TypeError, ValueError):
+            pass
+        if entity_name:
+            base['entity.name'] = str(entity_name)[:256]
     emitted = 0
     for entry in entries:
         try:
@@ -207,6 +275,29 @@ def emit_audit_spans(
         except Exception as e:  # pylint: disable=W0703
             log.debug(f'[INPUT_GUARDRAIL] Failed to emit audit span: {e}')
     return emitted
+
+
+def _payload_entity(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The agent a start_task payload runs, as ``emit_audit_spans`` entity kwargs."""
+    application = payload.get('application')
+    if not isinstance(application, dict) or not (application.get('id') or application.get('name')):
+        return {}
+    return {
+        'entity_type': 'application',
+        'entity_id': application.get('id'),
+        'entity_name': application.get('name'),
+    }
+
+
+def participant_entity(participant) -> Dict[str, Any]:
+    """The agent a chat participant row stands for, as ``emit_audit_spans`` entity kwargs;
+    empty for a user, a model or anything that is not an application."""
+    if participant is None or str(getattr(participant, 'entity_name', '')) != 'application':
+        return {}
+    meta = getattr(participant, 'entity_meta', None) or {}
+    if not isinstance(meta, dict) or meta.get('id') is None:
+        return {}
+    return {'entity_type': 'application', 'entity_id': meta.get('id'), 'entity_name': meta.get('name')}
 
 
 def _audit_entries(result_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -249,7 +340,10 @@ def _blocked(result_summary: Dict[str, Any]) -> InputGuardrailBlockedError:
     )
 
 
-def _run(slots: List[_Slot], policy: Policy, not_inspected: List[str], user_id, project_id, audit_on=None):
+def _run(
+    slots: List[_Slot], policy: Policy, not_inspected: List[str], user_id, project_id, audit_on=None,
+    entity: Optional[Dict[str, Any]] = None,
+):
     """Inspect, audit and write redactions back. Returns (summary, action).
 
     ``audit_on`` limits auditing to those actions; None audits every hit.
@@ -259,7 +353,7 @@ def _run(slots: List[_Slot], policy: Policy, not_inspected: List[str], user_id, 
     result_summary = summary(result, policy)
     action = effective_action(result, policy)
     if audit_on is None or action in audit_on:
-        emit_audit_spans(_audit_entries(result_summary), user_id=user_id, project_id=project_id)
+        emit_audit_spans(_audit_entries(result_summary), user_id=user_id, project_id=project_id, **(entity or {}))
     if action != 'block':
         for slot, segment in zip(slots, segments):
             new_text = result.redacted.get((segment.kind, segment.index))
@@ -271,6 +365,7 @@ def _run(slots: List[_Slot], policy: Policy, not_inspected: List[str], user_id, 
 
 def check_chat_input(
     user_input, project_id, user_id=None, kind: str = 'current_turn',
+    entity: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Any, Optional[Dict[str, Any]]]:
     """Checkpoint A: inspect a chat message before it is stored or broadcast.
 
@@ -282,6 +377,9 @@ def check_chat_input(
     again. Only block and redact are audited here: a blocked turn never reaches B, and
     a redacted one reaches it as a placeholder that matches nothing. A record or warn
     hit is audited once, by B.
+
+    ``entity`` names the agent the message is for, as ``emit_audit_spans`` entity kwargs
+    (``entity_type``, ``entity_id``, ``entity_name``); without it the audit row has no agent.
     """
     policy = policy_from_config()
     if not _applies(policy, project_id):
@@ -293,7 +391,7 @@ def check_chat_input(
         if not slots:
             return user_input, None
         result_summary, action = _run(
-            slots, policy, not_inspected, user_id, project_id, audit_on=('block', 'redact'),
+            slots, policy, not_inspected, user_id, project_id, audit_on=('block', 'redact'), entity=entity,
         )
     except Exception:  # pylint: disable=W0703
         log.warning('[INPUT_GUARDRAIL] chat check failed (on_error=%s)', policy.on_error)
@@ -307,7 +405,9 @@ def check_chat_input(
     return holder['user_input'], verdict_meta(result_summary)
 
 
-def check_resume_input(parsed, project_id, user_id=None) -> Optional[Dict[str, Any]]:
+def check_resume_input(
+    parsed, project_id, user_id=None, entity: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     """Checkpoint A for a resume: the replacement input and HITL edit/answer text.
 
     Rewrites the redacted values on ``parsed`` in place and returns the merged verdict,
@@ -319,7 +419,7 @@ def check_resume_input(parsed, project_id, user_id=None) -> Optional[Dict[str, A
         nonlocal verdict
         if not isinstance(value, str) or not value:
             return value
-        value, found = check_chat_input(value, project_id, user_id, kind=kind)
+        value, found = check_chat_input(value, project_id, user_id, kind=kind, entity=entity)
         if found:
             verdict = _merge(verdict, found)
         return value
@@ -368,13 +468,15 @@ def apply_input_guardrail(call_kwargs: Dict[str, Any]) -> Optional[Dict[str, Any
         return None
     # The preview is set from the raw input before dispatch; it never keeps a value
     if isinstance(meta.get('user_input_preview'), str):
-        meta['user_input_preview'] = redact_text(meta['user_input_preview'])
+        meta['user_input_preview'] = _redact_or_mask(meta['user_input_preview'])
     already: Set[str] = {h for h in payload.get(INSPECTED_PAYLOAD_KEY) or [] if isinstance(h, str)}
     not_inspected: List[str] = []
     try:
         slots = _payload_slots(payload, not_inspected)
         todo = [s for s in slots if segment_hash(s.text) not in already]
-        result_summary, action = _run(todo, policy, not_inspected, user_id, project_id) if todo else (None, 'none')
+        result_summary, action = _run(
+            todo, policy, not_inspected, user_id, project_id, entity=_payload_entity(payload),
+        ) if todo else (None, 'none')
     except Exception:  # pylint: disable=W0703
         log.warning('[INPUT_GUARDRAIL] dispatch check failed (on_error=%s)', policy.on_error)
         if policy.on_error == 'fail_closed':
@@ -406,5 +508,5 @@ def _merge(current: Optional[Dict[str, Any]], incoming: Dict[str, Any]) -> Dict[
 __all__ = [
     'CONFIG_KEY', 'INSPECTED_PAYLOAD_KEY', 'VERDICT_PAYLOAD_KEY', 'VERDICT_KEYS',
     'apply_input_guardrail', 'check_chat_input', 'check_resume_input', 'emit_audit_spans', 'policy_from_config',
-    'redact_text', 'verdict_meta',
+    'participant_entity', 'redact_text', 'redact_value', 'redacted_input', 'verdict_meta', 'UNCHECKED_PLACEHOLDER',
 ]

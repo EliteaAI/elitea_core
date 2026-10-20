@@ -44,7 +44,7 @@ from ..utils.skill_participant_utils import SkillParticipantError, build_skill_p
     resolve_skill_attachment_llm_settings
 from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
 from ..utils.input_guardrail import (
-    INSPECTED_PAYLOAD_KEY, accepted_history_hashes, check_chat_input, check_resume_input, redacted_input,
+    INSPECTED_PAYLOAD_KEY, accepted_history_hashes, check_chat_input, check_resume_input, participant_entity, redacted_input,
 )
 from ..utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation,
@@ -1193,11 +1193,16 @@ class RPC:
             try:
                 parsed.user_input, input_guardrail_verdict = check_chat_input(
                     parsed.user_input, parsed.project_id, current_user['id'],
+                    entity=participant_entity(
+                        session.get(Participant, parsed.participant_id) if parsed.participant_id else None
+                    ),
                 )
             except InputGuardrailBlockedError as blocked:
                 if not sid:
                     raise
-                self._store_blocked_turn(session, conversation, author_participant, parsed, blocked, room, sid)
+                stored_ids = self._store_blocked_turn(
+                    session, conversation, author_participant, parsed, blocked, room, sid,
+                ) or {}
                 self.context.sio.emit(
                     event=SioEvents.chat_predict.value,
                     data={
@@ -1205,6 +1210,9 @@ class RPC:
                         'stream_id': parsed.conversation_uuid,
                         'message_id': parsed.question_id,
                         'question_id': parsed.question_id,
+                        # The sender's placeholders carry client-made ids; without the stored
+                        # ones an edit or regenerate of the card cannot find the rows (#6886)
+                        **stored_ids,
                         'content': blocked.message,
                         'response_metadata': {
                             'human_readable': blocked.message,
@@ -1589,8 +1597,12 @@ class RPC:
 
         Plan D5: a reload shows the same card, and the stored copy never holds the value.
         Never raises; on failure the refusal still reaches the sender, unstored.
+
+        Returns the stored ids the sender's placeholders need (``response_message_id``,
+        ``question_item_uuid``), or None when nothing was stored.
         """
         verdict = blocked.verdict()
+        stored_ids = {}
         try:
             stored_input = redacted_input(parsed.user_input)
             msg_group = ConversationMessageGroup(
@@ -1600,14 +1612,16 @@ class RPC:
                 sent_to_id=parsed.participant_id,
                 meta={'input_guardrail': verdict},
             )
-            session.add(msg_group)
-            session.add(TextMessageItem(
+            question_item = TextMessageItem(
                 message_group=msg_group,
                 item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
                 content=stored_input,
                 order_index=0,
-            ))
+            )
+            session.add(msg_group)
+            session.add(question_item)
             session.flush()
+            stored_ids['question_item_uuid'] = str(question_item.uuid)
             if msg_group.sent_to_id:
                 response_msg = ConversationMessageGroup(
                     conversation=conversation,
@@ -1619,6 +1633,7 @@ class RPC:
                 )
                 session.add(response_msg)
                 session.flush()
+                stored_ids['response_message_id'] = str(response_msg.uuid)
                 session.add(TextMessageItem(
                     message_group=response_msg,
                     item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
@@ -1650,12 +1665,13 @@ class RPC:
         except Exception:  # pylint: disable=W0703
             log.exception('[INPUT_GUARDRAIL] Failed to store the blocked turn')
             session.rollback()
-            return
+            return None
         # The first turn still names the conversation, or its "naming" spinner never clears
         text = stored_input if isinstance(stored_input, str) else ' '.join(
             b.get('text') or '' for b in stored_input or [] if isinstance(b, dict) and b.get('type') == 'text'
         )
         self.check_and_generate_conversation_name(parsed.project_id, text or 'New Chat', room, conversation)
+        return stored_ids
 
     @web.method()
     def _wait_parallel_hitl_ack(self, message_id, decision_id, phase, timeout=0.75):
@@ -2006,7 +2022,12 @@ class RPC:
         # Checkpoint A (#6886) for a resume: the replacement input and HITL edit or
         # answer text, before a decision message is stored or any resume dispatches
         try:
-            check_resume_input(parsed, parsed.project_id, current_user['id'])
+            with db.get_session(parsed.project_id) as session:
+                resumed_group = session.query(ConversationMessageGroup).filter(
+                    ConversationMessageGroup.uuid == parsed.message_id
+                ).first()
+                resume_entity = participant_entity(resumed_group.author_participant if resumed_group else None)
+            check_resume_input(parsed, parsed.project_id, current_user['id'], entity=resume_entity)
         except InputGuardrailBlockedError as blocked:
             if not sid:
                 raise
@@ -2335,6 +2356,13 @@ class RPC:
                 response_msg.meta = begin_execution_generation(
                     response_msg.meta, execution_generation,
                 )
+                flag_modified(response_msg, 'meta')
+
+            # A block verdict stored by an earlier refused run must not outlive this resume:
+            # the meta writer keeps keys a run does not report, so the card would return on reload
+            stored_guardrail = (response_msg.meta or {}).get('input_guardrail')
+            if isinstance(stored_guardrail, dict) and stored_guardrail.get('action') == 'block':
+                response_msg.meta = {k: v for k, v in response_msg.meta.items() if k != 'input_guardrail'}
                 flag_modified(response_msg, 'meta')
 
             # Set streaming back to true

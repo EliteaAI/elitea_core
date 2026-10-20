@@ -249,7 +249,7 @@ def test_recording_the_failure_cannot_break_the_tick(env, monkeypatch):
 def test_webhook_dispatch_failure_closes_its_run(env, monkeypatch):
     for name, attrs in {
         'plugins.elitea_core.utils.exceptions': {'PoolSaturationError': type('PoolSaturationError', (Exception,), {})},
-        'plugins.elitea_core.utils.input_guardrail': {'redact_text': lambda text: text},
+        'plugins.elitea_core.utils.input_guardrail': {'redacted_input': lambda text: text},
     }.items():
         monkeypatch.setitem(sys.modules, name, _module(name, **attrs))
     webhook = _load(monkeypatch, 'plugins.elitea_core.rpc.pipeline_webhook', 'rpc/pipeline_webhook.py')

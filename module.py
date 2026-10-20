@@ -926,12 +926,13 @@ class Module(module.ModuleModel):
     def _register_input_guardrail_redactor(self):
         """Tracing span payloads carry the redacted text, not the detected value (#6886).
 
-        The redactor reads the live policy, so it is inert while the guardrail is off.
+        The redactor reads the live policy, so it is inert while the guardrail is off. It
+        returns None for a value it could not fully inspect: tracing masks the whole value.
         """
         try:
             from tools import this  # pylint: disable=E0401,C0415
-            from .utils.input_guardrail import redact_text
-            this.for_module("tracing").module.register_value_redactor(redact_text)
+            from .utils.input_guardrail import redact_value
+            this.for_module("tracing").module.register_value_redactor(redact_value)
         except Exception as e:  # pylint: disable=W0703
             log.debug(f"Input guardrail: tracing redactor not registered: {e}")
 
