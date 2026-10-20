@@ -67,11 +67,17 @@ class World:
             conversation=types.SimpleNamespace(id=CONVERSATION_ID, uuid="c-1", meta=meta),
         )
 
+    fail_step = False
+
     def finish(self, *args):
         self.events.append(("finish", *args))
+        if self.fail_step:
+            raise RuntimeError("db down")
 
     def pause(self, *args):
         self.events.append(("pause", *args))
+        if self.fail_step:
+            raise RuntimeError("db down")
 
 
 @pytest.fixture
@@ -111,7 +117,8 @@ def make_world(monkeypatch):
             package = _module(name)
             package.__path__ = []
             monkeypatch.setitem(sys.modules, name, package)
-        quiet = types.SimpleNamespace(info=none, debug=none, warning=none, error=none)
+        quiet = types.SimpleNamespace(
+            info=none, debug=none, warning=none, error=none, exception=lambda *a: world.events.append("logged"))
         monkeypatch.setitem(sys.modules, "pylon.core.tools", _module(
             "pylon.core.tools", web=types.SimpleNamespace(event=lambda *a: (lambda f: f)), log=quiet))
         monkeypatch.setitem(sys.modules, "tools", _module(
@@ -166,3 +173,30 @@ def test_7011_r1_6_stream_pause_without_a_schedule_run_keeps_todays_path(make_wo
     world = make_world(meta)
     world.pause_event({"hitl_interrupt": {"guardrail_type": "sensitive_tool"}})
     assert world.events == ["commit"]
+
+
+@pytest.mark.parametrize("metadata", [
+    {"hitl_interrupt": {"resume_strategy": "aggregate_child"}},
+    {"metadata": {"child_thread_id": "child-1"}},
+], ids=["parked-child-hitl", "durable-child-mcp-auth"])
+def test_7011_r5_1_a_pause_that_keeps_the_run_streaming_leaves_the_schedule_run_open(make_world, metadata):
+    world = make_world(dict(SCHEDULE_META))
+    world.pause_event(metadata)
+    assert world.msg_group.is_streaming is True
+    assert world.events == ["commit"]
+
+
+def test_7011_r1_6_a_failing_finish_step_does_not_break_the_stream_end(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.fail_step = True
+    world.end({})
+    assert world.events == ["commit", ("emit", "sync"), ("finish", PROJECT_ID, RUN_ID, "success", None,
+                                                         CONVERSATION_ID), "logged"]
+
+
+def test_7011_r1_6_a_failing_pause_step_does_not_break_the_pause(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.fail_step = True
+    world.pause_event({"hitl_interrupt": {"guardrail_type": "sensitive_tool"}})
+    assert world.events[0] == "commit"
+    assert world.events[-1] == "logged"

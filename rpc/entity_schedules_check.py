@@ -74,6 +74,11 @@ def _sweep_stale_runs(project_ids: list[int], stale_minutes: int, yield_to_hub) 
             log.exception("entity_schedules_check: stale sweep failed: project_id=%s exc=%r", project_id, exc)
 
 
+def _stale_minutes(settings: dict) -> int:
+    """The configured stale limit; config.yml skips the admin schema, so 0, null or negative is bounded here."""
+    return max(1, int(settings.get("stale_run_minutes") or DEFAULT_STALE_RUN_MINUTES))
+
+
 def _dispatch_project(project_id: int, entity_types: list[str], room: int) -> int:
     """Claim and start due rows of one project, at most `room`; return how many runs started.
 
@@ -98,8 +103,13 @@ def _dispatch_project(project_id: int, entity_types: list[str], room: int) -> in
                 run_id = insert_cron_run(session, schedule_id)
                 session.commit()  # the claim stays even when an active run blocks this one
                 if run_id is None:  # R2.1: the overlap is recorded, not dropped
-                    record_skipped_run(session, schedule_id, SKIPPED_REASON)
-                    session.commit()
+                    try:
+                        record_skipped_run(session, schedule_id, SKIPPED_REASON)
+                        session.commit()
+                    except Exception as exc:  # noqa: BLE001 -- the claim stays; the other due rows go on
+                        session.rollback()
+                        log.exception("entity_schedules_check: skipped run not recorded: project_id=%s "
+                                      "schedule_id=%s exc=%r", project_id, schedule_id, exc)
                     continue
                 if start_schedule_run(entity_type, project_id, schedule_id, run_id):
                     started += 1
@@ -142,7 +152,7 @@ class RPC:
             log.exception("entity_schedules_check: failed to enumerate projects: exc=%r", exc)
             return
         # Before the claims, so a schedule blocked by a dead run starts again this minute
-        _sweep_stale_runs(project_ids, settings.get("stale_run_minutes", DEFAULT_STALE_RUN_MINUTES), yield_to_hub)
+        _sweep_stale_runs(project_ids, _stale_minutes(settings), yield_to_hub)
         for project_id in project_ids:
             if not entity_types or dispatched >= cap:
                 break

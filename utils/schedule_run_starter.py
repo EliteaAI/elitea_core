@@ -65,7 +65,8 @@ def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> 
 def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
-    A closed budget blocks the run. Every other failure after the pre-run check closes the run as failed: a running run blocks the schedule.
+    A closed budget blocks the run. Every other failure after the pre-run check closes the run as failed:
+    a running run blocks the schedule.
     """
     loaded = _load(project_id, schedule_id)
     if loaded is None:

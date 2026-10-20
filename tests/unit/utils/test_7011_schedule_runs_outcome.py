@@ -188,3 +188,13 @@ def test_el_7011_r3_2_fail_stale_runs_keeps_a_resumed_or_fresh_run_and_a_finishe
         session.refresh(row)
         assert row.status == status
     assert sent.notices == []
+
+
+def test_el_7011_r4_3_announce_skips_a_run_whose_status_has_no_notice(runs, session, sent):
+    """The status moved on after the commit (here: still running); no notice and no KeyError."""
+    schedule = _schedule(runs, session, created_by=12)
+    run = _run(runs, session, schedule)
+
+    runs._announce(1, session, [run.id])
+
+    assert (sent.notices, sent.emitted) == ([], [])

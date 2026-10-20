@@ -29,12 +29,15 @@ class World:
     def __init__(self):
         self.projects, self.config = [1], {"dispatch_cap": 100}
         self.rows, self.conflict, self.fail_sweep = {}, set(), set()
-        self.skipped, self.swept, self.started, self.sessions = [], [], [], []
+        self.skipped, self.swept, self.started, self.sessions, self.logged = [], [], [], [], []
+        self.fail_skip = False
 
     def insert_run(self, session, schedule_id):
         return None if schedule_id in self.conflict else schedule_id * 10
 
     def record_skipped(self, session, schedule_id, reason):
+        if self.fail_skip:
+            raise RuntimeError("db down")
         self.skipped.append((schedule_id, reason, session.commits))
         return 1
 
@@ -71,7 +74,7 @@ def world(monkeypatch):
     tick = load_tick(
         monkeypatch, stubs, db=types.SimpleNamespace(get_session=world.get_session),
         project_list=lambda **_: [{"id": p} for p in world.projects], schedules=world.config,
-        log=types.SimpleNamespace(info=quiet, warning=quiet, exception=quiet),
+        log=types.SimpleNamespace(info=quiet, warning=quiet, exception=lambda msg, *a: world.logged.append(msg)),
     )
     monkeypatch.setattr(tick, "_run_legacy_step", lambda *a: None)
     world.tick = tick_caller(tick)
@@ -122,3 +125,17 @@ def test_7011_r3_1_a_failing_sweep_does_not_stop_the_next_project(world):
     world.projects, world.fail_sweep = [1, 2], {1}
     world.tick()
     assert world.swept == [(2, 120)]
+
+
+@pytest.mark.parametrize(("configured", "used"), [(0, 120), (None, 120), (-5, 1), ("30", 30)])
+def test_7011_r3_1_stale_minutes_are_bounded_to_at_least_one(world, configured, used):
+    world.config["stale_run_minutes"] = configured
+    world.tick()
+    assert world.swept == [(1, used)]
+
+
+def test_7011_r2_1_a_failed_skip_record_is_logged_and_the_next_row_still_starts(world):
+    world.rows, world.conflict, world.fail_skip = {1: [_row(1), _row(2)]}, {1}, True
+    world.tick()
+    assert any("skipped run not recorded" in message for message in world.logged)
+    assert [started[2] for started in world.started] == [2]

@@ -46,6 +46,7 @@ def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str |
 
 def pause_schedule_run(project_id: int, run_id: int, interrupt) -> None:
     """Handle an interrupt of a schedule run; no branch claims it yet, so the run fails (R5.2)."""
+    # lean: `interrupt` is unused here; US-18 and US-19 read it to route their pauses
     finish_schedule_run(project_id, run_id, 'failed', PAUSE_REASON)
 
 
@@ -110,8 +111,11 @@ def _announce(project_id: int, session, run_ids: list[int]) -> None:
     )
     for run_id in run_ids:
         run = session.get(EntityScheduleRun, run_id)
+        event = NOTICE_EVENTS.get(run.status)
+        if event is None:  # the status moved on after the commit; that writer owns the notice
+            continue
         schedule = session.get(EntitySchedule, run.schedule_id)
-        notify_schedule_event(project_id, schedule.created_by, NOTICE_EVENTS[run.status], schedule, run)
+        notify_schedule_event(project_id, schedule.created_by, event, schedule, run)
         if schedule.entity_type == 'agent':
             emit_schedule_run_finished(
                 schedule.created_by, schedule.id, run.id, run.status, schedule.application_id, run.conversation_id)
