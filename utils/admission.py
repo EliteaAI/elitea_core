@@ -89,6 +89,8 @@ def load_admission_settings(config: Mapping) -> AdmissionSettings:
             f"{CONFIG_SECTION}.context_ttl_s must be an integer from {TTL_RANGE_S[0]} to {TTL_RANGE_S[1]}, got {ttl!r}"
         )
     environment = section.get("environment")
+    if environment == "":
+        environment = None   # config.yml quotes the environment expansion, so an unset variable arrives as ""
     if environment is not None and (not isinstance(environment, str) or not 0 < len(environment.strip()) <= 64):
         raise ValueError(f"{CONFIG_SECTION}.environment must be null or a non-empty string of at most 64 characters")
     return AdmissionSettings(context_ttl_s=ttl, environment=environment, **values)

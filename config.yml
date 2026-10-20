@@ -61,17 +61,18 @@ cost_budgets:
       personal_project_monthly_limit: null
       user_monthly_limit: null
 
-# Enterprise credential governance (C-1009, #6754). Operator-owned: set it here in the
-# deployment config only. Deliberately NOT declared in admin_schema.json, so the admin
-# config editor cannot change it. Default off = legacy behaviour, nothing changes.
+# Enterprise credential governance (C-1009, #6754). Operator-owned: set it in the
+# deployment config or through the environment variables below (Helm/compose), never from
+# the admin UI. Deliberately NOT declared in admin_schema.json, so the admin config editor
+# cannot change it. Default off = legacy behaviour, nothing changes.
 # When enabled is true, policy_revision must be a non-empty string; a non-boolean
 # enabled value or a missing revision fails plugin startup.
 enterprise_credential_governance:
-  enabled: false
-  policy_revision: null
+  enabled: ${ELITEA_CREDENTIAL_GOVERNANCE_ENABLED:false}
+  policy_revision: "${ELITEA_CREDENTIAL_GOVERNANCE_POLICY_REVISION:}"   # quoted: a revision like 2026-10-20 must stay a string
   # Admission settings (#6756), validated only when enabled is true. Governed startup also needs
   # auth.auth_mode "rpc", auth identity_verifier.session_user configured, and tracing security audit.
   allow_runtime_domain_binding: false   # explicit allow for runtime_domain_binding bindings
   admit_legacy_pat: false               # let a legacy PAT through identity verification (it still needs a mandate)
   context_ttl_s: 3600                   # how long an admitted run may start or restart (60..86400)
-  environment: null                     # label recorded on contexts and audit events
+  environment: "${ELITEA_CREDENTIAL_GOVERNANCE_ENVIRONMENT:}"   # label recorded on contexts and audit events
