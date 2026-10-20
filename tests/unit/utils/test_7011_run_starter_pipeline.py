@@ -62,7 +62,7 @@ def world(monkeypatch):
 
     def run(entity_type="pipeline", run_mode=None, prompt="", variables=()):
         loaded = types.SimpleNamespace(
-            schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type=entity_type, run_mode=run_mode),
+            schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type=entity_type, run_mode=run_mode, approval_rule="pause_and_ask"),
             version=types.SimpleNamespace(id=9), entity_name="Nightly flow", prompt=prompt, variables=list(variables))
         monkeypatch.setattr(starter, "_load", lambda *a: loaded)
         starter.run_owner_schedule(34, SCHEDULE_ID, RUN_ID)
