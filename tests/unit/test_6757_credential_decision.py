@@ -722,28 +722,29 @@ def test_a_governed_dispatch_passes_the_payload_to_admission_and_the_context_car
 
 # --- startup, messages, source order -----------------------------------------------------------
 
-def test_governed_startup_needs_the_facts_methods_and_the_master_key_for_the_database_store(ns, env):
-    ns.adm.check_governed_startup(env.module())
+def failing(ns, env):
+    return sorted(check.id for check in ns.adm.governance_preflight(env.module()) if check.status == "fail")
+
+
+def test_the_preflight_needs_the_facts_methods_and_the_master_key_for_the_database_store(ns, env):
+    assert failing(ns, env) == []
     for missing in ("secrets", "configurations"):
         env.missing_modules = {missing}
-        with pytest.raises(ValueError, match=missing):
-            ns.adm.check_governed_startup(env.module())
+        assert failing(ns, env) == ["credential_facts"]
     env.missing_modules = set()
     ns.tools.config.SECRETS_ENGINE = "database"
     try:
-        with pytest.raises(ValueError, match="SECRETS_MASTER_KEY"):
-            ns.adm.check_governed_startup(env.module())
+        assert failing(ns, env) == ["master_key"]
         ns.tools.config.SECRETS_MASTER_KEY = "set"
-        ns.adm.check_governed_startup(env.module())
+        assert failing(ns, env) == []
     finally:
         for name in ("SECRETS_ENGINE", "SECRETS_MASTER_KEY"):
             vars(ns.tools.config).pop(name, None)
 
 
-def test_flag_off_startup_still_checks_nothing(ns, env):
-    env.poison()
-    env.missing_modules = {"secrets", "configurations"}
-    ns.adm.check_governed_startup(env.module(governed=False))
+def test_the_preflight_never_raises_however_much_is_missing(ns, env):
+    env.missing_modules = {"secrets", "configurations", "tracing"}
+    assert "credential_facts" in failing(ns, env)   # a failing preflight no longer stops the plugin from starting (#7120)
 
 
 NEW_CODES = ("CREDENTIAL_REFERENCE_REQUIRED", "CREDENTIAL_REFERENCE_INACTIVE", "CREDENTIAL_GENERATION_MISMATCH",
@@ -775,7 +776,7 @@ def test_the_decision_runs_after_binding_and_subject_and_before_the_context_row(
     body = text[text.index("def _admit("):text.index("def admit_execution")]
     order = [body.index(marker) for marker in (
         "_verify_identity(request, settings)", "_find_binding(request, settings)", "_subject_of(principal)",
-        "_decide_credentials(module, request, subject, binding, payload, expires_at)", "_store_admission(")]
+        "_decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow)", "_store_admission(")]
     assert order == sorted(order)
     store = text[text.index("def _store_admission("):text.index("# --- autonomous mandates")]
     assert store.index("session.add(ExecutionSecurityContext(") < store.index("security_audit_record(session")

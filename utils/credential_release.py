@@ -47,6 +47,7 @@ from . import admission as adm   # the live checks of validate_context, the audi
 from .credential_decision import recheck_credentials
 from .credential_slots import MAX_SLOT_FIELDS
 from .exceptions import AdmissionDenied
+from .governance import governance_lifecycle_active
 
 # pylint: disable=W0212
 
@@ -202,7 +203,7 @@ def release_credential(  # pylint: disable=R0913
 
 
 def _release(module, request: _Request, known: dict) -> dict:
-    if not module.governance_profile.enabled:
+    if not governance_lifecycle_active(module):   # also after a switch to off: admitted runs keep their admission
         raise _unaudited("STALE_CONTEXT")
     try:
         audit_allowed = adm._tracing().security_audit_admission_allowed_local()   # 2.

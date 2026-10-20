@@ -442,9 +442,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             self._parallel_set_child_task_ids(parent_thread_id, epoch, task_id_map)
 
     @web.method()
+    def _parallel_governance_active(self):
+        """Is there an admission to look after: enforce now, or enforce earlier in this process (its runs keep their
+        admission after a switch to off)."""
+        return bool(getattr(getattr(self, 'governance_profile', None), 'enabled', False)
+                    or getattr(self, 'governed_handlers_registered', False))
+
+    @web.method()
     def _parallel_resume_context(self, project_id, *payloads):
         """Governed only: reopen the admission contexts the given payloads (a list of payloads, or a payload) run under."""
-        if not getattr(getattr(self, 'governance_profile', None), 'enabled', False):
+        if not self._parallel_governance_active():   # also after a switch to off: the children keep their parent's admission
             return
         try:
             from ..utils.admission import reopen_contexts  # pylint: disable=C0415
@@ -457,7 +464,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     @web.method()
     def _parallel_track_reconcile(self, task_id, project_id, payload):
         """Governed only: the reconcile run closes the admission context when it stops, as the parked parent did."""
-        if not getattr(getattr(self, 'governance_profile', None), 'enabled', False):
+        if not self._parallel_governance_active():
             return
         try:
             from ..utils.admission import track_context  # pylint: disable=C0415

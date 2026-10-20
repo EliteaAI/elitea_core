@@ -997,31 +997,22 @@ def test_one_worker_thread_serves_all_events_not_one_thread_per_event(ns, env, a
 
 # --- startup ------------------------------------------------------------------------------------
 
-def test_governed_startup_passes_with_the_mandate_dependencies(ns, env):
-    ns.adm.check_governed_startup(env.module())
+def test_the_preflight_passes_with_the_mandate_dependencies(ns, env):
+    assert [check.id for check in ns.adm.governance_preflight(env.module()) if check.status == "fail"] == []
 
 
 @pytest.mark.parametrize("break_it, expected", [
-    (lambda env, ns: delattr(ns.tools.auth, "get_user_by_idp_subject"), "auth.get_user_by_idp_subject"),
-    (lambda env, ns: delattr(ns.tools.auth, "get_user_permissions"), "auth.get_user_permissions"),
-    (lambda env, ns: setattr(env, "facts_version", 1), "credential facts version 2"),
-    (lambda env, ns: setattr(env, "facts_version", None), "credential facts version 2"),
-    (lambda env, ns: setattr(env, "facts_version", True), "credential facts version 2"),
-    (lambda env, ns: setattr(env, "missing_modules", {"secrets"}), "credential facts version 2"),
+    (lambda env, ns: delattr(ns.tools.auth, "get_user_by_idp_subject"), "identity_verifier"),
+    (lambda env, ns: delattr(ns.tools.auth, "get_user_permissions"), "identity_verifier"),
+    (lambda env, ns: setattr(env, "facts_version", 1), "credential_facts"),
+    (lambda env, ns: setattr(env, "facts_version", None), "credential_facts"),
+    (lambda env, ns: setattr(env, "facts_version", True), "credential_facts"),
+    (lambda env, ns: setattr(env, "missing_modules", {"secrets"}), "credential_facts"),
 ])
-def test_governed_startup_refuses_a_platform_that_cannot_decide_a_mandate_run(ns, env, break_it, expected):
+def test_the_preflight_fails_for_a_platform_that_cannot_decide_a_mandate_run(ns, env, break_it, expected):
     break_it(env, ns)
     try:
-        with pytest.raises(ValueError, match=expected):
-            ns.adm.check_governed_startup(env.module())
-    finally:
-        ns.install_fakes(env)
-
-
-def test_flag_off_startup_ignores_the_mandate_dependencies(ns, env):
-    delattr(ns.tools.auth, "get_user_by_idp_subject")
-    try:
-        env.poison()
-        ns.adm.check_governed_startup(env.module(governed=False))
+        failed = [check.id for check in ns.adm.governance_preflight(env.module()) if check.status == "fail"]
+        assert expected in failed
     finally:
         ns.install_fakes(env)

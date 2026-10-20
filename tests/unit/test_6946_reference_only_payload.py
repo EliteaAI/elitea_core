@@ -478,33 +478,18 @@ def test_every_predict_entry_point_checks_before_it_unsecrets_and_marks_after(pa
         assert payload_wide and check < payload_wide[0] < mark < min(line for line in at["start_task"] if line > mark)
 
 
-def registrations(function_name):
-    """``(function, method registered, bus name)`` of the ``rpc_node.register/unregister`` calls of module.py, and
-    whether each sits under ``if self.governance_profile.enabled``."""
-    import ast
-    tree = ast.parse((PLUGIN_ROOT / "module.py").read_text())
-    found = []
-
-    def visit(node, guarded):
-        if isinstance(node, ast.If) and "governance_profile.enabled" in ast.unparse(node.test):
-            guarded = True
-        if isinstance(node, ast.Call) and called(node.func) in ("register", "unregister") \
-                and "rpc_node" in ast.unparse(node.func):
-            name = next((ast.literal_eval(k.value) for k in node.keywords if k.arg == "name"), None)
-            found.append((called(node.func), ast.unparse(node.args[0]), name, guarded))
-        for child in ast.iter_child_nodes(node):
-            visit(child, guarded)
-
-    visit(tree, False)
-    return found
-
-
-def test_the_release_handler_is_registered_only_when_governed_and_unregistered_with_it():
-    found = registrations("release")
-    assert ("register", "self.release_credential", "restricted_release_credential", True) in found
-    assert ("unregister", "self.release_credential", "restricted_release_credential", True) in found
-    assert ("register", "self.validate_execution_context", "restricted_validate_execution_context", True) in found
-    assert not [entry for entry in found if entry[2] == "restricted_release_credential" and not entry[3]]
+def test_the_release_handler_is_registered_with_the_validate_handler_on_the_first_enforce_and_unregistered_with_it():
+    text = (PLUGIN_ROOT / "module.py").read_text()
+    ensure = text[text.index("def _ensure_governed_handlers_registered"):text.index("def _unregister_governed_handlers")]
+    unregister = text[text.index("def _unregister_governed_handlers"):text.index("def _ensure_share_token_schema")]
+    for part, call in ((ensure, "rpc_node.register(handler, name=name)"), (unregister, "rpc_node.unregister(handler, name=name)")):
+        assert call in part
+        assert ("self.validate_execution_context" in part and "self.release_credential" in part
+                and '"restricted_validate_execution_context"' in part and '"restricted_release_credential"' in part)
+    # nothing registers them at boot: the switch does, when the mode reaches enforce (utils/governance_settings.py)
+    assert text.count("rpc_node.register(") == text.count("rpc_node.register(handler, name=name)") + 1   # + provider api
+    settings = (PLUGIN_ROOT / "utils" / "governance_settings.py").read_text()
+    assert "_ensure_governed_handlers_registered" in settings and "MODE_ENFORCE and self._on_enforce" in settings
 
 
 def test_the_two_module_methods_are_web_methods_so_they_bind():
@@ -732,33 +717,32 @@ def test_flag_off_the_release_handler_and_the_probe_refuse_and_touch_nothing(ns,
     assert env.release_calls == [] and env.redis.calls == [] and env.started == []
 
 
-def test_the_release_handler_is_registered_only_when_governed_and_unregistered_with_it():
+def test_the_module_registers_the_release_handler_lazily_and_the_methods_are_web_methods():
     text = (PLUGIN_ROOT / "module.py").read_text()
-    assert text.count('name="restricted_release_credential"') == 2
-    ready = text[text.index("if self.governance_profile.enabled:\n            try:"):text.index("def _ensure_share_token_schema")]
-    assert "self.release_credential" in ready and ready.count("rpc_node.register(") == 2
-    deinit = text[text.index("rpc_node.unregister(\n                        self.validate_execution_context"):]
-    assert "self.release_credential" in deinit[:900]
+    assert text.count('"restricted_release_credential"') == 2   # the register and the unregister table
+    ensure = text[text.index("def _ensure_governed_handlers_registered"):text.index("def _unregister_governed_handlers")]
+    assert "self.release_credential" in ensure and ensure.count("rpc_node.register(") == 1
     methods = (PLUGIN_ROOT / "methods" / "governed_credentials.py").read_text()
     assert "def release_credential(" in methods and "def governed_check_connection(" in methods
     assert methods.count("@web.method()") == 2
 
 
-def test_governed_startup_needs_the_release_methods_and_the_transport(ns, env):
-    ns.adm.check_governed_startup(env.module())
+def test_the_preflight_needs_the_release_methods_and_the_transport(ns, env):
+    def failing():
+        return sorted(check.id for check in ns.adm.governance_preflight(env.module()) if check.status == "fail")
+
+    assert failing() == []
     for missing in ("secrets", "configurations"):
         env.missing_modules = {missing}
-        with pytest.raises(ValueError, match=missing):
-            ns.adm.check_governed_startup(env.module())
+        assert failing() == ["credential_facts"]
     env.missing_modules = set()
     ns.tools.secret_stores = types.ModuleType("shared_without_transport")
     try:
-        with pytest.raises(ValueError, match="secret_stores.transport"):
-            ns.adm.check_governed_startup(env.module())
+        assert failing() == ["credential_facts"]
     finally:
         sys.modules.pop("shared_without_transport", None)
     ns.tools.secret_stores = sys.modules["shared_secret_stores_6946"]
-    ns.adm.check_governed_startup(env.module())
+    assert failing() == []
 
 
 # --- secret fields outside ``properties``: header maps ------------------------------------------

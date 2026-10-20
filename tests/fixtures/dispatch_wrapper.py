@@ -5,6 +5,7 @@ admission code, so the tests prove what the shipped wrapper does. ``dispatch_mat
 the off invariant is proven on (chat, predict, pipeline, test tool).
 """
 import copy
+import sys
 import textwrap
 import types
 from pathlib import Path
@@ -30,7 +31,6 @@ def build_wrapper(ns, module, original):
     text = source[source.index("def _maintenance_gated_start_task"):
                   source.index("self.task_node.start_task = _maintenance_gated_start_task")]
     text = textwrap.dedent("        " + text).replace("from .utils.", f"from {admission_env.PKG}.utils.")
-    import sys
     gate = types.ModuleType(f"{admission_env.PKG}.utils.maintenance_gate")
     gate.is_maintenance_active = lambda: False
     budget = types.ModuleType(f"{admission_env.PKG}.utils.budget_door")

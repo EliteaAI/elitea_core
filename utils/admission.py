@@ -18,11 +18,12 @@ Main restarts (the context ``expires_at`` still bounds any restart).
 import importlib
 import re
 import threading
+import time
 import uuid
 from collections import defaultdict, namedtuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Mapping, Optional
+from typing import Optional
 
 from pylon.core.tools import log
 from sqlalchemy import func, select, update
@@ -31,7 +32,7 @@ from tools import auth, config as c, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, AutonomousMandate, ExecutionSecurityContext
 from ..models.pd.admission import AdmissionRequest, ExecutionSecurityContextView
-from ..models.pd.task_envelope import PROFILE_GOVERNED
+from ..models.pd.task_envelope import CAPABILITY_ENVELOPE_V1, PROFILE_GOVERNED
 from .credential_decision import (
     ALLOWED as CREDENTIAL_USE_ALLOWED, WHOLE_TARGET, CredentialDecisionContext, CredentialDecisionError,
     binding_ref, collect_credential_uses, decide_credential_uses, read_configuration_facts, recheck_credentials,
@@ -40,15 +41,16 @@ from .credential_decision import (
 from .credential_slots import FREE_FORM_SECRET_MARK, seal_payload
 from .definition_digest import DigestError, digest_for_version
 from .exceptions import AdmissionDenied
-from .governance import CONFIG_SECTION, is_governed
+from .governance import governance_lifecycle_active, is_auditing, is_governed, is_unavailable
+from .governance_settings import Check
 from .mandate_state import expire_if_due, suspend_owner_mandates
 from .run_id import PREDICT_RUN_ID_KWARGS_KEY
 from .trigger_principal import OPERATION_OF
+from .worker_capabilities import GOVERNED_TASK_CAPABILITIES
 
 ADMITTED_TASKS = frozenset({"indexer_agent", "indexer_predict_agent"})
 SCHEMA_VERSION = 1
 MAX_TRACKED_CONTEXTS = 10_000
-TTL_RANGE_S = (60, 86400)
 LIVE_STATES = ("admitted", "running")
 # Codes that explain why a context was revoked; the worker is told the same reason, not a generic one
 REVOKE_CODES = frozenset({
@@ -122,82 +124,66 @@ class AdmissionSettings:
     environment: Optional[str] = None
 
 
-def load_admission_settings(config: Mapping) -> AdmissionSettings:
-    """Operator settings of the governance section. Validated only when governance is enabled."""
-    section = config.get(CONFIG_SECTION)
-    if not isinstance(section, Mapping) or section.get("enabled") is not True:
-        return AdmissionSettings()
-    #
-    defaults = AdmissionSettings()
-    values = {}
-    for key in ("allow_runtime_domain_binding", "admit_legacy_pat"):
-        value = section.get(key, getattr(defaults, key))
-        if not isinstance(value, bool):
-            raise ValueError(f"{CONFIG_SECTION}.{key} must be a boolean (true/false), got {value!r}")
-        values[key] = value
-    ttl = section.get("context_ttl_s", defaults.context_ttl_s)
-    if isinstance(ttl, bool) or not isinstance(ttl, int) or not TTL_RANGE_S[0] <= ttl <= TTL_RANGE_S[1]:
-        raise ValueError(
-            f"{CONFIG_SECTION}.context_ttl_s must be an integer from {TTL_RANGE_S[0]} to {TTL_RANGE_S[1]}, got {ttl!r}"
-        )
-    environment = section.get("environment")
-    if environment == "":
-        environment = None   # config.yml quotes the environment expansion, so an unset variable arrives as ""
-    if environment is not None and (not isinstance(environment, str) or not 0 < len(environment.strip()) <= 64):
-        raise ValueError(f"{CONFIG_SECTION}.environment must be null or a non-empty string of at most 64 characters")
-    return AdmissionSettings(context_ttl_s=ttl, environment=environment, **values)
+def governance_preflight(module, table_read="ok") -> list:  # pylint: disable=R0912,R0915
+    """What audit only and enforce depend on, as a fixed list of checks with stable ids (``Check``). Local attribute
+    checks only: nothing is called that reads or writes data. A failing blocking check keeps the mode from being
+    switched on, and makes governed admissions ``DEPENDENCY_UNAVAILABLE`` while it is on; a warning limits a feature."""
+    checks = []
 
+    def add(check_id, ok, code, blocking=True):
+        checks.append(Check(check_id, "ok" if ok else ("fail" if blocking else "warn"), "OK" if ok else code, blocking))
 
-def check_governed_startup(module):
-    """Refuse to start governed on a platform that cannot prove identity or record the decision."""
-    if not is_governed(module):
-        return
-    problems = []
-    if getattr(auth, "auth_mode", None) != "rpc":
-        problems.append("auth.auth_mode must be 'rpc'")
     try:
         verifier_ready = bool(auth.identity_verifier.configured("session_user"))
     except Exception:  # pylint: disable=W0703
         verifier_ready = False
-    if not verifier_ready:
-        problems.append("auth.identity_verifier must be configured for session_user")
+    # the mandate owner proof and the owner's RBAC (#6947) belong to the same identity services
+    add("identity_verifier",
+        verifier_ready and all(callable(getattr(auth, name, None)) for name in
+                               ("get_user_by_idp_subject", "get_user_permissions")), "NOT_CONFIGURED")
+    add("auth_rpc_mode", getattr(auth, "auth_mode", None) == "rpc", "NOT_RPC")
     try:
-        audit_ready = callable(getattr(this.for_module("tracing").module, "security_audit_record", None))
+        tracing = this.for_module("tracing").module
+        audit_ready = callable(getattr(tracing, "security_audit_record", None))
     except Exception:  # pylint: disable=W0703
-        audit_ready = False
-    if not audit_ready:
-        problems.append("the tracing plugin must provide security_audit_record")
+        tracing, audit_ready = None, False
+    add("security_audit", audit_ready, "UNAVAILABLE")
+    try:
+        backlog_ok = audit_ready and bool(tracing.security_audit_admission_allowed_local())
+    except Exception:  # pylint: disable=W0703
+        backlog_ok = False
+    add("audit_backlog", backlog_ok, "OVER_LIMIT" if audit_ready else "UNAVAILABLE")
+    provided = True
     for plugin, method in (
             ("secrets", "credential_use_facts"), ("configurations", "configuration_credential_facts"),
             ("secrets", "release_credential_material"), ("configurations", "configuration_secret_fields")):
         try:
-            provided = callable(getattr(this.for_module(plugin).module, method, None))
+            provided = provided and callable(getattr(this.for_module(plugin).module, method, None))
         except Exception:  # pylint: disable=W0703
             provided = False
-        if not provided:
-            problems.append(f"the {plugin} plugin must provide {method}")
-    for method in ("get_user_by_idp_subject", "get_user_permissions"):
-        if not callable(getattr(auth, method, None)):   # the mandate owner proof and the owner's RBAC (#6947)
-            problems.append(f"auth.{method} must be callable")
     try:
         from tools import secret_stores  # pylint: disable=C0415
-        sealed_transport = callable(importlib.import_module(".transport", secret_stores.__name__).seal)
+        provided = provided and callable(importlib.import_module(".transport", secret_stores.__name__).seal)
     except Exception:  # pylint: disable=W0703
-        sealed_transport = False
-    if not sealed_transport:   # the reply that carries released material is sealed to the worker (#6946)
-        problems.append("the shared plugin must provide secret_stores.transport")
+        provided = False   # the reply that carries released material is sealed to the worker (#6946)
     try:
         facts_version = this.for_module("secrets").module.credential_facts_version()
-        facts_current = isinstance(facts_version, int) and not isinstance(facts_version, bool) and facts_version >= 2
+        provided = provided and isinstance(facts_version, int) and not isinstance(facts_version, bool) \
+            and facts_version >= 2   # grant facts without subject_kind would refuse every mandate grant
     except Exception:  # pylint: disable=W0703
-        facts_current = False
-    if not facts_current:   # grant facts without subject_kind would refuse every mandate grant
-        problems.append("the secrets plugin must provide credential facts version 2 or newer")
-    if getattr(c, "SECRETS_ENGINE", None) == "database" and not getattr(c, "SECRETS_MASTER_KEY", None):
-        problems.append("SECRETS_MASTER_KEY must be set when SECRETS_ENGINE is 'database'")
-    if problems:
-        log.error("Credential governance cannot start: %s", "; ".join(problems))
-        raise ValueError(f"{CONFIG_SECTION}: " + "; ".join(problems))
+        provided = False
+    add("credential_facts", provided, "NOT_LOADED")
+    add("master_key", not (getattr(c, "SECRETS_ENGINE", None) == "database" and not getattr(c, "SECRETS_MASTER_KEY", None)),
+        "NOT_SET")
+    add("settings_table", table_read == "ok", "MISSING_TABLE" if table_read == "missing_table" else "UNAVAILABLE")
+    add("corporate_vault", bool(getattr(c, "CORPORATE_VAULT_ADDR", None)), "NOT_CONFIGURED", blocking=False)
+    required = frozenset({CAPABILITY_ENVELOPE_V1, *GOVERNED_TASK_CAPABILITIES["indexer_agent"]})
+    try:
+        worker_online = bool(module.worker_capabilities.has_capable_worker(required))
+    except Exception:  # pylint: disable=W0703
+        worker_online = False
+    add("governed_worker", worker_online, "NONE_ONLINE", blocking=False)
+    return checks
 
 
 # --- counters --------------------------------------------------------------------------------
@@ -225,11 +211,40 @@ class _LabeledCounter:
         return self._counts[labels]
 
 
+class _LabeledHistogram:
+    """prometheus_client Histogram with labels when installed, always an in-process count and sum as well."""
+
+    def __init__(self, name, documentation, labelnames):
+        self._observations = defaultdict(lambda: [0, 0.0])
+        self._lock = threading.Lock()
+        self._prom = None
+        try:
+            from prometheus_client import Histogram  # pylint: disable=C0415,E0401
+            self._prom = Histogram(name, documentation, labelnames)
+        except Exception:  # pylint: disable=W0718
+            pass
+
+    def observe(self, seconds, *labels):
+        with self._lock:
+            entry = self._observations[labels]
+            entry[0] += 1
+            entry[1] += seconds
+        if self._prom is not None:
+            self._prom.labels(*labels).observe(seconds)
+
+    def count(self, *labels):
+        return self._observations[labels][0] if labels in self._observations else 0
+
+
 ADMISSION_DECISION = _LabeledCounter(
     "admission_decision_total", "Governed run admission decisions", ["decision", "reason_code"],
 )
 CREDENTIAL_DECISION = _LabeledCounter(
     "credential_decision_total", "Governed run credential-use decisions", ["decision", "reason_code"],
+)
+# How long one admission takes, in enforce and in audit only: the measurement a customer compares before switching on
+ADMISSION_DURATION = _LabeledHistogram(
+    "admission_duration_seconds", "Time to decide one run admission", ["mode", "decision"],
 )
 CONTEXT_VALIDATION = _LabeledCounter(
     "execution_context_validation_total", "Governed run context validations on Main", ["result", "reason_code"],
@@ -255,17 +270,22 @@ def _event(**fields):
     return {key: value for key, value in fields.items() if value is not None}
 
 
-def _record_deny(module, code, *, event_type="admission", **fields):
-    """Audit a refusal on its own transaction. A failure to write it is logged; the refusal stands."""
+def _record_deny(module, code, *, event_type="admission", would_deny=False, **fields):
+    """Audit a refusal on its own transaction. A failure to write it is logged; the refusal stands.
+
+    ``would_deny``: audit only. Nothing was refused, so the event says what happened (``allow``) and what enforce would
+    have said (``reason_code``, ``would_deny=true``)."""
     event = _event(
-        event_type=event_type, decision="deny", reason_code=code,
+        event_type=event_type, decision="allow" if would_deny else "deny", reason_code=code,
+        would_deny=True if would_deny else None,
         policy_revision=module.governance_profile.policy_revision,
         environment=module.admission_settings.environment, **fields,
     )
     try:
         _tracing().security_audit_record_autocommit(event)
     except Exception as exc:  # pylint: disable=W0703
-        log.error("admission: the deny event %s was not recorded (%s)", code, type(exc).__name__)
+        log.error("admission: the %s event %s was not recorded (%s)", "would-deny" if would_deny else "deny", code,
+                  type(exc).__name__)
 
 
 def _denied(code, audit=None) -> AdmissionDenied:
@@ -370,9 +390,12 @@ def _subject_of(principal: dict) -> dict:
     }
 
 
-def _decide_credentials(module, request: AdmissionRequest, subject: dict, binding, payload, expires_at) -> list:
+def _decide_credentials(  # pylint: disable=R0913
+    module, request: AdmissionRequest, subject: dict, binding, payload, expires_at, shadow=False,
+) -> list:
     """Step 5b: may this agent use each credential it uses, for this user? The allowed decisions (none for an
-    agent without governed credentials), or ``AdmissionDenied`` for the first refusal."""
+    agent without governed credentials), or ``AdmissionDenied`` for the first refusal. ``shadow``: audit only, the
+    refusal is counted as a ``would_deny``."""
     user_id = subject.get("user_id", request.caller_id)   # a mandate acts for its owner
     context = CredentialDecisionContext(
         binding_project_id=request.binding_project_id, agent_binding_ref=str(binding.id), subject_ref=subject["ref"],
@@ -391,7 +414,8 @@ def _decide_credentials(module, request: AdmissionRequest, subject: dict, bindin
     except Exception as exc:  # pylint: disable=W0703
         log.error("admission: the credential decision failed (%s)", type(exc).__name__)
         error = CredentialDecisionError("DEPENDENCY_UNAVAILABLE")
-    _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "deny", error.reason_code)
+    _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "would_deny" if shadow else "deny",
+            error.reason_code)
     raise _denied(error.reason_code, error.audit)
 
 
@@ -467,6 +491,42 @@ def _store_admission(  # pylint: disable=R0913,R0914
         agent_binding_ref=str(binding.id), policy_revision=policy_revision, expires_at=expires_at,
         allowed_bindings=[binding_ref(d) for d in decisions],
     )
+
+
+def _record_shadow_allow(  # pylint: disable=R0913
+    module, request: AdmissionRequest, run_id, *, binding, subject, decisions, caller,
+) -> None:
+    """Step 6 of audit only: the allow events of an evaluation that passed, with ``would_deny=false``. There is no
+    context row: nothing would carry it, and a row would look like a live admission."""
+    settings = module.admission_settings
+    policy_revision = module.governance_profile.policy_revision
+    user_ref = subject.get("user_ref", subject["ref"])
+    with db.get_session(request.project_id) as session:
+        try:
+            for decision in decisions:
+                _tracing().security_audit_record(session, _event(
+                    event_type="decision", decision="allow", reason_code=CREDENTIAL_USE_ALLOWED, would_deny=False,
+                    event_id=decision.decision_id, tenant=subject["tid"], project_id=request.project_id,
+                    application_id=request.application_id, environment=settings.environment,
+                    caller_ref=caller["ref"], user_ref=user_ref, agent_binding_ref=str(binding.id), run_id=run_id,
+                    credential_ref=decision.credential_ref, credential_generation=decision.credential_generation,
+                    toolkit_instance_id=decision.toolkit_instance_id, target_ref=WHOLE_TARGET,
+                    policy_revision=policy_revision, revocation_epoch=decision.reference_epoch,
+                    traceparent=request.trace_ref,
+                ))
+            _tracing().security_audit_record(session, _event(
+                event_type="admission", decision="allow", reason_code="ADMITTED", would_deny=False,
+                tenant=subject["tid"], project_id=request.project_id, application_id=request.application_id,
+                environment=settings.environment, caller_ref=caller["ref"], user_ref=user_ref,
+                agent_binding_ref=str(binding.id), run_id=run_id, policy_revision=policy_revision,
+                revocation_epoch=binding.revocation_epoch, traceparent=request.trace_ref,
+            ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+    for _ in decisions:
+        _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "would_allow", CREDENTIAL_USE_ALLOWED)
 
 
 # --- autonomous mandates (#6947) -------------------------------------------------------------
@@ -637,8 +697,10 @@ def record_index_schedule_refusal(module, code, *, project_id, toolkit_id) -> No
 
 
 def _admit(  # pylint: disable=R0914
-    module, request: AdmissionRequest, run_id, payload=None,
-) -> ExecutionSecurityContextView:
+    module, request: AdmissionRequest, run_id, payload=None, shadow=False,
+) -> Optional[ExecutionSecurityContextView]:
+    """Steps 1 to 6. ``shadow`` (audit only): the same steps 1 to 5b, then the allow events without a context row; it
+    returns None, and a run under a mandate is not evaluated."""
     settings = module.admission_settings
     # 1. the audit trail can take a decision
     try:
@@ -648,6 +710,8 @@ def _admit(  # pylint: disable=R0914
     if not audit_allowed:
         raise _denied("AUDIT_UNAVAILABLE")
     if request.run_kind == "mandate":
+        if shadow:
+            return None
         return _admit_mandate(module, request, run_id, payload)
     # 2. a run with no person behind it needs a mandate
     if request.run_kind == "system":
@@ -662,10 +726,14 @@ def _admit(  # pylint: disable=R0914
     subject = _subject_of(principal)
     expires_at = _now() + timedelta(seconds=settings.context_ttl_s)
     # 5b. which credentials the run uses, and whether the agent may use them for this user
-    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at)
+    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow)
+    caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
+    if shadow:
+        _record_shadow_allow(module, request, run_id, binding=binding, subject=subject, decisions=decisions,
+                             caller=caller)
+        return None
     # 6. context row and allow events, atomically
     epochs = principal.get("epochs") if isinstance(principal.get("epochs"), dict) else {}
-    caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
     return _store_admission(
         module, request, run_id, binding=binding, subject=subject, decisions=decisions, caller=caller,
         user_epochs=epochs, extra_epochs={}, expires_at=expires_at)
@@ -674,6 +742,7 @@ def _admit(  # pylint: disable=R0914
 def admit_execution(module, request: AdmissionRequest, *, run_id: str, payload=None) -> ExecutionSecurityContextView:
     """Admit one governed run or raise ``AdmissionDenied``. Every decision is counted and audited.
     ``payload`` is the dispatched payload; it is cross-checked against the agent's stored credentials, never trusted."""
+    started = time.perf_counter()
     try:
         view = _admit(module, request, run_id, payload)
     except AdmissionDenied as exc:
@@ -682,8 +751,10 @@ def admit_execution(module, request: AdmissionRequest, *, run_id: str, payload=N
         log.error("admission: unexpected failure (%s)", type(exc).__name__)
         error = _denied("DEPENDENCY_UNAVAILABLE")
     else:
+        ADMISSION_DURATION.observe(time.perf_counter() - started, "enforce", "allow")
         _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "allow", "ADMITTED")
         return view
+    ADMISSION_DURATION.observe(time.perf_counter() - started, "enforce", "deny")
     _record_deny(
         module, error.reason_code, project_id=request.project_id, application_id=request.application_id,
         caller_ref=_caller_ref(request), run_id=run_id if isinstance(run_id, str) else None,
@@ -694,11 +765,55 @@ def admit_execution(module, request: AdmissionRequest, *, run_id: str, payload=N
     raise error
 
 
+def _shadow_admit(module, call_kwargs, admission: AdmissionRequest) -> None:
+    """Audit only: evaluate this dispatch exactly as enforce would, inline, and record what enforce would have done.
+    Nothing here refuses or raises into ``start_task``: a denial becomes a ``would_deny`` event, any other failure a
+    ``would_deny_error`` metric and a log line (the type of the exception only)."""
+    started, decision = time.perf_counter(), "would_allow"
+    try:
+        payload = call_kwargs.get("kwargs")
+        payload = payload if isinstance(payload, dict) else {}
+        run_id = payload.get(PREDICT_RUN_ID_KWARGS_KEY)
+        meta = call_kwargs.get("meta")
+        if admission.trace_ref is None and isinstance(meta, dict) and isinstance(meta.get("traceparent"), str):
+            admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
+        try:
+            if is_unavailable(module):   # enforce would refuse every run: say so for this one
+                raise _denied("DEPENDENCY_UNAVAILABLE")
+            _admit(module, admission, run_id, payload, shadow=True)
+        except AdmissionDenied as exc:
+            decision = "would_deny"
+            if exc.reason_code != "AUDIT_UNAVAILABLE":   # the audit trail cannot take it: a metric and a log line only
+                _record_deny(
+                    module, exc.reason_code, would_deny=True, project_id=admission.project_id,
+                    application_id=admission.application_id, caller_ref=_caller_ref(admission),
+                    run_id=run_id if isinstance(run_id, str) else None, traceparent=admission.trace_ref, **exc.audit)
+            _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_deny", exc.reason_code)
+        else:
+            _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_allow", "ADMITTED")
+    except Exception as exc:  # pylint: disable=W0703
+        decision = "would_deny_error"
+        log.error("admission: the audit-only evaluation failed (%s)", type(exc).__name__)
+        try:
+            _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_deny_error", "EVALUATION_FAILED")
+        except Exception:  # pylint: disable=W0703
+            pass
+    try:
+        ADMISSION_DURATION.observe(time.perf_counter() - started, "audit_only", decision)
+    except Exception:  # pylint: disable=W0703
+        pass
+
+
 def admit_dispatch(module, task_name, call_kwargs, admission: Optional[AdmissionRequest]) -> Optional[str]:
     """Admit the run behind a ``start_task`` call. Returns the new ``context_ref``, or ``None`` when
-    nothing was admitted here (governance off, a task that is not admitted, or a context inherited
-    from the parent run). Sets ``context_ref`` in the envelope and in the task meta."""
-    if not is_governed(module) or task_name not in ADMITTED_TASKS:
+    nothing was admitted here (governance off or audit only, a task that is not admitted, or a context inherited
+    from the parent run). Sets ``context_ref`` in the envelope and in the task meta. Under audit only the run is
+    evaluated as enforce would and the call is left untouched."""
+    if task_name not in ADMITTED_TASKS:
+        return None
+    if not is_governed(module):
+        if admission is not None and is_auditing(module):
+            _shadow_admit(module, call_kwargs, admission)   # never refuses: the run goes on as a legacy run
         return None
     payload = call_kwargs.setdefault("kwargs", {})
     meta = call_kwargs.get("meta")
@@ -724,6 +839,10 @@ def admit_dispatch(module, task_name, call_kwargs, admission: Optional[Admission
         _seal_inherited(module, payload, envelope["context_ref"], call_kwargs, run_id)
         meta.setdefault("context_ref", envelope["context_ref"])
         return None
+    if is_unavailable(module):
+        # enforce is on but a required service is not: a new admission is refused readably and audited (the platform
+        # cannot prove anything right now) until the preflight passes again; runs already admitted are not touched
+        return _refuse_dispatch(module, "DEPENDENCY_UNAVAILABLE", call_kwargs, run_id)
     if admission is None:
         return _refuse_dispatch(module, "IDENTITY_EVIDENCE_MISSING", call_kwargs, run_id)
     #
@@ -883,7 +1002,7 @@ def track_context(module, task_id, project_id, context_ref, deadline=None):
 
 def complete_context(module, task_id):
     """A task stopped: close its context. A context the map lost is closed by its expiry."""
-    if not is_governed(module):
+    if not governance_lifecycle_active(module):
         return
     with _context_lock(module):
         found = module._context_by_task.pop(task_id, None)  # pylint: disable=W0212
@@ -915,8 +1034,9 @@ def _revoked_among(entries) -> set:
 def reopen_contexts(module, project_id, context_refs) -> int:
     """A parked parent stops when it fans out, which completes its context, but its children and the reconcile run
     still run under that context: bring each one back to ``running`` when it is neither expired nor revoked. The
-    number reopened. Governed only; a failure is logged and the children then fail at ``validate_context``."""
-    if not is_governed(module):
+    number reopened. Governed only (also after a switch to off: the children keep the admission of their parent); a
+    failure is logged and the children then fail at ``validate_context``."""
+    if not governance_lifecycle_active(module):
         return 0
     reopened = 0
     for context_ref in {ref for ref in context_refs if isinstance(ref, str) and ref}:
@@ -939,12 +1059,13 @@ def reopen_contexts(module, project_id, context_refs) -> int:
 def enforce_run_deadlines(module, now=None) -> int:
     """Stop the tracked runs that must not go on: a mandate run past its time limit (the worker has no deadline of
     its own), and any tracked run whose context was revoked while it runs. Called once a minute by the pipeline
-    scheduler tick. Governed only. The number of runs stopped.
+    scheduler tick. Governed only (also after a switch to off, for the runs admitted before it). The number of runs
+    stopped.
 
     ``stop_task`` comes first: the run is forgotten (and, for a time limit, its context revoked and the event recorded)
     only once it was stopped, so a failed stop is tried again on the next tick. Runs this process does not track
     (after a Main restart, or children that inherit a mandate context) are not reached."""
-    if not is_governed(module):
+    if not governance_lifecycle_active(module):
         return 0
     now = now or _now()
     with _context_lock(module):
