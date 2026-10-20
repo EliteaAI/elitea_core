@@ -31,6 +31,7 @@ class SioEvents(StrEnum):
     chat_message_delete_all = 'chat_message_delete_all'
     chat_message_sync = 'chat_message_sync'
     notifications_notify = 'notifications_notify'
+    schedule_run_finished = 'schedule_run_finished'
     # chat_conversation_create = 'chat_conversation_create'
     # chat_conversation_delete = 'chat_conversation_delete'
 
