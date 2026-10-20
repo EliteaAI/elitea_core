@@ -1,4 +1,6 @@
 """EL-7011 US-10 R2.1, R2.2: the eligibility check of a new schedule owner."""
+import sys
+import types
 from queue import Empty
 from types import SimpleNamespace
 
@@ -35,10 +37,18 @@ class FakeRpc:
         return call
 
 
+def load_owner(monkeypatch):
+    """Load schedule_owner with its imports; another test may leave a tools stub without auth or config."""
+    tools = sys.modules.setdefault("tools", types.ModuleType("tools"))
+    monkeypatch.setattr(tools, "auth", getattr(tools, "auth", SimpleNamespace()), raising=False)
+    monkeypatch.setattr(tools, "config", getattr(tools, "config", SimpleNamespace()), raising=False)
+    load("utils/schedule_access.py", fresh=True)
+    prerun = load("utils/schedule_prerun.py", fresh=True)
+    return prerun, load("utils/schedule_owner.py", fresh=True)
+
+
 def _validate(monkeypatch, rpc, owner_id=20):
-    load("utils/schedule_access.py")
-    prerun = load("utils/schedule_prerun.py")
-    owner = load("utils/schedule_owner.py", fresh=True)
+    prerun, owner = load_owner(monkeypatch)
     fake = SimpleNamespace(RpcMixin=lambda: SimpleNamespace(rpc=rpc))
     monkeypatch.setattr(prerun, "rpc_tools", fake)
     monkeypatch.setattr(owner, "rpc_tools", fake)
