@@ -505,6 +505,10 @@ class Module(module.ModuleModel):
                 "migrate_eval_case_usage_columns", self.migrate_eval_case_usage_columns,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_legacy_pipeline_schedules", self.migrate_legacy_pipeline_schedules,
+                group="R-2.0.8",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -1026,6 +1030,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "set_index_schedule_expiration", self.set_index_schedule_expiration
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_legacy_pipeline_schedules", self.migrate_legacy_pipeline_schedules
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
