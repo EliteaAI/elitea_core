@@ -9,6 +9,10 @@ from pylon.core.tools import log
 from tools import VaultClient, db, serialize, this
 from tools import auth, rpc_tools, VaultClient, serialize, context
 
+from .context_window import (
+    BALANCED, budget_for_model_config, is_platform_admin, manual_context_tokens, manual_context_tokens_allowed,
+    normalize_mode,
+)
 from .llm_settings import normalize_runtime_max_tokens
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates
@@ -215,11 +219,84 @@ def load_context_settings_from_conversation(project_id: int, conversation_id: st
             ).first()
 
             if conversation and conversation.meta:
-                return conversation.meta.get('context_strategy')
+                strategy = conversation.meta.get('context_strategy')
+                if strategy:
+                    # Legacy chats with only max_context_tokens follow Balanced (#6898)
+                    strategy = {**strategy, 'context_window_mode': normalize_mode(strategy.get('context_window_mode'))}
+                    strategy.pop('max_context_tokens', None)
+                return strategy
     except Exception as e:
         log.debug(f"Could not load context_settings from conversation {conversation_id}: {e}")
 
     return None
+
+
+def load_manual_context_tokens(project_id: int, conversation_id) -> Optional[int]:
+    """Admin-set summarization trigger from the stored strategy, only while the platform toggle is on."""
+    try:
+        uuid.UUID(str(conversation_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    try:
+        from ..models.conversation import Conversation
+        with db.get_session(project_id) as session:
+            row = session.query(Conversation.meta).filter(Conversation.uuid == str(conversation_id)).first()
+        strategy = ((row[0] if row else None) or {}).get('context_strategy') or {}
+    except Exception as e:
+        log.debug(f"Could not load manual context tokens for conversation {conversation_id}: {e}")
+        return None
+    manual = manual_context_tokens(strategy)
+    if not manual or not manual_context_tokens_allowed() or not is_platform_admin(strategy.get('manual_set_by')):
+        return None
+    return manual
+
+
+def apply_context_budget(
+        context_settings, model_configuration: dict, llm_max_tokens=None, manual_max_context_tokens=None,
+) -> Optional[dict]:
+    """Resolve the window mode against the request's model and set the SDK summarization trigger."""
+    if context_settings is None:
+        return None
+    mode = getattr(context_settings, 'context_window_mode', None)
+    legacy_trigger = getattr(context_settings, 'max_context_tokens', None)
+    budget = budget_for_model_config(mode or BALANCED, model_configuration, normalize_runtime_max_tokens(llm_max_tokens))
+    if mode is None and legacy_trigger:
+        log.warning('context_settings.max_context_tokens without context_window_mode is deprecated')
+        context_settings.max_context_tokens = min(int(legacy_trigger), budget['usable_input'])
+    else:
+        context_settings.context_window_mode = budget['window_mode']
+        if manual_max_context_tokens:
+            context_settings.max_context_tokens = min(int(manual_max_context_tokens), budget['usable_input'])
+        else:
+            context_settings.max_context_tokens = budget['compaction_threshold']
+        context_settings.count_overhead_in_trigger = True
+    context_settings.effective_window = budget['effective_window']
+    context_settings.reserved_output = budget['reserved_output']
+    context_settings.safety_margin = budget['safety_margin']
+    return budget
+
+
+def store_context_budget(project_id: int, conversation_id, budget: Optional[dict]) -> None:
+    """Keep the latest resolved budget on the conversation for the context status API."""
+    if not budget or not conversation_id:
+        return
+    try:
+        uuid.UUID(str(conversation_id))
+    except (ValueError, AttributeError, TypeError):
+        return
+    try:
+        from sqlalchemy import literal
+        from sqlalchemy.dialects.postgresql import JSONB
+        from ..models.conversation import Conversation
+        with db.get_session(project_id) as session:
+            session.query(Conversation).filter(Conversation.uuid == str(conversation_id)).update(
+                {Conversation.meta: Conversation.meta.op('||')(
+                    literal({'context_budget': budget}, type_=JSONB))},
+                synchronize_session=False,
+            )
+            session.commit()
+    except Exception as e:
+        log.warning(f"Could not store context budget for conversation {conversation_id}: {e}")
 
 
 def generate_predict_payload(
@@ -298,6 +375,13 @@ def generate_predict_payload(
             continue
 
         model_parameters[param] = param_value
+
+    if parsed.context_settings is not None:
+        context_conversation_id = getattr(parsed, 'conversation_id', None) or parsed.stream_id
+        context_budget = apply_context_budget(
+            parsed.context_settings, llm_model_configuration, getattr(parsed.llm_settings, 'max_tokens', None),
+            load_manual_context_tokens(parsed.project_id, context_conversation_id))
+        store_context_budget(parsed.project_id, context_conversation_id, context_budget)
 
     model_max_output_tokens = llm_model_configuration.get('max_output_tokens')
     if model_max_output_tokens is not None:

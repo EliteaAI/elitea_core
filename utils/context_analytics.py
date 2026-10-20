@@ -10,6 +10,10 @@ from tools import db
 from ..models.conversation import Conversation
 from ..models.message_group import ConversationMessageGroup
 from ..models.pd.context import ContextStrategy
+from .context_window import (
+    get_model_limits, is_platform_admin, manual_context_tokens, manual_context_tokens_allowed, normalize_mode,
+    resolve_context_budget,
+)
 
 
 TOKEN_BREAKDOWN_KEYS = (
@@ -133,26 +137,73 @@ def update_context_analytics_after_message_delete(
     update_conversation_meta(project_id, conversation_id, {'context_analytics': updated_analytics})
 
 
-def get_context_data(project_id: int, conversation_id: int) -> tuple[dict | None, int, str]:
-    """Get context analytics, max_tokens and strategy_name from conversation meta."""
+def _conversation_model_budget(project_id: int, conversation_id: int, mode: str) -> dict:
+    """Budget before the first response: resolve from the model a participant chats with."""
+    from ..models.participants import ParticipantMapping
+    llm_settings = {}
+    try:
+        with db.get_session(project_id) as session:
+            mappings = session.query(ParticipantMapping.entity_settings).filter(
+                ParticipantMapping.conversation_id == conversation_id
+            ).all()
+        for (entity_settings,) in mappings:
+            candidate = (entity_settings or {}).get('llm_settings') or {}
+            if candidate.get('model_name'):
+                llm_settings = candidate
+                break
+    except Exception as e:
+        log.warning(f"Failed to read conversation {conversation_id} model: {e}")
+    limits = get_model_limits(llm_settings.get('model_project_id') or project_id, llm_settings.get('model_name'))
+    max_tokens = llm_settings.get('max_tokens')
+    return resolve_context_budget(
+        mode, limits.get('context_window'), limits.get('max_output_tokens'),
+        None if max_tokens in (None, -1) else max_tokens,
+    )
+
+
+def _manual_context_info(context_strategy: dict, user_id) -> dict | None:
+    """Manual trigger details, shown to platform admins only while the platform toggle is on."""
+    if not user_id or not manual_context_tokens_allowed() or not is_platform_admin(user_id):
+        return None
+    manual = manual_context_tokens(context_strategy)
+    if manual and not is_platform_admin(context_strategy.get('manual_set_by')):
+        manual = None
+    return {'manual_max_tokens_enabled': True, 'manual_max_context_tokens': manual}
+
+
+def get_context_data(
+        project_id: int, conversation_id: int, user_id: int | None = None,
+) -> tuple[dict | None, dict, str, dict | None, dict | None]:
+    """Get context analytics, resolved budget, strategy name, chat usage and manual trigger info."""
     meta = get_conversation_meta(project_id, conversation_id)
     context_analytics = meta.get('context_analytics')
-    context_strategy = meta.get('context_strategy', {})
-    max_tokens = context_strategy.get('max_context_tokens', 64000)
-    strategy_name = context_strategy.get('strategy_name', 'default')
-    return context_analytics, max_tokens, strategy_name
+    context_strategy = meta.get('context_strategy') or {}
+    mode = normalize_mode(context_strategy.get('context_window_mode'))
+    budget = meta.get('context_budget')
+    if not isinstance(budget, dict) or budget.get('window_mode') != mode:
+        budget = _conversation_model_budget(project_id, conversation_id, mode)
+    strategy_name = context_strategy.get('name', 'default')
+    manual = _manual_context_info(context_strategy, user_id)
+    return context_analytics, budget, strategy_name, meta.get('usage_totals'), manual
 
 
 def build_context_response(
     stored_analytics: dict | None = None,
-    max_tokens: int = 64000,
-    strategy_name: str = 'default'
+    budget: dict | None = None,
+    strategy_name: str = 'default',
+    usage_totals: dict | None = None,
+    manual: dict | None = None,
 ) -> dict:
     """Build context response for UI."""
+    budget = budget or resolve_context_budget(None, None)
     summary_count = stored_analytics.get('summaries_generated', 0) if stored_analytics else 0
     current_tokens = stored_analytics.get('current_context_tokens', 0) if stored_analytics else 0
     messages_in_context = stored_analytics.get('messages_in_context', 0) if stored_analytics else 0
 
+    manual = manual or {'manual_max_tokens_enabled': False, 'manual_max_context_tokens': None}
+    max_tokens = budget['available_window']
+    if manual['manual_max_context_tokens']:
+        max_tokens = min(manual['manual_max_context_tokens'], budget.get('usable_input') or max_tokens)
     utilization = (current_tokens / max_tokens) if max_tokens > 0 else 0.0
 
     breakdown = (stored_analytics or {}).get('token_breakdown') or {}
@@ -166,6 +217,13 @@ def build_context_response(
         'summary_count': summary_count,
         'token_source': breakdown.get('token_source', DEFAULT_TOKEN_SOURCE),
         'token_breakdown': breakdown,
+        **budget,
+        **manual,
+        'last_call': {
+            'input_tokens': breakdown.get('provider_input_tokens'),
+            'output_tokens': breakdown.get('provider_output_tokens'),
+        },
+        'chat_usage': usage_totals,
         'context_analytics': stored_analytics or {
             'summaries_generated': 0,
             'total_messages_summarized': 0,
@@ -181,6 +239,7 @@ def set_context_strategy(
     conversation_id: int,
     user_context_defaults: dict = None,
     user_summarization_defaults: dict = None,
+    context_window_mode: str = None,
 ) -> dict:
     """Set context strategy for a conversation.
 
@@ -192,6 +251,7 @@ def set_context_strategy(
         conversation_id: Conversation ID
         user_context_defaults: User's default context management settings
         user_summarization_defaults: User's default summarization settings
+        context_window_mode: Project default window mode; read from project settings when omitted
 
     Returns:
         dict: The context strategy configuration
@@ -201,8 +261,6 @@ def set_context_strategy(
     if user_context_defaults:
         if 'enabled' in user_context_defaults:
             strategy_data['enabled'] = user_context_defaults['enabled']
-        if 'max_context_tokens' in user_context_defaults:
-            strategy_data['max_context_tokens'] = user_context_defaults['max_context_tokens']
         if 'preserve_recent_messages' in user_context_defaults:
             strategy_data['preserve_recent_messages'] = user_context_defaults['preserve_recent_messages']
         if 'enable_summarization' in user_context_defaults:
@@ -226,6 +284,11 @@ def set_context_strategy(
             summary_llm_settings['max_tokens'] = user_summarization_defaults['target_summary_tokens']
         if summary_llm_settings:
             strategy_data['summary_llm_settings'] = summary_llm_settings
+
+    if context_window_mode is None:
+        from .context_window import get_project_default_mode
+        context_window_mode = get_project_default_mode(project_id)
+    strategy_data['context_window_mode'] = normalize_mode(context_window_mode)
 
     try:
         strategy = ContextStrategy(**strategy_data)
