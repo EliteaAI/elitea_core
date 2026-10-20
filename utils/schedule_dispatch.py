@@ -7,14 +7,17 @@ from pylon.core.tools import log
 START_FAILED = 'the run could not start'
 
 
-def _start_agent_run(project_id: int, schedule_id: int, run_id: int) -> None:
+def _start_owner_run(project_id: int, schedule_id: int, run_id: int) -> None:
     # Imported here, so the wrapper is needed: the starter map loads without the database layer
     from .schedule_run_starter import run_owner_schedule
     run_owner_schedule(project_id, schedule_id, run_id)
 
 
-# entity type -> starter(project_id, schedule_id, run_id); US-12 adds the pipeline
-RUN_STARTERS: dict[str, Callable[[int, int, int], None]] = {'agent': _start_agent_run}
+# entity type -> starter(project_id, schedule_id, run_id); one starter runs both types
+RUN_STARTERS: dict[str, Callable[[int, int, int], None]] = {
+    'agent': _start_owner_run,
+    'pipeline': _start_owner_run,
+}
 
 
 def _close_unstarted_run(project_id: int, schedule_id: int, run_id: int) -> None:
