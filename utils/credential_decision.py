@@ -7,6 +7,11 @@ against the dispatched payload (what will actually run); nothing in the payload 
 
 Metadata only: this module reads configuration and credential-governance facts through two in-process
 methods and never touches a secret store. A fact that cannot be read is a refusal, never a pass.
+
+A configuration can have a shared reference and personal ones, one per owner (#7119). The facts are read for the caller,
+so the reference found is the caller's own personal one when there is one, else the shared one; a personal reference is
+then usable only by its custodian: the person (``custodian_subject_ref`` equals the subject of the run) or, for a
+mandate, the mandate's owner.
 """
 import uuid
 from dataclasses import dataclass, replace
@@ -226,8 +231,17 @@ def _configuration_facts(project_id, uuids) -> dict:
     return this.for_module("configurations").module.configuration_credential_facts(project_id, uuids)
 
 
-def _credential_use_facts(project_id, config_ids, grant_keys, ref_ids=None) -> dict:
-    return this.for_module("secrets").module.credential_use_facts(project_id, config_ids, grant_keys, ref_ids)
+def _credential_use_facts(project_id, config_ids, grant_keys, ref_ids=None, **caller) -> dict:
+    """``caller``: ``personal_subject_ref`` / ``personal_user_id``, whose personal references the facts may prefer."""
+    return this.for_module("secrets").module.credential_use_facts(project_id, config_ids, grant_keys, ref_ids, **caller)
+
+
+def _caller_of(ctx) -> dict:
+    """Whose personal reference a configuration's facts are read for: the person of a user delegation, the owner of
+    the mandate of a mandate run."""
+    if ctx.subject_kind == "mandate":
+        return {} if ctx.subject_user_id is None else {"personal_user_id": ctx.subject_user_id}
+    return {"personal_subject_ref": ctx.subject_ref}
 
 
 def read_configuration_facts(pairs, reader=None) -> dict:
@@ -280,6 +294,16 @@ def grant_in_force(grant, now) -> bool:
     return (start is None or start <= now) and (end is None or now < end)
 
 
+def holds_personal(ctx: CredentialDecisionContext, reference: Mapping) -> bool:
+    """May the run use this personal reference? Its custodian may: the person whose identity the run carries (the
+    subject of the run is the custodian's), or, for a mandate, the mandate's owner (#6947). Nobody else, and a
+    reference that names no custodian is nobody's."""
+    if ctx.subject_kind == "mandate":
+        return ctx.subject_user_id is not None and _int_or_none(reference.get("custodian_user_id")) == ctx.subject_user_id
+    custodian = reference.get("custodian_subject_ref")
+    return isinstance(custodian, str) and bool(custodian) and custodian == ctx.subject_ref
+
+
 def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse, facts: CredentialFacts) -> Decision:
     """One use, AND of the checks, first failure wins. Pure: it reads only its arguments (``ctx.can_use`` aside)."""
     known = {}
@@ -304,10 +328,8 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
                  credential_generation=reference.get("generation"))
     if reference.get("state") != "active" or reference.get("store_kind") not in STORE_KINDS:   # 4. in force
         return verdict(False, "CREDENTIAL_REFERENCE_INACTIVE")
-    if reference.get("ownership_class") == "personal" and not (                    # 5. not a personal credential,
-            ctx.subject_kind == "mandate" and ctx.subject_user_id is not None      #    unless the owner of a
-            and _int_or_none(reference.get("custodian_user_id")) == ctx.subject_user_id):   # mandate holds it
-        return verdict(False, "CREDENTIAL_CLASS_NOT_ALLOWED")
+    if reference.get("ownership_class") == "personal" and not holds_personal(ctx, reference):   # 5. a personal one
+        return verdict(False, "CREDENTIAL_CLASS_NOT_ALLOWED")                  #    only its custodian may use
     approved = reference.get("configuration_generation")                          # 6. unchanged since approval
     if approved is None or config.get("generation") != approved:
         return verdict(False, "CREDENTIAL_GENERATION_MISMATCH")
@@ -327,7 +349,8 @@ def _read_decision_facts(ctx, uses, configurations) -> CredentialFacts:
     own = {fact["id"] for _, fact in named
            if fact is not None and fact.get("section") == CREDENTIAL_SECTION
            and fact.get("project_id") == ctx.binding_project_id}
-    references = _credential_use_facts(ctx.binding_project_id, sorted(own), [])["references"] if own else {}
+    references = _credential_use_facts(
+        ctx.binding_project_id, sorted(own), [], **_caller_of(ctx))["references"] if own else {}
     keys = {(ctx.agent_binding_ref, use.toolkit_instance_id, references[fact["id"]]["ref_id"], WHOLE_TARGET, ctx.subject_ref)
             for use, fact in named if fact is not None and fact.get("id") in references}
     grants = _credential_use_facts(ctx.binding_project_id, [], sorted(keys))["grants"] if keys else {}
@@ -389,6 +412,9 @@ def recheck_credentials(project_id, entries, subject_ref, agent_binding_ref, now
         reference = references.get(entry["credential_ref"])
         if reference is None or reference.get("state") != "active":
             return "CREDENTIAL_REFERENCE_INACTIVE"
+        if (reference.get("ownership_class") == "personal" and subject_kind_of(subject_ref) == "user_delegation"
+                and reference.get("custodian_subject_ref") != subject_ref):   # a mandate's owner is checked at admission
+            return "CREDENTIAL_CLASS_NOT_ALLOWED"
         if reference.get("revocation_epoch") != entry["reference_epoch"]:
             return "EPOCH_MISMATCH"
         config = configurations.get(entry["configuration_uuid"])

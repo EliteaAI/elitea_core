@@ -106,7 +106,8 @@ def _reference_of(project_id, configuration_uuid, config_type, user_id, known) -
         if (configuration.get("section") != CREDENTIAL_SECTION or configuration.get("project_id") != project_id
                 or configuration.get("type") != config_type):
             raise _deny("CREDENTIAL_REFERENCE_REQUIRED")
-        found = this.for_module("secrets").module.credential_use_facts(project_id, [configuration["id"]], [])
+        found = this.for_module("secrets").module.credential_use_facts(   # the tester's own personal reference first
+            project_id, [configuration["id"]], [], None, personal_user_id=user_id)
     except AdmissionDenied:
         raise
     except Exception as exc:  # pylint: disable=W0703

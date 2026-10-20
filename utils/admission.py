@@ -97,7 +97,7 @@ MESSAGES = {
     "CREDENTIAL_REFERENCE_REQUIRED": "This agent uses a credential that is not registered for governed use; the run was not started.",
     "CREDENTIAL_REFERENCE_INACTIVE": "A credential this agent uses is suspended or retired; the run was not started.",
     "CREDENTIAL_GENERATION_MISMATCH": "A credential changed after it was approved; the run was not started.",
-    "CREDENTIAL_CLASS_NOT_ALLOWED": "Personal credentials cannot be used by governed agents.",
+    "CREDENTIAL_CLASS_NOT_ALLOWED": "This agent uses a personal credential that belongs to someone else; the run was not started.",
     "DENIED_GRANT": "This agent is not allowed to use one of its credentials for you.",
     "DENIED_RBAC": "You do not have permission to use this agent's credentials.",
     # the release of credential material to a worker (#6946); fixed per code, no titles, ids or field names

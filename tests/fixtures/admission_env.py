@@ -600,18 +600,29 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                 raise env.configurations_raises
             return {item: dict(env.configurations[(project_id, item)]) for item in uuids if (project_id, item) in env.configurations}
 
-        def credential_use_facts(project_id, config_ids, grant_keys, ref_ids=None):
+        def credential_use_facts(project_id, config_ids, grant_keys, ref_ids=None, personal_subject_ref=None,
+                                 personal_user_id=None):
             env.secrets_calls.append((project_id, list(config_ids), list(grant_keys), None if ref_ids is None else list(ref_ids)))
+            env.__dict__.setdefault("caller_calls", []).append((personal_subject_ref, personal_user_id))   # who it was read for
             if env.secrets_raises:
                 raise env.secrets_raises
-            references, grants = {}, {}
+            references, grants, rank_of = {}, {}, {}
             for row in env.references:
-                if (row["project_id"] == project_id and row["state"] != "retired"
-                        and (row["configuration_id"] in config_ids or row["ref_id"] in (ref_ids or []))):
-                    references[row["configuration_id"]] = {
-                        key: row[key] for key in ("ref_id", "state", "generation", "configuration_generation",
-                                                  "store_kind", "ownership_class", "revocation_epoch")}
-                    references[row["configuration_id"]]["custodian_user_id"] = row.get("custodian_user_id")
+                if row["project_id"] == project_id and row["state"] != "retired":
+                    mine = row["ownership_class"] == "personal" and (
+                        (personal_subject_ref is not None and row.get("custodian_subject_ref") == personal_subject_ref)
+                        or (personal_user_id is not None and row.get("custodian_user_id") == personal_user_id))
+                    # as secrets facts v3: the exact reference, else the caller's own personal one, else the shared
+                    # one, else (so the class can be refused by name) someone else's personal one
+                    rank = (4 if row["ref_id"] in (ref_ids or []) else 0 if row["configuration_id"] not in config_ids
+                            else 3 if mine else 2 if row["ownership_class"] != "personal" else 1)
+                    if rank and rank > rank_of.get(row["configuration_id"], 0):
+                        rank_of[row["configuration_id"]] = rank
+                        references[row["configuration_id"]] = {
+                            key: row[key] for key in ("ref_id", "state", "generation", "configuration_generation",
+                                                      "store_kind", "ownership_class", "revocation_epoch")}
+                        references[row["configuration_id"]]["custodian_user_id"] = row.get("custodian_user_id")
+                        references[row["configuration_id"]]["custodian_subject_ref"] = row.get("custodian_subject_ref")
             for key in ("|".join(item) for item in grant_keys):
                 grant = env.grants.get((project_id, key))
                 if grant is not None and grant["state"] != "revoked":
