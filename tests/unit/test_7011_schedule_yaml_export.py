@@ -5,7 +5,6 @@ The export module and the schedule table are real. The plugin package around the
 Run via:
     python tests/run_tests.py unit/test_7011_schedule_yaml_export.py -v
 """
-import pathlib
 import sys
 import types
 from datetime import UTC, datetime
@@ -13,9 +12,8 @@ from datetime import UTC, datetime
 import pytest
 import yaml
 from fixtures import schedule_sqlite as sqlite_db
-from fixtures.helpers import load_module_with_stubs
+from unit.test_7011_schedule_yaml_import import load_plugin_module, sandbox
 
-PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = 'plugins.elitea_core'
 PROJECT_ID = 7
 ALLOWED_KEYS = [
@@ -37,40 +35,26 @@ class Env:
 
 @pytest.fixture
 def env(monkeypatch):
-    original = sys.modules.copy()
-    for name, module in sqlite_db.REAL_SQLALCHEMY.items():
-        monkeypatch.setitem(sys.modules, name, module)
     env = Env()
-    for name in ('plugins', PACKAGE, f'{PACKAGE}.utils', f'{PACKAGE}.models', f'{PACKAGE}.models.enums',
-                 f'{PACKAGE}.models.pd', 'pylon', 'pylon.core'):
-        sqlite_db.package(name)
-    Base, Application, ApplicationVersion = sqlite_db.install_parent_models(PACKAGE)
-    engine = sqlite_db.sqlite_engine()
-    env.session_factory = lambda: sqlite_db.orm.Session(engine, expire_on_commit=False)
-    tools = sqlite_db.LenientModule('tools')
-    tools.db = types.SimpleNamespace(get_session=lambda project_id=None: env.session_factory(), Base=Base)
-    sys.modules['tools'] = tools
-    service = types.ModuleType(f'{PACKAGE}.utils.schedule_service')
+    with sandbox(monkeypatch, env) as (Base, engine):
+        tools = sqlite_db.LenientModule('tools')
+        tools.db = types.SimpleNamespace(get_session=lambda project_id=None: env.session_factory(), Base=Base)
+        sys.modules['tools'] = tools
+        service = types.ModuleType(f'{PACKAGE}.utils.schedule_service')
 
-    class ScheduleError(Exception):
-        def __init__(self, body, status=400):
-            super().__init__(body.get('error'))
-            self.response = body, status
+        class ScheduleError(Exception):
+            def __init__(self, body, status=400):
+                super().__init__(body.get('error'))
+                self.response = body, status
 
-    service.ScheduleError = ScheduleError
-    sys.modules[service.__name__] = service
-    env.ScheduleError = ScheduleError
-
-    def load(relative_path, name):
-        return load_module_with_stubs(PLUGIN_ROOT / relative_path, f'{PACKAGE}.{name}')
-
-    env.EntitySchedule = sqlite_db.create_schedule_table(load, Base, engine)
-    load('utils/pipeline_utils.py', 'utils.pipeline_utils')
-    env.module = load('utils/schedule_yaml.py', 'utils.schedule_yaml')
-    sqlite_db.add_agent_and_pipeline(env.session_factory, Application, ApplicationVersion)
-    yield env
-    for key in set(sys.modules) - set(original):
-        sys.modules.pop(key, None)
+        service.ScheduleError = ScheduleError
+        sys.modules[service.__name__] = service
+        env.ScheduleError = ScheduleError
+        env.EntitySchedule = sqlite_db.create_schedule_table(load_plugin_module, Base, engine)
+        load_plugin_module('utils/pipeline_utils.py', 'utils.pipeline_utils')
+        env.module = load_plugin_module('utils/schedule_yaml.py', 'utils.schedule_yaml')
+        sqlite_db.add_agent_and_pipeline(env.session_factory, env.Application, env.ApplicationVersion)
+        yield env
 
 
 def test_7011_r1_1_export_writes_the_header_and_every_schedule_of_every_owner(env):

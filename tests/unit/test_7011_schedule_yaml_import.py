@@ -6,6 +6,7 @@ The plugin package around them is stubbed.
 Run via:
     python tests/run_tests.py unit/test_7011_schedule_yaml_import.py -v
 """
+import contextlib
 import pathlib
 import sys
 import types
@@ -14,14 +15,15 @@ import pytest
 import yaml
 from fixtures import schedule_sqlite as sqlite_db
 from fixtures.helpers import load_module_with_stubs
+from sqlalchemy.exc import OperationalError
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = 'plugins.elitea_core'
 PROJECT_ID = 35
 ADMIN_ID = 99
 NOT_YAML = 'The schedule file is not valid YAML'
-WRONG_HEADER = 'This is not a schedule file of schema version 1'
 TOO_LARGE = 'The schedule file is larger than 1 MB'
+TOO_MANY = 'The schedule file has more than 500 schedules'
 HEADER = {'kind': 'elitea_schedules', 'schema_version': 1}
 
 
@@ -43,6 +45,61 @@ def pipeline_item(**overrides):
 
 def file_text(*items, **header):
     return yaml.safe_dump({**HEADER, **header, 'schedules': list(items)}, sort_keys=False)
+
+
+def load_plugin_module(relative_path, name):
+    """Load one plugin file as a module of the stubbed package; shared by the three 7011 YAML test files."""
+    return load_module_with_stubs(PLUGIN_ROOT / relative_path, f'{PACKAGE}.{name}')
+
+
+@contextlib.contextmanager
+def sandbox(monkeypatch, env, packages=()):
+    """Real SQLAlchemy, empty plugin packages and an SQLite session factory on `env`; yields (Base, engine).
+
+    Every module the test loads is dropped again on exit.
+    """
+    original = sys.modules.copy()
+    for name, module in sqlite_db.REAL_SQLALCHEMY.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    for name in ('plugins', PACKAGE, f'{PACKAGE}.utils', f'{PACKAGE}.models', f'{PACKAGE}.models.enums',
+                 f'{PACKAGE}.models.pd', 'pylon', 'pylon.core', *packages):
+        sqlite_db.package(name)
+    Base, env.Application, env.ApplicationVersion = sqlite_db.install_parent_models(PACKAGE)
+    engine = sqlite_db.sqlite_engine()
+    env.session_factory = lambda: sqlite_db.orm.Session(engine, expire_on_commit=False)
+    try:
+        yield Base, engine
+    finally:
+        for key in set(sys.modules) - set(original):
+            sys.modules.pop(key, None)
+
+
+def install_service_stubs(env):
+    """Stub the folder rights, the run-without-asking secret and the notifications the create service calls."""
+    env.folder_error = None
+    env.run_without_asking = False
+    stubs = {
+        'folder_access': {'entity_access_error': lambda *args, **kwargs: env.folder_error},
+        'schedule_risk': {'is_run_without_asking_allowed': lambda project_id: env.run_without_asking},
+        'schedule_notifications': {'notify_schedule_event': lambda *args, **kwargs: True},
+    }
+    for name, attributes in stubs.items():
+        stub = types.ModuleType(f'{PACKAGE}.utils.{name}')
+        vars(stub).update(attributes)
+        sys.modules[stub.__name__] = stub
+
+
+def install_tools(env, Base, **extra):
+    """The `tools` module of the platform: admin user, modes, the SQLite session; `extra` adds or replaces members."""
+    tools = sqlite_db.LenientModule('tools')
+    tools.auth = types.SimpleNamespace(current_user=lambda: {'id': ADMIN_ID})
+    tools.config = types.SimpleNamespace(
+        ADMINISTRATION_MODE='administration', DEFAULT_MODE='default', POSTGRES_TENANT_SCHEMA='tenant',
+    )
+    tools.db = types.SimpleNamespace(get_session=lambda project_id=None: env.session_factory(), Base=Base)
+    tools.this = types.SimpleNamespace(module=types.SimpleNamespace(descriptor=types.SimpleNamespace(config={})))
+    vars(tools).update(extra)
+    sys.modules['tools'] = tools
 
 
 class Env:
@@ -68,55 +125,26 @@ class Env:
 
 @pytest.fixture
 def env(monkeypatch):
-    original = sys.modules.copy()
-    for name, module in sqlite_db.REAL_SQLALCHEMY.items():
-        monkeypatch.setitem(sys.modules, name, module)
     env = Env()
-    for name in ('plugins', PACKAGE, f'{PACKAGE}.utils', f'{PACKAGE}.models', f'{PACKAGE}.models.enums',
-                 f'{PACKAGE}.models.pd', 'pylon', 'pylon.core'):
-        sqlite_db.package(name)
-    Base, env.Application, env.ApplicationVersion = sqlite_db.install_parent_models(PACKAGE)
-    sqlite_db.install_trace_span(types.SimpleNamespace(set_attribute=lambda key, value: None))
-    engine = sqlite_db.sqlite_engine()
-    env.session_factory = lambda: sqlite_db.orm.Session(engine, expire_on_commit=False)
-    tools = sqlite_db.LenientModule('tools')
-    tools.auth = types.SimpleNamespace(current_user=lambda: {'id': ADMIN_ID})
-    tools.config = types.SimpleNamespace(
-        ADMINISTRATION_MODE='administration', DEFAULT_MODE='default', POSTGRES_TENANT_SCHEMA='tenant',
-    )
-    tools.db = types.SimpleNamespace(get_session=lambda project_id=None: env.session_factory(), Base=Base)
-    tools.this = types.SimpleNamespace(module=types.SimpleNamespace(descriptor=types.SimpleNamespace(config={})))
-    sys.modules['tools'] = tools
+    with sandbox(monkeypatch, env) as (Base, engine):
+        sqlite_db.install_trace_span(types.SimpleNamespace(set_attribute=lambda key, value: None))
+        install_tools(env, Base)
+        install_service_stubs(env)
 
-    env.folder_error = None
-    folder_access = types.ModuleType(f'{PACKAGE}.utils.folder_access')
-    folder_access.entity_access_error = lambda *args, **kwargs: env.folder_error
-    env.run_without_asking = False
-    risk = types.ModuleType(f'{PACKAGE}.utils.schedule_risk')
-    risk.is_run_without_asking_allowed = lambda project_id: env.run_without_asking
-    notifications = types.ModuleType(f'{PACKAGE}.utils.schedule_notifications')
-    notifications.notify_schedule_event = lambda *args, **kwargs: True
-    for stub in (folder_access, risk, notifications):
-        sys.modules[stub.__name__] = stub
-
-    def load(relative_path, name):
-        return load_module_with_stubs(PLUGIN_ROOT / relative_path, f'{PACKAGE}.{name}')
-
-    env.EntitySchedule = sqlite_db.create_schedule_table(load, Base, engine)
-    load('utils/constants.py', 'utils.constants')
-    load('utils/schedule_timing.py', 'utils.schedule_timing')
-    load('utils/schedule_access.py', 'utils.schedule_access')
-    load('utils/pipeline_utils.py', 'utils.pipeline_utils')
-    load('models/pd/index.py', 'models.pd.index')
-    load('models/pd/entity_schedule.py', 'models.pd.entity_schedule')
-    load('models/pd/schedule_yaml.py', 'models.pd.schedule_yaml')
-    env.service = load('utils/schedule_service.py', 'utils.schedule_service')
-    env.module = load('utils/schedule_yaml.py', 'utils.schedule_yaml')
-    env.add_entity(1, 'Entity')
-    env.add_entity(2, 'Flow', agent_type='pipeline')
-    yield env
-    for key in set(sys.modules) - set(original):
-        sys.modules.pop(key, None)
+        load = load_plugin_module
+        env.EntitySchedule = sqlite_db.create_schedule_table(load, Base, engine)
+        load('utils/constants.py', 'utils.constants')
+        load('utils/schedule_timing.py', 'utils.schedule_timing')
+        load('utils/schedule_access.py', 'utils.schedule_access')
+        load('utils/pipeline_utils.py', 'utils.pipeline_utils')
+        load('models/pd/index.py', 'models.pd.index')
+        load('models/pd/entity_schedule.py', 'models.pd.entity_schedule')
+        env.WRONG_HEADER = load('models/pd/schedule_yaml.py', 'models.pd.schedule_yaml').WRONG_HEADER
+        env.service = load('utils/schedule_service.py', 'utils.schedule_service')
+        env.module = load('utils/schedule_yaml.py', 'utils.schedule_yaml')
+        env.add_entity(1, 'Entity')
+        env.add_entity(2, 'Flow', agent_type='pipeline')
+        yield env
 
 
 # --- R3.1, R3.2: the file as a whole
@@ -145,7 +173,7 @@ def test_7011_r3_1_a_file_just_under_the_size_limit_is_accepted_and_reports_per_
     {'kind': 'other'}, {'schema_version': 2}, {'kind': None}, {'schema_version': '1'}, {'schema_version': True},
 ])
 def test_7011_r3_2_a_wrong_header_raises_the_header_message(env, header):
-    with pytest.raises(ValueError, match=WRONG_HEADER):
+    with pytest.raises(ValueError, match=env.WRONG_HEADER):
         env.module.parse_schedules_file(file_text(item(), **header))
 
 
@@ -153,8 +181,14 @@ def test_7011_r3_2_a_wrong_header_raises_the_header_message(env, header):
 def test_7011_r3_2_a_missing_header_key_raises_the_header_message(env, missing):
     data = {**HEADER, 'schedules': []}
     del data[missing]
-    with pytest.raises(ValueError, match=WRONG_HEADER):
+    with pytest.raises(ValueError, match=env.WRONG_HEADER):
         env.module.parse_schedules_file(yaml.safe_dump(data))
+
+
+def test_7011_r3_1_a_file_with_500_items_is_accepted_and_one_with_501_raises_the_count_message(env):
+    assert len(env.module.parse_schedules_file(file_text(*[item()] * 500)).schedules) == 500
+    with pytest.raises(ValueError, match=TOO_MANY):
+        env.module.parse_schedules_file(file_text(*[item()] * 501))
 
 
 # --- R2.1, R2.2, R2.6: a valid item
@@ -256,6 +290,30 @@ def test_7011_r3_5_a_pipeline_item_without_a_valid_run_mode_fails_and_the_agent_
     assert [entry['name'] for entry in report['failed']] == ['Report flow']
     assert reason in report['failed'][0]['reason']
     assert [row.entity_type for row in env.rows()] == ['agent']
+
+
+def test_7011_r2_4_a_database_error_fails_the_item_with_a_generic_reason_and_the_next_item_goes_on(env, monkeypatch):
+    real = env.service.create_schedule
+
+    def broken_once(session, project_id, body, scope):
+        if body.name == 'Broken':
+            raise OperationalError('INSERT secret_table', {}, Exception('connection lost'))
+        return real(session, project_id, body, scope)
+
+    monkeypatch.setattr(env.service, 'create_schedule', broken_once)
+    report = env.import_items(item(name='Broken'), item(name='Good'))
+    assert report['failed'] == [{'name': 'Broken', 'reason': 'The schedule could not be saved'}]
+    assert [entry['name'] for entry in report['created']] == ['Good']
+    assert [row.name for row in env.rows()] == ['Good']
+
+
+def test_7011_r2_2_import_reads_entity_names_with_one_query(env):
+    from sqlalchemy import event
+    selects = []
+    engine = env.session_factory().get_bind()
+    event.listen(engine, 'before_cursor_execute', lambda conn, cur, stmt, *a: selects.append(stmt))
+    env.import_items(*[item(name=f'S{n}') for n in range(5)])
+    assert sum('applications.name IN' in stmt for stmt in selects) == 1
 
 
 # --- R2.5: run without asking

@@ -20,6 +20,8 @@ from ...utils.schedule_access import (
 from ...utils.schedule_queries import list_schedules
 
 NOT_ALLOWED = {"error": "Method not allowed"}, 405
+MAX_ID = 2147483647  # the schedule id column is a 32-bit integer
+MAX_EXPORT_IDS = 500
 
 
 def _last_segment() -> str:
@@ -28,11 +30,12 @@ def _last_segment() -> str:
 
 
 def _parse_ids(raw: str) -> list[int] | None:
-    """Ids of `1,2`; ASCII digits only. None when the text is not such a list."""
+    """Ids of `1,2`; ASCII digits only, each a 32-bit id, at most 500. None when the text is not such a list."""
     parts = raw.split(",")
-    if not all(part.isascii() and part.isdigit() for part in parts):
+    if len(parts) > MAX_EXPORT_IDS or not all(part.isascii() and part.isdigit() for part in parts):
         return None
-    return [int(part) for part in parts]
+    ids = [int(part) for part in parts]
+    return ids if max(ids) <= MAX_ID else None
 
 
 def _owner_names(owner_ids: set[int]) -> dict[int, str | None]:
@@ -104,7 +107,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
         ]
         from ...utils.schedule_risk import is_run_without_asking_allowed
         return {"total": total, "rows": items, "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}, 200
-
 
     @auth.decorators.check_api(schedule_check_spec("export"))
     def _export(self, project_id: int):

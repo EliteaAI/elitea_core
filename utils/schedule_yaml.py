@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from tools import db
 
 from ..models.all import Application, ApplicationVersion
@@ -15,9 +16,11 @@ from .schedule_service import ScheduleError
 FILE_KIND = 'elitea_schedules'
 SCHEMA_VERSION = 1
 MAX_FILE_BYTES = 1024 * 1024
+MAX_ITEMS = 500
 NOT_YAML = 'The schedule file is not valid YAML'
 TOO_LARGE = 'The schedule file is larger than 1 MB'
-WRONG_HEADER = 'This is not a schedule file of schema version 1'
+TOO_MANY = f'The schedule file has more than {MAX_ITEMS} schedules'
+SAVE_FAILED = 'The schedule could not be saved'
 
 
 def _item(row: EntitySchedule, entity_name: str, version_name: str | None) -> dict:
@@ -66,10 +69,11 @@ def parse_schedules_file(text: str):
     """Return the checked file; the items stay raw dicts, so one bad item fails alone.
 
     Raises:
-        ValueError: With a schedule message when the text is too large, not a YAML mapping, or has a wrong header.
+        ValueError: With a schedule message when the text is too large, not a YAML mapping, has a wrong header
+            or has too many items.
     """
     # late: the export loads without the import-only modules
-    from ..models.pd.schedule_yaml import ScheduleFile
+    from ..models.pd.schedule_yaml import WRONG_HEADER, ScheduleFile
     if len(text.encode()) > MAX_FILE_BYTES:
         raise ValueError(TOO_LARGE)
     try:
@@ -77,12 +81,15 @@ def parse_schedules_file(text: str):
     except ValueError:  # the helper words its errors for pipelines
         raise ValueError(NOT_YAML) from None
     try:
-        return ScheduleFile.model_validate(data)
+        file = ScheduleFile.model_validate(data)
     except ValidationError as e:
         first = e.errors()[0]
         if first['loc'] in (('kind',), ('schema_version',)):  # a missing key reads 'Field required'
             raise ValueError(WRONG_HEADER) from None
         raise ValueError(_reason(e)) from None
+    if len(file.schedules) > MAX_ITEMS:
+        raise ValueError(TOO_MANY)
+    return file
 
 
 def _reason(error) -> str:
@@ -96,16 +103,24 @@ class _Skipped(Exception):
     """The item matches no single entity version of the project."""
 
 
-def _resolve(session, item) -> tuple[int, int]:
-    """Return (application_id, version_id) of the one entity and version the item names, or raise _Skipped."""
-    is_pipeline = item.entity_type == 'pipeline'
-    kind = item.entity_type.capitalize()
-    versions = session.execute(
-        select(Application.id, ApplicationVersion.id, ApplicationVersion.name)
+def _entity_index(session, names: set) -> dict:
+    """Map (entity_type, entity_name) to its (application_id, version_id, version_name) rows; one query."""
+    index = {}
+    rows = session.execute(
+        select(Application.id, Application.name, ApplicationVersion.id, ApplicationVersion.name, ApplicationVersion.agent_type)
         .join(ApplicationVersion, ApplicationVersion.application_id == Application.id)
-        .where(Application.name == item.entity_name)
-        .where((ApplicationVersion.agent_type == 'pipeline') == is_pipeline)
+        .where(Application.name.in_(names))
     ).all()
+    for application_id, name, version_id, version_name, agent_type in rows:
+        kind = 'pipeline' if agent_type == 'pipeline' else 'agent'
+        index.setdefault((kind, name), []).append((application_id, version_id, version_name))
+    return index
+
+
+def _resolve(index: dict, item) -> tuple[int, int]:
+    """Return (application_id, version_id) of the one entity and version the item names, or raise _Skipped."""
+    kind = item.entity_type.capitalize()
+    versions = index.get((item.entity_type, item.entity_name), [])
     if not versions:
         raise _Skipped(f"{kind} '{item.entity_name}' not found in this project")
     if len({application_id for application_id, *_ in versions}) > 1:
@@ -141,12 +156,14 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
     scope = ScheduleScope(user_id=admin_id, is_admin=True, permissions=frozenset())
     may_run_without_asking = is_run_without_asking_allowed(project_id)
     report = {'created': [], 'skipped': [], 'failed': []}
+    names = {raw['entity_name'] for raw in file.schedules if isinstance(raw.get('entity_name'), str)}
     with db.get_session(project_id) as session:
+        index = _entity_index(session, names)
         for raw in file.schedules:
             entry = {'name': raw.get('name')}
             try:
                 item = ScheduleFileItem.model_validate(raw)
-                application_id, version_id = _resolve(session, item)
+                application_id, version_id = _resolve(index, item)
                 values = item.model_dump(exclude={'entity_name', 'version_name'})
                 if item.approval_rule == 'run_without_asking' and not may_run_without_asking:
                     values['approval_rule'] = 'pause_and_ask'
@@ -161,4 +178,7 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
             except ScheduleError as e:
                 session.rollback()
                 report['failed'].append({**entry, 'reason': e.response[0]['error']})
+            except SQLAlchemyError:
+                session.rollback()
+                report['failed'].append({**entry, 'reason': SAVE_FAILED})
     return report
