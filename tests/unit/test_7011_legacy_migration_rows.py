@@ -127,6 +127,13 @@ def test_el7011_r31_unusable_creator_gives_a_disabled_row_owned_by_the_author(mi
     assert migration.calls == []
 
 
+# TC-US24-05 / R3.1, R3.2: a bad cron without a creator keeps invalid_cron and the author holds the row
+def test_el7011_r31_r32_bad_cron_without_a_creator_keeps_invalid_cron(migration):
+    row = migration.migrated_row(5, 11, 21, "p", "v", _trigger(cron="not a cron", created_by=...), NOW,
+                                 fallback_owner=3)
+    assert (row["enabled"], row["disabled_reason"], row["created_by"]) == (False, "invalid_cron", 3)
+
+
 @pytest.mark.parametrize("bad", UNUSABLE_CREATORS)
 def test_el7011_r31_unusable_creator_without_an_author_cannot_make_a_row(migration, bad):
     trigger = _trigger(**bad)

@@ -79,8 +79,9 @@ def migrated_row(
     if 'created_by' in failed:
         if fallback_owner is None:
             raise LegacyTriggerError(DISABLED_OWNER_LOST_ACCESS)
-        # created_by is NOT NULL: the version author holds the row until an admin changes the owner
-        owner, reason = fallback_owner, DISABLED_OWNER_LOST_ACCESS
+        # created_by is NOT NULL: the version author holds the row until an admin changes the owner.
+        # A bad cron or zone keeps invalid_cron, so the report shows it and no interval check runs on it
+        owner, reason = fallback_owner, reason or DISABLED_OWNER_LOST_ACCESS
     else:
         owner = int(trigger['created_by'])
     if reason is None:

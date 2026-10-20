@@ -2078,6 +2078,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         prefix = "[DRY RUN] " if dry_run else ""
         log.info("%sStarting migrate_legacy_pipeline_schedules (projects=%s)", prefix, len(project_ids))
+        # system_user_schedules_left is 0 by construction: every migrated row uses a delegation principal (R2.6)
         report = {"dry_run": dry_run, "projects": [], "errors": [], "system_user_schedules_left": 0}
         for project_id in project_ids:
             try:
