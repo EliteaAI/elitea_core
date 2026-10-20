@@ -11,7 +11,7 @@ from .schedule_claim import fail_run
 STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
 EXPIRE_BATCH = 100
-PAUSE_REASON = 'the run stopped for input that no one can give'
+PAUSE_REASON = 'the run needs a human answer'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
 APPROVAL_WAIT_HOURS = 24
@@ -70,7 +70,7 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
     # A parallel pause carries its interrupts in `hitl_interrupts`
     interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
     if not any(item.get('guardrail_type') == 'sensitive_tool' for item in interrupts):
-        finish_schedule_run(project_id, run_id, 'failed', PAUSE_REASON)
+        finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts))
         return
     # Late import, as in _announce
     from .schedule_notifications import notify_schedule_event
@@ -91,6 +91,15 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
             notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
         except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it (R1.3)
             log.exception('Schedule run %s: cannot send the approval notice', run_id)
+
+
+def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
+    """`PAUSE_REASON` plus the toolkit or step the pause names; the toolkit first, as an MCP sign-in node says little (R2.4)."""
+    for key, label in (('toolkit_name', 'toolkit'), ('node_name', 'step')):
+        name = next((item[key] for item in (interrupt, *interrupts) if item.get(key)), None)
+        if name:
+            return f"{PAUSE_REASON} ({label} '{name}')"
+    return PAUSE_REASON
 
 
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
