@@ -8,6 +8,8 @@ from tools import db
 from ..models.all import Application, ApplicationVersion
 from ..models.conversation import Conversation
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
+from .budget_door import closed_budget_scope
+from .exceptions import BudgetDoorClosedError
 from .pipeline_execution import (
     TriggerType,
     create_trigger_run_conversation,
@@ -15,13 +17,14 @@ from .pipeline_execution import (
     finish_trigger_run_with_error,
 )
 from .schedule_prerun import run_prerun_check
-from .schedule_runs import fail_schedule_run
+from .schedule_runs import block_schedule_run, fail_schedule_run
 
 NOT_FOUND = 'schedule or version not found'
 RUN_NOT_FOUND = 'run not found'
 START_FAILED = 'the run could not start'
 PREDICT_FAILED = 'the run call failed'
 ENTRY_POINT_MESSAGE = '[Scheduled execution triggered]'  # the text the legacy tick stores
+BUDGET_CLOSED = 'the {} budget is used up'
 PLACEHOLDER = re.compile(r'\{\{\s*(\w+)\s*\}\}')
 
 
@@ -62,7 +65,7 @@ def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> 
 def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
-    Every failure after the pre-run check closes the run as failed: a running run blocks the schedule.
+    A closed budget blocks the run. Every other failure after the pre-run check closes the run as failed: a running run blocks the schedule.
     """
     loaded = _load(project_id, schedule_id)
     if loaded is None:
@@ -70,6 +73,10 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         return
     check = run_prerun_check(project_id, loaded.schedule, run_id)
     if not check.ok:
+        return
+    scope = closed_budget_scope(project_id, check.owner_id)  # fails open (R2.2)
+    if scope:
+        block_schedule_run(project_id, run_id, BUDGET_CLOSED.format(scope))
         return
     source = loaded.schedule.entity_type
     if source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':
@@ -99,6 +106,9 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
             trigger_source='scheduled', is_system_user=False,
         )
+    except BudgetDoorClosedError as error:  # the door closed after the check (R2.3)
+        finish_trigger_run_with_error(project_id, response_id, error)
+        block_schedule_run(project_id, run_id, BUDGET_CLOSED.format(error.scope))
     except Exception as error:  # noqa: BLE001 -- the run message ends with the reason (R2.5)
         finish_trigger_run_with_error(project_id, response_id, error)
         fail_schedule_run(project_id, run_id, PREDICT_FAILED)
