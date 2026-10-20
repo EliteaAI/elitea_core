@@ -36,6 +36,18 @@ def test_el_7011_r1_2_a_sensitive_pause_sets_waiting_for_approval_for_24_hours(r
     assert before + timedelta(hours=24) <= expires <= datetime.now(UTC) + timedelta(hours=24)
 
 
+def test_el_7011_r2_4_a_new_pause_clears_the_resume_time_of_the_last_one(runs, session, sent):
+    schedule = _schedule(runs, session)
+    run = _chat_run(runs, session, schedule)
+    run.resumed_at = datetime.now(UTC)
+    session.flush()
+
+    runs.pause_schedule_run(1, run.id, SENSITIVE)
+
+    session.refresh(run)
+    assert (run.status, run.resumed_at) == ("waiting_for_approval", None)
+
+
 def test_el_7011_r1_2_a_sensitive_pause_in_the_parallel_list_also_waits(runs, session, sent):
     schedule = _schedule(runs, session)
     run = _chat_run(runs, session, schedule)

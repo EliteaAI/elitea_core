@@ -116,7 +116,11 @@ def _check_schedule_decision(parsed, caller_id) -> tuple[tuple | None, dict | No
     if run_id is None:
         return None, None
     decisions = parsed.hitl_decisions
-    actions = [item.get('action') for item in decisions] if decisions else [parsed.hitl_action]
+    # A non-dict item has no action, so it is refused as invalid (400) instead of failing (500)
+    actions = (
+        [item.get('action') if isinstance(item, dict) else None for item in decisions]
+        if decisions else [parsed.hitl_action]
+    )
     try:
         decision = check_schedule_decision(
             parsed.project_id, run_id, caller_id, actions, fan_out=bool(parsed.thread_id))

@@ -126,6 +126,14 @@ def test_el_7011_r2_1_an_unknown_action_names_the_field():
     assert check(_parsed(hitl_action='maybe'), OWNER)[1]['field'] == 'hitl_action'
 
 
+def test_el_7011_r2_1_a_non_dict_decision_item_is_passed_as_no_action():
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
+
+    check(_parsed(hitl_decisions=['approve', {'action': 'approve'}]), OWNER)
+
+    assert calls[0][4] == [None, 'approve']
+
+
 def test_el_7011_r2_4_an_apply_that_lost_a_race_gets_409():
     _, apply, _ = _helpers({'schedule_run_id': RUN_ID}, apply_error=NotWaiting())
 

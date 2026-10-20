@@ -76,7 +76,8 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
         paused = session.execute(
             update(EntityScheduleRun)
             .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running')
-            .values(status='waiting_for_approval',
+            # resumed_at is cleared, so a stale fan-out decision of an earlier pause never matches this one
+            .values(status='waiting_for_approval', resumed_at=None,
                     approval_expires_at=datetime.now(UTC) + timedelta(hours=APPROVAL_WAIT_HOURS))
         ).rowcount
         session.commit()
