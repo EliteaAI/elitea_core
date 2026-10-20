@@ -108,7 +108,8 @@ def world(monkeypatch):
             "RUN_STARTERS": {"pipeline": print}, "start_schedule_run": None, "START_FAILED": "",
         },
         "utils.schedule_timing": {"compute_next_run": None},
-        "utils.schedule_runs": {"record_skipped_run": None, "fail_stale_runs": lambda *a: 0},
+        "utils.schedule_runs": {"record_skipped_run": None, "fail_stale_runs": lambda *a: 0,
+                                "expire_waiting_runs": lambda *a: 0},
         "rpc.pipeline_scheduling": {
             "_check_project_pipelines": world.check_project, "_check_pipeline_scheduling_lock": world.legacy_lock,
         },

@@ -112,7 +112,7 @@ def test_el_7011_r5_2_pause_schedule_run_fails_the_run_that_waits_for_input(runs
 
     session.refresh(run)
     session.refresh(schedule)
-    assert (run.status, run.reason) == ("failed", "the run stopped for input that no one can give")
+    assert (run.status, run.reason) == ("failed", "the run needs a human answer")
     assert schedule.last_run_status == "failed"
     assert sent.notices == [(12, "schedule_run_failed", run.id)]
 
