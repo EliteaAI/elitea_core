@@ -4,7 +4,7 @@ from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
-from sqlalchemy import column, func, select, table
+from sqlalchemy import func, select
 from tools import this
 
 DEFAULT_MIN_INTERVAL_MINUTES = 5
@@ -33,6 +33,7 @@ def schedule_limits() -> ScheduleLimits:
 
 def compute_next_run(cron: str, timezone_name: str, after: datetime) -> datetime:
     """The next firing after `after` in the schedule timezone, as UTC."""
+    # lean: trusts an aware `after` (naive reads as server time); check it when a caller may pass naive
     local = croniter(cron, after.astimezone(ZoneInfo(timezone_name))).get_next(datetime)
     return local.astimezone(UTC)
 
@@ -48,10 +49,13 @@ def check_enabled_cap(session, adding: int = 1) -> None:
 
     Callers pass adding=0 for a row that is already enabled.
     """
+    # Imported here: the pydantic model imports this module and must not load the ORM tables.
+    from ..models.entity_schedule import EntitySchedule
+
     cap = schedule_limits().max_enabled_per_project
-    # Table by name: the check needs no ORM import, and the session is the project's own.
+    # lean: soft cap, no lock (US-07 checks and writes in one transaction); lock when parallel enables pass it
     enabled = session.execute(
-        select(func.count()).select_from(table('entity_schedules')).where(column('enabled').is_(True))
+        select(func.count()).select_from(EntitySchedule).where(EntitySchedule.enabled.is_(True))
     ).scalar()
     if enabled + adding > cap:
         raise ScheduleLimitError(cap)
