@@ -58,12 +58,24 @@ def _iso(moment) -> str | None:
     return moment.isoformat() if moment else None
 
 
+def _owner_name(owner_id: int) -> str | None:
+    """The owner's name, else the email, as the list shows it; a failed lookup gives None (US-32 R2.2)."""
+    try:
+        # Late import: the auth lookup is needed only for the details answer
+        from ...utils.authors import get_authors_data  # pylint: disable=C0415
+        user = next(iter(get_authors_data([owner_id])), None) or {}
+    except Exception as e:  # noqa: BLE001  # pylint: disable=W0718 -- a name must never break the details
+        log.warning("Schedule owner name lookup failed: %s", e)
+        return None
+    return user.get("name") or user.get("email")
+
+
 def _details(row, scope: ScheduleScope) -> dict:
-    """Shape a row as the API answers it; the owner name stays empty until a story needs it."""
+    """Shape a row as the API answers it, with the owner's name for the edit page (US-32)."""
     fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions"}
     return ScheduleDetails.model_validate({
         **{name: getattr(row, name) for name in fields},
-        "owner": {"id": row.created_by},
+        "owner": {"id": row.created_by, "name": _owner_name(row.created_by)},
         "allowed_actions": allowed_actions(row, scope),
     }).model_dump(mode="json")
 
