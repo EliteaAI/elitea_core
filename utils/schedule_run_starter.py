@@ -20,7 +20,7 @@ from .schedule_runs import fail_schedule_run
 NOT_FOUND = 'schedule or version not found'
 RUN_NOT_FOUND = 'run not found'
 START_FAILED = 'the run could not start'
-PREDICT_FAILED = 'the agent call failed'
+PREDICT_FAILED = 'the run call failed'
 ENTRY_POINT_MESSAGE = '[Scheduled execution triggered]'  # the text the legacy tick stores
 PLACEHOLDER = re.compile(r'\{\{\s*(\w+)\s*\}\}')
 
@@ -32,7 +32,7 @@ def fill_placeholders(text: str, variables: list[dict]) -> str:
 
 
 def _load(project_id: int, schedule_id: int) -> SimpleNamespace | None:
-    """Plain values of the schedule, its version and its agent, read inside one session."""
+    """Plain values of the schedule, its version and its agent or pipeline, read inside one session."""
     with db.get_session(project_id) as session:
         schedule = session.get(EntitySchedule, schedule_id)
         version = schedule and schedule.version_id and session.get(ApplicationVersion, schedule.version_id)
@@ -45,7 +45,7 @@ def _load(project_id: int, schedule_id: int) -> SimpleNamespace | None:
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id),
             version=SimpleNamespace(id=version.id, application_id=version.application_id),
-            agent_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []))
+            entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []))
 
 
 def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> bool:
@@ -81,7 +81,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         conversation_uuid, _, response_id = create_trigger_run_conversation(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             trigger_type=TriggerType.SCHEDULED, trigger_message=message,
-            conversation_name=f'Scheduled run: {loaded.agent_name}',
+            conversation_name=f'Scheduled run: {loaded.entity_name}',
             extra_meta={'schedule_id': schedule_id, 'schedule_run_id': run_id, 'execution_type': 'scheduled'},
             source=source,
         )

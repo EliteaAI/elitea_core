@@ -31,7 +31,7 @@ def world(monkeypatch):
         monkeypatch.setitem(sys.modules, f"{PKG}.utils.schedule_run_starter", starter)
         loaded = types.SimpleNamespace(
             schedule=types.SimpleNamespace(id=1, entity_type=entity_type, run_mode="prompt"),
-            version=types.SimpleNamespace(id=9), agent_name="Flow", prompt="Go", variables=[])
+            version=types.SimpleNamespace(id=9), entity_name="Flow", prompt="Go", variables=[])
         monkeypatch.setattr(starter, "_load", lambda *a: loaded)
         load("utils/schedule_dispatch.py", fresh=True).RUN_STARTERS[entity_type](34, 1, 3)
         return predict

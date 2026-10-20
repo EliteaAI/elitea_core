@@ -6,11 +6,6 @@ DISPATCH = "utils/schedule_dispatch.py"
 STARTER = "plugins.elitea_core.utils.schedule_run_starter"
 
 
-def test_7011_r1_1_pipeline_starter_is_registered():
-    starters = load(DISPATCH, fresh=True).RUN_STARTERS
-    assert callable(starters["pipeline"])
-
-
 def test_7011_r1_5_start_schedule_run_starts_a_pipeline_run(monkeypatch):
     dispatch = load(DISPATCH, fresh=True)
     started = []

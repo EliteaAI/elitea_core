@@ -340,4 +340,4 @@ def test_7011_r2_5_predict_error_closes_the_run_as_failed(world):
 
     world.run()
 
-    assert (world.run_row().status, world.run_row().reason) == ("failed", "the agent call failed")
+    assert (world.run_row().status, world.run_row().reason) == ("failed", "the run call failed")

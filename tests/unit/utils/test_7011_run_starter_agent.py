@@ -194,7 +194,7 @@ def test_7011_r2_5_predict_error_closes_the_run_as_failed(world):
     world.predict_error = RuntimeError("rpc down")
     _run(world)
     assert world.names()[-2:] == ["finish_error", "fail"]
-    assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "the agent call failed")
+    assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "the run call failed")
 
 
 @pytest.mark.parametrize("step", ["create_error", "link_error"])
