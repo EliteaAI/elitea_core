@@ -478,7 +478,7 @@ def sanitize_trigger_for_write(settings: dict, stored_trigger: dict | None) -> d
     """
     if "trigger" not in settings:
         return dict(settings)
-    # Compared as strings: importing TriggerType here creates a circular import
+    # Plain strings: this leaf module does not import the trigger models
     if (stored_trigger or {}).get("type") == "schedule":
         return {**settings, "trigger": stored_trigger}
     if (settings["trigger"] or {}).get("type") == "schedule":

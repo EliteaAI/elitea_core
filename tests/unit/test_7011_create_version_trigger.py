@@ -13,7 +13,7 @@ import pytest
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGIN_ROOT / "tests"))
 
-from fixtures.helpers import load_utils_module
+from unit.test_7011_legacy_trigger_write_rules import load_trigger_rule_module
 
 PKG = "pkg_7011_create"
 CHAT = {"type": "chat_message"}
@@ -56,25 +56,9 @@ def _package(name):
     return module
 
 
-def _trigger_rule_module():
-    for name in ("plugins", "plugins.elitea_core", "plugins.elitea_core.utils"):
-        if name not in sys.modules:
-            _package(name)
-    constants = sys.modules.setdefault(
-        "plugins.elitea_core.utils.constants", types.ModuleType("plugins.elitea_core.utils.constants"))
-    if not hasattr(constants, "PROMPT_LIB_MODE"):
-        constants.PROMPT_LIB_MODE = "prompt_lib"
-    tools = sys.modules.setdefault("tools", types.ModuleType("tools"))
-    if not hasattr(tools, "this"):
-        tools.this = types.SimpleNamespace(module_name="elitea_core")
-    if not hasattr(tools, "VaultClient"):
-        tools.VaultClient = object
-    return load_utils_module(PLUGIN_ROOT / "utils", "pipeline_trigger")
-
-
 @pytest.fixture
 def create_version(isolated_sys_modules):
-    rule_module = _trigger_rule_module()
+    rule_module = load_trigger_rule_module()
     for name in (PKG, f"{PKG}.models", f"{PKG}.models.pd", f"{PKG}.utils"):
         _package(name)
     tools = types.ModuleType("tools")

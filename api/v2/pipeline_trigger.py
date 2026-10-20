@@ -143,6 +143,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
         """
         payload = dict(request.json)
 
+        # Before the body check: every schedule write gets the same answer, even one with a bad cron (R1.1)
+        if (payload or {}).get("type") == TriggerType.schedule.value:
+            return {
+                "ok": False,
+                "error": "Schedules moved. Use the Schedules API: "
+                         f"/elitea_core/schedule/prompt_lib/{project_id}",
+            }, 400
+
         # Validate input
         try:
             update_data = UpdatePipelineTrigger.parse_obj(payload)
@@ -151,14 +159,6 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {
                 "ok": False,
                 "error": f"Validation error: {e.errors()}"
-            }, 400
-
-        # Compared as a string: importing TriggerType here is a circular import (see US-23).
-        if update_data.type == "schedule":
-            return {
-                "ok": False,
-                "error": "Schedules moved. Use the Schedules API: "
-                         f"/elitea_core/schedule/prompt_lib/{project_id}",
             }, 400
 
         # Additional validation for webhook type

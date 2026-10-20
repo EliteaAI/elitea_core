@@ -22,9 +22,8 @@ OTHER_SCHEDULE = {"type": "schedule", "cron": "0 1 * * *", "timezone": "UTC", "c
 WEBHOOK = {"type": "webhook", "webhook_type": "custom", "created_by": 7}
 
 
-@pytest.fixture(scope="module")
-def rule():
-    """sanitize_trigger_for_write from utils/pipeline_trigger.py, plugin imports stubbed."""
+def load_trigger_rule_module():
+    """utils/pipeline_trigger.py with its plugin imports stubbed; other 7011 tests import this loader."""
     for name in ("plugins", "plugins.elitea_core", "plugins.elitea_core.utils"):
         if name not in sys.modules:
             pkg = types.ModuleType(name)
@@ -39,8 +38,13 @@ def rule():
         tools.this = types.SimpleNamespace(module_name="elitea_core")
     if not hasattr(tools, "VaultClient"):
         tools.VaultClient = object
-    module = load_utils_module(PLUGIN_ROOT / "utils", "pipeline_trigger")
-    return module.sanitize_trigger_for_write
+    return load_utils_module(PLUGIN_ROOT / "utils", "pipeline_trigger")
+
+
+@pytest.fixture(scope="module")
+def rule():
+    """sanitize_trigger_for_write from utils/pipeline_trigger.py, plugin imports stubbed."""
+    return load_trigger_rule_module().sanitize_trigger_for_write
 
 
 @pytest.mark.unit

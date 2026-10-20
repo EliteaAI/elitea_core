@@ -143,8 +143,10 @@ def _call(harness, verb, body=None):
     return getattr(harness.module.PromptLibAPI(), verb)(project_id=PROJECT_ID, version_id=VERSION_ID)
 
 
-def test_7011_r1_1_put_schedule_is_400_naming_the_schedules_api(harness):
-    body, status = _call(harness, 'put', {'type': 'schedule', 'cron': '0 9 * * *', 'timezone': 'UTC'})
+@pytest.mark.parametrize('cron', ['0 9 * * *', 'not a cron'])
+def test_7011_r1_1_put_schedule_is_400_naming_the_schedules_api(harness, cron):
+    """Even a schedule body that fails the body check gets the Schedules API answer (review round 1)."""
+    body, status = _call(harness, 'put', {'type': 'schedule', 'cron': cron, 'timezone': 'UTC'})
     assert status == 400
     assert f'/elitea_core/schedule/prompt_lib/{PROJECT_ID}' in body['error']
 
