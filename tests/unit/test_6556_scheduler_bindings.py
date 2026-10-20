@@ -128,19 +128,6 @@ def test_plan_carries_the_expected_handler(bindings):
     assert plan["pipeline_scheduling"]["rpc_func"] == "entity_schedules_check"
 
 
-def test_index_handler_matches_the_rpc_this_plugin_registers(bindings):
-    registered = {
-        arg.value
-        for node in ast.walk(ast.parse((PLUGIN_ROOT / "rpc" / "index_scheduling.py").read_text()))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "rpc"
-        for arg in node.args
-        if isinstance(arg, ast.Constant)
-    }
-    assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["index_scheduling"] in registered
-
-
 def _rpc_names(module_file):
     return {
         arg.value
@@ -151,6 +138,10 @@ def _rpc_names(module_file):
         for arg in node.args
         if isinstance(arg, ast.Constant)
     }
+
+
+def test_index_handler_matches_the_rpc_this_plugin_registers(bindings):
+    assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["index_scheduling"] in _rpc_names("index_scheduling.py")
 
 
 def test_r4_4_el_7011_pipeline_row_is_bound_to_the_generic_tick(bindings):
