@@ -12,6 +12,7 @@ from ..models.all import ApplicationVersion
 from ..utils.budget_door import schema_may_use_llm
 from ..utils.utils import verify_signature
 from ..utils.exceptions import VerifySignatureError, PoolSaturationError
+from ..utils.pipeline_execution import TriggerType
 from ..utils.sio_utils import SioEvents
 from ..utils.vectorstore import get_pgvector_connection_string
 
@@ -30,6 +31,7 @@ class Method:
         predict_wait=True,
         predict_timeout=float(60*60),  # 1 hour
         return_chat_history: bool = False,
+        trigger_source: str = TriggerType.API,
     ):
         with db.get_session(project_id) as session:
             application_version = session.query(ApplicationVersion).options(
@@ -108,6 +110,7 @@ class Method:
         payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
         # Same as predict_sio: resolve {{secret.*}} and hand the worker its pgvector connstr pre-fork
         payload = VaultClient(parsed.project_id).unsecret(payload)
+        payload['trigger_source'] = trigger_source  # usage analytics groups runs by it (BUG-12)
         try:
             payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
         except Exception as e:  # pylint: disable=W0703

@@ -31,6 +31,7 @@ from ...models.all import ApplicationVersion, Application
 from ...models.enums.all import AgentTypes
 from ...models.pd.pipeline_trigger import TriggerType
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
+from ...utils.pipeline_execution import TriggerType as RunTrigger  # pylint: disable=E0402
 from ...utils.exceptions import VerifySignatureError, PoolSaturationError  # pylint: disable=E0402
 from ...utils.pipeline_trigger import (
     WEBHOOK_TYPE_CONFIG,
@@ -228,6 +229,7 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
                 raw=raw_data,
                 webhook_signature=webhook_signature,
                 webhook_type=webhook_type,
+                trigger_source=RunTrigger.WEBHOOK,
             )
             if "error" in result:
                 return result, 400

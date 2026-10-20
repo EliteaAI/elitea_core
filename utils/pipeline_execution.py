@@ -28,10 +28,15 @@ from ..utils.sio_utils import SioEvents
 
 
 class TriggerType:
-    """Trigger type constants for conversation metadata."""
-    SCHEDULED = "scheduled"
+    """The shared run trigger enum: conversation meta.execution_type and the predict trigger_source (BUG-12)."""
+    CHAT = "chat"
+    API = "api"
+    MCP = "mcp"
     WEBHOOK = "webhook"
-    MANUAL = "manual"
+    SCHEDULED = "scheduled"
+    SCHEDULE_MANUAL = "schedule_manual"
+    MANUAL = "manual"  # legacy: stored by Run now and Test run before BUG-12, still listed
+    VALUES = (CHAT, API, MCP, WEBHOOK, SCHEDULED, SCHEDULE_MANUAL, MANUAL)
 
 
 def create_trigger_run_conversation(
