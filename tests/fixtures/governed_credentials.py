@@ -5,7 +5,12 @@
 helpers dispatch such a payload through the real ``admit_dispatch`` and bring the admitted run to ``running``.
 """
 import json
+import sys
+import textwrap
+import types
 import uuid
+
+from fixtures import admission_env
 
 RUN = "run-1"
 SUBJECT = "idp:tid-1:oid-42"
@@ -105,3 +110,29 @@ def sealed_tool_settings(call, tool_index=0, field="credentials"):
 
 def dumped(value) -> str:
     return json.dumps(value, sort_keys=True, default=str)
+
+
+def build_wrapper(ns, module, original):
+    """The real ``_maintenance_gated_start_task`` of module.py (its source, run against the real gates), in front of
+    ``original``. Only the maintenance and budget doors are fakes: they would call the Pylon runtime."""
+    from pathlib import Path
+    source = (Path(__file__).parents[2] / "module.py").read_text()
+    text = source[source.index("def _maintenance_gated_start_task"):
+                  source.index("self.task_node.start_task = _maintenance_gated_start_task")]
+    text = textwrap.dedent("        " + text).replace("from .utils.", f"from {admission_env.PKG}.utils.")
+    gate = types.ModuleType(f"{admission_env.PKG}.utils.maintenance_gate")
+    gate.is_maintenance_active = lambda: False
+    budget = types.ModuleType(f"{admission_env.PKG}.utils.budget_door")
+    budget.closed_budget_scope = lambda *a, **k: None
+    budget.dispatch_may_use_llm = lambda kwargs: False
+    budget.dispatch_owner = lambda kwargs: (None, None)
+    budget.dispatch_uses_own_model = lambda *a, **k: False
+    sys.modules[gate.__name__], sys.modules[budget.__name__] = gate, budget
+    module.worker_capabilities = types.SimpleNamespace(has_capable_worker=lambda required: True)
+    namespace = {
+        "self": module, "log": ns.log, "_original_start_task": original,
+        "apply_envelope_gate": ns.caps.apply_envelope_gate, "stamp_predict_run_id": ns.run_id.stamp_predict_run_id,
+        "admit_dispatch": ns.adm.admit_dispatch, "track_context": ns.adm.track_context,
+    }
+    exec(compile(text, "module.py", "exec"), namespace)  # pylint: disable=W0122
+    return namespace["_maintenance_gated_start_task"]

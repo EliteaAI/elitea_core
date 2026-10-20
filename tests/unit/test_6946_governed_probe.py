@@ -87,7 +87,7 @@ def test_a_probe_sends_the_stored_configuration_without_secrets_and_a_slot_to_th
     settings = kwargs["settings"]
     assert kwargs["configuration_type"] == "jira" and set(kwargs) == {"configuration_type", "settings"}
     assert "token" not in settings and settings["base_url"] == "https://jira.example"
-    [ticket] = [key for key in env.redis.values if key.startswith(ns.credential_release.PROBE_KEY)]
+    [ticket] = [key for key in env.at_start[0] if key.startswith(ns.credential_release.PROBE_KEY)]
     probe_ref = ticket[len(ns.credential_release.PROBE_KEY):]
     assert settings["credential_slot"] == {
         "v": 1, "credential_ref": probe.cred.ref_id, "credential_generation": 1, "fields": ["token"],
@@ -110,10 +110,22 @@ def test_the_ticket_is_metadata_only_lives_ninety_seconds_and_follows_the_commit
     env.redis.set = watched_set
     probe.run()
     assert order == [("ticket", 1)]   # the probe event was committed when the ticket was stored
-    [(key, ttl)] = list(env.redis.ttls.items())
+    values, ttls = env.at_start
+    [(key, ttl)] = list(ttls.items())
     assert ttl == 90
-    ticket = json.loads(env.redis.values[key] if key in env.redis.values else "{}")
-    assert ticket == {} or set(ticket) == {"project_id", "credential_ref", "credential_generation", "task_name", "user_id"}
+    assert set(json.loads(values[key])) == {"project_id", "credential_ref", "credential_generation", "task_name", "user_id"}
+
+
+def test_the_ticket_is_removed_when_the_task_could_not_run(ns, env, probe):
+    env.start_raises = RuntimeError("maintenance")
+    assert probe.run()["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert not [key for key in env.redis.values if key.startswith(ns.credential_release.PROBE_KEY)]
+    env.start_raises, env.start_result = None, None   # saturated pool
+    probe.run()
+    env.start_result, env.task_result = "task-1", ...   # timeout
+    probe.run()
+    assert not [key for key in env.redis.values if key.startswith(ns.credential_release.PROBE_KEY)]
+    assert env.stopped == ["task-1"]
 
 
 def test_the_probe_event_is_recorded_before_the_task_and_the_outcome_after(ns, env, probe):
@@ -251,6 +263,29 @@ def test_no_worker_that_can_run_it_is_a_readable_refusal_before_anything_is_reco
     assert env.recorded == [] and env.redis.calls == []
 
 
+def test_a_configuration_that_moved_between_the_facts_and_the_read_is_not_probed(ns, env, probe):
+    probe.stored["configuration_generation"] = 4   # the saved configuration changed after the reference was approved
+    refused(probe, probe.run(), "CREDENTIAL_GENERATION_MISMATCH")
+    assert env.redis.calls == [] and env.release_calls == []
+
+
+def test_a_configuration_with_no_secret_value_is_refused_not_probed_with_an_empty_slot(ns, env, probe):
+    probe.stored["token"] = ""
+    refused(probe, probe.run(), "CREDENTIAL_REFERENCE_REQUIRED")
+    probe.stored["token"] = "{{secret.jira_token}}"
+    env.secret_fields["jira"] = []
+    env.denied.clear()
+    refused(probe, probe.run(), "CREDENTIAL_REFERENCE_REQUIRED")
+
+
+def test_a_stored_header_map_is_taken_out_and_asked_for_like_a_run(ns, env, probe):
+    probe.stored["headers"] = {"X-Api-Key": "{{secret.h1}}", "X-Empty": ""}
+    assert probe.run() == {"success": True}
+    [(_, kwargs, _, _)] = env.started
+    assert kwargs["settings"]["headers"] == {}
+    assert kwargs["settings"]["credential_slot"]["fields"] == ["token", "headers.X-Api-Key"]
+
+
 def test_a_stored_template_outside_the_secret_fields_is_refused(ns, env, probe):
     probe.stored["base_url"] = "{{secret.url}}"
     refused(probe, probe.run(), "CREDENTIAL_REFERENCE_REQUIRED")
@@ -308,10 +343,14 @@ def test_probe_messages_are_fixed_per_code_and_carry_no_ids(ns, env, probe):
 # --- the probe and the release agree ------------------------------------------------------------
 
 def test_what_the_probe_sends_is_what_the_release_accepts(ns, env, probe):
+    ns.need_transport()
+    env.redis.set = lambda key, value, ex=None: env.redis.values.__setitem__(key, value) or True
     probe.run()
+    values, _ = env.at_start
+    env.redis.values.update(values)   # the task asks while the probe runs: the ticket is there then
     [(_, kwargs, _, _)] = env.started
     slot = kwargs["settings"]["credential_slot"]
-    private, public = ns.transport.generate_recipient_keypair()
+    private, public = ns.keypair()
     request = dict(project_id=1, context_ref=None, probe_ref=slot["probe_ref"],
                    caller={"kind": "indexer_worker", "task_name": TASK, "run_id": None},
                    toolkit_instance_id="probe", field="configuration", slot=slot, recipient_key=public)

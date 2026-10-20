@@ -8,8 +8,25 @@ that shape; it runs at the dispatch chokepoint (``admission.admit_dispatch``) af
 inherited context accepted, and before the payload is handed to the task node.
 
 Nothing here reads a secret store or logs a value. A credential that cannot be matched to a decision, or whose type has
-no known secret fields, is a refusal, never a pass: several toolkits treat a missing secret as anonymous access.
+no known secret fields, is a refusal, never a pass: several toolkits treat a missing secret as anonymous access. A
+credential configuration that holds no secret value at all is refused too (a slot asking for nothing would let a toolkit
+run without its credential).
+
+Secret fields come from ``configurations.configuration_secret_fields``: dotted paths, and ``<path>.*`` for a dict whose
+every value is secret (``additionalProperties`` of format password, e.g. the headers of an OpenAPI configuration); the
+seal removes every key under it and asks for the concrete keys. Until the walker lists those, a dict-valued field named
+like a header map (``DICT_SECRET_FIELDS``) is treated the same way, so no resolved header value stays in a payload.
+
+What is and is not covered, stated so nobody has to guess:
+  - the free-form ``{{secret.*}}`` check reads toolkit settings (the run's and the prefetched sub-agents'), including the
+    non-secret fields of credential configurations; the instructions, variables and user input of the run are out of its
+    scope;
+  - ``mcp_tokens`` (the browser's OAuth tokens for MCP servers) are not store material: they stay in the payload and in the
+    parallel stash, as before;
+  - a release is bound to the context (and the decision), not to a task id: any process of the run that holds both can ask
+    (design-accepted, WP-1D design section 5).
 """
+import re
 from typing import Callable, Mapping, Optional
 
 from tools import this
@@ -29,6 +46,11 @@ MAX_SCAN_NODES = 100_000
 MAX_SCAN_DEPTH = 32
 REQUIRED = "CREDENTIAL_REFERENCE_REQUIRED"
 CONFIGURATION_TYPE = "configuration_type"
+WILDCARD = ".*"
+MAX_SLOT_FIELDS = 32   # what one slot may ask for; the release refuses more
+# Dict-valued fields that carry secrets whether or not the schema walker says so (HTTP header maps)
+DICT_SECRET_FIELDS = ("headers", "extra_headers", "auth_headers")
+_KEY = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # a concrete key under a wildcard path: what a release request can name
 
 
 def _prefetched_toolkits(payload) -> list:
@@ -49,19 +71,37 @@ def dispatched_toolkits(payload) -> list:
 
 # --- free-form secret templates (checked before the payload-wide unsecret) --------------------
 
-def _template_outside_configurations(node, budget, depth) -> bool:
+def _walk_templates(node, budget, depth, *, configs=None, path="", skip=None) -> bool:
+    """A ``{{secret.*}}`` string in ``node``. Without ``skip`` a configuration dict is collected into ``configs`` and not
+    entered; with ``skip`` (``(exact paths, wildcard bases)``) the walk enters it and passes over its secret fields."""
     budget[0] -= 1
     if budget[0] < 0 or depth > MAX_SCAN_DEPTH:
         return True   # a payload too large or deep to look through counts as holding one
     if isinstance(node, str):
         return SECRET_TEMPLATE in node
     if isinstance(node, dict):
-        if CONFIGURATION_TYPE in node:
-            return False   # a configuration: its secret fields are sealed (credentials) or platform-internal
-        return any(_template_outside_configurations(value, budget, depth + 1) for value in node.values())
+        if configs is not None and CONFIGURATION_TYPE in node:
+            configs.append(node)
+            return False
+        if skip is not None and path in skip[1]:
+            return False
+        for key, value in node.items():
+            child = f"{path}.{key}" if path else str(key)
+            if skip is not None and child in skip[0]:
+                continue
+            if _walk_templates(value, budget, depth + 1, configs=configs, path=child, skip=skip):
+                return True
+        return False
     if isinstance(node, (list, tuple)):
-        return any(_template_outside_configurations(value, budget, depth + 1) for value in node)
+        return any(_walk_templates(value, budget, depth + 1, configs=configs, path=path, skip=skip) for value in node)
     return False
+
+
+def _skip_of(paths) -> tuple:
+    """``(exact paths, wildcard bases)`` of the secret fields of a type, with the header-map fields always included."""
+    exact = {path for path in paths if not path.endswith(WILDCARD)}
+    wild = {path[:-len(WILDCARD)] for path in paths if path.endswith(WILDCARD)}
+    return exact | set(DICT_SECRET_FIELDS), wild | set(DICT_SECRET_FIELDS)
 
 
 def has_secret_template(node) -> bool:
@@ -84,15 +124,31 @@ def has_secret_template(node) -> bool:
 
 
 def has_free_form_secret(module, payload) -> bool:
-    """Does a toolkit of this payload hold a ``{{secret.*}}`` template outside a configuration dict? Always ``False``
-    (and nothing is read) when governance is off. Call it before the payload is unsecreted."""
+    """Does a toolkit of this payload hold a ``{{secret.*}}`` template that is not in a secret field of a configuration?
+    Always ``False`` (and nothing is read) when governance is off. Call it before the payload is unsecreted. The non-secret
+    fields of the configurations are read too, with one call for the secret fields of all their types; a type that call
+    does not know is read whole, and a call that fails counts as found."""
     from .governance import is_governed  # pylint: disable=C0415
 
     if not is_governed(module):
         return False
-    budget = [MAX_SCAN_NODES]
-    return any(
-        _template_outside_configurations(tool.get("settings"), budget, 0) for tool in dispatched_toolkits(payload))
+    budget, configs = [MAX_SCAN_NODES], []
+    for tool in dispatched_toolkits(payload):
+        if _walk_templates(tool.get("settings"), budget, 0, configs=configs):
+            return True
+    if not configs:
+        return False
+    names = sorted({config.get(CONFIGURATION_TYPE) for config in configs if isinstance(config.get(CONFIGURATION_TYPE), str)})
+    try:
+        known = configuration_secret_fields(names) if names else {}
+    except Exception:  # pylint: disable=W0703
+        return True
+    for config in configs:
+        listed = known.get(config.get(CONFIGURATION_TYPE)) if isinstance(known, Mapping) else None
+        skip = _skip_of(listed) if isinstance(listed, (list, tuple)) else None
+        if _walk_templates(config, budget, 0, skip=skip):
+            return True
+    return False
 
 
 def mark_free_form_secret(payload, found: bool) -> None:
@@ -147,11 +203,54 @@ def _path_present(node: dict, path: str) -> bool:
     return isinstance(node, dict) and leaf in node
 
 
+def _value_at(config, path):
+    node = config
+    for part in path.split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+    return node
+
+
+def _strip_dict(config: dict, base: str, held: list) -> None:
+    """Remove every key under the dict at ``base`` (a wildcard path); the keys that held a value are asked for."""
+    node = _value_at(config, base)
+    if isinstance(node, dict):
+        for key in list(node):
+            value = node.pop(key)
+            if value not in (None, ""):
+                if not isinstance(key, str) or not _KEY.match(key):
+                    raise CredentialDecisionError(REQUIRED)   # a key a release request cannot name
+                held.append(f"{base}.{key}")
+    elif node not in (None, "") and _remove_path(config, base):
+        held.append(base)
+
+
 def strip_secret_fields(config: dict, paths) -> list:
-    """Remove every secret path from a configuration dict (empty ones too) and return the paths that held a value,
-    in schema order. Asserts the result: a path still present is a refusal."""
-    held = [path for path in paths if _remove_path(config, path)]
-    if any(_path_present(config, path) for path in paths):
+    """Remove every secret path from a configuration dict (empty ones too) and return the paths that held a value, in
+    schema order. A path ``<base>.*`` removes every key under the dict at ``<base>`` and returns the concrete
+    ``<base>.<key>``; a header-map field (``DICT_SECRET_FIELDS``) the paths do not cover is treated the same way. Asserts
+    the result: a path or a dict still holding something is a refusal, and so is a slot asking for too much."""
+    paths = list(paths)
+    held = []
+    for path in paths:
+        if path.endswith(WILDCARD):
+            _strip_dict(config, path[:-len(WILDCARD)], held)
+        elif _remove_path(config, path):
+            held.append(path)
+    covered = {path[:-len(WILDCARD)] for path in paths if path.endswith(WILDCARD)} | set(paths)
+    for name in DICT_SECRET_FIELDS:
+        if name in config and name not in covered and not any(path.startswith(f"{name}.") for path in paths):
+            _strip_dict(config, name, held)
+    for path in paths:
+        base = path[:-len(WILDCARD)] if path.endswith(WILDCARD) else None
+        if base is not None:
+            left = _value_at(config, base)
+            if left not in (None, "", {}):
+                raise CredentialDecisionError(REQUIRED)
+        elif _path_present(config, path):
+            raise CredentialDecisionError(REQUIRED)
+    if any(config.get(name) not in (None, "", {}) for name in DICT_SECRET_FIELDS if name not in covered):
+        raise CredentialDecisionError(REQUIRED)
+    if len(held) > MAX_SLOT_FIELDS:
         raise CredentialDecisionError(REQUIRED)
     return held
 
@@ -176,7 +275,8 @@ def _slot_matches(slot, entry: Mapping) -> bool:
         and slot.get("credential_ref") == entry.get("credential_ref")
         and slot.get("credential_generation") == entry.get("credential_generation")
         and slot.get("decision_id") == entry.get("decision_id")
-        and isinstance(slot.get("fields"), list) and all(isinstance(path, str) and path for path in slot["fields"])
+        and isinstance(slot.get("fields"), list) and 0 < len(slot["fields"]) <= MAX_SLOT_FIELDS
+        and all(isinstance(path, str) and path for path in slot["fields"])
     )
 
 
@@ -254,6 +354,8 @@ def seal_payload(  # pylint: disable=R0912,R0913,R0914
             raise CredentialDecisionError(REQUIRED)
         held = strip_secret_fields(data, paths[data[CONFIGURATION_TYPE]])
         if existing is None:
+            if not held:
+                raise CredentialDecisionError(REQUIRED)   # nothing to ask for: a slot would let the toolkit run without it
             data[SLOT_KEY] = slot_of(entry, held)
     return len(to_seal)
 

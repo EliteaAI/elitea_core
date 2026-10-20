@@ -319,6 +319,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             },
         )
 
+        # Governed (#6946): the parked parent's admission context was completed when the parent stopped, and the children
+        # and the reconcile run still run under it; keep it live (unless expired or revoked) until the epoch reconciles
+        self._parallel_resume_context(project_id, reconcile_payload, [spec.get('child_payload') for spec in specs])
+
         # Prime the gate to the full roster BEFORE launching any child, so a
         # fast child's terminal event can never see a partial count. One
         # round-trip: SET remaining=N, register this epoch under the parent's
@@ -436,6 +440,32 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # N separate per-child UPDATEs).
         if task_id_map:
             self._parallel_set_child_task_ids(parent_thread_id, epoch, task_id_map)
+
+    @web.method()
+    def _parallel_resume_context(self, project_id, *payloads):
+        """Governed only: reopen the admission contexts the given payloads (a list of payloads, or a payload) run under."""
+        if not getattr(getattr(self, 'governance_profile', None), 'enabled', False):
+            return
+        try:
+            from ..utils.admission import reopen_contexts  # pylint: disable=C0415
+            flat = [item for payload in payloads for item in (payload if isinstance(payload, list) else [payload])]
+            reopen_contexts(self, project_id, [
+                (item.get('envelope') or {}).get('context_ref') for item in flat if isinstance(item, dict)])
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] could not reopen the admission context (project=%s)", project_id)
+
+    @web.method()
+    def _parallel_track_reconcile(self, task_id, project_id, payload):
+        """Governed only: the reconcile run closes the admission context when it stops, as the parked parent did."""
+        if not getattr(getattr(self, 'governance_profile', None), 'enabled', False):
+            return
+        try:
+            from ..utils.admission import track_context  # pylint: disable=C0415
+            context_ref = (payload.get('envelope') or {}).get('context_ref')
+            if context_ref:
+                track_context(self, task_id, project_id, context_ref)
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] could not track the reconcile run's context (task=%s)", task_id)
 
     @web.method()
     def parallel_dispatch_on_child_terminal(self, child_meta, child_result):
@@ -675,6 +705,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     1.0, self._parallel_reinvoke_parent, parent_thread_id, epoch,
                 )
                 return
+            self._parallel_track_reconcile(task_id, project_id, payload)
             chat_project_id = stash.get('chat_project_id')
             parent_message_id = stash.get('parent_message_id')
             if chat_project_id and parent_message_id:

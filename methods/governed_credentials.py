@@ -31,17 +31,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     """
 
     @web.method()
-    def release_credential(  # pylint: disable=R0913
-        self, project_id=None, context_ref=None, probe_ref=None, caller=None, toolkit_instance_id=None, field=None,
-        slot=None, recipient_key=None, **kwargs,
-    ):
+    def release_credential(self, **kwargs):
         """ Worker bus (``restricted_release_credential``): the material of one credential slot, sealed to the
-        requester's key. Registered only when governed. Never raises. """
-        from ..utils.credential_release import release_credential  # pylint: disable=C0415
+        requester's key. Registered only when governed. Never raises; only the request keys are read from ``kwargs``
+        (the bus is not trusted to send nothing else). """
+        from ..utils.credential_release import REQUEST_KEYS, release_credential  # pylint: disable=C0415
         #
-        return release_credential(
-            self, project_id=project_id, context_ref=context_ref, probe_ref=probe_ref, caller=caller,
-            toolkit_instance_id=toolkit_instance_id, field=field, slot=slot, recipient_key=recipient_key, **kwargs)
+        try:
+            return release_credential(self, **{key: kwargs.get(key) for key in REQUEST_KEYS})
+        except Exception:  # pylint: disable=W0703
+            return {"ok": False, "reason_code": "DEPENDENCY_UNAVAILABLE",
+                    "message": "A required service is unavailable; the run was not started. Try again."}
 
     @web.method()
     def governed_check_connection(self, project_id, configuration_uuid, config_type, user_id):

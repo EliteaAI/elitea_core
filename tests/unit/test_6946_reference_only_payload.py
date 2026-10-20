@@ -19,33 +19,9 @@ sys.path.insert(0, str(PLUGIN_ROOT / "tests"))
 
 from fixtures import admission_env  # noqa: E402  pylint: disable=C0413
 from fixtures.governed_credentials import (  # noqa: E402  pylint: disable=C0413
-    RUN, SECRET, Credential, call_kwargs, dispatch, dumped, payload_of, sealed_tool_settings, seeded,
+    RUN, SECRET, Credential, build_wrapper, call_kwargs, dispatch, dumped, payload_of, run_to_running,
+    sealed_tool_settings, seeded,
 )
-
-@pytest.fixture(scope="module")
-def parallel():
-    """The parallel dispatch methods, loaded standalone against a minimal ``pylon.core.tools`` (they use only
-    ``web.method`` and ``log``); whatever other suites left in ``sys.modules`` is put back."""
-    names = ("pylon", "pylon.core", "pylon.core.tools")
-    saved = {name: sys.modules.get(name) for name in names}
-    quiet = types.SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None,
-                                  exception=lambda *a, **k: None, debug=lambda *a, **k: None)
-    tools = types.ModuleType("pylon.core.tools")
-    tools.log, tools.web = quiet, types.SimpleNamespace(method=lambda *a, **k: (lambda function: function))
-    sys.modules.update({"pylon": types.ModuleType("pylon"), "pylon.core": types.ModuleType("pylon.core"),
-                        "pylon.core.tools": tools})
-    try:
-        spec = importlib.util.spec_from_file_location("parallel_dispatch_6946", PLUGIN_ROOT / "methods" / "parallel_dispatch.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    finally:
-        for name, previous in saved.items():
-            if previous is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = previous
-    return module
-
 
 @pytest.fixture(scope="module")
 def ns(tmp_path_factory):
@@ -59,6 +35,23 @@ def ns(tmp_path_factory):
 def env(ns):
     ns.env.reset()
     return ns.env
+
+
+@pytest.fixture(scope="module")
+def parallel(ns):
+    """The parallel dispatch methods, loaded as part of the plugin package (their relative imports resolve to the
+    harness's modules) against a minimal ``pylon.core.tools`` that has ``web.method``."""
+    package = types.ModuleType(f"{admission_env.PKG}.methods")
+    package.__path__ = []
+    sys.modules[package.__name__] = package
+    tools = sys.modules["pylon.core.tools"]
+    tools.web = types.SimpleNamespace(method=lambda *a, **k: (lambda function: function))
+    spec = importlib.util.spec_from_file_location(
+        f"{admission_env.PKG}.methods.parallel_dispatch", PLUGIN_ROOT / "methods" / "parallel_dispatch.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def contexts(env, ns):
@@ -451,14 +444,88 @@ def test_a_marked_payload_is_refused_at_the_gate_and_the_mark_never_travels(ns, 
     assert ns.credential_slots.FREE_FORM_SECRET_MARK not in clean
 
 
-def test_the_predict_entry_points_check_before_they_unsecret_and_mark_after():
-    for path in ("rpc/application.py", "methods/predict.py"):
-        text = (PLUGIN_ROOT / path).read_text()
-        for site in [i for i in range(len(text)) if text.startswith("has_free_form_secret(self, payload)", i)]:
-            after = text[site:site + 600]
-            assert after.index(".unsecret(payload)") < after.index("mark_free_form_secret(payload, free_form_secret)")
-    assert (PLUGIN_ROOT / "rpc/application.py").read_text().count("mark_free_form_secret(payload, free_form_secret)") == 2
-    assert (PLUGIN_ROOT / "methods/predict.py").read_text().count("mark_free_form_secret(payload, free_form_secret)") == 1
+def calls_in(path, function_name_of):
+    """``{function: [(line, called name)]}`` of the calls in a source file, from its syntax tree."""
+    import ast
+    tree = ast.parse((PLUGIN_ROOT / path).read_text())
+    found = {}
+    for function in ast.walk(tree):
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for call in ast.walk(function):
+                if isinstance(call, ast.Call):
+                    name = function_name_of(call.func)
+                    if name:
+                        found.setdefault(function.name, []).append((call.lineno, name))
+    return found
+
+
+def called(node):
+    import ast
+    return node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
+
+
+@pytest.mark.parametrize("path, count", [("rpc/application.py", 2), ("methods/predict.py", 1)])
+def test_every_predict_entry_point_checks_before_it_unsecrets_and_marks_after(path, count):
+    """The entry points need the Pylon runtime and cannot run here; their order is read from the syntax tree."""
+    sites = [lines for lines in calls_in(path, called).values() if any(name == "has_free_form_secret" for _, name in lines)]
+    assert len(sites) == count
+    for lines in sites:
+        at = {name: [line for line, other in lines if other == name] for name in
+              ("has_free_form_secret", "unsecret", "mark_free_form_secret", "start_task")}
+        assert len(at["has_free_form_secret"]) == len(at["mark_free_form_secret"]) == 1
+        check, mark = at["has_free_form_secret"][0], at["mark_free_form_secret"][0]
+        payload_wide = [line for line in at["unsecret"] if line > check]   # (the webhook secret is unsecreted earlier)
+        assert payload_wide and check < payload_wide[0] < mark < min(line for line in at["start_task"] if line > mark)
+
+
+def registrations(function_name):
+    """``(function, method registered, bus name)`` of the ``rpc_node.register/unregister`` calls of module.py, and
+    whether each sits under ``if self.governance_profile.enabled``."""
+    import ast
+    tree = ast.parse((PLUGIN_ROOT / "module.py").read_text())
+    found = []
+
+    def visit(node, guarded):
+        if isinstance(node, ast.If) and "governance_profile.enabled" in ast.unparse(node.test):
+            guarded = True
+        if isinstance(node, ast.Call) and called(node.func) in ("register", "unregister") \
+                and "rpc_node" in ast.unparse(node.func):
+            name = next((ast.literal_eval(k.value) for k in node.keywords if k.arg == "name"), None)
+            found.append((called(node.func), ast.unparse(node.args[0]), name, guarded))
+        for child in ast.iter_child_nodes(node):
+            visit(child, guarded)
+
+    visit(tree, False)
+    return found
+
+
+def test_the_release_handler_is_registered_only_when_governed_and_unregistered_with_it():
+    found = registrations("release")
+    assert ("register", "self.release_credential", "restricted_release_credential", True) in found
+    assert ("unregister", "self.release_credential", "restricted_release_credential", True) in found
+    assert ("register", "self.validate_execution_context", "restricted_validate_execution_context", True) in found
+    assert not [entry for entry in found if entry[2] == "restricted_release_credential" and not entry[3]]
+
+
+def test_the_two_module_methods_are_web_methods_so_they_bind():
+    import ast
+    tree = ast.parse((PLUGIN_ROOT / "methods" / "governed_credentials.py").read_text())
+    methods = {function.name: [ast.unparse(d) for d in function.decorator_list]
+               for function in ast.walk(tree) if isinstance(function, ast.FunctionDef)}
+    assert methods["release_credential"] == ["web.method()"] == methods["governed_check_connection"]
+
+
+def test_the_bus_handler_reads_only_the_request_keys_and_never_raises(ns, env, parallel):
+    """``parallel`` gives the harness a ``web.method``; a ``module`` key from the bus is not an argument."""
+    name = f"{admission_env.PKG}.methods.governed_credentials"
+    spec = importlib.util.spec_from_file_location(name, PLUGIN_ROOT / "methods" / "governed_credentials.py")
+    loaded = importlib.util.module_from_spec(spec)
+    sys.modules[name] = loaded
+    spec.loader.exec_module(loaded)
+    method = loaded.Method.release_credential
+    reply = method(env.module(), module="evil", project_id=1, context_ref=str(uuid.uuid4()), unknown=1)
+    assert reply["ok"] is False and reply["reason_code"] == "STALE_CONTEXT"
+    assert method(env.module(governed=False), project_id=object())["ok"] is False
 
 
 # --- the worker capability a sealed payload needs ----------------------------------------------
@@ -521,6 +588,7 @@ class Launcher:
         self.governance_profile = self.module.governance_profile
         self.stashed, self.order, self.dispatched = [], [], []
         self.parent_context = None
+        self._context_by_task, self._context_lock = self.module._context_by_task, self.module._context_lock
         self.refuse = False
         self.task_node = types.SimpleNamespace(start_task=self.start_task)
         self.ns, self.env = ns, env
@@ -595,14 +663,27 @@ def legacy_envelope():
     return {"schema_version": 1, "security_profile": "legacy", "required_capabilities": [], "context_ref": None}
 
 
+class Original:
+    """The real ``start_task`` behind the wrapper: records what it was handed (a copy, as Redis would hold it)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, copy.deepcopy(kwargs)))
+        return "task-1"
+
+
 def flag_off_dispatch(ns, env, payload, task="indexer_agent"):
-    """The seams of the start_task wrapper in order, as module.py runs them."""
-    module = env.module(governed=False)
-    call = {"args": ["s", "m"], "kwargs": copy.deepcopy(payload), "pool": "agents", "meta": {"project_id": 1}}
-    ns.caps.apply_envelope_gate(task, call, module.governance_profile, module.worker_capabilities)
-    ns.run_id.stamp_predict_run_id(call)
-    assert ns.adm.admit_dispatch(module, task, call, env.request()) is None
-    return call
+    """What reaches the real ``start_task`` through the real ``_maintenance_gated_start_task`` of module.py."""
+    original = Original()
+    wrapper = build_wrapper(ns, env.module(governed=False), original)
+    kwargs = {"args": ["s", "m"], "kwargs": copy.deepcopy(payload), "pool": "agents", "meta": {"project_id": 1},
+              "admission": env.request()}
+    assert wrapper(task, **kwargs) == "task-1"
+    [(args, sent)] = original.calls
+    assert args == (task,) and "admission" not in sent
+    return sent
 
 
 @pytest.mark.parametrize("task", [
@@ -678,3 +759,257 @@ def test_governed_startup_needs_the_release_methods_and_the_transport(ns, env):
         sys.modules.pop("shared_without_transport", None)
     ns.tools.secret_stores = sys.modules["shared_secret_stores_6946"]
     ns.adm.check_governed_startup(env.module())
+
+
+# --- secret fields outside ``properties``: header maps ------------------------------------------
+
+def openapi(env, headers, walker_paths=("api_key",)):
+    """A credential of an OpenAPI-like type whose configuration holds a header map (``Dict[str, SecretStr]``)."""
+    cred = seeded(env, ctype="openapi")
+    env.secret_fields["openapi"] = list(walker_paths)
+    payload = payload_of(cred)
+    config = payload["application"]["version_details"]["tools"][0]["settings"]["credentials"]
+    config["headers"] = headers
+    return cred, payload, config
+
+
+def test_a_header_map_the_walker_does_not_list_is_still_taken_out_and_asked_for(ns, env):
+    _, payload, config = openapi(env, {"X-Api-Key": f"{SECRET}-h1", "X-Other": f"{SECRET}-h2", "X-Empty": ""})
+    call, _ = dispatch(env, ns, payload=payload)
+    sealed = sealed_tool_settings(call)
+    assert sealed["headers"] == {}
+    assert sealed["credential_slot"]["fields"] == ["api_key", "headers.X-Api-Key", "headers.X-Other"]
+    assert SECRET not in dumped(call)
+
+
+def test_a_wildcard_path_removes_every_key_under_the_dict_and_asks_for_the_concrete_ones(ns, env):
+    _, payload, _ = openapi(env, {"X-Api-Key": f"{SECRET}-h1", "X-Empty": ""}, walker_paths=("api_key", "headers.*"))
+    call, _ = dispatch(env, ns, payload=payload)
+    sealed = sealed_tool_settings(call)
+    assert sealed["headers"] == {} and sealed["credential_slot"]["fields"] == ["api_key", "headers.X-Api-Key"]
+    assert SECRET not in dumped(call)
+
+
+def test_a_header_map_given_as_one_string_is_taken_out_whole(ns, env):
+    _, payload, _ = openapi(env, f"{SECRET}-as-text")
+    call, _ = dispatch(env, ns, payload=payload)
+    sealed = sealed_tool_settings(call)
+    assert "headers" not in sealed and sealed["credential_slot"]["fields"] == ["api_key", "headers"]
+    assert SECRET not in dumped(call)
+
+
+def test_a_key_a_release_request_cannot_name_and_a_slot_asking_for_too_much_are_refused(ns, env):
+    for headers in ({"X Key": "v"}, {"X.Key": "v"}, {f"K{n}": "v" for n in range(40)}):
+        env.reset()
+        _, payload, _ = openapi(env, headers)
+        with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+            dispatch(env, ns, payload=payload)
+        assert err.value.reason_code == "CREDENTIAL_REFERENCE_REQUIRED"
+        [row] = contexts(env, ns)
+        assert row.revoked_reason == "NOT_DISPATCHED"
+
+
+def test_a_header_map_of_a_slot_already_sealed_stays_sealed(ns, env):
+    _, payload, _ = openapi(env, {"X-Api-Key": f"{SECRET}-h1"})
+    call, ref = dispatch(env, ns, payload=payload)
+    sealed = copy.deepcopy(call["kwargs"])
+    child = call_kwargs(copy.deepcopy(call["kwargs"]), ref)
+    assert ns.adm.admit_dispatch(env.module(), "indexer_agent", child, None) is None
+    assert child["kwargs"]["application"] == sealed["application"]
+
+
+def test_strip_secret_fields_on_its_own(ns):
+    strip = ns.credential_slots.strip_secret_fields
+    config = {"a": "1", "auth": {"token": "t", "keep": "k"}, "headers": {"X": "x"}, "extra_headers": {"Y": "y"}}
+    assert strip(config, ["a", "auth.token"]) == ["a", "auth.token", "headers.X", "extra_headers.Y"]
+    assert config == {"auth": {"keep": "k"}, "headers": {}, "extra_headers": {}}
+    assert strip({"h": {"k": "v"}}, ["h.*"]) == ["h.k"]
+    assert strip({"headers": {"X": "x"}}, ["headers.*"]) == ["headers.X"]
+    assert strip({}, ["a", "b.*"]) == []
+
+
+def schemas_of_the_sdk():
+    """The JSON schema of every configuration the SDK ships, read in a subprocess (importing the SDK here would put
+    its dependencies into the other suites); skipped when the SDK checkout is not there."""
+    import subprocess
+    sdk = Path("/Users/romanmitusov/Documents/Work/.claude/projects/elitea-sdk/wt/elitea-sdk-integration")
+    if not (sdk / "elitea_sdk" / "configurations" / "__init__.py").is_file():
+        pytest.skip("the SDK checkout is not available")
+    code = ("import json, sys; sys.path.insert(0, sys.argv[1]); "
+            "from elitea_sdk.configurations import AVAILABLE_CONFIGURATIONS as A; print(json.dumps(A))")
+    done = subprocess.run([sys.executable, "-c", code, str(sdk)], capture_output=True, text=True, timeout=120, check=False)
+    if done.returncode != 0 or not done.stdout.strip():
+        pytest.skip("the SDK cannot be imported here")
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def _ref(schema, defs):
+    return defs.get(schema["$ref"].split("/")[-1], {}) if "$ref" in schema else schema
+
+
+def _is_password(schema, defs):
+    schema = _ref(schema, defs)
+    return schema.get("format") == "password" or any(
+        _ref(option, defs).get("format") == "password" for option in schema.get("anyOf", []) if isinstance(option, dict))
+
+
+def instance_of(schema, defs, marks, depth=0):
+    """A value for a schema with a distinct marker in every password leaf, at any depth (properties,
+    additionalProperties, items, anyOf)."""
+    schema = _ref(schema, defs)
+    if depth > 6 or not isinstance(schema, dict):
+        return None
+    if _is_password(schema, defs):
+        marks.append(f"MARK{len(marks)}-{SECRET}")
+        return marks[-1]
+    for option in schema.get("anyOf", []):
+        if isinstance(option, dict) and option.get("type") not in (None, "null"):
+            value = instance_of(option, defs, marks, depth + 1)
+            if value is not None:
+                return value
+    if isinstance(schema.get("properties"), dict):
+        return {name: value for name, sub in schema["properties"].items()
+                if (value := instance_of(sub, defs, marks, depth + 1)) is not None}
+    if isinstance(schema.get("additionalProperties"), dict):
+        value = instance_of(schema["additionalProperties"], defs, marks, depth + 1)
+        return {"X-Key-1": value, "X-Key-2": value} if value is not None else {}
+    if isinstance(schema.get("items"), dict):
+        value = instance_of(schema["items"], defs, marks, depth + 1)
+        return [value] if value is not None else []
+    return None
+
+
+def walker_paths(schema, wildcards):
+    """What ``configuration_secret_fields`` lists today (``properties`` only), or with the ``.*`` paths of dicts whose
+    every value is a password (what the walker is being taught)."""
+    defs, found = schema.get("$defs", {}), []
+
+    def walk(sub, prefix):
+        for name, spec in (_ref(sub, defs).get("properties") or {}).items():
+            path = f"{prefix}{name}"
+            if _is_password(spec, defs):
+                found.append(path)
+            elif wildcards and isinstance(_ref(spec, defs).get("additionalProperties"), dict) \
+                    and _is_password(_ref(spec, defs)["additionalProperties"], defs):
+                found.append(f"{path}.*")
+            elif _ref(spec, defs).get("properties"):
+                walk(spec, f"{path}.")
+
+    walk(schema, "")
+    return found
+
+
+@pytest.mark.parametrize("wildcards", [False, True])
+def test_after_sealing_no_password_of_any_sdk_configuration_remains_at_any_depth(ns, env, wildcards):
+    schemas = schemas_of_the_sdk()
+    assert len(schemas) > 20
+    sealed_types = 0
+    for name, schema in sorted(schemas.items()):
+        marks = []
+        data = instance_of(schema, schema.get("$defs", {}), marks)
+        if not isinstance(data, dict) or not marks:
+            continue   # nothing secret in this configuration: a slot would ask for nothing (refused, tested elsewhere)
+        config = {**data, "configuration_type": name, "configuration_uuid": str(uuid.uuid4()),
+                  "configuration_project_id": 1}
+        entry = {"toolkit_instance_id": "1", "field": "credentials", "configuration_uuid": config["configuration_uuid"],
+                 "credential_ref": str(uuid.uuid4()), "credential_generation": 1, "decision_id": str(uuid.uuid4())}
+        payload = {"tools": [{"id": 1, "type": "x", "settings": {"credentials": config}}]}
+        paths = walker_paths(schema, wildcards)
+        ns.credential_slots.seal_payload(
+            payload, lambda: [entry], secret_fields_of=lambda types, paths=paths: {name: paths})
+        text = dumped(payload)
+        left = [mark for mark in marks if mark in text]
+        assert not left, f"{name} (walker wildcards={wildcards}) leaves {left}"
+        assert config["credential_slot"]["fields"], name
+        sealed_types += 1
+    assert sealed_types > 20
+
+
+# --- a credential configuration holding no secret at all --------------------------------------
+
+def test_a_credential_configuration_with_no_secret_value_is_refused_not_sealed_with_an_empty_slot(ns, env):
+    cred = seeded(env)
+    payload = payload_of(cred)
+    payload["application"]["version_details"]["tools"][0]["settings"]["credentials"]["token"] = ""
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        dispatch(env, ns, payload=payload)
+    assert err.value.reason_code == "CREDENTIAL_REFERENCE_REQUIRED"
+    [row] = contexts(env, ns)
+    assert row.revoked_reason == "NOT_DISPATCHED"
+    env.reset()
+    cred = seeded(env)
+    env.secret_fields["jira"] = []   # a type without secret fields at all
+    with pytest.raises(ns.exceptions.AdmissionDenied):
+        dispatch(env, ns, cred)
+
+
+# --- free-form secrets in the non-secret fields of a configuration --------------------------------
+
+def test_a_template_in_a_non_secret_field_of_a_credential_is_found_one_in_its_secret_fields_is_not(ns, env):
+    module, cred = env.module(), seeded(env)
+    payload = payload_of(cred)
+    config = payload["application"]["version_details"]["tools"][0]["settings"]["credentials"]
+    assert ns.credential_slots.has_free_form_secret(module, payload) is False
+    config["token"] = "{{secret.unresolved}}"           # a secret field: sealed, not scanned
+    assert ns.credential_slots.has_free_form_secret(module, payload) is False
+    config["base_url"] = "https://{{secret.host}}.example"   # a plain field: the payload-wide unsecret would resolve it
+    assert ns.credential_slots.has_free_form_secret(module, payload) is True
+
+
+def test_the_secret_fields_of_all_types_are_asked_once_per_payload_and_unknown_or_failing_is_read_whole(ns, env):
+    module = env.module()
+    first, second = seeded(env), None
+    second = Credential(env, first.binding, tool_id=2, config_id=6, field="other")
+    payload = payload_of(first, second)
+    assert ns.credential_slots.has_free_form_secret(module, payload) is False
+    assert env.secret_field_calls == [["jira"]]
+    env.unregistered_types.add("jira")   # the walker does not know the type: everything is read, secrets included
+    env.secret_field_calls.clear()
+    assert ns.credential_slots.has_free_form_secret(module, payload) is False
+    payload["application"]["version_details"]["tools"][0]["settings"]["credentials"]["token"] = "{{secret.x}}"
+    assert ns.credential_slots.has_free_form_secret(module, payload) is True
+    env.secret_fields_raises = RuntimeError("down")   # cannot tell: counts as found
+    assert ns.credential_slots.has_free_form_secret(module, payload_of(first)) is True
+
+
+def test_a_header_map_is_not_scanned_for_templates_it_is_sealed(ns, env):
+    _, payload, _ = openapi(env, {"X-Api-Key": "{{secret.k}}"})
+    assert ns.credential_slots.has_free_form_secret(env.module(), payload) is False
+
+
+# --- a fan-out: the parent's context lives until the epoch reconciles -----------------------------
+
+def test_launching_the_children_of_a_governed_parked_parent_reopens_its_completed_context(ns, env, parallel):
+    cred = seeded(env)
+    _, parent = dispatch(env, ns, cred)
+    run_to_running(env, ns, parent)
+    launcher = make_launcher(parallel, ns, env, governed=True)
+    launcher.module._context_by_task["parent-task"] = (1, parent)
+    ns.adm.complete_context(launcher.module, "parent-task")
+    assert contexts(env, ns)[0].state == "completed"
+    child = call_kwargs(payload_of(cred), parent)["kwargs"]
+    launch(launcher, child)
+    assert contexts(env, ns)[0].state == "running"
+    assert ns.adm.validate_context(launcher.module, 1, parent, {
+        "kind": "indexer_worker", "task_name": "indexer_agent", "run_id": RUN})["ok"] is True
+
+
+def test_a_legacy_launch_does_not_touch_any_context(ns, env, parallel):
+    launcher = make_launcher(parallel, ns, env, governed=False)
+    env.poison()
+    launch(launcher, {"thread_id": "root:B:c", "envelope": {"context_ref": str(uuid.uuid4())}})
+    env.unpoison()
+    assert launcher.order == ["stash", "start"]
+
+
+def test_the_reconcile_run_is_tracked_so_it_closes_the_context_when_it_stops(ns, env, parallel):
+    cred = seeded(env)
+    _, parent = dispatch(env, ns, cred)
+    launcher = make_launcher(parallel, ns, env, governed=True)
+    launcher._parallel_track_reconcile("reconcile-task", 1, {"envelope": {"context_ref": parent}})
+    assert launcher.module._context_by_task["reconcile-task"] == (1, parent)
+    ns.adm.complete_context(launcher.module, "reconcile-task")
+    assert contexts(env, ns)[0].state == "completed"
+    legacy = make_launcher(parallel, ns, env, governed=False)
+    legacy._parallel_track_reconcile("other-task", 1, {"envelope": {"context_ref": parent}})
+    assert "other-task" not in legacy.module._context_by_task

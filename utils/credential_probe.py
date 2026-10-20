@@ -157,6 +157,14 @@ def _open_probe(module, project_id, user_id, probe_ref, reference) -> None:
         raise _deny("DEPENDENCY_UNAVAILABLE") from None
 
 
+def _close_probe(module, probe_ref) -> None:
+    """The ticket is spent by the release; when the task never asked (it did not start, timed out, died) it goes now."""
+    try:
+        module.get_redis_client().delete(PROBE_KEY + probe_ref)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("governed check_connection: the probe ticket was not removed (%s)", type(exc).__name__)
+
+
 def _run_probe(module, project_id, config_type, settings):
     """Run the task in the ``governed_ops`` pool and wait for its result."""
     try:
@@ -232,6 +240,8 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known) 
     # the stored configuration without its secret fields, and a slot for them
     try:
         settings = _stored_configuration(project_id, configuration_uuid, user_id)
+        if settings.get("configuration_generation") != reference.get("configuration_generation"):
+            raise _deny("CREDENTIAL_GENERATION_MISMATCH")   # changed between the facts and the read: no probe
         paths = secret_paths_for({config_type}, configuration_secret_fields)[config_type]
         held = strip_secret_fields(settings, paths)
     except AdmissionDenied:
@@ -240,14 +250,19 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known) 
         log.error("governed check_connection: the stored configuration could not be prepared (%s)", type(exc).__name__)
         code = getattr(exc, "reason_code", None)
         raise _deny(code if code == "CREDENTIAL_REFERENCE_REQUIRED" else "DEPENDENCY_UNAVAILABLE") from None
-    if has_secret_template(settings):   # a stored template outside the secret fields would be sent as it is
+    if not held or has_secret_template(settings):
+        # nothing to ask for would run the probe without its credential; a stored template outside the secret fields
+        # would be sent as it is
         raise _deny("CREDENTIAL_REFERENCE_REQUIRED")
     probe_ref = str(uuid.uuid4())
     settings[SLOT_KEY] = slot_of(
         {"credential_ref": reference["ref_id"], "credential_generation": reference["generation"]}, held,
         ticket=probe_ref)
     _open_probe(module, project_id, user_id, probe_ref, reference)
-    answer = shape_result(_run_probe(module, project_id, config_type, settings))
+    try:
+        answer = shape_result(_run_probe(module, project_id, config_type, settings))
+    finally:
+        _close_probe(module, probe_ref)
     _outcome(module, project_id, user_id, reference, answer)
     adm._metric(CREDENTIAL_PROBE, "credential_probe_total", "decision", "allow",
                 SUCCEEDED if answer.get("success") else FAILED)

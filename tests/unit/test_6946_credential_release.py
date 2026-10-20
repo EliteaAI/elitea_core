@@ -16,7 +16,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "tests"))
 
 from fixtures import admission_env  # noqa: E402  pylint: disable=C0413
 from fixtures.governed_credentials import (  # noqa: E402  pylint: disable=C0413
-    CALLER, RUN, SECRET, dispatch, dumped, run_to_running, sealed_tool_settings, seeded,
+    CALLER, RUN, SECRET, Credential, dispatch, dumped, run_to_running, sealed_tool_settings, seeded,
 )
 
 
@@ -43,7 +43,7 @@ class Run:
         self.call, self.ref = dispatch(env, ns, self.cred)
         run_to_running(env, ns, self.ref)
         self.slot = dict(sealed_tool_settings(self.call)["credential_slot"])
-        self.private, self.public = ns.transport.generate_recipient_keypair()
+        self.private, self.public = ns.keypair()
         env.denied.clear()
         env.recorded.clear()
         env.release_calls.clear()
@@ -91,9 +91,24 @@ def denied(run, reply, code):
     return event
 
 
+def unaudited(run, reply, code):
+    """A request nobody admitted anything behind: refused with the code and counted, but no audit row is written."""
+    env = run.env
+    assert reply["ok"] is False and reply["reason_code"] == code and "sealed" not in reply
+    assert env.denied == [] and env.recorded == [] and env.release_calls == []
+    assert any(f"credential_release_total decision=rejected_request reason_code={code}" in line for line in env.log.lines)
+    return reply
+
+
+@pytest.fixture
+def sealed(ns):
+    """For the tests that seal or open a release: skipped when this run has no sealed transport."""
+    ns.need_transport()
+
+
 # --- an allowed release -----------------------------------------------------------------------
 
-def test_a_release_is_sealed_to_the_requester_and_bound_to_its_context(ns, env, run):
+def test_a_release_is_sealed_to_the_requester_and_bound_to_its_context(ns, env, run, sealed):
     reply = run.release()
     assert reply["ok"] is True and reply["fields"] == ["token"] and set(reply) == {
         "ok", "release_id", "fields", "expires_at", "sealed"}
@@ -107,9 +122,9 @@ def test_a_release_is_sealed_to_the_requester_and_bound_to_its_context(ns, env, 
         1, run.cred.ref_id, 1, reply["release_id"], "indexer_worker:indexer_agent", False)
 
 
-def test_the_reply_opens_only_with_the_requesters_key_and_the_exact_binding(ns, env, run):
+def test_the_reply_opens_only_with_the_requesters_key_and_the_exact_binding(ns, env, run, sealed):
     reply = run.release()
-    other_private, _ = ns.transport.generate_recipient_keypair()
+    other_private, _ = ns.keypair()
     with pytest.raises(ns.transport.TransportError):
         run.open(reply, key=other_private)
     for over in ({"project": "2"}, {"ref": str(uuid.uuid4())}, {"toolkit": "2"}, {"field": "other"},
@@ -119,12 +134,12 @@ def test_the_reply_opens_only_with_the_requesters_key_and_the_exact_binding(ns, 
     assert run.open(reply)["generation"] == 1
 
 
-def test_each_release_has_its_own_id_and_its_own_ciphertext(ns, env, run):
+def test_each_release_has_its_own_id_and_its_own_ciphertext(ns, env, run, sealed):
     first, second = run.release(), run.release()
     assert first["release_id"] != second["release_id"] and first["sealed"]["ct"] != second["sealed"]["ct"]
 
 
-def test_the_release_event_is_committed_with_the_decision_ids_and_no_value(ns, env, run):
+def test_the_release_event_is_committed_with_the_decision_ids_and_no_value(ns, env, run, sealed):
     reply = run.release()
     [(session, event)] = env.recorded
     entry = run.row().allowed_bindings[0]
@@ -142,7 +157,7 @@ def test_the_release_event_is_committed_with_the_decision_ids_and_no_value(ns, e
     assert any("credential_release_total decision=allow reason_code=CREDENTIAL_RELEASED" in l for l in env.log.lines)
 
 
-def test_the_expiry_is_the_contexts_or_five_minutes_whichever_is_sooner(ns, env, run):
+def test_the_expiry_is_the_contexts_or_five_minutes_whichever_is_sooner(ns, env, run, sealed):
     reply = run.release()
     from datetime import datetime
     expires = datetime.fromisoformat(reply["expires_at"])
@@ -150,20 +165,18 @@ def test_the_expiry_is_the_contexts_or_five_minutes_whichever_is_sooner(ns, env,
     assert expires <= now + timedelta(seconds=301) and expires <= ns.adm._aware(run.row().expires_at)   # pylint: disable=W0212
 
 
-def test_a_failing_audit_commit_means_no_reply_material(ns, env, run):
+def test_a_failing_audit_commit_means_no_reply_material(ns, env, run, sealed):
     env.record_raises = RuntimeError("outbox full")
     reply = run.release()
     denied(run, reply, "AUDIT_UNAVAILABLE")
     assert env.recorded == []
 
 
-def test_the_audit_trail_being_unavailable_refuses_before_the_store_is_read(ns, env, run):
+def test_the_audit_trail_being_unavailable_refuses_before_the_store_is_read_and_records_nothing(ns, env, run):
     env.audit_allowed = False
-    denied(run, run.release(), "AUDIT_UNAVAILABLE")
-    assert env.release_calls == []
+    unaudited(run, run.release(), "AUDIT_UNAVAILABLE")
     env.audit_allowed, env.audit_allowed_raises = True, True
-    env.denied.clear()
-    denied(run, run.release(), "AUDIT_UNAVAILABLE")
+    unaudited(run, run.release(), "AUDIT_UNAVAILABLE")
 
 
 # --- the request ------------------------------------------------------------------------------
@@ -185,6 +198,7 @@ def test_a_request_that_is_not_well_formed_names_nothing_and_reads_nothing(ns, e
     event_reply = run.release(**over)
     assert event_reply["ok"] is False and event_reply["reason_code"] == "STALE_CONTEXT", name
     assert env.release_calls == [] and env.redis.calls == [] and "sealed" not in event_reply
+    assert env.denied == [] and env.recorded == []   # nothing was admitted behind it: counted, not audited
 
 
 def test_slot_shapes_that_cannot_be_a_slot_are_stale(ns, env, run):
@@ -206,9 +220,8 @@ def test_the_handler_never_raises_whatever_it_is_given(ns, env):
 
 # --- the context ------------------------------------------------------------------------------
 
-def test_an_unknown_context_is_stale(ns, env, run):
-    denied(run, run.release(context_ref=str(uuid.uuid4())), "STALE_CONTEXT")
-    assert env.release_calls == []
+def test_an_unknown_context_is_stale_and_not_audited(ns, env, run):
+    unaudited(run, run.release(context_ref=str(uuid.uuid4())), "STALE_CONTEXT")
 
 
 def test_a_context_the_worker_has_not_validated_is_not_released_to(ns, env):
@@ -217,7 +230,7 @@ def test_a_context_the_worker_has_not_validated_is_not_released_to(ns, env):
     other.cred = seeded(env)
     call, ref = dispatch(env, ns, other.cred)   # admitted, never validated: still "admitted"
     other.ref, other.slot = ref, dict(sealed_tool_settings(call)["credential_slot"])
-    other.private, other.public = ns.transport.generate_recipient_keypair()
+    other.private, other.public = ns.keypair()
     env.denied.clear()
     denied(other, other.release(), "STALE_CONTEXT")
     assert env.release_calls == []
@@ -237,7 +250,7 @@ def test_a_context_that_ended_is_refused_with_the_reason_it_ended(ns, env, run, 
     assert env.release_calls == []
 
 
-def test_an_expired_context_is_stale_at_the_boundary(ns, env, run):
+def test_an_expired_context_is_stale_at_the_boundary(ns, env, run, sealed):
     expires = ns.adm._aware(run.row().expires_at)   # pylint: disable=W0212
     ns.adm._now = lambda: expires - timedelta(seconds=1)   # pylint: disable=W0212
     assert run.release()["ok"] is True
@@ -256,7 +269,7 @@ def test_only_the_worker_of_this_run_is_released_to(ns, env, run, caller):
 
 
 def test_another_project_is_not_this_context(ns, env, run):
-    denied(run, run.release(project_id=2), "STALE_CONTEXT")
+    unaudited(run, run.release(project_id=2), "STALE_CONTEXT")
 
 
 def test_a_schema_or_profile_it_does_not_know_is_stale(ns, env, run):
@@ -290,24 +303,60 @@ def test_a_slot_asking_for_other_fields_than_it_was_sealed_with_is_still_this_de
     denied(run, reply, "STORE_NOT_FOUND")
 
 
-# --- at most 64 releases per context ------------------------------------------------------------
+# --- a bounded number of releases per use --------------------------------------------------------
 
-def test_the_sixty_fifth_release_of_a_context_is_refused(ns, env, run):
-    limit = ns.credential_release.MAX_RELEASES_PER_CONTEXT
-    assert limit == 64
+def test_the_seventeenth_release_of_a_use_is_refused(ns, env, run, sealed):
+    limit = ns.credential_release.MAX_RELEASES_PER_FIELD
+    assert limit == 16
     for _ in range(limit):
         assert run.release()["ok"] is True
     env.denied.clear()
     denied(run, run.release(), "RATE_LIMITED")
     assert len(env.release_calls) == limit   # the refused one did not read the store
-    counter = ns.credential_release.COUNTER_KEY + run.ref
+    [counter] = [key for key in env.redis.ttls if key.startswith(ns.credential_release.COUNTER_KEY)]
+    assert counter == f"{ns.credential_release.COUNTER_KEY}{run.ref}|1|credentials"
     assert 0 < env.redis.ttls[counter] <= 3600
+
+
+def test_each_use_of_a_context_has_its_own_budget(ns, env, sealed):
+    first = seeded(env)
+    second = Credential(env, first.binding, tool_id=2, config_id=6, field="other")
+    call, ref = dispatch(env, ns, first, second)
+    run_to_running(env, ns, ref)
+    private, public = ns.keypair()
+    slots = [sealed_tool_settings(call, 0)["credential_slot"], sealed_tool_settings(call, 1, "other")["credential_slot"]]
+
+    def release(index, toolkit, field):
+        return ns.credential_release.release_credential(
+            env.module(), project_id=1, context_ref=ref, probe_ref=None, caller=dict(CALLER),
+            toolkit_instance_id=toolkit, field=field, slot=dict(slots[index]), recipient_key=public)
+
+    limit = ns.credential_release.MAX_RELEASES_PER_FIELD
+    assert all(release(0, "1", "credentials")["ok"] for _ in range(limit))
+    assert release(0, "1", "credentials")["reason_code"] == "RATE_LIMITED"
+    assert release(1, "2", "other")["ok"] is True   # the fan-out's other use is not starved by this one
 
 
 def test_the_counter_failing_is_a_dependency_refusal_not_a_pass(ns, env, run):
     env.redis.raises = RuntimeError("redis down")
     denied(run, run.release(), "DEPENDENCY_UNAVAILABLE")
     assert env.release_calls == []
+
+
+# --- uuids in any other spelling are not this uuid (they would each get a counter of their own) ---
+
+@pytest.mark.parametrize("spell", [
+    lambda text: text.upper(), lambda text: text.replace("-", ""), lambda text: f"urn:uuid:{text}",
+    lambda text: "{" + text + "}",
+])
+def test_a_uuid_spelled_any_other_way_names_nothing(ns, env, run, spell):
+    for field in ("context_ref",):
+        reply = run.release(**{field: spell(run.ref)})
+        assert reply["reason_code"] == "STALE_CONTEXT"
+    for key in ("credential_ref", "decision_id"):
+        reply = run.release(slot={**run.slot, key: spell(run.slot[key])})
+        assert reply["reason_code"] == "STALE_CONTEXT", key
+    assert env.release_calls == [] and env.redis.calls == [] and env.denied == []
 
 
 # --- the live checks of the admission (a refusal ends the run, as validate_context does) ----------
@@ -391,19 +440,19 @@ def test_nothing_partial_is_released_when_a_requested_field_is_absent(ns, env, r
 
 
 def test_a_reply_that_cannot_be_sealed_is_a_refusal(ns, env, run):
-    ns.transport  # the real transport is used everywhere else; here it is made to fail
-    original = ns.transport.seal
-    ns.transport.seal = lambda *a, **k: (_ for _ in ()).throw(ns.transport.TransportError())
+    transport = sys.modules["shared_secret_stores_6946.transport"]   # the real one, or the stand-in that cannot seal
+    original = transport.seal
+    transport.seal = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sealing failed"))
     try:
         denied(run, run.release(), "DEPENDENCY_UNAVAILABLE")
     finally:
-        ns.transport.seal = original
+        transport.seal = original
     assert env.recorded == []
 
 
 # --- nothing leaks ----------------------------------------------------------------------------
 
-def test_no_value_reaches_a_log_an_event_a_metric_or_the_context_row(ns, env, run):
+def test_no_value_reaches_a_log_an_event_a_metric_or_the_context_row(ns, env, run, sealed):
     assert run.release()["ok"] is True
     env.release_raises = RuntimeError(SECRET)
     run.release()
@@ -438,7 +487,7 @@ def ns_key(run):
     return run.ns.credential_release.PROBE_KEY
 
 
-def test_a_probe_ticket_releases_once_and_the_reply_is_bound_to_the_probe(ns, env, run):
+def test_a_probe_ticket_releases_once_and_the_reply_is_bound_to_the_probe(ns, env, run, sealed):
     request = probe_request(run)
     reply = ns.credential_release.release_credential(env.module(), **request)
     assert reply["ok"] is True
@@ -493,3 +542,107 @@ def test_a_probe_cannot_use_a_run_slot_and_a_run_cannot_use_a_probe_ticket(ns, e
     assert ns.credential_release.release_credential(env.module(), **request)["ok"] is False
     swapped = run.request(probe_ref=str(uuid.uuid4()), context_ref=None, slot={**run.slot, "probe_ref": "x"})
     assert ns.credential_release.release_credential(env.module(), **swapped)["ok"] is False
+
+
+# --- the ticket of a probe is single-use even under a race ---------------------------------------
+
+def test_two_workers_racing_for_one_ticket_cannot_both_get_past_it(ns, env, run):
+    import threading
+    request = probe_request(run)
+    replies, barrier = [], threading.Barrier(8)
+
+    def ask():
+        barrier.wait()
+        replies.append(ns.credential_release.release_credential(env.module(), **request))
+
+    threads = [threading.Thread(target=ask) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    past = [reply for reply in replies if reply.get("reason_code") != "STALE_CONTEXT"]
+    assert len(replies) == 8 and len(past) == 1   # one got the ticket (and its release), seven found it spent
+    assert len(env.release_calls) <= 1
+
+
+def test_the_ticket_is_read_and_deleted_in_one_transaction(ns, env, run):
+    request = probe_request(run)
+    ns.credential_release.release_credential(env.module(), **request)
+    names = [call[0] for call in env.redis.calls]
+    assert names[:2] == ["get", "delete"]   # the pipeline of the release: nothing between the read and the removal
+
+
+def test_an_unknown_ticket_is_not_audited_but_a_ticket_for_another_probe_is(ns, env, run):
+    request = probe_request(run)
+    env.redis.values.clear()
+    unaudited(run, ns.credential_release.release_credential(env.module(), **request), "STALE_CONTEXT")
+    request = probe_request(run)
+    key = ns_key(run) + request["probe_ref"]
+    env.redis.values[key] = json.dumps({**json.loads(env.redis.values[key]), "credential_generation": 2})
+    reply = ns.credential_release.release_credential(env.module(), **request)
+    assert reply["reason_code"] == "STALE_CONTEXT"
+    [event] = env.denied
+    assert (event["event_type"], event["decision"]) == ("credential_acquired", "deny")
+
+
+# --- the cost of a release ---------------------------------------------------------------------
+
+def test_a_release_is_one_read_transaction_one_audit_transaction_one_secrets_call_and_one_counter(ns, env, run, sealed):
+    statements = []
+    engine = env.engine(1)
+    ns.sa.event.listen(engine, "before_cursor_execute", lambda conn, cursor, statement, *a: statements.append(statement))
+    sessions, redis_calls = len(env.sessions), len(env.redis.calls)
+    secrets_facts = len(env.secrets_calls)
+    assert run.release()["ok"] is True
+    opened = env.sessions[sessions:]
+    assert len(opened) == 2                         # the read, and the audit event
+    assert sum(item[1].commits for item in opened) == 1   # only the audit commits: the live checks write nothing
+    selects = [text for text in statements if text.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == 2                        # the context row and its binding
+    assert not [text for text in statements if text.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))]
+    assert len(env.release_calls) == 1              # one secrets call, which is the one store read
+    assert len(env.redis.calls) - redis_calls == 2  # the counter (INCR + EXPIRE, one round trip)
+    assert len(env.secrets_calls) - secrets_facts == 2   # the recheck of this one use: its reference, its grant
+
+
+# --- a fan-out: the parent stops, the children and the reconcile run keep its context -------------
+
+def test_a_child_cannot_release_under_the_completed_context_of_its_parked_parent_until_it_is_reopened(ns, env, run, sealed):
+    """The finding: ``task_status_changed`` completes the context of a stopped task before the parallel dispatch launches
+    the children, who run under the same context and the same run id. They fail ``validate_context`` (and so would a
+    release) until the context is reopened for them."""
+    module = env.module()
+    module._context_by_task["parent-task"] = (1, run.ref)
+    ns.adm.complete_context(module, "parent-task")
+    assert run.row().state == "completed"
+    assert ns.adm.validate_context(module, 1, run.ref, CALLER)["reason_code"] == "STALE_CONTEXT"
+    env.denied.clear()
+    denied(run, run.release(), "STALE_CONTEXT")
+    assert ns.adm.reopen_contexts(module, 1, [run.ref, run.ref, None]) == 1
+    assert run.row().state == "running"
+    env.denied.clear()
+    assert ns.adm.validate_context(module, 1, run.ref, CALLER)["ok"] is True
+    assert run.release()["ok"] is True
+
+
+@pytest.mark.parametrize("state, reason", [("revoked", "DENIED_GRANT"), ("admitted", None), ("running", None)])
+def test_only_a_completed_context_is_reopened(ns, env, run, state, reason):
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        session.execute(ns.sa.update(ns.models.ExecutionSecurityContext).values(state=state, revoked_reason=reason))
+        session.commit()
+    assert ns.adm.reopen_contexts(env.module(), 1, [run.ref]) == 0
+    assert run.row().state == state and run.row().revoked_reason == reason
+
+
+def test_an_expired_context_is_not_reopened_and_flag_off_nothing_is(ns, env, run):
+    module = env.module()
+    module._context_by_task["parent-task"] = (1, run.ref)
+    ns.adm.complete_context(module, "parent-task")
+    expires = ns.adm._aware(run.row().expires_at)   # pylint: disable=W0212
+    ns.adm._now = lambda: expires   # pylint: disable=W0212
+    assert ns.adm.reopen_contexts(module, 1, [run.ref]) == 0
+    ns.adm._now = ns.real_now   # pylint: disable=W0212
+    env.poison()
+    assert ns.adm.reopen_contexts(env.module(governed=False), 1, [run.ref]) == 0
+    env.unpoison()
+    assert run.row().state == "completed"

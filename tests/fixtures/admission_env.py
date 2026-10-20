@@ -11,11 +11,13 @@ The caller saves ``sys.modules`` before ``install`` and restores it after (see `
 the ``test_6756_*`` files): the stubs must not leak into other suites.
 """
 import ast
+import base64
 import importlib
 import json
 import os
 import sys
 import threading
+import time
 import types
 import uuid
 import warnings
@@ -29,12 +31,15 @@ from fixtures.helpers import load_module_with_stubs
 
 # The sealed transport (shared plugin) imports these; they must be in ``sys.modules`` before a suite saves it, or a
 # suite that restores it afterwards leaves the next one with a second copy of their classes (HashAlgorithm and co.)
-import cryptography.exceptions  # noqa: E402,F401  pylint: disable=C0413
-import cryptography.hazmat.primitives.asymmetric.x25519  # noqa: E402,F401  pylint: disable=C0413
-import cryptography.hazmat.primitives.ciphers.aead  # noqa: E402,F401  pylint: disable=C0413
-import cryptography.hazmat.primitives.hashes  # noqa: E402,F401  pylint: disable=C0413
-import cryptography.hazmat.primitives.kdf.hkdf  # noqa: E402,F401  pylint: disable=C0413
-import cryptography.hazmat.primitives.serialization  # noqa: E402,F401  pylint: disable=C0413
+try:
+    import cryptography.exceptions  # noqa: F401
+    import cryptography.hazmat.primitives.asymmetric.x25519  # noqa: F401
+    import cryptography.hazmat.primitives.ciphers.aead  # noqa: F401
+    import cryptography.hazmat.primitives.hashes  # noqa: F401
+    import cryptography.hazmat.primitives.kdf.hkdf  # noqa: F401
+    import cryptography.hazmat.primitives.serialization  # noqa: F401
+except ImportError:   # the transport tests skip; everything else runs
+    pass
 
 PKG = identity.PKG
 TRACING_EVENT_MODEL = Path("tracing") / "models" / "security_audit_event.py"
@@ -69,6 +74,7 @@ class FakeRedis:
 
     def __init__(self):
         self.values, self.ttls, self.calls, self.raises = {}, {}, [], None
+        self.lock = threading.Lock()   # MULTI/EXEC: a transaction pipeline runs its commands without interleaving
 
     def _hit(self, name, *args):
         self.calls.append((name, *args))
@@ -82,7 +88,9 @@ class FakeRedis:
 
     def get(self, key):
         self._hit("get", key)
-        return self.values.get(key)
+        value = self.values.get(key)
+        time.sleep(0.001)   # lets a second reader in between a GET and a DEL that are not one transaction
+        return value
 
     def delete(self, key):
         self._hit("delete", key)
@@ -115,7 +123,10 @@ class FakeRedis:
                 queued.append(lambda: redis.expire(key, seconds))
 
             def execute(self_inner):
-                return [step() for step in queued]
+                if not transaction:
+                    return [step() for step in queued]
+                with redis.lock:
+                    return [step() for step in queued]
 
         return _Pipe()
 
@@ -215,6 +226,7 @@ class Env:  # pylint: disable=R0902,R0904
         self.start_raises = None
         self.task_result = None         # what join_task returns for the probe
         self.stopped = []
+        self.at_start = ({}, {})
         self.stored_configuration = None   # what the probe reads as the saved configuration (None: not found)
         self.schema_calls = []
         # digests
@@ -338,6 +350,7 @@ class Env:  # pylint: disable=R0902,R0904
         if self.start_raises:
             raise self.start_raises
         self.started.append((name, kwargs.get("kwargs"), kwargs.get("pool"), kwargs.get("meta")))
+        self.at_start = dict(self.redis.values), dict(self.redis.ttls)   # what Redis held when the task was started
         return self.start_result
 
     def request(self, **over):
@@ -489,14 +502,34 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
         ns.event_model = load_module_with_stubs(event_model, "tracing_security_audit_event_6756")
 
     # --- the sealed transport of the shared plugin (real code, found next to this plugin) -------
-    transport_file = find_secret_store_transport(plugin_root)
-    if transport_file is None:
-        pytest.fail("shared transport not found: no ancestor of elitea_core holds shared/tools/secret_stores/transport.py")
+    transport_file = None if os.environ.get("ELITEA_TEST_NO_SHARED") else find_secret_store_transport(plugin_root)
     secret_stores = types.ModuleType("shared_secret_stores_6946")
     secret_stores.__path__ = []
     sys.modules[secret_stores.__name__] = secret_stores
-    ns.transport = load_module_with_stubs(transport_file, f"{secret_stores.__name__}.transport")
+    try:
+        if transport_file is None:
+            raise ImportError("not found")
+        ns.transport = load_module_with_stubs(transport_file, f"{secret_stores.__name__}.transport")
+        ns.keypair = ns.transport.generate_recipient_keypair
+    except ImportError:   # CI checks out this plugin alone, or cryptography is not installed
+        warnings.warn(
+            "shared transport not found (or cryptography missing): the tests that seal or open a release are skipped"
+            " in this run; everything else runs", stacklevel=1)
+        ns.transport = None
+        # a stand-in that only has what startup checks look for; it cannot seal
+        standin = types.ModuleType(f"{secret_stores.__name__}.transport")
+        standin.seal = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no sealed transport in this run"))
+        sys.modules[standin.__name__] = standin
+        # a key that parses (32 bytes, base64) for the requests that are refused before anything is sealed
+        ns.keypair = lambda: (None, base64.b64encode(os.urandom(32)).decode("ascii"))
     tools.secret_stores = secret_stores
+
+    def need_transport():
+        """Skip the calling test when this run has no sealed transport."""
+        if ns.transport is None:
+            pytest.skip("shared sealed transport not available in this run")
+
+    ns.need_transport = need_transport
 
     # --- fakes ---------------------------------------------------------------------------------
     flask = types.ModuleType("flask")
@@ -592,7 +625,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             env.secret_field_calls.append(list(types))
             if env.secret_fields_raises:
                 raise env.secret_fields_raises
-            return {name: list(env.secret_fields.get(name, [])) for name in types if name not in env.unregistered_types}
+            return {name: list(env.secret_fields.get(name, ["token"])) for name in types if name not in env.unregistered_types}
 
         def release_credential_material(project_id, ref_id, generation, release_id, actor_ref, allow_validated=False):
             env.release_calls.append((project_id, ref_id, generation, release_id, actor_ref, allow_validated))

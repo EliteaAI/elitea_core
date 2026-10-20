@@ -912,6 +912,30 @@ def _revoked_among(entries) -> set:
     return revoked
 
 
+def reopen_contexts(module, project_id, context_refs) -> int:
+    """A parked parent stops when it fans out, which completes its context, but its children and the reconcile run
+    still run under that context: bring each one back to ``running`` when it is neither expired nor revoked. The
+    number reopened. Governed only; a failure is logged and the children then fail at ``validate_context``."""
+    if not is_governed(module):
+        return 0
+    reopened = 0
+    for context_ref in {ref for ref in context_refs if isinstance(ref, str) and ref}:
+        try:
+            with db.get_session(project_id) as session:
+                changed = session.execute(
+                    update(ExecutionSecurityContext)
+                    .where(ExecutionSecurityContext.id == uuid.UUID(context_ref),
+                           ExecutionSecurityContext.state == "completed",
+                           ExecutionSecurityContext.expires_at > _now())
+                    .values(state="running", ended_at=None).execution_options(synchronize_session=False)
+                ).rowcount
+                session.commit()
+            reopened += changed
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("admission: a context could not be reopened for its children (%s)", type(exc).__name__)
+    return reopened
+
+
 def enforce_run_deadlines(module, now=None) -> int:
     """Stop the tracked runs that must not go on: a mandate run past its time limit (the worker has no deadline of
     its own), and any tracked run whose context was revoked while it runs. Called once a minute by the pipeline

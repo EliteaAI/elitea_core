@@ -403,28 +403,3 @@ def recheck_credentials(project_id, entries, subject_ref, agent_binding_ref, now
         if grant.get("revocation_epoch") != entry["grant_epoch"]:
             return "EPOCH_MISMATCH"
     return None
-
-
-def uncovered_credentials(payload, covered_of: Callable[[], set], project_id) -> bool:
-    """Does a payload carry a credential-section configuration that a parent context does not cover (by uuid)?
-    ``covered_of`` is asked only when the payload carries a configuration at all. A configuration whose
-    section cannot be established counts as a credential."""
-    from .application_utils import _find_configurations_in_settings  # pylint: disable=C0415
-
-    sent = []
-    for tool in _payload_toolkits(payload):
-        settings = tool.get("settings")
-        for found in _find_configurations_in_settings(settings) if isinstance(settings, dict) else []:
-            data = found["data"]
-            sent.append((_uuid_text(data.get("configuration_uuid")),
-                         _int_or_none(data.get("configuration_project_id")) or project_id))
-    if not sent:
-        return False
-    covered = covered_of()
-    pairs = [(cfg_uuid, lookup) for cfg_uuid, lookup in sent if cfg_uuid not in covered]
-    if any(cfg_uuid is None for cfg_uuid, _ in pairs):
-        return True
-    configurations = read_configuration_facts(pairs) if pairs else {}
-    return any(
-        configurations.get(cfg_uuid) is None or configurations[cfg_uuid].get("section") == CREDENTIAL_SECTION
-        for cfg_uuid, _ in pairs)

@@ -13,15 +13,21 @@ Checks, in order, the first failure wins (a run; a probe has its ticket instead 
   3a. the context is governed, running, in time, and this worker's         STALE_CONTEXT / the revoke reason
   4. the context was admitted for exactly this toolkit, field, credential,  CREDENTIAL_REFERENCE_REQUIRED
      generation and decision
-  5. at most ``MAX_RELEASES_PER_CONTEXT`` releases per context              RATE_LIMITED
+  5. at most ``MAX_RELEASES_PER_FIELD`` releases per context, toolkit and   RATE_LIMITED
+     field (the children and reconcile runs of a fan-out share the parent's
+     context, so the bound is per use, not per context)
   6/7. the live admission still stands: user and binding epochs, digest,    the codes of ``validate_context``
-     mandate, and every credential decision rechecked (WP-1B); a refusal
-     here revokes the context, as ``validate_context`` does
+     mandate, and the credential decision of this use rechecked (WP-1B); a
+     refusal here revokes the context, as ``validate_context`` does. Read-only
+     otherwise: it does not move the context's state
   8. the store read, by the secrets plugin, which re-reads the reference    CREDENTIAL_REFERENCE_INACTIVE / STORE_*
   9. the release event is committed before the reply leaves                 AUDIT_UNAVAILABLE
 
-Every release, allowed or denied, is audited (``credential_acquired``). Nothing here logs, stores or returns a value
-except the sealed reply, and no exception text of a dependency is repeated.
+Every release, allowed or denied, from check 3 on is audited (``credential_acquired``). A request that is not well formed,
+one that arrives while the audit trail cannot take it, one for a context or ticket that does not exist, is not: nobody
+admitted anything there, so it is counted (``credential_release_total{decision="rejected_request"}``) and logged at debug
+level only. Nothing here logs, stores or returns a value except the sealed reply, and no exception text of a dependency is
+repeated.
 """
 import base64
 import binascii
@@ -34,16 +40,17 @@ from typing import Optional
 
 from pylon.core.tools import log
 from sqlalchemy import select
-from tools import db, this
+from tools import auth, db, this
 
-from ..models.agent_identity import ExecutionSecurityContext
+from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
 from . import admission as adm   # the live checks of validate_context, the audit and counter helpers
+from .credential_decision import recheck_credentials
+from .credential_slots import MAX_SLOT_FIELDS
 from .exceptions import AdmissionDenied
 
 # pylint: disable=W0212
 
-MAX_RELEASES_PER_CONTEXT = 64
-MAX_SLOT_FIELDS = 32
+MAX_RELEASES_PER_FIELD = 16
 RELEASE_TTL_S = 300
 KEY_BYTES = 32
 PROBE_TASK = "indexer_governed_check_connection"
@@ -51,6 +58,7 @@ PROBE_TOOLKIT_INSTANCE_ID = "probe"
 PROBE_FIELD = "configuration"
 PROBE_KEY = "c1009:probe:"       # single-use ticket of a probe: metadata only, minted by credential_probe
 COUNTER_KEY = "c1009:rel:"
+REQUEST_KEYS = ("project_id", "context_ref", "probe_ref", "caller", "toolkit_instance_id", "field", "slot", "recipient_key")
 AAD_VERSION = "v1"
 RELEASED = "CREDENTIAL_RELEASED"
 EVENT = "credential_acquired"
@@ -71,10 +79,20 @@ def _transport():
 
 
 def _uuid(value) -> Optional[str]:
+    """The value when it is a uuid in its canonical spelling (lower case, dashes), else ``None``: the other spellings
+    parse to the same uuid and would each get a counter of their own."""
     try:
-        return str(uuid.UUID(str(value))) if isinstance(value, str) else None
+        return value if isinstance(value, str) and str(uuid.UUID(value)) == value else None
     except ValueError:
         return None
+
+
+class _Unaudited(AdmissionDenied):
+    """A refusal of a request that no admitted run stands behind: counted, not audited."""
+
+
+def _unaudited(code) -> _Unaudited:
+    return _Unaudited(code, adm.MESSAGES.get(code, adm.GENERIC_MESSAGE))
 
 
 def _int(value) -> bool:
@@ -105,7 +123,7 @@ class _Request:  # pylint: disable=R0902,R0903
 
 def _parse(project_id, context_ref, probe_ref, caller, toolkit_instance_id, field, slot, recipient_key) -> _Request:  # pylint: disable=R0913
     """Check 1. Anything off is ``STALE_CONTEXT``: the request names nothing that could be released."""
-    stale = adm._denied("STALE_CONTEXT")
+    stale = _unaudited("STALE_CONTEXT")
     if not _int(project_id) or (context_ref is None) == (probe_ref is None):
         raise stale
     ref = context_ref if probe_ref is None else probe_ref
@@ -145,10 +163,14 @@ def _parse(project_id, context_ref, probe_ref, caller, toolkit_instance_id, fiel
     return _Request(project_id, context_ref, probe_ref, caller, toolkit_instance_id, field, slot, recipient_key)
 
 
+def _reply(code) -> dict:
+    return {"ok": False, "reason_code": code, "message": adm.MESSAGES.get(code, adm.GENERIC_MESSAGE)}
+
+
 def _deny_reply(module, code, known) -> dict:
     adm._record_deny(module, code, event_type=EVENT, **known)
     adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "deny", code)
-    return {"ok": False, "reason_code": code, "message": adm.MESSAGES.get(code, adm.GENERIC_MESSAGE)}
+    return _reply(code)
 
 
 def release_credential(  # pylint: disable=R0913
@@ -164,9 +186,13 @@ def release_credential(  # pylint: disable=R0913
         request = _parse(project_id, context_ref, probe_ref, caller, toolkit_instance_id, field, slot, recipient_key)
         known.update(
             project_id=request.project_id, caller_ref=f"indexer_worker:{request.task_name}",
-            toolkit_instance_id=request.toolkit_instance_id, credential_ref=_uuid(slot["credential_ref"]),
+            toolkit_instance_id=request.toolkit_instance_id, credential_ref=slot["credential_ref"],
             credential_generation=slot["credential_generation"], run_id=request.caller.get("run_id"))
         return _release(module, request, known)
+    except _Unaudited as rejected:
+        log.debug("credential release: request rejected (%s)", rejected.reason_code)
+        adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "rejected_request", rejected.reason_code)
+        return _reply(rejected.reason_code)
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703
@@ -177,13 +203,13 @@ def release_credential(  # pylint: disable=R0913
 
 def _release(module, request: _Request, known: dict) -> dict:
     if not module.governance_profile.enabled:
-        raise adm._denied("STALE_CONTEXT")
+        raise _unaudited("STALE_CONTEXT")
     try:
         audit_allowed = adm._tracing().security_audit_admission_allowed_local()   # 2.
     except Exception:  # pylint: disable=W0703
         audit_allowed = False
     if not audit_allowed:
-        raise adm._denied("AUDIT_UNAVAILABLE")
+        raise _unaudited("AUDIT_UNAVAILABLE")   # nothing can be recorded, so nothing is
     if request.context_ref is not None:
         scope = _check_run(module, request, known)
     else:
@@ -203,19 +229,27 @@ class _Scope:  # pylint: disable=R0903
 
 
 def _check_run(module, request: _Request, known: dict) -> _Scope:  # pylint: disable=R0914
-    """Checks 3a to 7 of a run."""
+    """Checks 3a to 7 of a run: one read transaction, the counter, the live checks."""
     context_id = uuid.UUID(request.context_ref)
     columns = ExecutionSecurityContext
+    binding_columns = (AgentIdentityBinding.state, AgentIdentityBinding.revocation_epoch,
+                       AgentIdentityBinding.definition_digest)
     with db.get_session(request.project_id) as session:
         row = session.execute(
             select(columns.schema_version, columns.profile, columns.state, columns.revoked_reason, columns.expires_at,
                    columns.run_id, columns.attempt, columns.application_id, columns.agent_binding_ref,
                    columns.binding_project_id, columns.project_id, columns.tenant, columns.subject,
-                   columns.allowed_bindings, columns.trace_ref)
+                   columns.allowed_bindings, columns.trace_ref, columns.revocation_epochs, columns.caller,
+                   columns.definition_digest)
             .where(columns.id == context_id)
         ).one_or_none()
-    if row is None:
-        raise adm._denied("STALE_CONTEXT")
+        if row is None:
+            raise _unaudited("STALE_CONTEXT")   # no admitted run behind it
+        binding_project_id = row.binding_project_id or row.project_id
+        binding = session.execute(select(*binding_columns).where(AgentIdentityBinding.id == row.agent_binding_ref)
+                                  ).one_or_none() if binding_project_id == request.project_id else None
+    if binding_project_id != request.project_id:   # the agent lives in another project: a second read
+        binding = adm._read_binding(binding_project_id, row.agent_binding_ref)
     subject = row.subject if isinstance(row.subject, dict) else {}
     is_mandate = subject.get("kind") == "mandate"
     known.update(
@@ -241,17 +275,11 @@ def _check_run(module, request: _Request, known: dict) -> _Scope:  # pylint: dis
         item.get("credential_generation"), item.get("decision_id"))), None)
     if entry is None:
         raise adm._denied("CREDENTIAL_REFERENCE_REQUIRED")
-    #   5. a bounded number of releases per context
+    #   5. a bounded number of releases per use
     remaining = max(1, int((adm._aware(row.expires_at) - adm._now()).total_seconds()))
-    _count_release(module, request.context_ref, remaining, MAX_RELEASES_PER_CONTEXT)
-    #   6, 7. the admission still stands (user, binding, mandate, every credential decision): the live checks of
-    #   validate_context, which also revoke the context for a revoke code
-    validated = {}
-    try:
-        adm._validate(request.project_id, request.context_ref, request.caller, validated)
-    except AdmissionDenied:
-        known.update(validated)
-        raise
+    _count_release(module, request, remaining, MAX_RELEASES_PER_FIELD)
+    #   6, 7. the admission still stands for this use (read-only; a refusal with a revoke code ends the run)
+    _live_check(request, row, binding, entry, is_mandate)
     user_ref = subject.get("owner") if is_mandate else subject.get("ref")
     event = dict(
         tenant=row.tenant, project_id=row.project_id, application_id=row.application_id,
@@ -262,25 +290,76 @@ def _check_run(module, request: _Request, known: dict) -> _Scope:  # pylint: dis
         traceparent=row.trace_ref)
 
     def on_revoke(code):   # a reference that changed between the recheck and the read ends the run, as the recheck would
-        if code in adm.REVOKE_CODES:
-            with db.get_session(request.project_id) as session:
-                adm._set_state(session, context_id, "revoked", code)
-                session.commit()
+        _revoke(request, code)
 
-    return _Scope(row.binding_project_id or row.project_id, False, min(adm._aware(row.expires_at), _horizon()),
-                  event, on_revoke=on_revoke)
+    return _Scope(binding_project_id, False, min(adm._aware(row.expires_at), _horizon()), event, on_revoke=on_revoke)
+
+
+def _revoke(request: _Request, code) -> None:
+    """End the run with a revoke code (the one write of a failing release); other codes change nothing."""
+    if code in adm.REVOKE_CODES:
+        with db.get_session(request.project_id) as session:
+            adm._set_state(session, uuid.UUID(request.context_ref), "revoked", code)
+            session.commit()
+
+
+def _live_check(request: _Request, row, binding, entry, is_mandate) -> None:  # pylint: disable=R0912
+    """Checks 6 and 7 for one use: the checks of ``validate_context`` that decide whether the admission still stands
+    (user and binding epochs, digest, mandate, this use's credential decision), without its state write. A refusal with a
+    revoke code revokes the context; a fact that cannot be read is unknown, not revoked."""
+    def refuse(code):
+        _revoke(request, code)
+        return adm._denied(code)
+
+    stamped = row.revocation_epochs if isinstance(row.revocation_epochs, dict) else {}
+    binding_project_id = row.binding_project_id or row.project_id
+    user_id = (row.caller or {}).get("user_id")
+    if isinstance(user_id, bool) or not isinstance(user_id, int):
+        raise refuse("EPOCH_MISMATCH")
+    try:
+        epochs = auth.read_identity_epochs("user", user_id)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("credential release: user epochs unreadable (%s)", type(exc).__name__)
+        epochs = None
+    if not isinstance(epochs, dict):
+        raise adm._denied("DEPENDENCY_UNAVAILABLE")
+    if not epochs.get("active") and is_mandate:
+        adm._suspend_owner(binding_project_id, user_id)   # the owner is gone: the mandate goes with them
+        raise refuse("MANDATE_INACTIVE")
+    if not epochs.get("active") or epochs.get("user") != stamped.get("user"):
+        raise refuse("EPOCH_MISMATCH")
+    if binding is None or binding.state != "active":
+        raise refuse("DENIED_BINDING")
+    if binding.revocation_epoch != stamped.get("binding"):
+        raise refuse("EPOCH_MISMATCH")
+    if binding.definition_digest != row.definition_digest:
+        raise refuse("BINDING_DIGEST_MISMATCH")
+    if is_mandate:
+        code = adm._mandate_revoke_code(row, stamped)
+        if code is not None:
+            raise refuse(code)
+    try:
+        code = recheck_credentials(
+            binding_project_id, [entry], (row.subject or {}).get("ref"), str(row.agent_binding_ref), adm._now())
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("credential release: credential facts unreadable (%s)", type(exc).__name__)
+        raise adm._denied("DEPENDENCY_UNAVAILABLE") from None
+    if code is not None:
+        raise refuse(code)
 
 
 def _horizon():
     return adm._now() + timedelta(seconds=RELEASE_TTL_S)
 
 
-def _count_release(module, ref, ttl_s, limit) -> None:
-    """Check 5: ``INCR`` the release counter of a context; over ``limit`` is ``RATE_LIMITED``. Redis down is a refusal."""
+def _count_release(module, request: _Request, ttl_s, limit) -> None:
+    """Check 5: ``INCR`` the release counter of a context's use (toolkit and field); over ``limit`` is ``RATE_LIMITED``.
+    Redis down is a refusal."""
+    key = "|".join((COUNTER_KEY + request.context_ref, request.toolkit_instance_id, request.field))   # '|' is not in a name
     try:
         pipe = module.get_redis_client().pipeline(transaction=False)
-        pipe.incr(COUNTER_KEY + ref)
-        pipe.expire(COUNTER_KEY + ref, ttl_s)
+        pipe.incr(key)
+        pipe.expire(key, ttl_s)
         count = pipe.execute()[0]
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: the release counter failed (%s)", type(exc).__name__)
@@ -306,6 +385,8 @@ def _check_probe(module, request: _Request, known: dict) -> _Scope:
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: the probe ticket could not be taken (%s)", type(exc).__name__)
         raise adm._denied("DEPENDENCY_UNAVAILABLE") from None
+    if ticket is None:
+        raise _unaudited("STALE_CONTEXT")   # no probe was opened for it (or it was spent): nothing to record
     if not isinstance(ticket, dict) or (
             ticket.get("project_id"), ticket.get("credential_ref"), ticket.get("credential_generation"),
             ticket.get("task_name")) != (request.project_id, slot["credential_ref"], slot["credential_generation"],

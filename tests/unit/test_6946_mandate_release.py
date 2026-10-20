@@ -68,7 +68,7 @@ def run(ns, env):
         entry_point="schedule", caller_type="trigger", mandate_ref=str(mandate), trigger_ref="schedule:version:70")
     ref = ns.adm.admit_dispatch(env.module(), "indexer_agent", call, asked)
     assert ns.adm.validate_context(env.module(), 1, ref, CALLER)["ok"] is True
-    private, public = ns.transport.generate_recipient_keypair()
+    private, public = ns.keypair()
     env.denied.clear()
     env.recorded.clear()
     slot = dict(payload["application"]["version_details"]["tools"][0]["settings"]["credentials"]["credential_slot"])
@@ -84,6 +84,7 @@ def test_the_payload_of_a_mandate_run_is_sealed_like_any_other(ns, env, run):
 
 
 def test_a_mandate_runs_release_names_the_mandate_and_its_owner(ns, env, run):
+    ns.need_transport()
     reply = run.release()
     assert reply["ok"] is True
     aad = f"v1|1|{run.ref}|1|credentials|{run.slot['decision_id']}|{reply['release_id']}".encode()
