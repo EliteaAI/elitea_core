@@ -25,7 +25,7 @@ def test_7011_r1_2_manual_run_starts_as_the_owner_with_manual_meta(world, trigge
 
     (predicted,) = world.predictions
     assert (predicted["is_system_user"], predicted["user_id"]) == (False, OWNER)
-    assert predicted["trigger_source"] == "manual"
+    assert predicted["trigger_source"] is None
     (conversation,) = world.conversations()
     assert conversation.meta["execution_type"] == "manual"
     assert "scheduled_run" not in conversation.meta

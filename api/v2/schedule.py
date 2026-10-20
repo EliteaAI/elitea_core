@@ -40,6 +40,14 @@ def _details(row, scope: ScheduleScope) -> dict:
     }).model_dump(mode="json")
 
 
+NOT_ALLOWED = {"error": "Method not allowed"}, 405
+
+
+def _on_run_path() -> bool:
+    """True for the `<project>/<schedule>/run` URL, which shares this resource with the schedule URL."""
+    return request.path.rstrip("/").endswith("/run")
+
+
 def _parse_body(model):
     """The request body as `model`, or the 400 answer of its first error."""
     try:
@@ -68,12 +76,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def post(self, project_id: int, schedule_id: int | None = None, **kwargs):
-        # The router matches by verb only, so the URL tail tells a run from a post to the schedule itself
+        # The router matches by verb only, so the URL tail tells a run from a post to the schedule itself.
+        # Keyword arguments: check_api reads project_id from them for the project-scoped permission check.
         if schedule_id is None:
-            return self._create(project_id)
-        if not request.path.rstrip("/").endswith("/run"):
-            return {"error": "Method not allowed"}, 405
-        return self._run(project_id, schedule_id)
+            return self._create(project_id=project_id)
+        if not _on_run_path():
+            return NOT_ALLOWED
+        return self._run(project_id=project_id, schedule_id=schedule_id)
 
     @auth.decorators.check_api(schedule_check_spec("create"))
     def _create(self, project_id: int):
@@ -129,6 +138,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("details"))
     @api_tools.endpoint_metrics
     def get(self, project_id: int, schedule_id: int, **kwargs):
+        if _on_run_path():  # only POST serves the run URL
+            return NOT_ALLOWED
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
@@ -146,6 +157,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("update"))
     @api_tools.endpoint_metrics
     def put(self, project_id: int, schedule_id: int, **kwargs):
+        if _on_run_path():  # only POST serves the run URL
+            return NOT_ALLOWED
         body, error = _parse_body(ScheduleUpdate)
         if error:
             return error
@@ -170,6 +183,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("delete"))
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, schedule_id: int, **kwargs):
+        if _on_run_path():  # only POST serves the run URL
+            return NOT_ALLOWED
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:

@@ -76,6 +76,14 @@ def test_7011_r1_1_a_bad_trigger_is_400_and_inserts_nothing(harness, started):
     assert (runs(harness), started) == ([], [])
 
 
+@pytest.mark.parametrize('verb', ['get', 'put', 'delete'])
+def test_7011_r1_1_other_verbs_on_the_run_url_are_refused(harness, verb):
+    """Review round 1: the router matches by verb only, so GET, PUT and DELETE on /run must not touch the schedule."""
+    schedule_id = harness.seed()
+    assert harness.call(verb, {'name': 'changed'}, schedule_id, suffix='/run')[1] == 405
+    assert harness.row(schedule_id) is not None
+
+
 def test_7011_r1_1_post_to_the_schedule_without_run_is_refused(harness, started):
     schedule_id = harness.seed()
     assert harness.call('post', {'trigger': 'manual'}, schedule_id)[1] == 405

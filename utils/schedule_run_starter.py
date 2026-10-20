@@ -92,7 +92,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         conversation_uuid, _, response_id = create_trigger_run_conversation(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             trigger_type=trigger_type, trigger_message=message,
-            conversation_name=f'Scheduled run: {loaded.entity_name}',
+            conversation_name=f"{'Manual' if manual else 'Scheduled'} run: {loaded.entity_name}",
             extra_meta={'schedule_id': schedule_id, 'schedule_run_id': run_id, 'execution_type': trigger_type},
             source=source,
         )
@@ -108,7 +108,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         execute_pipeline_via_predict_sio(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
-            trigger_source=trigger_type, is_system_user=False,
+            # Usage analytics counts a run without trigger_source as started by a person (#6881)
+            trigger_source=None if manual else 'scheduled', is_system_user=False,
         )
     except BudgetDoorClosedError as error:  # the door closed after the check (R2.3)
         finish_trigger_run_with_error(project_id, response_id, error)

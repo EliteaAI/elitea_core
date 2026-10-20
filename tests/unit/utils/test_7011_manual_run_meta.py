@@ -50,7 +50,7 @@ def test_7011_r1_3_manual_run_conversation_has_execution_type_manual(world, trig
 def test_7011_r1_2_manual_run_starts_as_the_owner_with_the_manual_source(world):
     calls = world("manual")
 
-    assert calls.predict[0]["trigger_source"] == "manual"
+    assert calls.predict[0]["trigger_source"] is None  # a person started it (#6881)
     assert calls.predict[0]["is_system_user"] is False
     assert calls.predict[0]["user_id"] == OWNER
 
