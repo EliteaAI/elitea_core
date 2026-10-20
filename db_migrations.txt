@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS {pid}.entity_schedules (
     CONSTRAINT ck_entity_schedules_run_mode
         CHECK (run_mode IS NULL OR run_mode IN ('entry_point', 'prompt')),
     CONSTRAINT ck_entity_schedules_principal_kind
-        CHECK (principal->>'kind' IN ('mandate', 'delegation', 'legacy_system'))
+        CHECK (principal->>'kind' IS NOT NULL
+               AND principal->>'kind' IN ('mandate', 'delegation', 'legacy_system'))
 );
 CREATE INDEX IF NOT EXISTS ix_entity_schedules_next_run_enabled
     ON {pid}.entity_schedules (next_run) WHERE enabled;
