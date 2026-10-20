@@ -152,6 +152,15 @@ class TestEL7011R1Sender:
 
         assert recorder.fired[0][1]['meta']['message'] == message
 
+    @pytest.mark.parametrize('extra, message', [
+        (None, 'An admin edited your schedule "Daily report"'),
+        ({'action': 'deleted'}, 'An admin deleted your schedule "Daily report"'),
+    ])
+    def test_r1_2_the_admin_notice_names_the_action(self, notifications, recorder, extra, message):
+        _send(notifications, 'schedule_edited_by_admin', extra=extra)
+
+        assert recorder.fired[0][1]['meta']['message'] == message
+
     def test_r1_2_a_notice_without_a_run_has_null_run_fields(self, notifications, recorder):
         _send(notifications, 'schedule_expired')
 
