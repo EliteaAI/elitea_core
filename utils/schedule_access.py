@@ -42,3 +42,21 @@ def schedule_scope(project_id: int) -> ScheduleScope:
         is_admin=SCHEDULE_PERMISSIONS["admin"] in permissions,
         permissions=permissions,
     )
+
+
+def allowed_actions(row, scope: ScheduleScope) -> list[str]:
+    """Actions the caller may take on one schedule row; a pure function of the row and the scope."""
+    is_owner = row.created_by == scope.user_id
+    if not (is_owner or scope.is_admin):
+        return []
+    granted = {verb for verb in _VERBS if SCHEDULE_PERMISSIONS[verb] in scope.permissions}
+    actions = []
+    if is_owner and "run" in granted and row.version_id is not None:
+        actions.append("run")
+    if "update" in granted:
+        actions += ["edit", "pause" if row.enabled else "resume"]
+    if "delete" in granted:
+        actions.append("delete")
+    if scope.is_admin:
+        actions.append("change_owner")
+    return actions
