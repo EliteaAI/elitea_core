@@ -24,16 +24,18 @@ ROW_KEYS = {
 
 
 class FakeArgs(dict):
+    """Werkzeug MultiDict subset: each key holds a list; `get` and `to_dict` give the first value."""
+
     def get(self, key, default=None, type=None):
         if key not in self:
             return default
-        return type(self[key]) if type else self[key]
+        return type(self[key][0]) if type else self[key][0]
 
     def getlist(self, key):
-        return [self[key]] if key in self else []
+        return list(super().get(key, []))
 
     def to_dict(self, flat=True):
-        return dict(self)
+        return {k: v[0] for k, v in self.items()}
 
 
 class Row(types.SimpleNamespace):
@@ -179,7 +181,7 @@ def env(monkeypatch):
 
 def call(env, **args):
     env.args.clear()
-    env.args.update({k: str(v) for k, v in args.items()})
+    env.args.update({k: [str(x) for x in v] if isinstance(v, list) else [str(v)] for k, v in args.items()})
     return env.handler.PromptLibAPI().get(project_id=1)
 
 
@@ -209,6 +211,14 @@ def test_r1_3_el7011_owner_name_is_null_when_lookup_fails(env, error):
     assert [r["owner"] for r in body["rows"]] == [{"id": 5, "name": None}, {"id": 6, "name": None}]
 
 
+# R1.2
+def test_r1_2_el7011_empty_page_skips_owner_lookup(env):
+    env.grant(9, "list", "admin")
+    body = ok(env)
+    assert body == {"total": 0, "rows": []}
+    assert env.author_calls == []
+
+
 # R1.4 (TC-US05-04)
 def test_r1_4_el7011_caller_without_list_gets_403(env):
     env.grant(5, "details")
@@ -227,6 +237,15 @@ def test_r2_2_el7011_regular_caller_owner_ids_is_ignored(env, owner_ids):
     assert {r["owner"]["id"] for r in body["rows"]} == {5}
     assert body["total"] == 1
     assert env.query_calls[0]["scope"].is_admin is False
+
+
+# R2.2
+def test_r2_2_el7011_admin_repeated_owner_ids_reach_the_query(env):
+    env.grant(9, "list", "admin")
+    env.rows = [make_row(1, 5), make_row(2, 6), make_row(3, 7)]
+    body = ok(env, owner_ids=[5, 6])
+    assert env.query_calls[0]["filters"].owner_ids == [5, 6]
+    assert {r["owner"]["id"] for r in body["rows"]} == {5, 6}
 
 
 # R3.4 (TC-US05-13)
