@@ -143,7 +143,7 @@ def env(monkeypatch):
     _register(monkeypatch, "tools", tools)
 
     flask = types.ModuleType("flask")
-    flask.request = types.SimpleNamespace(args=env.args, json={}, method="GET")
+    flask.request = types.SimpleNamespace(args=env.args, json={}, method="GET", path="")
     _register(monkeypatch, "flask", flask)
 
     for name in (PKG, f"{PKG}.api", f"{PKG}.models", f"{PKG}.models.pd", f"{PKG}.utils"):
