@@ -33,7 +33,7 @@ def validate(secrets, monkeypatch):
     load('models/pd/entity_schedule.py', fresh=True)
     load('models/pd/generate_schedule_draft.py', fresh=True)
     module = load('utils/schedule_draft_utils.py', fresh=True)
-    monkeypatch.setattr(module, '_roster', lambda project_id: ROSTER)
+    monkeypatch.setattr(module, 'schedule_roster', lambda project_id: ROSTER)
     return lambda raw, locked=None: module.validate_schedule_draft(1, raw, locked)
 
 

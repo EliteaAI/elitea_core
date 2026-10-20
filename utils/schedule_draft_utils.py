@@ -16,7 +16,7 @@ TRUE_VALUES = ('true', '1', 'yes')
 PLAIN_FIELDS = ('name', 'description', 'prompt', 'variables', 'expires_at', 'approval_rule')
 
 
-def _roster(project_id: int) -> list[dict]:
+def schedule_roster(project_id: int) -> list[dict]:
     """One row per agent or pipeline version in the project."""
     # Imported here: the ORM tables are not needed by callers that only check fields.
     from tools import db  # pylint: disable=E0401,C0415
@@ -98,7 +98,7 @@ def _resolve_entity(project_id: int, raw: dict, locked: dict | None, out: dict, 
             warn('entity_type', 'The type must be agent or pipeline')
         return
     out['entity_type'] = entity_type
-    rows = _roster(project_id)
+    rows = schedule_roster(project_id)
     if locked:
         out['application_id'] = locked['application_id']
         rows = [row for row in rows if row['application_id'] == out['application_id']]
