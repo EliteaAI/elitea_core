@@ -2,6 +2,72 @@
 # Try to make migrations safe to run multiple times (e.g. "IF NOT EXISTS")
 # When release tags are moved - comment with release version will be added
 
+# R-2.0.8 — Schedules (EL-7011)
+# Run for every existing project schema {pid} (e.g. p_1, p_2, …).
+# New projects get the tables via create_all() on project creation.
+# Idempotent: every statement is IF NOT EXISTS; constraints live inside CREATE TABLE.
+# No backfill: all three tables are new.
+CREATE TABLE IF NOT EXISTS {pid}.entity_schedules (
+    id SERIAL PRIMARY KEY,
+    entity_type VARCHAR(16) NOT NULL,
+    application_id INTEGER NOT NULL REFERENCES {pid}.applications(id) ON DELETE CASCADE,
+    version_id INTEGER NULL REFERENCES {pid}.application_versions(id) ON DELETE SET NULL,
+    name VARCHAR(256) NOT NULL,
+    description VARCHAR(2304) NULL,
+    cron VARCHAR(128) NOT NULL,
+    timezone VARCHAR(64) NOT NULL,
+    run_mode VARCHAR(16) NULL,
+    prompt TEXT NULL,
+    variables JSONB NOT NULL DEFAULT '[]'::jsonb,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    disabled_reason VARCHAR(32) NULL,
+    approval_rule VARCHAR(32) NOT NULL DEFAULT 'pause_and_ask',
+    created_by INTEGER NOT NULL,
+    updated_by INTEGER NULL,
+    principal JSONB NOT NULL,
+    last_run TIMESTAMPTZ NULL,
+    next_run TIMESTAMPTZ NULL,
+    last_run_status VARCHAR(32) NULL,
+    last_conversation_id INTEGER NULL,
+    expires_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_entity_schedules_entity_type CHECK (entity_type IN ('agent', 'pipeline')),
+    CONSTRAINT ck_entity_schedules_run_mode
+        CHECK (run_mode IS NULL OR run_mode IN ('entry_point', 'prompt')),
+    CONSTRAINT ck_entity_schedules_principal_kind
+        CHECK (principal->>'kind' IN ('mandate', 'delegation', 'legacy_system'))
+);
+CREATE INDEX IF NOT EXISTS ix_entity_schedules_next_run_enabled
+    ON {pid}.entity_schedules (next_run) WHERE enabled;
+CREATE INDEX IF NOT EXISTS ix_entity_schedules_created_by
+    ON {pid}.entity_schedules (created_by);
+CREATE INDEX IF NOT EXISTS ix_entity_schedules_application_version
+    ON {pid}.entity_schedules (application_id, version_id);
+
+CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_runs (
+    id SERIAL PRIMARY KEY,
+    schedule_id INTEGER NOT NULL REFERENCES {pid}.entity_schedules(id) ON DELETE CASCADE,
+    trigger VARCHAR(16) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    reason TEXT NULL,
+    conversation_id INTEGER NULL,
+    requested_by INTEGER NULL,
+    approval_expires_at TIMESTAMPTZ NULL,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resumed_at TIMESTAMPTZ NULL,
+    finished_at TIMESTAMPTZ NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_schedule_runs_active
+    ON {pid}.entity_schedule_runs (schedule_id)
+    WHERE status IN ('running', 'waiting_for_approval');
+
+CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_preferences (
+    user_id INTEGER PRIMARY KEY,
+    get_notified BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 # R-2.0.7 — Chat configuration templates
 # Run for every existing project schema {pid} (e.g. p_1, p_2, …).
 # New projects get the table via create_all() on project creation.
