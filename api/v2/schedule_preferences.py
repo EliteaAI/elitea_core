@@ -3,7 +3,8 @@ from typing import ClassVar
 
 from flask import request
 from pydantic import BaseModel, StrictBool, ValidationError
-from tools import api_tools, auth, db, register_openapi, serialize
+from sqlalchemy.exc import IntegrityError
+from tools import api_tools, auth, db, register_openapi
 
 from ...models.entity_schedule import EntitySchedulePreference
 from ...utils.constants import PROMPT_LIB_MODE
@@ -31,7 +32,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, **kwargs):
         with db.get_session(project_id) as session:
             row = session.get(EntitySchedulePreference, auth.current_user()["id"])
-            return serialize({"get_notified": row.get_notified if row else True}), 200
+            return {"get_notified": row.get_notified if row else True}, 200
 
     @register_openapi(
         name="Save Schedule Notification Preference",
@@ -54,7 +55,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 row.get_notified = value
             else:
                 session.add(EntitySchedulePreference(user_id=user_id, get_notified=value))
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError:  # a parallel first save of the same user inserted the row first
+                session.rollback()
+                session.get(EntitySchedulePreference, user_id).get_notified = value
+                session.commit()
         return {"get_notified": value}, 200
 
 

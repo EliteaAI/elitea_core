@@ -1,7 +1,7 @@
 """EL-7011 US-06: the "Get notified" endpoint (R2.1-R2.4).
 
 The endpoint module is loaded from source with a fake `tools`, a fake row model and a fake
-session; no Pylon runtime. The fake session offers `get`, `add`, `merge`, `flush` and `commit`.
+session; no Pylon runtime. The fake session offers `get`, `add`, `commit` and `rollback`.
 """
 import contextlib
 import functools
@@ -11,6 +11,7 @@ import types
 
 import pytest
 from fixtures.helpers import load_module_with_stubs
+from sqlalchemy.exc import IntegrityError
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = 'plugins.elitea_core'
@@ -27,8 +28,9 @@ class FakePreference:
 
 
 class FakeSession:
-    def __init__(self, rows):
-        self.rows = rows
+    def __init__(self, harness):
+        self.harness = harness
+        self.rows = harness.rows
 
     def get(self, model, key, **kwargs):
         return self.rows.get(key)
@@ -36,14 +38,13 @@ class FakeSession:
     def add(self, row):
         self.rows[row.user_id] = row
 
-    def merge(self, row):
-        self.rows[row.user_id] = row
-        return row
-
-    def flush(self):
-        pass
-
     def commit(self):
+        if self.harness.parallel_insert:  # another request of the same user inserted its row first
+            self.harness.parallel_insert = False
+            self.rows[CALLER_ID] = FakePreference(CALLER_ID, True)
+            raise IntegrityError('INSERT INTO entity_schedule_preferences', {}, Exception('duplicate key'))
+
+    def rollback(self):
         pass
 
 
@@ -53,6 +54,7 @@ class Harness:
         self.rows = {}
         self.body = None
         self.specs = []
+        self.parallel_insert = False
 
     def check_api(self, spec):
         self.specs.append(spec)
@@ -70,7 +72,7 @@ class Harness:
     @contextlib.contextmanager
     def get_session(self, project_id=None):
         assert project_id == PROJECT_ID
-        yield FakeSession(self.rows)
+        yield FakeSession(self)
 
 
 def _package(name):
@@ -166,6 +168,13 @@ def test_7011_r2_2_put_updates_the_existing_row(harness):
     assert (body, status) == ({'get_notified': False}, 200)
     assert harness.rows[CALLER_ID].get_notified is False
     assert other.get_notified is True
+
+
+def test_7011_r2_2_put_saves_over_a_parallel_first_insert(harness):
+    harness.parallel_insert = True
+    body, status = _call(harness, 'put', {'get_notified': False})
+    assert (body, status) == ({'get_notified': False}, 200)
+    assert harness.rows[CALLER_ID].get_notified is False
 
 
 @pytest.mark.parametrize('body', [
