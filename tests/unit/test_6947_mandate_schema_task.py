@@ -239,8 +239,8 @@ def test_the_report_of_all_projects_and_a_filter(admin_tasks):
     module, calls = pylon_module()
     result = admin_tasks.Method.report_trigger_principals(module, param="project_id=all;principal=legacy_system")
     assert admin_tasks.report_fake.calls == [([1, 2, 5], "legacy_system")] and calls
-    assert result == {"count": 3, "outcomes": {"MANDATE_REQUIRED": 2, "ADMISSIBLE": 1}, "failed_projects": [2],
-                      "rows": admin_tasks.report_fake.rows}
+    assert result == {"count": 3, "outcomes": {"MANDATE_REQUIRED": 2, "ADMISSIBLE": 1}, "failed": 1,
+                      "failed_projects": [2], "rows": admin_tasks.report_fake.rows}
 
 
 def test_the_report_of_one_project_does_not_list_projects(admin_tasks):
@@ -283,11 +283,15 @@ def test_module_registers_and_unregisters_the_admin_tasks(task):
 def test_module_registers_the_mandate_permissions_whatever_the_governance_flag_says():
     text = source_of("module.py")
     for permission in ("manage", "approve", "view"):
-        assert f'"agent_identity.mandates.{permission}"' in text
-    assert text.index('"agent_identity.mandates.manage"') < text.index("self.task_node.start()")
-    assert text.index("init_governance(self)") < text.index('"agent_identity.mandates.manage"')
-    assert 'if is_governed' not in text[text.index('"agent_identity.mandates.manage"') - 400:
-                                        text.index('"agent_identity.mandates.view"') + 600]
+        assert f'"governance.mandates.{permission}"' in text
+    assert text.index('"governance.mandates.manage"') < text.index("self.task_node.start()")
+    assert text.index("init_governance(self)") < text.index('"governance.mandates.manage"')
+    block = text[text.index('"governance.mandates.manage"') - 400:text.index('"governance.mandates.view"') + 600]
+    for permission in ("manage", "approve", "view"):
+        assert f'("governance.mandates.{permission}", {{"admin": True, "viewer": False, "editor": False}})' in block
+    assert "agent_identity.mandates" not in text
+    assert 'if is_governed' not in text[text.index('"governance.mandates.manage"') - 400:
+                                        text.index('"governance.mandates.view"') + 600]
 
 
 def test_the_startup_guard_checks_both_table_sets():
@@ -306,4 +310,20 @@ def test_the_migration_note_points_at_the_task():
 def test_the_method_is_registered_under_its_design_name():
     text = source_of("methods/trigger_report.py")
     assert '@web.method("autonomous_trigger_report")' in text
-    assert "build_trigger_report(project_ids, principal)[0]" in text
+    assert "rows, failed = build_trigger_report(project_ids, principal)" in text
+    assert 'return {"rows": rows, "failed": failed}' in text
+
+
+def test_the_tracing_model_is_found_by_walking_up_from_a_worktree_or_a_plain_checkout(tmp_path):
+    from fixtures import admission_env  # pylint: disable=C0415
+    model = tmp_path / "plugins" / "tracing" / "models" / "security_audit_event.py"
+    model.parent.mkdir(parents=True)
+    model.write_text("")
+    plain = tmp_path / "plugins" / "elitea_core"
+    worktree = plain / "wt" / "elitea-core-1"
+    worktree.mkdir(parents=True)
+    assert admission_env.find_tracing_event_model(plain) == model
+    assert admission_env.find_tracing_event_model(worktree) == model
+    assert admission_env.find_tracing_event_model(tmp_path / "plugins" / "elsewhere") == model
+    model.unlink()
+    assert admission_env.find_tracing_event_model(worktree) is None

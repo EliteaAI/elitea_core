@@ -8,7 +8,8 @@ Reads only; nothing here changes behaviour until the admission layer asks.
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
 
 from ..models.agent_identity import AutonomousMandate
 
@@ -33,14 +34,17 @@ LEGACY = TriggerPrincipal("legacy_system", None, None, None)
 
 
 def latest_mandates(session, project_id, version_ids=None) -> dict:
-    """The latest revision row of each agent version that has a mandate, by version id. One read."""
-    statement = select(*_COLUMNS).where(AutonomousMandate.project_id == project_id)
+    """The latest revision row of each agent version that has a mandate, by version id. One query: a correlated
+    ``max(revision)`` over the unique ``(project_id, agent_version, revision)`` index."""
+    other = aliased(AutonomousMandate)
+    newest = select(func.max(other.revision)).where(
+        other.project_id == AutonomousMandate.project_id, other.agent_version == AutonomousMandate.agent_version,
+    ).scalar_subquery()
+    statement = select(*_COLUMNS).where(AutonomousMandate.project_id == project_id,
+                                        AutonomousMandate.revision == newest)
     if version_ids is not None:
         statement = statement.where(AutonomousMandate.agent_version.in_(list(version_ids)))
-    latest = {}
-    for row in session.execute(statement.order_by(AutonomousMandate.agent_version, AutonomousMandate.revision.desc())):
-        latest.setdefault(row.agent_version, row)
-    return latest
+    return {row.agent_version: row for row in session.execute(statement)}
 
 
 def principal_of(trigger_kind, mandate=None, schedule_key=None) -> TriggerPrincipal:

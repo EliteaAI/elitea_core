@@ -747,7 +747,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Each row has the trigger kind, ids, enabled, the principal, the mandate and its state, and the governed
         outcome (ADMISSIBLE, MANDATE_REQUIRED, MANDATE_INACTIVE, MANDATE_EXPIRED, DENIED_OPERATION,
-        AUTHORIZATION_REQUIRED). No cron, secret, credential title or schedule body is ever returned.
+        AUTHORIZATION_REQUIRED, MANDATE_TABLE_MISSING). Projects that cannot be read are listed in failed_projects. No cron, secret, credential title or schedule body is ever returned.
         """
         from ..utils.trigger_report import PRINCIPALS, build_trigger_report  # pylint: disable=C0415
 
@@ -771,7 +771,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         for row in rows:
             outcomes[row["governed_outcome"]] = outcomes.get(row["governed_outcome"], 0) + 1
         log.info("report_trigger_principals: rows=%s failed=%s outcomes=%s", len(rows), len(failed), outcomes)
-        return {"count": len(rows), "outcomes": outcomes, "failed_projects": failed, "rows": rows}
+        return {"count": len(rows), "outcomes": outcomes, "failed": len(failed), "failed_projects": failed,
+                "rows": rows}
 
     @web.method()
     def migrate_eval_dataset_columns(self, *args, **kwargs):

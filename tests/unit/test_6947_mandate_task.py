@@ -292,7 +292,7 @@ def test_a_new_revision_is_accepted_after_a_revoke(ns, env, agent):
 
 
 def test_a_lost_insert_race_is_reported_and_rolled_back(ns, env, agent, monkeypatch):
-    monkeypatch.setattr(ns.mandate_admin, "_live_mandate_exists", lambda session, project_id, version_id: False)
+    monkeypatch.setattr(ns.mandate_admin, "_live_mandate", lambda session, project_id, version_id: None)
     create(ns, env)
     env.recorded.clear()
     result = run(ns, env, CREATE)
@@ -548,3 +548,160 @@ def test_revoking_a_mandates_contexts_is_one_conditional_statement_that_does_not
     assert {"kind": "mandate", "ref": f"mandate:{mandate_id}"} in compiled.params.values()
     assert "revoked" in compiled.params.values() and "MANDATE_EXPIRED" in compiled.params.values()
     assert ["admitted", "running"] in compiled.params.values()
+
+
+# --- review fixes (#6947): lazy expiry, bounds, binding, dependency failures ---------------------------------
+
+def overdue(ns, env, monkeypatch, days=31):
+    monkeypatch.setattr(ns.mandate_admin, "_now", lambda: NOW + timedelta(days=days))
+
+
+@pytest.mark.parametrize("state", ["active", "suspended"])
+def test_an_overdue_mandate_does_not_hold_the_slot_so_it_can_be_renewed(ns, env, agent, monkeypatch, state):
+    old = to_state(ns, env, state)
+    overdue(ns, env, monkeypatch)
+    env.recorded.clear()
+    ns.revoked.clear()
+    result = run(ns, env, CREATE.replace(UNTIL, (NOW + timedelta(days=60)).isoformat()))
+    assert result["state"] == "draft" and result["revision"] == 2, result
+    row = mandate_row(env, ns, old)
+    assert row.state == "expired" and row.state_changed_by is None
+    assert row.revocation_epoch == (2 if state == "suspended" else 1)
+    assert [call[1:] for call in ns.revoked] == [(old, "MANDATE_EXPIRED")]
+    assert [(e["reason_code"], e["mandate_ref"]) for e in events(env)] == [
+        ("MANDATE_EXPIRED", str(old)), ("MANDATE_DRAFT", result["mandate_ref"])]
+    assert events(env)[0]["revocation_epoch"] == row.revocation_epoch
+
+
+def test_expiry_and_the_new_draft_are_one_transaction(ns, env, agent, monkeypatch):
+    old = to_state(ns, env, "active")
+    overdue(ns, env, monkeypatch)
+    env.record_raises = RuntimeError("outbox down")
+    assert run(ns, env, CREATE.replace(UNTIL, (NOW + timedelta(days=60)).isoformat()))["code"] == "FAILED"
+    assert mandate_row(env, ns, old).state == "active" and len(env.query(1, ns.Mandate)) == 1
+
+
+def test_a_mandate_within_its_validity_still_holds_the_slot(ns, env, agent, monkeypatch):
+    to_state(ns, env, "active")
+    overdue(ns, env, monkeypatch, days=29)
+    assert run(ns, env, CREATE)["code"] == "MANDATE_EXISTS"
+
+
+def test_a_dry_run_of_a_renewal_expires_nothing(ns, env, agent, monkeypatch):
+    old = to_state(ns, env, "active")
+    overdue(ns, env, monkeypatch)
+    env.recorded.clear()
+    ns.revoked.clear()
+    assert run(ns, env, CREATE.replace(UNTIL, (NOW + timedelta(days=60)).isoformat()) + ";dry_run") == {
+        "dry_run": True, "action": "create", "state": "draft", "revision": 2}
+    assert mandate_row(env, ns, old).state == "active" and env.recorded == [] and ns.revoked == []
+
+
+@pytest.mark.parametrize("action,state", [("submit", "draft"), ("approve", "pending_approval")])
+def test_a_draft_or_pending_mandate_past_its_validity_is_refused_not_acted_on(ns, env, agent, monkeypatch, action, state):
+    mandate_id = to_state(ns, env, state)
+    overdue(ns, env, monkeypatch)
+    env.recorded.clear()
+    extra = f";{APPROVE}" if action == "approve" else ""
+    assert run(ns, env, f"project_id=1;action={action};mandate={mandate_id}{extra}", APPROVER)["code"] == "MANDATE_EXPIRED"
+    assert mandate_row(env, ns, mandate_id).state == state and env.recorded == []
+
+
+def test_a_suspended_mandate_past_its_validity_is_expired_on_resume_and_stays_expired(ns, env, agent, monkeypatch):
+    mandate_id = to_state(ns, env, "suspended")
+    overdue(ns, env, monkeypatch)
+    ns.revoked.clear()
+    env.recorded.clear()
+    assert run(ns, env, f"project_id=1;action=resume;mandate={mandate_id}", APPROVER)["code"] == "MANDATE_EXPIRED"
+    assert mandate_row(env, ns, mandate_id).state == "expired"   # committed, not rolled back with the refusal
+    assert [call[1:] for call in ns.revoked] == [(mandate_id, "MANDATE_EXPIRED")]
+    assert [e["reason_code"] for e in events(env)] == ["MANDATE_EXPIRED"]
+    assert run(ns, env, f"project_id=1;action=resume;mandate={mandate_id}", APPROVER)["code"] == "INVALID_STATE"
+
+
+def test_an_overdue_resume_dry_run_writes_nothing(ns, env, agent, monkeypatch):
+    mandate_id = to_state(ns, env, "suspended")
+    overdue(ns, env, monkeypatch)
+    env.recorded.clear()
+    assert run(ns, env, f"project_id=1;action=resume;mandate={mandate_id};dry_run", APPROVER)["code"] == "MANDATE_EXPIRED"
+    assert mandate_row(env, ns, mandate_id).state == "suspended" and env.recorded == []
+
+
+@pytest.mark.parametrize("binding_state", ["suspended", "retired"])
+def test_resume_needs_the_binding_to_be_active_still(ns, env, agent, binding_state):
+    mandate_id = to_state(ns, env, "suspended")
+    with env.get_session(1) as session:
+        session.execute(ns.sa.update(ns.models.AgentIdentityBinding).values(state=binding_state))
+        session.commit()
+    assert run(ns, env, f"project_id=1;action=resume;mandate={mandate_id}", APPROVER)["code"] == "BINDING_NOT_ACTIVE"
+    assert mandate_row(env, ns, mandate_id).state == "suspended"
+
+
+@pytest.mark.parametrize("name,value", [
+    ("approval_ref", "x" * 129), ("approval_ref", "has space"), ("approval_ref", "q'uote"),
+    ("policy_revision", "x" * 129), ("policy_revision", "new\nline"), ("policy_revision", "<tag>"),
+    ("approval_ref", "\u00e9")])
+def test_an_unbounded_or_odd_reference_is_a_readable_refusal(ns, env, name, value):
+    other = "policy_revision=rev-1" if name == "approval_ref" else "approval_ref=CHG-1"
+    values, error = parsed(ns, f"project_id=1;action=approve;mandate={uuid.uuid4()};{other};{name}={value}")
+    assert values is None and error.startswith(f"invalid {name}: 1 to 128 characters")
+    assert value not in error
+
+
+@pytest.mark.parametrize("value", ["x" * 128, "CHG-12", "a.b_c:d/e@f-g", "2026-10-1"])
+def test_the_allowed_reference_shapes_are_accepted(ns, env, value):
+    assert parsed(ns, f"project_id=1;action=approve;mandate={uuid.uuid4()};approval_ref={value};policy_revision=r")[1] is None
+
+
+@pytest.mark.parametrize("until", ["9999-12-31T23:59:59-01:00", "0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59+00:00"])
+def test_a_validity_at_the_edge_of_the_calendar_is_a_readable_refusal(ns, env, until):
+    values, error = parsed(ns, CREATE.replace(UNTIL, until))
+    assert values is None and error.startswith("invalid valid_until")
+
+
+@pytest.mark.parametrize("key", ["project_id", "version_id", "owner_user_id"])
+def test_an_integer_too_big_for_the_column_is_refused(ns, env, key):
+    param = CREATE.replace("project_id=1", "project_id=1")
+    param = f"{param};{key}=99999999999" if key == "project_id" else param.replace(f"{key}=", f"{key}=99999999999", 1)
+    values, error = parsed(ns, param)
+    assert values is None and f"invalid {key}" in error
+
+
+def test_the_largest_column_integer_is_accepted(ns, env):
+    assert parsed(ns, CREATE.replace("version_id=70", "version_id=2147483647"))[1] is None
+
+
+def test_the_parser_never_escapes_the_task(ns, env, monkeypatch):
+    def boom(param):
+        raise OverflowError("date value out of range")
+
+    monkeypatch.setattr(ns.mandate_admin, "parse_mandate_param", boom)
+    result = run(ns, env, CREATE)
+    assert list(result) == ["error"] and result["error"].startswith("invalid parameter")
+
+
+@pytest.mark.parametrize("error,code", [
+    (RuntimeError("No such user found: id=5"), "OWNER_NOT_FOUND"),
+    (RuntimeError("timeout waiting for the rpc"), "DEPENDENCY_UNAVAILABLE"),
+    (TimeoutError("auth did not answer"), "DEPENDENCY_UNAVAILABLE"),
+    (ConnectionError("redis down"), "DEPENDENCY_UNAVAILABLE")])
+def test_only_a_missing_user_is_owner_not_found(ns, env, agent, error, code):
+    def get_user(user_id):
+        raise error
+
+    ns.tools.auth.get_user = get_user
+    result = run(ns, env, CREATE)
+    assert result["code"] == code
+    assert env.query(1, ns.Mandate) == [] and env.recorded == []
+    assert ns.mandate_admin.MESSAGES["DEPENDENCY_UNAVAILABLE"] == "The identity service did not answer; try again."
+
+
+def test_an_identity_service_that_does_not_answer_on_resume_is_a_dependency_failure(ns, env, agent):
+    mandate_id = add_mandate(env, ns, state="suspended", suspended_reason="OWNER_SUSPENDED", binding_ref=agent, epoch=1)
+
+    def boom(kind, ident):
+        raise TimeoutError("no answer")
+
+    ns.tools.auth.read_identity_epochs = boom
+    assert run(ns, env, f"project_id=1;action=resume;mandate={mandate_id}", APPROVER)["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert mandate_row(env, ns, mandate_id).state == "suspended"

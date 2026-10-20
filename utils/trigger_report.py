@@ -4,16 +4,24 @@ would be admitted under a mandate, and which would be refused once governance is
 Lists, per project, the pipeline schedule and webhook triggers, the agent webhooks (non-pipeline versions of an
 application with a webhook secret) and the toolkit index schedules, each with its principal and the outcome the
 admission layer would give it. Works with governance off: it is the driver of the migration to mandates.
-Never selects or returns a cron, a webhook secret, a credential title or a schedule body.
+
+What is loaded and what is returned: the index query loads each toolkit's ``indexes_meta`` into memory (the schedule
+bodies in it can hold a cron and a credential title; SQL cannot cheaply project just the schedule keys), and the
+pipeline and webhook queries select ids, the trigger type and its creator only; webhook secrets are tested for
+presence in SQL and never selected. Only ids, flags, states and outcomes leave this module. A project whose
+mandate table does not exist yet is still reported, with the outcome ``MANDATE_TABLE_MISSING`` on the rows that
+depend on a mandate (run ``create_mandate_tables``).
 """
 from datetime import datetime, timezone
 
 from pylon.core.tools import log
 from sqlalchemy import String, select
+from sqlalchemy.exc import DBAPIError
 from tools import db
 
 from .trigger_principal import OPERATION_OF, TEAM_SCHEDULE_KEY, latest_mandates, principal_of
 
+MANDATE_TABLE = "autonomous_mandate"
 PRINCIPALS = ("legacy_system", "delegation", "mandate")
 PIPELINE_TRIGGER_KINDS = {"schedule": "pipeline_schedule", "webhook": "pipeline_webhook"}
 
@@ -86,27 +94,42 @@ def _int_or_none(value):
         return None
 
 
-def _row(project_id, trigger_kind, principal, mandate, now, **fields):
+def _row(project_id, trigger_kind, principal, mandate, now, outcome=None, **fields):
     row = {"project_id": project_id, "trigger_kind": trigger_kind, "application_id": None, "version_id": None,
            "toolkit_id": None, "index_name": None, "owner_user_id": None, "enabled": True}
     row.update(fields)
     row.update(
         principal=principal.kind, mandate_ref=str(mandate.id) if mandate is not None else None,
-        mandate_state=principal.mandate_state, governed_outcome=governed_outcome(principal, trigger_kind, mandate, now))
+        mandate_state=principal.mandate_state,
+        governed_outcome=outcome or governed_outcome(principal, trigger_kind, mandate, now))
     return row
+
+
+def _mandates(session, project_id, version_ids):
+    """The latest mandate rows by version, or None when the project has no mandate table yet."""
+    try:
+        return latest_mandates(session, project_id, version_ids)
+    except DBAPIError as exc:
+        if MANDATE_TABLE not in str(getattr(exc, "orig", exc)):
+            raise
+        session.rollback()
+        return None
 
 
 def _project_rows(session, project_id, now):
     pipelines, webhooks, indexes = _pipeline_triggers(session), _agent_webhooks(session), _index_schedules(session)
-    mandates = latest_mandates(session, project_id, {item[0] for item in pipelines + webhooks})
+    mandates = _mandates(session, project_id, {item[0] for item in pipelines + webhooks})
+    outcome = "MANDATE_TABLE_MISSING" if mandates is None else None
+    mandates = mandates or {}
     rows = []
     for version_id, application_id, trigger_type, created_by in pipelines:
         kind, mandate = PIPELINE_TRIGGER_KINDS[trigger_type], mandates.get(version_id)
-        rows.append(_row(project_id, kind, principal_of(kind, mandate), mandate, now, application_id=application_id,
-                         version_id=version_id, owner_user_id=_int_or_none(created_by)))
+        rows.append(_row(project_id, kind, principal_of(kind, mandate), mandate, now, outcome,
+                         application_id=application_id, version_id=version_id,
+                         owner_user_id=_int_or_none(created_by)))
     for version_id, application_id, owner_id in webhooks:
         mandate = mandates.get(version_id)
-        rows.append(_row(project_id, "agent_webhook", principal_of("agent_webhook", mandate), mandate, now,
+        rows.append(_row(project_id, "agent_webhook", principal_of("agent_webhook", mandate), mandate, now, outcome,
                          application_id=application_id, version_id=version_id, owner_user_id=owner_id))
     for toolkit_id, index_name, key, enabled, created_by in indexes:
         principal = principal_of("index_schedule", schedule_key=key)

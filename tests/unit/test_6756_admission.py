@@ -426,8 +426,6 @@ def test_nothing_secret_reaches_the_row_the_events_or_the_view(ns, env):
 
 
 def test_the_audit_event_matches_the_tracing_schema(ns, env):
-    if ns.event_model is None:
-        pytest.skip("the tracing plugin is not checked out beside elitea_core")
     seed(env)
     admit(env, ns)  # the audit fake validates every event against SecurityAuditEventV1
     denied_code(env, ns, run_kind="system")

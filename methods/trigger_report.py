@@ -19,7 +19,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     @web.method("autonomous_trigger_report")
     def trigger_report(self, project_ids, principal=None):
         """Triggers that run on the system user, per project, with the outcome governance would give them
-        (#6947, C-1009). Read-only; rows hold ids, states and outcomes only. Projects that cannot be read are
-        logged and left out."""
+        (#6947, C-1009). Read-only; rows hold ids, states and outcomes only. Returns
+        ``{"rows": [...], "failed": [project ids that could not be read]}``."""
         from ..utils.trigger_report import build_trigger_report  # pylint: disable=C0415
-        return build_trigger_report(project_ids, principal)[0]
+        rows, failed = build_trigger_report(project_ids, principal)
+        return {"rows": rows, "failed": failed}

@@ -113,6 +113,19 @@ def test_resolving_is_one_read_and_never_a_write(ns, env):
     assert len(statements) == 1 and statements[0].is_select
 
 
+def test_only_the_newest_revision_leaves_the_database(ns, env):
+    for revision in (1, 2, 3):
+        add_mandate(env, ns, version=70, state="revoked" if revision < 3 else "draft", revision=revision,
+                    approved_by=8 if revision < 3 else None)
+    seen = []
+    with env.get_session(1) as session:
+        original = session.execute
+        session.execute = lambda statement, *a, **k: seen.append(statement) or original(statement, *a, **k)
+        latest = ns.trigger_principal.latest_mandates(session, 1)
+    assert len(seen) == 1 and "max(" in str(seen[0].compile(dialect=ns.postgresql.dialect()))
+    assert [row.revision for row in latest.values()] == [3]
+
+
 def test_an_index_schedule_reads_nothing(ns, env):
     env.poison()
     ns.trigger_principal.resolve_trigger_principal(
@@ -255,6 +268,34 @@ def test_a_project_that_cannot_be_read_is_reported_and_the_others_still_are(ns, 
     assert any("failed to read project 2" in line for line in ns.log.lines)
 
 
+def test_a_missing_mandate_table_still_reports_the_project(ns, env, report, monkeypatch):
+    report.pipelines = [(70, 7, "schedule", "3")]
+    report.webhooks = [(80, 8, 4)]
+    report.indexes = [(11, "docs", "7", True, 7)]
+
+    def missing(session, project_id, ids=None):
+        raise ns.sa.exc.OperationalError("select", {}, Exception("no such table: autonomous_mandate"))
+
+    monkeypatch.setattr(ns.trigger_report, "latest_mandates", missing)
+    rows, failed = report.run()
+    assert failed == [] and len(rows) == 3
+    assert {row["trigger_kind"]: row["governed_outcome"] for row in rows} == {
+        "pipeline_schedule": "MANDATE_TABLE_MISSING", "agent_webhook": "MANDATE_TABLE_MISSING",
+        "index_schedule": "AUTHORIZATION_REQUIRED"}
+    assert only(rows, trigger_kind="pipeline_schedule")["mandate_ref"] is None
+
+
+def test_another_database_error_fails_the_project_not_the_report(ns, env, report, monkeypatch):
+    report.pipelines = [(70, 7, "schedule", "3")]
+
+    def broken(session, project_id, ids=None):
+        raise ns.sa.exc.OperationalError("select", {}, Exception("connection reset"))
+
+    monkeypatch.setattr(ns.trigger_report, "latest_mandates", broken)
+    rows, failed = report.run(project_ids=(1, 2))
+    assert rows == [] and failed == [1, 2]
+
+
 def test_one_mandate_query_per_project_whatever_the_number_of_triggers(ns, env, report):
     report.pipelines = [(70 + n, 7, "schedule", "3") for n in range(20)]
     report.webhooks = [(100 + n, 8, 4) for n in range(20)]
@@ -277,8 +318,7 @@ def test_no_row_holds_a_secret_shaped_value(ns, env, report):
     values = [value for row in rows for value in row.values() if isinstance(value, str)]
     assert values
     for value in values:
-        if ns.event_model is not None:
-            ns.event_model.assert_no_secret_shaped(value)
+        ns.event_model.assert_no_secret_shaped(value)
         assert not value.startswith(("eyJ", "sk-", "ghp_"))
 
 

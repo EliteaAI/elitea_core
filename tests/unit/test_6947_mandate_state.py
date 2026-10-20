@@ -25,6 +25,7 @@ ALLOWED = {
     ("draft", "revoked"), ("pending_approval", "revoked"), ("active", "revoked"), ("suspended", "revoked"),
 }
 LEAVING_ACTIVE = {"suspended", "expired", "revoked"}
+EXPIRY = {("active", "expired"), ("suspended", "expired")}  # in the table, but only expire_if_due may do them
 CREATOR, APPROVER = 3, 1
 GOOD = dict(actor=APPROVER)
 
@@ -91,6 +92,10 @@ def test_full_matrix(ns, expected, target):
         with pytest.raises(ns.state.InvalidTransition) as err:
             ns.mandate_state.transition_mandate(session, "m1", expected, target, **GOOD)
         assert err.value.reason_code == "APPROVAL_REQUIRED"
+    elif (expected, target) in EXPIRY:
+        with pytest.raises(ns.state.InvalidTransition) as err:
+            ns.mandate_state.transition_mandate(session, "m1", expected, target, **GOOD)
+        assert err.value.reason_code == "EXPIRY_BY_CLOCK"
     elif (expected, target) in ALLOWED:
         assert ns.mandate_state.transition_mandate(session, "m1", expected, target, **GOOD) is True
         assert len(session.statements) == 1
@@ -98,7 +103,7 @@ def test_full_matrix(ns, expected, target):
         with pytest.raises(ns.state.InvalidTransition) as err:
             ns.mandate_state.transition_mandate(session, "m1", expected, target, **GOOD)
         assert err.value.reason_code == "INVALID_TRANSITION"
-    if (expected, target) not in ALLOWED or (expected, target) == ("pending_approval", "active"):
+    if (expected, target) not in ALLOWED or (expected, target) in EXPIRY | {("pending_approval", "active")}:
         assert session.statements == []
 
 
@@ -142,7 +147,7 @@ def test_no_state_function_commits(ns):
 
 # --- transitions on real rows --------------------------------------------------------------------
 
-@pytest.mark.parametrize("expected,target", sorted(ALLOWED - {("pending_approval", "active")}))
+@pytest.mark.parametrize("expected,target", sorted(ALLOWED - EXPIRY - {("pending_approval", "active")}))
 def test_every_allowed_move_changes_the_row_and_bumps_the_epoch_only_when_leaving_active(ns, env, expected, target):
     mandate_id = add_mandate(env, ns, state=expected, epoch=4,
                              suspended_reason="MANUAL" if expected == "suspended" else None)
@@ -434,3 +439,40 @@ def test_the_approver_is_set_once(ns, env):
         session.get(ns.Mandate, mandate_id).approved_by = 2
         with pytest.raises(models.ImmutableFieldChanged):
             session.flush()
+
+
+def test_the_approver_is_set_once_even_when_the_attribute_is_not_loaded(ns, env):
+    mandate_id = add_mandate(env, ns, state="active", approved_by=1)
+    models = sys.modules[ns.Mandate.__module__]
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        row = session.get(ns.Mandate, mandate_id)
+        session.expire(row, ["approved_by"])
+        row.approved_by = 2
+        with pytest.raises(models.ImmutableFieldChanged):
+            session.flush()
+
+
+def test_the_approver_can_still_be_written_once_when_it_was_empty(ns, env):
+    mandate_id = add_mandate(env, ns, state="pending_approval")
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        row = session.get(ns.Mandate, mandate_id)
+        session.expire(row, ["approved_by"])
+        row.approved_by, row.state, row.approval_ref, row.policy_revision = 1, "active", "CHG-2", "rev-2"
+        session.commit()
+    assert mandate_row(env, ns, mandate_id).approved_by == 1
+
+
+# --- system transitions ------------------------------------------------------------------------------
+
+def test_expiry_and_owner_suspension_are_system_changes(ns, env):
+    expiring = add_mandate(env, ns, state="active", version=70, valid_until=NOW - timedelta(days=1))
+    owned = add_mandate(env, ns, state="active", version=71)
+    with env.get_session(1) as session:   # a human changed it last
+        session.execute(ns.sa.update(ns.Mandate).values(state_changed_by=9))
+        session.commit()
+    assert expire(ns, env, expiring, NOW) is True
+    with env.get_session(1) as session:
+        assert ns.mandate_state.suspend_owner_mandates(session, OWNER) == [owned]
+        session.commit()
+    assert mandate_row(env, ns, expiring).state_changed_by is None
+    assert mandate_row(env, ns, owned).state_changed_by is None

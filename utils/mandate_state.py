@@ -42,13 +42,15 @@ def transition_mandate(  # pylint: disable=R0913
 
     False means the row is not in ``expected`` any more (another writer won), does not exist, or the guard of
     the statement refused (resuming one's own mandate, resuming past ``valid_until``); the caller re-reads.
-    Raises ``InvalidTransition`` for a change that is never allowed here. Approval is ``approve_mandate``; expiry by
-    time is ``expire_if_due``, which checks the clock.
+    Raises ``InvalidTransition`` for a change that is never allowed here. Approval is ``approve_mandate``; expiry is
+    ``expire_if_due`` only, which checks the clock.
     """
     if (expected, target) not in TRANSITIONS:
         raise InvalidTransition("INVALID_TRANSITION", f"{expected} -> {target} is not a legal mandate change")
     if target == "active" and expected == "pending_approval":
         raise InvalidTransition("APPROVAL_REQUIRED", "activation is done by approving the mandate")
+    if target == "expired":
+        raise InvalidTransition("EXPIRY_BY_CLOCK", "a mandate expires by the clock only (expire_if_due)")
     if target == "suspended":
         reason = reason or "MANUAL"
         if reason not in SUSPENDED_REASONS:
@@ -83,13 +85,13 @@ def approve_mandate(session, mandate_id, *, actor: int, approval_ref: str, polic
 
 def expire_if_due(session, mandate_id, now=None) -> bool:
     """Lazy expiry: an ``active`` or ``suspended`` mandate whose ``valid_until`` is now or past becomes
-    ``expired``. True when this call changed it."""
+    ``expired`` (a system change: ``state_changed_by`` is cleared). True when this call changed it."""
     return _apply(
         session,
         [AutonomousMandate.id == mandate_id, AutonomousMandate.state.in_(("active", "suspended")),
          AutonomousMandate.valid_until <= (now or _now())],
         {"state": "expired", "suspended_reason": None, "revocation_epoch": AutonomousMandate.revocation_epoch + 1,
-         "updated_at": func.now()},
+         "state_changed_by": None, "updated_at": func.now()},
     ) == 1
 
 
@@ -100,7 +102,8 @@ def suspend_owner_mandates(session, owner_user_id) -> list:
         update(AutonomousMandate)
         .where(AutonomousMandate.owner_user_id == owner_user_id, AutonomousMandate.state == "active")
         .values(state="suspended", suspended_reason="OWNER_SUSPENDED",
-                revocation_epoch=AutonomousMandate.revocation_epoch + 1, updated_at=func.now())
+                revocation_epoch=AutonomousMandate.revocation_epoch + 1, state_changed_by=None,
+                updated_at=func.now())
         .returning(AutonomousMandate.id).execution_options(synchronize_session=False)
     ).scalars())
 

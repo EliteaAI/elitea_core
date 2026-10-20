@@ -6,6 +6,7 @@ creator nor its owner approves it. Works with governance off, so mandates can be
 switched on. Every change is an audit event in the same transaction; leaving ``active`` also revokes the live
 contexts of the mandate's runs. Results and messages carry ids and states only, never a credential.
 """
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -19,7 +20,7 @@ from .admission import revoke_mandate_contexts, version_application_id
 from .binding_state import InvalidTransition
 from .definition_digest import DigestError, digest_for_version
 from .mandate_state import (
-    BUMPS_EPOCH, MAX_MANDATE_VALIDITY_DAYS, approve_mandate, next_revision, transition_mandate,
+    BUMPS_EPOCH, MAX_MANDATE_VALIDITY_DAYS, approve_mandate, expire_if_due, next_revision, transition_mandate,
 )
 from .trigger_principal import OPERATION_OF
 
@@ -42,6 +43,9 @@ NEEDED = {"create": ("version_id", "owner_user_id", "operations", "max_runtime_s
 OPERATIONS = tuple(sorted(set(OPERATION_OF.values())))
 ANY_TARGET = "*"
 RUNTIME_RANGE_S = (60, 86400)
+MAX_INT = 2 ** 31 - 1
+REFERENCE_KEYS = ("approval_ref", "policy_revision")
+REFERENCE_PATTERN = re.compile(r"^[A-Za-z0-9._:/@-]{1,128}$")
 # Moves that are not creation or approval: action -> (states it starts from, state it ends in)
 MOVES = {
     "submit": (("draft",), "pending_approval"),
@@ -57,7 +61,8 @@ MESSAGES = {
     "DENIED_BINDING": "The agent version has no single active identity binding.",
     "BINDING_DIGEST_MISMATCH": "The agent changed after its identity binding was approved.",
     "BINDING_NOT_ACTIVE": "The identity binding this mandate was made for is no longer active.",
-    "OWNER_NOT_FOUND": "The owner does not exist or could not be read.",
+    "OWNER_NOT_FOUND": "The owner does not exist.",
+    "DEPENDENCY_UNAVAILABLE": "The identity service did not answer; try again.",
     "OWNER_NOT_LINKED": "The owner has no linked identity-provider subject.",
     "OWNER_INACTIVE": "The owner is not active.",
     "MANDATE_EXISTS": "A live mandate already exists for this agent version.",
@@ -91,11 +96,11 @@ def _aware(moment: datetime) -> datetime:
 def _parse_valid_until(text):
     try:
         until = datetime.fromisoformat(text)
-    except ValueError:
+        if until.tzinfo is None or until.utcoffset() is None:
+            return None, f"invalid valid_until: '{text}' (needs an offset)"
+        until = until.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None, f"invalid valid_until: '{text}'"
-    if until.tzinfo is None or until.utcoffset() is None:
-        return None, f"invalid valid_until: '{text}' (needs an offset)"
-    until = until.astimezone(timezone.utc)
     now = _now()
     if until <= now:
         return None, f"invalid valid_until: '{text}' (must be in the future)"
@@ -122,7 +127,7 @@ def parse_mandate_param(param):  # pylint: disable=R0911,R0912
                 values[key] = int(value)
             except ValueError:
                 return None, f"invalid {key}: '{value}'"
-            if values[key] <= 0:
+            if not 0 < values[key] <= MAX_INT:
                 return None, f"invalid {key}: '{value}'"
         else:
             values[key] = value
@@ -138,6 +143,9 @@ def parse_mandate_param(param):  # pylint: disable=R0911,R0912
     missing = [key for key in NEEDED.get(action, ("mandate",)) if not values.get(key)]
     if missing:
         return None, f"{', '.join(missing)} required. {USAGE}"
+    for key in REFERENCE_KEYS:
+        if key in values and not REFERENCE_PATTERN.match(values[key]):
+            return None, f"invalid {key}: 1 to 128 characters of letters, digits and . _ : / @ - are allowed"
     if "mandate" in values:
         try:
             values["mandate"] = uuid.UUID(values["mandate"])
@@ -189,8 +197,11 @@ def _active_binding(session, project_id, application_id, version_id, allow_runti
 def _owner_ref(owner_user_id):
     try:
         user = auth.get_user(user_id=owner_user_id)
+    except RuntimeError as exc:  # the identity service answers "No such user found" as a RuntimeError
+        raise MandateTaskError(
+            "OWNER_NOT_FOUND" if str(exc).startswith("No such user found") else "DEPENDENCY_UNAVAILABLE") from None
     except Exception:  # pylint: disable=W0703
-        raise MandateTaskError("OWNER_NOT_FOUND") from None
+        raise MandateTaskError("DEPENDENCY_UNAVAILABLE") from None
     user = user if isinstance(user, dict) else {}
     issuer, tid, oid = user.get("idp_issuer"), user.get("idp_tid"), user.get("idp_oid")
     if not (issuer and tid and oid):
@@ -198,10 +209,31 @@ def _owner_ref(owner_user_id):
     return {"user_id": owner_user_id, "issuer": issuer, "tid": tid, "oid": oid}
 
 
-def _live_mandate_exists(session, project_id, version_id):
-    return session.execute(select(AutonomousMandate.id).where(
+def _live_mandate(session, project_id, version_id):
+    """The one live mandate of the version (the unique index allows one), or None."""
+    return session.execute(select(AutonomousMandate).where(
         AutonomousMandate.project_id == project_id, AutonomousMandate.agent_version == version_id,
-        AutonomousMandate.state.in_(LIVE_MANDATE_STATES))).first() is not None
+        AutonomousMandate.state.in_(LIVE_MANDATE_STATES))).scalar_one_or_none()
+
+
+def _overdue(mandate, now):
+    return mandate.state in ("active", "suspended") and _aware(mandate.valid_until) <= now
+
+
+def _expire_overdue(session, tracing, mandate, actor, now):
+    """Lazy expiry, decided by the clock: an active or suspended mandate past its validity becomes ``expired``,
+    its live contexts are revoked and the event is recorded, all in the caller's transaction (not committed here).
+    True when this call expired it."""
+    if not _overdue(mandate, now):
+        return False
+    mandate_id = mandate.id
+    if not expire_if_due(session, mandate_id, now=now):
+        return False
+    session.expire(mandate)  # the UPDATE bypassed the instance
+    revoke_mandate_contexts(session, mandate_id, "MANDATE_EXPIRED")
+    tracing.security_audit_record(session, _event(
+        "lifecycle", "MANDATE_EXPIRED", mandate, actor, revocation_epoch=mandate.revocation_epoch))
+    return True
 
 
 def _create(module, session, tracing, values, actor):
@@ -213,8 +245,13 @@ def _create(module, session, tracing, values, actor):
     binding_ref = _active_binding(
         session, project_id, application_id, version_id, bool(settings and settings.allow_runtime_domain_binding))
     owner = _owner_ref(values["owner_user_id"])
-    if _live_mandate_exists(session, project_id, version_id):
-        raise MandateTaskError("MANDATE_EXISTS")
+    live, now = _live_mandate(session, project_id, version_id), _now()
+    if live is not None:
+        # An overdue active or suspended mandate does not hold the version's slot: renewal must be possible
+        if not _overdue(live, now):
+            raise MandateTaskError("MANDATE_EXISTS")
+        if not values["dry_run"]:
+            _expire_overdue(session, tracing, live, actor, now)
     revision = next_revision(session, project_id, version_id)
     if values["dry_run"]:
         return {"dry_run": True, "action": "create", "state": "draft", "revision": revision}
@@ -245,7 +282,7 @@ def _read(session, values):
     return mandate
 
 
-def _guard_change(session, mandate, action, actor, now):
+def _guard_change(session, mandate, action, actor):
     """The refusals that need more than the row's state; the conditional UPDATE repeats the ones that race."""
     if action == "approve" and actor in (mandate.created_by, mandate.owner_user_id):
         raise MandateTaskError("SELF_APPROVAL")
@@ -253,16 +290,16 @@ def _guard_change(session, mandate, action, actor, now):
         raise MandateTaskError("SELF_APPROVAL")
     if action not in ("approve", "resume"):
         return
-    if _aware(mandate.valid_until) <= now:
-        raise MandateTaskError("MANDATE_EXPIRED")
-    if action == "approve":
-        state = session.execute(
-            select(AgentIdentityBinding.state).where(AgentIdentityBinding.id == mandate.agent_binding_ref)
-        ).scalar_one_or_none()
-        if state != "active":
-            raise MandateTaskError("BINDING_NOT_ACTIVE")
-    elif mandate.suspended_reason == "OWNER_SUSPENDED":
-        verdict = auth.read_identity_epochs("user", mandate.owner_user_id)
+    state = session.execute(
+        select(AgentIdentityBinding.state).where(AgentIdentityBinding.id == mandate.agent_binding_ref)
+    ).scalar_one_or_none()
+    if state != "active":
+        raise MandateTaskError("BINDING_NOT_ACTIVE")
+    if action == "resume" and mandate.suspended_reason == "OWNER_SUSPENDED":
+        try:
+            verdict = auth.read_identity_epochs("user", mandate.owner_user_id)
+        except Exception:  # pylint: disable=W0703
+            raise MandateTaskError("DEPENDENCY_UNAVAILABLE") from None
         if not isinstance(verdict, dict) or verdict.get("active") is not True:
             raise MandateTaskError("OWNER_INACTIVE")
 
@@ -270,13 +307,19 @@ def _guard_change(session, mandate, action, actor, now):
 def _change(session, tracing, values, actor):
     action = values["action"]
     mandate = _read(session, values)
+    now = _now()
+    if action in ("submit", "approve", "resume") and mandate.state in LIVE_MANDATE_STATES \
+            and _aware(mandate.valid_until) <= now:
+        # Past its validity: refused, not acted on. An active or suspended one is expired on the spot.
+        if not values["dry_run"] and _expire_overdue(session, tracing, mandate, actor, now):
+            session.commit()
+        raise MandateTaskError("MANDATE_EXPIRED")
     starts, target = ("pending_approval",), "active"
     if action != "approve":
         starts, target = MOVES[action]
     if mandate.state not in starts:
         raise MandateTaskError("INVALID_STATE")
-    now = _now()
-    _guard_change(session, mandate, action, actor, now)
+    _guard_change(session, mandate, action, actor)
     source, mandate_id = mandate.state, mandate.id
     if values["dry_run"]:
         return {"dry_run": True, "action": action, "mandate_ref": str(mandate_id), "from": source, "to": target}
@@ -304,7 +347,10 @@ def _change(session, tracing, values, actor):
 
 def manage_mandate(module, param, actor_user_id=0):
     """Run one mandate action. Returns a result dict, or ``{"error": ..., "code": ...}`` with nothing written."""
-    values, error = parse_mandate_param(param)
+    try:
+        values, error = parse_mandate_param(param)
+    except Exception:  # pylint: disable=W0703
+        values, error = None, f"invalid parameter. {USAGE}"
     if error:
         log.error("manage_autonomous_mandate: %s", error)
         return {"error": error}

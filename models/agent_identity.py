@@ -155,7 +155,8 @@ class AutonomousMandate(db_tools.AbstractBaseMixin, db.Base):
     approval_ref: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     policy_revision: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_by: Mapped[int] = mapped_column(Integer, nullable=False)
-    approved_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # active_history: the old value is loaded when it is replaced, so "set once" holds for an expired attribute too
+    approved_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, active_history=True)
     state_changed_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     revocation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default='0')

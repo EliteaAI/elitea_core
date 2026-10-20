@@ -693,12 +693,13 @@ class Module(module.ModuleModel):
             }
         })
 
-        # Autonomous mandates (#6947, C-1009). Registered whatever the governance flag says, so roles can be
-        # assigned before it is switched on; nothing evaluates them yet (the operator tasks are the only writers).
+        # Autonomous mandates (#6947, C-1009), in the governance.* family of the operator UI. Registered whatever
+        # the governance flag says, so roles can be assigned before it is switched on; nothing evaluates them yet
+        # (the operator tasks are the only writers).
         for permission, default_roles in (
-                ("agent_identity.mandates.manage", {"admin": True, "viewer": False, "editor": False}),
-                ("agent_identity.mandates.approve", {"admin": True, "viewer": False, "editor": False}),
-                ("agent_identity.mandates.view", {"admin": True, "viewer": True, "editor": False}),
+                ("governance.mandates.manage", {"admin": True, "viewer": False, "editor": False}),
+                ("governance.mandates.approve", {"admin": True, "viewer": False, "editor": False}),
+                ("governance.mandates.view", {"admin": True, "viewer": False, "editor": False}),
         ):
             auth.register_permissions({
                 "permissions": [permission],

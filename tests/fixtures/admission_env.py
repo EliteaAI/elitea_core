@@ -19,11 +19,23 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 
+import pytest
+
 from fixtures import identity
 from fixtures.helpers import load_module_with_stubs
 
 PKG = identity.PKG
 TRACING_EVENT_MODEL = Path("tracing") / "models" / "security_audit_event.py"
+
+
+def find_tracing_event_model(plugin_root: Path):
+    """The tracing plugin's audit event model, found by walking up to the first ancestor that holds it (the plugin
+    directory in a plain checkout, the same one from a ``wt/`` worktree), or None."""
+    for directory in (plugin_root, *plugin_root.parents):
+        candidate = directory / TRACING_EVENT_MODEL
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 class RecordingLog:
@@ -333,11 +345,11 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.AdmissionRequest = ns.pd_admission.AdmissionRequest
     ns.postgresql = postgresql
 
-    # --- the event model of the tracing plugin, when it is checked out beside this one ---------
-    event_model = plugin_root.parents[2] / TRACING_EVENT_MODEL
-    ns.event_model = None
-    if event_model.exists():
-        ns.event_model = load_module_with_stubs(event_model, "tracing_security_audit_event_6756")
+    # --- the event model of the tracing plugin: audit events are validated against it, so it must exist ---
+    event_model = find_tracing_event_model(plugin_root)
+    if event_model is None:
+        pytest.fail("tracing model not found: no ancestor of elitea_core holds " + str(TRACING_EVENT_MODEL))
+    ns.event_model = load_module_with_stubs(event_model, "tracing_security_audit_event_6756")
 
     # --- fakes ---------------------------------------------------------------------------------
     flask = types.ModuleType("flask")
@@ -370,8 +382,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
         tools.auth.identity_verifier = types.SimpleNamespace(configured=lambda kind: env.verifier_configured)
 
         def validated(event):
-            if ns.event_model is not None:
-                ns.event_model.SecurityAuditEventV1.model_validate(event)
+            ns.event_model.SecurityAuditEventV1.model_validate(event)
             return event
 
         def allowed_local():
