@@ -39,7 +39,8 @@ def credential_errors_of(error) -> list[dict]:
 def check_principal(schedule) -> str | None:
     """None when the row delegates to its owner (R1.3); runs before any auth call."""
     principal = schedule.principal or {}
-    if principal.get('kind') != 'delegation' or principal.get('ref') != schedule.created_by:
+    if (principal.get('kind') != 'delegation' or schedule.created_by is None
+            or principal.get('ref') != schedule.created_by):
         return PRINCIPAL_MISMATCH
     return None
 

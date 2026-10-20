@@ -103,3 +103,7 @@ def test_7011_r1_3_delegation_principal_of_the_owner_passes(prerun):
 ], ids=["other-ref", "user-kind", "legacy-kind", "string-ref", "empty"])
 def test_7011_r1_3_principal_that_does_not_match_the_owner_fails(prerun, schedule):
     assert prerun.check_principal(schedule) == "principal does not match the owner"
+
+
+def test_7011_r1_3_a_row_without_an_owner_fails_the_principal_check(prerun):
+    assert prerun.check_principal(_schedule(ref=None, created_by=None)) == "principal does not match the owner"
