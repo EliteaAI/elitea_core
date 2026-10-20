@@ -345,12 +345,16 @@ def test_digest_inputs_show_the_shape_of_the_definition_without_its_text(digest)
                                           "token": "tok-secret", "url": "https://x"}, name="Jira")),
             (mapping(1), tool(1, "github", {"url": "x"}, name="GitHub"))]
     inputs = digest.digest_inputs(ver, rows)
+    sha = __import__("hashlib").sha256
     assert inputs == {
         "agent_type": "openai", "model": "gpt-x",
-        "instructions": {"length": len(secret), "sha256": __import__("hashlib").sha256(secret.encode()).hexdigest()},
+        "llm_settings_sha256": sha(b'{"model_name":"gpt-x","temperature":0.5}').hexdigest(),
+        "instructions": {"length": len(secret), "sha256": sha(secret.encode()).hexdigest()},
         "tools": [
-            {"id": 1, "type": "github", "name": "GitHub", "credential_configuration_uuid": None},
-            {"id": 2, "type": "jira", "name": "Jira", "credential_configuration_uuid": CFG},
+            {"id": 1, "type": "github", "name": "GitHub", "credential_configuration_uuid": None,
+             "selected_tools_count": 2, "selected_tools_sha256": sha(b'["a","b"]').hexdigest(), "ref": None},
+            {"id": 2, "type": "jira", "name": "Jira", "credential_configuration_uuid": CFG,
+             "selected_tools_count": 2, "selected_tools_sha256": sha(b'["a","b"]').hexdigest(), "ref": None},
         ],
     }
     text = json.dumps(inputs)
@@ -387,3 +391,32 @@ def test_digest_inputs_for_version_use_the_same_two_queries_and_refuse_a_missing
     with pytest.raises(digest.DigestError) as err:
         digest.digest_inputs_for_version(session, 404)
     assert err.value.reason_code == "VERSION_NOT_FOUND"
+
+
+def test_every_part_of_the_definition_moves_one_hash_so_a_changed_status_is_explainable(digest):
+    """The digest changes when one of these changes; the inputs shown change in the matching field."""
+    def inputs(ver=None, rows=None):
+        return digest.digest_inputs(ver or version(), pairs() if rows is None else rows)
+
+    base = inputs()
+    assert inputs(version(llm_settings={"model_name": "m", "temperature": 0.9}))["llm_settings_sha256"] != base["llm_settings_sha256"]
+    assert inputs(version(instructions="other"))["instructions"] != base["instructions"]
+    changed_tools = inputs(rows=[(mapping(1, ["b"]), tool(1)), (mapping(2, ["z"]), pairs()[1][1])])
+    by_id = lambda value, tool_id: [row for row in value["tools"] if row["id"] == tool_id][0]   # noqa: E731
+    assert by_id(changed_tools, 1)["selected_tools_sha256"] != by_id(base, 1)["selected_tools_sha256"]
+    assert by_id(changed_tools, 1)["selected_tools_count"] == 1
+    assert by_id(changed_tools, 2) == by_id(base, 2)
+    child = [row for row in base["tools"] if row["type"] == "application"][0]
+    assert child["ref"] == {"application_id": 9, "version_id": 90}
+    moved = pairs()
+    moved[1][1].settings = {"application_id": 9, "application_version_id": 91}
+    assert [row for row in inputs(rows=moved)["tools"] if row["type"] == "application"][0]["ref"] == {
+        "application_id": 9, "version_id": 91}
+    # nothing else moves: the same definition gives the same inputs
+    assert inputs() == base
+
+
+@pytest.mark.parametrize("settings", [{"application_id": "9", "application_version_id": None}, {"application_id": True}])
+def test_a_child_ref_that_is_not_an_id_is_shown_as_none(digest, settings):
+    [row] = digest.digest_inputs(version(), [(mapping(2), tool(2, "application", settings))])["tools"]
+    assert row["ref"] == {"application_id": None, "version_id": None}

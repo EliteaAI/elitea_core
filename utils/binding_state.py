@@ -84,9 +84,8 @@ def transition_binding(  # pylint: disable=R0913
             raise InvalidTransition("DENIED_BINDING", "runtime domain bindings cannot be activated here")
 
     values = {"state": target, "state_changed_by": actor_user_id, "updated_at": func.now()}
-    if approval_ref is not None:
+    if approving:   # only an approval writes the two columns; a resume keeps the stored ones
         values["approval_ref"] = approval_ref
-    if policy_revision is not None:
         values["policy_revision"] = policy_revision
     if rebind:   # approved again from scratch, for the definition as it is now
         values.update(definition_digest=current_digest, approval_ref=None, policy_revision=None)

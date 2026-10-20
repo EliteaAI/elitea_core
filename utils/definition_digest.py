@@ -118,6 +118,47 @@ def digest_for_version(session, version_id: int) -> str:
     return definition_digest(canonical_definition(version, toolkit_rows(session, version_id)))
 
 
+def digests_for_versions(session, version_ids) -> dict:
+    """``{version id: digest or None}`` for many versions in two queries, whatever their number: the versions, then
+    every one's toolkit mappings joined to tools. None is a version that does not exist or whose definition cannot be
+    digested. The values equal ``digest_for_version`` one by one."""
+    from ..models.all import ApplicationVersion  # pylint: disable=C0415
+    from ..models.elitea_tools import EliteATool, EntityToolMapping  # pylint: disable=C0415
+    from ..models.enums.all import ToolEntityTypes  # pylint: disable=C0415
+
+    ids = sorted({int(version_id) for version_id in version_ids})
+    if not ids:
+        return {}
+    versions = {row.id: row for row in session.query(ApplicationVersion).filter(ApplicationVersion.id.in_(ids)).all()}
+    rows = {}
+    for mapping, tool in (
+        session.query(EntityToolMapping, EliteATool)
+        .join(EliteATool, EliteATool.id == EntityToolMapping.tool_id)
+        .filter(EntityToolMapping.entity_version_id.in_(ids), EntityToolMapping.entity_type == ToolEntityTypes.agent.value)
+        .all()
+    ):
+        rows.setdefault(mapping.entity_version_id, []).append((mapping, tool))
+    digests = {}
+    for version_id in ids:
+        try:
+            version = versions.get(version_id)
+            digests[version_id] = None if version is None else definition_digest(
+                canonical_definition(version, rows.get(version_id, [])))
+        except DigestError:
+            digests[version_id] = None
+    return digests
+
+
+def _sha256_json(value) -> str:
+    return hashlib.sha256(json.dumps(
+        norm_json(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _int_or_none(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _configuration_uuid(settings):
     """The first stored configuration a toolkit's settings point to (``{"configuration_uuid": ...}``), or None."""
     found = []
@@ -133,23 +174,29 @@ def _configuration_uuid(settings):
 def digest_inputs(version, mappings_with_tools) -> dict:
     """What the digest of a version is made of, as the operator is shown it: names, ids and hashes only.
 
-    The instructions are never returned, only their length and the hash of the same normalised text the digest
-    covers. Toolkit settings are not returned at all; a toolkit shows the stored configuration it points to.
+    The instructions and the model settings are never returned, only their length and hash (of the same normalised
+    form the digest covers); a toolkit shows the hash and number of the tools it may call, the agent version an
+    agent-as-tool points at, and the stored configuration it uses. Toolkit settings are not returned at all. Enough to
+    tell which part of the definition a "changed" status comes from.
     """
     llm_settings = version.llm_settings if isinstance(version.llm_settings, dict) else {}
     model = llm_settings.get("model_name")
     instructions = norm_text(version.instructions or "")
-    tools = [
-        {
+    tools = []
+    for mapping, tool in mappings_with_tools:
+        selected = sorted({str(name) for name in (mapping.selected_tools or [])})
+        ref = child_ref(tool)
+        tools.append({
             "id": tool.id, "type": tool.type, "name": tool.name,
             "credential_configuration_uuid": _configuration_uuid(tool.settings),
-        }
-        for _mapping, tool in mappings_with_tools
-    ]
+            "selected_tools_count": len(selected), "selected_tools_sha256": _sha256_json(selected),
+            "ref": None if ref is None else {key: _int_or_none(value) for key, value in ref.items()},
+        })
     tools.sort(key=lambda item: (item["type"], item["id"]))
     return {
         "agent_type": version.agent_type,
         "model": model if isinstance(model, str) else None,
+        "llm_settings_sha256": _sha256_json(llm_settings),
         "instructions": {"length": len(instructions), "sha256": hashlib.sha256(instructions.encode("utf-8")).hexdigest()},
         "tools": tools,
     }

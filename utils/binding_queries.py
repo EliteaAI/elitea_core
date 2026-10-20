@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from tools import auth, db
 
 from ..models.agent_identity import AgentIdentityBinding as Binding
-from .definition_digest import DigestError, digest_for_version, digest_inputs_for_version
+from .definition_digest import DigestError, digest_for_version, digest_inputs_for_version, digests_for_versions
 
 MAX_VERSIONS_PER_AGENT = 50
 SORTS = ("updated_at", "created_at", "state", "application_name")
@@ -105,11 +105,13 @@ def list_page(project_id, *, state=None, identity_mode=None, application_id=None
         total = session.execute(select(func.count()).select_from(statement.subquery())).scalar_one()
         page = session.execute(statement.order_by(order, Binding.id).limit(limit).offset(offset)).all()
         users = users_by_id([uid for binding, _, _ in page for uid in (binding.created_by, binding.state_changed_by)])
+        # one digest per distinct version of the page, from two queries in all
+        current = digests_for_versions(session, {binding.version_id for binding, _, _ in page})
         rows = []
         for binding, application_name, version_name in page:
             item = _row(binding, application_name, version_name, users)
             item["definition_digest"] = digest_prefix(binding.definition_digest)
-            item["digest_status"] = digest_status(binding.definition_digest, digest_now(session, binding.version_id))
+            item["digest_status"] = digest_status(binding.definition_digest, current.get(binding.version_id))
             rows.append(item)
     return {"total": total, "rows": rows}
 
@@ -166,10 +168,11 @@ def list_agents(project_id, *, search=None, limit=20, offset=0):
                     select(ranked.c.id, ranked.c.application_id, ranked.c.name)
                     .where(ranked.c.rank <= MAX_VERSIONS_PER_AGENT).order_by(ranked.c.application_id, ranked.c.id.desc())):
                 versions.setdefault(row.application_id, []).append(row)
-            for row in session.execute(
+            shown = [ver.id for listed in versions.values() for ver in listed]
+            for row in (session.execute(
                     select(Binding.id, Binding.version_id, Binding.identity_mode, Binding.state)
-                    .where(Binding.project_id == project_id, Binding.application_id.in_(ids))
-                    .order_by(Binding.identity_mode)):
+                    .where(Binding.project_id == project_id, Binding.version_id.in_(shown))
+                    .order_by(Binding.identity_mode)) if shown else ()):
                 bindings.setdefault(row.version_id, []).append(
                     {"id": str(row.id), "identity_mode": row.identity_mode, "state": row.state})
     return {"total": total, "rows": [

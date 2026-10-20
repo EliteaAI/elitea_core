@@ -296,9 +296,11 @@ class Env:  # pylint: disable=R0902,R0904
 
     # --- seeding -------------------------------------------------------------------------------
 
-    def add_version(self, project_id, version_id, application_id, name=None):
+    def add_version(self, project_id, version_id, application_id, name=None, **definition):
+        """``definition``: ``agent_type``, ``instructions``, ``llm_settings`` for the suites that digest for real."""
         with self.ns.sa_orm.Session(self.engine(project_id)) as session:
-            session.add(self.ns.ApplicationVersion(id=version_id, application_id=application_id, name=name))
+            session.add(self.ns.ApplicationVersion(
+                id=version_id, application_id=application_id, name=name, **definition))
             session.commit()
 
     def add_application(self, project_id, application_id, name):
@@ -401,6 +403,9 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
         id = sa.Column(sa.Integer, primary_key=True)
         application_id = sa.Column(sa.Integer, nullable=False)
         name = sa.Column(sa.String, nullable=True)
+        agent_type = sa.Column(sa.String, nullable=True)       # what the digest of the definition reads (#7105)
+        instructions = sa.Column(sa.String, nullable=True)
+        llm_settings = sa.Column(postgresql.JSONB, nullable=True)
 
     class EliteATool(base):  # stand-ins with the columns the credential decision reads
         __tablename__ = "elitea_tools"
@@ -461,7 +466,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.application_tools = application_tools
     tools.auth = types.SimpleNamespace()
     tools.this = types.SimpleNamespace()
-    tools.config.ADMINISTRATION_MODE = "administration"
+    tools.config.ADMINISTRATION_MODE, tools.config.DEFAULT_MODE = "administration", "default"
 
     def load(kind, name):
         return load_module_with_stubs(plugin_root / kind / f"{name}.py", f"{PKG}.{kind.replace('/', '.')}.{name}")
@@ -708,6 +713,14 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
         ns.adm.digest_for_version = digest_for_version
         ns.binding_admin.digest_for_version = digest_for_version
         ns.binding_queries.digest_for_version = digest_for_version
+
+        def digests_for_versions(session, version_ids):  # pylint: disable=W0613
+            wanted = set(version_ids)
+            env.digest_calls += len(wanted)   # one per distinct version, as the batched read does
+            return {version_id: env.digests.get(version_id) for version_id in wanted}
+
+        ns.binding_queries.digests_for_versions = digests_for_versions
+        ns.real_digests_for_versions = ns.digest.digests_for_versions
 
         def digest_inputs_for_version(session, version_id):  # pylint: disable=W0613
             if version_id not in env.digest_inputs:

@@ -1,7 +1,10 @@
 """What the agent identity binding REST endpoints share (#7105, C-1009): permissions, request parsing,
 readable refusals. Nothing here touches the database."""
+import re
+
 from pydantic import ValidationError
 from tools import auth, config as c
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from ..models.agent_identity import BINDING_STATES, IDENTITY_MODES
 
@@ -35,12 +38,23 @@ MESSAGES = {
 }
 
 
+# Every role is named: the auth plugin's model defaults an unnamed ``system`` and ``super_admin`` to True, and an
+# unnamed mode to ``admin: True``. Platform administration only: admins and super admins in administration mode;
+# in a project (default) mode only the super admin, and no project role.
+RECOMMENDED_ROLES = {
+    c.ADMINISTRATION_MODE: {"system": False, "super_admin": True, "admin": True, "editor": False, "viewer": False},
+    c.DEFAULT_MODE: {"system": False, "super_admin": True, "admin": False, "editor": False, "viewer": False},
+}
+
+
 def check_spec(*permissions):
     """The ``check_api`` descriptor: platform administration only, the permissions are any-of."""
-    return {
-        "permissions": list(permissions),
-        "recommended_roles": {c.ADMINISTRATION_MODE: {"admin": True, "editor": False, "viewer": False}},
-    }
+    return {"permissions": list(permissions), "recommended_roles": RECOMMENDED_ROLES}
+
+
+def registration(permission):
+    """What the module registers for one permission: the same roles the endpoints recommend."""
+    return check_spec(permission)
 
 
 def refusal(code, message=None):
@@ -66,8 +80,14 @@ def has_permission(permission, project_id):
 
 def parse_body(request, model):
     """``(model instance, None)`` or ``(None, response)``. The size is checked before the body is parsed."""
-    length = request.content_length
-    if length is None or length > MAX_BODY_BYTES:
+    if request.content_length is not None and request.content_length > MAX_BODY_BYTES:
+        return None, refusal("PAYLOAD_TOO_LARGE")
+    request.max_content_length = MAX_BODY_BYTES   # a body that does not say its length is cut off at the limit too
+    try:
+        data = request.get_data()
+    except RequestEntityTooLarge:
+        return None, refusal("PAYLOAD_TOO_LARGE")
+    if len(data) > MAX_BODY_BYTES:
         return None, refusal("PAYLOAD_TOO_LARGE")
     raw = request.get_json(silent=True)
     if not isinstance(raw, dict):
@@ -120,7 +140,7 @@ def list_filters(args):
             filters[name] = value
     application_id = args.get("application_id")
     if application_id:
-        if not application_id.isdigit() or int(application_id) > 2 ** 31 - 1:
+        if not re.fullmatch(r"[0-9]{1,10}", application_id) or not 1 <= int(application_id) <= 2 ** 31 - 1:
             return None, refusal("INVALID_REQUEST", "application_id must be a positive integer")
         filters["application_id"] = int(application_id)
     return filters, None

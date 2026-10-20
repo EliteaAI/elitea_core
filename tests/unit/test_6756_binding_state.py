@@ -303,3 +303,24 @@ def test_resuming_is_not_an_approval(state):
     assert state.transition_binding(session, "b1", "suspended", "active", **GOOD) is True
     sql, _ = compiled(session.updates[0])
     assert "DISTINCT FROM" not in sql
+
+
+# --- only an approval writes the approval (#7105 review) ----------------------------------------------
+
+@pytest.mark.parametrize("expected, target", sorted(ALLOWED - {("pending_approval", "active")}))
+def test_no_other_change_writes_the_approval_columns_even_when_it_is_handed_some(state, expected, target):
+    session = FakeSession()
+    state.transition_binding(session, "b1", expected, target, **{**GOOD, "approval_ref": "EVIL", "policy_revision": "EVIL"})
+    sql, params = compiled(session.updates[0])
+    if (expected, target) in REBINDS:   # a rebind clears them
+        assert params["approval_ref"] is None and params["policy_revision"] is None
+    else:
+        assert "approval_ref" not in sql and "policy_revision" not in sql
+        assert "EVIL" not in params.values()
+
+
+def test_an_approval_writes_exactly_what_the_approver_gave(state):
+    session = FakeSession()
+    state.transition_binding(session, "b1", "pending_approval", "active", **GOOD)
+    _, params = compiled(session.updates[0])
+    assert params["approval_ref"] == "appr-1" and params["policy_revision"] == "rev-3"

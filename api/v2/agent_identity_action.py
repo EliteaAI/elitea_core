@@ -38,6 +38,8 @@ class AdminAPI(api_tools.APIModeHandler):
         body, error = api.parse_body(request, BindingActionRequest)
         if error:
             return error
+        if body.action != "activate" and (body.approval_ref is not None or body.policy_revision is not None):
+            return api.refusal("INVALID_REQUEST", "approval_ref and policy_revision belong to action activate only")
         if not api.has_permission(api.APPROVE if body.action == "activate" else api.MANAGE, project_id):
             return api.refusal("FORBIDDEN")
         try:

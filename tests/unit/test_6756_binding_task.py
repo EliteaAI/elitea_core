@@ -299,7 +299,7 @@ def test_an_action_that_does_not_apply_to_the_state_is_refused_and_changes_nothi
     if state == "retired":
         run(ns, env, f"{ONE};action=retire")
     before = (binding(env, ns).state, binding(env, ns).revocation_epoch, len(env.recorded))
-    result = run(ns, env, f"{ONE};action={action};{APPROVE}")
+    result = run(ns, env, f"{ONE};action={action}" + (f";{APPROVE}" if action == "activate" else ""))
     assert result == {"error": f"cannot {action} a binding in state '{state}'"}
     assert (binding(env, ns).state, binding(env, ns).revocation_epoch, len(env.recorded)) == before
 
@@ -517,7 +517,7 @@ def raised(ns, env, param, actor=7, **more):
     (["create"], f"{ONE};action=submit", {"expected_state": "active"}, "CONCURRENT_CHANGE"),
     (["create", "submit"], f"{ONE};action=activate;{APPROVE}", {}, "SELF_APPROVAL"),
     (["create", "submit"], f"{ONE};action=activate", {}, "APPROVAL_REQUIRED"),
-    ([], "project_id=1;application_id=8;version_id=70;mode=elitea_native;action=create", {}, "NOT_FOUND"),
+    ([], "project_id=1;application_id=8;version_id=70;mode=elitea_native;action=create", {}, "VERSION_NOT_FOUND"),
 ])
 def test_a_refusal_carries_a_stable_code_and_nothing_is_written(ns, env, setup, param, more, code):
     for action in setup:
@@ -561,6 +561,152 @@ def test_the_task_text_of_every_code_is_unchanged(ns, env):
     run(ns, env, f"{ONE};action=submit")
     assert run(ns, env, f"{ONE};action=activate")["error"].startswith(
         "APPROVAL_REQUIRED: activation needs an approval and a policy revision")
+
+
+# --- the approval is the approver's own (#7105 review) ----------------------------------------------------
+
+@pytest.mark.parametrize("action", ["create", "submit", "suspend", "resume", "retire", "rebind"])
+@pytest.mark.parametrize("field", ["approval_ref=CHG-1", "policy_revision=rev-1"])
+def test_the_parser_refuses_approval_fields_for_any_action_but_activate(ns, action, field):
+    values, error = parsed(ns, f"{ONE};action={action};{field}")
+    assert values is None and error == "approval_ref and policy_revision belong to action=activate only"
+
+
+@pytest.mark.parametrize("value", ["", "has space", "line\nbreak", "x" * 129, "semi;colon", "a\tb", "ü", "a=b"])
+def test_the_parser_holds_an_approval_to_printable_reference_text(ns, value):
+    for key in ("approval_ref", "policy_revision"):
+        other = "policy_revision=rev-1" if key == "approval_ref" else "approval_ref=CHG-1"
+        values, error = parsed(ns, f"{ONE};action=activate;{key}={value};{other}")
+        assert values is None and error is not None, (key, value)
+
+
+@pytest.mark.parametrize("value", ["CHG-12", "a.b_c:d/e@f-g", "x" * 128, "2026-10-20.1"])
+def test_the_parser_accepts_reference_text(ns, value):
+    assert parsed(ns, f"{ONE};action=activate;approval_ref={value};policy_revision={value}")[1] is None
+
+
+def test_submit_with_an_approval_is_refused_and_writes_nothing(ns, env):
+    run(ns, env, f"{ONE};action=create")
+    result = run(ns, env, f"{ONE};action=submit;{APPROVE}")
+    assert "belong to action=activate only" in result["error"]
+    assert binding(env, ns).state == "draft" and binding(env, ns).approval_ref is None and len(env.recorded) == 1
+
+
+def test_activate_without_the_approval_fields_is_refused_whatever_the_row_holds(ns, env):
+    run(ns, env, f"{ONE};action=create")
+    run(ns, env, f"{ONE};action=submit")
+    for param in (f"{ONE};action=activate", f"{ONE};action=activate;approval_ref=CHG-1",
+                  f"{ONE};action=activate;policy_revision=rev-1"):
+        assert run(ns, env, param, actor=APPROVER)["error"].startswith("APPROVAL_REQUIRED")
+    assert binding(env, ns).state == "pending_approval"
+
+
+def test_the_audit_names_the_approvers_own_reference(ns, env):
+    run(ns, env, f"{ONE};action=create")
+    run(ns, env, f"{ONE};action=submit")
+    run(ns, env, f"{ONE};action=activate;approval_ref=MINE-1;policy_revision=pol-9", actor=APPROVER)
+    event = env.recorded[-1][1]
+    assert (event["reason_code"], event["approver_ref"], event["policy_revision"]) == ("BINDING_ACTIVE", "MINE-1", "pol-9")
+    assert (binding(env, ns).approval_ref, binding(env, ns).policy_revision) == ("MINE-1", "pol-9")
+    assert all("approver_ref" not in event for _, event in env.recorded[:-1])
+
+
+def test_a_resume_keeps_the_stored_approval_and_ignores_whatever_the_values_carry(ns, env):
+    activate(ns, env)
+    run(ns, env, f"{ONE};action=suspend")
+    result = ns.binding_admin.run_binding_action(
+        env.module(governed=False),
+        values_of(ns, f"{ONE};action=resume", approval_ref="EVIL-1", policy_revision="EVIL-2"), 7)
+    row = binding(env, ns)
+    assert result["state"] == "active" and (row.approval_ref, row.policy_revision) == ("CHG-12", "rev-1")
+    event = env.recorded[-1][1]
+    assert (event["approver_ref"], event["policy_revision"]) == ("CHG-12", "rev-1")
+
+
+@pytest.mark.parametrize("action", ["submit", "suspend", "retire", "rebind"])
+def test_no_other_action_stamps_the_approval_even_when_the_values_carry_one(ns, env, action):
+    if action == "submit":
+        run(ns, env, f"{ONE};action=create")
+    else:
+        activate(ns, env)
+    before = (binding(env, ns).approval_ref, binding(env, ns).policy_revision)
+    ns.binding_admin.run_binding_action(
+        env.module(governed=False), values_of(ns, f"{ONE};action={action}", approval_ref="EVIL-1", policy_revision="EVIL-2"), 7)
+    row = binding(env, ns)
+    assert "EVIL-1" not in (row.approval_ref, row.policy_revision) and "EVIL-2" not in (row.approval_ref, row.policy_revision)
+    if action in ("suspend", "retire"):
+        assert (row.approval_ref, row.policy_revision) == before
+    assert all("EVIL" not in json_text(event) for _, event in env.recorded)
+
+
+def json_text(value):
+    import json
+    return json.dumps(value, default=str)
+
+
+# --- a binding whose version is gone (#7105 review) ----------------------------------------------------------
+
+def drop_version(ns, env, version_id=70):
+    with ns.sa_orm.Session(env.engine(1)) as session:
+        session.query(ns.ApplicationVersion).filter_by(id=version_id).delete()
+        session.commit()
+
+
+@pytest.mark.parametrize("action", ["suspend", "retire"])
+def test_a_binding_can_be_taken_out_of_use_after_its_version_was_deleted(ns, env, action):
+    activate(ns, env)
+    drop_version(ns, env)
+    result = run(ns, env, f"{ONE};action={action}")
+    assert "error" not in result and binding(env, ns).state == {"suspend": "suspended", "retire": "retired"}[action]
+
+
+def test_submit_of_a_draft_works_on_the_row_alone(ns, env):
+    run(ns, env, f"{ONE};action=create")
+    drop_version(ns, env)
+    assert run(ns, env, f"{ONE};action=submit")["state"] == "pending_approval"
+
+
+@pytest.mark.parametrize("action", ["activate", "resume", "rebind", "create"])
+def test_what_reads_the_definition_still_needs_the_version(ns, env, action):
+    if action == "create":
+        drop_version(ns, env)
+    else:
+        activate(ns, env) if action == "rebind" else run(ns, env, f"{ONE};action=create")
+        if action == "resume":
+            run(ns, env, f"{ONE};action=submit")
+            run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)
+            run(ns, env, f"{ONE};action=suspend")
+        if action == "activate":
+            run(ns, env, f"{ONE};action=submit")
+        drop_version(ns, env)
+    before = (len(env.query(1, ns.models.AgentIdentityBinding)), len(env.recorded))
+    err = raised(ns, env, f"{ONE};action={action}" + (f";{APPROVE}" if action == "activate" else ""), actor=APPROVER)
+    assert err.code == "VERSION_NOT_FOUND" and err.message == "the version does not exist in this application"
+    assert (len(env.query(1, ns.models.AgentIdentityBinding)), len(env.recorded)) == before
+
+
+# --- two creates that race (#7105 review) -----------------------------------------------------------------------
+
+def test_a_create_that_loses_the_race_to_the_unique_key_is_binding_exists_not_an_audit_failure(ns, env, monkeypatch):
+    run(ns, env, f"{ONE};action=create")
+    events = len(env.recorded)
+    # the pre-check does not see the other writer's row yet: the INSERT meets the unique constraint
+    monkeypatch.setattr(ns.binding_admin, "_find", lambda values: ns.sa.select(ns.models.AgentIdentityBinding).where(ns.sa.false()))
+    err = raised(ns, env, f"{ONE};action=create")
+    assert (err.code, err.message) == ("BINDING_EXISTS", "binding already exists; use another action")
+    assert err.task_text == err.message
+    assert len(env.query(1, ns.models.AgentIdentityBinding)) == 1 and len(env.recorded) == events
+
+
+# --- the rebind event carries both digests (#7105 review) -------------------------------------------------------
+
+def test_the_rebind_event_names_the_new_definition_and_the_previous_one(ns, env):
+    activate(ns, env)
+    env.digests[70] = NEW_DIGEST
+    run(ns, env, f"{ONE};action=rebind", actor=9)
+    event = env.recorded[-1][1]
+    assert (event["target_ref"], event["operation_id"]) == (NEW_DIGEST, f"previous:{DIGEST}")
+    assert all("target_ref" not in other and "operation_id" not in other for _, other in env.recorded[:-1])
 
 
 # --- the admin task method ---------------------------------------------------------------------
