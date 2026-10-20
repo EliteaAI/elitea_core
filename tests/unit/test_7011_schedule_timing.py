@@ -257,6 +257,16 @@ def test_el_7011_r3_2_next_run_keeps_local_time_across_a_clock_change(timing, cr
     assert timing.compute_next_run(cron, zone, after) == expected
 
 
+# R3.3 a start inside the second pass of a repeated hour: the first-pass firing is not after it,
+# so the next one follows; an hourly cron skips the second pass of 01:00 (01:00 EST, 06:00 UTC)
+@pytest.mark.parametrize("cron, after, expected", [
+    ("30 1 * * *", datetime(2026, 11, 1, 6, 10, tzinfo=UTC), datetime(2026, 11, 2, 6, 30, tzinfo=UTC)),
+    ("0 * * * *", datetime(2026, 11, 1, 5, 30, tzinfo=UTC), datetime(2026, 11, 1, 7, 0, tzinfo=UTC)),
+])
+def test_el_7011_r3_3_repeated_hour_fires_once_and_the_next_run_is_after_the_start(timing, cron, after, expected):
+    assert timing.compute_next_run(cron, "America/New_York", after) == expected
+
+
 # R4.1 the stop date is stored as the end of that day in the schedule timezone, in UTC
 @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
 def test_el_7011_r4_1_end_of_day_is_local_midnight_minus_one_second_in_utc(timing, zone):
