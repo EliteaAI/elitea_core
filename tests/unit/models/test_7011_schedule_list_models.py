@@ -55,6 +55,13 @@ def test_r5_2_offset_past_integer_range(pd_list):
     assert exc.value.errors()[0]['loc'][0] == 'offset'
 
 
+@pytest.mark.parametrize('field, value', [('entity_id', 2**31), ('owner_ids', [5, 2**31])])
+def test_r3_4_ids_past_integer_range(pd_list, field, value):
+    with pytest.raises(ValidationError) as exc:
+        pd_list.ScheduleListFilters(**{field: value})
+    assert exc.value.errors()[0]['loc'][0] == field
+
+
 @pytest.mark.parametrize('limit', [1, 100])
 def test_r5_2_limit_bounds_accepted(pd_list, limit):
     assert pd_list.ScheduleListFilters(limit=limit).limit == limit
