@@ -103,6 +103,8 @@ def harness(isolated_sys_modules):
     tools = types.ModuleType('tools')
     tools.api_tools = types.SimpleNamespace(
         APIModeHandler=type('APIModeHandler', (), {}),
+        APIBase=type('APIBase', (), {}),
+        with_modes=lambda urls: urls,
         endpoint_metrics=lambda func: func,
     )
     tools.auth = types.SimpleNamespace(
@@ -119,6 +121,7 @@ def harness(isolated_sys_modules):
     schedule_models.EntitySchedulePreference = FakePreference
     sys.modules[schedule_models.__name__] = schedule_models
 
+    _load('utils/constants.py', f'{PACKAGE}.utils.constants')
     _load('utils/schedule_access.py', f'{PACKAGE}.utils.schedule_access')
     harness.module = _load('api/v2/schedule_preferences.py', f'{PACKAGE}.api.v2.schedule_preferences')
     return harness
