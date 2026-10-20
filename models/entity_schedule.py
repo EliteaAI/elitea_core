@@ -32,7 +32,8 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
             "run_mode IS NULL OR run_mode IN ('entry_point', 'prompt')", name='ck_entity_schedules_run_mode'
         ),
         CheckConstraint(
-            "principal->>'kind' IN ('mandate', 'delegation', 'legacy_system')",
+            "principal->>'kind' IS NOT NULL"
+            " AND principal->>'kind' IN ('mandate', 'delegation', 'legacy_system')",
             name='ck_entity_schedules_principal_kind',
         ),
         Index('ix_entity_schedules_next_run_enabled', 'next_run', postgresql_where=text('enabled')),
