@@ -19,6 +19,8 @@ from ..utils.schedule_timing import compute_next_run
 from ..utils.utils import end_ambient_transaction, make_yield_to_hub
 
 DEFAULT_DISPATCH_CAP = 100
+DEFAULT_STALE_RUN_MINUTES = 120
+SKIPPED_REASON = "the previous run is still running"
 LEGACY_LOCK = text("SELECT pg_try_advisory_lock(:key)")
 LEGACY_UNLOCK = text("SELECT pg_advisory_unlock(:key)")
 
@@ -59,11 +61,31 @@ def _run_legacy_step(project_ids: list[int], yield_to_hub) -> None:
         _check_pipeline_scheduling_lock.release()
 
 
+def _sweep_stale_runs(project_ids: list[int], stale_minutes: int, yield_to_hub) -> None:
+    """R3.1 to R3.3: fail the running runs that went quiet, per project, before the claims."""
+    # Imported at call time, as in _dispatch_project
+    from ..utils.schedule_runs import fail_stale_runs
+    for project_id in project_ids:
+        yield_to_hub()
+        end_ambient_transaction()
+        try:
+            fail_stale_runs(project_id, datetime.now(UTC), stale_minutes)
+        except Exception as exc:  # noqa: BLE001 -- one bad project must not stop the sweep
+            log.exception("entity_schedules_check: stale sweep failed: project_id=%s exc=%r", project_id, exc)
+
+
+def _stale_minutes(settings: dict) -> int:
+    """The configured stale limit; config.yml skips the admin schema, so 0, null or negative is bounded here."""
+    return max(1, int(settings.get("stale_run_minutes") or DEFAULT_STALE_RUN_MINUTES))
+
+
 def _dispatch_project(project_id: int, entity_types: list[str], room: int) -> int:
     """Claim and start due rows of one project, at most `room`; return how many runs started.
 
     The cap counts started runs; a row whose claim is lost or whose active run blocks it uses no room.
     """
+    # Imported at call time: the tick loads without the run writers' model graph
+    from ..utils.schedule_runs import record_skipped_run
     started = 0
     with db.get_session(project_id) as session:
         # Plain values, read once: a commit expires ORM rows, and a reloaded next_run that another
@@ -80,7 +102,14 @@ def _dispatch_project(project_id: int, entity_types: list[str], room: int) -> in
                     continue  # another replica took this due time
                 run_id = insert_cron_run(session, schedule_id)
                 session.commit()  # the claim stays even when an active run blocks this one
-                if run_id is None:
+                if run_id is None:  # R2.1: the overlap is recorded, not dropped
+                    try:
+                        record_skipped_run(session, schedule_id, SKIPPED_REASON)
+                        session.commit()
+                    except Exception as exc:  # noqa: BLE001 -- the claim stays; the other due rows go on
+                        session.rollback()
+                        log.exception("entity_schedules_check: skipped run not recorded: project_id=%s "
+                                      "schedule_id=%s exc=%r", project_id, schedule_id, exc)
                     continue
                 if start_schedule_run(entity_type, project_id, schedule_id, run_id):
                     started += 1
@@ -122,6 +151,8 @@ class RPC:
         except Exception as exc:  # noqa: BLE001 -- a failed project list ends this tick quietly (R1.4)
             log.exception("entity_schedules_check: failed to enumerate projects: exc=%r", exc)
             return
+        # Before the claims, so a schedule blocked by a dead run starts again this minute
+        _sweep_stale_runs(project_ids, _stale_minutes(settings), yield_to_hub)
         for project_id in project_ids:
             if not entity_types or dispatched >= cap:
                 break
