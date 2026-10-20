@@ -60,7 +60,7 @@ class World:
         self.create_error = self.link_error = self.predict_error = None
         self.schedule = Row(
             _world=self, id=SCHEDULE_ID, name="S1", principal={}, application_id=AGENT_ID, version_id=VERSION_ID,
-            created_by=OWNER, prompt=PROMPT, variables=[])
+            created_by=OWNER, prompt=PROMPT, variables=[], entity_type="agent", run_mode=None)
         self.run = SimpleNamespace(id=RUN_ID, conversation_id=None)
         self.rows = {
             ("EntitySchedule", SCHEDULE_ID): self.schedule,
@@ -194,7 +194,7 @@ def test_7011_r2_5_predict_error_closes_the_run_as_failed(world):
     world.predict_error = RuntimeError("rpc down")
     _run(world)
     assert world.names()[-2:] == ["finish_error", "fail"]
-    assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "the agent call failed")
+    assert world.call("fail") == ("fail", PROJECT_ID, RUN_ID, "the run call failed")
 
 
 @pytest.mark.parametrize("step", ["create_error", "link_error"])
