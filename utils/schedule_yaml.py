@@ -54,7 +54,9 @@ def export_schedules_yaml(project_id: int, ids: list[int] | None) -> str:
     if ids is not None:
         query = query.where(EntitySchedule.id.in_(ids))
     with db.get_session(project_id) as session:
-        found = session.execute(query).all()
+        found = session.execute(query.limit(MAX_ITEMS + 1)).all()
+    if len(found) > MAX_ITEMS:  # the import takes at most MAX_ITEMS, so a bigger file could not come back
+        raise ScheduleError({'error': f'{TOO_MANY}; export them in parts by ids'})
     unknown = sorted(set(ids or []) - {row.id for row, *_ in found})
     if unknown:
         raise ScheduleError({'error': f'Unknown schedule ids: {", ".join(map(str, unknown))}'})

@@ -110,6 +110,18 @@ def test_7011_r1_4_export_with_unknown_ids_raises_400_listing_them(env):
     assert body['error'] == 'Unknown schedule ids: 901, 902'
 
 
+def test_7011_r1_4_export_above_the_import_cap_raises_400(env, monkeypatch):
+    """A file the import would refuse is not written; the admin exports it in parts by ids."""
+    monkeypatch.setattr(env.module, 'MAX_ITEMS', 2)
+    ids = [env.seed() for _ in range(3)]
+    with pytest.raises(env.ScheduleError) as error:
+        env.module.export_schedules_yaml(PROJECT_ID, None)
+    body, status = error.value.response
+    assert status == 400
+    assert 'export them in parts by ids' in body['error']
+    assert len(env.items(ids[:2])) == 2
+
+
 def test_7011_r1_5_export_writes_null_run_mode_for_an_agent(env):
     env.seed(run_mode='prompt')
     assert env.items()[0]['run_mode'] is None
