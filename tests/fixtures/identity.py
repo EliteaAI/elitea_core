@@ -19,15 +19,37 @@ LOG = types.SimpleNamespace(
 )
 
 
+_REAL_SQLALCHEMY: dict = {}
+_SQLALCHEMY_MODULES = (
+    "sqlalchemy", "sqlalchemy.orm", "sqlalchemy.schema", "sqlalchemy.sql.dml", "sqlalchemy.sql.selectable",
+    "sqlalchemy.dialects.postgresql", "sqlalchemy.dialects.sqlite", "sqlalchemy.ext.compiler",
+)
+
+
+def snapshot_sqlalchemy():
+    """Remember the real SQLAlchemy package while it is still intact (called from ``conftest.py`` before any
+    suite installs stand-ins). The package is never imported twice: its compiled extensions keep references to
+    the first import's classes (``InternalTraversal`` and friends), so a second import is inconsistent with
+    them and every statement fails at cache-key generation on SQLAlchemy 2.1."""
+    if _REAL_SQLALCHEMY:
+        return
+    for name in _SQLALCHEMY_MODULES:
+        importlib.import_module(name)
+    _REAL_SQLALCHEMY.update(
+        (name, module) for name, module in sys.modules.items()
+        if name == "sqlalchemy" or name.startswith("sqlalchemy."))
+
+
 def fresh_sqlalchemy():
     """A clean, consistent SQLAlchemy for these tests. Other suites leave ``types.ModuleType`` stand-ins
-    for ``sqlalchemy.*`` in ``sys.modules`` and evict half of the real package, which cannot be repaired
-    in place, so every ``sqlalchemy*`` entry is dropped and imported again (the caller restores)."""
+    for ``sqlalchemy.*`` in ``sys.modules`` and evict half of the real package, so every ``sqlalchemy*``
+    entry is dropped and the snapshot of the real package is put back (the caller restores afterwards)."""
+    snapshot_sqlalchemy()
     for name in [n for n in sys.modules if n == "sqlalchemy" or n.startswith("sqlalchemy.")]:
         del sys.modules[name]
-    modules = {name: importlib.import_module(name) for name in (
-        "sqlalchemy", "sqlalchemy.orm", "sqlalchemy.dialects.postgresql", "sqlalchemy.schema",
-        "sqlalchemy.sql.dml", "sqlalchemy.sql.selectable")}
+    sys.modules.update(_REAL_SQLALCHEMY)
+    modules = {name: sys.modules[name] for name in (
+        "sqlalchemy", "sqlalchemy.orm", "sqlalchemy.dialects.postgresql", "sqlalchemy.schema")}
     return types.SimpleNamespace(
         Table=modules["sqlalchemy"].Table, postgresql=modules["sqlalchemy.dialects.postgresql"],
         CreateTable=modules["sqlalchemy.schema"].CreateTable, CreateIndex=modules["sqlalchemy.schema"].CreateIndex,
