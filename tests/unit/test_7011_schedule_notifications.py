@@ -37,6 +37,7 @@ class Recorder:
         self.preference = None  # the owner's EntitySchedulePreference row, None when absent
         self.fire_error = None
         self.emit_error = None
+        self.gate_error = None
 
 
 class FakeSession:
@@ -44,26 +45,14 @@ class FakeSession:
         self._recorder = recorder
 
     def __enter__(self):
+        if self._recorder.gate_error:
+            raise self._recorder.gate_error
         return self
 
     def __exit__(self, *exc):
         return False
 
-    def close(self):
-        pass
-
     def get(self, _model, _user_id):
-        return self._recorder.preference
-
-    def query(self, *_args):
-        return self
-
-    def filter(self, *_args):
-        return self
-
-    filter_by = filter
-
-    def first(self):
         return self._recorder.preference
 
 
@@ -152,7 +141,16 @@ class TestEL7011R1Sender:
         assert meta['schedule_name'] == 'Daily report'
         assert meta['run_id'] == 301
         assert meta['conversation_id'] == 55
-        assert 'Daily report' in meta['message']
+        assert meta['message'] == 'Schedule "Daily report" failed: credential not found'
+
+    @pytest.mark.parametrize('extra, message', [
+        (None, 'Schedule "Daily report" was switched off'),
+        ({'reason': 'the agent was deleted'}, 'Schedule "Daily report" was switched off: the agent was deleted'),
+    ])
+    def test_r1_2_a_notice_without_a_reason_has_no_dangling_colon(self, notifications, recorder, extra, message):
+        _send(notifications, 'schedule_disabled', extra=extra)
+
+        assert recorder.fired[0][1]['meta']['message'] == message
 
     def test_r1_2_a_notice_without_a_run_has_null_run_fields(self, notifications, recorder):
         _send(notifications, 'schedule_expired')
@@ -160,7 +158,7 @@ class TestEL7011R1Sender:
         meta = recorder.fired[0][1]['meta']
         assert meta['run_id'] is None
         assert meta['conversation_id'] is None
-        assert meta['message']
+        assert meta['message'] == 'Schedule "Daily report" reached its stop date and is switched off'
 
     def test_r1_3_owner_change_adds_both_owner_ids(self, notifications, recorder):
         _send(notifications, 'schedule_owner_changed', extra={'old_owner_id': 42, 'new_owner_id': 43})
@@ -199,6 +197,13 @@ class TestEL7011R3Gate:
         recorder.preference = types.SimpleNamespace(get_notified=True)
 
         assert _send(notifications, 'schedule_run_succeeded', run=RUN) is True
+
+    def test_r3_1_run_succeeded_is_sent_when_the_gate_read_fails(self, notifications, recorder):
+        recorder.gate_error = RuntimeError('database down')
+
+        assert _send(notifications, 'schedule_run_succeeded', run=RUN) is True
+        assert recorder.fired[0][1]['event_type'] == 'schedule_run_succeeded'
+        assert any('7' in line and 'database down' in line for line in recorder.logged)
 
     def test_get_notified_for_is_true_without_a_row_and_follows_the_row_otherwise(self, notifications, recorder):
         session = FakeSession(recorder)

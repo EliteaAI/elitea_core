@@ -5,14 +5,14 @@ from ..models.entity_schedule import EntitySchedulePreference
 from ..models.enums.all import NotificationEventTypes as Types
 from .sio_utils import SioEvents, get_event_room
 
-# One fixed text per event type; {reason} is the run's reason and is empty without a run
+# One fixed text per event type; {reason} is ": <reason>" when the run or `extra` gives one, else empty
 MESSAGES = {
-    Types.schedule_run_failed: 'Schedule "{name}" failed: {reason}',
+    Types.schedule_run_failed: 'Schedule "{name}" failed{reason}',
     Types.schedule_run_succeeded: 'Schedule "{name}" ran successfully',
     Types.schedule_approval_needed: 'Schedule "{name}" waits for your approval',
     Types.schedule_approval_expired: 'Schedule "{name}" was not approved in 24 hours and the run stopped',
     Types.schedule_expired: 'Schedule "{name}" reached its stop date and is switched off',
-    Types.schedule_disabled: 'Schedule "{name}" was switched off: {reason}',
+    Types.schedule_disabled: 'Schedule "{name}" was switched off{reason}',
     Types.schedule_edited_by_admin: 'An admin edited your schedule "{name}"',
     Types.schedule_owner_changed: 'The owner of schedule "{name}" changed',
 }
@@ -25,21 +25,24 @@ def get_notified_for(session, user_id: int) -> bool:
 
 
 def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, extra=None) -> bool:
-    """Send one schedule notice to the owner. Return True when it was fired, False when dropped or failed."""
+    """Send one schedule notice to the owner. Return True when it was fired, False when dropped or failed.
+
+    `extra` may carry `reason` (when there is no run) and, for schedule_owner_changed, `old_owner_id` and
+    `new_owner_id`.
+    """
+    extra = extra or {}
+    if event_type == Types.schedule_run_succeeded and not _owner_wants_success(project_id, owner_id, schedule):
+        return False
     try:
-        if event_type == Types.schedule_run_succeeded:
-            with db.get_session(project_id) as session:
-                if not get_notified_for(session, owner_id):
-                    return False
+        reason = getattr(run, 'reason', None) or extra.get('reason')
         meta = {
-            'message': MESSAGES[event_type].format(name=schedule.name, reason=getattr(run, 'reason', None) or ''),
+            'message': MESSAGES[event_type].format(name=schedule.name, reason=f': {reason}' if reason else ''),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,
             'run_id': run.id if run else None,
             'conversation_id': run.conversation_id if run else None,
         }
         if event_type == Types.schedule_owner_changed:
-            extra = extra or {}
             meta.update(old_owner_id=extra.get('old_owner_id'), new_owner_id=extra.get('new_owner_id'))
         rpc_tools.EventManagerMixin().event_manager.fire_event('notifications_stream', {
             'project_id': project_id, 'user_id': owner_id, 'meta': meta, 'event_type': event_type,
@@ -48,6 +51,16 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
     except Exception as e:  # noqa: BLE001 -- a notice must never break the caller (R1.4)
         log.error('Schedule %s: cannot send %s notice: %s', schedule.id, event_type, e)
         return False
+
+
+def _owner_wants_success(project_id, owner_id, schedule) -> bool:
+    """The owner's "Get notified" value; a failed read sends the notice, only a saved false drops it (R3.1)."""
+    try:
+        with db.get_session(project_id) as session:
+            return get_notified_for(session, owner_id)
+    except Exception as e:  # noqa: BLE001 -- the gate must not lose a notice the owner did not turn off
+        log.error('Schedule %s: cannot read Get notified, sending the notice: %s', schedule.id, e)
+        return True
 
 
 def emit_schedule_run_finished(owner_id, schedule_id, run_id, status, entity_id, conversation_id) -> None:
