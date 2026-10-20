@@ -707,6 +707,38 @@
       "default": "* * * * *",
       "visible_when": { "field": "pipeline_scheduling_enabled", "value": true }
     },
+    "schedules_min_interval_minutes": {
+      "type": "integer",
+      "title": "Schedules Minimum Interval (minutes)",
+      "description": "Smallest allowed gap in minutes between two runs of one schedule. A schedule that fires more often is rejected when it is saved. Allowed range: 1–1440.",
+      "path": "scheduler.schedules.min_interval_minutes",
+      "section": "runtime",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 1440,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1440
+      }
+    },
+    "schedules_max_enabled_per_project": {
+      "type": "integer",
+      "title": "Schedules Max Enabled Per Project",
+      "description": "Maximum number of enabled schedules in one project. Disabled schedules do not count. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.max_enabled_per_project",
+      "section": "runtime",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
     "index_scheduling_enabled": {
       "type": "boolean",
       "title": "Index Scheduling Enabled",
