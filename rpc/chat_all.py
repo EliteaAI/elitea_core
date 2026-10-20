@@ -57,6 +57,7 @@ from ..utils.toolkit_authorization import (
     retire_all_authorization_requests, retire_authorization_requests,
 )
 from ..utils.authors import get_authors_data
+from ..utils.schedule_runs import ScheduleDecisionForbidden, ScheduleRunNotWaiting, resume_schedule_run
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
     inject_internal_attachment_tool, ATTACHMENT_INTERNAL_TOOL_KEY,
@@ -86,6 +87,25 @@ CHAT_PREDICT_MAPPER = {
     ParticipantTypes.skill: 'applications_predict_sio',
     # ParticipantTypes.pipeline: 'applications_predict_sio',
 }
+
+
+def _schedule_decision_error(parsed, caller_id) -> dict | None:
+    """Apply a HITL decision to the schedule run of the conversation (EL-7011); an error dict refuses it."""
+    if not parsed.hitl_resume:
+        return None
+    with db.get_session(parsed.project_id) as session:
+        meta = session.query(Conversation.meta).where(Conversation.uuid == parsed.conversation_uuid).scalar()
+    run_id = (meta or {}).get('schedule_run_id')
+    if run_id is None:
+        return None
+    action = parsed.hitl_action or (parsed.hitl_decisions or [{}])[0].get('action')
+    try:
+        resume_schedule_run(parsed.project_id, run_id, caller_id, action)
+    except ScheduleDecisionForbidden:
+        return {"error": "Only the schedule owner can approve or reject this run", "status": 403}
+    except ScheduleRunNotWaiting:
+        return {"error": "This schedule run is not waiting for approval", "status": 409}
+    return None
 
 
 def _get_agent_type(
@@ -1869,6 +1889,17 @@ class RPC:
             current_user = auth.current_user(auth_data=auth.sio_users[sid])
         else:
             current_user = auth.current_user()
+
+        # Owner check of a scheduled run before any resume (EL-7011); an internal replay was checked already
+        if _internal_token is not INTERNAL_CONTINUE_TOKEN:
+            denied = _schedule_decision_error(parsed, current_user['id'])
+            if denied and sid:
+                raise SioValidationError(
+                    sio=self.context.sio, sid=sid, event=SioEvents.chat_predict.value, error=denied['error'],
+                    stream_id=str(parsed.conversation_uuid), message_id=parsed.message_id,
+                )
+            if denied:
+                return denied
 
         # Stopped-run guard (#4993 Track 2): the chat stop button freezes the
         # run. A stale HITL approval card left in the UI must NOT resume anything
