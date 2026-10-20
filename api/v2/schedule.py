@@ -40,6 +40,14 @@ def _details(row, scope: ScheduleScope) -> dict:
     }).model_dump(mode="json")
 
 
+def _parse_body(model):
+    """The request body as `model`, or the 400 answer of its first error."""
+    try:
+        return model.model_validate(request.get_json(silent=True)), None
+    except ValidationError as e:
+        return None, _validation_response(e)
+
+
 def _validation_response(error: ValidationError) -> tuple[dict, int]:
     """Answer 400 with the first broken field and its plain reason."""
     first = error.errors()[0]
@@ -69,10 +77,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @auth.decorators.check_api(schedule_check_spec("create"))
     def _create(self, project_id: int):
-        try:
-            body = ScheduleCreate.model_validate(request.get_json(silent=True))
-        except ValidationError as e:
-            return _validation_response(e)
+        body, error = _parse_body(ScheduleCreate)
+        if error:
+            return error
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
@@ -85,10 +92,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @auth.decorators.check_api(schedule_check_spec("run"))
     def _run(self, project_id: int, schedule_id: int):
-        try:
-            body = ScheduleRunRequest.model_validate(request.get_json(silent=True))
-        except ValidationError as e:
-            return _validation_response(e)
+        body, error = _parse_body(ScheduleRunRequest)
+        if error:
+            return error
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
@@ -140,10 +146,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("update"))
     @api_tools.endpoint_metrics
     def put(self, project_id: int, schedule_id: int, **kwargs):
-        try:
-            body = ScheduleUpdate.model_validate(request.get_json(silent=True))
-        except ValidationError as e:
-            return _validation_response(e)
+        body, error = _parse_body(ScheduleUpdate)
+        if error:
+            return error
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
