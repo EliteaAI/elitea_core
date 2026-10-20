@@ -1,4 +1,6 @@
 """Schedules list endpoint: GET /api/v2/elitea_core/schedules/prompt_lib/{project_id} (EL-7011, US-05)."""
+from typing import ClassVar
+
 from flask import request
 from pydantic import ValidationError
 from pylon.core.tools import log
@@ -19,7 +21,7 @@ def _owner_names(owner_ids: set[int]) -> dict[int, str | None]:
     """Map owner id to name; a failed lookup gives an empty map, so every name is null (R1.3)."""
     try:
         return {user["id"]: user.get("name") for user in get_authors_data(sorted(owner_ids))}
-    except Exception as e:  # pylint: disable=W0718
+    except Exception as e:  # noqa: BLE001  # pylint: disable=W0718 -- names must never break the list (R1.3)
         log.warning(f"Schedule owner names lookup failed: {e}")
         return {}
 
@@ -62,8 +64,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
 class API(api_tools.APIBase):
     """URL pattern: /api/v2/elitea_core/schedules/prompt_lib/{project_id}."""
-    url_params = api_tools.with_modes(['<int:project_id>'])
+    url_params: ClassVar[list[str]] = api_tools.with_modes(['<int:project_id>'])
 
-    mode_handlers = {
+    mode_handlers: ClassVar[dict] = {
         PROMPT_LIB_MODE: PromptLibAPI
     }
