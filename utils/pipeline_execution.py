@@ -31,6 +31,7 @@ class TriggerType:
     """Trigger type constants for conversation metadata."""
     SCHEDULED = "scheduled"
     WEBHOOK = "webhook"
+    MANUAL = "manual"
 
 
 def create_trigger_run_conversation(
