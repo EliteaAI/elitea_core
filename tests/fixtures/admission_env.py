@@ -205,6 +205,7 @@ class Env:  # pylint: disable=R0902,R0904
         self.verifier_configured = True
         self.auth_mode = "rpc"
         self.has_audit_method = True
+        self.audit_has_would_deny = True   # the audit schema knows the would_deny field (tracing #7120)
         # credential governance fakes (the facts methods of `configurations` and `secrets`, #6757)
         self.configurations = {}        # (project_id, uuid) -> {id, project_id, type, section, generation}
         self.references = []            # rows as `credential_use_facts` returns them, plus project_id/configuration_id
@@ -600,6 +601,11 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             return env.audit_allowed
 
         def record(session, event):
+            if getattr(session, "is_probe", False):   # the preflight's schema probe: validates, writes nothing
+                validated(event)
+                if "would_deny" in event and not env.audit_has_would_deny:
+                    raise ValueError("invalid security audit event: would_deny: Extra inputs are not permitted")
+                return {"event_id": "probe"}
             env.tracing_calls += 1
             if env.record_raises:
                 raise env.record_raises

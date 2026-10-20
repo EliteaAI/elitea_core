@@ -16,7 +16,7 @@ import arbiter  # pylint: disable=E0401
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.admission import AdmissionSettings, admit_dispatch, track_context
 from .utils.governance import init_governance
-from .utils.governance_settings import record_boot_preflight
+from .utils.governance_settings import has_live_contexts, record_boot_preflight
 from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
 from .utils.worker_capabilities import (
@@ -645,15 +645,23 @@ class Module(module.ModuleModel):
 
     def _start_governance(self):
         """Once every plugin is up: read the switch again (the first read ran in init, before the plugins it needs
-        were loaded), start its refresher, and say so if the mode is on and the platform cannot honour it."""
-        self.governance_state.refresh()
-        self.governance_state.start()
+        were loaded), keep serving the runs admitted before this restart, start the refresher, and say so if the mode
+        is on and the platform cannot honour it."""
+        state = self.governance_state
+        state.refresh()
+        if not self.governed_handlers_registered and has_live_contexts():
+            # booting into off (or audit only) with governed runs still live: their workers still validate them and ask
+            # for their credentials, so the handlers (and the sweep of their deadlines) stay until the next restart
+            log.warning("Credential governance: governed runs admitted before this start are still live; "
+                        "their worker handlers are registered")
+            self._ensure_governed_handlers_registered()
+        state.start()
         record_boot_preflight(self)
 
     def _ensure_governed_handlers_registered(self):
         """Register the worker bus handlers of a governed run: workers prove a run still holds its admission
         (#6756), and ask Main for the material of a credential slot, sealed to the asking worker (#6946). Idempotent;
-        a handler that could not be registered is tried again at the next refresh of the switch."""
+        a handler that could not be registered is tried again at the next refresh of the switch. True when both are."""
         with self._governed_handlers_lock:
             for key, handler, name in (
                     ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
@@ -666,6 +674,7 @@ class Module(module.ModuleModel):
                 except Exception:  # pylint: disable=W0703
                     log.exception("Failed to register %s", name)
             self.governed_handlers_registered = any(self._governed_handlers.values())
+            return all(self._governed_handlers.values())
 
     def _unregister_governed_handlers(self):
         with self._governed_handlers_lock:
@@ -832,12 +841,15 @@ class Module(module.ModuleModel):
                 )
                 raise BudgetDoorClosedError(scope=closed_scope, project_id=project_id)
             # Versioned worker envelope; a governed task with no capable worker is refused here
+            # the state is read once, so a switch in the middle of a dispatch cannot give it a governed envelope and an
+            # ungoverned admission (or the other way round)
+            effective = self.governance_effective
             apply_envelope_gate(
                 args[0] if args else kwargs.get("name"),
-                kwargs, self.governance_profile, self.worker_capabilities,
+                kwargs, effective.profile, self.worker_capabilities,
             )
             stamp_predict_run_id(kwargs)
-            context_ref = admit_dispatch(self, args[0] if args else kwargs.get("name"), kwargs, admission)
+            context_ref = admit_dispatch(self, args[0] if args else kwargs.get("name"), kwargs, admission, effective)
             # a mandate run carries its time limit here (admit_dispatch); it is for Main only, the worker never sees it
             deadline = (kwargs.get("meta") or {}).pop("context_deadline", None) if context_ref else None
             task_id = _original_start_task(*args, **kwargs)

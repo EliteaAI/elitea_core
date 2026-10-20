@@ -7,6 +7,7 @@ platform's authorization decided from the permissions and recommended roles the 
 """
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -96,8 +97,8 @@ def test_get_shape_with_a_stored_row(ns, env, module):
     assert (stored["mode"], stored["revision"], stored["updated_by"]) == ("audit_only", 1, 1)
     assert result["ceiling"] == {"max_mode": "enforce", "source": "default"} and result["locks"] == {}
     assert [item["id"] for item in result["preflight"]["checks"]] == [
-        "identity_verifier", "auth_rpc_mode", "security_audit", "audit_backlog", "credential_facts", "master_key",
-        "settings_table", "corporate_vault", "governed_worker"]
+        "identity_verifier", "auth_rpc_mode", "security_audit", "audit_schema", "audit_backlog", "credential_facts",
+        "master_key", "settings_table", "corporate_vault", "governed_worker"]
     assert all(set(item) == {"id", "status", "code", "blocking", "message"} for item in result["preflight"]["checks"])
     json.dumps(result)   # the whole answer is plain JSON
 
@@ -156,15 +157,17 @@ def test_get_returns_the_texts_the_page_shows(ns, env, module):
     assert texts["modes"]["off"]["label"] == "Off"
     assert texts["modes"]["audit_only"]["label"] == "Audit only"
     assert texts["modes"]["enforce"]["label"] == "Enforce"
-    assert texts["modes"]["audit_only"]["tooltip"].endswith("Sub-agent runs are not evaluated in this mode.")
+    assert texts["modes"]["audit_only"]["tooltip"].endswith(
+        "Sub-agent runs and runs started by schedules or webhooks are not evaluated in this mode.")
     assert texts["modes"]["off"]["tooltip"].startswith("Agents run exactly as they do without governance")
     assert texts["fields"]["policy_revision"]["tooltip"].endswith("Required for audit-only and enforce.")
     assert texts["fields"]["change_note"]["placeholder"] == "Why are you changing this? (recorded in the history)"
     assert "ELITEA_CREDENTIAL_GOVERNANCE_MAX_MODE" in texts["locks"]["max_mode"]
     assert texts["preflight"]["unavailable"].startswith("Governance is on but a required service is unavailable.")
-    assert set(texts["checks"]) == {"identity_verifier", "auth_rpc_mode", "security_audit", "audit_backlog",
-                                    "credential_facts", "master_key", "settings_table", "corporate_vault",
-                                    "governed_worker"}
+    assert set(texts["checks"]) == {"identity_verifier", "auth_rpc_mode", "security_audit", "audit_schema",
+                                    "audit_backlog", "credential_facts", "master_key", "settings_table",
+                                    "corporate_vault", "governed_worker", "preflight"}   # incl. the fallback check
+    assert texts["checks"]["preflight"] == "The preflight could not run."
     assert texts["switch_dialog"]["off"].endswith("Runs already admitted keep their admission.")
 
 
@@ -357,16 +360,72 @@ def test_put_rejects_a_malformed_body_with_a_fixed_message(ns, env, module, payl
     assert rows(ns, env, "CredentialGovernanceSettings") == [] and env.recorded == []
 
 
-def test_put_checks_the_body_size_before_parsing_and_bounds_what_it_reports(ns, env, module):
-    ns.request.args, ns.request.body, ns.request.content_length = {}, body(), ns.governance_settings.MAX_BODY_BYTES + 1
+def put_raw(ns, module, raw, content_length=None):
+    ns.request.args, ns.request.body, ns.request.content_length, ns.request.raw = {}, None, content_length, raw
+    ns.env.g.auth = types.SimpleNamespace(type=ns.actor.kind, id=ns.actor.id)
+    stream = ns.request.start()
     instance = ns.api_settings.AdminAPI()
     instance.module = module
-    result, status = instance.put()
+    return instance.put(), stream
+
+
+def test_put_reads_at_most_the_limit_plus_one_whatever_the_framing_and_refuses_more_with_413(ns, env, module):
+    limit = ns.governance_settings.MAX_BODY_BYTES
+    big = json.dumps({**body(), "change_note": "x" * limit}).encode()   # a chunked body: no length to trust
+    ((result, status), stream) = put_raw(ns, module, big)
+    assert (status, result["code"], result["error"]) == (413, "PAYLOAD_TOO_LARGE", "The request is too large.")
+    assert stream.reads == [limit + 1]   # never more than the limit and one byte of it was taken from the wire
+    ((result, status), stream) = put_raw(ns, module, big, content_length=len(big))   # a declared length is refused unread
+    assert (status, result["code"]) == (413, "PAYLOAD_TOO_LARGE") and stream.reads == []
+    assert rows(ns, env, "CredentialGovernanceSettings") == [] and env.recorded == []
+
+
+def test_put_accepts_a_body_right_at_the_limit_and_parses_what_it_read(ns, env, module):
+    raw = json.dumps(body()).encode()
+    padded = raw[:-1] + b" " * (ns.governance_settings.MAX_BODY_BYTES - len(raw)) + b"}"
+    assert len(padded) == ns.governance_settings.MAX_BODY_BYTES
+    ((result, status), _) = put_raw(ns, module, padded)
+    assert status == 200 and result["effective"]["mode"] == "audit_only"
+
+
+@pytest.mark.parametrize("raw", [b"", b"{", b"not json", b"\xff\xfe", b"[1, 2]", b"null", b'"text"'])
+def test_put_refuses_a_body_that_is_not_a_json_object(ns, env, module, raw):
+    ((result, status), _) = put_raw(ns, module, raw)
     assert (status, result["code"]) == (400, "INVALID_REQUEST") and rows(ns, env, "CredentialGovernanceSettings") == []
-    huge = {f"unknown_{index}_" + "x" * 500: 1 for index in range(40)}
+
+
+def test_put_reports_a_bounded_list_of_fields(ns, env, module):
+    huge = {f"unknown_{index}_" + "x" * 200: 1 for index in range(40)}
     result, status = put(ns, module, {**body(), **huge})
     assert status == 400 and len(result["fields"]) <= ns.governance_settings.MAX_REPORTED_FIELDS
     assert all(len(item["field"]) <= 64 for item in result["fields"])
+
+
+def test_put_needs_an_interactive_session_an_api_token_cannot_change_the_switch(ns, env, module):
+    ns.actor = Actor(1, ["super_admin"], kind="token")   # a super administrator's own token
+    result, status = put(ns, module, body())
+    assert (status, result["code"]) == (403, "FORBIDDEN")
+    assert result["error"] == "The governance switch needs an interactive session; an API token cannot change it."
+    assert rows(ns, env, "CredentialGovernanceSettings") == [] and env.recorded == [] and ns.fired == []
+    assert get(ns, module)[1] == 200 and history(ns, module)[1] == 200   # reading is not restricted
+    ns.actor = Actor(1, ["super_admin"])
+    assert put(ns, module, body())[1] == 200
+    for odd in (None, "user ", "TOKEN", ""):   # anything but a session is refused
+        ns.actor = Actor(1, ["super_admin"], kind=odd)
+        assert put(ns, module, body(expected_revision=1))[1] == 403, odd
+
+
+def test_a_put_refreshes_this_replica_once_its_own_event_is_skipped_by_revision(ns, env, module):
+    state, count = module.governance_state, []
+    original = state.refresh
+    state.refresh = lambda: count.append(1) or original()
+    module.context.event_manager.fire_event = lambda name, payload: (
+        ns.fired.append((name, payload)), ns.governance_settings.on_settings_changed(module, payload))   # delivered at once
+    assert put(ns, module, body())[1] == 200
+    assert len(count) == 1 and state.effective.mode == "audit_only" and state.revision == 1
+    count.clear()
+    ns.governance_settings.on_settings_changed(module, {"revision": 2})   # a change made on another replica
+    assert len(count) == 1
 
 
 def test_put_requires_every_field_except_the_two_optional_ones(ns, env, module):

@@ -1013,6 +1013,6 @@ def test_the_preflight_fails_for_a_platform_that_cannot_decide_a_mandate_run(ns,
     break_it(env, ns)
     try:
         failed = [check.id for check in ns.adm.governance_preflight(env.module()) if check.status == "fail"]
-        assert expected in failed
+        assert failed == [expected]   # exactly this check, nothing else
     finally:
         ns.install_fakes(env)

@@ -10,17 +10,18 @@ Dispatch never queries: it reads the snapshot kept by ``GovernanceState``. A ref
 ``TTL_S`` seconds (``RETRY_S`` after a failed read), and a change made on any replica fires an event that refreshes the
 others at once.
 """
+import json
 import os
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Callable, Literal, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError, field_validator
 from pylon.core.tools import log
-from sqlalchemy import func, insert, inspect, select, update
+from sqlalchemy import func, insert, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError
 from tools import auth, config as c, db, this
 
@@ -29,7 +30,7 @@ from ..models.governance_settings import (
     CredentialGovernanceSettingsHistory as History,
 )
 from .governance import (
-    CONFIG_SECTION, MODE_ENFORCE, MODE_OFF, MODE_RANK, MODES, PROFILE_GOVERNED, PROFILE_LEGACY,
+    CONFIG_SECTION, MODE_AUDIT_ONLY, MODE_ENFORCE, MODE_OFF, MODE_RANK, MODES, PROFILE_GOVERNED, PROFILE_LEGACY,
     GovernanceProfile,
 )
 
@@ -46,7 +47,7 @@ RETRY_S = 5.0           # a failed read (or a failing preflight) is read again a
 TTL_RANGE_S = (60, 86400)   # context_ttl_s of the plugin config
 DEFAULT_CONTEXT_TTL_S = 3600
 MAX_POLICY_REVISION, MAX_ENVIRONMENT, MAX_CHANGE_NOTE = 128, 64, 256
-MAX_BODY_BYTES = 16 * 1024   # a request body is checked against this before it is parsed
+MAX_BODY_BYTES = 16 * 1024   # at most this much of a request body is read; more is refused (413)
 MAX_REPORTED_FIELDS = 10
 HISTORY_MAX_LIMIT, HISTORY_DEFAULT_LIMIT = 100, 20
 CHANGED_EVENT = "credential_governance_settings_changed"
@@ -66,6 +67,7 @@ _SECRET_SHAPES = (   # the shapes tracing's ``assert_no_secret_shaped`` rejects;
 
 MESSAGES = {
     "INVALID_REQUEST": "The request is not valid.",
+    "PAYLOAD_TOO_LARGE": "The request is too large.",
     "FORBIDDEN": "Only a super administrator can change the governance switch.",
     "REVISION_CONFLICT": "The settings changed since they were read; read them again and retry.",
     "FIELD_LOCKED": "This value is set by the deployment and cannot be changed here.",
@@ -77,7 +79,7 @@ MESSAGES = {
     "AUDIT_UNAVAILABLE": "The security audit trail is unavailable; nothing was changed.",
 }
 STATUS = {
-    "INVALID_REQUEST": 400, "POLICY_REVISION_REQUIRED": 400, "FORBIDDEN": 403, "REVISION_CONFLICT": 409,
+    "INVALID_REQUEST": 400, "POLICY_REVISION_REQUIRED": 400, "PAYLOAD_TOO_LARGE": 413, "FORBIDDEN": 403, "REVISION_CONFLICT": 409,
     "FIELD_LOCKED": 409, "MODE_ABOVE_CEILING": 409, "PREFLIGHT_FAILED": 409, "MIGRATION_REQUIRED": 409,
     "DEPENDENCY_UNAVAILABLE": 503, "AUDIT_UNAVAILABLE": 503,
 }
@@ -95,7 +97,7 @@ DESCRIPTIONS = {
             "tooltip": "Every run is checked as if governance were enforced, and the result is recorded, but nothing "
                        "is refused. Users see no refusals; runs take as long to start as under enforce, so you can "
                        "measure the cost. Use it to find agents and credentials that are not ready before you enforce. "
-                       "Sub-agent runs are not evaluated in this mode.",
+                       "Sub-agent runs and runs started by schedules or webhooks are not evaluated in this mode.",
         },
         "enforce": {
             "label": "Enforce",
@@ -160,6 +162,9 @@ DESCRIPTIONS = {
         "master_key": "The secrets master key is not set.",
         "settings_table": "Settings storage is not set up. Run the task create_governance_settings_tables under System "
                           "→ Tasks.",
+        "audit_schema": "The security audit trail cannot record what audit only would have refused yet; audit only "
+                        "cannot be turned on until the audit service is updated (enforce is not affected).",
+        "preflight": "The preflight could not run.",
         "corporate_vault": "Corporate Vault is not configured; only database-stored credentials can be registered.",
         "governed_worker": "No worker that can run governed agents is online right now.",
     },
@@ -342,61 +347,86 @@ def read_settings():
 
 
 class GovernanceState:
-    """The snapshot dispatch reads, and the refresher that keeps it fresh. ``effective`` never does I/O."""
+    """The snapshot dispatch reads, and the refresher that keeps it fresh. ``effective`` never does I/O.
+
+    ``refresh`` is serialised: the read and the swap happen under one lock, so a refresh that read the row before a
+    change cannot publish it after the refresh that read the change."""
 
     POLL_S = 1.0   # how often the refresher looks at the clock
+    JOIN_S = 2.0   # how long ``stop`` waits for the refresher
 
     def __init__(  # pylint: disable=R0913
         self, *, ceiling: Ceiling, env_environment: Optional[str], context_ttl_s: int,
         preflight: Callable, reader: Callable = read_settings, clock: Callable = time.monotonic,
-        on_enforce: Optional[Callable] = None,
+        on_enforce: Optional[Callable] = None, on_unreadable: Optional[Callable] = None,
     ):
         self.ceiling = ceiling
         self.env_environment = env_environment
         self.context_ttl_s = context_ttl_s
-        self._preflight = preflight       # (read) -> list[Check]
+        self._preflight = preflight       # (read, mode) -> list[Check]
         self._reader = reader
         self._clock = clock
-        self._on_enforce = on_enforce
+        self._on_enforce = on_enforce         # registers what a governed run needs; raises when it cannot
+        self._on_unreadable = on_unreadable   # (effective) the stored mode vanished: say so
         self._lock = threading.Lock()
         self._last_good = None            # (read, stored) of the last read that did not fail
+        self._unreadable_reported = False
+        self.revision = 0                 # the stored revision the snapshot was built from
         self._due = 0.0
         self._stop = threading.Event()
         self._thread = None
         self.effective = resolve(None, ceiling=ceiling.max_mode, env_environment=env_environment, preflight=[],
                                  read=READ_ERROR)   # until the first read: unknown
 
-    def _checks(self, read):
+    def _checks(self, read, mode):
         try:
-            return list(self._preflight(read))
+            return list(self._preflight(read, mode))
         except Exception as exc:  # pylint: disable=W0703
             log.error("governance settings: the preflight could not run (%s)", type(exc).__name__)
             return [Check("preflight", "fail", "UNAVAILABLE", True)]
 
-    def refresh(self) -> Effective:
-        """Read the row and the preflight and swap the snapshot. A failed read keeps the last good row (a failure on a
-        cold start is ``error``)."""
-        read, stored = self._reader()
+    def refresh(self) -> Effective:  # pylint: disable=R0912
+        """Read the row and the preflight and swap the snapshot.
+
+        A failed read keeps the last good row (a failure on a cold start is ``error``). So does a read that finds no
+        table or no row after the mode was seen on: that is not a switch to off, so it is kept, logged and audited.
+        The governed handlers are registered before an ``enforce`` snapshot is published; if they cannot be, the
+        snapshot says ``unavailable`` and the next tick tries again."""
         with self._lock:
-            if read == READ_ERROR and self._last_good is not None:
-                read, stored = self._last_good
-                failed = True
-            else:
-                failed = read == READ_ERROR
-                if not failed:
-                    self._last_good = (read, stored)
+            read, stored = self._reader()
+            previous, failed, vanished = self._last_good, read == READ_ERROR, False
+            if failed and previous is not None:
+                read, stored = previous
+            elif not failed and previous is not None and previous[1] is not None and previous[1].mode != MODE_OFF \
+                    and (read == READ_MISSING_TABLE or stored is None):
+                read, stored, failed, vanished = previous[0], previous[1], True, True
+            elif not failed:
+                self._last_good, self._unreadable_reported = (read, stored), False
+                self.revision = stored.revision if stored is not None else 0
             args = dict(ceiling=self.ceiling.max_mode, env_environment=self.env_environment, read=read)
             effective = resolve(stored, preflight=[], **args)
             if effective.mode != MODE_OFF:   # off asks nothing of the platform: no preflight, no audit probe
-                effective = resolve(stored, preflight=self._checks(read), **args)
+                effective = resolve(stored, preflight=self._checks(read, effective.mode), **args)
+            if effective.mode == MODE_ENFORCE and self._on_enforce is not None and not self._stop.is_set():
+                try:
+                    self._on_enforce()
+                except Exception as exc:  # pylint: disable=W0703
+                    log.error("governance settings: the governed handlers could not be registered (%s)",
+                              type(exc).__name__)
+                    effective = replace(effective, unavailable=True)
             self.effective = effective
             self._due = self._clock() + (RETRY_S if failed or effective.unavailable else TTL_S)
-        if effective.mode == MODE_ENFORCE and self._on_enforce is not None:
+            report = vanished and not self._unreadable_reported
+            if vanished:
+                self._unreadable_reported = True
+        if vanished:
+            log.error("governance settings: the stored switch is gone (no table or row) while the mode was %s; the "
+                      "last known state is kept", effective.mode)
+        if report and self._on_unreadable is not None:
             try:
-                self._on_enforce()
+                self._on_unreadable(effective)
             except Exception as exc:  # pylint: disable=W0703
-                log.error("governance settings: the governed handlers could not be registered (%s)",
-                          type(exc).__name__)
+                log.error("governance settings: the lost switch was not recorded (%s)", type(exc).__name__)
         return effective
 
     def tick(self, now: Optional[float] = None) -> bool:
@@ -407,7 +437,8 @@ class GovernanceState:
         return True
 
     def start(self):
-        if self._thread is not None:
+        """Start the refresher. A deployment whose ceiling is ``off`` has nothing to refresh: the mode cannot leave off."""
+        if self._thread is not None or self.ceiling.max_mode == MODE_OFF:
             return
 
         def _run():
@@ -422,6 +453,9 @@ class GovernanceState:
 
     def stop(self):
         self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(self.JOIN_S)
 
 
 def create_state(module) -> GovernanceState:
@@ -436,20 +470,33 @@ def create_state(module) -> GovernanceState:
     for name in ignored_settings(config, environ):
         log.warning("%s is ignored: the mode, policy revision and flags are set in the Admin UI", name)
 
-    def preflight(read):
+    def preflight(read, mode):
         from .admission import governance_preflight  # pylint: disable=C0415
-        return governance_preflight(module, table_read=read)
+        return governance_preflight(module, table_read=read, mode=mode)
 
     def on_enforce():
         ensure = getattr(module, "_ensure_governed_handlers_registered", None)
-        if ensure is not None:
-            ensure()
+        if ensure is not None and ensure() is False:
+            raise RuntimeError("the governed worker handlers are not registered")
 
     state = GovernanceState(
         ceiling=ceiling, env_environment=environment_label(environ, strict),
-        context_ttl_s=load_context_ttl(config, strict), preflight=preflight, on_enforce=on_enforce)
+        context_ttl_s=load_context_ttl(config, strict), preflight=preflight, on_enforce=on_enforce,
+        on_unreadable=record_settings_unreadable)
     state.refresh()
     return state
+
+
+def record_settings_unreadable(effective) -> None:
+    """The stored switch disappeared (table or row) while the mode was on: the last state is kept; leave a trace."""
+    try:
+        this.for_module("tracing").module.security_audit_record_autocommit({
+            key: value for key, value in dict(
+                event_type="lifecycle", reason_code="GOVERNANCE_SETTINGS_UNREADABLE", outcome="failed",
+                caller_ref="system:governance", policy_revision=effective.policy_revision,
+                environment=effective.environment).items() if value is not None})
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("governance settings: the lost switch was not recorded (%s)", type(exc).__name__)
 
 
 def record_boot_preflight(module) -> None:
@@ -472,19 +519,25 @@ def record_boot_preflight(module) -> None:
 
 def on_settings_changed(module, payload=None) -> None:
     """Another replica (or this one) changed the switch: read it now instead of at the next tick."""
-    _ = payload
     state = getattr(module, "governance_state", None)
-    if state is not None:
-        state.refresh()
+    if state is None:
+        return
+    revision = payload.get("revision") if isinstance(payload, dict) else None
+    if isinstance(revision, int) and not isinstance(revision, bool) and revision <= state.revision:
+        return   # a change this process already read (its own, or one it caught up with)
+    state.refresh()
 
 
 # --- the API payloads ------------------------------------------------------------------------
 
+SESSION_REQUIRED_MESSAGE = "The governance switch needs an interactive session; an API token cannot change it."
+
+
 class SettingsError(Exception):
-    def __init__(self, code, **extra):
+    def __init__(self, code, message=None, **extra):
         super().__init__(code)
         self.code, self.extra = code, extra
-        self.message, self.status = MESSAGES[code], STATUS[code]
+        self.message, self.status = message or MESSAGES[code], STATUS[code]
 
     def body(self) -> dict:
         return {"error": self.message, "code": self.code, **self.extra}
@@ -543,7 +596,11 @@ def current_state(module) -> dict:
     """The GET: a fresh read of the row and a fresh preflight (the snapshot dispatch uses may be a few seconds old)."""
     from .admission import governance_preflight  # pylint: disable=C0415
     read, stored = read_settings()
-    return settings_payload(module, read, stored, governance_preflight(module, table_read=read))
+    state = module.governance_state
+    mode = resolve(stored, ceiling=state.ceiling.max_mode, env_environment=state.env_environment, preflight=[],
+                   read=read).mode
+    return settings_payload(module, read, stored, governance_preflight(
+        module, table_read=read, mode=None if mode == MODE_OFF else mode))
 
 
 # --- the change ------------------------------------------------------------------------------
@@ -574,6 +631,20 @@ class SettingsUpdate(BaseModel):
     @classmethod
     def _note(cls, value):
         return _no_secret_shape(value)
+
+
+def read_body(stream, content_length=None):
+    """The JSON body of a request, reading at most ``MAX_BODY_BYTES + 1`` bytes (a chunked body has no length to
+    trust). ``SettingsError`` 413 above the limit, 400 when it is not JSON."""
+    if isinstance(content_length, int) and content_length > MAX_BODY_BYTES:
+        raise SettingsError("PAYLOAD_TOO_LARGE")
+    raw = stream.read(MAX_BODY_BYTES + 1)
+    if len(raw) > MAX_BODY_BYTES:
+        raise SettingsError("PAYLOAD_TOO_LARGE")
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        raise SettingsError("INVALID_REQUEST") from None
 
 
 def parse_update(body) -> SettingsUpdate:
@@ -615,7 +686,7 @@ def apply_update(module, body, actor_id: int) -> dict:  # pylint: disable=R0912,
     if update_.mode != MODE_OFF:
         if update_.policy_revision is None:
             raise SettingsError("POLICY_REVISION_REQUIRED")
-        failed = [check.id for check in governance_preflight(module, table_read=read)
+        failed = [check.id for check in governance_preflight(module, table_read=read, mode=update_.mode)
                   if check.status == "fail" and check.blocking]
         if failed:
             raise SettingsError("PREFLIGHT_FAILED", failed_checks=failed)
@@ -664,12 +735,12 @@ def apply_update(module, body, actor_id: int) -> dict:  # pylint: disable=R0912,
             session.rollback()
             log.error("governance settings: the change was not saved (%s)", type(exc).__name__)
             raise SettingsError("DEPENDENCY_UNAVAILABLE") from None
-    try:   # the other replicas read the new row now; this one right away
+    state.refresh()   # this replica reads the new row right away; its own event is then skipped by revision
+    try:   # the other replicas read it now
         module.context.event_manager.fire_event(
             CHANGED_EVENT, {"revision": revision, "old_mode": old_mode, "new_mode": update_.mode})
     except Exception as exc:  # pylint: disable=W0703
         log.error("governance settings: the change event was not sent (%s)", type(exc).__name__)
-    state.refresh()
     return current_state(module)
 
 
@@ -735,3 +806,39 @@ def create_tables(dry_run=False) -> dict:
             METADATA.create_all(connection, checkfirst=True)
             session.commit()
     return {"created": [] if dry_run else missing, "would_create": missing if dry_run else [], "dry_run": dry_run}
+
+
+# --- governed runs that outlive a restart ---------------------------------------------------------
+
+LIVE_CHUNK = 100   # project schemas per query
+_CONTEXT_SCHEMAS = text(
+    "SELECT table_schema FROM information_schema.tables "
+    "WHERE table_name = 'execution_security_context' AND table_schema ~ '^p_[0-9]+$'")
+_PROJECT_SCHEMA = re.compile(r"^p_[0-9]+$")
+
+
+def live_context_exists(session, schemas, now) -> bool:
+    """Is there an admitted or running context that has not expired in any of these project schemas? One query per
+    ``LIVE_CHUNK`` schemas (each part reads the index on ``(state, expires_at)``), and the first chunk with a hit ends it.
+    Schema names come from the catalog and are checked against ``p_<digits>`` before they are quoted into the text."""
+    names = [name for name in schemas if _PROJECT_SCHEMA.match(name)]
+    for start in range(0, len(names), LIVE_CHUNK):
+        parts = " UNION ALL ".join(
+            f'SELECT 1 AS live FROM "{name}".execution_security_context '
+            "WHERE state IN ('admitted', 'running') AND expires_at > :now"
+            for name in names[start:start + LIVE_CHUNK])
+        if session.execute(text(f"SELECT 1 FROM ({parts}) AS found LIMIT 1"), {"now": now}).first() is not None:
+            return True
+    return False
+
+
+def has_live_contexts() -> bool:
+    """A restart into ``off`` must still serve the runs admitted under ``enforce`` before it: do any project schemas hold
+    a live context? One catalog query, then bounded chunks. A failure is logged and answers no."""
+    try:
+        with db.get_session(None) as session:
+            schemas = list(session.execute(_CONTEXT_SCHEMAS).scalars())
+            return live_context_exists(session, schemas, _now())
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("governance settings: live governed runs could not be looked for (%s)", type(exc).__name__)
+        return False

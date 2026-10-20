@@ -703,9 +703,12 @@ def test_flag_off_the_payload_is_untouched_and_nothing_credential_related_is_cal
     assert env.schema_calls == [] and contexts(env, ns) == []
 
 
-def test_flag_off_an_inherited_dispatch_does_not_look_at_credentials(ns, env):
+def test_flag_off_a_dispatch_with_a_legacy_envelope_does_not_look_at_credentials(ns, env):
+    """Off stays free. (A child of a run admitted under enforce carries a governed envelope: it is sealed against its
+    parent whatever the mode is now, see test_7120_audit_only.)"""
     cred = seeded(env)
     call = call_kwargs(payload_of(cred), "11111111-1111-1111-1111-111111111111")
+    call["kwargs"]["envelope"]["security_profile"] = "legacy"
     env.poison()
     assert ns.adm.admit_dispatch(env.module(governed=False), "indexer_agent", call, None) is None
     env.unpoison()

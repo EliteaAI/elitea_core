@@ -400,7 +400,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Governed (#6946): the payload is sealed in place by start_task (credential slots instead of material), so
             # the stash is written after it, from the sealed dict, and a child the gate refused is never stashed. A
             # stash written before would hold whatever the child payload carried when it was built.
-            governed = bool(getattr(getattr(self, 'governance_profile', None), 'enabled', False))
+            # (a parent admitted under enforce stays sealed after a switch: its children carry its governed envelope)
+            envelope = child_payload.get('envelope') if isinstance(child_payload, dict) else None
+            governed = self._parallel_governance_active() or (
+                isinstance(envelope, dict) and envelope.get('security_profile') == 'governed')
             if not governed:
                 self._parallel_child_stash(
                     child_thread_id, child_payload, child_meta,

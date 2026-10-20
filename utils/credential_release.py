@@ -241,7 +241,7 @@ def _check_run(module, request: _Request, known: dict) -> _Scope:  # pylint: dis
                    columns.run_id, columns.attempt, columns.application_id, columns.agent_binding_ref,
                    columns.binding_project_id, columns.project_id, columns.tenant, columns.subject,
                    columns.allowed_bindings, columns.trace_ref, columns.revocation_epochs, columns.caller,
-                   columns.definition_digest)
+                   columns.definition_digest, columns.policy_revision, columns.environment)
             .where(columns.id == context_id)
         ).one_or_none()
         if row is None:
@@ -255,7 +255,7 @@ def _check_run(module, request: _Request, known: dict) -> _Scope:  # pylint: dis
     is_mandate = subject.get("kind") == "mandate"
     known.update(
         application_id=row.application_id, attempt=row.attempt, agent_binding_ref=str(row.agent_binding_ref),
-        run_id=row.run_id, traceparent=row.trace_ref,
+        run_id=row.run_id, traceparent=row.trace_ref, policy_revision=row.policy_revision, environment=row.environment,
         mandate_ref=str(subject.get("ref"))[len("mandate:"):] if is_mandate else None)
     #   3a. a live, running context of this worker's run
     if row.schema_version != adm.SCHEMA_VERSION or row.profile != "governed":
@@ -288,7 +288,7 @@ def _check_run(module, request: _Request, known: dict) -> _Scope:  # pylint: dis
         agent_binding_ref=str(row.agent_binding_ref), run_id=row.run_id, attempt=row.attempt,
         toolkit_instance_id=request.toolkit_instance_id, credential_ref=slot["credential_ref"],
         credential_generation=slot["credential_generation"], revocation_epoch=entry.get("reference_epoch"),
-        traceparent=row.trace_ref)
+        traceparent=row.trace_ref, policy_revision=row.policy_revision, environment=row.environment)
 
     def on_revoke(code):   # a reference that changed between the recheck and the read ends the run, as the recheck would
         _revoke(request, code)
@@ -443,11 +443,11 @@ def _read_and_reply(module, request: _Request, known: dict, scope: _Scope) -> di
     #   9. the event is committed before the reply leaves; if it cannot be, the sealed bytes are dropped with it
     try:
         with db.get_session(request.project_id) as session:
+            stamped = {"environment": module.admission_settings.environment,   # a probe has no admitted context
+                       "policy_revision": module.governance_profile.policy_revision}
+            stamped.update({key: item for key, item in scope.event.items() if item is not None})
             adm._tracing().security_audit_record(session, adm._event(
-                event_type=EVENT, decision="allow", reason_code=RELEASED, event_id=release_id,
-                environment=module.admission_settings.environment,
-                policy_revision=module.governance_profile.policy_revision,
-                **{key: item for key, item in scope.event.items() if item is not None}))
+                event_type=EVENT, decision="allow", reason_code=RELEASED, event_id=release_id, **stamped))
             session.commit()
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: the release event was not recorded (%s)", type(exc).__name__)

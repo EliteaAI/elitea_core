@@ -5,14 +5,18 @@ GET /api/v2/elitea_core/governance_settings/administration  - what is in effect,
 PUT /api/v2/elitea_core/governance_settings/administration  - change the mode, the policy revision and the two flags
 
 Reading needs ``governance.settings.view`` (super administrators and platform administrators). Changing needs
-``governance.settings.manage`` and, in addition to the permission, the ``super_admin`` role: a role matrix edit cannot
-widen it. Every refusal is ``{error, code}`` with a fixed message.
+``governance.settings.manage`` and, in addition to the permission, the ``super_admin`` role (a role matrix edit cannot
+widen it) and an interactive session (an API token cannot change it). The body is read up to 16 KiB; more is a 413.
+Every refusal is ``{error, code}`` with a fixed message.
 """
+import flask
 from flask import request
 from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi
 
-from ...utils.governance_settings import MAX_BODY_BYTES, SettingsError, apply_update, current_state, is_super_admin
+from ...utils.governance_settings import (
+    SESSION_REQUIRED_MESSAGE, SettingsError, apply_update, current_state, is_super_admin, read_body,
+)
 
 OPENAPI_TAG = "elitea_core/governance"
 
@@ -81,7 +85,8 @@ class AdminAPI(api_tools.APIModeHandler):
         responses={
             "200": {"description": "The state after the change."},
             "400": {"description": "INVALID_REQUEST or POLICY_REVISION_REQUIRED."},
-            "403": {"description": "FORBIDDEN: not a super administrator."},
+            "403": {"description": "FORBIDDEN: not a super administrator, or not an interactive session."},
+            "413": {"description": "PAYLOAD_TOO_LARGE: the body is over 16 KiB."},
             "409": {"description": "REVISION_CONFLICT, FIELD_LOCKED, MODE_ABOVE_CEILING, PREFLIGHT_FAILED, "
                                    "MIGRATION_REQUIRED."},
             "503": {"description": "DEPENDENCY_UNAVAILABLE or AUDIT_UNAVAILABLE; nothing was changed."},
@@ -103,9 +108,10 @@ class AdminAPI(api_tools.APIModeHandler):
         try:
             if isinstance(actor, bool) or not isinstance(actor, int) or actor <= 0 or not is_super_admin(actor):
                 raise SettingsError("FORBIDDEN")
-            if (request.content_length or 0) > MAX_BODY_BYTES:   # before anything is parsed
-                raise SettingsError("INVALID_REQUEST")
-            return apply_update(self.module, request.get_json(silent=True), actor), 200
+            if getattr(getattr(flask.g, "auth", None), "type", None) != "user":
+                raise SettingsError("FORBIDDEN", SESSION_REQUIRED_MESSAGE)
+            body = read_body(request.stream, request.content_length)   # at most 16 KiB + 1, whatever the framing
+            return apply_update(self.module, body, actor), 200
         except SettingsError as error:
             return error.body(), error.status
 

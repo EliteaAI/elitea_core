@@ -4,6 +4,7 @@ Real code (``utils/governance_settings.py``, ``models/governance_settings.py``, 
 against SQLite; only the Pylon runtime is faked (see ``fixtures/governance_api_env.py``).
 """
 import itertools
+import sqlite3
 import sys
 import textwrap
 import threading
@@ -270,7 +271,7 @@ def new_state(ns, reader, *, ceiling="enforce", checks=None, label=None, clock=N
     gs = ns.governance_settings
     probes = []
 
-    def preflight(read):
+    def preflight(read, mode=None):
         probes.append(read)
         if isinstance(checks, Exception):
             raise checks
@@ -385,9 +386,6 @@ def test_the_enforce_hook_runs_on_enforce_only(ns):
         assert len(calls) == expected, mode
     assert new_state(ns, Reader(ns, "missing_table"), on_enforce=lambda: calls.append(2)).refresh().mode == "off"
     assert 2 not in calls
-    # a hook that fails does not stop the refresh
-    state = new_state(ns, Reader(ns, "ok", stored(ns, "enforce")), on_enforce=lambda: 1 / 0)
-    assert state.refresh().mode == "enforce"
 
 
 def test_the_ceiling_caps_the_snapshot_and_lowering_it_keeps_the_stored_row(ns):
@@ -539,3 +537,278 @@ def test_the_module_registers_the_two_permissions_with_the_super_admin_pin():
     block = text[text.index('("governance.settings.view"'):][:900]
     assert '"default": {"super_admin": False, "admin": False, "viewer": False, "editor": False}' in block
     assert textwrap.dedent(block).count('"viewer": False, "editor": False') >= 1
+
+
+# --- the handlers are registered before enforce is published (#7120 review) -------------------------------------
+
+def test_the_handlers_are_registered_before_an_enforce_snapshot_is_published(ns):
+    seen = []
+    state = new_state(ns, Reader(ns, "ok", stored(ns, "enforce")), on_enforce=lambda: seen.append(state.effective.mode))
+    assert state.effective.mode == "enforce" and state.effective.read == "error"   # the unknown cold-start state
+    state.refresh()
+    assert seen == ["enforce"] and state.effective.read == "ok"
+    reader = Reader(ns, "ok", stored(ns, "off"))
+    switching = new_state(ns, reader, on_enforce=lambda: seen.append(switching.effective.mode))
+    switching.refresh()
+    reader.answer = ("ok", stored(ns, "enforce", revision=2))
+    seen.clear()
+    switching.refresh()
+    assert seen == ["off"]   # when the hook ran, the snapshot in force was still the old one
+
+
+def test_a_registration_that_fails_publishes_enforce_as_unavailable_and_is_tried_again_at_the_next_tick(ns):
+    clock, outcomes = Clock(), [RuntimeError("worker bus not up"), None]
+
+    def register():
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+    state = new_state(ns, Reader(ns, "ok", stored(ns, "enforce")), clock=clock, on_enforce=register)
+    effective = state.refresh()
+    assert (effective.mode, effective.unavailable) == ("enforce", True)   # governed runs are refused, readably
+    assert state.effective is effective and state._due == clock.now + 5   # pylint: disable=W0212
+    clock.now += 5
+    assert state.tick() is True
+    assert state.effective.unavailable is False and outcomes == []   # registered; admitting again
+
+
+def test_the_module_reports_whether_both_handlers_are_registered():
+    text = (PLUGIN_ROOT / "module.py").read_text()
+    ensure = text[text.index("def _ensure_governed_handlers_registered"):text.index("def _unregister_governed_handlers")]
+    assert "return all(self._governed_handlers.values())" in ensure
+    settings = (PLUGIN_ROOT / "utils" / "governance_settings.py").read_text()
+    assert "if ensure is not None and ensure() is False:" in settings
+
+
+# --- a switch that vanishes is not a switch to off ----------------------------------------------------------------
+
+@pytest.mark.parametrize("mode", ["audit_only", "enforce"])
+@pytest.mark.parametrize("gone", [("missing_table", None), ("ok", None)], ids=["table dropped", "row deleted"])
+def test_a_switch_that_vanishes_while_the_mode_was_on_keeps_the_last_state_and_is_audited_once(ns, env, mode, gone):
+    clock, reader = Clock(), Reader(ns, "ok", stored(ns, mode))
+    reported = []
+    state = new_state(ns, reader, clock=clock)
+    state._on_unreadable = reported.append   # pylint: disable=W0212
+    state.refresh()
+    reader.answer = gone
+    for _ in range(3):
+        effective = state.refresh()
+        assert (effective.mode, effective.policy_revision, effective.read) == (mode, "rev-1", "ok")   # not off
+    assert len(reported) == 1 and reported[0].mode == mode   # once, not every five seconds
+    assert any("stored switch is gone" in line for line in env.log.lines)
+    assert state._due == clock.now + 5   # pylint: disable=W0212  and it is looked at again soon
+    reader.answer = ("ok", stored(ns, "off", revision=3))   # a real, readable off row ends it
+    assert state.refresh().mode == "off"
+    reader.answer = ("ok", stored(ns, mode, revision=4))
+    state.refresh()
+    reader.answer = gone
+    state.refresh()
+    assert len(reported) == 2   # and a later loss is reported again
+
+
+def test_the_lost_switch_is_written_to_the_audit_trail(ns, env, monkeypatch):
+    monkeypatch.delenv(ENABLED, raising=False)
+    monkeypatch.delenv(MAX, raising=False)
+    genv.create_tables(ns)
+    with ns.tools.db.get_session(None) as session:
+        session.execute(ns.sa.insert(ns.settings_models.CredentialGovernanceSettings).values(
+            mode="audit_only", policy_revision="CHG-3", revision=1))
+        session.commit()
+    state = ns.governance_settings.create_state(module_with(env))
+    assert state.effective.mode == "audit_only"
+    with ns.tools.db.get_session(None) as session:
+        session.execute(ns.sa.delete(ns.settings_models.CredentialGovernanceSettings))
+        session.commit()
+    state.refresh()
+    [event] = env.denied
+    assert (event["event_type"], event["reason_code"], event["outcome"], event["policy_revision"]) == (
+        "lifecycle", "GOVERNANCE_SETTINGS_UNREADABLE", "failed", "CHG-3")
+    assert state.effective.mode == "audit_only"
+
+
+def test_a_replica_that_never_saw_the_mode_on_reads_a_missing_switch_as_off(ns, env):
+    reported = []
+    for read in (("missing_table", None), ("ok", None), ("ok", stored(ns, "off"))):
+        state = new_state(ns, Reader(ns, *read))
+        state._on_unreadable = reported.append   # pylint: disable=W0212
+        assert state.refresh().mode == "off"
+    assert reported == []
+
+
+# --- refreshes are serialised --------------------------------------------------------------------------------------
+
+def test_a_refresh_that_read_the_row_before_a_change_cannot_publish_it_after_the_refresh_that_read_the_change(ns):
+    """The PUT commits and refreshes while the refresher is between its read and its swap."""
+    in_read, release = threading.Event(), threading.Event()
+    answers = [("ok", stored(ns, "off", revision=1)), ("ok", stored(ns, "enforce", revision=2))]
+    calls = []
+
+    def reader():
+        calls.append(1)
+        answer = answers[min(len(calls), 2) - 1] if len(calls) > 1 else answers[0]
+        if len(calls) == 1:
+            in_read.set()
+            assert release.wait(5)   # the refresher holds the old row while the change is committed
+        return answer
+
+    state = new_state(ns, reader)
+    refresher = threading.Thread(target=state.refresh)
+    refresher.start()
+    assert in_read.wait(5)
+    put = threading.Thread(target=state.refresh)   # the PUT's refresh, after its commit
+    put.start()
+    time.sleep(0.05)
+    assert len(calls) == 1   # it waits for the refresh in flight: one read at a time
+    release.set()
+    refresher.join(5)
+    put.join(5)
+    assert len(calls) == 2
+    assert state.effective.mode == "enforce" and state.revision == 2   # the change is what stays published
+
+
+def test_the_hook_runs_inside_the_lock_so_a_registration_is_never_raced(ns):
+    state = new_state(ns, Reader(ns, "ok", stored(ns, "enforce")), on_enforce=lambda: None)
+    held = []
+    state._on_enforce = lambda: held.append(state._lock.locked())   # pylint: disable=W0212
+    state.refresh()
+    assert held == [True]
+
+
+# --- the refresher thread ----------------------------------------------------------------------------------------
+
+def test_the_refresher_is_not_started_when_the_ceiling_is_off(ns):
+    state = new_state(ns, Reader(ns, "ok", stored(ns, "off")), ceiling="off")
+    state.start()
+    assert state._thread is None   # pylint: disable=W0212  the mode cannot leave off: nothing to refresh
+    on = new_state(ns, Reader(ns, "ok", stored(ns, "off")), ceiling="audit_only")
+    on.POLL_S = 0.005
+    on.start()
+    assert on._thread is not None   # pylint: disable=W0212
+    on.stop()
+
+
+def test_stop_joins_the_refresher_with_a_timeout_and_the_hook_is_not_run_after_it(ns):
+    calls = []
+    state = new_state(ns, Reader(ns, "ok", stored(ns, "enforce")), on_enforce=lambda: calls.append(1))
+    state.POLL_S = 0.005
+    state.start()
+    thread = state._thread   # pylint: disable=W0212
+    state.stop()
+    assert not thread.is_alive()   # joined, not left to the daemon flag
+    before = len(calls)
+    state.refresh()
+    assert len(calls) == before and state.effective.mode == "enforce"   # no registration once stopped
+    assert state.JOIN_S == 2.0
+    state.stop()   # idempotent, and a stop from the thread itself does not join itself
+
+
+# --- the audit schema --------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("mode, unavailable", [("audit_only", True), ("enforce", False)])
+def test_a_snapshot_is_unavailable_for_audit_only_but_not_enforce_when_the_audit_schema_is_outdated(
+        ns, env, mode, unavailable):
+    env.audit_has_would_deny = False
+    module = env.module(governed=False)
+    state = genv.state_for(ns, module)
+    state._reader = lambda: ("ok", stored(ns, mode))   # pylint: disable=W0212
+    assert state.refresh().unavailable is unavailable
+
+
+# --- governed runs that outlive a restart ------------------------------------------------------------------------
+
+def attached(*schemas):
+    """A SQLite session with each schema attached as its own database (a project schema), and the context table in it."""
+    engine = ns_engine()
+    connection = engine.connect()
+    for name in schemas:
+        connection.exec_driver_sql(f"ATTACH DATABASE ':memory:' AS {name}")
+        connection.exec_driver_sql(
+            f"CREATE TABLE {name}.execution_security_context (id INTEGER PRIMARY KEY, state TEXT, expires_at TEXT)")
+    return connection
+
+
+def ns_engine():
+    import sqlalchemy
+    return sqlalchemy.create_engine("sqlite://")
+
+
+def put_context(connection, schema, state, expires_at):
+    connection.exec_driver_sql(
+        f"INSERT INTO {schema}.execution_security_context (state, expires_at) VALUES (?, ?)", (state, expires_at))
+
+
+def test_a_live_context_in_any_project_schema_is_found_and_finished_ones_are_not(ns):
+    gs = ns.governance_settings
+    connection = attached("p_1", "p_2", "p_3")
+    session = ns.sa_orm.Session(bind=connection)
+    now = "2026-10-20 12:00:00"
+    assert gs.live_context_exists(session, ["p_1", "p_2", "p_3"], now) is False
+    put_context(connection, "p_1", "completed", "2026-10-20 13:00:00")   # ended
+    put_context(connection, "p_2", "revoked", "2026-10-20 13:00:00")
+    put_context(connection, "p_3", "running", "2026-10-20 11:00:00")    # expired
+    assert gs.live_context_exists(session, ["p_1", "p_2", "p_3"], now) is False
+    put_context(connection, "p_3", "admitted", "2026-10-20 13:00:00")
+    assert gs.live_context_exists(session, ["p_1", "p_2", "p_3"], now) is True
+    assert gs.live_context_exists(session, [], now) is False
+
+
+def test_the_lookup_is_chunked_stops_at_the_first_hit_and_only_quotes_project_schema_names(ns, monkeypatch):
+    gs = ns.governance_settings
+    monkeypatch.setattr(gs, "LIVE_CHUNK", 2)
+    seen = []
+
+    class Session:
+        def __init__(self, hit_on):
+            self.hit_on = hit_on
+
+        def execute(self, statement, params):
+            seen.append(str(statement))
+            return types.SimpleNamespace(first=lambda: (1,) if len(seen) == self.hit_on else None)
+
+    names = ["p_1", "p_2", "p_3", "p_4", "p_5", 'p_1"; DROP TABLE x; --', "public", "p_", "P_7", "p_8 "]
+    assert gs.live_context_exists(Session(hit_on=2), names, "now") is True
+    assert len(seen) == 2 and all(" UNION ALL " in text for text in seen)   # chunks of 2, stopped at the second
+    text = "\n".join(seen)
+    assert "DROP" not in text and "public" not in text and '"p_1"' in text and '"p_5"' not in text
+    seen.clear()
+    assert gs.live_context_exists(Session(hit_on=0), names, "now") is False and len(seen) == 3   # 5 valid names / 2
+
+
+def test_one_catalog_query_lists_the_project_schemas_and_a_failure_answers_no(ns, env):
+    gs = ns.governance_settings
+    queries = []
+
+    class Session:
+        def execute(self, statement, params=None):
+            queries.append(str(statement))
+            if len(queries) == 1:
+                return types.SimpleNamespace(scalars=lambda: iter(["p_1", "p_2"]))
+            return types.SimpleNamespace(first=lambda: (1,))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    original = ns.tools.db.get_session
+    ns.tools.db.get_session = lambda project_id: Session()
+    try:
+        assert gs.has_live_contexts() is True
+    finally:
+        ns.tools.db.get_session = original
+    assert "information_schema.tables" in queries[0] and "execution_security_context" in queries[0] and len(queries) == 2
+    ns.tools.db.get_session = lambda project_id: (_ for _ in ()).throw(RuntimeError("db down: password=hunter2"))
+    try:
+        assert gs.has_live_contexts() is False
+    finally:
+        ns.tools.db.get_session = original
+    assert any("RuntimeError" in line for line in env.log.lines) and not any("hunter2" in line for line in env.log.lines)
+
+
+def test_booting_into_off_with_live_runs_registers_the_handlers_otherwise_nothing():
+    text = (PLUGIN_ROOT / "module.py").read_text()
+    start = text[text.index("    def _start_governance"):text.index("    def _ensure_governed_handlers_registered")]
+    assert start.index("state.refresh()") < start.index("has_live_contexts()") < start.index("state.start()")
+    assert "if not self.governed_handlers_registered and has_live_contexts():" in start
+    assert "_ensure_governed_handlers_registered()" in start

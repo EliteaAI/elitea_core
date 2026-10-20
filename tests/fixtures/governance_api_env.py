@@ -5,6 +5,7 @@ two API files loaded from disk with a faked HTTP layer, and a ``check_api`` that
 actor's roles in administration mode against the endpoint's ``recommended_roles``), so the authorization matrix is run
 against the permissions the endpoints really declare.
 """
+import json
 import sys
 import types
 from pathlib import Path
@@ -16,21 +17,35 @@ PKG = admission_env.PKG
 ADMINISTRATION = "administration"
 
 
-class FakeRequest:
-    def __init__(self):
-        self.args, self.body, self.content_length = {}, None, None
+class FakeStream:
+    def __init__(self, data):
+        self.data, self.reads = data, []
 
-    def get_json(self, silent=False):  # pylint: disable=W0613
-        return self.body
+    def read(self, size=-1):
+        self.reads.append(size)
+        return self.data if size is None or size < 0 else self.data[:size]
+
+
+class FakeRequest:
+    """``body`` is what the client sent as JSON; ``raw`` (bytes) overrides it. ``stream`` serves it like a chunked body:
+    no length is known, and no more than asked for is handed out."""
+
+    def __init__(self):
+        self.args, self.body, self.content_length, self.raw, self.stream = {}, None, None, None, None
+
+    def start(self):
+        data = self.raw if self.raw is not None else json.dumps(self.body).encode("utf-8")
+        self.stream = FakeStream(data)
+        return self.stream
 
 
 class Actor:
     """Who is calling: ``roles`` in administration mode, ``extra`` permissions granted outside the role matrix (a
     matrix edit), ``scope`` the permissions a token is limited to (None: not a token)."""
 
-    def __init__(self, user_id=1, roles=("super_admin",), authenticated=True, extra=(), scope=None):
+    def __init__(self, user_id=1, roles=("super_admin",), authenticated=True, extra=(), scope=None, kind="user"):
         self.id, self.roles, self.authenticated = user_id, list(roles), authenticated
-        self.extra, self.scope = set(extra), scope
+        self.extra, self.scope, self.kind = set(extra), scope, kind   # kind: "user" (a session) or "token"
 
 
 def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:
@@ -95,7 +110,7 @@ def state_for(ns, module, *, ceiling="enforce", source="default", env_environmen
     gs = ns.governance_settings
     return gs.GovernanceState(
         ceiling=gs.Ceiling(ceiling, source), env_environment=env_environment, context_ttl_s=3600,
-        preflight=lambda read: ns.adm.governance_preflight(module, table_read=read))
+        preflight=lambda read, mode=None: ns.adm.governance_preflight(module, table_read=read, mode=mode))
 
 
 def api_module(ns, *, ceiling="enforce", env_environment=None):
@@ -110,7 +125,9 @@ def api_module(ns, *, ceiling="enforce", env_environment=None):
 
 def call(ns, module, method, body=None, handler="settings", **args):
     """The handler's answer ``(body, status)`` to a request from ``ns.actor``."""
-    ns.request.args, ns.request.body, ns.request.content_length = args, body, None
+    ns.request.args, ns.request.body, ns.request.content_length, ns.request.raw = args, body, None, None
+    ns.request.start()
+    ns.env.g.auth = types.SimpleNamespace(type=ns.actor.kind, id=ns.actor.id)
     api = ns.api_settings if handler == "settings" else ns.api_history
     instance = api.AdminAPI()
     instance.module = module

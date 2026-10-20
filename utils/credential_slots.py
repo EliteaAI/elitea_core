@@ -125,12 +125,13 @@ def has_secret_template(node) -> bool:
 
 def has_free_form_secret(module, payload) -> bool:
     """Does a toolkit of this payload hold a ``{{secret.*}}`` template that is not in a secret field of a configuration?
-    Always ``False`` (and nothing is read) when governance is off. Call it before the payload is unsecreted. The non-secret
+    Always ``False`` (and nothing is read) when governance is off; audit only looks as enforce does, to rehearse the
+    refusal. Call it before the payload is unsecreted. The non-secret
     fields of the configurations are read too, with one call for the secret fields of all their types; a type that call
     does not know is read whole, and a call that fails counts as found."""
-    from .governance import is_governed  # pylint: disable=C0415
+    from .governance import is_auditing, is_governed  # pylint: disable=C0415
 
-    if not is_governed(module):
+    if not (is_governed(module) or is_auditing(module)):
         return False
     budget, configs = [MAX_SCAN_NODES], []
     for tool in dispatched_toolkits(payload):

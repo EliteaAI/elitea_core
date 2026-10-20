@@ -6,6 +6,8 @@ and no context; what enforce would have said is an audit event (``decision=allow
 ``reason_code=<the code enforce would refuse with>``) and a metric.
 """
 import copy
+import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -18,7 +20,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "tests"))
 from fixtures import admission_env  # noqa: E402  pylint: disable=C0413
 from fixtures.admission_env import principal  # noqa: E402  pylint: disable=C0413
 from fixtures.dispatch_wrapper import Original, build_wrapper  # noqa: E402  pylint: disable=C0413
-from fixtures.governed_credentials import Credential, payload_of  # noqa: E402  pylint: disable=C0413
+from fixtures.governed_credentials import SECRET, Credential, payload_of  # noqa: E402  pylint: disable=C0413
 
 RUN = "run-1"
 
@@ -142,7 +144,6 @@ def personal(env, cred):
 # Every refusal of steps 2 to 5b, with the request it needs and how to set it up
 # (id, request override, setup(env) -> credentials, the code enforce would refuse with)
 DENIES = [
-    ("step 2: a run with no person behind it", SYSTEM, seeded_agent, "MANDATE_REQUIRED"),
     ("step 3: no verifiable caller", PUBLIC, seeded_agent, "IDENTITY_EVIDENCE_MISSING"),
     ("step 3: a token is not an admitted kind", TOKEN, verify_rejects("IDENTITY_KIND_NOT_ADMITTED"),
      "IDENTITY_KIND_NOT_ADMITTED"),
@@ -259,16 +260,27 @@ def test_the_trace_reference_of_the_dispatch_is_carried_into_the_event(ns, env):
 
 
 def test_every_event_of_audit_only_is_valid_against_the_audit_schema(ns, env):
-    """The harness validates each event against the tracing model when one is checked out next to this plugin."""
+    """The harness validates each event against the tracing plugin's model. It must be a model that has ``would_deny``:
+    a run without a tracing checkout skips (``ELITEA_TEST_NO_TRACING=1``, or none next to this plugin)."""
+    if ns.event_model is None:
+        assert os.environ.get("ELITEA_TEST_NO_TRACING") or not any(
+            (parent / "tracing" / "models" / "security_audit_event.py").is_file() for parent in PLUGIN_ROOT.parents), (
+            "a tracing checkout is next to this plugin but its model was not used")
+        pytest.skip("no tracing model in this run (ELITEA_TEST_NO_TRACING=1, or no checkout next to this plugin)")
+    model = ns.event_model.SecurityAuditEventV1
+    assert "would_deny" in model.model_fields, "the tracing model found has no would_deny: merge tracing #7120 first"
     cred = Credential(env, env.seed_agent())
     dispatch(ns, env, payload_of(cred))
+    allowed = [event for _, event in env.recorded]
     env.reset()
     env.seed_agent()
     env.verify_result = {"ok": False, "reason_code": "IDENTITY_REVOKED", "message": "x"}
     dispatch(ns, env)
-    if ns.event_model is not None and "would_deny" in ns.event_model.SecurityAuditEventV1.model_fields:
-        [event] = env.denied
-        assert ns.event_model.SecurityAuditEventV1.model_validate(event).would_deny is True
+    assert allowed and env.denied
+    for event in allowed + env.denied:
+        validated = model.model_validate(event)   # the real model, not the harness's tolerant copy
+        assert validated.would_deny is event["would_deny"]
+    assert env.denied[0]["would_deny"] is True and all(event["would_deny"] is False for event in allowed)
 
 
 # --- nothing in audit only can refuse or fail the run ----------------------------------------------
@@ -321,6 +333,22 @@ def test_a_failure_while_recording_a_would_deny_is_contained(ns, env, monkeypatc
     assert dispatch(ns, env)[0] == "task-1"
 
 
+def test_a_run_with_no_person_behind_it_is_not_evaluated_and_never_a_would_deny(ns, env):
+    """A schedule, a webhook or a system user: enforce refuses these without a mandate, and a mandate cannot be rehearsed
+    (its ticket is minted only for enforce), so audit only would record a refusal that enforce does not always give."""
+    env.seed_agent()
+    before = ns.adm.ADMISSION_DECISION.total("would_deny", "MANDATE_REQUIRED")
+    for over in (SYSTEM, dict(SYSTEM, entry_point="schedule", trigger_ref="schedule:version:70"),
+                 dict(run_kind="system", entry_point="chat_sio")):
+        task_id, calls, _ = dispatch(ns, env, **over)
+        assert task_id == "task-1"
+        assert_dispatched_as_legacy(ns, env, calls)
+    assert env.denied == [] and env.recorded == [] and env.verify_calls == []
+    assert ns.adm.ADMISSION_DECISION.total("would_deny", "MANDATE_REQUIRED") == before
+    text = (PLUGIN_ROOT / "utils" / "governance_settings.py").read_text()
+    assert "Sub-agent runs and runs started by schedules or webhooks are not evaluated in this mode." in text
+
+
 def test_a_mandate_request_or_a_dispatch_without_a_request_is_not_evaluated(ns, env):
     env.seed_agent()
     env.poison()
@@ -352,6 +380,126 @@ def test_tasks_that_are_not_admitted_are_not_evaluated(ns, env):
     env.poison()
     call = {"args": [], "kwargs": {"project_id": 1, "_elitea_predict_run_id": RUN}, "pool": "agents", "meta": {}}
     assert ns.adm.admit_dispatch(env.module(governed=False, audit=True), "indexer_validator", call, env.request()) is None
+
+
+# --- the two refusals that enforce makes when it seals the payload ---------------------------------------
+
+def free_form_payload(cred):
+    payload = payload_of(cred)
+    payload["application"]["version_details"]["tools"].append(
+        {"id": 9, "type": "x", "settings": {"headers": {"X-Key": "{{secret.api_key}}"}}})
+    return payload
+
+
+def test_a_secret_template_outside_a_credential_is_a_would_deny_found_before_the_unsecret(ns, env):
+    cred = Credential(env, env.seed_agent())
+    payload = free_form_payload(cred)
+    module = env.module(governed=False, audit=True)
+    found = ns.credential_slots.has_free_form_secret(module, payload)   # as the entry point does, before unsecret
+    assert found is True
+    ns.credential_slots.mark_free_form_secret(payload, found)
+    before = (ns.adm.CREDENTIAL_DECISION.total("would_deny", "CREDENTIAL_REFERENCE_REQUIRED"),
+              ns.adm.ADMISSION_DECISION.total("would_deny", "CREDENTIAL_REFERENCE_REQUIRED"))
+    task_id, calls, _ = dispatch(ns, env, payload, module=module)
+    assert task_id == "task-1"
+    [event] = env.denied   # before any admission was made: nothing was evaluated, nothing allowed
+    assert (event["decision"], event["reason_code"], event["would_deny"]) == (
+        "allow", "CREDENTIAL_REFERENCE_REQUIRED", True)
+    assert env.recorded == [] and env.verify_calls == []
+    assert ns.adm.CREDENTIAL_DECISION.total("would_deny", "CREDENTIAL_REFERENCE_REQUIRED") == before[0] + 1
+    assert ns.adm.ADMISSION_DECISION.total("would_deny", "CREDENTIAL_REFERENCE_REQUIRED") == before[1] + 1
+    [(_, sent)] = calls
+    assert ns.credential_slots.FREE_FORM_SECRET_MARK not in sent["kwargs"]   # the mark never travels
+    assert_dispatched_as_legacy(ns, env, calls, {k: v for k, v in payload.items()
+                                                 if k != ns.credential_slots.FREE_FORM_SECRET_MARK})
+
+
+def test_the_free_form_scan_runs_for_audit_only_and_enforce_and_never_for_off(ns, env):
+    payload = free_form_payload(Credential(env, env.seed_agent()))
+    has = ns.credential_slots.has_free_form_secret
+    assert has(env.module(governed=False, audit=True), payload) is True and has(env.module(), payload) is True
+    env.poison()
+    assert has(env.module(governed=False), payload) is False
+    env.unpoison()
+
+
+def test_a_marked_payload_loses_its_mark_even_when_nothing_is_evaluated(ns, env):
+    env.seed_agent()
+    module = env.module(governed=False, audit=True)
+    for admission in (None, env.request(**SYSTEM)):
+        payload = {}
+        ns.credential_slots.mark_free_form_secret(payload, True)
+        call = {"args": [], "kwargs": payload, "pool": "agents", "meta": {}}
+        assert ns.adm.admit_dispatch(module, "indexer_agent", call, admission) is None
+        assert call["kwargs"] == {}
+
+
+def test_a_refusal_when_the_payload_is_sealed_is_a_would_deny_and_the_real_payload_is_not_sealed(ns, env):
+    cred = Credential(env, env.seed_agent())
+    env.secret_fields_raises = RuntimeError("configurations down: " + SECRET)   # admission passes, the seal cannot
+    payload = payload_of(cred)
+    before = (ns.adm.CREDENTIAL_DECISION.total("would_deny", "DEPENDENCY_UNAVAILABLE"),
+              ns.adm.ADMISSION_DECISION.total("would_deny", "DEPENDENCY_UNAVAILABLE"),
+              ns.adm.ADMISSION_DURATION.count("audit_only", "would_deny"))
+    task_id, calls, _ = dispatch(ns, env, payload)
+    assert task_id == "task-1"
+    # as for enforce: the admission was allowed and written, then the seal refused
+    assert [event["reason_code"] for _, event in env.recorded] == ["CREDENTIAL_USE_ALLOWED", "ADMITTED"]
+    [event] = env.denied
+    assert (event["decision"], event["reason_code"], event["would_deny"]) == (
+        "allow", "DEPENDENCY_UNAVAILABLE", True)
+    assert ns.adm.CREDENTIAL_DECISION.total("would_deny", "DEPENDENCY_UNAVAILABLE") == before[0] + 1
+    assert ns.adm.ADMISSION_DECISION.total("would_deny", "DEPENDENCY_UNAVAILABLE") == before[1] + 1
+    assert ns.adm.ADMISSION_DURATION.count("audit_only", "would_deny") == before[2] + 1
+    [(_, sent)] = calls
+    assert sent["kwargs"]["application"] == payload["application"] and SECRET in json.dumps(sent["kwargs"])
+    assert contexts(env, ns) == [] and not [line for line in env.log.lines if SECRET in line]
+
+
+def test_the_seal_check_is_run_on_a_copy_and_never_changes_the_payload_it_was_given(ns, env):
+    cred = Credential(env, env.seed_agent())
+    payload = payload_of(cred)
+    snapshot = copy.deepcopy(payload)
+    task_id, calls, _ = dispatch(ns, env, payload)   # the seal check passes: the copy would be sealed, the real one is not
+    assert task_id == "task-1" and payload == snapshot
+    [(_, sent)] = calls
+    assert "credential_slot" not in json.dumps(sent["kwargs"]) and SECRET in json.dumps(sent["kwargs"])
+    sealed = []
+    original = ns.adm._seal_dispatch   # pylint: disable=W0212
+
+    def spy(target, entries_of, decided=False, shadow=False):
+        sealed.append((target is payload, decided, shadow))
+        return original(target, entries_of, decided=decided, shadow=shadow)
+    ns.adm._seal_dispatch = spy   # pylint: disable=W0212
+    try:
+        env.reset()
+        cred = Credential(env, env.seed_agent())
+        module = env.module(governed=False, audit=True)
+        call = {"args": [], "kwargs": {"project_id": 1, "message_id": 5, "_elitea_predict_run_id": RUN,
+                                        **payload_of(cred)}, "pool": "agents", "meta": {}}
+        ns.adm.admit_dispatch(module, "indexer_agent", call, env.request())
+    finally:
+        ns.adm._seal_dispatch = original   # pylint: disable=W0212
+    assert sealed == [(False, True, True)]   # a copy, after a decided admission, counted as a would-deny
+
+
+def test_the_span_of_the_histogram_ends_before_the_seal_in_audit_only_as_in_enforce(ns, env, monkeypatch):
+    cred = Credential(env, env.seed_agent())
+    ticks = iter([0.0, 1.0, 10.0, 10.0, 10.0, 10.0])
+    monkeypatch.setattr(ns.adm.time, "perf_counter", lambda: next(ticks, 99.0))
+    seen = []
+    monkeypatch.setattr(ns.adm.ADMISSION_DURATION, "observe", lambda seconds, *labels: seen.append((seconds, labels)))
+    dispatch(ns, env, payload_of(cred))
+    [(seconds, labels)] = seen
+    assert labels == ("audit_only", "would_allow") and seconds == 1.0   # not the 10 s the seal check "took"
+
+
+def test_a_deny_is_in_the_span_with_its_audit_write_in_both_modes(ns, env, monkeypatch):
+    text = (PLUGIN_ROOT / "utils" / "admission.py").read_text()
+    enforce = text[text.index("def admit_execution("):text.index("def _shadow_admit(")]
+    assert enforce.index("_record_deny(") < enforce.index('ADMISSION_DURATION.observe(time.perf_counter() - started, "enforce", "deny")')
+    shadow = text[text.index("def _shadow_admit("):text.index("def _carries_parent_context(")]
+    assert shadow.index("_record_deny(") < shadow.index('"audit_only", decision)')
 
 
 # --- the platform cannot decide ------------------------------------------------------------------
@@ -441,7 +589,8 @@ def test_audit_only_runs_the_same_admission_code_inline_on_the_dispatch_path():
     assert "_admit(module, admission, run_id, payload, shadow=True)" in shadow   # the same function enforce runs
     assert "Thread" not in text and "spawn" not in text and "apply_async" not in text   # inline, not deferred
     dispatch_part = text[text.index("def admit_dispatch("):text.index("def _parent_entries(")]
-    assert dispatch_part.index("task_name not in ADMITTED_TASKS") < dispatch_part.index("_shadow_admit(module, call_kwargs, admission)")
+    assert dispatch_part.index("task_name not in ADMITTED_TASKS") < dispatch_part.index(
+        "_shadow_admit(module, call_kwargs, admission, unavailable)")
 
 
 def test_runs_admitted_under_enforce_are_looked_after_after_a_switch_to_off(ns, env):
