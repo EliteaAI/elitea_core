@@ -1,9 +1,9 @@
-"""EL-7011 US-18: the owner check runs before a schedule run resumes, and REST answers 403 or 409.
+"""EL-7011 US-18: the owner check runs before a schedule run resumes, and REST answers 400, 403 or 409.
 
-Contract under test: rpc/chat_all.py `_schedule_decision_error` and its place in
-`continue_predict_sio`, and api/v2/continue_predict.py `PromptLibAPI.post`.
-Nothing loads rpc/chat_all.py in the unit env, so the helper is compiled from the file's source
-with fakes around it. Cases: TC-US18-05, TC-US18-08, TC-US18-09.
+Contract under test: rpc/chat_all.py `_check_schedule_decision`, `_apply_schedule_decision` and their
+places in `continue_predict_sio`, and api/v2/continue_predict.py `PromptLibAPI.post`.
+Nothing loads rpc/chat_all.py in the unit env, so the helpers are compiled from the file's source
+with fakes around them. Cases: TC-US18-05, TC-US18-08, TC-US18-09.
 
 Run via:
     python tests/run_tests.py unit/test_7011_continue_predict_owner.py -v
@@ -20,9 +20,14 @@ from fixtures.helpers import load_module_with_stubs
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHAT_ALL = (PLUGIN_ROOT / 'rpc' / 'chat_all.py').read_text()
 PROJECT_ID, RUN_ID, OWNER = 7, 9, 12
+HELPERS = {'_SCHEDULE_REFUSALS', '_check_schedule_decision', '_apply_schedule_decision'}
 
 
 class Forbidden(Exception):
+    pass
+
+
+class Invalid(Exception):
     pass
 
 
@@ -30,14 +35,20 @@ class NotWaiting(Exception):
     pass
 
 
-def _helper(meta, error=None):
-    """The real helper on a fake conversation meta; `calls` records each resume_schedule_run call."""
+def _helpers(meta, error=None, decision='approve', apply_error=None):
+    """The real helpers on a fake conversation meta; `calls` records each schedule_runs call."""
     calls = []
 
-    def resume_schedule_run(*args):
-        calls.append(args)
+    def check_schedule_decision(*args, **kwargs):
+        calls.append(('check', *args, kwargs))
         if error:
             raise error
+        return decision
+
+    def apply_schedule_decision(*args):
+        calls.append(('apply', *args))
+        if apply_error:
+            raise apply_error
 
     query = types.SimpleNamespace(where=lambda *_: types.SimpleNamespace(scalar=lambda: meta))
 
@@ -45,51 +56,80 @@ def _helper(meta, error=None):
     def get_session(project_id):
         yield types.SimpleNamespace(query=lambda *_: query)
 
-    tree = ast.parse(CHAT_ALL)
-    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_schedule_decision_error')
+    nodes = [
+        node for node in ast.parse(CHAT_ALL).body
+        if getattr(node, 'name', None) in HELPERS
+        or any(getattr(target, 'id', None) in HELPERS for target in getattr(node, 'targets', []))
+    ]
     namespace = {
         'db': types.SimpleNamespace(get_session=get_session),
         'Conversation': types.SimpleNamespace(meta='meta', uuid='uuid'),
-        'resume_schedule_run': resume_schedule_run,
+        'check_schedule_decision': check_schedule_decision,
+        'apply_schedule_decision': apply_schedule_decision,
         'ScheduleDecisionForbidden': Forbidden,
+        'ScheduleDecisionInvalid': Invalid,
         'ScheduleRunNotWaiting': NotWaiting,
     }
-    exec(compile(ast.Module(body=[node], type_ignores=[]), 'chat_all.py', 'exec'), namespace)  # noqa: S102 - runs the real helper cut out of rpc/chat_all.py
-    return namespace['_schedule_decision_error'], calls
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), 'chat_all.py', 'exec'), namespace)  # noqa: S102 - runs the real helpers cut out of rpc/chat_all.py
+    return namespace['_check_schedule_decision'], namespace['_apply_schedule_decision'], calls
 
 
 def _parsed(**values):
     return types.SimpleNamespace(**{
         'project_id': PROJECT_ID, 'conversation_uuid': 'c-1', 'hitl_resume': True,
-        'hitl_action': 'approve', 'hitl_decisions': None, **values,
+        'hitl_action': 'approve', 'hitl_decisions': None, 'thread_id': None, **values,
     })
 
 
-def test_el_7011_r2_1_an_owner_approve_resumes_the_schedule_run():
-    check, calls = _helper({'schedule_run_id': RUN_ID})
+def test_el_7011_r2_1_the_check_changes_nothing_and_the_apply_writes_the_decision():
+    check, apply, calls = _helpers({'schedule_run_id': RUN_ID})
 
-    assert check(_parsed(), OWNER) is None
-    assert calls == [(PROJECT_ID, RUN_ID, OWNER, 'approve')]
+    pending, denied = check(_parsed(), OWNER)
+    assert (pending, denied) == ((RUN_ID, 'approve'), None)
+    assert calls == [('check', PROJECT_ID, RUN_ID, OWNER, ['approve'], {'fan_out': False})]
 
-
-def test_el_7011_r2_1_a_parallel_decision_passes_its_first_action():
-    check, calls = _helper({'schedule_run_id': RUN_ID})
-
-    check(_parsed(hitl_action=None, hitl_decisions=[{'action': 'reject'}]), OWNER)
-
-    assert calls == [(PROJECT_ID, RUN_ID, OWNER, 'reject')]
+    assert apply(PROJECT_ID, pending) is None
+    assert calls[-1] == ('apply', PROJECT_ID, RUN_ID, 'approve')
 
 
-def test_el_7011_r2_3_a_caller_other_than_the_owner_gets_403():
-    check, _ = _helper({'schedule_run_id': RUN_ID}, Forbidden())
+def test_el_7011_r2_2_a_decision_list_passes_every_action():
+    check, _, calls = _helpers({'schedule_run_id': RUN_ID})
 
-    assert check(_parsed(), 1)['status'] == 403
+    check(_parsed(hitl_action='approve', hitl_decisions=[{'action': 'approve'}, {'action': 'reject'}]), OWNER)
+
+    assert calls[0][4] == ['approve', 'reject']
 
 
-def test_el_7011_r2_4_a_run_not_waiting_gets_409():
-    check, _ = _helper({'schedule_run_id': RUN_ID}, NotWaiting())
+def test_el_7011_r2_4_a_fan_out_child_on_a_resumed_run_has_nothing_to_apply():
+    check, apply, calls = _helpers({'schedule_run_id': RUN_ID}, decision=None)
 
-    assert check(_parsed(), OWNER)['status'] == 409
+    pending, denied = check(_parsed(thread_id='child-1'), OWNER)
+
+    assert (pending, denied) == (None, None)
+    assert calls[0][-1] == {'fan_out': True}
+    assert apply(PROJECT_ID, pending) is None
+    assert [call[0] for call in calls] == ['check']
+
+
+@pytest.mark.parametrize('error, status', [(Forbidden(), 403), (Invalid(), 400), (NotWaiting(), 409)])
+def test_el_7011_r2_3_r2_4_a_refused_check_answers_its_status(error, status):
+    check, _, _ = _helpers({'schedule_run_id': RUN_ID}, error)
+
+    pending, denied = check(_parsed(), 1)
+
+    assert (pending, denied['status']) == (None, status)
+
+
+def test_el_7011_r2_1_an_unknown_action_names_the_field():
+    check, _, _ = _helpers({'schedule_run_id': RUN_ID}, Invalid())
+
+    assert check(_parsed(hitl_action='maybe'), OWNER)[1]['field'] == 'hitl_action'
+
+
+def test_el_7011_r2_4_an_apply_that_lost_a_race_gets_409():
+    _, apply, _ = _helpers({'schedule_run_id': RUN_ID}, apply_error=NotWaiting())
+
+    assert apply(PROJECT_ID, (RUN_ID, 'approve'))['status'] == 409
 
 
 @pytest.mark.parametrize('meta, parsed', [
@@ -98,20 +138,33 @@ def test_el_7011_r2_4_a_run_not_waiting_gets_409():
     ({'schedule_run_id': RUN_ID}, _parsed(hitl_resume=False)),
 ])
 def test_el_7011_r2_1_other_conversations_and_resumes_skip_the_check(meta, parsed):
-    check, calls = _helper(meta)
+    check, _, calls = _helpers(meta)
 
-    assert check(parsed, OWNER) is None
+    assert check(parsed, OWNER) == (None, None)
     assert calls == []
 
 
 def test_el_7011_r2_3_the_check_runs_before_any_resume_return():
     body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
-    check_index = body.index('_schedule_decision_error(parsed, current_user')
+    check_index = body.index('_check_schedule_decision(parsed, current_user')
 
     assert body.index('current_user = auth.current_user()') < check_index
     assert body.index('if _internal_token is not INTERNAL_CONTINUE_TOKEN:') < check_index  # a replay was checked
     assert check_index < body.index('self.is_chat_run_stopped(parsed.message_id)')
     assert check_index < body.index('self._continue_child_resume(')
+
+
+def test_el_7011_r2_1_a_refused_later_guard_leaves_the_run_waiting():
+    # The write follows the stopped-run, child-resume and expired-child guards, before the parent resume
+    body = CHAT_ALL[CHAT_ALL.index('def continue_predict_sio('):]
+    body = body[:body.index('\n    def ', 1)]
+    child_index = body.index('self._continue_child_resume(')
+    child_apply, parent_apply = (
+        index for index in range(len(body)) if body.startswith('_apply_schedule_decision(', index))
+
+    assert body.index('self.is_chat_run_stopped(parsed.message_id)') < child_index
+    assert child_index < child_apply < body.index('return child_resume')
+    assert body.index('if expired_child:') < parent_apply < body.index('Conversation.uuid == parsed.conversation_uuid')
 
 
 @pytest.fixture
@@ -162,7 +215,7 @@ def post(monkeypatch):
     return rpc, lambda: handler.post(PROJECT_ID, 'c-1')
 
 
-@pytest.mark.parametrize('status', [403, 409])
+@pytest.mark.parametrize('status', [400, 403, 409])
 def test_el_7011_r2_3_r2_4_rest_answers_the_status_of_the_decision(post, status):
     rpc, call = post
     rpc.result = {'error': 'denied', 'status': status}

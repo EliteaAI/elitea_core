@@ -1,7 +1,8 @@
 """Run status and schedule disable writers of the schedule runs (EL-7011)."""
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, update
+from pylon.core.tools import log
+from sqlalchemy import func, select, update
 from tools import db
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
@@ -13,10 +14,16 @@ PAUSE_REASON = 'the run stopped for input that no one can give'
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
 APPROVAL_WAIT_HOURS = 24
 REJECT_REASON = 'rejected by the owner'
+# The HITL actions of a decision: `reject` ends a waiting run, the others let it go on (R2.1, R2.2)
+DECISION_ACTIONS = ('approve', 'edit', 'answer', 'block_with_comment', 'reject')
 
 
 class ScheduleDecisionForbidden(Exception):
     """The caller of an approve or reject is not the schedule owner; an admin included (R2.3)."""
+
+
+class ScheduleDecisionInvalid(Exception):
+    """An action of an approve or reject is empty or unknown."""
 
 
 class ScheduleRunNotWaiting(Exception):
@@ -73,17 +80,24 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
                     approval_expires_at=datetime.now(UTC) + timedelta(hours=APPROVAL_WAIT_HOURS))
         ).rowcount
         session.commit()
-        if paused:  # a run that is not running stays as it is, with no notice (R1.4)
+        if not paused:  # a run that is not running stays as it is, with no notice (R1.4)
+            return
+        try:
             run = session.get(EntityScheduleRun, run_id)
             schedule = session.get(EntitySchedule, run.schedule_id)
             notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
+        except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it (R1.3)
+            log.exception('Schedule run %s: cannot send the approval notice', run_id)
 
 
-def resume_schedule_run(project_id: int, run_id: int, caller_id: int, action: str) -> None:
-    """Apply the owner's decision on a waiting run: `reject` fails it, any other action sets it running.
+def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
+                            fan_out: bool = False) -> str | None:
+    """Check the owner's decision on a waiting run without changing it; `reject` or `approve`.
 
-    The owner check comes first: `ScheduleDecisionForbidden` for anyone but `created_by`, an admin included
-    (R2.3); then `ScheduleRunNotWaiting` when the run is not waiting for approval (R2.4).
+    Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but `created_by`, an admin
+    included (R2.3); then `ScheduleDecisionInvalid` for an empty or unknown action; then
+    `ScheduleRunNotWaiting` when the run is not waiting (R2.4). None when a fan-out child decides a run
+    that an earlier decision of the same pause resumed: nothing to change.
     """
     with db.get_session(project_id) as session:
         run = session.get(EntityScheduleRun, run_id)
@@ -91,7 +105,23 @@ def resume_schedule_run(project_id: int, run_id: int, caller_id: int, action: st
             raise ScheduleRunNotWaiting(run_id)
         if session.get(EntitySchedule, run.schedule_id).created_by != caller_id:
             raise ScheduleDecisionForbidden(run_id)
-        if action != 'reject':
+        status, resumed_at = run.status, run.resumed_at
+    if not actions or not all(action in DECISION_ACTIONS for action in actions):
+        raise ScheduleDecisionInvalid(actions)
+    if fan_out and status == 'running' and resumed_at is not None:
+        return None
+    if status != 'waiting_for_approval':
+        raise ScheduleRunNotWaiting(run_id)
+    return 'reject' if 'reject' in actions else 'approve'
+
+
+def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None:
+    """Write a checked decision: `approve` sets the run running, `reject` fails it (R2.1, R2.2).
+
+    `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
+    """
+    with db.get_session(project_id) as session:
+        if decision == 'approve':
             resumed = session.execute(
                 update(EntityScheduleRun)
                 .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'waiting_for_approval')
@@ -101,7 +131,9 @@ def resume_schedule_run(project_id: int, run_id: int, caller_id: int, action: st
             if not resumed:
                 raise ScheduleRunNotWaiting(run_id)
             return
-    if not finish_schedule_run(project_id, run_id, 'failed', REJECT_REASON,
+        conversation_id = session.scalar(
+            select(EntityScheduleRun.conversation_id).where(EntityScheduleRun.id == run_id))
+    if not finish_schedule_run(project_id, run_id, 'failed', REJECT_REASON, conversation_id=conversation_id,
                                expected_status='waiting_for_approval', notice=False):
         raise ScheduleRunNotWaiting(run_id)
 

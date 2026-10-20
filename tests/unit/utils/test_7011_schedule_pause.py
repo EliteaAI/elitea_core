@@ -1,14 +1,15 @@
 """EL-7011 US-18: a sensitive-tool pause makes a schedule run wait for the owner; a reject ends it.
 
-Contract under test: utils/schedule_runs.py (pause_schedule_run, resume_schedule_run with "reject",
+Contract under test: utils/schedule_runs.py (pause_schedule_run, apply_schedule_decision with "reject",
 finish_schedule_run with expected_status and notice) on the real models, in-memory SQLite.
 Cases: TC-US18-02, TC-US18-03, TC-US18-04, TC-US18-07.
 """
+import sys
 from datetime import UTC, datetime, timedelta
 
 # Shared fixtures of the US-09 and US-13 writer tests: pytest injects them by name
 from unit.utils.test_7011_schedule_runs_fail import _run, _schedule, runs, session  # noqa: F401
-from unit.utils.test_7011_schedule_runs_outcome import sent  # noqa: F401
+from unit.utils.test_7011_schedule_runs_outcome import NOTICES, sent  # noqa: F401
 
 # ruff: noqa: F811
 
@@ -56,6 +57,21 @@ def test_el_7011_r1_3_a_waiting_run_sends_the_owner_one_approval_notice(runs, se
     assert sent.emitted == []
 
 
+def test_el_7011_r1_3_a_failed_notice_keeps_the_run_waiting(runs, session, sent):
+    schedule = _schedule(runs, session)
+    run = _chat_run(runs, session, schedule)
+
+    def broken(*_, **__):
+        raise RuntimeError("notice service down")
+
+    sys.modules[NOTICES].notify_schedule_event = broken
+
+    runs.pause_schedule_run(1, run.id, SENSITIVE)
+
+    session.refresh(run)
+    assert run.status == "waiting_for_approval"
+
+
 def test_el_7011_r1_4_a_pause_for_a_run_that_is_not_running_changes_nothing(runs, session, sent):
     schedule = _schedule(runs, session, last_run_status="failed")
     run = _run(runs, session, schedule, status="failed")
@@ -85,7 +101,7 @@ def test_el_7011_r2_2_a_reject_fails_the_run_and_copies_the_status_without_a_not
     runs.pause_schedule_run(1, run.id, SENSITIVE)
     sent.notices.clear()
 
-    runs.resume_schedule_run(1, run.id, 12, "reject")
+    runs.apply_schedule_decision(1, run.id, runs.check_schedule_decision(1, run.id, 12, ["reject"]))
 
     session.refresh(run)
     session.refresh(schedule)

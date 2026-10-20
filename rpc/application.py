@@ -322,7 +322,18 @@ class RPC:
             user_id = resolve_request_user_id()
 
         try:
-            payload: dict = generate_predict_payload(parsed, user_id=user_id, sid=sid, is_system_user=is_system_user, skip_expansion=skip_expansion, return_chat_history=return_chat_history, eligible_for_autoapproval=eligible_for_autoapproval, chat_skills=chat_skills, invoked_skills=invoked_skills, auto_approve_sensitive_actions=auto_approve_sensitive_actions)
+            payload: dict = generate_predict_payload(
+                parsed,
+                user_id=user_id,
+                sid=sid,
+                is_system_user=is_system_user,
+                skip_expansion=skip_expansion,
+                return_chat_history=return_chat_history,
+                eligible_for_autoapproval=eligible_for_autoapproval,
+                chat_skills=chat_skills,
+                invoked_skills=invoked_skills,
+                auto_approve_sensitive_actions=auto_approve_sensitive_actions,
+            )
             if routing_projection is not None:
                 payload['routing_projection'] = routing_projection
             if isinstance(payload.get('application'), dict) and application_project_id:
