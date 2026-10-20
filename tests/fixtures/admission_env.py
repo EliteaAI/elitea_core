@@ -229,6 +229,11 @@ class Env:  # pylint: disable=R0902,R0904
         self.at_start = ({}, {})
         self.stored_configuration = None   # what the probe reads as the saved configuration (None: not found)
         self.schema_calls = []
+        # operator API reads (#7105)
+        self.users = {}                 # user id -> email, for auth.list_users
+        self.list_users_raises = None
+        self.list_users_calls = []
+        self.digest_inputs = {}         # version id -> what digest_inputs_for_version returns
         # digests
         self.digests = {}
         self.fail_commit_once = None
@@ -291,9 +296,18 @@ class Env:  # pylint: disable=R0902,R0904
 
     # --- seeding -------------------------------------------------------------------------------
 
-    def add_version(self, project_id, version_id, application_id):
+    def add_version(self, project_id, version_id, application_id, name=None, **definition):
+        """``definition``: ``agent_type``, ``instructions``, ``llm_settings`` for the suites that digest for real."""
         with self.ns.sa_orm.Session(self.engine(project_id)) as session:
-            session.add(self.ns.ApplicationVersion(id=version_id, application_id=application_id))
+            session.add(self.ns.ApplicationVersion(
+                id=version_id, application_id=application_id, name=name, **definition))
+            session.commit()
+
+    def add_application(self, project_id, application_id, name):
+        """Needs ``ns.Application``: a suite that reads application names defines it on ``ns.Base`` itself (another
+        suite defines a different ``applications`` table on the same base, so the harness cannot)."""
+        with self.ns.sa_orm.Session(self.engine(project_id)) as session:
+            session.add(self.ns.Application(id=application_id, name=name))
             session.commit()
 
     def add_binding(self, project_id, application_id, version_id, *, state="active", mode="elitea_native",
@@ -383,11 +397,15 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.log = RecordingLog()
     sys.modules["pylon.core.tools"].log = ns.log
 
-    class ApplicationVersion(base):  # a stand-in with the two columns admission reads
+    class ApplicationVersion(base):  # a stand-in with the columns admission and the operator API read
         __tablename__ = "application_versions"
         __table_args__ = {"schema": "tenant"}
         id = sa.Column(sa.Integer, primary_key=True)
         application_id = sa.Column(sa.Integer, nullable=False)
+        name = sa.Column(sa.String, nullable=True)
+        agent_type = sa.Column(sa.String, nullable=True)       # what the digest of the definition reads (#7105)
+        instructions = sa.Column(sa.String, nullable=True)
+        llm_settings = sa.Column(postgresql.JSONB, nullable=True)
 
     class EliteATool(base):  # stand-ins with the columns the credential decision reads
         __tablename__ = "elitea_tools"
@@ -448,6 +466,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.application_tools = application_tools
     tools.auth = types.SimpleNamespace()
     tools.this = types.SimpleNamespace()
+    tools.config.ADMINISTRATION_MODE, tools.config.DEFAULT_MODE = "administration", "default"
 
     def load(kind, name):
         return load_module_with_stubs(plugin_root / kind / f"{name}.py", f"{PKG}.{kind.replace('/', '.')}.{name}")
@@ -466,6 +485,9 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.credential_release = load("utils", "credential_release")
     ns.credential_probe = load("utils", "credential_probe")
     ns.binding_admin = load("utils", "binding_admin")
+    ns.binding_queries = load("utils", "binding_queries")
+    ns.binding_api = load("utils", "binding_api")
+    ns.pd_binding_api = load("models/pd", "binding_api")
     ns.mandate_admission = load("utils", "mandate_admission")
     ns.real_now = ns.adm._now  # pylint: disable=W0212
 
@@ -690,6 +712,30 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
 
         ns.adm.digest_for_version = digest_for_version
         ns.binding_admin.digest_for_version = digest_for_version
+        ns.binding_queries.digest_for_version = digest_for_version
+
+        def digests_for_versions(session, version_ids):  # pylint: disable=W0613
+            wanted = set(version_ids)
+            env.digest_calls += len(wanted)   # one per distinct version, as the batched read does
+            return {version_id: env.digests.get(version_id) for version_id in wanted}
+
+        ns.binding_queries.digests_for_versions = digests_for_versions
+        ns.real_digests_for_versions = ns.digest.digests_for_versions
+
+        def digest_inputs_for_version(session, version_id):  # pylint: disable=W0613
+            if version_id not in env.digest_inputs:
+                raise ns.digest.DigestError("VERSION_NOT_FOUND", "no such version")
+            return env.digest_inputs[version_id]
+
+        ns.binding_queries.digest_inputs_for_version = digest_inputs_for_version
+
+        def list_users(user_ids):
+            env.list_users_calls.append(list(user_ids))
+            if env.list_users_raises:
+                raise env.list_users_raises
+            return [{"id": uid, "email": env.users[uid], "name": "n"} for uid in user_ids if uid in env.users]
+
+        tools.auth.list_users = list_users
 
     ns.install_fakes = install_fakes
     env = Env(ns, tmp_path)

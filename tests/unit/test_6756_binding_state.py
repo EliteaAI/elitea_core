@@ -18,8 +18,10 @@ ALLOWED = {
     ("pending_approval", "draft"), ("active", "suspended"), ("suspended", "active"),
     ("active", "retiring"), ("suspended", "retiring"), ("retiring", "retired"),
     ("draft", "retired"), ("provisioning", "retired"), ("pending_approval", "retired"),
+    ("active", "pending_approval"), ("suspended", "pending_approval"),   # rebind (#7105)
 }
 ENTERING_REVOKED = {"suspended", "retiring", "retired"}
+REBINDS = {("active", "pending_approval"), ("suspended", "pending_approval")}
 DIGEST = "adv1:" + "a" * 64
 GOOD = dict(actor_user_id=7, approval_ref="appr-1", policy_revision="rev-3", current_digest=DIGEST)
 
@@ -40,14 +42,16 @@ def state():
 class FakeSession:
     """Answers the row read with ``row`` and the UPDATE with ``rowcount``; records every statement."""
 
-    def __init__(self, row=("dedicated_agent", DIGEST), rowcount=1):
+    def __init__(self, row=("dedicated_agent", DIGEST, None, None), rowcount=1):
         self.row, self.rowcount, self.statements = row, rowcount, []
 
     def execute(self, statement):
         self.statements.append(statement)
         if statement.is_select:
             row = None if self.row is None else types.SimpleNamespace(
-                identity_mode=self.row[0], definition_digest=self.row[1])
+                identity_mode=self.row[0], definition_digest=self.row[1],
+                created_by=self.row[2] if len(self.row) > 2 else None,
+                state_changed_by=self.row[3] if len(self.row) > 3 else None)
             return types.SimpleNamespace(one_or_none=lambda: row)
         return types.SimpleNamespace(rowcount=self.rowcount)
 
@@ -164,11 +168,11 @@ def test_leaving_use_needs_no_approval_or_digest(state, target):
 # --- the statement ------------------------------------------------------------------------
 
 @pytest.mark.parametrize("expected,target", sorted(ALLOWED))
-def test_revocation_epoch_rises_only_when_entering_suspended_retiring_or_retired(state, expected, target):
+def test_revocation_epoch_rises_only_when_entering_suspended_retiring_or_retired_or_rebinding(state, expected, target):
     session = FakeSession()
     state.transition_binding(session, "b1", expected, target, **GOOD)
     sql, _ = compiled(session.updates[0])
-    assert ("revocation_epoch=" in set_clause(sql).replace(" ", "")) == (target in ENTERING_REVOKED)
+    assert ("revocation_epoch=" in set_clause(sql).replace(" ", "")) == (target in ENTERING_REVOKED or (expected, target) in REBINDS)
 
 
 def test_the_epoch_is_incremented_in_sql_not_read_modified_written(state):
@@ -212,3 +216,111 @@ def test_a_stale_expected_state_changes_nothing_and_reports_false(state):
     """Another writer moved the row first: the WHERE matches no row, rowcount is 0, the caller re-reads."""
     session = FakeSession(rowcount=0)
     assert state.transition_binding(session, "b1", "pending_approval", "active", **GOOD) is False
+
+
+# --- rebind (#7105) -----------------------------------------------------------------------------
+
+NEW_DIGEST = "adv1:" + "c" * 64
+
+
+@pytest.mark.parametrize("expected", ["active", "suspended"])
+def test_a_rebind_stores_the_new_digest_clears_the_approval_and_raises_the_epoch(state, expected):
+    session = FakeSession()
+    assert state.transition_binding(
+        session, "b1", expected, "pending_approval", actor_user_id=9, current_digest=NEW_DIGEST) is True
+    [update] = session.updates
+    sql, params = compiled(update)
+    clause = set_clause(sql)
+    assert "definition_digest" in clause and NEW_DIGEST in params.values()
+    assert "approval_ref" in clause and "policy_revision" in clause
+    assert params["approval_ref"] is None and params["policy_revision"] is None
+    assert "revocation_epoch=(tenant.agent_identity_binding.revocation_epoch + " in clause.replace("  ", " ")
+    assert 9 in params.values()
+    assert not [s for s in session.statements if s.is_select]
+
+
+@pytest.mark.parametrize("expected", ["active", "suspended"])
+@pytest.mark.parametrize("digest", [None, ""])
+def test_a_rebind_needs_the_current_digest(state, expected, digest):
+    session = FakeSession()
+    with pytest.raises(state.InvalidTransition) as err:
+        state.transition_binding(session, "b1", expected, "pending_approval", actor_user_id=9, current_digest=digest)
+    assert err.value.reason_code == "DIGEST_REQUIRED" and session.statements == []
+
+
+def test_submitting_does_not_touch_the_digest_or_the_epoch(state):
+    session = FakeSession()
+    state.transition_binding(session, "b1", "provisioning", "pending_approval", actor_user_id=9)
+    sql, _ = compiled(session.updates[0])
+    assert "definition_digest" not in sql and "revocation_epoch" not in set_clause(sql)
+
+
+def test_the_helpers_agree_with_the_table(state):
+    assert {pair for pair in state.TRANSITIONS if state.is_rebind(*pair)} == REBINDS
+    assert {pair for pair in state.TRANSITIONS if state.bumps_epoch(*pair)} == (
+        {pair for pair in ALLOWED if pair[1] in ENTERING_REVOKED} | REBINDS)
+
+
+# --- self-approval (#7105) --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("created_by, changed_by, actor, refused", [
+    (7, None, 7, True),          # the creator
+    (3, 7, 7, True),             # whoever submitted it (last changed its state)
+    (7, 7, 7, True),
+    (3, 4, 7, False),            # a third operator
+    (None, None, 7, False),      # rows made before the columns were filled
+])
+def test_only_another_operator_may_approve(state, created_by, changed_by, actor, refused):
+    session = FakeSession(row=("dedicated_agent", DIGEST, created_by, changed_by))
+    call = lambda: state.transition_binding(  # noqa: E731
+        session, "b1", "pending_approval", "active", **{**GOOD, "actor_user_id": actor})
+    if refused:
+        with pytest.raises(state.InvalidTransition) as err:
+            call()
+        assert err.value.reason_code == "SELF_APPROVAL" and session.updates == []
+    else:
+        assert call() is True
+
+
+def test_an_unidentified_operator_cannot_approve(state):
+    session = FakeSession()
+    with pytest.raises(state.InvalidTransition) as err:
+        state.transition_binding(session, "b1", "pending_approval", "active", **{**GOOD, "actor_user_id": 0})
+    assert err.value.reason_code == "SELF_APPROVAL" and session.updates == []
+
+
+def test_the_statement_repeats_the_rule_so_a_change_between_read_and_write_cannot_slip_by(state):
+    session = FakeSession()
+    state.transition_binding(session, "b1", "pending_approval", "active", **GOOD)
+    sql, _ = compiled(session.updates[0])
+    where = sql.split(" WHERE ", 1)[1]
+    assert "created_by IS DISTINCT FROM" in where and "state_changed_by IS DISTINCT FROM" in where
+
+
+def test_resuming_is_not_an_approval(state):
+    """A suspended binding comes back with the approval it already has, by whoever suspended it."""
+    session = FakeSession(row=("dedicated_agent", DIGEST, 7, 7))
+    assert state.transition_binding(session, "b1", "suspended", "active", **GOOD) is True
+    sql, _ = compiled(session.updates[0])
+    assert "DISTINCT FROM" not in sql
+
+
+# --- only an approval writes the approval (#7105 review) ----------------------------------------------
+
+@pytest.mark.parametrize("expected, target", sorted(ALLOWED - {("pending_approval", "active")}))
+def test_no_other_change_writes_the_approval_columns_even_when_it_is_handed_some(state, expected, target):
+    session = FakeSession()
+    state.transition_binding(session, "b1", expected, target, **{**GOOD, "approval_ref": "EVIL", "policy_revision": "EVIL"})
+    sql, params = compiled(session.updates[0])
+    if (expected, target) in REBINDS:   # a rebind clears them
+        assert params["approval_ref"] is None and params["policy_revision"] is None
+    else:
+        assert "approval_ref" not in sql and "policy_revision" not in sql
+        assert "EVIL" not in params.values()
+
+
+def test_an_approval_writes_exactly_what_the_approver_gave(state):
+    session = FakeSession()
+    state.transition_binding(session, "b1", "pending_approval", "active", **GOOD)
+    _, params = compiled(session.updates[0])
+    assert params["approval_ref"] == "appr-1" and params["policy_revision"] == "rev-3"

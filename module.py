@@ -15,6 +15,7 @@ import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.admission import admit_dispatch, check_governed_startup, load_admission_settings, track_context
+from .utils.binding_api import PERMISSIONS as BINDING_PERMISSIONS, registration as binding_registration
 from .utils.governance import init_governance
 from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
@@ -720,6 +721,11 @@ class Module(module.ModuleModel):
                     "default": default_roles,
                 }
             })
+
+        # Agent identity bindings (#7105, C-1009): the operator REST API. Platform administration only in this slice
+        # (roles in binding_api.RECOMMENDED_ROLES). Registered whatever the governance flag says.
+        for permission in BINDING_PERMISSIONS:
+            auth.register_permissions(binding_registration(permission))
 
         # self.init_db()
         # TaskNode
