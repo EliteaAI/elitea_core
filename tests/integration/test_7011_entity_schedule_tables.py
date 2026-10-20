@@ -13,11 +13,42 @@ import types
 
 import pytest
 from fixtures.helpers import load_module_with_stubs
-from sqlalchemy import Column, Integer, Table, create_engine, event, null, select
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import DeclarativeBase, Session
+
+
+def _sqlalchemy_modules():
+    return {n: m for n, m in sys.modules.items() if n == "sqlalchemy" or n.startswith("sqlalchemy.")}
+
+
+def _import_real_sqlalchemy():
+    """Real sqlalchemy modules by name, even when an earlier suite left stubs in sys.modules.
+
+    A stub is a sqlalchemy entry without a `__file__`. Real modules stay cached: running one
+    twice breaks the C-extension state.
+    """
+    stubs = {n: m for n, m in _sqlalchemy_modules().items() if not hasattr(m, "__file__")}
+    for n in stubs:
+        del sys.modules[n]
+    try:
+        import sqlalchemy.dialects.postgresql  # noqa: F401
+        import sqlalchemy.exc  # noqa: F401
+        import sqlalchemy.ext.compiler  # noqa: F401
+        import sqlalchemy.orm  # noqa: F401
+        return _sqlalchemy_modules()
+    finally:
+        sys.modules.update(stubs)
+
+
+REAL_SQLALCHEMY = _import_real_sqlalchemy()
+
+_sa = REAL_SQLALCHEMY["sqlalchemy"]
+Column, Integer, Table, create_engine, event, null, select = (
+    _sa.Column, _sa.Integer, _sa.Table, _sa.create_engine, _sa.event, _sa.null, _sa.select
+)
+JSONB = REAL_SQLALCHEMY["sqlalchemy.dialects.postgresql"].JSONB
+IntegrityError = REAL_SQLALCHEMY["sqlalchemy.exc"].IntegrityError
+compiles = REAL_SQLALCHEMY["sqlalchemy.ext.compiler"].compiles
+DeclarativeBase = REAL_SQLALCHEMY["sqlalchemy.orm"].DeclarativeBase
+Session = REAL_SQLALCHEMY["sqlalchemy.orm"].Session
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PRINCIPAL = {"kind": "mandate"}
@@ -31,6 +62,9 @@ def _jsonb_as_json(type_, compiler, **kw):
 @pytest.fixture
 def tables(monkeypatch):
     """(models module, SQLite engine, parent tables by name) with the tables created."""
+    for name, module in REAL_SQLALCHEMY.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
     class Base(DeclarativeBase):
         pass
 
@@ -182,15 +216,10 @@ def test_7011_r3_1_principal_kind_accepts_known_values(tables, session, parents,
     session.flush()
 
 
-_NULL_KIND = pytest.mark.xfail(
-    strict=True, reason="CHECK passes on NULL: principal->>'kind' IS NULL; the model needs a NOT NULL test (scope note)"
-)
-
-
 @pytest.mark.parametrize("principal", [
     {"kind": "admin"},
-    pytest.param({}, marks=_NULL_KIND, id="missing-kind"),
-    pytest.param({"kind": None}, marks=_NULL_KIND, id="null-kind"),
+    pytest.param({}, id="missing-kind"),
+    pytest.param({"kind": None}, id="null-kind"),
 ])
 def test_7011_r3_1_principal_kind_rejects_other_values(tables, session, parents, principal):
     session.add(_schedule(tables[0], principal=principal))
