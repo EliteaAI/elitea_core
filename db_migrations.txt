@@ -391,3 +391,9 @@ CREATE INDEX IF NOT EXISTS ix_audit_events_is_error ON centry.audit_events (is_e
 # (dry_run) or re-run. Idempotent: schemas that have both tables are left alone.
 Run admin task create_agent_identity_tables with param: project_id=all;dry_run
 Run admin task create_agent_identity_tables with param: project_id=all
+
+# Issue #6947 (C-1009): autonomous mandate table - autonomous_mandate in every project schema. Nothing
+# reads it yet (WP-1C PR C does), so this is not urgent; new projects get it via create_all and the startup
+# safety net creates it for existing projects. Run the task to report (dry_run) or re-run. Idempotent.
+Run admin task create_mandate_tables with param: project_id=all;dry_run
+Run admin task create_mandate_tables with param: project_id=all

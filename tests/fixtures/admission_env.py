@@ -12,17 +12,32 @@ the ``test_6756_*`` files): the stubs must not leak into other suites.
 """
 import ast
 import importlib
+import json
+import os
 import sys
 import types
 import uuid
+import warnings
 from collections import OrderedDict
 from pathlib import Path
+
+import pytest
 
 from fixtures import identity
 from fixtures.helpers import load_module_with_stubs
 
 PKG = identity.PKG
 TRACING_EVENT_MODEL = Path("tracing") / "models" / "security_audit_event.py"
+
+
+def find_tracing_event_model(plugin_root: Path):
+    """The tracing plugin's audit event model, found by walking up to the first ancestor that holds it (the plugin
+    directory in a plain checkout, the same one from a ``wt/`` worktree), or None."""
+    for directory in (plugin_root, *plugin_root.parents):
+        candidate = directory / TRACING_EVENT_MODEL
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 class RecordingLog:
@@ -132,6 +147,9 @@ class Env:  # pylint: disable=R0902,R0904
             sa = self.ns.sa
             engine = sa.create_engine(f"sqlite:///{self.dir}/p{project_id}.db").execution_options(
                 schema_translate_map={"tenant": None})
+            # PostgreSQL's jsonb_array_length, used by a CHECK of the mandate table, for SQLite
+            sa.event.listen(engine, "connect", lambda conn, _: conn.create_function(
+                "jsonb_array_length", 1, lambda value: len(json.loads(value)), deterministic=True))
             self.ns.Base.metadata.create_all(engine)
             self.engines[project_id] = engine
         return self.engines[project_id]
@@ -329,10 +347,16 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.AdmissionRequest = ns.pd_admission.AdmissionRequest
     ns.postgresql = postgresql
 
-    # --- the event model of the tracing plugin, when it is checked out beside this one ---------
-    event_model = plugin_root.parents[2] / TRACING_EVENT_MODEL
-    ns.event_model = None
-    if event_model.exists():
+    # --- the event model of the tracing plugin: audit events are validated against it, so it must exist ---
+    event_model = find_tracing_event_model(plugin_root)
+    if os.environ.get("ELITEA_TEST_NO_TRACING"):  # reproduce the single-plugin CI checkout locally
+        event_model = None
+    if event_model is None:
+        # CI checks out this plugin alone: say so loudly (warning + the schema test skips) instead of passing silently
+        warnings.warn("tracing model not found: no ancestor of elitea_core holds " + str(TRACING_EVENT_MODEL)
+                      + "; audit events are not validated against SecurityAuditEventV1 in this run", stacklevel=1)
+        ns.event_model = None
+    else:
         ns.event_model = load_module_with_stubs(event_model, "tracing_security_audit_event_6756")
 
     # --- fakes ---------------------------------------------------------------------------------

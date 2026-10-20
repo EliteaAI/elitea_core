@@ -528,6 +528,18 @@ class Module(module.ModuleModel):
                 "manage_agent_identity_binding", self.manage_agent_identity_binding,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "create_mandate_tables", self.create_mandate_tables,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "manage_autonomous_mandate", self.manage_autonomous_mandate,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "report_trigger_principals", self.report_trigger_principals,
+                group="R-2.0.8",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
@@ -622,20 +634,22 @@ class Module(module.ModuleModel):
         Thread(target=_run, daemon=True).start()
 
     def _ensure_agent_identity_schema(self):
-        """Startup safety net: create the agent identity tables in any project schema that predates
-        them (#6756). Runs off-thread; guarded by a catalog check so steady-state boots issue no DDL.
+        """Startup safety net: create the agent identity and mandate tables in any project schema that predates
+        them (#6756, #6947). Runs off-thread; guarded by a catalog check so steady-state boots issue no DDL.
         New projects are already covered by create_all."""
         def _run():
             try:
                 from .utils.agent_identity_schema import (
-                    project_ids_missing_identity_tables,
-                    apply_identity_tables,
+                    IDENTITY_TABLES, MANDATE_TABLES,
+                    project_ids_missing_tables,
+                    apply_tables,
                 )
-                pending = project_ids_missing_identity_tables()
+                tables = IDENTITY_TABLES + MANDATE_TABLES
+                pending = project_ids_missing_tables(tables)
                 if not pending:
                     return
                 log.info("agent identity schema: auto-migrating %s project(s)", len(pending))
-                migrated, failed = apply_identity_tables(pending)
+                migrated, failed = apply_tables(pending, tables)
                 log.info(
                     "agent identity schema: auto-migration done (migrated=%s failed=%s)",
                     len(migrated), len(failed),
@@ -678,6 +692,22 @@ class Module(module.ModuleModel):
                 "default": {"admin": True, "viewer": False, "editor": False},
             }
         })
+
+        # Autonomous mandates (#6947, C-1009), in the governance.* family of the operator UI. Registered whatever
+        # the governance flag says, so roles can be assigned before it is switched on; nothing evaluates them yet
+        # (the operator tasks are the only writers).
+        for permission, default_roles in (
+                ("governance.mandates.manage", {"admin": True, "viewer": False, "editor": False}),
+                ("governance.mandates.approve", {"admin": True, "viewer": False, "editor": False}),
+                ("governance.mandates.view", {"admin": True, "viewer": False, "editor": False}),
+        ):
+            auth.register_permissions({
+                "permissions": [permission],
+                "recommended_roles": {
+                    "administration": {"admin": default_roles["admin"], "viewer": False, "editor": False},
+                    "default": default_roles,
+                }
+            })
 
         # self.init_db()
         # TaskNode
@@ -1115,6 +1145,15 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "manage_agent_identity_binding", self.manage_agent_identity_binding
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "create_mandate_tables", self.create_mandate_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "manage_autonomous_mandate", self.manage_autonomous_mandate
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "report_trigger_principals", self.report_trigger_principals
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
