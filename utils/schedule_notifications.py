@@ -13,7 +13,7 @@ MESSAGES = {
     Types.schedule_approval_expired: 'Schedule "{name}" was not approved in 24 hours and the run stopped',
     Types.schedule_expired: 'Schedule "{name}" reached its stop date and is switched off',
     Types.schedule_disabled: 'Schedule "{name}" was switched off{reason}',
-    Types.schedule_edited_by_admin: 'An admin edited your schedule "{name}"',
+    Types.schedule_edited_by_admin: 'An admin {action} your schedule "{name}"',
     Types.schedule_owner_changed: 'The owner of schedule "{name}" changed',
 }
 
@@ -27,8 +27,8 @@ def get_notified_for(session, user_id: int) -> bool:
 def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, extra=None) -> bool:
     """Send one schedule notice to the owner. Return True when it was fired, False when dropped or failed.
 
-    `extra` may carry `reason` (when there is no run) and, for schedule_owner_changed, `old_owner_id` and
-    `new_owner_id`.
+    `extra` may carry `reason` (when there is no run), `action` ("deleted" for schedule_edited_by_admin, default
+    "edited") and, for schedule_owner_changed, `old_owner_id` and `new_owner_id`.
     """
     extra = extra or {}
     if event_type == Types.schedule_run_succeeded and not _owner_wants_success(project_id, owner_id, schedule):
@@ -36,7 +36,9 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
     try:
         reason = getattr(run, 'reason', None) or extra.get('reason')
         meta = {
-            'message': MESSAGES[event_type].format(name=schedule.name, reason=f': {reason}' if reason else ''),
+            'message': MESSAGES[event_type].format(
+                name=schedule.name, reason=f': {reason}' if reason else '', action=extra.get('action', 'edited'),
+            ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,
             'run_id': run.id if run else None,
