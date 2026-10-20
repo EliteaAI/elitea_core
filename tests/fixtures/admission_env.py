@@ -201,7 +201,7 @@ class Env:  # pylint: disable=R0902,R0904
         self.epochs_raise = False
         self.idp_links = {}             # (issuer, tid, oid) -> user row, for auth.get_user_by_idp_subject (#6947)
         self.idp_raises = None
-        self.facts_version = 2          # credential_facts_version of the secrets plugin
+        self.facts_version = 3          # credential_facts_version of the secrets plugin
         self.verifier_configured = True
         self.auth_mode = "rpc"
         self.has_audit_method = True
@@ -693,14 +693,16 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                 raise env.secret_fields_raises
             return {name: list(env.secret_fields.get(name, ["token"])) for name in types if name not in env.unregistered_types}
 
-        def release_credential_material(project_id, ref_id, generation, release_id, actor_ref, allow_validated=False):
+        def release_credential_material(project_id, ref_id, generation, release_id, actor_ref, allow_validated=False,
+                                        allow_pending=False):
             env.release_calls.append((project_id, ref_id, generation, release_id, actor_ref, allow_validated))
+            env.__dict__.setdefault("pending_release_calls", []).append(allow_pending)
             if env.release_raises:
                 raise env.release_raises
             if env.release_reply is not None:
                 return env.release_reply
             row = next((r for r in env.references if r["ref_id"] == str(ref_id) and r["project_id"] == project_id), None)
-            allowed = ("validated", "active") if allow_validated else ("active",)
+            allowed = ("pending", "validated", "active") if allow_pending else ("validated", "active") if allow_validated else ("active",)
             if row is None or row["state"] not in allowed:
                 return {"ok": False, "reason_code": "CREDENTIAL_REFERENCE_INACTIVE"}
             if row["generation"] != generation:

@@ -1008,6 +1008,7 @@ def test_the_preflight_passes_with_the_mandate_dependencies(ns, env):
     (lambda env, ns: setattr(env, "facts_version", None), "credential_facts"),
     (lambda env, ns: setattr(env, "facts_version", True), "credential_facts"),
     (lambda env, ns: setattr(env, "missing_modules", {"secrets"}), "credential_facts"),
+    (lambda env, ns: setattr(env, "facts_version", 2), "credential_facts"),   # facts without the caller's personal reference (#7119)
 ])
 def test_the_preflight_fails_for_a_platform_that_cannot_decide_a_mandate_run(ns, env, break_it, expected):
     break_it(env, ns)

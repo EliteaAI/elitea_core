@@ -52,6 +52,7 @@ from .worker_capabilities import GOVERNED_TASK_CAPABILITIES
 ADMITTED_TASKS = frozenset({"indexer_agent", "indexer_predict_agent"})
 SCHEMA_VERSION = 1
 MAX_TRACKED_CONTEXTS = 10_000
+CREDENTIAL_FACTS_MIN_VERSION = 3   # the secrets plugin's credential_use_facts shape this module reads
 LIVE_STATES = ("admitted", "running")
 # Codes that explain why a context was revoked; the worker is told the same reason, not a generic one
 REVOKE_CODES = frozenset({
@@ -187,13 +188,15 @@ def governance_preflight(module, table_read="ok", mode=None) -> list:  # pylint:
         provided = provided and callable(importlib.import_module(".transport", secret_stores.__name__).seal)
     except Exception:  # pylint: disable=W0703
         provided = False   # the reply that carries released material is sealed to the worker (#6946)
+    outdated = False
     try:
         facts_version = this.for_module("secrets").module.credential_facts_version()
-        provided = provided and isinstance(facts_version, int) and not isinstance(facts_version, bool) \
-            and facts_version >= 2   # grant facts without subject_kind would refuse every mandate grant
+        current = isinstance(facts_version, int) and not isinstance(facts_version, bool)
+        outdated = current and facts_version < CREDENTIAL_FACTS_MIN_VERSION   # v2: grant subject_kind; v3: personal references (#7119)
+        provided = provided and current and not outdated
     except Exception:  # pylint: disable=W0703
         provided = False
-    add("credential_facts", provided, "NOT_LOADED")
+    add("credential_facts", provided, "OUTDATED" if outdated else "NOT_LOADED")
     add("master_key", not (getattr(c, "SECRETS_ENGINE", None) == "database" and not getattr(c, "SECRETS_MASTER_KEY", None)),
         "NOT_SET")
     add("settings_table", table_read == "ok", "MISSING_TABLE" if table_read == "missing_table" else "UNAVAILABLE")

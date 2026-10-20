@@ -12,6 +12,15 @@ A configuration can have a shared reference and personal ones, one per owner (#7
 so the reference found is the caller's own personal one when there is one, else the shared one; a personal reference is
 then usable only by its custodian: the person (``custodian_subject_ref`` equals the subject of the run) or, for a
 mandate, the mandate's owner.
+
+The caller's personal reference wins even when it is not active (fail closed): while it is pending, validated or
+suspended the owner's runs are refused, and they do not fall back to the shared credential. The facts carry a ``note``
+saying so for the UI.
+
+Known limits (follow-ups, no code yet): the owner of a mandate is read at admission, and a change of owner after it is
+not re-read when a queued run is re-checked; the facts' fallback to another owner's personal reference is capped, so a
+crowded configuration can crowd another out (both only change which refusal is named); and ``ref_ids`` are keyed by
+configuration id, so one configuration's two references asked for together return one.
 """
 import uuid
 from dataclasses import dataclass, replace

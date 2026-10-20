@@ -44,10 +44,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     "message": "A required service is unavailable; the run was not started. Try again."}
 
     @web.method()
-    def governed_check_connection(self, project_id, configuration_uuid, config_type, user_id):
-        """ Same process (the check-connection routes of ``configurations``): test a saved credential through the
-        governed path. Returns ``{"success": True, ...}``, a provider failure ``{"success": False, "message"}``, an
-        authorization request, or a refusal ``{"success": False, "code", "message"}``. Never raises. """
+    def governed_check_connection(  # pylint: disable=R0913
+        self, project_id, configuration_uuid, config_type, user_id, actor_user_id=None, onboarding=False,
+    ):
+        """ Same process (the check-connection routes of ``configurations``, and the credential onboarding of
+        ``secrets``): test a saved credential through the governed path. ``user_id`` is whose personal reference is
+        preferred, ``actor_user_id`` (default ``user_id``) who holds ``credentials.probe`` (an operator testing a
+        personal reference for its custodian), ``onboarding`` lets a ``pending`` reference be probed. Returns
+        ``{"success": True, ...}``, a provider failure ``{"success": False, "message"}``, an authorization request,
+        or a refusal ``{"success": False, "code", "message"}``. Never raises. """
         from ..utils.credential_probe import governed_check_connection  # pylint: disable=C0415
         #
-        return governed_check_connection(self, project_id, configuration_uuid, config_type, user_id)
+        return governed_check_connection(
+            self, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding)
