@@ -10,6 +10,7 @@ this one, so a wrong field or a secret-shaped value fails here.
 The caller saves ``sys.modules`` before ``install`` and restores it after (see ``admission_env`` in
 the ``test_6756_*`` files): the stubs must not leak into other suites.
 """
+import ast
 import importlib
 import sys
 import types
@@ -86,6 +87,20 @@ class Env:  # pylint: disable=R0902,R0904
         self.verifier_configured = True
         self.auth_mode = "rpc"
         self.has_audit_method = True
+        # credential governance fakes (the facts methods of `configurations` and `secrets`, #6757)
+        self.configurations = {}        # (project_id, uuid) -> {id, project_id, type, section, generation}
+        self.references = []            # rows as `credential_use_facts` returns them, plus project_id/configuration_id
+        self.grants = {}                # (project_id, grant key string) -> {grant_id, state, ...}
+        self.permissions = {42: {"credentials.use"}, 43: {"credentials.use"}}
+        self.permission_calls = []
+        self.configuration_calls = []   # (project_id, uuids)
+        self.secrets_calls = []         # (project_id, config_ids, grant_keys, ref_ids)
+        self.missing_modules = set()    # plugin names whose module is not installed
+        self.configurations_raises = None
+        self.secrets_raises = None
+        self.permissions_raise = None
+        self.schemas = {}               # toolkit type -> schema (provider hub), as `find_toolkit_schema_by_type_everywhere`
+        self.schema_calls = []
         # digests
         self.digests = {}
         self.fail_commit_once = None
@@ -171,6 +186,14 @@ class Env:  # pylint: disable=R0902,R0904
         self.add_version(project_id, version_id, application_id)
         return self.add_binding(project_id, application_id, version_id, **binding)
 
+    def add_toolkit(self, project_id, version_id, tool_id, kind, settings, selected=("run",)):
+        """A toolkit row of a version, as the digest and the credential decision read it."""
+        with self.ns.sa_orm.Session(self.engine(project_id)) as session:
+            session.add(self.ns.EliteATool(id=tool_id, type=kind, settings=settings))
+            session.add(self.ns.EntityToolMapping(
+                tool_id=tool_id, entity_version_id=version_id, entity_type="agent", selected_tools=list(selected)))
+            session.commit()
+
     def module(self, *, governed=True, **settings):
         adm = self.ns.adm
         return types.SimpleNamespace(
@@ -217,18 +240,58 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
         id = sa.Column(sa.Integer, primary_key=True)
         application_id = sa.Column(sa.Integer, nullable=False)
 
+    class EliteATool(base):  # stand-ins with the columns the credential decision reads
+        __tablename__ = "elitea_tools"
+        __table_args__ = {"schema": "tenant"}
+        id = sa.Column(sa.Integer, primary_key=True)
+        type = sa.Column(sa.String, nullable=False)
+        settings = sa.Column(postgresql.JSONB, nullable=False)
+
+    class EntityToolMapping(base):
+        __tablename__ = "entity_tool_mapping"
+        __table_args__ = {"schema": "tenant"}
+        id = sa.Column(sa.Integer, primary_key=True)
+        tool_id = sa.Column(sa.Integer, nullable=False)
+        entity_version_id = sa.Column(sa.Integer, nullable=False)
+        entity_type = sa.Column(sa.String, nullable=False)
+        selected_tools = sa.Column(postgresql.JSONB, nullable=True)
+
+    @compiler.compiles(sa.sql.elements.BinaryExpression, "sqlite")
+    def _jsonb_contains(element, compiler_, **kw):
+        """SQLite has no ``@>``: emulate the one probe the plugin sends, a list holding one ``credential_ref``."""
+        if getattr(element.operator, "opstring", None) == "@>":
+            left, right = compiler_.process(element.left, **kw), compiler_.process(element.right, **kw)
+            return (f"EXISTS (SELECT 1 FROM json_each({left}) AS je WHERE "
+                    f"json_extract(je.value, '$.credential_ref') = json_extract({right}, '$[0].credential_ref'))")
+        return compiler_.visit_binary(element, **kw)
+
     for table in base.metadata.tables.values():  # PostgreSQL-only defaults do not exist on SQLite
         for column in table.columns:
             if column.server_default is not None and "jsonb" in str(getattr(column.server_default, "arg", "")):
                 column.server_default = None
 
-    for name in ("plugins", PKG, f"{PKG}.models", f"{PKG}.models.pd", f"{PKG}.utils"):
+    for name in ("plugins", PKG, f"{PKG}.models", f"{PKG}.models.pd", f"{PKG}.models.enums", f"{PKG}.utils"):
         package = sys.modules.get(name) or types.ModuleType(name)
         package.__path__ = []
         sys.modules[name] = package
     models_all = types.ModuleType(f"{PKG}.models.all")
     models_all.ApplicationVersion = ApplicationVersion
     sys.modules[f"{PKG}.models.all"] = models_all
+    tool_models = types.ModuleType(f"{PKG}.models.elitea_tools")
+    tool_models.EliteATool, tool_models.EntityToolMapping = EliteATool, EntityToolMapping
+    sys.modules[tool_models.__name__] = tool_models
+    enums = types.ModuleType(f"{PKG}.models.enums.all")
+    enums.ToolEntityTypes = types.SimpleNamespace(agent=types.SimpleNamespace(value="agent"))
+    sys.modules[enums.__name__] = enums
+    # the real scanner of expanded configurations, lifted from the module that is too heavy to import here
+    scanner = next(node for node in ast.parse((plugin_root / "utils" / "application_utils.py").read_text()).body
+                   if isinstance(node, ast.FunctionDef) and node.name == "_find_configurations_in_settings")
+    utils_application = types.ModuleType(f"{PKG}.utils.application_utils")
+    exec(compile(ast.Module([scanner], []), "application_utils.py", "exec"), utils_application.__dict__)  # pylint: disable=W0122
+    sys.modules[utils_application.__name__] = utils_application
+    application_tools = types.ModuleType(f"{PKG}.utils.application_tools")
+    sys.modules[application_tools.__name__] = application_tools
+    ns.application_tools = application_tools
     tools.auth = types.SimpleNamespace()
     tools.this = types.SimpleNamespace()
 
@@ -241,6 +304,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.run_id = load("utils", "run_id")
     ns.pd_admission = load("models/pd", "admission")
     ns.caps = load("utils", "worker_capabilities")
+    ns.credential_decision = load("utils", "credential_decision")
     ns.adm = load("utils", "admission")
     ns.binding_admin = load("utils", "binding_admin")
     ns.real_now = ns.adm._now  # pylint: disable=W0212
@@ -258,6 +322,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             self.commits += 1
             return super().commit()
 
+    ns.EliteATool, ns.EntityToolMapping = EliteATool, EntityToolMapping
     ns.sa, ns.sa_orm, ns.Base = sa, sa_orm, base
     ns.CountingSession = CountingSession
     ns.ApplicationVersion = ApplicationVersion
@@ -316,7 +381,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             if env.record_raises:
                 raise env.record_raises
             env.recorded.append((session, validated(event)))
-            return {"event_id": str(uuid.uuid4())}
+            return {"event_id": event.get("event_id") or str(uuid.uuid4())}
 
         def record_autocommit(event):
             env.tracing_calls += 1
@@ -333,7 +398,56 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                 method_names.pop("security_audit_record")
             return types.SimpleNamespace(**method_names)
 
-        tools.this.for_module = lambda name: types.SimpleNamespace(module=tracing_module())
+        def configuration_credential_facts(project_id, uuids):
+            env.configuration_calls.append((project_id, list(uuids)))
+            if env.configurations_raises:
+                raise env.configurations_raises
+            return {item: dict(env.configurations[(project_id, item)]) for item in uuids if (project_id, item) in env.configurations}
+
+        def credential_use_facts(project_id, config_ids, grant_keys, ref_ids=None):
+            env.secrets_calls.append((project_id, list(config_ids), list(grant_keys), None if ref_ids is None else list(ref_ids)))
+            if env.secrets_raises:
+                raise env.secrets_raises
+            references, grants = {}, {}
+            for row in env.references:
+                if (row["project_id"] == project_id and row["state"] != "retired"
+                        and (row["configuration_id"] in config_ids or row["ref_id"] in (ref_ids or []))):
+                    references[row["configuration_id"]] = {
+                        key: row[key] for key in ("ref_id", "state", "generation", "configuration_generation",
+                                                  "store_kind", "ownership_class", "revocation_epoch")}
+            for key in ("|".join(item) for item in grant_keys):
+                grant = env.grants.get((project_id, key))
+                if grant is not None and grant["state"] != "revoked":
+                    grants[key] = dict(grant)
+            return {"references": references, "grants": grants}
+
+        def modules():
+            return {
+                "tracing": tracing_module(),
+                "configurations": types.SimpleNamespace(configuration_credential_facts=configuration_credential_facts),
+                "secrets": types.SimpleNamespace(credential_use_facts=credential_use_facts),
+            }
+
+        def for_module(name):
+            if name in env.missing_modules:
+                return types.SimpleNamespace(module=None)
+            return types.SimpleNamespace(module=modules()[name])
+
+        tools.this.for_module = for_module
+
+        def get_user_permissions(user_id, mode, project_id):
+            env.permission_calls.append((user_id, mode, project_id))
+            if env.permissions_raise:
+                raise env.permissions_raise
+            return set(env.permissions.get(user_id, set()))
+
+        tools.auth.get_user_permissions = get_user_permissions
+
+        def find_schema(tool_type, project_id, user_id):
+            env.schema_calls.append((tool_type, project_id, user_id))
+            return env.schemas.get(tool_type), bool(env.schemas.get(tool_type))
+
+        application_tools.find_toolkit_schema_by_type_everywhere = find_schema
 
         def digest_for_version(session, version_id):  # pylint: disable=W0613
             env.digest_calls += 1
