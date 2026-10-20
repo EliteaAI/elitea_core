@@ -80,7 +80,7 @@ def world(monkeypatch):
         "utils.utils": {"make_yield_to_hub": lambda _runtime: (lambda: None), "end_ambient_transaction": lambda: None},
         "utils.schedule_claim": {
             "select_due_schedules": world.select_due, "claim_schedule": world.claim,
-            "insert_cron_run": world.insert_run,
+            "insert_cron_run": world.insert_run, "legacy_lock_key": lambda project_id: project_id,
         },
         "utils.schedule_dispatch": {
             "RUN_STARTERS": {"agent": print, "pipeline": print}, "start_schedule_run": world.start,

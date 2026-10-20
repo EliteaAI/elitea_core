@@ -148,3 +148,8 @@ def test_el_7011_r2_1_active_run_blocks_a_second_run_and_keeps_the_claim(claim, 
     assert [run.status for run in _runs(claim, session, row.id)] == [active]
     session.expire_all()
     assert session.get(claim.EntitySchedule, row.id).next_run.replace(tzinfo=None) == NEXT
+
+
+def test_el_7011_r4_2_legacy_lock_key_is_stable_per_project(claim):
+    """R4.2: the legacy step and the migration (US-24) take the same key; it never depends on the process."""
+    assert [claim.legacy_lock_key(project_id) for project_id in (1, 5)] == [(7011 << 32) + 1, (7011 << 32) + 5]

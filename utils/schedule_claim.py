@@ -6,6 +6,9 @@ from sqlalchemy.exc import IntegrityError
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 
+# Must stay stable across deploys: the legacy step of the tick and the migration (US-24) take the same keys
+LEGACY_LOCK_BASE = 7011 << 32
+
 
 def select_due_schedules(session, entity_types, limit: int) -> list[EntitySchedule]:
     """Enabled schedules of `entity_types` due by now, oldest `next_run` first, at most `limit`."""
@@ -41,3 +44,8 @@ def insert_cron_run(session, schedule_id: int) -> int | None:
     except IntegrityError:
         return None
     return run.id
+
+
+def legacy_lock_key(project_id: int) -> int:
+    """The advisory lock key of one project, shared by the legacy step and the migration."""
+    return LEGACY_LOCK_BASE + project_id
