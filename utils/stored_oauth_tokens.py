@@ -1,5 +1,7 @@
 """Access tokens for credentials holding a stored OAuth login, so runs without browser tokens can use them."""
 
+import hashlib
+import time
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
@@ -10,6 +12,8 @@ GRAPH_DEFAULT_SCOPE = "https://graph.microsoft.com/.default"
 CACHE_PREFIX = "oauth:stored:at:"
 LOCK_PREFIX = "oauth:stored:lock:"
 LOCK_SECONDS = 30
+LOCK_WAIT_SECONDS = 5
+LOCK_POLL_SECONDS = 0.25
 EXPIRY_MARGIN_SECONDS = 120
 GRAPH_CONFIGURATION_KEYS = ("sharepoint_configuration", "outlook_configuration", "teams_configuration")
 
@@ -38,29 +42,39 @@ def _dataverse_login(config: dict) -> Optional[dict]:
 LOGIN_RESOLVERS = {**{key: _graph_login for key in GRAPH_CONFIGURATION_KEYS}, "dataverse_configuration": _dataverse_login}
 
 
-def iter_stored_logins(tools: list):
-    """(token map key, configuration, login) for every tool credential that carries a stored login."""
+def iter_credential_refs(tools: list):
+    """(configuration_uuid, credential type, payload token key) per tool credential; only pointers are taken."""
     for tool in tools or []:
         settings = (tool or {}).get("settings") or {}
         for settings_key, resolve in LOGIN_RESOLVERS.items():
             config = settings.get(settings_key)
-            if not isinstance(config, dict) or not config.get("refresh_token") or not config.get("configuration_uuid"):
+            if not isinstance(config, dict) or not config.get("configuration_uuid"):
                 continue
-            login = resolve(config)
-            if login:
-                yield f"{config['configuration_uuid']}:{login['token_key']}", config, login
+            yield config["configuration_uuid"], settings_key.removesuffix("_configuration"), resolve
 
 
-def get_access_token(redis, config: dict, login: dict, refresh_fn: Callable) -> Optional[str]:
-    """Cached access token for the credential, refreshing its stored login at most once per lifetime."""
-    cache_key = f"{CACHE_PREFIX}{config['configuration_uuid']}"
+def _login_fingerprint(config: dict, login: dict) -> str:
+    # Ties the cache entry to this exact login, so a different or re-done login never reads another's token
+    material = "|".join([str(config.get("refresh_token")), str(config.get("client_id")),
+                         login["authority"], login["scope"]])
+    return hashlib.sha256(material.encode()).hexdigest()[:32]
+
+
+def get_access_token(redis, config: dict, login: dict, refresh_fn: Callable, sleep: Callable = time.sleep) -> Optional[str]:
+    """Cached access token for the stored login, refreshing it at most once per lifetime."""
+    suffix = f"{config['configuration_uuid']}:{_login_fingerprint(config, login)}"
+    cache_key, lock_key = f"{CACHE_PREFIX}{suffix}", f"{LOCK_PREFIX}{suffix}"
     cached = redis.get(cache_key)
     if cached:
         return cached
-    lock_key = f"{LOCK_PREFIX}{config['configuration_uuid']}"
     if not redis.set(lock_key, "1", nx=True, ex=LOCK_SECONDS):
-        # Another run is refreshing; use its result if it already landed, otherwise go without
-        return redis.get(cache_key)
+        # Another run is refreshing this login; wait for its result instead of reporting a false logout
+        for _ in range(int(LOCK_WAIT_SECONDS / LOCK_POLL_SECONDS)):
+            sleep(LOCK_POLL_SECONDS)
+            cached = redis.get(cache_key)
+            if cached:
+                return cached
+        return None
     try:
         cached = redis.get(cache_key)
         if cached:
@@ -95,11 +109,22 @@ def collect_payload_tools(payload: dict) -> list:
     return tools
 
 
-def inject_stored_oauth_tokens(payload: dict, redis, refresh_fn: Callable) -> int:
+def inject_stored_oauth_tokens(payload: dict, redis, refresh_fn: Callable, load_fn: Callable) -> int:
     """Add access tokens for stored logins to payload['mcp_tokens']; browser tokens always win."""
+    # Payload tool dicts can be client-supplied: only their uuid is used, the login comes from load_fn (DB)
     tokens = payload.setdefault("mcp_tokens", {})
-    added = 0
-    for token_key, config, login in iter_stored_logins(collect_payload_tools(payload)):
+    added, seen = 0, set()
+    for configuration_uuid, credential_type, resolve in iter_credential_refs(collect_payload_tools(payload)):
+        if configuration_uuid in seen:
+            continue
+        seen.add(configuration_uuid)
+        config = load_fn(configuration_uuid, credential_type)
+        if not config or not config.get("refresh_token") or config.get("configuration_uuid") != configuration_uuid:
+            continue
+        login = resolve(config)
+        if not login:
+            continue
+        token_key = f"{configuration_uuid}:{login['token_key']}"
         if token_key in tokens:
             continue
         token = get_access_token(redis, config, login, refresh_fn)

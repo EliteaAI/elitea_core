@@ -10,9 +10,11 @@ from tools import VaultClient, db, serialize, this
 from tools import auth, rpc_tools, VaultClient, serialize, context
 
 from .llm_settings import normalize_runtime_max_tokens
+from .mcp_oauth import refresh_token
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates
 from .skill_utils import consume_message_skills, resolve_runtime_skills
+from .stored_oauth_tokens import inject_stored_oauth_tokens
 from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
 from ..models.elitea_tools import EliteATool
 from ..models.enums.all import AgentTypes
@@ -220,6 +222,20 @@ def load_context_settings_from_conversation(project_id: int, conversation_id: st
         log.debug(f"Could not load context_settings from conversation {conversation_id}: {e}")
 
     return None
+
+
+def inject_stored_logins(payload: dict, project_id: int, expansion_user_id: int) -> None:
+    """Stored OAuth logins (Microsoft toolkits) for runs that carry no browser token, e.g. schedules."""
+    try:
+        rpc = rpc_tools.RpcMixin().rpc.timeout(5)
+        inject_stored_oauth_tokens(
+            payload, this.module.get_redis_client(), refresh_token,
+            lambda uuid_, type_: rpc.configurations_get_stored_login(
+                project_id=project_id, user_id=expansion_user_id,
+                configuration_uuid=uuid_, expected_type=type_),
+        )
+    except Exception as e:  # pylint: disable=W0703
+        log.warning("Stored OAuth token injection skipped: %s", type(e).__name__)
 
 
 def generate_predict_payload(
@@ -532,13 +548,7 @@ def generate_predict_payload(
     if isinstance(parsed, ApplicationChatRequest):
         attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)
 
-    try:
-        # Stored OAuth logins (Microsoft toolkits) for runs that carry no browser token, e.g. schedules
-        from .mcp_oauth import refresh_token
-        from .stored_oauth_tokens import inject_stored_oauth_tokens
-        inject_stored_oauth_tokens(payload, this.module.get_redis_client(), refresh_token)
-    except Exception as e:
-        log.warning("Stored OAuth token injection skipped: %s", type(e).__name__)
+    inject_stored_logins(payload, parsed.project_id, expansion_user_id)
 
     return payload
 

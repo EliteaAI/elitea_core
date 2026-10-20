@@ -43,6 +43,18 @@ class _AuthorSortRow(NamedTuple):
     pin_updated_at: Optional[datetime]
 
 
+def connection_errors_from(err: dict):
+    """Connection errors carried by the check_connection sentinel in one pydantic error, else None."""
+    if err.get('type') != 'value_error':
+        return None
+    # pydantic keeps the raised ValueError in ctx.error; the sentinel dict is its first argument
+    ctx_error = err.get('ctx', {}).get('error')
+    payload = ctx_error.args[0] if getattr(ctx_error, 'args', None) else ctx_error
+    if isinstance(payload, dict) and ToolValidatedDetails.CONNECTION_ERROR_SENTINEL in payload:
+        return payload[ToolValidatedDetails.CONNECTION_ERROR_SENTINEL]
+    return None
+
+
 def apply_selected_tools_intersection(tools, tool_mappings):
     """
     Apply selected_tools intersection from tool_mappings to tools.
@@ -790,15 +802,9 @@ def validate_toolkit_details(
                 # and re-raise it as ToolkitConnectionError so the API can return
                 # connection_errors separately from settings_errors.
                 for err in e.errors():
-                    # pydantic keeps the raised ValueError in ctx.error; the sentinel dict is its first argument
-                    ctx_error = err.get('ctx', {}).get('error')
-                    payload = ctx_error.args[0] if getattr(ctx_error, 'args', None) else ctx_error
-                    if (
-                        err.get('type') == 'value_error'
-                        and isinstance(payload, dict)
-                        and ToolValidatedDetails.CONNECTION_ERROR_SENTINEL in payload
-                    ):
-                        raise ToolkitConnectionError(payload[ToolValidatedDetails.CONNECTION_ERROR_SENTINEL])
+                    connection_errors = connection_errors_from(err)
+                    if connection_errors is not None:
+                        raise ToolkitConnectionError(connection_errors)
                 raise
     finally:
         if session_created:
@@ -1159,18 +1165,13 @@ def validate_application_version_details(
                     ToolValidatedDetails.model_validate(tool, context=validation_context)
                 except ValidationError as e:
                     for err in e.errors():
-                        # Intercept connection errors carried via the sentinel key
-                        if (
-                            err.get('type') == 'value_error'
-                            and isinstance(err.get('ctx', {}).get('error'), dict)
-                            and ToolValidatedDetails.CONNECTION_ERROR_SENTINEL
-                                in err['ctx']['error']
-                        ):
+                        connection_errors = connection_errors_from(err)
+                        if connection_errors is not None:
                             application_toolkit_errors.append({
                                 'type': 'connection_error',
                                 'loc': ('tools', tool['id'], '__root__'),
                                 'input': err.get('input'),
-                                'ctx': err['ctx']['error'][ToolValidatedDetails.CONNECTION_ERROR_SENTINEL],
+                                'ctx': connection_errors,
                             })
                         else:
                             application_toolkit_errors.append({
