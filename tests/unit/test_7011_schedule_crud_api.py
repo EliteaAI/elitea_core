@@ -399,3 +399,22 @@ def test_7011_r5_7_template_syntax_other_than_placeholders_is_400_on_prompt(harn
 def test_7011_r5_7_simple_placeholders_with_spaces_are_saved(harness):
     body = agent_body(prompt='Hi {{who}} and {{  who  }}')
     assert harness.call('post', body)[1] == 201
+
+
+# US-32 R2.2: the details answer names the owner as the list does (name, else email)
+def test_7011_us32_r2_2_details_name_the_owner(harness, monkeypatch):
+    authors = types.ModuleType(f'{PACKAGE}.utils.authors')
+    authors.get_authors_data = lambda ids: [{'id': OWNER_ID, 'name': None, 'email': 'owner@example.com'}]
+    monkeypatch.setitem(sys.modules, authors.__name__, authors)
+    schedule_id = harness.seed()
+    body, status = harness.call('get', schedule_id=schedule_id)
+    assert (status, body['owner']) == (200, {'id': OWNER_ID, 'name': 'owner@example.com'})
+
+
+def test_7011_us32_r2_2_a_failed_name_lookup_keeps_the_details(harness, monkeypatch):
+    authors = types.ModuleType(f'{PACKAGE}.utils.authors')
+    authors.get_authors_data = lambda ids: (_ for _ in ()).throw(RuntimeError('auth down'))
+    monkeypatch.setitem(sys.modules, authors.__name__, authors)
+    schedule_id = harness.seed()
+    body, status = harness.call('get', schedule_id=schedule_id)
+    assert (status, body['owner']) == (200, {'id': OWNER_ID, 'name': None})
