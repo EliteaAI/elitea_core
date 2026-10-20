@@ -9,7 +9,6 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from croniter import croniter
 from pydantic import ValidationError
 from sqlalchemy import Column, Integer, Table
 from sqlalchemy.dialects import postgresql
@@ -229,18 +228,43 @@ def test_el_7011_r3_2_next_run_is_strictly_after_the_firing_instant(timing):
     assert timing.compute_next_run(DAILY, "Europe/Kyiv", after) == datetime(2026, 1, 11, 7, 0, tzinfo=UTC)
 
 
-# R3.3 a clock change gives the firing croniter gives for that timezone
-@pytest.mark.parametrize("cron, zone, after", [
-    ("30 2 * * *", "America/New_York", datetime(2026, 3, 8, 5, 0, tzinfo=UTC)),
-    ("30 1 * * *", "America/New_York", datetime(2026, 11, 1, 4, 0, tzinfo=UTC)),
+# R3.3 a local time that does not exist moves by the gap (02:30 EST -> 03:30 EDT, as the runtime
+# croniter 1.4.1 gives); a repeated local time fires at its first occurrence (01:30 EDT)
+@pytest.mark.parametrize("cron, zone, after, expected", [
+    ("30 2 * * *", "America/New_York", datetime(2026, 3, 8, 5, 0, tzinfo=UTC), datetime(2026, 3, 8, 7, 30, tzinfo=UTC)),
+    ("30 1 * * *", "America/New_York", datetime(2026, 11, 1, 4, 0, tzinfo=UTC), datetime(2026, 11, 1, 5, 30, tzinfo=UTC)),
 ])
-def test_el_7011_r3_3_clock_change_follows_croniter(timing, cron, zone, after):
-    tz = ZoneInfo(zone)
-    expected = croniter(cron, after.astimezone(tz)).get_next(datetime).astimezone(UTC)
+def test_el_7011_r3_3_clock_change_moves_a_missing_time_and_takes_a_repeated_one_once(
+    timing, cron, zone, after, expected,
+):
     result = timing.compute_next_run(cron, zone, after)
     assert result == expected
     assert result > after
-    assert result.utcoffset() == timedelta(0)
+
+
+# R3.2 hand-checked UTC times on clock change days (not croniter's own answer, so a croniter that
+# keeps the old offset fails); EET/EEST is UTC+2/+3, EST/EDT is UTC-5/-4
+@pytest.mark.parametrize(
+    "cron, zone, after, expected",
+    [
+        ("0 9 * * *", "Europe/Kyiv", datetime(2026, 3, 28, 10, tzinfo=UTC), datetime(2026, 3, 29, 6, tzinfo=UTC)),
+        ("0 9 * * *", "Europe/Kyiv", datetime(2026, 10, 24, 10, tzinfo=UTC), datetime(2026, 10, 25, 7, tzinfo=UTC)),
+        ("0 9 * * *", "America/New_York", datetime(2026, 3, 7, 15, tzinfo=UTC), datetime(2026, 3, 8, 13, tzinfo=UTC)),
+        ("0 9 * * 1", "Europe/Kyiv", datetime(2026, 3, 27, 10, tzinfo=UTC), datetime(2026, 3, 30, 6, tzinfo=UTC)),
+    ],
+)
+def test_el_7011_r3_2_next_run_keeps_local_time_across_a_clock_change(timing, cron, zone, after, expected):
+    assert timing.compute_next_run(cron, zone, after) == expected
+
+
+# R3.3 a start inside the second pass of a repeated hour: the first-pass firing is not after it,
+# so the next one follows; an hourly cron skips the second pass of 01:00 (01:00 EST, 06:00 UTC)
+@pytest.mark.parametrize("cron, after, expected", [
+    ("30 1 * * *", datetime(2026, 11, 1, 6, 10, tzinfo=UTC), datetime(2026, 11, 2, 6, 30, tzinfo=UTC)),
+    ("0 * * * *", datetime(2026, 11, 1, 5, 30, tzinfo=UTC), datetime(2026, 11, 1, 7, 0, tzinfo=UTC)),
+])
+def test_el_7011_r3_3_repeated_hour_fires_once_and_the_next_run_is_after_the_start(timing, cron, after, expected):
+    assert timing.compute_next_run(cron, "America/New_York", after) == expected
 
 
 # R4.1 the stop date is stored as the end of that day in the schedule timezone, in UTC
