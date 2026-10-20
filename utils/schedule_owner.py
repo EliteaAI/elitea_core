@@ -29,3 +29,12 @@ def validate_new_owner(project_id: int, owner_id: int) -> str | None:
         log.exception('New owner %s of project %s: the permission check failed', owner_id, project_id)
         return ACCESS_CHECK_UNAVAILABLE
     return None if SCHEDULE_PERMISSIONS['list'] in permissions else CANNOT_USE_SCHEDULES
+
+
+def mark_owner_change_span(schedule) -> None:
+    """Name the schedule on the request span, so the tracing trail writes one audit record (R3.1)."""
+    from .schedule_service import (
+        mark_audit_span,  # late: the service pulls in the models
+    )
+
+    mark_audit_span(schedule)
