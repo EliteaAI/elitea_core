@@ -9,7 +9,10 @@ from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from .schedule_claim import fail_run
 
 STALE_REASON = 'the run did not finish in time'
-PAUSE_REASON = 'the run stopped for input that no one can give'
+EXPIRED_REASON = 'approval expired'
+EXPIRE_BATCH = 100
+NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
+PAUSE_REASON = 'the run needs a human answer'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
 APPROVAL_WAIT_HOURS = 24
@@ -68,7 +71,7 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
     # A parallel pause carries its interrupts in `hitl_interrupts`
     interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
     if not any(item.get('guardrail_type') == 'sensitive_tool' for item in interrupts):
-        finish_schedule_run(project_id, run_id, 'failed', PAUSE_REASON)
+        finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts))
         return
     # Late import, as in _announce
     from .schedule_notifications import notify_schedule_event
@@ -89,6 +92,15 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
             notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
         except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it (R1.3)
             log.exception('Schedule run %s: cannot send the approval notice', run_id)
+
+
+def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
+    """`PAUSE_REASON` plus the toolkit or step the pause names; the toolkit first, as an MCP sign-in node says little (R2.4)."""
+    for key, label in (('toolkit_name', 'toolkit'), ('node_name', 'step')):
+        name = next((item[key] for item in (interrupt, *interrupts) if item.get(key)), None)
+        if name:
+            return f"{PAUSE_REASON} ({label} '{str(name)[:NAME_LIMIT]}')"
+    return PAUSE_REASON
 
 
 def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
@@ -170,6 +182,25 @@ def fail_stale_runs(project_id: int, now: datetime, stale_minutes: int) -> int:
     return len(ended)
 
 
+def expire_waiting_runs(project_id: int, now: datetime) -> int:
+    """Fail the runs whose approval wait ended before `now`, tell the owners; the number failed.
+
+    At most `EXPIRE_BATCH` runs per call; the rest go in the next tick. The update keeps the
+    `waiting_for_approval` condition, so an owner decision that wins the race is never overwritten (R1.1).
+    """
+    expired = (select(EntityScheduleRun.id)
+               .where(EntityScheduleRun.status == 'waiting_for_approval', EntityScheduleRun.approval_expires_at < now)
+               .order_by(EntityScheduleRun.approval_expires_at, EntityScheduleRun.id)
+               .limit(EXPIRE_BATCH))
+    with db.get_session(project_id) as session:
+        ended = _end_runs(session, EntityScheduleRun.id.in_(expired), 'failed', EXPIRED_REASON,
+                          expected_status='waiting_for_approval')
+        session.commit()
+        # Only the expiry notice: a plain failure notice would be a second one (R1.3)
+        _announce(project_id, session, ended, {'failed': 'schedule_approval_expired'})
+    return len(ended)
+
+
 def _end_runs(session, condition, status: str, reason: str | None, conversation_id: int | None = None,
               expected_status: str = 'running') -> list[int]:
     """End the runs in `expected_status` that match `condition` and copy the status to their schedules; the run ids."""
@@ -192,7 +223,7 @@ def _end_runs(session, condition, status: str, reason: str | None, conversation_
     return [run_id for run_id, _ in ended]
 
 
-def _announce(project_id: int, session, run_ids: list[int]) -> None:
+def _announce(project_id: int, session, run_ids: list[int], events: dict = NOTICE_EVENTS) -> None:
     """Send the notice of each ended run to its owner; an agent run also tells the owner's open chats."""
     # Late import: the notice stack is needed only here, so the writers above load without it
     from .schedule_notifications import (
@@ -201,11 +232,15 @@ def _announce(project_id: int, session, run_ids: list[int]) -> None:
     )
     for run_id in run_ids:
         run = session.get(EntityScheduleRun, run_id)
-        event = NOTICE_EVENTS.get(run.status)
+        event = events.get(run.status)
         if event is None:  # the status moved on after the commit; that writer owns the notice
             continue
         schedule = session.get(EntitySchedule, run.schedule_id)
-        notify_schedule_event(project_id, schedule.created_by, event, schedule, run)
-        if schedule.entity_type == 'agent':
-            emit_schedule_run_finished(
-                schedule.created_by, schedule.id, run.id, run.status, schedule.application_id, run.conversation_id)
+        # One failed notice must not leave the other runs of a batch without theirs
+        try:
+            notify_schedule_event(project_id, schedule.created_by, event, schedule, run)
+            if schedule.entity_type == 'agent':
+                emit_schedule_run_finished(
+                    schedule.created_by, schedule.id, run.id, run.status, schedule.application_id, run.conversation_id)
+        except Exception:  # noqa: BLE001 - the run already ended; only its notice is lost
+            log.exception('Schedule run %s: cannot send the %s notice', run_id, event)
