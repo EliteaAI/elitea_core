@@ -3,10 +3,12 @@ from typing import ClassVar
 
 from flask import request
 from pydantic import ValidationError
+from pylon.core.tools import log
 from sqlalchemy import select
 from tools import api_tools, auth, db, register_openapi
 
 from ...models.entity_schedule import EntityScheduleRun
+from ...models.enums.all import NotificationEventTypes
 from ...models.pd.entity_schedule import ScheduleCreate, ScheduleDetails, ScheduleUpdate
 from ...models.pd.schedule_run import ScheduleRunRequest
 from ...utils.constants import PROMPT_LIB_MODE
@@ -18,6 +20,7 @@ from ...utils.schedule_access import (
 )
 from ...utils.schedule_claim import fail_run, insert_run
 from ...utils.schedule_dispatch import START_FAILED, start_schedule_run
+from ...utils.schedule_notifications import notify_schedule_event
 from ...utils.schedule_service import (
     ScheduleError,
     create_schedule,
@@ -67,6 +70,11 @@ def _on_run_path() -> bool:
     return request.path.rstrip("/").endswith("/run")
 
 
+def _on_owner_path() -> bool:
+    """True for the `<project>/<schedule>/owner` URL, which shares this resource with the schedule URL."""
+    return request.path.rstrip("/").endswith("/owner")
+
+
 def _parse_body(model):
     """The request body as `model`, or the 400 answer of its first error."""
     try:
@@ -82,13 +90,23 @@ def _validation_response(error: ValidationError) -> tuple[dict, int]:
     return {"error": first["msg"].removeprefix("Value error, "), "field": field}, 400
 
 
+def _notify_owner_change(project_id: int, row, change: dict) -> None:
+    """Tell the old and the new owner, both ids in the meta (R3.2); a failure is logged, the change stays."""
+    for user_id in change.values():
+        try:
+            notify_schedule_event(project_id, user_id, NotificationEventTypes.schedule_owner_changed, row, extra=change)
+        except Exception as e:  # noqa: BLE001 -- the change is committed; a lost notice must not fail it
+            log.error("Schedule %s: cannot send the owner change notice: %s", row.id, e)
+
+
 class PromptLibAPI(api_tools.APIModeHandler):
     """Schedule of the caller; a user without `schedules.admin` sees only their own rows."""
 
     @register_openapi(
         name="Create Schedule",
         description="Create a schedule owned by the caller. The owner is never taken from the body. "
-                    "POST .../{schedule_id}/run starts a run now or a test run of the caller's own schedule.",
+                    "POST .../{schedule_id}/run starts a run now or a test run of the caller's own schedule. "
+                    "POST .../{schedule_id}/owner with {owner_id} sets a new owner (schedules admin only).",
         tags=[OPENAPI_TAG],
         request_body=ScheduleCreate,
         available_to_users=True,
@@ -99,6 +117,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
         # Keyword arguments: check_api reads project_id from them for the project-scoped permission check.
         if schedule_id is None:
             return self._create(project_id=project_id)
+        if _on_owner_path():
+            return self._change_owner(project_id=project_id, schedule_id=schedule_id)
         if not _on_run_path():
             return NOT_ALLOWED
         return self._run(project_id=project_id, schedule_id=schedule_id)
@@ -151,6 +171,36 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {"error": "The run could not start"}, 500
             return {"run_id": run_id}, 202
 
+    @auth.decorators.check_api(schedule_check_spec("admin"))
+    def _change_owner(self, project_id: int, schedule_id: int):
+        # late, like schedule_risk: only the owner route needs the owner and auth RPC checks
+        from ...utils.schedule_owner import (
+            ACCESS_CHECK_UNAVAILABLE,
+            change_schedule_owner,
+            mark_owner_change_span,
+            validate_new_owner,
+        )
+        body = request.get_json(silent=True)
+        owner_id = body.get("owner_id") if isinstance(body, dict) else None
+        if type(owner_id) is not int:  # strict: "20", true and 20.0 are no owner ids (R2.3)
+            return {"error": "owner_id must be an integer", "field": "owner_id"}, 400
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                row = load_schedule_in_scope(session, schedule_id, scope)
+            except ScheduleError as e:
+                return e.response
+            reason = validate_new_owner(project_id, owner_id)
+            if reason == ACCESS_CHECK_UNAVAILABLE:
+                return {"error": reason}, 503
+            if reason:
+                return {"error": reason, "field": "owner_id"}, 400
+            change = change_schedule_owner(session, row, owner_id, scope.user_id)
+            if change:
+                mark_owner_change_span(row)
+                _notify_owner_change(project_id, row, change)
+            return _read(row, scope, project_id), 200
+
     @register_openapi(
         name="Get Schedule",
         description="Read one schedule. Another owner's schedule answers 404 unless the caller is a schedules admin.",
@@ -160,7 +210,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("details"))
     @api_tools.endpoint_metrics
     def get(self, project_id: int, schedule_id: int, **kwargs):
-        if _on_run_path():  # only POST serves the run URL
+        if _on_run_path() or _on_owner_path():  # only POST serves the run and owner URLs
             return NOT_ALLOWED
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
@@ -179,7 +229,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("update"))
     @api_tools.endpoint_metrics
     def put(self, project_id: int, schedule_id: int, **kwargs):
-        if _on_run_path():  # only POST serves the run URL
+        if _on_run_path() or _on_owner_path():  # only POST serves the run and owner URLs
             return NOT_ALLOWED
         body, error = _parse_body(ScheduleUpdate)
         if error:
@@ -208,7 +258,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("delete"))
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, schedule_id: int, **kwargs):
-        if _on_run_path():  # only POST serves the run URL
+        if _on_run_path() or _on_owner_path():  # only POST serves the run and owner URLs
             return NOT_ALLOWED
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
@@ -222,6 +272,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 class API(api_tools.APIBase):
     url_params: ClassVar[list] = api_tools.with_modes([
         "<int:project_id>", "<int:project_id>/<int:schedule_id>", "<int:project_id>/<int:schedule_id>/run",
+        "<int:project_id>/<int:schedule_id>/owner",
     ])
 
     mode_handlers: ClassVar[dict] = {PROMPT_LIB_MODE: PromptLibAPI}
