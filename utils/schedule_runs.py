@@ -9,6 +9,8 @@ from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from .schedule_claim import fail_run
 
 STALE_REASON = 'the run did not finish in time'
+EXPIRED_REASON = 'approval expired'
+EXPIRE_BATCH = 100
 PAUSE_REASON = 'the run stopped for input that no one can give'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
@@ -170,6 +172,24 @@ def fail_stale_runs(project_id: int, now: datetime, stale_minutes: int) -> int:
     return len(ended)
 
 
+def expire_waiting_runs(project_id: int, now: datetime) -> int:
+    """Fail the runs whose approval wait ended before `now`, tell the owners; the number failed.
+
+    At most `EXPIRE_BATCH` runs per call; the rest go in the next tick. The update keeps the
+    `waiting_for_approval` condition, so an owner decision that wins the race is never overwritten (R1.1).
+    """
+    expired = (select(EntityScheduleRun.id)
+               .where(EntityScheduleRun.status == 'waiting_for_approval', EntityScheduleRun.approval_expires_at < now)
+               .limit(EXPIRE_BATCH))
+    with db.get_session(project_id) as session:
+        ended = _end_runs(session, EntityScheduleRun.id.in_(expired), 'failed', EXPIRED_REASON,
+                          expected_status='waiting_for_approval')
+        session.commit()
+        # Only the expiry notice: a plain failure notice would be a second one (R1.3)
+        _announce(project_id, session, ended, {'failed': 'schedule_approval_expired'})
+    return len(ended)
+
+
 def _end_runs(session, condition, status: str, reason: str | None, conversation_id: int | None = None,
               expected_status: str = 'running') -> list[int]:
     """End the runs in `expected_status` that match `condition` and copy the status to their schedules; the run ids."""
@@ -192,7 +212,7 @@ def _end_runs(session, condition, status: str, reason: str | None, conversation_
     return [run_id for run_id, _ in ended]
 
 
-def _announce(project_id: int, session, run_ids: list[int]) -> None:
+def _announce(project_id: int, session, run_ids: list[int], events: dict = NOTICE_EVENTS) -> None:
     """Send the notice of each ended run to its owner; an agent run also tells the owner's open chats."""
     # Late import: the notice stack is needed only here, so the writers above load without it
     from .schedule_notifications import (
@@ -201,7 +221,7 @@ def _announce(project_id: int, session, run_ids: list[int]) -> None:
     )
     for run_id in run_ids:
         run = session.get(EntityScheduleRun, run_id)
-        event = NOTICE_EVENTS.get(run.status)
+        event = events.get(run.status)
         if event is None:  # the status moved on after the commit; that writer owns the notice
             continue
         schedule = session.get(EntitySchedule, run.schedule_id)
