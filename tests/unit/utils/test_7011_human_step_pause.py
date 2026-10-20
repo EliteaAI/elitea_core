@@ -30,6 +30,9 @@ def _pause(runs, session, interrupt, status="running"):
                          "node_name": "mcp_auth_guard"}},
      PLAIN + " (toolkit 'SharePoint')"),  # TC-US19-08: the toolkit wins over the node
     ({"toolkit_name": "SharePoint"}, PLAIN + " (toolkit 'SharePoint')"),  # TC-US19-08: top level
+    ({"type": "mcp_authorization_required", "toolkit_name": "SharePoint"},
+     PLAIN + " (toolkit 'SharePoint')"),  # R2.2: the MCP sign-in payload
+    ({"hitl_interrupt": {"node_name": "x" * 300}}, PLAIN + " (step '" + "x" * 100 + "')"),  # the name is cut
     ({"hitl_interrupts": [{"guardrail_type": "hitl"}, {"node_name": "Second"}]},
      PLAIN + " (step 'Second')"),  # R2.4 over a parallel pause
     ({"type": "interrupt"}, PLAIN),  # TC-US19-11: no name

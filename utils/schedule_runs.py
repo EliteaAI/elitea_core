@@ -11,6 +11,7 @@ from .schedule_claim import fail_run
 STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
 EXPIRE_BATCH = 100
+NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
 PAUSE_REASON = 'the run needs a human answer'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
@@ -98,7 +99,7 @@ def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
     for key, label in (('toolkit_name', 'toolkit'), ('node_name', 'step')):
         name = next((item[key] for item in (interrupt, *interrupts) if item.get(key)), None)
         if name:
-            return f"{PAUSE_REASON} ({label} '{name}')"
+            return f"{PAUSE_REASON} ({label} '{str(name)[:NAME_LIMIT]}')"
     return PAUSE_REASON
 
 
@@ -189,6 +190,7 @@ def expire_waiting_runs(project_id: int, now: datetime) -> int:
     """
     expired = (select(EntityScheduleRun.id)
                .where(EntityScheduleRun.status == 'waiting_for_approval', EntityScheduleRun.approval_expires_at < now)
+               .order_by(EntityScheduleRun.approval_expires_at, EntityScheduleRun.id)
                .limit(EXPIRE_BATCH))
     with db.get_session(project_id) as session:
         ended = _end_runs(session, EntityScheduleRun.id.in_(expired), 'failed', EXPIRED_REASON,
@@ -234,7 +236,11 @@ def _announce(project_id: int, session, run_ids: list[int], events: dict = NOTIC
         if event is None:  # the status moved on after the commit; that writer owns the notice
             continue
         schedule = session.get(EntitySchedule, run.schedule_id)
-        notify_schedule_event(project_id, schedule.created_by, event, schedule, run)
-        if schedule.entity_type == 'agent':
-            emit_schedule_run_finished(
-                schedule.created_by, schedule.id, run.id, run.status, schedule.application_id, run.conversation_id)
+        # One failed notice must not leave the other runs of a batch without theirs
+        try:
+            notify_schedule_event(project_id, schedule.created_by, event, schedule, run)
+            if schedule.entity_type == 'agent':
+                emit_schedule_run_finished(
+                    schedule.created_by, schedule.id, run.id, run.status, schedule.application_id, run.conversation_id)
+        except Exception:  # noqa: BLE001 - the run already ended; only its notice is lost
+            log.exception('Schedule run %s: cannot send the %s notice', run_id, event)
