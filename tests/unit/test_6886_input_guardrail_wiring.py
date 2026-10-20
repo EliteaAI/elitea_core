@@ -86,3 +86,38 @@ def test_webhook_history_preview_is_redacted_before_truncation():
 
 def test_tracing_redactor_is_registered():
     assert 'register_value_redactor(redact_text)' in _source('module.py')
+
+
+def test_blocked_chat_turn_is_stored_redacted():
+    source = _source('rpc/chat_all.py')
+    store = source.index('def _store_blocked_turn')
+
+    assert 'self._store_blocked_turn(' in source
+    assert 'redacted_input(' in source[store:]
+    assert "'is_error': True" in source[store:store + 4000]
+
+
+def test_accepted_history_is_listed_on_both_chat_dispatch_paths():
+    assert _source('rpc/chat_all.py').count(
+        'payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)'
+    ) == 2
+
+
+def test_chat_history_content_is_not_logged():
+    assert not re.search(r'log\.\w+\([^)]*chat_history\'\]\s*\}', _source('rpc/chat_all.py'))
+
+
+def test_regenerate_checks_an_edited_turn_before_storing_it():
+    source = _source('api/v2/regenerate.py')
+    check = source.index('check_chat_input(')
+
+    assert check < source.index('item.content = content')
+    assert re.search(r'except InputGuardrailBlockedError as e:\s+session\.rollback\(\)\s+return e\.body\(\), 422', source)
+    assert 'except SioValidationError as e:' in source
+
+
+def test_conversation_naming_does_not_log_the_input_or_the_name():
+    source = _source('methods/conversation_naming.py')
+
+    assert 'user_input[:' not in source
+    assert "'{generated_name}'" not in source

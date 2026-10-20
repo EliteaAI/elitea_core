@@ -16,10 +16,12 @@ from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, g
 from ...utils.chat_history import generate_chat_history
 from ...models.enums.all import ChatHistoryRole, AgentTypes
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.exceptions import InputGuardrailBlockedError
+from ...utils.input_guardrail import check_chat_input
 from ...utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, retire_all_interrupts,
 )
-from ...utils.sio_utils import SioEvents
+from ...utils.sio_utils import SioEvents, SioValidationError
 from ...utils.skill_participant_utils import pop_chat_skills, pop_skill_dispatch, record_skill_run
 
 
@@ -60,13 +62,26 @@ class PromptLibAPI(api_tools.APIModeHandler):
             msg_entity_meta = msg_group.author_participant.entity_meta
 
             if parsed.updated_items:
+                # Checkpoint A (#6886): an edited turn is checked before it replaces the stored copy
+                checked = []
                 for update in parsed.updated_items:
                     item = next(
                         (i for i in reply_msg.message_items if str(i.uuid) == update.get('uuid')),
                         None,
                     )
                     if item and isinstance(item, TextMessageItem):
-                        item.content = update['content']
+                        try:
+                            content, verdict = check_chat_input(
+                                update['content'], project_id, auth.current_user().get('id'),
+                            )
+                        except InputGuardrailBlockedError as e:
+                            session.rollback()
+                            return e.body(), 422
+                        checked.append((item, content, verdict))
+                for item, content, verdict in checked:
+                    item.content = content
+                    if verdict:
+                        reply_msg.meta = {**(reply_msg.meta or {}), 'input_guardrail': verdict}
                     # canvas and other item types: reserved for future support
                 session.commit()
                 session.refresh(reply_msg)
@@ -185,14 +200,30 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     'question_id': parsed.question_id,
                 })
                 record_skill_run(session, msg_group, start_event_content)
-                getattr(self.module.context.rpc_manager.call, rpc_func)(
-                    parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
-                    routing_projection=regenerate_payload.pop('_routing_projection', None),
-                    **pop_chat_skills(regenerate_payload),
-                    start_event_content=start_event_content,
-                    chat_project_id=project_id,
-                    **skill_rpc_kwargs,
-                )
+                try:
+                    getattr(self.module.context.rpc_manager.call, rpc_func)(
+                        parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
+                        routing_projection=regenerate_payload.pop('_routing_projection', None),
+                        **pop_chat_skills(regenerate_payload),
+                        start_event_content=start_event_content,
+                        chat_project_id=project_id,
+                        **skill_rpc_kwargs,
+                    )
+                except InputGuardrailBlockedError as e:
+                    msg_group.is_streaming = False
+                    session.commit()
+                    return e.body(), 422
+                except SioValidationError as e:
+                    # A refusal at dispatch (budget, input guardrail) was already streamed to
+                    # the sid and stored on the group; the response must not turn it into a 500
+                    session.refresh(msg_group)
+                    if msg_group.is_streaming:
+                        msg_group.is_streaming = False
+                        session.commit()
+                        session.refresh(msg_group)
+                    if parsed.sid:
+                        return serialize(MessageGroupDetail.model_validate(msg_group)), 200
+                    return {'error': str(e.error)}, 400
                 # load new regenerated message items
                 session.refresh(msg_group)
                 return serialize(MessageGroupDetail.model_validate(msg_group)), 200

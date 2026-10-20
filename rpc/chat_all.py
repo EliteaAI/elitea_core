@@ -43,7 +43,9 @@ from ..utils.skill_participant_utils import SkillParticipantError, build_skill_p
     apply_participant_skill_mentions, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
     resolve_skill_attachment_llm_settings
 from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
-from ..utils.input_guardrail import check_chat_input, check_resume_input
+from ..utils.input_guardrail import (
+    INSPECTED_PAYLOAD_KEY, accepted_history_hashes, check_chat_input, check_resume_input, redacted_input,
+)
 from ..utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation,
     claim_supervisor_decision_phase, decisions_for_child,
@@ -1185,8 +1187,9 @@ class RPC:
                 return {"error": "This message has already been submitted"}
 
             # Checkpoint A (#6886): before the turn is stored, broadcast or used to
-            # name the conversation. A blocked turn leaves no trace; the refusal goes
-            # to the sender only, and REST callers get the error raised (422)
+            # name the conversation. A blocked turn is stored redacted with the refusal
+            # as its answer (plan D5), so the card survives a reload; REST callers get
+            # the error raised (422) and nothing is stored
             try:
                 parsed.user_input, input_guardrail_verdict = check_chat_input(
                     parsed.user_input, parsed.project_id, current_user['id'],
@@ -1194,6 +1197,7 @@ class RPC:
             except InputGuardrailBlockedError as blocked:
                 if not sid:
                     raise
+                self._store_blocked_turn(session, conversation, author_participant, parsed, blocked, room, sid)
                 self.context.sio.emit(
                     event=SioEvents.chat_predict.value,
                     data={
@@ -1516,7 +1520,8 @@ class RPC:
                         include_context=not is_pipeline,
                         routing_projection=payload.get('_routing_projection'),
                     )
-                    log.debug('chat payload["chat_history"]=%s', payload["chat_history"])
+                    payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
+                    log.debug('chat payload["chat_history"] has %d messages', len(payload["chat_history"]))
 
                     context_meta = {
                         'context': {
@@ -1577,6 +1582,80 @@ class RPC:
                             "response_message_group_id": response_msg.id,
                         }
                     return result
+
+    @web.method()
+    def _store_blocked_turn(self, session, conversation, author_participant, parsed, blocked, room, sid):
+        """Store a turn checkpoint A refused: the input redacted, the refusal as its answer.
+
+        Plan D5: a reload shows the same card, and the stored copy never holds the value.
+        Never raises; on failure the refusal still reaches the sender, unstored.
+        """
+        verdict = blocked.verdict()
+        try:
+            stored_input = redacted_input(parsed.user_input)
+            msg_group = ConversationMessageGroup(
+                uuid=parsed.question_id,
+                conversation=conversation,
+                author_participant=author_participant,
+                sent_to_id=parsed.participant_id,
+                meta={'input_guardrail': verdict},
+            )
+            session.add(msg_group)
+            session.add(TextMessageItem(
+                message_group=msg_group,
+                item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
+                content=stored_input,
+                order_index=0,
+            ))
+            session.flush()
+            if msg_group.sent_to_id:
+                response_msg = ConversationMessageGroup(
+                    conversation=conversation,
+                    author_participant_id=msg_group.sent_to_id,
+                    is_streaming=False,
+                    reply_to_id=msg_group.id,
+                    created_at=datetime.now(tz=timezone.utc) + timedelta(seconds=1),
+                    meta={'is_error': True, 'error': blocked.message, 'input_guardrail': verdict},
+                )
+                session.add(response_msg)
+                session.flush()
+                session.add(TextMessageItem(
+                    message_group=response_msg,
+                    item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
+                    content=blocked.message,
+                    order_index=0,
+                ))
+            session.commit()
+            session.refresh(msg_group)
+            self.context.sio.emit(
+                event=SioEvents.chat_predict.value,
+                data={'type': 'chat_user_message', **serialize(MessageGroupDetail.model_validate(msg_group))},
+                room=room,
+                skip_sid=sid,
+            )
+            if isinstance(stored_input, str):
+                # The sender's optimistic copy holds what they typed; match the stored copy
+                self.context.sio.emit(
+                    event=SioEvents.chat_predict.value,
+                    data={
+                        'type': 'input_guardrail_notice',
+                        'stream_id': parsed.conversation_uuid,
+                        'message_id': parsed.question_id,
+                        'question_id': parsed.question_id,
+                        'content': stored_input,
+                        'response_metadata': {'input_guardrail': verdict},
+                    },
+                    to=sid,
+                )
+        except Exception:  # pylint: disable=W0703
+            log.exception('[INPUT_GUARDRAIL] Failed to store the blocked turn')
+            session.rollback()
+            return
+        # The first turn still names the conversation, or its "naming" spinner never clears
+        text = stored_input if isinstance(stored_input, str) else ' '.join(
+            b.get('text') or '' for b in stored_input or [] if isinstance(b, dict) and b.get('type') == 'text'
+        )
+        self.check_and_generate_conversation_name(parsed.project_id, text or 'New Chat', room, conversation)
 
     @web.method()
     def _wait_parallel_hitl_ack(self, message_id, decision_id, phase, timeout=0.75):
@@ -2388,6 +2467,7 @@ class RPC:
                     include_context=not continues_pipeline,
                     routing_projection=payload.get('_routing_projection'),
                 )
+                payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
                 if is_token_limit_continuation_request:
                     prepare_token_limit_payload(payload, truncated_content)
                 payload['message_id'] = str(response_msg.uuid)

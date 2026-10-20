@@ -152,6 +152,19 @@ def redact_text(text: str) -> str:
     return result.redacted.get(('current_turn', 0), text)
 
 
+def redacted_input(user_input):
+    """A copy of a chat input with every detected value replaced: the stored copy of a
+    blocked turn (plan D5). Text blocks of a list are rewritten in a new list."""
+    if isinstance(user_input, list):
+        return [
+            {**block, 'text': redact_text(block.get('text') or '')}
+            if isinstance(block, dict) and block.get('type') == 'text'
+            else (redact_text(block) if isinstance(block, str) else block)
+            for block in user_input
+        ]
+    return redact_text(user_input)
+
+
 # --- audit ------------------------------------------------------------------------
 
 
@@ -203,6 +216,26 @@ def _audit_entries(result_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
         e for e in result_summary.get('audit') or []
         if not (e.get('segment_kind') == 'history' and str(e.get('action', '')).rsplit(':', 1)[-1] in ('record', 'warn'))
     ]
+
+
+def accepted_history_hashes(message_groups) -> List[str]:
+    """Hashes of stored user turns checkpoint A let through on record or warn.
+
+    Such a turn is stored as sent, and its verdict is on the group's meta. Listing it
+    in ``input_guardrail_inspected`` keeps it from blocking every later turn once it
+    is history. A turn stored while the guardrail was off has no verdict and is still
+    inspected.
+    """
+    hashes: Set[str] = set()
+    for group in message_groups or []:
+        verdict = (getattr(group, 'meta', None) or {}).get(VERDICT_PAYLOAD_KEY)
+        if not isinstance(verdict, dict) or verdict.get('action') not in ('record', 'warn'):
+            continue
+        for item in getattr(group, 'message_items', None) or []:
+            content = getattr(item, 'content', None)
+            if isinstance(content, str) and content:
+                hashes.add(segment_hash(content))
+    return sorted(hashes)
 
 
 # --- checkpoints ------------------------------------------------------------------
@@ -296,11 +329,20 @@ def check_resume_input(parsed, project_id, user_id=None) -> Optional[Dict[str, A
             return {k: check(v, 'hitl_edit') for k, v in value.items()}
         return check(value, 'hitl_edit')
 
-    if getattr(parsed, 'user_input', None):
-        parsed.user_input = check(parsed.user_input, 'current_turn')
-    if getattr(parsed, 'hitl_value', None) is not None:
+    hitl_value = getattr(parsed, 'hitl_value', None)
+    decisions = getattr(parsed, 'hitl_decisions', None) or []
+    # On a HITL resume the input carries the reviewer's edit, not a new turn
+    hitl = hitl_value is not None or bool(decisions)
+    user_input = getattr(parsed, 'user_input', None)
+    if user_input and not (hitl and user_input == hitl_value):
+        parsed.user_input = check(user_input, 'hitl_edit' if hitl else 'current_turn')
+    elif user_input:
+        parsed.user_input = None  # set below from the checked hitl_value
+    if hitl_value is not None:
         parsed.hitl_value = check_value(parsed.hitl_value)
-    for decision in getattr(parsed, 'hitl_decisions', None) or []:
+    if user_input and parsed.user_input is None:
+        parsed.user_input = parsed.hitl_value
+    for decision in decisions:
         if isinstance(decision, dict) and decision.get('value') is not None:
             decision['value'] = check_value(decision['value'])
     return verdict

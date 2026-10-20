@@ -222,8 +222,41 @@ def test_resume_redacts_input_and_hitl_values_in_place(guardrail):
     assert parsed.hitl_value == {'note': 'mail [REDACTED:personal_data]', 'n': 3}
     assert parsed.hitl_decisions == [{'value': '[REDACTED:credentials]'}, {'value': None}]
     assert verdict['detection_count'] == 3
-    assert verdict['segments'] == ['current_turn', 'hitl_edit']
+    # On a HITL resume the input is the reviewer's text, so it is labelled hitl_edit
+    assert verdict['segments'] == ['hitl_edit']
     _assert_no_value(FAKE_GITHUB_TOKEN, verdict, guardrail.spans)
+
+
+def test_resume_input_mirroring_the_hitl_edit_is_audited_once_as_hitl_edit(guardrail):
+    _enable(guardrail)
+    edit = f'use {FAKE_GITHUB_TOKEN}'
+    parsed = types.SimpleNamespace(user_input=edit, hitl_value=edit, hitl_decisions=None)
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError) as caught:
+        guardrail.check_resume_input(parsed, 1, 7)
+
+    assert caught.value.segments == ['hitl_edit']
+    assert [s['audit.tool.name'] for s in guardrail.spans] == ['hitl_edit']
+
+
+def test_resume_mirrored_input_takes_the_redacted_hitl_value(guardrail):
+    _enable(guardrail, categories={'credentials': 'redact'})
+    edit = f'use {FAKE_GITHUB_TOKEN}'
+    parsed = types.SimpleNamespace(user_input=edit, hitl_value=edit, hitl_decisions=None)
+
+    guardrail.check_resume_input(parsed, 1, 7)
+
+    assert parsed.user_input == parsed.hitl_value == 'use [REDACTED:credentials]'
+
+
+def test_resume_without_hitl_labels_the_input_current_turn(guardrail):
+    _enable(guardrail)
+    parsed = types.SimpleNamespace(user_input=f'use {FAKE_GITHUB_TOKEN}', hitl_value=None, hitl_decisions=None)
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError) as caught:
+        guardrail.check_resume_input(parsed, 1, 7)
+
+    assert caught.value.segments == ['current_turn']
 
 
 def test_resume_block_in_a_hitl_edit_raises(guardrail):
@@ -329,3 +362,52 @@ def test_redact_text_replaces_every_category_not_off(guardrail):
     _enable(guardrail, categories={'credentials': 'block', 'personal_data': 'off'})
 
     assert guardrail.redact_text(f'{FAKE_GITHUB_TOKEN} {FAKE_EMAIL}') == f'[REDACTED:credentials] {FAKE_EMAIL}'
+
+
+# --- stored turns -------------------------------------------------------------------
+
+
+def _group(action, *contents):
+    return types.SimpleNamespace(
+        meta={'input_guardrail': {'action': action}} if action else {},
+        message_items=[types.SimpleNamespace(content=c) for c in contents],
+    )
+
+
+def test_accepted_history_hashes_lists_record_and_warn_turns_only(guardrail):
+    hashes = guardrail.accepted_history_hashes([
+        _group('record', 'recorded'), _group('warn', 'warned'),
+        _group('redact', 'redacted'), _group(None, 'stored while off'),
+    ])
+
+    assert hashes == sorted({guardrail.detector.segment_hash('recorded'), guardrail.detector.segment_hash('warned')})
+
+
+def test_accepted_history_turn_does_not_block_a_later_turn(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+    earlier = f'earlier {FAKE_GITHUB_TOKEN}'
+    call = _call('hello', chat_history=[{'role': 'user', 'content': earlier}],
+                 input_guardrail_inspected=guardrail.accepted_history_hashes([_group('warn', earlier)]))
+
+    assert guardrail.apply_input_guardrail(call) is None
+
+
+def test_history_turn_without_a_verdict_is_still_inspected(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+    earlier = f'earlier {FAKE_GITHUB_TOKEN}'
+    call = _call('hello', chat_history=[{'role': 'user', 'content': earlier}],
+                 input_guardrail_inspected=guardrail.accepted_history_hashes([_group(None, earlier)]))
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError):
+        guardrail.apply_input_guardrail(call)
+
+
+def test_redacted_input_masks_a_string_and_text_blocks_without_mutating(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+    blocks = [{'type': 'text', 'text': f'key {FAKE_GITHUB_TOKEN}'}, {'type': 'image_url', 'image_url': 'x'}]
+
+    assert guardrail.redacted_input(f'key {FAKE_GITHUB_TOKEN}') == 'key [REDACTED:credentials]'
+    redacted = guardrail.redacted_input(blocks)
+    assert redacted[0]['text'] == 'key [REDACTED:credentials]'
+    assert redacted[1] == blocks[1]
+    assert FAKE_GITHUB_TOKEN in blocks[0]['text']

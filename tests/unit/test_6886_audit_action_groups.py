@@ -10,6 +10,7 @@ import sys
 import types
 
 import pytest
+import sqlalchemy
 from sqlalchemy import Boolean, Column, Integer, String, create_engine
 from sqlalchemy.orm import Session, declarative_base
 
@@ -39,6 +40,8 @@ def audit_api(monkeypatch):
     flask = types.ModuleType('flask')
     flask.request = types.SimpleNamespace(args={})
     monkeypatch.setitem(sys.modules, 'flask', flask)
+    # Others leave a sqlalchemy stub whose func is a lambda; audit.py imports func lazily
+    monkeypatch.setitem(sys.modules, 'sqlalchemy', sqlalchemy)
     pylon_tools = types.ModuleType('pylon.core.tools')
     pylon_tools.log = types.SimpleNamespace(error=lambda *a, **k: None)
     for name, module in (('pylon', types.ModuleType('pylon')), ('pylon.core', types.ModuleType('pylon.core')), ('pylon.core.tools', pylon_tools)):

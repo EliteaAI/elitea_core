@@ -120,8 +120,15 @@ class InputGuardrailBlockedError(Exception):
         self.segments = [str(s) for s in segments or []]
         self.type = INPUT_GUARDRAIL_BLOCKED_TYPE
         self.code = INPUT_GUARDRAIL_BLOCKED_TYPE
-        if self.categories != ["error"]:
-            labels = [_INPUT_GUARDRAIL_CATEGORY_LABELS.get(c, c) for c in self.categories]
+        labels = [_INPUT_GUARDRAIL_CATEGORY_LABELS.get(c, c) for c in self.categories]
+        if self.categories != ["error"] and self.segments == ["instructions"]:
+            # The user cannot fix this by editing their message; the agent owner can
+            self.message = (
+                f"This agent's instructions appear to contain {' and '.join(labels)}, so the turn was not sent "
+                "to the model. Ask the agent's owner to remove it or store it as a project secret."
+            )
+            self.message_key = "input_guardrail.blocked.instructions"
+        elif self.categories != ["error"]:
             self.message = (
                 f"Your message appears to contain {' and '.join(labels)}. It was not sent to the model. "
                 "Remove it, or store it as a project secret and reference it instead."

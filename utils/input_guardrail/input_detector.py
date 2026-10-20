@@ -30,6 +30,7 @@ DEFAULT_TIMEOUT_MS = 200
 
 ERROR_TIMEOUT = 'timeout'
 ERROR_INTERNAL = 'internal'
+ERROR_OVERSIZE = 'oversize'
 
 
 @dataclass(frozen=True)
@@ -304,7 +305,7 @@ def inspect(
         return InspectionResult(not_inspected=not_inspected)
     try:
         if sum(len(s.text) for s in segments) > policy.max_inspect_chars:
-            return InspectionResult(not_inspected=not_inspected, error=ERROR_TIMEOUT, elapsed_ms=elapsed())
+            return InspectionResult(not_inspected=not_inspected, error=ERROR_OVERSIZE, elapsed_ms=elapsed())
         deadline = started + policy.timeout_ms / 1000.0
         detections: List[Detection] = []
         redacted: Dict[Tuple[str, int], str] = {}
