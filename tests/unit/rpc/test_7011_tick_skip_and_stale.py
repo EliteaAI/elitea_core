@@ -69,7 +69,8 @@ def world(monkeypatch):
             "start_schedule_run": lambda *a: world.started.append(a) or True, "START_FAILED": "",
         },
         "utils.schedule_timing": {"compute_next_run": lambda cron, zone, after: NOW},
-        "utils.schedule_runs": {"record_skipped_run": world.record_skipped, "fail_stale_runs": world.fail_stale},
+        "utils.schedule_runs": {"record_skipped_run": world.record_skipped, "fail_stale_runs": world.fail_stale,
+                                "expire_waiting_runs": lambda *a: 0},
     }
     tick = load_tick(
         monkeypatch, stubs, db=types.SimpleNamespace(get_session=world.get_session),
