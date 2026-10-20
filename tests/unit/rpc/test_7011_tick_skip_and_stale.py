@@ -4,12 +4,11 @@ Contract under test: rpc/entity_schedules_check.py. The claim, the writers of ut
 and the starter are faked, so the test pins what the tick calls and with which values.
 """
 import contextlib
-import sys
 import types
 from datetime import UTC, datetime
 
 import pytest
-from unit._tool_spend_loader import load
+from unit.rpc.test_7011_entity_schedules_check import load_tick, tick_caller
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 SKIP_REASON = "the previous run is still running"
@@ -57,8 +56,6 @@ def world(monkeypatch):
     world = World()
     quiet = lambda *a, **k: None
     stubs = {
-        "utils.maintenance_gate": {"is_maintenance_active": lambda: False},
-        "utils.utils": {"make_yield_to_hub": lambda _runtime: quiet, "end_ambient_transaction": quiet},
         "utils.schedule_claim": {
             "select_due_schedules": lambda session, types_, limit: world.rows.get(1, []),
             "claim_schedule": lambda *a: True, "insert_cron_run": world.insert_run,
@@ -71,25 +68,13 @@ def world(monkeypatch):
         "utils.schedule_timing": {"compute_next_run": lambda cron, zone, after: NOW},
         "utils.schedule_runs": {"record_skipped_run": world.record_skipped, "fail_stale_runs": world.fail_stale},
     }
-    for dotted, names in stubs.items():
-        module = types.ModuleType("plugins.elitea_core." + dotted)
-        vars(module).update(names)
-        monkeypatch.setitem(sys.modules, module.__name__, module)
-    pylon_tools = types.ModuleType("pylon.core.tools")
-    pylon_tools.web = types.SimpleNamespace(rpc=lambda *a, **k: (lambda f: f))
-    pylon_tools.log = types.SimpleNamespace(info=quiet, warning=quiet, exception=quiet)
-    monkeypatch.setitem(sys.modules, "pylon.core.tools", pylon_tools)
-    monkeypatch.setitem(sys.modules, "plugins.elitea_core.rpc.entity_schedules_check", None)
-    tick = load("rpc/entity_schedules_check.py", fresh=True)
-    monkeypatch.setattr(tick, "db", types.SimpleNamespace(get_session=world.get_session))
-    rpc = types.SimpleNamespace(timeout=lambda _n: types.SimpleNamespace(
-        project_list=lambda **_: [{"id": p} for p in world.projects]))
-    monkeypatch.setattr(tick, "rpc_tools", types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=rpc)))
-    descriptor = types.SimpleNamespace(config={"scheduler": {"schedules": world.config}})
-    monkeypatch.setattr(tick, "this", types.SimpleNamespace(module=types.SimpleNamespace(descriptor=descriptor)))
+    tick = load_tick(
+        monkeypatch, stubs, db=types.SimpleNamespace(get_session=world.get_session),
+        project_list=lambda **_: [{"id": p} for p in world.projects], schedules=world.config,
+        log=types.SimpleNamespace(info=quiet, warning=quiet, exception=quiet),
+    )
     monkeypatch.setattr(tick, "_run_legacy_step", lambda *a: None)
-    world.tick = lambda: tick.RPC().entity_schedules_check.__func__(
-        types.SimpleNamespace(context=types.SimpleNamespace(web_runtime="flask")))
+    world.tick = tick_caller(tick)
     return world
 
 

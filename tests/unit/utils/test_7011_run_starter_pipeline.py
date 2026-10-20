@@ -20,8 +20,13 @@ def _module(name, **attrs):
     return module
 
 
-def load_starter(monkeypatch, create, predict, prerun):
-    """The real starter on faked neighbours; also used by test_7011_no_system_user_runs."""
+def _ignore(*_args):
+    return None
+
+
+def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, fail=_ignore, block=_ignore,
+                 budget_scope=_ignore, budget_error=None):
+    """The real starter on faked neighbours; also used by test_7011_no_system_user_runs and _budget."""
     stubs = {
         "models.all": {"Application": object, "ApplicationVersion": object},
         "models.conversation": {"Conversation": object},
@@ -30,11 +35,12 @@ def load_starter(monkeypatch, create, predict, prerun):
             "TriggerType": types.SimpleNamespace(SCHEDULED="scheduled"),
             "create_trigger_run_conversation": create,
             "execute_pipeline_via_predict_sio": predict,
-            "finish_trigger_run_with_error": lambda *a: None},
+            "finish_trigger_run_with_error": finish_error},
         "utils.schedule_prerun": {"run_prerun_check": prerun},
-        "utils.schedule_runs": {"fail_schedule_run": lambda *a: None, "block_schedule_run": lambda *a: None},
-        "utils.budget_door": {"closed_budget_scope": lambda *a: None},
-        "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
+        "utils.schedule_runs": {"fail_schedule_run": fail, "block_schedule_run": block},
+        "utils.budget_door": {"closed_budget_scope": budget_scope},
+        "utils.exceptions": {
+            "BudgetDoorClosedError": budget_error or type("BudgetDoorClosedError", (Exception,), {})},
     }
     for dotted, attrs in stubs.items():
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", _module(f"{PKG}.{dotted}", **attrs))

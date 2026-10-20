@@ -8,16 +8,9 @@ import types
 
 import pytest
 from unit._tool_spend_loader import load
+from unit.utils.test_7011_run_starter_pipeline import OWNER, load_starter
 
-PKG = "plugins.elitea_core"
-PROJECT_ID, SCHEDULE_ID, RUN_ID, OWNER = 34, 1, 3, 12
-
-
-def _module(name, **attrs):
-    module = types.ModuleType(name)
-    module.__path__ = []
-    vars(module).update(attrs)
-    return module
+PROJECT_ID, SCHEDULE_ID, RUN_ID = 34, 1, 3
 
 
 @pytest.fixture
@@ -34,27 +27,17 @@ def world(monkeypatch):
         state.calls.append(("budget", project_id, user_id))
         return state.scope
 
-    stubs = {
-        "models.all": {"Application": object, "ApplicationVersion": object},
-        "models.conversation": {"Conversation": object},
-        "models.entity_schedule": {"EntitySchedule": object, "EntityScheduleRun": object},
-        "utils.budget_door": {"closed_budget_scope": budget_scope},
-        "utils.exceptions": {"BudgetDoorClosedError": exceptions.BudgetDoorClosedError},
-        "utils.pipeline_execution": {
-            "TriggerType": types.SimpleNamespace(SCHEDULED="scheduled"),
-            "create_trigger_run_conversation": lambda **kw: state.calls.append(("create",)) or ("uuid-1", 7, "resp-1"),
-            "execute_pipeline_via_predict_sio": predict,
-            "finish_trigger_run_with_error": lambda *a: state.calls.append(("finish_error", *a))},
-        "utils.schedule_prerun": {"run_prerun_check": lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER)},
-        "utils.schedule_runs": {
-            "fail_schedule_run": lambda *a: state.calls.append(("fail", *a)),
-            "block_schedule_run": lambda *a: state.calls.append(("block", *a))},
-    }
-    for dotted, attrs in stubs.items():
-        monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", _module(f"{PKG}.{dotted}", **attrs))
-    monkeypatch.setitem(sys.modules, "tools", _module("tools", db=types.SimpleNamespace()))
-    starter = load("utils/schedule_run_starter.py", fresh=True)
-    monkeypatch.setattr(starter, "_link_conversation", lambda *a: True)
+    starter = load_starter(
+        monkeypatch,
+        create=lambda **kw: state.calls.append(("create",)) or ("uuid-1", 7, "resp-1"),
+        predict=predict,
+        prerun=lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER),
+        finish_error=lambda *a: state.calls.append(("finish_error", *a)),
+        fail=lambda *a: state.calls.append(("fail", *a)),
+        block=lambda *a: state.calls.append(("block", *a)),
+        budget_scope=budget_scope,
+        budget_error=exceptions.BudgetDoorClosedError,
+    )
     loaded = types.SimpleNamespace(
         schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type="agent", run_mode=None),
         version=types.SimpleNamespace(id=9), entity_name="Daily report", prompt="Hi", variables=[])
