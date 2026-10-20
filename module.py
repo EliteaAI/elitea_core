@@ -1089,6 +1089,7 @@ class Module(module.ModuleModel):
         from .models.message_items import base, text, canvas, context
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
         from .models import chat_template  # noqa: F401 — register ChatTemplate with db.Base.metadata
+        from .models import entity_schedule  # noqa: F401 — register the schedule tables with db.Base.metadata
 
         self.thread = Thread(
             target=self.listen_in_memory_event
