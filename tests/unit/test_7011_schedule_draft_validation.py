@@ -19,11 +19,11 @@ def secrets():
     return {}
 
 
-@pytest.fixture
-def validate(secrets, monkeypatch):
+def load_draft_utils(monkeypatch, secrets=None):
+    """schedule_draft_utils on its real models, with the roster above and the given project secrets."""
     stub = types.ModuleType('tools')
     stub.this = types.SimpleNamespace(module=types.SimpleNamespace(descriptor=types.SimpleNamespace(config={})))
-    stub.VaultClient = lambda project_id: types.SimpleNamespace(get_all_secrets=lambda: secrets)
+    stub.VaultClient = lambda project_id: types.SimpleNamespace(get_all_secrets=lambda: secrets or {})
     monkeypatch.setitem(sys.modules, 'tools', stub)
     for dotted in ('utils.schedule_timing', 'models.pd.entity_schedule', 'models.pd.generate_schedule_draft',
                    'utils.schedule_draft_utils'):
@@ -34,6 +34,12 @@ def validate(secrets, monkeypatch):
     load('models/pd/generate_schedule_draft.py', fresh=True)
     module = load('utils/schedule_draft_utils.py', fresh=True)
     monkeypatch.setattr(module, 'schedule_roster', lambda project_id: ROSTER)
+    return module
+
+
+@pytest.fixture
+def validate(secrets, monkeypatch):
+    module = load_draft_utils(monkeypatch, secrets)
     return lambda raw, locked=None: module.validate_schedule_draft(1, raw, locked)
 
 
