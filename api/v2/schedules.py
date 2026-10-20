@@ -65,7 +65,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).model_dump(mode="json")  # one ISO offset per date; serialize() adds a second 'Z'
             for row in rows
         ]
-        return {"total": total, "rows": items}, 200
+        from ...utils.schedule_risk import is_run_without_asking_allowed
+        return {"total": total, "rows": items, "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}, 200
 
 
 class API(api_tools.APIBase):
