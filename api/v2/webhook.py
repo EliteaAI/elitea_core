@@ -31,7 +31,7 @@ from ...models.all import ApplicationVersion, Application
 from ...models.enums.all import AgentTypes
 from ...models.pd.pipeline_trigger import TriggerType
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
-from ...utils.exceptions import VerifySignatureError, PoolSaturationError  # pylint: disable=E0402
+from ...utils.exceptions import AdmissionDenied, VerifySignatureError, PoolSaturationError  # pylint: disable=E0402
 from ...utils.pipeline_trigger import (
     WEBHOOK_TYPE_CONFIG,
     normalize_secret_value,
@@ -235,6 +235,8 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
         except VerifySignatureError as e:
             return e.value, 400
+        except AdmissionDenied as e:
+            return {"code": e.reason_code, "error": e.message}, 403
         except PoolSaturationError as e:
             return {
                 "error": "temporarily_unavailable",

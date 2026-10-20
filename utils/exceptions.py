@@ -115,3 +115,16 @@ class BudgetDoorClosedError(Exception):
     def body(self):
         """The wire body the inference-plane refusal uses, byte-identical."""
         return {"error": {"message": self.message, "type": self.type, "code": self.code}}
+
+
+class AdmissionDenied(Exception):
+    """A governed run was refused before dispatch (C-1009, #6756).
+
+    ``reason_code`` is a stable upper-case code; ``message`` is fixed text per code and never
+    carries a claim, token or identifier from the request.
+    """
+
+    def __init__(self, reason_code: str, message: str):
+        self.reason_code = reason_code
+        self.message = message
+        super().__init__(f"{reason_code}: {message}")

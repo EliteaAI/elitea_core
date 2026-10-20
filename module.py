@@ -14,6 +14,7 @@ from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
+from .utils.admission import admit_dispatch, check_governed_startup, load_admission_settings, track_context
 from .utils.governance import init_governance
 from .utils.run_id import stamp_predict_run_id
 from .utils.worker_capabilities import (
@@ -127,6 +128,8 @@ class Module(module.ModuleModel):
         # Must be initialized here in __init__ — the callback is registered in init() via
         # task_node.subscribe_to_task_statuses, which can fire before ready() runs.
         self.callback_tasks = {}
+        # task_id -> (project_id, context_ref) of governed runs admitted by this process (#6756); bounded
+        self._context_by_task = OrderedDict()
         self.active_index_tasks = OrderedDict()
         self.active_index_tasks_max = 4096
         self.recently_stopped_index_tasks = OrderedDict()
@@ -521,12 +524,17 @@ class Module(module.ModuleModel):
                 "create_agent_identity_tables", self.create_agent_identity_tables,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "manage_agent_identity_binding", self.manage_agent_identity_binding,
+                group="R-2.0.8",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
         self._ensure_agent_identity_schema()
+        check_governed_startup(self)
 
         self.handle_pylon_modules_initialized()
 
@@ -585,6 +593,16 @@ class Module(module.ModuleModel):
         except Exception as e:
             log.warning('Failed to register provider RPC method: %s', e)
 
+        # Workers prove a governed run still holds its admission over the worker bus (#6756)
+        if self.governance_profile.enabled:
+            try:
+                this.for_module("worker_client").module.rpc_node.register(
+                    self.validate_execution_context,
+                    name="restricted_validate_execution_context",
+                )
+            except Exception:  # pylint: disable=W0703
+                log.exception("Failed to register restricted_validate_execution_context")
+
     def _ensure_share_token_schema(self):
         """Startup safety net: create share-token tables in any project schema (and
         the public schema) that predates them. Runs off-thread; guarded by catalog
@@ -630,6 +648,7 @@ class Module(module.ModuleModel):
     def init(self):
         # Fail fast on a misconfigured governance flag, before anything can consult it
         init_governance(self)
+        self.admission_settings = load_admission_settings(self.descriptor.config)
         #
         self.bp = self.descriptor.init_all(url_prefix="/app")
 
@@ -676,6 +695,7 @@ class Module(module.ModuleModel):
         _original_start_task = self.task_node.start_task
 
         def _maintenance_gated_start_task(*args, **kwargs):
+            admission = kwargs.pop("admission", None)  # built by the entry point from its trusted caller; None when ungoverned
             from .utils.maintenance_gate import is_maintenance_active
             from .utils.budget_door import (
                 closed_budget_scope, dispatch_may_use_llm, dispatch_owner, dispatch_uses_own_model,
@@ -708,7 +728,11 @@ class Module(module.ModuleModel):
                 kwargs, self.governance_profile, self.worker_capabilities,
             )
             stamp_predict_run_id(kwargs)
-            return _original_start_task(*args, **kwargs)
+            context_ref = admit_dispatch(self, args[0] if args else kwargs.get("name"), kwargs, admission)
+            task_id = _original_start_task(*args, **kwargs)
+            if context_ref:
+                track_context(self, task_id, admission.project_id, context_ref)
+            return task_id
 
         self.task_node.start_task = _maintenance_gated_start_task
 
@@ -1009,6 +1033,14 @@ class Module(module.ModuleModel):
         self.task_node.stop()
         try:
             from tools import this
+            if self.governance_profile.enabled:
+                try:
+                    this.for_module("worker_client").module.rpc_node.unregister(
+                        self.validate_execution_context,
+                        name="restricted_validate_execution_context",
+                    )
+                except Exception:  # pylint: disable=W0703
+                    log.exception("Failed to unregister restricted_validate_execution_context")
             this.for_module("admin").module.unregister_admin_task(
                 "eliminate_prompts", prompt_2_agent_migration
             )
@@ -1080,6 +1112,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_agent_identity_tables", self.create_agent_identity_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "manage_agent_identity_binding", self.manage_agent_identity_binding
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
