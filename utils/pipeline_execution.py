@@ -206,6 +206,7 @@ def execute_pipeline_via_predict_sio(
     user_input: str = "",
     trigger_source: str | None = None,
     is_system_user: bool = True,
+    auto_approve_sensitive_actions: bool = False,
 ) -> dict:
     """
     Execute a pipeline using the applications_predict_sio RPC.
@@ -221,6 +222,7 @@ def execute_pipeline_via_predict_sio(
         response_message_id: UUID of the response message group
         user_input: Input to send to the pipeline (empty for scheduled, payload for webhook)
         is_system_user: False runs as ``user_id`` itself, for owner-bound schedule runs
+        auto_approve_sensitive_actions: True skips the sensitive-action approval pause (schedule rule and secret)
 
     Returns:
         Dict with task_id from the RPC call
@@ -248,6 +250,7 @@ def execute_pipeline_via_predict_sio(
         # sid-is-None auto-derive (sid=None here), but kept to document intent.
         non_interactive=True,
         trigger_source=trigger_source,
+        auto_approve_sensitive_actions=auto_approve_sensitive_actions,
     )
 
     log.debug(

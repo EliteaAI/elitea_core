@@ -39,7 +39,7 @@ def world(monkeypatch):
         budget_error=exceptions.BudgetDoorClosedError,
     )
     loaded = types.SimpleNamespace(
-        schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type="agent", run_mode=None),
+        schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type="agent", run_mode=None, approval_rule="pause_and_ask"),
         version=types.SimpleNamespace(id=9), entity_name="Daily report", prompt="Hi", variables=[])
     monkeypatch.setattr(starter, "_load", lambda *a: loaded)
     state.names = lambda: [call[0] for call in state.calls]
