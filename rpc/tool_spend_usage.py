@@ -1,38 +1,34 @@
-""" Member-facing Tool Spend usage, for Settings -> Usage (#6983) """
+""" Tool Spend limits for Settings -> Usage (#6983); spend is read by usage itself """
 
 from pylon.core.tools import web, log
 
-from ..utils.feature_budget_admin import feature_state
 from ..utils.tool_spend_features import feature_map
 
 
-def feature_usage(state):
-    """One feature's Usage-page row, shaped like the LLM usage payload."""
-    limit = state.get("effective_limit")
-    return {
-        "effective_limit": limit,
-        # The resolver says "default" even when no default exists; that reads as unlimited here
-        "limit_source": "unlimited" if limit is None else (state.get("limit_source") or "default"),
-        "currency": "USD",
-        "spend": state.get("spend", 0.0),
-        "remaining": state.get("remaining"),
-        "percent_used": state.get("percent_used"),
-        "calls": state.get("calls", 0),
-        "enabled": state.get("feature_enabled_effective") is not False,
-        "spend_available": state.get("spend_available", False),
-    }
-
-
 class RPC:  # pylint: disable=E1101,R0903
-    @web.rpc("elitea_core_get_tool_spend_usage", "get_tool_spend_usage")
-    def get_tool_spend_usage(self, project_id, user_id=None, **kwargs):
-        """[{feature, label, ...usage}] per Tool Spend feature; user_id scopes it to one member."""
+    @web.rpc("elitea_core_get_tool_spend_limits", "get_tool_spend_limits")
+    def get_tool_spend_limits(self, project_id, user_id=None, **kwargs):
+        """[{feature, label, limit_usd, limit_source, enabled}] per feature; no call back into usage."""
         result = []
         for name, info in sorted(feature_map(self.toolkit_schemas).items()):
             try:
-                state = feature_state(project_id, name, user_id)
+                limits = self.get_effective_feature_limits(project_id, user_id, name)
             except Exception:  # pylint: disable=W0703
-                log.exception("Tool spend usage failed for project %s feature %s", project_id, name)
+                log.exception("Tool spend limits failed for project %s feature %s", project_id, name)
                 continue
-            result.append({"feature": name, "label": info["label"], **feature_usage(state)})
+            limit = limits.get("project_limit_usd" if user_id is None else "member_limit_usd")
+            source = limits.get("project_source" if user_id is None else "member_source")
+            result.append({
+                "feature": name,
+                "label": info["label"],
+                "limit_usd": limit,
+                # The resolver says "default" even when no default exists; that reads as unlimited
+                "limit_source": "unlimited" if limit is None else (source or "default"),
+                "enabled": limits.get("feature_enabled") is not False,
+            })
         return result
+
+    @web.rpc("elitea_core_get_tool_spend_labels", "get_tool_spend_labels")
+    def get_tool_spend_labels(self, **kwargs):
+        """{feature: label} from toolkit metadata, for analytics rows."""
+        return {name: info["label"] for name, info in feature_map(self.toolkit_schemas).items()}

@@ -5,6 +5,9 @@ from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.tool_spend_features import validate_feature_period
 
+# Budget periods are monthly until #6006 adds the others
+PERIOD_MONTH = "month"
+
 OPENAPI_TAG = "elitea_core/usage"
 
 # Nothing to warn about: also what a caller gets when the feature is not installed
@@ -101,7 +104,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         feature = request.args.get("feature") or None
         if feature:
             try:
-                validate_feature_period(feature, "month")
+                validate_feature_period(feature, PERIOD_MONTH)
             except ValueError as error:
                 return {"error": str(error)}, 400
         #
