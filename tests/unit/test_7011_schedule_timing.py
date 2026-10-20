@@ -11,12 +11,17 @@ from zoneinfo import ZoneInfo
 import pytest
 from croniter import croniter
 from pydantic import ValidationError
+from sqlalchemy import Column, Integer, Table
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import DeclarativeBase
 from unit._tool_spend_loader import load
 
 TIMING = "utils/schedule_timing.py"
 MODEL = "models/pd/entity_schedule.py"
 DAILY = "0 9 * * *"
 YEARLY = "0 0 1 1 *"
+# 20:00 UTC is already the next day in Tokyo
+NOW = datetime(2026, 6, 15, 20, 0, tzinfo=UTC)
 
 
 class FakeSession:
@@ -26,13 +31,15 @@ class FakeSession:
         self.enabled = enabled
         self.statements = []
 
-    def execute(self, statement, *args, **kwargs):
+    def execute(self, statement):
         self.statements.append(statement)
-        return types.SimpleNamespace(scalar=lambda: self.enabled, scalar_one=lambda: self.enabled)
+        return types.SimpleNamespace(scalar=lambda: self.enabled)
 
-    def scalar(self, statement, *args, **kwargs):
-        self.statements.append(statement)
-        return self.enabled
+
+class FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW.astimezone(tz)
 
 
 @pytest.fixture
@@ -55,7 +62,31 @@ def _set_limits(config, minimum=None, maximum=None):
 
 
 @pytest.fixture
-def timing(config, monkeypatch):
+def schedule_table(monkeypatch):
+    """The real EntitySchedule model on a fresh base in the tenant schema."""
+    class Base(DeclarativeBase):
+        pass
+
+    for parent in ("applications", "application_versions"):
+        Table(parent, Base.metadata, Column("id", Integer, primary_key=True), schema="tenant")
+    stubs = {
+        "db": types.SimpleNamespace(Base=Base),
+        "db_tools": types.SimpleNamespace(AbstractBaseMixin=type("AbstractBaseMixin", (), {})),
+        "config": types.SimpleNamespace(POSTGRES_TENANT_SCHEMA="tenant"),
+    }
+    # A fresh package: another suite may leave its own `models` package under this key
+    package = types.ModuleType("plugins.elitea_core.models")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models", package)
+    for name, stub in stubs.items():
+        setattr(package, name, stub)
+        monkeypatch.setitem(sys.modules, "plugins.elitea_core.models." + name, stub)
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.models.entity_schedule", None)
+    return load("models/entity_schedule.py", fresh=True).EntitySchedule.__table__
+
+
+@pytest.fixture
+def timing(config, schedule_table, monkeypatch):
     for dotted in ("utils.schedule_timing", "models.pd.entity_schedule"):
         monkeypatch.setitem(sys.modules, "plugins.elitea_core." + dotted, None)
     module = load(TIMING, fresh=True)
@@ -68,8 +99,9 @@ def _error_fields(excinfo):
     return {error["loc"][0] for error in excinfo.value.errors() if error["loc"]}
 
 
-def _today(tz="UTC"):
-    return datetime.now(ZoneInfo(tz)).date()
+@pytest.fixture
+def frozen_now(timing, monkeypatch):
+    monkeypatch.setattr(timing.model, "datetime", FrozenDatetime)
 
 
 # R1.1 a cron needs exactly 5 parts
@@ -142,10 +174,12 @@ def test_el_7011_r2_1_enabling_up_to_the_cap_is_allowed(timing):
 
 
 # R2.2 a disabled save adds nothing to the count
-def test_el_7011_r2_2_counts_only_enabled_rows(timing):
+def test_el_7011_r2_2_counts_only_enabled_rows_of_the_tenant_table(timing):
     session = FakeSession(enabled=3)
     timing.check_enabled_cap(session)
-    assert "enabled" in str(session.statements[0])
+    sql = " ".join(str(session.statements[0].compile(dialect=postgresql.dialect())).split())
+    assert sql.startswith("SELECT count(*)")
+    assert "FROM tenant.entity_schedules WHERE tenant.entity_schedules.enabled IS true" in sql
 
 
 def test_el_7011_r2_2_row_already_enabled_adds_nothing(timing):
@@ -225,24 +259,25 @@ def test_el_7011_r4_1_end_of_day_on_a_clock_change_day_uses_that_day_offset(timi
 
 
 # R4.2 a stop date before today in the schedule timezone is rejected
-def test_el_7011_r4_2_past_stop_date_is_rejected_on_expires_at(timing):
-    past = _today("Asia/Tokyo") - timedelta(days=1)
+def test_el_7011_r4_2_past_stop_date_is_rejected_on_expires_at(timing, frozen_now):
+    # Today in UTC, yesterday in Tokyo
     with pytest.raises(ValidationError) as excinfo:
-        timing.model.ScheduleTiming(cron=DAILY, timezone="Asia/Tokyo", expires_at=past)
+        timing.model.ScheduleTiming(cron=DAILY, timezone="Asia/Tokyo", expires_at=date(2026, 6, 15))
     assert _error_fields(excinfo) == {"expires_at"}
     assert "The stop date is in the past" in str(excinfo.value)
 
 
 # R4.3 the next run must come before the end of the stop date
-def test_el_7011_r4_3_stop_date_before_next_run_is_rejected_on_expires_at(timing):
+def test_el_7011_r4_3_stop_date_before_next_run_is_rejected_on_expires_at(timing, frozen_now):
     with pytest.raises(ValidationError) as excinfo:
-        timing.model.ScheduleTiming(cron=YEARLY, timezone="UTC", expires_at=_today())
+        timing.model.ScheduleTiming(cron=YEARLY, timezone="UTC", expires_at=date(2026, 6, 15))
     assert _error_fields(excinfo) == {"expires_at"}
     assert "The schedule never runs before its stop date" in str(excinfo.value)
 
 
-def test_el_7011_r4_3_stop_date_after_next_run_is_accepted(timing):
-    model = timing.model.ScheduleTiming(cron=DAILY, timezone="UTC", expires_at=_today() + timedelta(days=2))
+def test_el_7011_r4_3_stop_date_after_next_run_is_accepted(timing, frozen_now):
+    # Today's 09:00 has passed; the next run is 09:00 on the stop date
+    model = timing.model.ScheduleTiming(cron=DAILY, timezone="UTC", expires_at=date(2026, 6, 16))
     assert model.expires_at is not None
 
 
