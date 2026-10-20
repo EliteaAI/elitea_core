@@ -231,7 +231,7 @@ def test_7011_r2_2_update_ignores_created_by_and_principal(harness):
 def test_7011_r2_5_resume_without_a_version_is_400_and_stays_disabled(harness):
     schedule_id = harness.seed(version_id=None, enabled=False, disabled_reason='version_deleted')
     assert harness.call('put', {'enabled': True}, schedule_id) == (
-        {'error': 'Choose a version before you resume this schedule'}, 400,
+        {'error': 'Choose a version before you resume this schedule', 'field': 'version_id'}, 400,
     )
     assert harness.row(schedule_id).enabled is False
 
