@@ -194,6 +194,16 @@ def test_7011_r1_1_parallel_ticks_start_a_due_schedule_once(world, monkeypatch):
     assert [(s, status) for s, _run, status in world.starts] == [(schedule_id, "running")]
 
 
+# US-14 R3.1 (review round 1): a schedule past its stop date is picked even when its next run is far away
+def test_7011_us14_r3_1_expired_schedule_is_due_although_its_next_run_is_far(world):
+    now = datetime.now(UTC)
+    expired = world.add_schedule(next_run=now + timedelta(days=365), expires_at=now - timedelta(minutes=1))
+    later = world.add_schedule(next_run=now + timedelta(days=365))
+    with world.orm.Session(world.engine) as session:
+        due = [row.id for row in world.claim.select_due_schedules(session, ["pipeline"], 10)]
+    assert expired in due and later not in due
+
+
 # TC-US08-03 / R1.1: a claim from a stale `next_run` changes nothing
 def test_7011_r1_1_claim_from_a_stale_next_run_loses(world):
     schedule_id = world.add_schedule()

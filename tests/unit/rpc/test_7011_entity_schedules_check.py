@@ -29,6 +29,7 @@ class FakeSession:
 def _row(row_id, entity_type="pipeline"):
     return types.SimpleNamespace(
         id=row_id, entity_type=entity_type, cron="* * * * *", timezone="UTC", next_run=NOW,
+        expires_at=None, name=f"schedule {row_id}", created_by=1,
     )
 
 

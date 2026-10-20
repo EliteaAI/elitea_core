@@ -193,7 +193,7 @@ def update_schedule(
     }
     resuming = changes.get('enabled') is True and not row.enabled
     if resuming and changes.get('version_id', row.version_id) is None:
-        raise ScheduleError({'error': 'Choose a version before you resume this schedule'})
+        raise _field_error('version_id', 'Choose a version before you resume this schedule')
     if 'version_id' in changes:
         _check_entity(session, project_id, row.entity_type, row.application_id, changes['version_id'])
     check_run_input(
