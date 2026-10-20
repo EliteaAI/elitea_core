@@ -3,15 +3,59 @@ import time
 from datetime import UTC, datetime
 
 from pylon.core.tools import log, web
+from sqlalchemy import text
 from tools import db, rpc_tools, this
 
 from ..utils.maintenance_gate import is_maintenance_active
-from ..utils.schedule_claim import claim_schedule, insert_cron_run, select_due_schedules
+from ..utils.schedule_claim import (
+    claim_schedule,
+    insert_cron_run,
+    legacy_lock_key,
+    select_due_schedules,
+)
 from ..utils.schedule_dispatch import RUN_STARTERS, start_schedule_run
 from ..utils.schedule_timing import compute_next_run
 from ..utils.utils import end_ambient_transaction, make_yield_to_hub
 
 DEFAULT_DISPATCH_CAP = 100
+LEGACY_LOCK = text("SELECT pg_try_advisory_lock(:key)")
+LEGACY_UNLOCK = text("SELECT pg_advisory_unlock(:key)")
+
+
+def _run_legacy_step(project_ids: list[int], yield_to_hub) -> None:
+    """R4.1, R4.2: the legacy pipeline check per project; a project the migration holds waits a minute."""
+    # Imported at call time: the tick loads without the legacy module's model graph
+    from .pipeline_scheduling import (
+        _check_pipeline_scheduling_lock,
+        _check_project_pipelines,
+    )
+    if not _check_pipeline_scheduling_lock.acquire(blocking=False):
+        log.warning("entity_schedules_check: previous legacy step still running, skipping it this minute")
+        return
+    try:
+        # A session lock is freed only by the connection that took it; autocommit keeps no transaction open
+        with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            for project_id in project_ids:
+                yield_to_hub()
+                end_ambient_transaction()
+                key = {"key": legacy_lock_key(project_id)}
+                if not connection.execute(LEGACY_LOCK, key).scalar():
+                    log.info("entity_schedules_check: migration holds the project, legacy step skipped: "
+                             "project_id=%s", project_id)
+                    continue
+                try:
+                    _check_project_pipelines(project_id, yield_to_hub=yield_to_hub)
+                except Exception as exc:  # noqa: BLE001 -- one bad project must not stop the step
+                    log.exception("entity_schedules_check: legacy step failed: project_id=%s exc=%r",
+                                  project_id, exc)
+                finally:
+                    try:
+                        connection.execute(LEGACY_UNLOCK, key)
+                    except Exception:
+                        connection.invalidate()  # closing the server session frees the lock for the migration
+                        raise
+    finally:
+        _check_pipeline_scheduling_lock.release()
 
 
 def _dispatch_project(project_id: int, entity_types: list[str], room: int) -> int:
@@ -72,4 +116,8 @@ class RPC:
                 dispatched += _dispatch_project(project_id, entity_types, cap - dispatched)
             except Exception as exc:  # noqa: BLE001 -- one bad project must not stop the tick (R1.4)
                 log.exception("entity_schedules_check: skipped project: project_id=%s exc=%r", project_id, exc)
+        try:
+            _run_legacy_step(project_ids, yield_to_hub)  # R4.1: last, after every schedule step
+        except Exception as exc:  # noqa: BLE001 -- a failed legacy step ends this tick quietly
+            log.exception("entity_schedules_check: legacy step stopped: exc=%r", exc)
         log.info("entity_schedules_check: started=%s duration=%.3fs", dispatched, time.monotonic() - tick_started)
