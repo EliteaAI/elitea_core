@@ -6,12 +6,11 @@ Covers R1.3 (models created from code), R2.1, R2.3, R2.6, R3.1, R3.4.
 Run via:
     python tests/run_tests.py unit/test_7011_entity_schedule_models.py -v
 """
+import pathlib
 import sys
 import types
-import pathlib
 
 import pytest
-
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 
