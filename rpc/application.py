@@ -39,6 +39,7 @@ from ..utils.application_utils import (
 )
 from ..models.pd.admission import admission_request_from
 from ..utils.mandate_admission import take_trigger_admission
+from ..utils.credential_slots import has_free_form_secret, mark_free_form_secret
 from ..utils.exceptions import (
     AdmissionDenied, PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError,
 )
@@ -368,8 +369,11 @@ class RPC:
             }
 
         # TODO probably better move to toolkits expand, check OpenAPI
+        # Governed: a {{secret.*}} outside a credential configuration is noticed before it is resolved (#6946)
+        free_form_secret = has_free_form_secret(self, payload)
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
+        mark_free_form_secret(payload, free_form_secret)
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a
@@ -648,8 +652,11 @@ class RPC:
                 raise PredictPayloadError(str(e))
 
         # TODO probably better move to toolkits expand, check OpenAPI
+        # Governed: a {{secret.*}} outside a credential configuration is noticed before it is resolved (#6946)
+        free_form_secret = has_free_form_secret(self, payload)
         vc = VaultClient(parsed.project_id)
         payload = vc.unsecret(payload)
+        mark_free_form_secret(payload, free_form_secret)
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a

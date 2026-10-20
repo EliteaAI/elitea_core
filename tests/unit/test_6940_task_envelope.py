@@ -188,9 +188,10 @@ GOVERNED = types.SimpleNamespace(enabled=True, policy_revision="r1", profile="go
 
 
 def _registry(mods, *workers):
+    """Workers that can resolve credential slots (a governed agent task needs that, #6946)."""
     reg = mods.caps.WorkerCapabilityRegistry(ttl_s=120, clock=Clock())
     for w in workers:
-        reg.on_capabilities("e", _payload(w))
+        reg.on_capabilities("e", _payload(w, ["task_envelope.v1", "credential_slots.v1"]))
     return reg
 
 
@@ -225,7 +226,8 @@ def test_gate_redispatch_keeps_parent_envelope_even_if_flag_changed(mods):
     parent = mods.env.attach_envelope({}, "governed")["envelope"]
     call = {"kwargs": {"envelope": dict(parent)}}
     mods.caps.apply_envelope_gate("indexer_agent", call, LEGACY, _registry(mods, "w1"))
-    assert call["kwargs"]["envelope"] == parent
+    # still the parent's governed envelope, now also asking for credential slots (a sealed payload needs them)
+    assert call["kwargs"]["envelope"] == {**parent, "required_capabilities": ["credential_slots.v1", "task_envelope.v1"]}
     # and the parent's governed envelope is still gated on capability
     with pytest.raises(mods.exc.WorkerCapabilityUnavailable):
         mods.caps.apply_envelope_gate("indexer_agent", {"kwargs": {"envelope": dict(parent)}},

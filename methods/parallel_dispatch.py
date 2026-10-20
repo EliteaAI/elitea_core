@@ -392,10 +392,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # human-think-time. Cleared when the epoch reconciles. The
             # stream/message ids are the parent's — a resumed child emits on the
             # same stream so its card renders in the parent conversation.
-            self._parallel_child_stash(
-                child_thread_id, child_payload, child_meta,
-                parent_stream_id, parent_message_id,
-            )
+            #
+            # Governed (#6946): the payload is sealed in place by start_task (credential slots instead of material), so
+            # the stash is written after it, from the sealed dict, and a child the gate refused is never stashed. A
+            # stash written before would hold whatever the child payload carried when it was built.
+            governed = bool(getattr(getattr(self, 'governance_profile', None), 'enabled', False))
+            if not governed:
+                self._parallel_child_stash(
+                    child_thread_id, child_payload, child_meta,
+                    parent_stream_id, parent_message_id,
+                )
             try:
                 child_task_id = self.task_node.start_task(  # pylint: disable=E1101
                     "indexer_agent",
@@ -407,6 +413,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             except Exception:  # pylint: disable=W0703
                 log.exception("[PARALLEL] start_task raised for child %s", child_thread_id)
                 child_task_id = None
+            if governed and child_task_id is not None:
+                self._parallel_child_stash(
+                    child_thread_id, child_payload, child_meta,
+                    parent_stream_id, parent_message_id,
+                )
             # Pool saturation (start_task returns None) or a raise: settle so the
             # gate does not wait forever on an undispatched child.
             if child_task_id is None:

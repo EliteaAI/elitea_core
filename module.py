@@ -617,6 +617,14 @@ class Module(module.ModuleModel):
                 )
             except Exception:  # pylint: disable=W0703
                 log.exception("Failed to register restricted_validate_execution_context")
+            # ... and ask Main for the material of a credential slot, sealed to the asking worker (#6946)
+            try:
+                this.for_module("worker_client").module.rpc_node.register(
+                    self.release_credential,
+                    name="restricted_release_credential",
+                )
+            except Exception:  # pylint: disable=W0703
+                log.exception("Failed to register restricted_release_credential")
 
     def _ensure_share_token_schema(self):
         """Startup safety net: create share-token tables in any project schema (and
@@ -1076,6 +1084,13 @@ class Module(module.ModuleModel):
                     )
                 except Exception:  # pylint: disable=W0703
                     log.exception("Failed to unregister restricted_validate_execution_context")
+                try:
+                    this.for_module("worker_client").module.rpc_node.unregister(
+                        self.release_credential,
+                        name="restricted_release_credential",
+                    )
+                except Exception:  # pylint: disable=W0703
+                    log.exception("Failed to unregister restricted_release_credential")
             this.for_module("admin").module.unregister_admin_task(
                 "eliminate_prompts", prompt_2_agent_migration
             )
