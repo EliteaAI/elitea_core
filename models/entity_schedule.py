@@ -1,12 +1,24 @@
 """Schedule tables (EL-7011). Keep in step with the R-2.0.8 block of db_migrations.txt."""
 from datetime import datetime
-from typing import Optional
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, func, text, true
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+    true,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from . import db, db_tools, config as c
+from . import config as c
+from . import db, db_tools
 
 ACTIVE_RUN_STATUSES = "status IN ('running', 'waiting_for_approval')"
 
@@ -34,31 +46,31 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     application_id: Mapped[int] = mapped_column(
         ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.applications.id', ondelete='CASCADE'), nullable=False
     )
-    version_id: Mapped[Optional[int]] = mapped_column(
+    version_id: Mapped[int | None] = mapped_column(
         ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.application_versions.id', ondelete='SET NULL'), nullable=True
     )
     name: Mapped[str] = mapped_column(String(256), nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(String(2304), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(2304), nullable=True)
     cron: Mapped[str] = mapped_column(String(128), nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False)
-    run_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-    prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    run_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     variables: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
-    disabled_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    disabled_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     approval_rule: Mapped[str] = mapped_column(
         String(32), nullable=False, default='pause_and_ask', server_default='pause_and_ask'
     )
     created_by: Mapped[int] = mapped_column(Integer, nullable=False)
-    updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     principal: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    last_run: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    next_run: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_run_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    last_conversation_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_conversation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -85,21 +97,21 @@ class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
     )
     trigger: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
-    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    conversation_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    requested_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    approval_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requested_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    approval_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    resumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class EntitySchedulePreference(db_tools.AbstractBaseMixin, db.Base):
     """Per-user schedule notification preference."""
     __tablename__ = 'entity_schedule_preferences'
-    __table_args__ = {'schema': c.POSTGRES_TENANT_SCHEMA}
+    __table_args__ = ({'schema': c.POSTGRES_TENANT_SCHEMA},)
 
     user_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     get_notified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
