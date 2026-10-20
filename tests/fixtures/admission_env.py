@@ -12,6 +12,7 @@ the ``test_6756_*`` files): the stubs must not leak into other suites.
 """
 import ast
 import importlib
+import json
 import sys
 import types
 import uuid
@@ -132,6 +133,9 @@ class Env:  # pylint: disable=R0902,R0904
             sa = self.ns.sa
             engine = sa.create_engine(f"sqlite:///{self.dir}/p{project_id}.db").execution_options(
                 schema_translate_map={"tenant": None})
+            # PostgreSQL's jsonb_array_length, used by a CHECK of the mandate table, for SQLite
+            sa.event.listen(engine, "connect", lambda conn, _: conn.create_function(
+                "jsonb_array_length", 1, lambda value: len(json.loads(value)), deterministic=True))
             self.ns.Base.metadata.create_all(engine)
             self.engines[project_id] = engine
         return self.engines[project_id]

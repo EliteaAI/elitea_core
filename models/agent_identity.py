@@ -12,12 +12,22 @@ from tools import db_tools, db, config as c
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import (
-    BigInteger, CheckConstraint, DateTime, Index, Integer, SmallInteger, String, UniqueConstraint, func, text,
+    BigInteger, CheckConstraint, DateTime, Index, Integer, SmallInteger, String, UniqueConstraint, event, func,
+    inspect, text,
 )
 
 IDENTITY_MODES = ('dedicated_agent', 'runtime_domain_binding', 'elitea_native')
 BINDING_STATES = ('draft', 'provisioning', 'pending_approval', 'active', 'suspended', 'retiring', 'retired')
 CONTEXT_STATES = ('admitted', 'running', 'completed', 'revoked')
+MANDATE_STATES = ('draft', 'pending_approval', 'active', 'suspended', 'expired', 'revoked')
+LIVE_MANDATE_STATES = ('draft', 'pending_approval', 'active', 'suspended')
+SUSPENDED_REASONS = ('MANUAL', 'OWNER_SUSPENDED')
+# Columns that never change after the row exists; ``approved_by`` is set once (a second fence behind the
+# conditional UPDATEs in ``utils/mandate_state.py``, which are the only writers of the state columns)
+MANDATE_IMMUTABLE = frozenset({
+    'id', 'project_id', 'application_id', 'agent_version', 'agent_binding_ref', 'owner_user_id', 'owner_user_ref',
+    'allowed_operations', 'allowed_targets', 'max_runtime_s', 'valid_until', 'revision', 'created_by', 'created_at',
+})
 
 
 def _in_list(column: str, values) -> str:
@@ -96,3 +106,69 @@ class ExecutionSecurityContext(db_tools.AbstractBaseMixin, db.Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ImmutableFieldChanged(ValueError):
+    """An ORM flush tried to change a column that must stay as it was written."""
+
+
+class AutonomousMandate(db_tools.AbstractBaseMixin, db.Base):
+    """An approved, time-boxed permission for one agent version to run without a signed-in user (#6947, C-1009).
+
+    Scope is never edited: changing it means revoking the mandate and creating the next revision. The row
+    holds references and limits only, no credential.
+    """
+    __tablename__ = 'autonomous_mandate'
+    __table_args__ = (
+        UniqueConstraint('project_id', 'agent_version', 'revision', name='autonomous_mandate_revision_uc'),
+        CheckConstraint(_in_list('state', MANDATE_STATES), name='autonomous_mandate_state_ck'),
+        CheckConstraint('suspended_reason IS NULL OR ' + _in_list('suspended_reason', SUSPENDED_REASONS),
+                        name='autonomous_mandate_suspended_reason_ck'),
+        CheckConstraint("state NOT IN ('active', 'suspended') OR "
+                        "(approved_by IS NOT NULL AND approval_ref IS NOT NULL AND policy_revision IS NOT NULL)",
+                        name='autonomous_mandate_active_ck'),
+        CheckConstraint('approved_by IS NULL OR (approved_by <> created_by AND approved_by <> owner_user_id)',
+                        name='autonomous_mandate_approver_ck'),
+        CheckConstraint('jsonb_array_length(allowed_operations) >= 1', name='autonomous_mandate_operations_ck'),
+        CheckConstraint('max_runtime_s BETWEEN 60 AND 86400', name='autonomous_mandate_runtime_ck'),
+        # One live mandate per agent version. ``sqlite_where`` only lets the unit tests run this on SQLite.
+        Index('uq_autonomous_mandate_live_version', 'project_id', 'agent_version', unique=True,
+              postgresql_where=text(_in_list('state', LIVE_MANDATE_STATES)),
+              sqlite_where=text(_in_list('state', LIVE_MANDATE_STATES))),
+        Index('ix_autonomous_mandate_owner_state', 'owner_user_id', 'state'),
+        {'schema': c.POSTGRES_TENANT_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    application_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent_binding_ref: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_user_ref: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    allowed_operations: Mapped[list] = mapped_column(JSONB, nullable=False)
+    allowed_targets: Mapped[list] = mapped_column(JSONB, nullable=False)
+    max_runtime_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False, default='draft', server_default='draft')
+    suspended_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    approval_ref: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    policy_revision: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    created_by: Mapped[int] = mapped_column(Integer, nullable=False)
+    approved_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    state_changed_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    revocation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default='0')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+@event.listens_for(AutonomousMandate, 'before_update')
+def _guard_mandate(_mapper, _connection, target):
+    attrs = inspect(target).attrs
+    for name in MANDATE_IMMUTABLE:
+        if attrs[name].history.has_changes():
+            raise ImmutableFieldChanged(f"AutonomousMandate.{name} cannot be changed")
+    if any(old is not None for old in attrs.approved_by.history.deleted):
+        raise ImmutableFieldChanged("AutonomousMandate.approved_by is set once")

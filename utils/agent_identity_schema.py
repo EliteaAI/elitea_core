@@ -1,16 +1,18 @@
-"""Idempotent per-project setup of the agent identity tables (#6756, C-1009).
+"""Idempotent per-project setup of the agent identity tables (#6756, C-1009) and the autonomous mandate
+table (#6947).
 
 ``create_all`` provisions them for new projects. Existing project schemas get them here, from the
-startup safety net in ``module.py`` or from the ``create_agent_identity_tables`` admin task. Both
-only create what is missing, so a steady-state boot issues no DDL.
+startup safety net in ``module.py`` or from the ``create_agent_identity_tables`` and
+``create_mandate_tables`` admin tasks. All only create what is missing, so a steady-state boot issues no DDL.
 """
 from sqlalchemy import bindparam, text
 from pylon.core.tools import log
 from tools import db
 
-from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
+from ..models.agent_identity import AgentIdentityBinding, AutonomousMandate, ExecutionSecurityContext
 
-_MODELS = (AgentIdentityBinding, ExecutionSecurityContext)
+IDENTITY_TABLES = (AgentIdentityBinding, ExecutionSecurityContext)
+MANDATE_TABLES = (AutonomousMandate,)
 
 # Only fully provisioned project schemas (they already hold elitea_core's own tables) are considered.
 _MISSING_QUERY = text(
@@ -21,15 +23,23 @@ _MISSING_QUERY = text(
 ).bindparams(bindparam("names", expanding=True))
 
 
-def project_ids_missing_identity_tables():
-    """One catalog query: project schemas that lack either identity table."""
-    params = {"names": [model.__tablename__ for model in _MODELS], "expected": len(_MODELS)}
+def project_ids_missing_tables(models=IDENTITY_TABLES):
+    """One catalog query: project schemas that lack any of these tables."""
+    params = {"names": [model.__tablename__ for model in models], "expected": len(models)}
     with db.get_session(None) as session:
         rows = session.execute(_MISSING_QUERY, params).fetchall()
     return [int(row[0][2:]) for row in rows]
 
 
-def apply_identity_tables(project_ids, dry_run=False):
+def project_ids_missing_identity_tables():
+    return project_ids_missing_tables(IDENTITY_TABLES)
+
+
+def project_ids_missing_mandate_tables():
+    return project_ids_missing_tables(MANDATE_TABLES)
+
+
+def apply_tables(project_ids, models, dry_run=False):
     """Create the missing tables, one transaction per project, so one broken schema does not stop
     the rest. Returns ``(migrated, failed)``; on a dry run ``migrated`` is what would be created."""
     migrated, failed = [], []
@@ -39,7 +49,7 @@ def apply_identity_tables(project_ids, dry_run=False):
             continue
         try:
             with db.get_session(pid) as session:
-                for model in _MODELS:
+                for model in models:
                     model.__table__.create(session.connection(), checkfirst=True)
                 session.commit()
             migrated.append(pid)
@@ -47,3 +57,11 @@ def apply_identity_tables(project_ids, dry_run=False):
             log.exception("agent identity schema: failed to migrate project %s", pid)
             failed.append({"project_id": pid})
     return migrated, failed
+
+
+def apply_identity_tables(project_ids, dry_run=False):
+    return apply_tables(project_ids, IDENTITY_TABLES, dry_run)
+
+
+def apply_mandate_tables(project_ids, dry_run=False):
+    return apply_tables(project_ids, MANDATE_TABLES, dry_run)

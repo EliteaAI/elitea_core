@@ -549,6 +549,17 @@ def revoke_binding_contexts(session, binding_id, reason="EPOCH_MISMATCH") -> int
     ).rowcount
 
 
+def revoke_mandate_contexts(session, mandate_id, reason="MANDATE_INACTIVE") -> int:
+    """Revoke every live context of runs admitted under a mandate, in this session's schema. Does not commit."""
+    probe = {"kind": "mandate", "ref": f"mandate:{mandate_id}"}
+    return session.execute(
+        update(ExecutionSecurityContext)
+        .where(ExecutionSecurityContext.subject.contains(probe), ExecutionSecurityContext.state.in_(LIVE_STATES))
+        .values(state="revoked", revoked_reason=reason, ended_at=func.now())
+        .execution_options(synchronize_session=False)
+    ).rowcount
+
+
 def revoke_credential_contexts(session, credential_ref, reason="CREDENTIAL_REFERENCE_INACTIVE") -> int:
     """Revoke every live context in this session's schema that holds a decision for this credential
     reference. Does not commit. Contexts of other schemas fail at ``validate_context``."""
