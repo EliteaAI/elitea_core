@@ -9,8 +9,8 @@ it is only useful while it keeps matching the admin schema.
 import ast
 import collections
 import json
-import sys
 import types
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,8 @@ import pytest
 PLUGIN_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(PLUGIN_ROOT / "tests"))
 
-from fixtures.helpers import load_utils_module
+from fixtures.helpers import load_utils_module  # noqa: E402
+
 
 _LogLine = collections.namedtuple("_LogLine", "level template args rendered")
 
@@ -147,6 +148,14 @@ def test_index_handler_matches_the_rpc_this_plugin_registers(bindings):
 def test_r4_4_el_7011_pipeline_row_is_bound_to_the_generic_tick(bindings):
     assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["pipeline_scheduling"] in _rpc_names(
         "entity_schedules_check.py"
+    )
+
+
+def test_r3_4_el_7011_pipeline_scheduling_off_makes_the_tick_row_inactive(bindings):
+    """R3.4: with pipeline_scheduling off the managed row of the generic tick is inactive, so no step runs."""
+    plan = {e["name"]: e for e in bindings.build_scheduler_sync_plan({"pipeline_scheduling": {"enabled": False}})}
+    assert (plan["pipeline_scheduling"]["rpc_func"], plan["pipeline_scheduling"]["active"]) == (
+        "entity_schedules_check", False,
     )
 
 

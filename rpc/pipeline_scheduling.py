@@ -6,7 +6,7 @@ The generic tick `entity_schedules_check` calls it as its last step.
 """
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import datetime, UTC
 
 from pylon.core.tools import log
 from sqlalchemy.orm.attributes import flag_modified
@@ -14,12 +14,10 @@ from tools import db
 
 from ..models.all import Application, ApplicationVersion
 from ..models.enums.all import AgentTypes
-from ..models.pd.pipeline_trigger import PipelineTriggerSchedule, TriggerType
+from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
 from ..utils.cron_utils import is_cron_due
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
-)
-from ..utils.pipeline_execution import (
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
     finish_trigger_run_with_error,
