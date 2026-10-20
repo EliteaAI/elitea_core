@@ -49,6 +49,12 @@ def test_r5_2_limit_out_of_range(pd_list, limit):
     assert exc.value.errors()[0]['loc'][0] == 'limit'
 
 
+def test_r5_2_offset_past_integer_range(pd_list):
+    with pytest.raises(ValidationError) as exc:
+        pd_list.ScheduleListFilters(offset=2**31)
+    assert exc.value.errors()[0]['loc'][0] == 'offset'
+
+
 @pytest.mark.parametrize('limit', [1, 100])
 def test_r5_2_limit_bounds_accepted(pd_list, limit):
     assert pd_list.ScheduleListFilters(limit=limit).limit == limit
