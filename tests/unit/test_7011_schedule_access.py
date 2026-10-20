@@ -2,6 +2,7 @@
 
 The helper module is loaded from source with a fake `tools` (auth, config); no Pylon runtime.
 """
+import ast
 import importlib.util
 import pathlib
 import sys
@@ -134,6 +135,22 @@ def test_r2_3_el7011_unreadable_permissions_raise(load):
     auth = FakeAuth(error=RuntimeError("auth down"))
     with pytest.raises(RuntimeError):
         load(auth).schedule_scope(1)
+
+
+def test_r2_3_el7011_empty_permission_set_gives_no_rights(load):
+    # The platform's resolve_permissions returns an empty set when it cannot read the rights
+    module = load(FakeAuth(user_id=5, permissions={1: set()}))
+    scope = module.schedule_scope(1)
+    assert scope.is_admin is False
+    assert module.allowed_actions(_row(owner=5), scope) == []
+
+
+def test_r1_1_el7011_module_init_registers_the_schedule_permissions():
+    tree = ast.parse((PLUGIN_ROOT / "module.py").read_text(encoding="utf-8"))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Module")
+    init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "init")
+    calls = {n.func.id for n in ast.walk(init) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "register_schedule_permissions" in calls
 
 
 # R3.1, R3.2, R3.3, R3.4 (TC-US02-10..16)
