@@ -19,7 +19,7 @@ the allowed strings stay single-sourced.
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, StrictInt, field_validator, model_validator
 
 from ..evaluation import (
     EvalTier, EvalEngine, EvalScaleType, EvalPolarity, EvalCaseSource, EvalRunTrigger,
@@ -44,6 +44,10 @@ _RUN_TRIGGERS = {EvalRunTrigger.offline_batch, EvalRunTrigger.on_demand}
 
 # Upper bound for a suite's ``meta.steps_limit``; the SDK default is 25.
 MAX_SUITE_STEPS_LIMIT = 100
+# ``meta.case_time_limit_seconds`` bounds (performance design §3.1). The ceiling stays well under
+# the run reaper's 30-minute quiet gap, which one case (agent + judge/code dispatches) must fit in.
+MIN_CASE_TIME_LIMIT_SECONDS = 10
+MAX_CASE_TIME_LIMIT_SECONDS = 900
 CONSUMPTION_BUDGET_SCOPES = ('per_case', 'per_run')
 #: What reaching ``per_run.tokens`` does: stop starting cases (default) or only report the breach.
 BUDGET_ON_BREACH = ('stop', 'report')
@@ -362,6 +366,18 @@ class EvalSuiteBaseModel(BaseModel):
 
     @field_validator('meta')
     @classmethod
+    def _check_case_time_limit(cls, v: dict) -> dict:
+        # ``meta.case_time_limit_seconds`` stops the agent on a case of a batch run after that many
+        # seconds (performance design §3.1); absent or null keeps the 120 s default.
+        limit = (v or {}).get('case_time_limit_seconds')
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
+                                  or not MIN_CASE_TIME_LIMIT_SECONDS <= limit <= MAX_CASE_TIME_LIMIT_SECONDS):
+            raise ValueError('meta.case_time_limit_seconds must be an integer '
+                             f'{MIN_CASE_TIME_LIMIT_SECONDS}..{MAX_CASE_TIME_LIMIT_SECONDS} or null')
+        return v
+
+    @field_validator('meta')
+    @classmethod
     def _check_store_tool_outputs(cls, v: dict) -> dict:
         # ``meta.store_tool_outputs = false`` keeps tool outputs out of stored trajectories (#6809
         # Q-S5); absent or null stores them.
@@ -472,6 +488,8 @@ class EvalDatasetCaseBaseModel(BaseModel):
     variables: dict = Field(default_factory=dict)
     expected_output: Optional[str] = None
     expected_trajectory: Optional[dict] = None
+    # Performance P-5: overrides the suite's case time limit for this case; null keeps the suite's.
+    time_limit_seconds: Optional[StrictInt] = None
     source_type: str = EvalCaseSource.manual
     source_ref: Optional[str] = Field(None, max_length=256)
     order_index: int = 0
@@ -481,6 +499,14 @@ class EvalDatasetCaseBaseModel(BaseModel):
     @classmethod
     def _validate_expected_trajectory(cls, v):
         return normalize_expected_trajectory(v)
+
+    @field_validator('time_limit_seconds')
+    @classmethod
+    def _validate_time_limit(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not MIN_CASE_TIME_LIMIT_SECONDS <= v <= MAX_CASE_TIME_LIMIT_SECONDS:
+            raise ValueError('time_limit_seconds must be an integer '
+                             f'{MIN_CASE_TIME_LIMIT_SECONDS}..{MAX_CASE_TIME_LIMIT_SECONDS} or null')
+        return v
 
     @field_validator('source_type')
     @classmethod
@@ -517,6 +543,7 @@ class EvalDatasetCaseDetailModel(BaseModel):
     variables: dict = Field(default_factory=dict)
     expected_output: Optional[str] = None
     expected_trajectory: Optional[dict] = None
+    time_limit_seconds: Optional[int] = None
     source_type: str
     source_ref: Optional[str] = None
     meta: dict = Field(default_factory=dict)

@@ -1,7 +1,6 @@
 import json
 
 from flask import request
-from pylon.core.tools import log
 from sqlalchemy.orm import joinedload, selectinload
 from tools import api_tools, config as c, db, auth
 from ...models.all import ApplicationVersion, Application
@@ -11,7 +10,6 @@ from ...models.pd.version import ApplicationVersionDetailModel
 from ...models.enums.all import PublishStatus
 from ...utils.application_utils import build_skill_mappings_list
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.secrets import check_secret_header
 from ...utils.skill_utils import apply_runtime_skills
 from ...utils.utils import add_public_project_id
 
@@ -29,21 +27,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int, application_id: int, version_name: str = None, *args, **kwargs):
-        # Any viewer can read this endpoint, and published skill twins are hidden
-        # from the catalog on purpose. The query parameter alone is therefore not
-        # enough to release skill bodies.
-        serve_runtime_skills = False
-        if request.args.get('runtime') == 'true':
-            serve_runtime_skills = check_secret_header(
-                request.headers.get('X-SECRET'), project_id=project_id,
-            )
-            if not serve_runtime_skills:
-                log.warning(
-                    "Withholding runtime skills for public application %s: X-SECRET did "
-                    "not validate. A published agent's sub-agents will run without their "
-                    "skills — check secrets_header_value on the calling project.",
-                    application_id,
-                )
+        # Anyone who can see a published agent may see its skills; runtime only selects the runtime shape
+        serve_runtime_skills = request.args.get('runtime') == 'true'
         with db.with_project_schema_session(project_id) as session:
             filters = [
                 ApplicationVersion.application_id == application_id,

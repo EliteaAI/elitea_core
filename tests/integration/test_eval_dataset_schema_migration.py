@@ -88,6 +88,8 @@ def test_applies_all_statements_for_a_project(eval_dataset_schema_module):
     assert any("is_shared" in sql and "ADD COLUMN IF NOT EXISTS" in sql for sql in executed)
     assert any("FOREIGN KEY" in sql for sql in executed)
     assert any("CREATE INDEX IF NOT EXISTS" in sql for sql in executed)
+    assert any("time_limit_seconds INTEGER" in sql and "ADD COLUMN IF NOT EXISTS" in sql
+               for sql in executed)
 
 
 def test_migration_statements_are_safe_to_run_twice(eval_dataset_schema_module):

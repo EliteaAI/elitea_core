@@ -1582,7 +1582,12 @@ def get_application_version_details_expanded(
             include_openai_compatible=True,
         )
 
-        log.debug(f"{result=}")
+        # Tool settings are expanded with resolved secrets here, so log identifiers only
+        log.debug(
+            "Expanded version details: id=%s agent_type=%s tools=%s",
+            result.get('id'), result.get('agent_type'),
+            [(t.get('type'), t.get('name')) for t in result.get('tools') or [] if isinstance(t, dict)],
+        )
         return result
     finally:
         if session_created:

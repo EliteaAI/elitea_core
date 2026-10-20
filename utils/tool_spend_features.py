@@ -63,6 +63,15 @@ def feature_map(schemas):
         return _cache["map"]
 
 
+def toolkit_feature(tool, features):
+    """The tool_spend feature a toolkit payload belongs to (by its type), or None."""
+    toolkit_type = (tool or {}).get("type") if isinstance(tool, dict) else None
+    for name, entry in (features or {}).items():
+        if any(spec.get("toolkit_type") == toolkit_type for spec in (entry.get("backends") or {}).values()):
+            return name
+    return None
+
+
 def backend_spec(features, feature, backend):
     """The backend entry, or None when the feature/backend pair is not declared."""
     return ((features.get(feature) or {}).get("backends") or {}).get(backend)

@@ -356,14 +356,49 @@
       "section": "runtime",
       "default": "centry.user"
     },
-    "prefetch_subagents": {
-      "type": "boolean",
-      "title": "Prefetch Sub-agents On Predict",
-      "description": "Send expanded sub-agent version details with the predict task so the runtime does not fetch each sub-agent over HTTP. Disable to fall back to per-sub-agent fetching.",
-      "path": "predict.prefetch_subagents",
+    "subagent_prefetch_max_nodes": {
+      "type": "integer",
+      "title": "Sub-agent Prefetch Max Nodes",
+      "description": "Maximum number of sub-agents expanded in pylon_main before a predict. Sub-agents beyond it are fetched by the runtime itself. Allowed range: 1–1000.",
+      "path": "predict.subagent_prefetch.max_nodes",
       "section": "runtime",
-      "default": true,
-      "requires_restart": false
+      "default": 200,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "subagent_prefetch_max_bytes": {
+      "type": "integer",
+      "title": "Sub-agent Prefetch Max Bytes",
+      "description": "Maximum total size in bytes of expanded sub-agents sent with a predict task. Sub-agents beyond it are fetched by the runtime itself. Default 15728640 (15 MB).",
+      "path": "predict.subagent_prefetch.max_bytes",
+      "section": "runtime",
+      "default": 15728640,
+      "minimum": 1,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "subagent_prefetch_max_seconds": {
+      "type": "number",
+      "title": "Sub-agent Prefetch Time Budget",
+      "description": "Seconds pylon_main may spend expanding sub-agents before a predict. When it runs out, the remaining sub-agents are fetched by the runtime itself.",
+      "path": "predict.subagent_prefetch.max_seconds",
+      "section": "runtime",
+      "default": 40,
+      "minimum": 1,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "number",
+        "minimum": 1
+      }
     },
     "cancel_on_timeout": {
       "type": "boolean",
@@ -452,48 +487,6 @@
       "section": "observability",
       "default": true,
       "requires_restart": true
-    },
-    "banner_enabled": {
-      "type": "boolean",
-      "title": "Banner Enabled",
-      "description": "When enabled, a notification banner is displayed to all users environment-wide.",
-      "path": "extra_ui_config.vite_maintenance_banner.enabled",
-      "section": "dedicated_banner",
-      "default": false
-    },
-    "banner_dismissible": {
-      "type": "boolean",
-      "title": "Dismissible",
-      "description": "When enabled, users can close the banner. Dismissed state persists until a new banner is configured or the user logs out.",
-      "path": "extra_ui_config.vite_maintenance_banner.dismissible",
-      "section": "dedicated_banner",
-      "default": false
-    },
-    "banner_icon": {
-      "type": "string",
-      "title": "Icon",
-      "description": "Icon type displayed alongside the banner message.",
-      "path": "extra_ui_config.vite_maintenance_banner.icon",
-      "section": "dedicated_banner",
-      "default": "info",
-      "enum": ["info", "warning"]
-    },
-    "banner_style": {
-      "type": "string",
-      "title": "Banner Style",
-      "description": "Visual style of the banner.",
-      "path": "extra_ui_config.vite_maintenance_banner.style",
-      "section": "dedicated_banner",
-      "default": "info",
-      "enum": ["info", "warning"]
-    },
-    "banner_message": {
-      "type": "string",
-      "title": "Banner Message",
-      "description": "The message content displayed in the banner. Supports Markdown formatting.",
-      "path": "extra_ui_config.vite_maintenance_banner.message",
-      "section": "dedicated_banner",
-      "default": ""
     },
     "resources_information_enabled": {
       "type": "boolean",

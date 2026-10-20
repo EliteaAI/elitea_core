@@ -82,11 +82,15 @@ def participant_display_name(participant: dict) -> str | None:
 def _participant_ref(participant: dict | None) -> dict | None:
     if not participant:
         return None
-    return {
+    ref = {
         'participant_id': participant['id'],
         'entity_name': participant['entity_name'],
         'name': participant_display_name(participant),
     }
+    email = (participant.get('meta') or {}).get('user_email')
+    if email:
+        ref['email'] = email
+    return ref
 
 
 def _attachment_item(item: dict, is_generated: bool) -> dict:
@@ -134,14 +138,19 @@ def build_export_payload(
                     entry = _attachment_item(item, is_generated)
                     entry['_ref'] = item['id']
                     items.append(entry)
-        messages.append({
+        message = {
             'uuid': str(group['uuid']),
             'created_at': _isoformat(group['created_at']),
             'author': _participant_ref(author),
             'sent_to': _participant_ref(participants_by_id.get(group.get('sent_to_id'))),
             'reply_to_uuid': group.get('reply_to_uuid'),
             'items': items,
-        })
+        }
+        group_meta = group.get('meta') or {}
+        if group_meta.get('is_error'):
+            message['is_error'] = True
+            message['error'] = group_meta.get('error') or None
+        messages.append(message)
 
     return {
         'export_info': {
@@ -237,6 +246,7 @@ def load_conversation_export_data(session, project_id: int, conversation) -> tup
             'sent_to_id': g.sent_to_id,
             'reply_to_uuid': uuid_by_id.get(g.reply_to_id),
             'created_at': g.created_at,
+            'meta': dict(g.meta or {}),
             'items': items_by_group.get(g.id, []),
         }
         for g in groups
@@ -288,6 +298,7 @@ def _resolve_participants(participants) -> list[dict]:
                     author = authors_by_id.get(entity_meta.get('id'))
                     if author:
                         p['meta']['user_name'] = author.get('name')
+                        p['meta']['user_email'] = author.get('email')
                 case ParticipantTypes.application.value:
                     details = this.module.get_application_by_id(
                         project_id=entity_meta.get('project_id'),

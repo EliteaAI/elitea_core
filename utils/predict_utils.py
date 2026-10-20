@@ -13,7 +13,7 @@ from .llm_settings import normalize_runtime_max_tokens
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates
 from .skill_utils import consume_message_skills, resolve_runtime_skills
-from .subagent_prefetch import attach_subagent_prefetch
+from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
 from ..models.elitea_tools import EliteATool
 from ..models.enums.all import AgentTypes
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
@@ -99,6 +99,28 @@ def get_system_token(project_id: int) -> Optional[str]:
         create_if_not_exists=True
     )
     return system_token
+
+
+def get_expansion_user_id(project_id: int, user_id: int, is_system_user: bool) -> int:
+    # System-token runs expand as the project system user, exactly as the runtime's own fetch did
+    if not is_system_user:
+        return user_id
+    system_user = rpc_tools.RpcMixin().rpc.timeout(2).admin_get_project_system_user(project_id)
+    if not system_user:
+        raise PredictPayloadError(f"Project {project_id} has no system user")
+    return system_user['id']
+
+
+def expand_top_level_version(parsed: ApplicationChatRequest, expansion_user_id: int) -> Optional[dict]:
+    """Expanded details for a request that names a version but carries none, so the runtime needn't fetch them."""
+    if parsed.version_details or not (parsed.application_id and parsed.version_id):
+        return None
+    expanded = expand_version_for_runtime(
+        parsed.project_id, parsed.application_id, parsed.version_id, expansion_user_id,
+    )
+    if 'error' in expanded:
+        raise PredictPayloadError(expanded['error'])
+    return expanded
 
 
 def get_session_cookie_name() -> Optional[str]:
@@ -214,11 +236,20 @@ def generate_predict_payload(
     :param user_id: User ID
     :param sid: Socket.IO session id
     :param is_system_user: no real user behind the run (cron); implies skip_expansion
-    :param skip_expansion: skip tool/configuration expansion, but keep the real user's identity
+    :param skip_expansion: skip internal MCP resolution of request tools, but keep the real user's identity
     :return:
     """
     vault_client = VaultClient(parsed.project_id)
     skip_expansion = skip_expansion or is_system_user
+
+    expansion_user_id = user_id
+    if isinstance(parsed, ApplicationChatRequest) and parsed.application_id:
+        expansion_user_id = get_expansion_user_id(parsed.project_id, user_id, is_system_user)
+        expanded = expand_top_level_version(parsed, expansion_user_id)
+        if expanded is not None:
+            # Same shape chat sends: tools travel inside version_details, not the raw ORM rows
+            parsed.version_details = expanded
+            parsed.tools = []
 
     session_cookie_name = None
     if is_system_user:
@@ -320,8 +351,6 @@ def generate_predict_payload(
                 #
                 "stream": True,  # hardcoded
                 "api_extra_headers": {
-                    'X-SECRET': all_secrets.get('secrets_header_value', 'secret'),
-                    'X-USERSESSION': auth_session if auth_session else '-',
                     'X-Project-Id': str(parsed.project_id),
                     # Runtime execution is already audited by the tracing plugin
                     # (LangChain/Langfuse generation spans) - tells the LLM proxy
@@ -500,7 +529,8 @@ def generate_predict_payload(
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
 
-        attach_subagent_prefetch(payload, parsed.project_id, user_id)
+    if isinstance(parsed, ApplicationChatRequest):
+        attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)
 
     return payload
 
@@ -555,27 +585,58 @@ def get_project_context(project_id: int) -> dict:
     }
 
 
+def default_tool_llm_settings(model_name, model_project_id, plain_model_temperature: Optional[float] = None) -> dict:
+    """The worker reads only top-level llm_model/llm_settings; without them the SDK picks a model itself."""
+    if not model_name:
+        return {}
+    settings = {"model_name": model_name, "model_project_id": model_project_id, "max_tokens": 1024}
+    try:
+        configuration = rpc_tools.RpcMixin().rpc.call.configurations_get_configuration_model(
+            model_project_id, model_name
+        ) or {}
+        settings["openai_compatible"] = bool(configuration.get("openai_compatible", False))
+        if plain_model_temperature is not None and not configuration.get("supports_reasoning"):
+            settings["temperature"] = plain_model_temperature
+    except Exception as e:  # pylint: disable=W0703
+        log.warning(f"Failed to resolve openai_compatible for default model {model_name!r}: {e}")
+    return settings
+
+
+EXPLICIT_MODEL_TEST_LLM_SETTINGS = {"max_tokens": 1024, "temperature": 0.1}
+
+
+def resolve_test_tool_llm(project_id: int, llm_model: Optional[str], llm_settings: Optional[dict]) -> tuple:
+    requested = llm_settings or {}
+    if llm_model or requested.get("model_name") or requested.get("selection"):
+        return llm_model, dict(EXPLICIT_MODEL_TEST_LLM_SETTINGS) if llm_settings is None else llm_settings
+    caller_chose_sampling = requested.get("temperature") is not None or requested.get("reasoning_effort") is not None
+    default_model = this.for_module('configurations').module.get_default_model(project_id)
+    resolved = default_tool_llm_settings(
+        default_model.get("model_name"), default_model.get("model_project_id"),
+        plain_model_temperature=None if caller_chose_sampling else EXPLICIT_MODEL_TEST_LLM_SETTINGS["temperature"],
+    )
+    return resolved.get("model_name"), {**resolved, **requested}
+
+
 def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, tool_name: str, tool_params: dict, sid: str = None) -> dict:
-    vault_client = VaultClient(project_id)
     token, auth_session = get_predict_token_and_session(project_id, user_id, sid)
     base_url = get_predict_base_url(project_id)
     llm_settings = this.for_module('configurations').module.get_default_model(project_id)
+    tool_llm_settings = default_tool_llm_settings(llm_settings.get("model_name"), llm_settings.get("model_project_id"))
     #
     # use default model settings
     llm_settings["max_tokens"] = 1024
     llm_settings["temperature"] = 0.7
     #
     payload = {
+        "llm_model": tool_llm_settings.get("model_name"),
+        "llm_settings": tool_llm_settings,
         "llm": {
             "kwargs": {
                 "model": llm_settings.get("model_name"),#llm_settings.model_name,
                 **llm_settings,
                 #
                 "stream": True,  # hardcoded
-                "api_extra_headers": {
-                    'X-SECRET': vault_client.get_all_secrets().get('secrets_header_value', 'secret'),
-                    'X-USERSESSION': auth_session if auth_session else '-',
-                }
             }
         },
         "deployment_url": base_url,

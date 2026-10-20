@@ -371,6 +371,15 @@ def _canonical(value) -> str:
         return str(value)
 
 
+def final_answer_ms(trajectory: Optional[dict]) -> Optional[float]:
+    """``duration_ms`` of the last top-level LLM step: the same step ``performance.final_answer_time``
+    scores, so the run diff and the dimension never disagree on which step is the answer."""
+    steps = (trajectory or {}).get('steps') or []
+    answers = [s for s in steps if isinstance(s, dict) and s.get('kind') == 'llm' and not s.get('parent_agent')]
+    duration = answers[-1].get('duration_ms') if answers else None
+    return duration if isinstance(duration, (int, float)) else None
+
+
 def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] = None,
                        error: Optional[str] = None, final_text: Optional[str] = None) -> dict:
     """Per-case counters (G8), computed once here so the UI and P2 dimensions read, not recompute.
@@ -409,6 +418,8 @@ def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] 
                            or bool(_GRAPH_STEP_LIMIT_REPLY.match((final_text or '').strip().lower()))),
         'guardrail_events': sum(1 for s in tools if s.get('status') in ('blocked', 'action_required')) + paused,
         'latency_ms': latency_ms,
+        # Stored so the run diff reads one number instead of loading every trajectory (§3.4).
+        'final_answer_ms': final_answer_ms(trajectory),
     }
 
 
@@ -474,7 +485,9 @@ def trajectory_rollup(rows: List[dict]) -> Optional[dict]:
 
     Totals and averages come from recorded cases only. A case with no trajectory to read is
     counted in ``excluded_cases``, split by why, so an average never silently covers fewer cases
-    than the run had (G7). ``None`` when the run has no execution rows."""
+    than the run had (G7). ``timed_out_cases`` counts the cases stopped at the suite's time limit:
+    their scores are skipped, so this is what keeps them visible next to the headline
+    (performance §3.2). ``None`` when the run has no execution rows."""
     if not rows:
         return None
     recorded = [r for r in rows if r.get('trajectory_state') == TRAJECTORY_RECORDED]
@@ -500,6 +513,7 @@ def trajectory_rollup(rows: List[dict]) -> Optional[dict]:
         'totals': totals,
         'averages': {key: (totals[key] / n if n else None) for key in ROLLUP_COUNTERS},
         'step_limit_hits': sum(1 for m in metrics if m.get('step_limit_hit')),
+        'timed_out_cases': sum(1 for r in rows if r.get('status') == 'timeout'),
         'average_latency_ms': sum(latencies) / len(latencies) if latencies else None,
         'p50_latency_ms': _percentile(latencies, 50),
         'p95_latency_ms': _percentile(latencies, 95),

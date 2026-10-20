@@ -68,6 +68,18 @@ from ..utils.validator_cache import make_validator_cache_key, toolkit_validator_
 from ..utils.toolkit_test_rooms import guard_test_stream
 
 
+def _toolkit_config_log_summary(toolkit_config) -> dict:
+    """Loggable view of a toolkit config: settings values may hold unsecreted credentials, so keep keys only."""
+    toolkit_config = toolkit_config if isinstance(toolkit_config, dict) else {}
+    settings = toolkit_config.get('settings')
+    return {
+        'id': toolkit_config.get('id', toolkit_config.get('toolkit_id')),
+        'type': toolkit_config.get('type'),
+        'toolkit_name': toolkit_config.get('toolkit_name'),
+        'settings_keys': sorted(settings) if isinstance(settings, dict) else [],
+    }
+
+
 def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
     """Stop a task the blocking caller gave up on, so it doesn't hold a worker slot forever."""
     if not this.descriptor.config.get("cancel_on_timeout", True):
@@ -1495,7 +1507,7 @@ class RPC:
 
         log.debug("Expanding toolkit configurations: user_id=%s, project_id=%s", user_id, project_id)
         try:
-            log.debug("Original toolkit_config: %s", data.get('toolkit_config', {}))
+            log.debug("Original toolkit_config: %s", _toolkit_config_log_summary(data.get('toolkit_config')))
 
             toolkit_config = data.get('toolkit_config', {})
             toolkit_type = toolkit_config.get('type', 'unknown_toolkit')
@@ -1514,7 +1526,7 @@ class RPC:
                 'settings': toolkit_settings_expanded
             }
 
-            log.debug("Expanded toolkit_config: %s", data['toolkit_config'])
+            log.debug("Expanded toolkit_config: %s", _toolkit_config_log_summary(data['toolkit_config']))
         except Exception as e:
             log.error(f"Error expanding toolkit configurations: {str(e)}")
             # Continue with original config if expansion fails

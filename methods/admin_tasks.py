@@ -681,7 +681,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Adds ``agent_id`` (owning agent, nullable) and ``is_shared`` (opt-in
         sharing flag) to ``eval_dataset``, and ``expected_trajectory`` (JSONB,
-        nullable, #6809) to ``eval_dataset_case``, on every project schema. Idempotent
+        nullable, #6809) and ``time_limit_seconds`` (integer, nullable, performance P-5) to
+        ``eval_dataset_case``, on every project schema. Idempotent
         (``ADD COLUMN IF NOT EXISTS``): safe to run multiple times.
 
         Param format (optional):
@@ -967,9 +968,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Seven code-scored platform dimensions (trajectory.tool_match, .forbidden_tools,
         .tool_errors, .redundant_calls, .step_budget, .step_limit_hit, .guardrail_events; #6809
-        item 5). Their scripts ship with the plugin (utils/evaluation_trajectory_checks.py) and are
-        resolved at run time, so the registry rows carry only the definition and
-        meta.builtin_check.
+        item 5), plus the two latency dimensions performance.latency and .final_answer_time
+        (performance design §3.3). Their scripts ship with the plugin
+        (utils/evaluation_trajectory_checks.py) and are resolved at run time, so the registry rows
+        carry only the definition and meta.builtin_check.
 
         Insert-only and idempotent: an entry already present under its name is left as is, so an
         admin's weight/target edits survive a re-run. A same-named entry that is *not* the

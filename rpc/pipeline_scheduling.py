@@ -23,6 +23,7 @@ from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
+    finish_trigger_run_with_error,
 )
 
 
@@ -150,8 +151,8 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
         f"last_run={schedule.last_run}, user_id={schedule.created_by}"
     )
 
-    # Execute the pipeline. Failures here must not prevent last_run update
-    # nor poison the session for the next pipeline in this tick.
+    # A failed dispatch still consumes this cron slot: otherwise the schedule stays due
+    # and every tick opens another run that fails the same way (#7064)
     try:
         _execute_pipeline(
             project_id=project_id,
@@ -169,7 +170,6 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
             project_id, version.id, schedule.cron,
             type(exc).__name__, exc,
         )
-        return
 
     # Update last_run timestamp
     try:
@@ -228,15 +228,19 @@ def _execute_pipeline(
     )
 
     # Execute using shared utility
-    result = execute_pipeline_via_predict_sio(
-        project_id=project_id,
-        version=version,
-        user_id=creator_id,
-        conversation_uuid=conversation_uuid,
-        response_message_id=response_message_id,
-        user_input="",  # Empty input for scheduled runs
-        trigger_source="scheduled",
-    )
+    try:
+        result = execute_pipeline_via_predict_sio(
+            project_id=project_id,
+            version=version,
+            user_id=creator_id,
+            conversation_uuid=conversation_uuid,
+            response_message_id=response_message_id,
+            user_input="",  # Empty input for scheduled runs
+            trigger_source="scheduled",
+        )
+    except Exception as exc:
+        finish_trigger_run_with_error(project_id, response_message_id, exc)
+        raise
 
     return result
 

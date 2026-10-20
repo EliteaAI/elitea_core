@@ -1357,6 +1357,23 @@ def find_public_version_by_source(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _copy_content_fields(ver_info: dict) -> dict:
+    """Return the user-visible content fields shared by all version dict builders.
+
+    Centralising them here prevents the next added field from silently missing
+    one of the three build sites (_build_published_version_dict, create_embedded_agent,
+    and any future callers).
+    """
+    return {
+        'instructions': ver_info.get('instructions', ''),
+        'agent_type': ver_info.get('agent_type', 'openai'),
+        'variables': ver_info.get('variables', []),
+        'tags': ver_info.get('tags', []),
+        'welcome_message': ver_info.get('welcome_message', ''),
+        'conversation_starters': ver_info.get('conversation_starters', []),
+    }
+
+
 def _build_base_version_dict(ver_info: dict, user_id: int, project_id: int) -> dict:
     """Build a minimal 'base' version dict required by ``Application.get_default_version()``."""
     return {
@@ -1393,12 +1410,7 @@ def _build_published_version_dict(
         'author_id': user_id,
         'project_id': project_id,
         'user_id': user_id,
-        'instructions': ver_info.get('instructions', ''),
-        'agent_type': ver_info.get('agent_type', 'openai'),
-        'variables': ver_info.get('variables', []),
-        'tags': ver_info.get('tags', []),
-        'welcome_message': ver_info.get('welcome_message', ''),
-        'conversation_starters': ver_info.get('conversation_starters', []),
+        **_copy_content_fields(ver_info),
         'llm_settings': ver_info.get('llm_settings') or {},
         'meta': meta,
         'status': PublishStatus.published.value,
@@ -1448,9 +1460,7 @@ def create_embedded_agent(
         'author_id': user_id,
         'project_id': public_project_id,
         'user_id': user_id,
-        'instructions': ver_info.get('instructions', ''),
-        'agent_type': ver_info.get('agent_type', 'openai'),
-        'variables': ver_info.get('variables', []),
+        **_copy_content_fields(ver_info),
         'llm_settings': ver_info.get('llm_settings') or {},
         'meta': meta,
         'status': PublishStatus.embedded.value,

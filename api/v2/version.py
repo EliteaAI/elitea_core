@@ -4,7 +4,6 @@ import json
 import copy
 from flask import request
 from pydantic import ValidationError
-from typing import Optional
 
 from pylon.core.tools import log
 from sqlalchemy.orm import selectinload
@@ -29,23 +28,10 @@ from ...utils.mcp_versioning import (
     instructions_sha256,
     sanitize_mcp_settings_update,
 )
-from ...utils.subagent_prefetch import expand_version_for_sdk
-from ...utils.utils import mask_secret
+from ...utils.subagent_prefetch import expand_version_for_runtime
 from ....configurations.utils import expand_configuration
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.secrets import check_secret_header
 from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
-
-
-def extract_user_id(received_auth_session: Optional[str]) -> int:
-    user_id = None
-    if received_auth_session and received_auth_session != '-':
-        session_context = auth.get_referenced_auth_context(received_auth_session)
-        if session_context:
-            user_id = session_context.get('user_id')
-    else:
-        user_id = auth.current_user().get('id')
-    return user_id
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -111,27 +97,25 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.debug(f"{result=}")
             return result, 200
 
+    # Returns unsecreted credentials, so it needs the right to read project secrets
     @auth.decorators.check_api({
-        "permissions": ["models.applications.version.details"],
+        "permissions": ["configuration.secrets.secret.unsecret"],
         "recommended_roles": {
-            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
-            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": True},
+            c.ADMINISTRATION_MODE: {"admin": True, "viewer": False, "editor": True},
+            c.DEFAULT_MODE: {"admin": True, "viewer": False, "editor": True},
         }})
     @api_tools.endpoint_metrics
     @require_folder_access(APPLICATION_ENTITY_TYPES, 'application_id', write=True)
     def patch(self, project_id: int, application_id: int, version_id: int, **kwargs):
-        received_secret = request.headers.get('X-SECRET')
-        received_auth_session = request.headers.get('X-USERSESSION')
-        user_id = extract_user_id(received_auth_session)
-        if user_id is None:
-            log.debug(f"Invalid auth session: {received_auth_session}, {mask_secret(received_secret, 6)}")
-            return {'error': 'Invalid auth session'}, 400
-        unsecret = check_secret_header(received_secret, project_id=project_id)
-        if not unsecret:
-            return {'error': 'Invalid secret header'}, 400
+        user_id = auth.current_user().get('id')
+        # Platform predicts send expanded details up front (#7064); anything here is an outside caller
+        log.info(
+            "[version_patch] expanded version fetch: project=%s application=%s version=%s user=%s",
+            project_id, application_id, version_id, user_id,
+        )
 
         # Shared with the predict-time sub-agent prefetch so both paths return identical details
-        version_details = expand_version_for_sdk(
+        version_details = expand_version_for_runtime(
             project_id=project_id,
             application_id=application_id,
             version_id=version_id,
