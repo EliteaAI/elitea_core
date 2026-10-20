@@ -20,7 +20,7 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = 'plugins.elitea_core'
 PROJECT_ID = 7
 CALLER_ID = 42
-SCHEDULE_FILTER = "CAST((chat_conversations.meta ->> 'schedule_id') AS INTEGER) = 5"
+SCHEDULE_FILTER = "CAST((chat_conversations.meta ->> 'schedule_id') AS VARCHAR) = '5'"
 
 
 class Base(DeclarativeBase):

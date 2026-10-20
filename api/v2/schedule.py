@@ -60,7 +60,7 @@ def _on_runs_path() -> bool:
 class RunsQuery(BaseModel):
     """Query of the run records list; `limit` above the cap is lowered to it (R3.3, R3.5)."""
 
-    limit: int = Field(default=50, ge=1)
+    limit: int = Field(default=20, ge=1)
     offset: int = Field(default=0, ge=0)
     status: Literal["running", "success", "failed", "skipped", "blocked", "waiting_for_approval"] | None = None
 

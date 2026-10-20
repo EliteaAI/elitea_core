@@ -1,7 +1,6 @@
 import re
 from datetime import datetime
-from typing import List, Optional
-from typing import Literal
+from typing import List, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field, constr, ConfigDict, model_validator

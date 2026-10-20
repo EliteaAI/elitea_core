@@ -24,9 +24,6 @@ from test_7011_schedule_crud_api import (
 from test_7011_schedule_crud_api import harness as _crud_harness
 
 harness = _crud_harness  # the CRUD harness fixture, shared
-from test_7011_schedule_crud_api import harness as _crud_harness
-
-harness = _crud_harness  # the CRUD harness fixture, shared
 
 FIELDS = {'id', 'trigger', 'status', 'reason', 'conversation_id', 'requested_by', 'started_at', 'finished_at'}
 
@@ -77,6 +74,14 @@ def test_7011_r3_3_tc_us16_09_limit_offset_and_status_page_and_filter(harness):
     failed, _ = get_runs(harness, schedule_id, status='failed')
     assert (failed['total'], {r['status'] for r in failed['rows']}) == (30, {'failed'})
     assert len(get_runs(harness, schedule_id, limit='500')[0]['rows']) == 100
+
+
+def test_7011_r3_3_default_page_size_is_20_for_el_7011(harness):
+    """EL-7011: without `limit` the page holds 20 runs (design: default 20, cap 100)."""
+    schedule_id = harness.seed()
+    add_runs(harness, schedule_id, *([{'status': 'success'}] * 25))
+    body, _ = get_runs(harness, schedule_id)
+    assert (len(body['rows']), body['total']) == (20, 25)
 
 
 @pytest.mark.parametrize('query', [{'limit': 'x'}, {'limit': '0'}, {'offset': '-1'}])

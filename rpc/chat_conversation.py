@@ -1,7 +1,7 @@
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, or_, func
+from sqlalchemy import desc, asc, Integer, String, or_, func
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
@@ -464,7 +464,7 @@ class RPC:
 
             if schedule_id is not None:
                 base_query = base_query.filter(
-                    Conversation.meta['schedule_id'].astext.cast(Integer) == schedule_id,
+                    Conversation.meta['schedule_id'].astext.cast(String) == str(schedule_id),  # text compare: a non-numeric row cannot raise
                 )
 
             base_query = base_query.order_by(sorting(sorting_by))
