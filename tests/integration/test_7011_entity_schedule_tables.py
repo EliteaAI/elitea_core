@@ -29,9 +29,9 @@ def _import_real_sqlalchemy():
     for n in stubs:
         del sys.modules[n]
     try:
-        import sqlalchemy.dialects.postgresql  # noqa: F401
-        import sqlalchemy.exc  # noqa: F401
-        import sqlalchemy.ext.compiler  # noqa: F401
+        import sqlalchemy.dialects.postgresql
+        import sqlalchemy.exc
+        import sqlalchemy.ext.compiler
         import sqlalchemy.orm  # noqa: F401
         return _sqlalchemy_modules()
     finally:
