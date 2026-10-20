@@ -4,7 +4,7 @@ from typing import ClassVar
 from flask import request
 from pydantic import ValidationError
 from pylon.core.tools import log
-from tools import api_tools, auth, db, register_openapi, serialize
+from tools import api_tools, auth, db, register_openapi
 
 from ...models.pd.schedule_list import ScheduleListFilters, ScheduleListItem
 from ...utils.authors import get_authors_data
@@ -62,10 +62,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 **row._mapping,
                 owner={"id": row.created_by, "name": names.get(row.created_by)},
                 allowed_actions=allowed_actions(row, scope),
-            ).model_dump()
+            ).model_dump(mode="json")  # one ISO offset per date; serialize() adds a second 'Z'
             for row in rows
         ]
-        return serialize({"total": total, "rows": items}), 200
+        return {"total": total, "rows": items}, 200
 
 
 class API(api_tools.APIBase):
