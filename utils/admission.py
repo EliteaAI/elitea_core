@@ -8,12 +8,18 @@ event in the same transaction. The worker later proves the run still holds that 
 Everything fails closed: any step that cannot be proven denies, and a deny is audited on its own
 transaction so a failing audit never lets a run through. No token, cookie, delegation material or
 exception text from a dependency is written to the row, the audit event, a log line or a message.
+
+Runs under an autonomous mandate (#6947) are also stopped by Main: once a minute ``enforce_run_deadlines`` stops a
+tracked task that ran past its mandate's time limit, or whose context was revoked meanwhile. Known limits: only the
+tasks this process dispatched and tracks are reached (children that inherit a mandate context are not tracked: a
+revocation means no new starts, and a running child finishes or hits its parent's deadline), and the map is lost when
+Main restarts (the context ``expires_at`` still bounds any restart).
 """
 import importlib
 import re
 import threading
 import uuid
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Mapping, Optional
@@ -51,6 +57,9 @@ REVOKE_CODES = frozenset({
     "MANDATE_INACTIVE", "MANDATE_EXPIRED", "RUNTIME_LIMIT_EXCEEDED",
 })
 _CODE = re.compile(r"^[A-Z0-9_]{1,64}$")
+STOP_CHUNK = 500   # context ids per query of the sweep
+# When Main stops a mandate run, and the code of the bound that applied (RUNTIME_LIMIT_EXCEEDED or MANDATE_EXPIRED)
+RunDeadline = namedtuple("RunDeadline", "at code")
 PREDICT_PERMISSION = "models.applications.predict.post"
 # The mandate operation each trigger entry point needs (the scheduler and both webhook kinds, #6947)
 MANDATE_OPERATION_OF = {"schedule": OPERATION_OF["pipeline_schedule"], "webhook": OPERATION_OF["pipeline_webhook"]}
@@ -64,7 +73,7 @@ MANDATE_COLUMNS = (
 
 MESSAGES = {
     "AUDIT_UNAVAILABLE": "The security audit trail is unavailable; the run was not started. Try again later.",
-    "MANDATE_REQUIRED": "This scheduled or webhook run has no approved mandate; it was not started.",
+    "MANDATE_REQUIRED": "No approved mandate or delegation covers this run; it was not started.",
     "AUTHORIZATION_REQUIRED": "This schedule runs on a user's behalf, which needs the user's renewed authorization; "
                               "it was not started.",
     "DENIED_OPERATION": "The mandate does not allow this kind of trigger; the run was not started.",
@@ -224,6 +233,10 @@ CREDENTIAL_DECISION = _LabeledCounter(
 )
 CONTEXT_VALIDATION = _LabeledCounter(
     "execution_context_validation_total", "Governed run context validations on Main", ["result", "reason_code"],
+)
+RUN_STOP = _LabeledCounter(
+    "governed_run_stop_total", "Governed runs Main tried to stop (result: stopped or stop_failed)",
+    ["result", "reason_code"],
 )
 
 
@@ -553,15 +566,19 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
         epochs = None
     if not isinstance(epochs, dict):
         raise _denied("DEPENDENCY_UNAVAILABLE")
-    if not epochs.get("active"):
+    if epochs.get("active") is False:   # only an explicit verdict suspends; a reply without one is "unknown"
         _suspend_owner(request.binding_project_id, owner)
         raise _denied("MANDATE_INACTIVE")
+    if epochs.get("active") is not True:
+        raise _denied("DEPENDENCY_UNAVAILABLE")
     ref = mandate.owner_user_ref if isinstance(mandate.owner_user_ref, dict) else {}
     issuer, tid, oid = ref.get("issuer"), ref.get("tid"), ref.get("oid")
     if not (isinstance(issuer, str) and isinstance(tid, str) and isinstance(oid, str) and issuer and tid and oid):
         raise _denied("IDENTITY_SUBJECT_UNLINKED")
     try:
         linked = auth.get_user_by_idp_subject(issuer, tid, oid)
+    except ValueError:   # the identity service refused the stored reference itself: it names nobody
+        raise _denied("IDENTITY_SUBJECT_UNLINKED") from None
     except Exception as exc:  # pylint: disable=W0703
         log.error("admission: the owner link could not be read (%s)", type(exc).__name__)
         raise _denied("DEPENDENCY_UNAVAILABLE") from None
@@ -589,26 +606,34 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
         "user_ref": owner_ref, "user_id": owner, "mandate_ref": str(mandate.id),
     }
     now = _now()
-    expires_at = min(now + timedelta(seconds=settings.context_ttl_s), now + timedelta(seconds=mandate.max_runtime_s),
-                     _aware(mandate.valid_until))
+    by_runtime, by_validity = now + timedelta(seconds=mandate.max_runtime_s), _aware(mandate.valid_until)
+    # the window to start (or restart) the run, and the moment Main stops it: the context ttl bounds only the first
+    expires_at = min(now + timedelta(seconds=settings.context_ttl_s), by_runtime, by_validity)
+    deadline = (RunDeadline(by_validity, "MANDATE_EXPIRED") if by_validity < by_runtime
+                else RunDeadline(by_runtime, "RUNTIME_LIMIT_EXCEEDED"))
     # 5b. which credentials the run uses, and whether the agent may use them for the mandate
     decisions = _decide_credentials(module, request, subject, binding, payload, expires_at)
     # 6. context row and allow events, atomically
     caller = {"kind": "trigger", "ref": _caller_ref(request), "user_id": owner}
-    return _store_admission(
+    view = _store_admission(
         module, request, run_id, binding=binding, subject=subject, decisions=decisions, caller=caller,
         user_epochs={"user": epochs.get("user"), "token": None},
         extra_epochs={"mandate": mandate.revocation_epoch}, expires_at=expires_at)
+    return view.model_copy(update={"run_deadline": deadline.at, "run_deadline_code": deadline.code})
 
 
-def refuse_index_schedule(module, principal, *, project_id, toolkit_id) -> str:
-    """A scheduled index run is not admitted in this release (no agent binding to hold a mandate): refuse it, record
-    the refusal and return its code: ``AUTHORIZATION_REQUIRED`` for a per-user schedule (it acts on a user's behalf
-    and has no renewed authorization), ``MANDATE_REQUIRED`` for a team schedule (it ran as the system user)."""
-    code = "AUTHORIZATION_REQUIRED" if principal.kind == "delegation" else "MANDATE_REQUIRED"
+def index_schedule_refusal_code(principal) -> str:
+    """A scheduled index run is not admitted in this release (no agent binding to hold a mandate). The code that
+    refuses it: ``AUTHORIZATION_REQUIRED`` for a per-user schedule (it acts on a user's behalf and has no renewed
+    authorization), ``MANDATE_REQUIRED`` for a team schedule (it ran as the system user)."""
+    return "AUTHORIZATION_REQUIRED" if principal.kind == "delegation" else "MANDATE_REQUIRED"
+
+
+def record_index_schedule_refusal(module, code, *, project_id, toolkit_id) -> None:
+    """Audit and count the refusal of one scheduled index run. Called once the refusal was concluded (written into
+    the index history), so a slot that is retried does not record one deny per minute."""
     _record_deny(module, code, project_id=project_id, caller_ref=f"schedule:index:{toolkit_id}")
     _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "deny", code)
-    return code
 
 
 def _admit(  # pylint: disable=R0914
@@ -718,7 +743,8 @@ def admit_dispatch(module, task_name, call_kwargs, admission: Optional[Admission
     envelope["context_ref"] = view.context_ref
     meta["context_ref"] = view.context_ref
     if admission.run_kind == "mandate":
-        meta["context_deadline"] = view.expires_at   # the wrapper takes it out again: the run is stopped at this moment
+        # the wrapper takes it out again; Main stops the run at this moment (not the context ttl)
+        meta["context_deadline"] = RunDeadline(view.run_deadline, view.run_deadline_code)
     return view.context_ref
 
 
@@ -833,19 +859,24 @@ def revoke_credential_contexts(session, credential_ref, reason="CREDENTIAL_REFER
     ).rowcount
 
 
+def _context_lock(module):
+    return module._context_lock  # pylint: disable=W0212
+
+
 def track_context(module, task_id, project_id, context_ref, deadline=None):
     """After ``start_task`` returned: remember which task runs the context, or revoke it if none started.
-    A run with a ``deadline`` (a mandate run) is remembered with it, for ``enforce_run_deadlines``."""
+    A run with a ``deadline`` (a ``RunDeadline``, mandate runs) is remembered with it, for ``enforce_run_deadlines``."""
     try:
         if task_id is None:
             with db.get_session(project_id) as session:
                 _set_state(session, uuid.UUID(context_ref), "revoked", "NOT_DISPATCHED", ("admitted",))
                 session.commit()
             return
-        tracked = module._context_by_task  # pylint: disable=W0212
-        tracked[task_id] = (project_id, context_ref) if deadline is None else (project_id, context_ref, deadline)
-        while len(tracked) > MAX_TRACKED_CONTEXTS:
-            tracked.popitem(last=False)
+        with _context_lock(module):
+            tracked = module._context_by_task  # pylint: disable=W0212
+            tracked[task_id] = (project_id, context_ref) if deadline is None else (project_id, context_ref, deadline)
+            while len(tracked) > MAX_TRACKED_CONTEXTS:
+                tracked.popitem(last=False)
     except Exception as exc:  # pylint: disable=W0703
         log.error("admission: could not track context of task %s (%s)", task_id, type(exc).__name__)
 
@@ -854,7 +885,8 @@ def complete_context(module, task_id):
     """A task stopped: close its context. A context the map lost is closed by its expiry."""
     if not is_governed(module):
         return
-    found = module._context_by_task.pop(task_id, None)  # pylint: disable=W0212
+    with _context_lock(module):
+        found = module._context_by_task.pop(task_id, None)  # pylint: disable=W0212
     if found is None:
         return
     project_id, context_ref = found[:2]
@@ -863,36 +895,71 @@ def complete_context(module, task_id):
         session.commit()
 
 
-def enforce_run_deadlines(module, now=None) -> int:
-    """Stop every tracked mandate run whose context ran out (``max_runtime_s``): the worker has no deadline of its
-    own. Called once a minute by the pipeline scheduler tick. Governed only. The number of runs stopped.
+def _revoked_among(entries) -> set:
+    """The context refs, among tracked ``(task_id, entry)`` pairs, that are ``revoked`` now: one query per project
+    and chunk of ids."""
+    by_project = defaultdict(list)
+    for _, entry in entries:
+        by_project[entry[0]].append(uuid.UUID(entry[1]))
+    revoked = set()
+    for project_id, ids in by_project.items():
+        with db.get_session(project_id) as session:
+            for start in range(0, len(ids), STOP_CHUNK):
+                revoked.update(str(found) for found in session.execute(
+                    select(ExecutionSecurityContext.id).where(
+                        ExecutionSecurityContext.id.in_(ids[start:start + STOP_CHUNK]),
+                        ExecutionSecurityContext.state == "revoked")).scalars())
+    return revoked
 
-    A run whose task Main no longer tracks (Main restarted) is not stopped here; it cannot be restarted past the
-    context's ``expires_at`` either (``validate_context``)."""
+
+def enforce_run_deadlines(module, now=None) -> int:
+    """Stop the tracked runs that must not go on: a mandate run past its time limit (the worker has no deadline of
+    its own), and any tracked run whose context was revoked while it runs. Called once a minute by the pipeline
+    scheduler tick. Governed only. The number of runs stopped.
+
+    ``stop_task`` comes first: the run is forgotten (and, for a time limit, its context revoked and the event recorded)
+    only once it was stopped, so a failed stop is tried again on the next tick. Runs this process does not track
+    (after a Main restart, or children that inherit a mandate context) are not reached."""
     if not is_governed(module):
         return 0
     now = now or _now()
-    tracked = module._context_by_task  # pylint: disable=W0212
+    with _context_lock(module):
+        snapshot = list(module._context_by_task.items())  # pylint: disable=W0212
+    overdue = [(task_id, entry, entry[2].code) for task_id, entry in snapshot if len(entry) > 2 and entry[2].at <= now]
+    rest = [(task_id, entry) for task_id, entry in snapshot if not (len(entry) > 2 and entry[2].at <= now)]
+    work = list(overdue)
+    if rest:
+        try:
+            revoked = _revoked_among(rest)
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("admission: the revoked runs could not be listed (%s)", type(exc).__name__)
+            revoked = set()
+        work += [(task_id, entry, None) for task_id, entry in rest if entry[1] in revoked]
     stopped = 0
-    for task_id, entry in list(tracked.items()):
-        if len(entry) < 3 or entry[2] > now:
-            continue
-        if tracked.pop(task_id, None) is None:   # the task finished meanwhile
-            continue
-        project_id, context_ref = entry[:2]
+    for task_id, entry, code in work:
+        code_label = code or "CONTEXT_REVOKED"
         try:
             module.task_node.stop_task(task_id)
         except Exception as exc:  # pylint: disable=W0703
-            log.error("admission: a run past its time limit could not be stopped (%s)", type(exc).__name__)
-        try:
-            _revoke_for_runtime_limit(module, project_id, context_ref)
-        except Exception as exc:  # pylint: disable=W0703
-            log.error("admission: a run past its time limit could not be recorded (%s)", type(exc).__name__)
+            log.error("admission: a governed run could not be stopped, it is tried again (%s)", type(exc).__name__)
+            RUN_STOP.inc("stop_failed", code_label)
+            continue
+        with _context_lock(module):
+            tracked = module._context_by_task.pop(task_id, None) is not None  # pylint: disable=W0212
+        if not tracked:   # the task finished (and closed its context) meanwhile
+            continue
         stopped += 1
+        RUN_STOP.inc("stopped", code_label)
+        if code is not None:
+            try:
+                _revoke_overrun(module, entry[0], entry[1], code)
+            except Exception as exc:  # pylint: disable=W0703
+                log.error("admission: a run past its time limit could not be recorded (%s)", type(exc).__name__)
     return stopped
 
 
-def _revoke_for_runtime_limit(module, project_id, context_ref):
+def _revoke_overrun(module, project_id, context_ref, code):
+    """The run was stopped for running past ``code`` (``RUNTIME_LIMIT_EXCEEDED`` or ``MANDATE_EXPIRED``)."""
     context_id = uuid.UUID(context_ref)
     with db.get_session(project_id) as session:
         row = session.execute(
@@ -901,18 +968,18 @@ def _revoke_for_runtime_limit(module, project_id, context_ref):
                    ExecutionSecurityContext.subject)
             .where(ExecutionSecurityContext.id == context_id)
         ).one_or_none()
-        changed = _set_state(session, context_id, "revoked", "RUNTIME_LIMIT_EXCEEDED")
+        changed = _set_state(session, context_id, "revoked", code)
         session.commit()
     if row is None or not changed:
         return
     subject_ref = (row.subject or {}).get("ref")
     _record_deny(
-        module, "RUNTIME_LIMIT_EXCEEDED", event_type="decision", project_id=project_id,
+        module, code, event_type="decision", project_id=project_id,
         application_id=row.application_id, run_id=row.run_id, attempt=row.attempt,
         agent_binding_ref=str(row.agent_binding_ref),
         mandate_ref=subject_ref[len("mandate:"):] if isinstance(subject_ref, str) else None,
     )
-    _metric(CONTEXT_VALIDATION, "execution_context_validation_total", "result", "deny", "RUNTIME_LIMIT_EXCEEDED")
+    _metric(CONTEXT_VALIDATION, "execution_context_validation_total", "result", "deny", code)
 
 
 # --- validation on behalf of the worker ------------------------------------------------------
@@ -1001,10 +1068,12 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
             epochs = None
         if not isinstance(epochs, dict):
             raise _denied("DEPENDENCY_UNAVAILABLE")  # unknown, not revoked: the run may be retried
-        if not epochs.get("active") and is_mandate:
+        if is_mandate and epochs.get("active") is False:
             # the owner is gone: the mandate goes with them, for every run, not only this one
             _suspend_owner(row.binding_project_id or project_id, user_id)
             raise revoke("MANDATE_INACTIVE")
+        if is_mandate and epochs.get("active") is not True:
+            raise _denied("DEPENDENCY_UNAVAILABLE")   # no verdict: unknown, not revoked
         if not epochs.get("active") or epochs.get("user") != stamped.get("user"):
             raise revoke("EPOCH_MISMATCH")
         #

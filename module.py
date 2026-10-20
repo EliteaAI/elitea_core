@@ -131,6 +131,7 @@ class Module(module.ModuleModel):
         self.callback_tasks = {}
         # task_id -> (project_id, context_ref) of governed runs admitted by this process (#6756); bounded
         self._context_by_task = OrderedDict()
+        self._context_lock = Lock()   # the map is read by the deadline sweep while dispatch threads change it
         # single-use tickets of autonomous (mandate) runs, minted and taken in this process only; bounded (#6947)
         self._mandate_tickets = TicketStore()
         self.active_index_tasks = OrderedDict()

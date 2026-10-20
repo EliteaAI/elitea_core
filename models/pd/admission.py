@@ -50,6 +50,9 @@ class ExecutionSecurityContextView(BaseModel):
     # The credential-use decisions of the run (the entries of ``allowed_bindings``): references and ids, never
     # material. Dispatch seals the payload against exactly these (#6946)
     allowed_bindings: list = Field(default_factory=list)
+    # A mandate run only: when Main stops it, and the code that says which bound applied (#6947)
+    run_deadline: Optional[datetime] = None
+    run_deadline_code: Optional[str] = None
 
 
 def _holder(sid):

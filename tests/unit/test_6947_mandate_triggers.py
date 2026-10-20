@@ -515,8 +515,8 @@ def test_flag_off_the_deadline_sweep_is_not_called_by_the_tick_rpc(ns, env):
     text = source_of("rpc/pipeline_scheduling.py")
     rpc_part = text[text.index("class RPC"):]
     assert rpc_part.index("if is_governed(self):") < rpc_part.index("enforce_run_deadlines(self)") < rpc_part.index(
-        "_check_pipeline_scheduling_lock.acquire")
-    assert rpc_part.index("is_maintenance_active()") < rpc_part.index("if is_governed(self):")
+        "is_maintenance_active()") < rpc_part.index("_check_pipeline_scheduling_lock.acquire")
+    assert "Main restart" in rpc_part[:rpc_part.index("if is_governed(self):")]   # the accepted gap is documented
 
 
 def test_the_tick_rpc_sweeps_once_when_governed_and_not_at_all_when_not(ns, env, monkeypatch):
@@ -533,6 +533,32 @@ def test_the_tick_rpc_sweeps_once_when_governed_and_not_at_all_when_not(ns, env,
         swept.clear()
         ns.scheduling.RPC.check_pipeline_scheduling(rpc)
         assert len(swept) == expected
+
+
+def test_the_sweep_runs_in_maintenance_mode_too_and_the_tick_itself_does_not(ns, env, monkeypatch):
+    rpc = ns.scheduling.RPC()
+    rpc.governance_profile = types.SimpleNamespace(enabled=True)
+    swept = []
+    monkeypatch.setattr(ns.scheduling, "enforce_run_deadlines", lambda module: swept.append(module))
+    monkeypatch.setattr(ns.scheduling, "is_maintenance_active", lambda: True)
+    monkeypatch.setattr(ns.scheduling, "make_yield_to_hub", mock.Mock(side_effect=AssertionError("the tick ran")))
+    assert ns.scheduling.RPC.check_pipeline_scheduling(rpc) is None and swept == [rpc]
+    rpc.governance_profile = types.SimpleNamespace(enabled=False)
+    swept.clear()
+    ns.scheduling.RPC.check_pipeline_scheduling(rpc)
+    assert swept == []
+
+
+def test_the_sweep_runs_even_when_the_previous_tick_is_still_running(ns, env, monkeypatch):
+    rpc = ns.scheduling.RPC()
+    rpc.governance_profile = types.SimpleNamespace(enabled=True)
+    swept = []
+    monkeypatch.setattr(ns.scheduling, "enforce_run_deadlines", lambda module: swept.append(module))
+    assert ns.scheduling._check_pipeline_scheduling_lock.acquire(blocking=False)   # pylint: disable=W0212
+    try:
+        assert ns.scheduling.RPC.check_pipeline_scheduling(rpc) is None and swept == [rpc]
+    finally:
+        ns.scheduling._check_pipeline_scheduling_lock.release()   # pylint: disable=W0212
 
 
 def test_a_sweep_that_fails_never_stops_the_tick(ns, env, monkeypatch):
@@ -629,6 +655,37 @@ def test_a_refused_webhook_answers_403_with_the_fixed_code_and_text_and_closes_i
     [(event_name, payload)] = ns.state.events
     assert event_name == "chat_message_stream_end" and payload["response_metadata"]["code"] == code
     assert contexts(env, ns) == [] and env.denied[-1]["reason_code"] == code
+
+
+@pytest.mark.parametrize("name, change, code", [
+    ("audit_down", lambda ns, env, agent: setattr(env, "audit_allowed", False), "AUDIT_UNAVAILABLE"),
+    ("identity_down", lambda ns, env, agent: env.epochs.pop(OWNER), "DEPENDENCY_UNAVAILABLE"),
+])
+def test_a_webhook_the_platform_could_not_decide_answers_503_so_the_sender_retries(ns, env, agent, webhook, name, change, code):
+    arm(ns, env)
+    change(ns, env, agent)
+    result, status = post(webhook)
+    assert status == 503 and result == {"code": code, "error": ns.adm.MESSAGES[code]}
+    assert contexts(env, ns) == []
+
+
+def test_every_other_refusal_stays_403(ns, env):
+    status = ns.mandate_admission.refusal_http_status
+    assert {status(code) for code in ns.adm.MESSAGES if code not in ("DEPENDENCY_UNAVAILABLE", "AUDIT_UNAVAILABLE")} == {403}
+    assert status("DEPENDENCY_UNAVAILABLE") == status("AUDIT_UNAVAILABLE") == 503
+    assert status("SOMETHING_NEW") == 403 and status(None) == 403
+
+
+@pytest.mark.parametrize("code, expected", [
+    ("AUDIT_UNAVAILABLE", 503), ("DEPENDENCY_UNAVAILABLE", 503), ("MANDATE_REQUIRED", 403), ("MANDATE_INACTIVE", 403),
+    ("DENIED_OPERATION", 403), ("DENIED_BINDING", 403),
+])
+def test_the_agent_webhook_refusal_uses_the_same_status_mapping(ns, env, webhook, code, expected):
+    webhook.version.agent_type = "agent"   # not a pipeline: the do_predict route
+    webhook.handler.module = types.SimpleNamespace(do_predict=mock.Mock(
+        side_effect=ns.exceptions.AdmissionDenied(code, ns.adm.MESSAGES[code])))
+    result, status = post(webhook)
+    assert status == expected and result == {"code": code, "error": ns.adm.MESSAGES[code]}
 
 
 def test_flag_off_a_webhook_runs_as_before_with_no_ticket(ns, env, agent, webhook):
@@ -873,12 +930,15 @@ def test_predict_sio_takes_the_ticket_after_it_loaded_the_row_and_passes_nothing
 
 # --- scheduled indexing -------------------------------------------------------------------------
 
-def test_a_governed_platform_refuses_a_team_schedule_with_mandate_required_and_a_per_user_one_with_authorization(ns, env):
+def test_a_team_schedule_is_refused_as_mandate_required_and_a_per_user_one_as_authorization_required(ns, env):
     module = arm(ns, env)
     team = ns.trigger_principal.principal_of("index_schedule", schedule_key="-1")
     user = ns.trigger_principal.principal_of("index_schedule", schedule_key="5")
-    assert ns.adm.refuse_index_schedule(module, team, project_id=1, toolkit_id=12) == "MANDATE_REQUIRED"
-    assert ns.adm.refuse_index_schedule(module, user, project_id=1, toolkit_id=12) == "AUTHORIZATION_REQUIRED"
+    assert ns.adm.index_schedule_refusal_code(team) == "MANDATE_REQUIRED"
+    assert ns.adm.index_schedule_refusal_code(user) == "AUTHORIZATION_REQUIRED"
+    assert env.denied == []   # deciding the code records nothing
+    for code in ("MANDATE_REQUIRED", "AUTHORIZATION_REQUIRED"):
+        ns.adm.record_index_schedule_refusal(module, code, project_id=1, toolkit_id=12)
     assert [(event["reason_code"], event["caller_ref"], event["project_id"], event["decision"], event["event_type"])
             for event in env.denied] == [("MANDATE_REQUIRED", "schedule:index:12", 1, "deny", "admission"),
                                          ("AUTHORIZATION_REQUIRED", "schedule:index:12", 1, "deny", "admission")]
@@ -955,6 +1015,8 @@ def test_a_refusal_that_concluded_nothing_leaves_the_slot_open(ns, env, index_ti
     index_tick.helpers.handle_failed_index_schedule.return_value = False   # a live run holds the row: retry next scan
     run_index_tick(ns, env, index_tick, {"-1": {"created_by": CREATOR}})
     assert index_tick.helpers.stamp_schedule_last_run.call_count == 0
+    assert env.denied == []   # not concluded: no deny per minute for a slot that stays due
+    assert "reason_code=MANDATE_REQUIRED" not in " ".join(env.log.lines)
     assert index_tick.tools_module.start_index_task.call_count == 0
 
 
@@ -1026,7 +1088,8 @@ def test_the_wrapper_tracks_a_mandate_run_with_its_deadline_and_never_sends_the_
     [row] = contexts(env, ns)
     assert "context_deadline" not in sent["meta"] and "admission" not in sent
     assert sent["kwargs"]["envelope"]["context_ref"] == str(row.id) == sent["meta"]["context_ref"]
-    assert module._context_by_task == OrderedDict({"task-9": (1, str(row.id), NOW + timedelta(seconds=600))})   # pylint: disable=W0212
+    assert module._context_by_task == OrderedDict({"task-9": (1, str(row.id), ns.adm.RunDeadline(
+        NOW + timedelta(seconds=600), "RUNTIME_LIMIT_EXCEEDED"))})   # pylint: disable=W0212
     # and the sweep stops it once the deadline passes
     stopped = []
     module.task_node = types.SimpleNamespace(stop_task=stopped.append)

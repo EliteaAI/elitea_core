@@ -6,10 +6,13 @@ only the Pylon runtime, the identity service and the audit methods are fakes.
 """
 import re
 import sys
+import threading
+import time
 import types
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -98,7 +101,7 @@ def test_the_request_carries_the_mandate_and_the_trigger_and_nothing_secret(ns, 
 def test_the_new_codes_have_fixed_readable_messages_without_ids_and_revoke_a_context(ns):
     texts = {code: ns.adm.MESSAGES[code] for code in (*NEW_CODES, "AUTHORIZATION_REQUIRED", "DENIED_OPERATION",
                                                      "MANDATE_REQUIRED")}
-    assert texts["MANDATE_REQUIRED"] == "This scheduled or webhook run has no approved mandate; it was not started."
+    assert texts["MANDATE_REQUIRED"] == "No approved mandate or delegation covers this run; it was not started."
     assert texts["MANDATE_INACTIVE"] == ("The mandate for this autonomous run is suspended or revoked; "
                                          "the run was not started.")
     assert texts["MANDATE_EXPIRED"] == "The mandate for this autonomous run has expired; renew it to run again."
@@ -310,6 +313,28 @@ def test_the_other_owners_mandates_are_left_alone(ns, env, agent):
     env.epochs[OWNER]["active"] = False
     refusal(ns, env, agent)
     assert mandate_row(env, ns, other).state == "active"
+
+
+@pytest.mark.parametrize("verdict", [{"user": 1}, {"user": 1, "active": None}, {"user": 1, "active": "yes"},
+                                     {"user": 1, "active": 0}, {}])
+def test_only_an_explicit_inactive_verdict_suspends_a_mandate_a_vague_one_is_unknown(ns, env, agent, verdict):
+    env.epochs[OWNER] = verdict
+    assert refusal(ns, env, agent).reason_code == "DEPENDENCY_UNAVAILABLE"
+    assert mandate_row(env, ns, agent.mandate).state == "active" and env.recorded == []
+
+
+def test_a_vague_owner_verdict_at_validation_is_unknown_not_a_revocation(ns, env, agent):
+    ref = admitted(ns, env, agent)
+    env.epochs[OWNER] = {"user": 1}
+    assert validate(ns, env, ref)["reason_code"] == "DEPENDENCY_UNAVAILABLE"
+    assert mandate_row(env, ns, agent.mandate).state == "active" and context_row(env, ns).state == "admitted"
+
+
+def test_an_owner_link_the_identity_service_refuses_as_malformed_names_nobody(ns, env, agent):
+    env.idp_raises = ValueError("not a valid oid")
+    assert refusal(ns, env, agent).reason_code == "IDENTITY_SUBJECT_UNLINKED"
+    env.idp_raises = RuntimeError("auth down")
+    assert refusal(ns, env, agent, run_id="run-2").reason_code == "DEPENDENCY_UNAVAILABLE"
 
 
 # --- credentials for a mandate subject ----------------------------------------------------------
@@ -564,7 +589,23 @@ def dispatch(ns, env, agent, module=None, over=None):
 def test_a_mandate_dispatch_carries_the_context_and_its_deadline_for_main_only(ns, env, agent):
     context_ref, call = dispatch(ns, env, agent)
     assert call["kwargs"]["envelope"]["context_ref"] == context_ref == call["meta"]["context_ref"]
-    assert call["meta"]["context_deadline"] == NOW + timedelta(seconds=600)   # the context's expiry, not the forged text
+    assert call["meta"]["context_deadline"] == ns.adm.RunDeadline(NOW + timedelta(seconds=600), "RUNTIME_LIMIT_EXCEEDED")
+
+
+@pytest.mark.parametrize("over, ttl, expires, deadline, code", [
+    ({}, 3600, 600, 600, "RUNTIME_LIMIT_EXCEEDED"),                     # max_runtime_s 600 is the nearest
+    ({"runtime": 7200}, 3600, 3600, 7200, "RUNTIME_LIMIT_EXCEEDED"),    # the ttl bounds the start window only
+    ({"runtime": 7200, "valid_until": NOW + timedelta(seconds=5000)}, 3600, 3600, 5000, "MANDATE_EXPIRED"),
+    ({"runtime": 7200, "valid_until": NOW + timedelta(seconds=90)}, 3600, 90, 90, "MANDATE_EXPIRED"),
+    ({"runtime": 600, "valid_until": NOW + timedelta(seconds=600)}, 3600, 600, 600, "RUNTIME_LIMIT_EXCEEDED"),   # a tie
+])
+def test_the_run_deadline_is_not_capped_by_the_context_ttl_and_names_the_bound_that_applied(
+        ns, env, over, ttl, expires, deadline, code):
+    binding = env.seed_agent()
+    agent = types.SimpleNamespace(mandate=add_mandate(env, ns, state="active", binding_ref=binding, **over))
+    view = admit(ns, env, agent, module=env.module(context_ttl_s=ttl))
+    assert view.expires_at == NOW + timedelta(seconds=expires)   # the start / restart window
+    assert (view.run_deadline, view.run_deadline_code) == (NOW + timedelta(seconds=deadline), code)
 
 
 def test_an_interactive_or_inherited_dispatch_never_keeps_a_deadline(ns, env):
@@ -583,7 +624,7 @@ def test_an_interactive_or_inherited_dispatch_never_keeps_a_deadline(ns, env):
 def test_track_context_remembers_a_deadline_and_completion_still_closes_the_context(ns, env, agent):
     module = env.module()
     view = admit(ns, env, agent)
-    deadline = NOW + timedelta(seconds=600)
+    deadline = ns.adm.RunDeadline(NOW + timedelta(seconds=600), "RUNTIME_LIMIT_EXCEEDED")
     ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=deadline)
     assert module._context_by_task["task-1"] == (1, view.context_ref, deadline)   # pylint: disable=W0212
     ns.adm.track_context(module, "task-2", 1, "other-ref")
@@ -602,9 +643,21 @@ def sweep_setup(ns, env, agent):
     return module, stopped, view
 
 
+def overdue(ns, seconds=-1, code="RUNTIME_LIMIT_EXCEEDED"):
+    return ns.adm.RunDeadline(NOW + timedelta(seconds=seconds), code)
+
+
+def broken_stop(module, calls):
+    def stop(task_id):
+        calls.append(task_id)
+        raise RuntimeError("pool down")
+
+    module.task_node = types.SimpleNamespace(stop_task=stop)
+
+
 def test_a_run_past_its_deadline_is_stopped_once_and_its_context_revoked(ns, env, agent):
     module, stopped, view = sweep_setup(ns, env, agent)
-    ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=NOW - timedelta(seconds=1))
+    ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=overdue(ns))
     assert ns.adm.enforce_run_deadlines(module) == 1 and stopped == ["task-1"]
     assert (context_row(env, ns).state, context_row(env, ns).revoked_reason) == ("revoked", "RUNTIME_LIMIT_EXCEEDED")
     event = deny_event(env)
@@ -615,9 +668,17 @@ def test_a_run_past_its_deadline_is_stopped_once_and_its_context_revoked(ns, env
     assert "task-1" not in module._context_by_task   # pylint: disable=W0212
 
 
+def test_a_run_that_outlived_the_mandate_is_revoked_as_expired_not_as_over_time(ns, env, agent):
+    module, stopped, view = sweep_setup(ns, env, agent)
+    ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=overdue(ns, code="MANDATE_EXPIRED"))
+    assert ns.adm.enforce_run_deadlines(module) == 1 and stopped == ["task-1"]
+    assert (context_row(env, ns).state, context_row(env, ns).revoked_reason) == ("revoked", "MANDATE_EXPIRED")
+    assert deny_event(env)["reason_code"] == "MANDATE_EXPIRED"
+
+
 def test_the_deadline_is_inclusive_and_a_future_one_is_left_alone(ns, env, agent):
     module, stopped, view = sweep_setup(ns, env, agent)
-    ns.adm.track_context(module, "later", 1, view.context_ref, deadline=NOW + timedelta(seconds=1))
+    ns.adm.track_context(module, "later", 1, view.context_ref, deadline=overdue(ns, 1))
     assert ns.adm.enforce_run_deadlines(module, now=NOW) == 0 and stopped == []
     assert ns.adm.enforce_run_deadlines(module, now=NOW + timedelta(seconds=1)) == 1 and stopped == ["later"]
 
@@ -630,26 +691,129 @@ def test_runs_without_a_deadline_are_never_touched_by_the_sweep(ns, env, agent):
     assert "interactive" in module._context_by_task   # pylint: disable=W0212
 
 
-def test_a_task_that_cannot_be_stopped_still_has_its_context_revoked(ns, env, agent):
+def test_a_task_that_cannot_be_stopped_stays_tracked_and_is_tried_again_on_the_next_tick(ns, env, agent):
     module, _, view = sweep_setup(ns, env, agent)
+    calls = []
+    broken_stop(module, calls)
+    ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=overdue(ns))
+    before = ns.adm.RUN_STOP.total("stop_failed", "RUNTIME_LIMIT_EXCEEDED")
+    assert ns.adm.enforce_run_deadlines(module) == 0 and calls == ["task-1"]
+    assert "task-1" in module._context_by_task   # pylint: disable=W0212
+    assert (context_row(env, ns).state, context_row(env, ns).revoked_reason) == ("admitted", None)   # nothing recorded yet
+    assert env.denied == []
+    assert ns.adm.RUN_STOP.total("stop_failed", "RUNTIME_LIMIT_EXCEEDED") == before + 1
+    assert len([line for line in env.log.lines if "could not be stopped" in line]) == 1
+    # the pool is back: the next tick stops it, forgets it and revokes the context
+    stopped = []
+    module.task_node = types.SimpleNamespace(stop_task=stopped.append)
+    assert ns.adm.enforce_run_deadlines(module) == 1 and stopped == ["task-1"]
+    assert "task-1" not in module._context_by_task   # pylint: disable=W0212
+    assert context_row(env, ns).revoked_reason == "RUNTIME_LIMIT_EXCEEDED" and len(env.denied) == 1
 
-    def broken(task_id):
-        raise RuntimeError("pool down")
 
-    module.task_node = types.SimpleNamespace(stop_task=broken)
-    ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=NOW - timedelta(seconds=1))
-    assert ns.adm.enforce_run_deadlines(module) == 1
-    assert context_row(env, ns).revoked_reason == "RUNTIME_LIMIT_EXCEEDED"
-    assert any("could not be stopped" in line for line in env.log.lines)
+def test_a_failed_stop_does_not_hold_back_the_other_runs(ns, env, agent):
+    module, _, view = sweep_setup(ns, env, agent)
+    calls = []
+
+    def stop(task_id):
+        calls.append(task_id)
+        if task_id == "bad":
+            raise RuntimeError("pool down")
+
+    module.task_node = types.SimpleNamespace(stop_task=stop)
+    ns.adm.track_context(module, "bad", 1, view.context_ref, deadline=overdue(ns))
+    ns.adm.track_context(module, "good", 1, view.context_ref, deadline=overdue(ns))
+    assert ns.adm.enforce_run_deadlines(module) == 1 and calls == ["bad", "good"]
+    assert list(module._context_by_task) == ["bad"]   # pylint: disable=W0212
 
 
 def test_a_context_that_finished_before_the_sweep_is_not_recorded_again(ns, env, agent):
     module, stopped, view = sweep_setup(ns, env, agent)
-    ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=NOW - timedelta(seconds=1))
+    ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=overdue(ns))
     update(env, ns.models.ExecutionSecurityContext, ns.models.ExecutionSecurityContext.id == uuid.UUID(view.context_ref),
            state="completed")
     assert ns.adm.enforce_run_deadlines(module) == 1 and stopped == ["task-1"]
     assert context_row(env, ns).state == "completed" and env.denied == []
+
+
+def revoke_context(env, ns, view, reason="DENIED_BINDING"):
+    update(env, ns.models.ExecutionSecurityContext, ns.models.ExecutionSecurityContext.id == uuid.UUID(view.context_ref),
+           state="revoked", revoked_reason=reason)
+
+
+def test_a_tracked_run_whose_context_was_revoked_is_stopped_even_without_a_deadline(ns, env, agent):
+    module, stopped, view = sweep_setup(ns, env, agent)
+    ns.adm.track_context(module, "interactive", 1, view.context_ref)
+    ns.adm.track_context(module, "mandate", 1, view.context_ref, deadline=overdue(ns, 600))
+    assert ns.adm.enforce_run_deadlines(module) == 0 and stopped == []   # nothing revoked yet
+    revoke_context(env, ns, view)
+    assert ns.adm.enforce_run_deadlines(module) == 2 and sorted(stopped) == ["interactive", "mandate"]
+    assert list(module._context_by_task) == []   # pylint: disable=W0212
+    assert context_row(env, ns).revoked_reason == "DENIED_BINDING" and env.denied == []   # already audited when revoked
+    assert ns.adm.enforce_run_deadlines(module) == 0 and len(stopped) == 2
+
+
+def test_a_revoked_run_that_cannot_be_stopped_stays_tracked_for_the_next_tick(ns, env, agent):
+    module, _, view = sweep_setup(ns, env, agent)
+    calls = []
+    broken_stop(module, calls)
+    ns.adm.track_context(module, "task-1", 1, view.context_ref)
+    revoke_context(env, ns, view)
+    before = ns.adm.RUN_STOP.total("stop_failed", "CONTEXT_REVOKED")
+    assert ns.adm.enforce_run_deadlines(module) == 0 and calls == ["task-1"] and "task-1" in module._context_by_task  # pylint: disable=W0212
+    assert ns.adm.RUN_STOP.total("stop_failed", "CONTEXT_REVOKED") == before + 1
+    assert ns.adm.enforce_run_deadlines(module) == 0 and calls == ["task-1", "task-1"]
+
+
+def test_an_overdue_run_is_stopped_once_not_as_overdue_and_as_revoked(ns, env, agent):
+    module, stopped, view = sweep_setup(ns, env, agent)
+    ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=overdue(ns))
+    revoke_context(env, ns, view, "EPOCH_MISMATCH")
+    assert ns.adm.enforce_run_deadlines(module) == 1 and stopped == ["task-1"]
+    assert context_row(env, ns).revoked_reason == "EPOCH_MISMATCH" and env.denied == []   # the first reason stays
+
+
+def test_the_revoked_runs_are_found_with_one_query_per_project_not_one_per_run(ns, env, agent):
+    module, stopped, view = sweep_setup(ns, env, agent)
+    for index in range(5):
+        ns.adm.track_context(module, f"task-{index}", 1, view.context_ref)
+    env.sessions.clear()
+    ns.adm.enforce_run_deadlines(module)
+    assert [project for project, _ in env.sessions] == [1]
+
+
+def test_an_unreadable_context_table_does_not_stop_the_deadline_part_of_the_sweep(ns, env, agent, monkeypatch):
+    module, stopped, view = sweep_setup(ns, env, agent)
+    ns.adm.track_context(module, "late", 1, view.context_ref, deadline=overdue(ns))
+    ns.adm.track_context(module, "other", 1, view.context_ref)
+    monkeypatch.setattr(ns.adm, "_revoked_among", mock.Mock(side_effect=RuntimeError("db down")))
+    assert ns.adm.enforce_run_deadlines(module) == 1 and stopped == ["late"]
+    assert any("could not be listed" in line for line in env.log.lines)
+
+
+def test_the_sweep_reads_the_tracked_map_under_the_lock_that_dispatch_uses(ns, env, agent):
+    module, stopped, view = sweep_setup(ns, env, agent)
+
+    class Spy:
+        def __init__(self):
+            self.entered = 0
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            self.entered += 1
+            return self._lock.__enter__()
+
+        def __exit__(self, *exc):
+            return self._lock.__exit__(*exc)
+
+    module._context_lock = spy = Spy()   # pylint: disable=W0212
+    ns.adm.track_context(module, "task-1", 1, view.context_ref, deadline=overdue(ns))
+    assert spy.entered == 1
+    ns.adm.enforce_run_deadlines(module)
+    assert spy.entered >= 3   # snapshot, then forgetting the stopped task
+    ns.adm.track_context(module, "task-2", 1, view.context_ref)
+    ns.adm.complete_context(module, "task-2")
+    assert spy.entered >= 5
 
 
 def test_flag_off_the_sweep_does_nothing_at_all(ns, env, agent):
@@ -663,35 +827,110 @@ def test_flag_off_the_sweep_does_nothing_at_all(ns, env, agent):
 
 # --- the owner event ----------------------------------------------------------------------------
 
-def event_runner(ns, env, payload, module=None, spawned=None):
-    spawned = [] if spawned is None else spawned
-    started = ns.mandate_owner.on_auth_invalidate(module or env.module(), payload, spawn=lambda target: (
-        spawned.append(target), target()))
-    return started, spawned
+def scanner_for(ns, delay=6.0, **kwargs):
+    return ns.mandate_owner.OwnerScanner(delay=lambda: delay, start_worker=False, **kwargs)
+
+
+def event_runner(ns, env, payload, module=None, scanner=None):
+    """Deliver one event and let the (single) worker serve whatever it queued, without waiting."""
+    scanner = scanner_for(ns) if scanner is None else scanner
+    queued = ns.mandate_owner.on_auth_invalidate(module or env.module(), payload, scanner=scanner)
+    while scanner.run_one(wait=False):
+        pass
+    return queued, scanner
 
 
 def test_flag_off_the_owner_event_returns_at_once(ns, env, agent):
     env.poison()
-    started, spawned = event_runner(ns, env, {"kind": "user", "id": OWNER, "epoch": 2}, module=env.module(governed=False))
-    assert started is False and spawned == []
+    scanner = scanner_for(ns)
+    queued = ns.mandate_owner.on_auth_invalidate(
+        env.module(governed=False), {"kind": "user", "id": OWNER, "epoch": 2}, scanner=scanner)
+    assert queued is False and len(scanner) == 0 and scanner._queue.empty()   # pylint: disable=W0212
 
 
 @pytest.mark.parametrize("payload", [None, "user", {}, {"kind": "token", "id": OWNER}, {"kind": "user"},
                                      {"kind": "user", "id": "5"}, {"kind": "user", "id": True}, {"id": OWNER}])
-def test_an_event_that_is_not_about_a_user_starts_nothing(ns, env, agent, payload):
-    started, spawned = event_runner(ns, env, payload)
-    assert started is False and spawned == [] and env.epoch_calls == []
+def test_an_event_that_is_not_about_a_user_queues_nothing(ns, env, agent, payload):
+    queued, scanner = event_runner(ns, env, payload)
+    assert queued is False and scanner._queue.empty() and env.epoch_calls == []   # pylint: disable=W0212
 
 
-def test_a_role_change_leaves_the_mandates_and_scans_no_project(ns, env, agent):
-    started, _ = event_runner(ns, env, {"kind": "user", "id": OWNER, "epoch": 2})
-    assert started is True and env.epoch_calls == [("user", OWNER)]
+def test_a_role_change_queues_one_read_and_suspends_and_scans_nothing(ns, env, agent):
+    queued, _ = event_runner(ns, env, {"kind": "user", "id": OWNER, "epoch": 2})
+    assert queued is True and env.epoch_calls == [("user", OWNER)]
     assert mandate_row(env, ns, agent.mandate).state == "active"
-    assert env.sessions == []   # no project was opened: the verdict said active
+    assert env.sessions == []   # no project was opened (the project list was not even asked): the verdict said active
+
+
+def test_duplicate_events_for_one_user_coalesce_into_one_read(ns, env, agent):
+    scanner = scanner_for(ns)
+    module = env.module()
+    payload = {"kind": "user", "id": OWNER, "epoch": 2}
+    results = [ns.mandate_owner.on_auth_invalidate(module, payload, scanner=scanner) for _ in range(50)]
+    assert results == [True] + [False] * 49 and len(scanner) == 1
+    while scanner.run_one(wait=False):
+        pass
+    assert env.epoch_calls == [("user", OWNER)]
+    # once the worker took the user up, a newer event queues a fresh read
+    assert ns.mandate_owner.on_auth_invalidate(module, payload, scanner=scanner) is True
+
+
+def test_other_users_are_queued_separately_and_served_in_order(ns, env, agent):
+    scanner = scanner_for(ns)
+    module = env.module()
+    for user in (OWNER, 6, 7):
+        assert ns.mandate_owner.on_auth_invalidate(module, {"kind": "user", "id": user}, scanner=scanner) is True
+    while scanner.run_one(wait=False):
+        pass
+    assert env.epoch_calls == [("user", OWNER), ("user", 6), ("user", 7)]
+
+
+def test_the_queue_is_bounded(ns, env, agent):
+    scanner = scanner_for(ns, max_pending=3)
+    module = env.module()
+    results = [ns.mandate_owner.on_auth_invalidate(module, {"kind": "user", "id": user}, scanner=scanner)
+               for user in range(10, 16)]
+    assert results == [True] * 3 + [False] * 3 and len(scanner) == 3
+
+
+def test_the_verdict_is_read_only_after_the_auth_cache_ttl_has_passed(ns, env, agent):
+    clock, slept = [100.0], []
+    scanner = ns.mandate_owner.OwnerScanner(
+        delay=ns.mandate_owner.owner_read_delay, clock=lambda: clock[0], sleep=slept.append, start_worker=False)
+    ns.tools.auth.epoch_ttl = 5.0
+    try:
+        assert ns.mandate_owner.owner_read_delay() == 6.0
+        ns.mandate_owner.on_auth_invalidate(env.module(), {"kind": "user", "id": OWNER}, scanner=scanner)
+        clock[0] += 2.0   # two seconds later the worker gets to it
+        scanner.run_one()
+        assert slept == [4.0]   # waits out the rest of ttl + 1 s
+        ns.tools.auth.epoch_ttl = 30
+        assert ns.mandate_owner.owner_read_delay() == 31.0
+        for odd in (None, "5", True, -1):
+            ns.tools.auth.epoch_ttl = odd
+            assert ns.mandate_owner.owner_read_delay() == 6.0   # not exposed: the default ttl plus a second
+    finally:
+        del ns.tools.auth.epoch_ttl
+
+
+def test_a_stale_active_reply_is_not_trusted_the_verdict_is_read_after_the_wait(ns, env, agent):
+    """The cached verdict still says active when the event arrives; by the time the worker reads, it is fresh."""
+    scanner = scanner_for(ns, sleep=lambda seconds: env.epochs[OWNER].update(active=False))
+    ns.mandate_owner.on_auth_invalidate(env.module(), {"kind": "user", "id": OWNER}, scanner=scanner)
+    assert env.epoch_calls == []   # nothing was read on arrival
+    scanner.run_one()   # waits (the fake sleep is when the cache turns fresh), then reads
+    assert env.epoch_calls == [("user", OWNER)]
+    assert mandate_row(env, ns, agent.mandate).state == "suspended"
 
 
 def test_an_unreadable_verdict_changes_nothing(ns, env, agent):
     env.epochs.pop(OWNER)
+    event_runner(ns, env, {"kind": "user", "id": OWNER, "epoch": 2})
+    assert mandate_row(env, ns, agent.mandate).state == "active"
+
+
+def test_a_verdict_without_the_active_key_changes_nothing(ns, env, agent):
+    env.epochs[OWNER] = {"user": 9}
     event_runner(ns, env, {"kind": "user", "id": OWNER, "epoch": 2})
     assert mandate_row(env, ns, agent.mandate).state == "active"
 
@@ -703,8 +942,8 @@ def test_a_suspended_owner_loses_their_mandates_in_every_project_and_their_live_
     other = add_mandate(env, ns, project_id=2, state="active", owner=6, version=71, application=8)
     admit(ns, env, agent)
     env.epochs[OWNER]["active"] = False
-    started, _ = event_runner(ns, env, {"kind": "user", "id": OWNER, "epoch": 2})
-    assert started is True
+    queued, _ = event_runner(ns, env, {"kind": "user", "id": OWNER, "epoch": 2})
+    assert queued is True
     assert (mandate_row(env, ns, agent.mandate).state, mandate_row(env, ns, agent.mandate).suspended_reason) == (
         "suspended", "OWNER_SUSPENDED")
     assert mandate_row(env, ns, second, project_id=2).state == "suspended"
@@ -732,10 +971,28 @@ def test_one_unreadable_project_does_not_stop_the_scan_of_the_others(ns, env, ag
     ns.projects[:] = [1]
 
 
-def test_a_failing_scan_is_logged_and_never_raised_into_the_event_thread(ns, env, agent):
+def test_a_failing_scan_is_logged_and_never_stops_the_worker(ns, env, agent):
     env.epochs_raise = True
-    started, _ = event_runner(ns, env, {"kind": "user", "id": OWNER, "epoch": 2})
-    assert started is True and any("suspension scan failed" in line for line in env.log.lines)
+    queued, scanner = event_runner(ns, env, {"kind": "user", "id": OWNER, "epoch": 2})
+    assert queued is True and any("suspension scan failed" in line for line in env.log.lines)
+    assert len(scanner) == 0   # and the user can be queued again
+    env.epochs_raise = False
+    assert ns.mandate_owner.on_auth_invalidate(env.module(), {"kind": "user", "id": OWNER}, scanner=scanner) is True
+
+
+def test_one_worker_thread_serves_all_events_not_one_thread_per_event(ns, env, agent):
+    seen = []
+    scanner = ns.mandate_owner.OwnerScanner(scan=seen.append, delay=lambda: 0.0, sleep=lambda seconds: None)
+    workers = lambda: [t for t in threading.enumerate() if t.name == "mandate-owner-scan"]   # noqa: E731
+    before = len(workers())
+    for user in range(20, 40):
+        scanner.submit(user)
+    assert len(workers()) <= before + 1
+    for _ in range(200):
+        if len(seen) == 20:
+            break
+        time.sleep(0.01)
+    assert seen == list(range(20, 40)) and len(workers()) <= before + 1 and scanner._worker.daemon   # pylint: disable=W0212
 
 
 # --- startup ------------------------------------------------------------------------------------

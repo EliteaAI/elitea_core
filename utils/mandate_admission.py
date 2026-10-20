@@ -22,6 +22,8 @@ from ..models.pd.admission import AdmissionRequest
 from .governance import is_governed
 from .trigger_principal import TriggerPrincipal, resolve_trigger_principal
 
+# Refusals that say "try again", not "no": a webhook sender retries a 5xx and never a 403
+UNAVAILABLE_CODES = frozenset({"DEPENDENCY_UNAVAILABLE", "AUDIT_UNAVAILABLE"})
 TICKET_TTL_S = 60
 MAX_TICKETS = 1000
 MANDATE_PREFIX = "mandate:"
@@ -60,6 +62,11 @@ class TicketStore:
             if entry is None or entry[0] <= self._clock():
                 return None
             return entry[1]
+
+
+def refusal_http_status(code) -> int:
+    """The HTTP status of a governed refusal answered to a webhook: 503 when the platform could not decide, else 403."""
+    return 503 if code in UNAVAILABLE_CODES else 403
 
 
 def governed_module():
