@@ -1,9 +1,9 @@
 """Create, read, update and delete of one entity schedule (EL-7011, ADR-0004)."""
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from flask import request
-from pydantic import ValidationError
-from sqlalchemy import select
+from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import func, select
 from tools import api_tools, auth, db, register_openapi
 
 from ...models.entity_schedule import EntityScheduleRun
@@ -30,6 +30,10 @@ from ...utils.schedule_timing import ScheduleLimitError
 OPENAPI_TAG = "elitea_core/schedules"
 
 
+def _iso(moment) -> str | None:
+    return moment.isoformat() if moment else None
+
+
 def _details(row, scope: ScheduleScope) -> dict:
     """Shape a row as the API answers it; the owner name stays empty until a story needs it."""
     fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions"}
@@ -46,6 +50,25 @@ NOT_ALLOWED = {"error": "Method not allowed"}, 405
 def _on_run_path() -> bool:
     """True for the `<project>/<schedule>/run` URL, which shares this resource with the schedule URL."""
     return request.path.rstrip("/").endswith("/run")
+
+
+def _on_runs_path() -> bool:
+    """True for the `<project>/<schedule>/runs` URL, which shares this resource with the schedule URL."""
+    return request.path.rstrip("/").endswith("/runs")
+
+
+class RunsQuery(BaseModel):
+    """Query of the run records list; `limit` above the cap is lowered to it (R3.3, R3.5)."""
+
+    limit: int = Field(default=50, ge=1)
+    offset: int = Field(default=0, ge=0)
+    status: Literal["running", "success", "failed", "skipped", "blocked", "waiting_for_approval"] | None = None
+
+
+MAX_RUNS_LIMIT = 100
+RUN_FIELDS = (
+    "id", "trigger", "status", "reason", "conversation_id", "requested_by", "started_at", "finished_at",
+)
 
 
 def _parse_body(model):
@@ -140,12 +163,39 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def get(self, project_id: int, schedule_id: int, **kwargs):
         if _on_run_path():  # only POST serves the run URL
             return NOT_ALLOWED
+        if _on_runs_path():
+            return self._runs(project_id=project_id, schedule_id=schedule_id)
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
                 return _details(load_schedule_in_scope(session, schedule_id, scope), scope), 200
             except ScheduleError as e:
                 return e.response
+
+    def _runs(self, project_id: int, schedule_id: int):
+        """Run records of a schedule in scope, newest first, with the total before paging."""
+        try:
+            query = RunsQuery.model_validate(dict(request.args))
+        except ValidationError as e:
+            return _validation_response(e)
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                load_schedule_in_scope(session, schedule_id, scope)
+            except ScheduleError as e:
+                return e.response
+            where = [EntityScheduleRun.schedule_id == schedule_id]
+            if query.status:
+                where.append(EntityScheduleRun.status == query.status)
+            rows = session.execute(
+                select(*(getattr(EntityScheduleRun, name) for name in RUN_FIELDS)).where(*where)
+                .order_by(EntityScheduleRun.started_at.desc(), EntityScheduleRun.id.desc())
+                .limit(min(query.limit, MAX_RUNS_LIMIT)).offset(query.offset)
+            ).mappings().all()
+            total = session.scalar(select(func.count()).select_from(EntityScheduleRun).where(*where))
+            return {"total": total, "rows": [{
+                **row, "started_at": _iso(row["started_at"]), "finished_at": _iso(row["finished_at"]),
+            } for row in rows]}, 200
 
     @register_openapi(
         name="Update Schedule",
@@ -157,7 +207,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("update"))
     @api_tools.endpoint_metrics
     def put(self, project_id: int, schedule_id: int, **kwargs):
-        if _on_run_path():  # only POST serves the run URL
+        if _on_run_path() or _on_runs_path():  # only POST serves the run URL, only GET the runs URL
             return NOT_ALLOWED
         body, error = _parse_body(ScheduleUpdate)
         if error:
@@ -183,7 +233,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("delete"))
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, schedule_id: int, **kwargs):
-        if _on_run_path():  # only POST serves the run URL
+        if _on_run_path() or _on_runs_path():  # only POST serves the run URL, only GET the runs URL
             return NOT_ALLOWED
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
@@ -197,6 +247,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 class API(api_tools.APIBase):
     url_params: ClassVar[list] = api_tools.with_modes([
         "<int:project_id>", "<int:project_id>/<int:schedule_id>", "<int:project_id>/<int:schedule_id>/run",
+        "<int:project_id>/<int:schedule_id>/runs",
     ])
 
     mode_handlers: ClassVar[dict] = {PROMPT_LIB_MODE: PromptLibAPI}
