@@ -39,6 +39,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return validate_context(self, project_id, context_ref, caller)
 
     @web.method()
+    def revoke_credential_contexts(self, session, credential_ref):
+        """ Same process: a credential reference left use, so the live runs holding it are revoked (#6757).
+        The caller owns the transaction; returns the number of contexts revoked. """
+        from ..utils.admission import revoke_credential_contexts  # pylint: disable=C0415
+        #
+        return revoke_credential_contexts(session, credential_ref)
+
+    @web.method()
     def get_provider_api_info(self, user_id, project_id, provider_name):
         """ Method """
         provider = self.lookup_provider(user_id, project_id, provider_name)

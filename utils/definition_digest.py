@@ -91,16 +91,12 @@ def definition_digest(canonical: dict) -> str:
     return DIGEST_PREFIX + hashlib.sha256(payload).hexdigest()
 
 
-def digest_for_version(session, version_id: int) -> str:
-    """Two queries, whatever the number of toolkits: the version, then its mappings joined to tools."""
-    from ..models.all import ApplicationVersion  # pylint: disable=C0415
+def toolkit_rows(session, version_id: int):
+    """``(EntityToolMapping, EliteATool)`` of the version's toolkits: one joined query."""
     from ..models.elitea_tools import EliteATool, EntityToolMapping  # pylint: disable=C0415
     from ..models.enums.all import ToolEntityTypes  # pylint: disable=C0415
 
-    version = session.query(ApplicationVersion).filter(ApplicationVersion.id == version_id).first()
-    if version is None:
-        raise DigestError("VERSION_NOT_FOUND", f"application version {version_id} does not exist")
-    rows = (
+    return (
         session.query(EntityToolMapping, EliteATool)
         .join(EliteATool, EliteATool.id == EntityToolMapping.tool_id)
         .filter(
@@ -109,4 +105,13 @@ def digest_for_version(session, version_id: int) -> str:
         )
         .all()
     )
-    return definition_digest(canonical_definition(version, rows))
+
+
+def digest_for_version(session, version_id: int) -> str:
+    """Two queries, whatever the number of toolkits: the version, then its mappings joined to tools."""
+    from ..models.all import ApplicationVersion  # pylint: disable=C0415
+
+    version = session.query(ApplicationVersion).filter(ApplicationVersion.id == version_id).first()
+    if version is None:
+        raise DigestError("VERSION_NOT_FOUND", f"application version {version_id} does not exist")
+    return definition_digest(canonical_definition(version, toolkit_rows(session, version_id)))

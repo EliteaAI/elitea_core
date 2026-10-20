@@ -20,11 +20,16 @@ from typing import Mapping, Optional
 from pylon.core.tools import log
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
-from tools import auth, db, this
+from tools import auth, config as c, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
 from ..models.pd.admission import AdmissionRequest, ExecutionSecurityContextView
 from ..models.pd.task_envelope import PROFILE_GOVERNED
+from .credential_decision import (
+    ALLOWED as CREDENTIAL_USE_ALLOWED, WHOLE_TARGET, CredentialDecisionContext, CredentialDecisionError,
+    binding_ref, collect_credential_uses, decide_credential_uses, recheck_credentials, toolkit_secret_fields,
+    uncovered_credentials, user_may_use_credentials,
+)
 from .definition_digest import DigestError, digest_for_version
 from .exceptions import AdmissionDenied
 from .governance import CONFIG_SECTION, is_governed
@@ -36,7 +41,10 @@ MAX_TRACKED_CONTEXTS = 10_000
 TTL_RANGE_S = (60, 86400)
 LIVE_STATES = ("admitted", "running")
 # Codes that explain why a context was revoked; the worker is told the same reason, not a generic one
-REVOKE_CODES = frozenset({"EPOCH_MISMATCH", "BINDING_DIGEST_MISMATCH", "DENIED_BINDING"})
+REVOKE_CODES = frozenset({
+    "EPOCH_MISMATCH", "BINDING_DIGEST_MISMATCH", "DENIED_BINDING",
+    "CREDENTIAL_REFERENCE_INACTIVE", "CREDENTIAL_GENERATION_MISMATCH", "DENIED_GRANT",
+})
 _CODE = re.compile(r"^[A-Z0-9_]{1,64}$")
 
 MESSAGES = {
@@ -56,6 +64,12 @@ MESSAGES = {
     "STALE_CONTEXT": "The admission for this run is no longer valid; the run was stopped.",
     "EPOCH_MISMATCH": "Access was revoked after this run was admitted; the run was stopped.",
     "UNKNOWN_SCHEMA_VERSION": "The admission record is not understood by this version; the run was stopped.",
+    "CREDENTIAL_REFERENCE_REQUIRED": "This agent uses a credential that is not registered for governed use; the run was not started.",
+    "CREDENTIAL_REFERENCE_INACTIVE": "A credential this agent uses is suspended or retired; the run was not started.",
+    "CREDENTIAL_GENERATION_MISMATCH": "A credential changed after it was approved; the run was not started.",
+    "CREDENTIAL_CLASS_NOT_ALLOWED": "Personal credentials cannot be used by governed agents.",
+    "DENIED_GRANT": "This agent is not allowed to use one of its credentials for you.",
+    "DENIED_RBAC": "You do not have permission to use this agent's credentials.",
 }
 GENERIC_MESSAGE = "The run was not started."
 
@@ -115,6 +129,15 @@ def check_governed_startup(module):
         audit_ready = False
     if not audit_ready:
         problems.append("the tracing plugin must provide security_audit_record")
+    for plugin, method in (("secrets", "credential_use_facts"), ("configurations", "configuration_credential_facts")):
+        try:
+            provided = callable(getattr(this.for_module(plugin).module, method, None))
+        except Exception:  # pylint: disable=W0703
+            provided = False
+        if not provided:
+            problems.append(f"the {plugin} plugin must provide {method}")
+    if getattr(c, "SECRETS_ENGINE", None) == "database" and not getattr(c, "SECRETS_MASTER_KEY", None):
+        problems.append("SECRETS_MASTER_KEY must be set when SECRETS_ENGINE is 'database'")
     if problems:
         log.error("Credential governance cannot start: %s", "; ".join(problems))
         raise ValueError(f"{CONFIG_SECTION}: " + "; ".join(problems))
@@ -147,6 +170,9 @@ class _LabeledCounter:
 
 ADMISSION_DECISION = _LabeledCounter(
     "admission_decision_total", "Governed run admission decisions", ["decision", "reason_code"],
+)
+CREDENTIAL_DECISION = _LabeledCounter(
+    "credential_decision_total", "Governed run credential-use decisions", ["decision", "reason_code"],
 )
 CONTEXT_VALIDATION = _LabeledCounter(
     "execution_context_validation_total", "Governed run context validations on Main", ["result", "reason_code"],
@@ -181,8 +207,8 @@ def _record_deny(module, code, *, event_type="admission", **fields):
         log.error("admission: the deny event %s was not recorded (%s)", code, type(exc).__name__)
 
 
-def _denied(code) -> AdmissionDenied:
-    return AdmissionDenied(code, MESSAGES.get(code, GENERIC_MESSAGE))
+def _denied(code, audit=None) -> AdmissionDenied:
+    return AdmissionDenied(code, MESSAGES.get(code, GENERIC_MESSAGE), audit)
 
 
 def _caller_ref(request: AdmissionRequest) -> str:
@@ -281,7 +307,30 @@ def _subject_of(principal: dict) -> dict:
     }
 
 
-def _admit(module, request: AdmissionRequest, run_id) -> ExecutionSecurityContextView:  # pylint: disable=R0914
+def _decide_credentials(module, request: AdmissionRequest, subject: dict, binding, payload, expires_at) -> list:
+    """Step 5b: may this agent use each credential it uses, for this user? The allowed decisions (none for an
+    agent without governed credentials), or ``AdmissionDenied`` for the first refusal."""
+    context = CredentialDecisionContext(
+        binding_project_id=request.binding_project_id, agent_binding_ref=str(binding.id), subject_ref=subject["ref"],
+        policy_revision=module.governance_profile.policy_revision, now=_now(), expires_at=expires_at,
+        can_use=user_may_use_credentials(request.caller_id, request.binding_project_id),
+    )
+    try:
+        with db.get_session(request.binding_project_id) as session:
+            candidates = collect_credential_uses(
+                session, request.binding_project_id, request.version_id, payload,
+                lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, request.caller_id))
+        return decide_credential_uses(context, candidates)
+    except CredentialDecisionError as exc:
+        error = exc
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the credential decision failed (%s)", type(exc).__name__)
+        error = CredentialDecisionError("DEPENDENCY_UNAVAILABLE")
+    _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "deny", error.reason_code)
+    raise _denied(error.reason_code, error.audit)
+
+
+def _admit(module, request: AdmissionRequest, run_id, payload=None) -> ExecutionSecurityContextView:  # pylint: disable=R0914
     settings = module.admission_settings
     policy_revision = module.governance_profile.policy_revision
     # 1. the audit trail can take a decision
@@ -302,10 +351,12 @@ def _admit(module, request: AdmissionRequest, run_id) -> ExecutionSecurityContex
     binding = _find_binding(request, settings)
     # 5. on whose behalf
     subject = _subject_of(principal)
-    # 6. context row and allow event, atomically
+    expires_at = _now() + timedelta(seconds=settings.context_ttl_s)
+    # 5b. which credentials the run uses, and whether the agent may use them for this user
+    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at)
+    # 6. context row and allow events, atomically
     epochs = principal.get("epochs") if isinstance(principal.get("epochs"), dict) else {}
     context_id = uuid.uuid4()
-    expires_at = _now() + timedelta(seconds=settings.context_ttl_s)
     caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
     for _ in range(3):
         with db.get_session(request.project_id) as session:
@@ -324,9 +375,23 @@ def _admit(module, request: AdmissionRequest, run_id) -> ExecutionSecurityContex
                     version_id=request.version_id, definition_digest=binding.definition_digest,
                     run_id=run_id, attempt=attempt,
                     revocation_epochs={"user": epochs.get("user"), "token": epochs.get("token"),
-                                       "binding": binding.revocation_epoch, "project": None, "credential": None},
+                                       "binding": binding.revocation_epoch, "project": None,
+                                       "credential": {d.credential_ref: d.reference_epoch for d in decisions} or None},
+                    allowed_bindings=[binding_ref(d) for d in decisions],
                     trace_ref=request.trace_ref, expires_at=expires_at, state="admitted",
                 ))
+                for decision in decisions:
+                    _tracing().security_audit_record(session, _event(
+                        event_type="decision", decision="allow", reason_code=CREDENTIAL_USE_ALLOWED,
+                        event_id=decision.decision_id, tenant=subject["tid"], project_id=request.project_id,
+                        application_id=request.application_id, environment=settings.environment,
+                        caller_ref=caller["ref"], user_ref=subject["ref"], agent_binding_ref=str(binding.id),
+                        run_id=run_id, attempt=attempt, credential_ref=decision.credential_ref,
+                        credential_generation=decision.credential_generation,
+                        toolkit_instance_id=decision.toolkit_instance_id, target_ref=WHOLE_TARGET,
+                        policy_revision=policy_revision, revocation_epoch=decision.reference_epoch,
+                        traceparent=request.trace_ref,
+                    ))
                 _tracing().security_audit_record(session, _event(
                     event_type="admission", decision="allow", reason_code="ADMITTED",
                     tenant=subject["tid"], project_id=request.project_id, application_id=request.application_id,
@@ -346,6 +411,8 @@ def _admit(module, request: AdmissionRequest, run_id) -> ExecutionSecurityContex
         break
     else:
         raise _denied("DEPENDENCY_UNAVAILABLE")
+    for _ in decisions:
+        _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "allow", CREDENTIAL_USE_ALLOWED)
     return ExecutionSecurityContextView(
         context_ref=str(context_id), run_id=run_id, attempt=attempt, project_id=request.project_id,
         application_id=request.application_id, version_id=request.version_id,
@@ -353,10 +420,11 @@ def _admit(module, request: AdmissionRequest, run_id) -> ExecutionSecurityContex
     )
 
 
-def admit_execution(module, request: AdmissionRequest, *, run_id: str) -> ExecutionSecurityContextView:
-    """Admit one governed run or raise ``AdmissionDenied``. Every decision is counted and audited."""
+def admit_execution(module, request: AdmissionRequest, *, run_id: str, payload=None) -> ExecutionSecurityContextView:
+    """Admit one governed run or raise ``AdmissionDenied``. Every decision is counted and audited.
+    ``payload`` is the dispatched payload; it is cross-checked against the agent's stored credentials, never trusted."""
     try:
-        view = _admit(module, request, run_id)
+        view = _admit(module, request, run_id, payload)
     except AdmissionDenied as exc:
         error = exc
     except Exception as exc:  # pylint: disable=W0703
@@ -368,7 +436,7 @@ def admit_execution(module, request: AdmissionRequest, *, run_id: str) -> Execut
     _record_deny(
         module, error.reason_code, project_id=request.project_id, application_id=request.application_id,
         caller_ref=_caller_ref(request), run_id=run_id if isinstance(run_id, str) else None,
-        traceparent=request.trace_ref,
+        traceparent=request.trace_ref, **error.audit,
     )
     _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "deny", error.reason_code)
     raise error
@@ -392,7 +460,8 @@ def admit_dispatch(module, task_name, call_kwargs, admission: Optional[Admission
         # switched on): the worker would not check it, so the run is not started
         return _refuse_dispatch(module, "STALE_CONTEXT", call_kwargs, run_id)
     if envelope.get("context_ref"):
-        # a child or reconcile dispatch reusing its parent's payload runs under the parent's admission
+        # a child or reconcile dispatch runs under its parent's admission, which decided the parent's credentials only
+        _refuse_uncovered_credentials(module, payload, envelope["context_ref"], call_kwargs, run_id)
         meta.setdefault("context_ref", envelope["context_ref"])
         return None
     if admission is None:
@@ -400,10 +469,44 @@ def admit_dispatch(module, task_name, call_kwargs, admission: Optional[Admission
     #
     if admission.trace_ref is None and isinstance(meta.get("traceparent"), str):
         admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
-    view = admit_execution(module, admission, run_id=run_id)
+    view = admit_execution(module, admission, run_id=run_id, payload=payload)
     envelope["context_ref"] = view.context_ref
     meta["context_ref"] = view.context_ref
     return view.context_ref
+
+
+def _parent_covered(project_id, context_ref) -> set:
+    """The configuration uuids the parent context decided credentials for."""
+    if isinstance(project_id, bool) or not isinstance(project_id, int):
+        raise _denied("STALE_CONTEXT")
+    try:
+        context_id = uuid.UUID(str(context_ref))
+    except ValueError:
+        raise _denied("STALE_CONTEXT") from None
+    with db.get_session(project_id) as session:
+        entries = session.execute(
+            select(ExecutionSecurityContext.allowed_bindings).where(ExecutionSecurityContext.id == context_id)
+        ).scalar_one_or_none()
+    if not isinstance(entries, list):
+        raise _denied("STALE_CONTEXT")
+    return {entry.get("configuration_uuid") for entry in entries if isinstance(entry, dict)}
+
+
+def _refuse_uncovered_credentials(module, payload, context_ref, call_kwargs, run_id):
+    """Refuse a dispatch under a parent context whose payload carries a credential the parent was not
+    admitted for (a credential-bearing sub-agent, a conversation toolkit)."""
+    project_id = (call_kwargs.get("meta") or {}).get("project_id") or payload.get("project_id")
+    try:
+        code = "CREDENTIAL_REFERENCE_REQUIRED" if uncovered_credentials(
+            payload, lambda: _parent_covered(project_id, context_ref), project_id) else None
+    except AdmissionDenied as exc:
+        code = exc.reason_code
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the inherited credentials could not be checked (%s)", type(exc).__name__)
+        code = "DEPENDENCY_UNAVAILABLE"
+    if code is not None:
+        _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "deny", code)
+        _refuse_dispatch(module, code, call_kwargs, run_id)
 
 
 def _refuse_dispatch(module, code, call_kwargs, run_id):
@@ -441,6 +544,19 @@ def revoke_binding_contexts(session, binding_id, reason="EPOCH_MISMATCH") -> int
         update(ExecutionSecurityContext)
         .where(ExecutionSecurityContext.agent_binding_ref == binding_id,
                ExecutionSecurityContext.state.in_(LIVE_STATES))
+        .values(state="revoked", revoked_reason=reason, ended_at=func.now())
+        .execution_options(synchronize_session=False)
+    ).rowcount
+
+
+def revoke_credential_contexts(session, credential_ref, reason="CREDENTIAL_REFERENCE_INACTIVE") -> int:
+    """Revoke every live context in this session's schema that holds a decision for this credential
+    reference. Does not commit. Contexts of other schemas fail at ``validate_context``."""
+    probe = [{"credential_ref": str(uuid.UUID(str(credential_ref)))}]
+    return session.execute(
+        update(ExecutionSecurityContext)
+        .where(ExecutionSecurityContext.state.in_(LIVE_STATES),
+               ExecutionSecurityContext.allowed_bindings.contains(probe))
         .values(state="revoked", revoked_reason=reason, ended_at=func.now())
         .execution_options(synchronize_session=False)
     ).rowcount
@@ -543,6 +659,17 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
             raise revoke("EPOCH_MISMATCH")
         if binding.definition_digest != row.definition_digest:
             raise revoke("BINDING_DIGEST_MISMATCH")
+        #
+        if isinstance(row.allowed_bindings, list) and row.allowed_bindings:
+            try:
+                code = recheck_credentials(
+                    row.binding_project_id or project_id, row.allowed_bindings, (row.subject or {}).get("ref"),
+                    str(row.agent_binding_ref), _now())
+            except Exception as exc:  # pylint: disable=W0703
+                log.error("validate_context: credential facts unreadable (%s)", type(exc).__name__)
+                raise _denied("DEPENDENCY_UNAVAILABLE") from None   # unknown, not revoked: the run may be retried
+            if code is not None:
+                raise revoke(code)
         #
         if _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
             raise _denied("STALE_CONTEXT")

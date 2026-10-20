@@ -121,10 +121,12 @@ class AdmissionDenied(Exception):
     """A governed run was refused before dispatch (C-1009, #6756).
 
     ``reason_code`` is a stable upper-case code; ``message`` is fixed text per code and never
-    carries a claim, token or identifier from the request.
+    carries a claim, token or identifier from the request. ``audit`` holds reference fields of the
+    refused credential for the deny event only (never for the message).
     """
 
-    def __init__(self, reason_code: str, message: str):
+    def __init__(self, reason_code: str, message: str, audit: dict | None = None):
         self.reason_code = reason_code
         self.message = message
+        self.audit = audit or {}
         super().__init__(f"{reason_code}: {message}")
