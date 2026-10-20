@@ -93,6 +93,7 @@ def world(monkeypatch):
             "START_FAILED": "the run could not start",
         },
         "utils.schedule_timing": {"compute_next_run": lambda cron, zone, after: NEXT},
+        "utils.schedule_runs": {"record_skipped_run": lambda *a: 1, "fail_stale_runs": lambda *a: 0},
     }
     for dotted, names in stubs.items():
         module = types.ModuleType("plugins.elitea_core." + dotted)
