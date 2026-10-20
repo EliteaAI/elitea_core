@@ -1,0 +1,281 @@
+{
+  "_comment": "Shared by elitea-sdk runtime/guardrails and elitea_core utils/input_guardrail (#6886). Every value is a generated fake; text is split into parts so secret scanners do not flag this file. Join parts before use.",
+  "positive": [
+    {
+      "rule_id": "aws_access_key",
+      "category": "credentials",
+      "parts": [
+        "my key is ",
+        "AK",
+        "IA",
+        "FAKE0TEST0VECTOR",
+        " ok"
+      ]
+    },
+    {
+      "rule_id": "aws_secret_assignment",
+      "category": "credentials",
+      "parts": [
+        "aws_secret_access_key = ",
+        "fAkEfAkEfAkEfAkEfAkEfAkEfAkEfAkEfAkEfAkE"
+      ]
+    },
+    {
+      "rule_id": "github_token",
+      "category": "credentials",
+      "parts": [
+        "token ",
+        "gh",
+        "p_",
+        "fAkEtEsTvEcToR0000000000000000000000"
+      ]
+    },
+    {
+      "rule_id": "github_token",
+      "category": "credentials",
+      "parts": [
+        "github",
+        "_pat_",
+        "FakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFake00"
+      ]
+    },
+    {
+      "rule_id": "openai_key",
+      "category": "credentials",
+      "parts": [
+        "use ",
+        "sk",
+        "-proj-",
+        "FakeTestVectorNotARealKey0000"
+      ]
+    },
+    {
+      "rule_id": "anthropic_key",
+      "category": "credentials",
+      "parts": [
+        "sk",
+        "-ant-",
+        "api03-FakeTestVectorNotARealKey000000"
+      ]
+    },
+    {
+      "rule_id": "slack_token",
+      "category": "credentials",
+      "parts": [
+        "xo",
+        "xb-",
+        "000000000-FakeTestVector"
+      ]
+    },
+    {
+      "rule_id": "google_api_key",
+      "category": "credentials",
+      "parts": [
+        "AI",
+        "za",
+        "Fake_Test-Vector0000000000000000000"
+      ]
+    },
+    {
+      "rule_id": "azure_storage_conn",
+      "category": "credentials",
+      "parts": [
+        "DefaultEndpointsProtocol=https;AccountName=fake;Account",
+        "Key=",
+        "FakeTestVector+/FakeTestVector+/FakeTestVector+/FakeTestVector+/",
+        "==;"
+      ]
+    },
+    {
+      "rule_id": "private_key_block",
+      "category": "credentials",
+      "parts": [
+        "-----BEGIN ",
+        "PRIVATE KEY-----\n",
+        "TUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lCQVFDN1ZKVFV0OVVz\n",
+        "-----END ",
+        "PRIVATE KEY-----"
+      ]
+    },
+    {
+      "rule_id": "jwt",
+      "category": "credentials",
+      "parts": [
+        "Bearer-less ",
+        "eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9",
+        ".",
+        "eyJzdWIiOiAiZmFrZS11c2VyIiwgImlhdCI6IDF9",
+        ".",
+        "c2lnbmF0dXJlLW5vdC1yZWFs"
+      ]
+    },
+    {
+      "rule_id": "auth_header",
+      "category": "credentials",
+      "parts": [
+        "Authorization: ",
+        "Bearer ",
+        "FakeOpaqueTokenValue0123456789"
+      ]
+    },
+    {
+      "rule_id": "password_assignment",
+      "category": "credentials",
+      "parts": [
+        "db password=",
+        "Xq7#mB2!vR9pLw"
+      ]
+    },
+    {
+      "rule_id": "password_assignment",
+      "category": "credentials",
+      "parts": [
+        "api_key: \"",
+        "Zr8kQ2mN5vT1xW4y",
+        "\""
+      ]
+    },
+    {
+      "rule_id": "email",
+      "category": "personal_data",
+      "parts": [
+        "contact ",
+        "jane.doe",
+        "@example.com",
+        " please"
+      ]
+    },
+    {
+      "rule_id": "phone_e164",
+      "category": "personal_data",
+      "parts": [
+        "call +",
+        "4915",
+        "123456789"
+      ]
+    },
+    {
+      "rule_id": "payment_card",
+      "category": "personal_data",
+      "parts": [
+        "card ",
+        "4111 1111 1111 1111"
+      ]
+    },
+    {
+      "rule_id": "iban",
+      "category": "personal_data",
+      "parts": [
+        "iban ",
+        "GB82 WEST 1234 5698 7654 32"
+      ]
+    }
+  ],
+  "negative": [
+    {
+      "parts": [
+        "password=changeme"
+      ]
+    },
+    {
+      "parts": [
+        "password: ********"
+      ]
+    },
+    {
+      "parts": [
+        "password=${DB_PASSWORD}"
+      ]
+    },
+    {
+      "parts": [
+        "token=<your-token-here>"
+      ]
+    },
+    {
+      "parts": [
+        "password = os.environ.get('DB_PASSWORD')"
+      ]
+    },
+    {
+      "parts": [
+        "api_key = settings.OPENAI_API_KEY"
+      ]
+    },
+    {
+      "parts": [
+        "Set the token: YOUR_TOKEN_HERE in config"
+      ]
+    },
+    {
+      "parts": [
+        "password=aaaaaaaaaaaa"
+      ]
+    },
+    {
+      "parts": [
+        "The AKIA prefix marks AWS access keys."
+      ]
+    },
+    {
+      "parts": [
+        "sk-short"
+      ]
+    },
+    {
+      "parts": [
+        "Use ghp_ prefixed tokens for GitHub."
+      ]
+    },
+    {
+      "parts": [
+        "eyJhbGciOi is how a JWT header starts"
+      ]
+    },
+    {
+      "parts": [
+        "Order 1234 5678 9012 3456 shipped"
+      ]
+    },
+    {
+      "parts": [
+        "Version 2.14.0-rc1 released on 2026-10-20"
+      ]
+    },
+    {
+      "parts": [
+        "git commit 47a57c5e9f0b1d2c3a4b5c6d7e8f9a0b1c2d3e4f"
+      ]
+    },
+    {
+      "parts": [
+        "UUID 123e4567-e89b-12d3-a456-426614174000"
+      ]
+    },
+    {
+      "parts": [
+        "Call me at extension 4421"
+      ]
+    },
+    {
+      "parts": [
+        "See https://docs.elitea.ai/support/contact-support/ for help"
+      ]
+    },
+    {
+      "parts": [
+        "def login(password: str) -> bool:"
+      ]
+    },
+    {
+      "parts": [
+        "The secret to good code is tests."
+      ]
+    },
+    {
+      "parts": [
+        "[REDACTED:credentials] was removed"
+      ]
+    }
+  ]
+}

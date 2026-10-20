@@ -98,3 +98,57 @@ class BudgetDoorClosedError(Exception):
     def body(self):
         """The wire body the inference-plane refusal uses, byte-identical."""
         return {"error": {"message": self.message, "type": self.type, "code": self.code}}
+
+
+INPUT_GUARDRAIL_BLOCKED_TYPE = "input_guardrail_blocked"
+_INPUT_GUARDRAIL_CATEGORY_LABELS = {
+    "credentials": "a credential",
+    "personal_data": "personal data",
+}
+
+
+class InputGuardrailBlockedError(Exception):
+    """Raised when the input guardrail (#6886) blocks a turn before it reaches a model.
+
+    Carries rule ids and segment kinds only; the detected value never reaches it. The
+    message is twinned with indexer_worker's build_input_guardrail_error.
+    """
+
+    def __init__(self, categories=None, rules=None, segments=None):
+        self.categories = [str(c) for c in categories or ["error"]]
+        self.rules = [str(r) for r in rules or []]
+        self.segments = [str(s) for s in segments or []]
+        self.type = INPUT_GUARDRAIL_BLOCKED_TYPE
+        self.code = INPUT_GUARDRAIL_BLOCKED_TYPE
+        if self.categories != ["error"]:
+            labels = [_INPUT_GUARDRAIL_CATEGORY_LABELS.get(c, c) for c in self.categories]
+            self.message = (
+                f"Your message appears to contain {' and '.join(labels)}. It was not sent to the model. "
+                "Remove it, or store it as a project secret and reference it instead."
+            )
+            self.message_key = f"input_guardrail.blocked.{self.categories[0]}"
+        else:
+            # fail_closed on a detector error: nothing was detected, the check could not run
+            self.message = "Your message could not be checked by the input guardrail, so it was not sent to the model."
+            self.message_key = "input_guardrail.blocked.error"
+        super().__init__(self.message)
+
+    def verdict(self):
+        """The ``input_guardrail`` block of the SIO event and the stored message meta."""
+        return {
+            "action": "block",
+            "categories": self.categories,
+            "rules": self.rules,
+            "segments": self.segments,
+            "message_key": self.message_key,
+        }
+
+    def body(self):
+        """The REST 422 body."""
+        return {
+            "error": self.type,
+            "categories": self.categories,
+            "rules": self.rules,
+            "message": self.message,
+            "message_key": self.message_key,
+        }

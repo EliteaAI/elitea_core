@@ -14,6 +14,7 @@ from ..models.message_group import ConversationMessageGroup
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType
 from ..utils.exceptions import PoolSaturationError
+from ..utils.input_guardrail import redact_text
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
@@ -59,7 +60,11 @@ def execute_pipeline_webhook(
         Dict with task_id, conversation_id, and status
     """
     payload_str = json.dumps(payload, indent=2)
-    payload_preview = payload_str[:500] + "..." if len(payload_str) > 500 else payload_str
+    # Stored before dispatch inspects the payload, so the History copy never keeps a
+    # value; redacted before truncation so a cut cannot leave half a token unmatched.
+    # A block still fails the run at start_task.
+    preview_source = redact_text(payload_str)
+    payload_preview = preview_source[:500] + "..." if len(preview_source) > 500 else preview_source
 
     # Get application name for conversation
     with db.get_session(project_id) as session:

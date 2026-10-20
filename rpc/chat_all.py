@@ -42,7 +42,8 @@ from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
     apply_participant_skill_mentions, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
     resolve_skill_attachment_llm_settings
-from ..utils.exceptions import PoolSaturationError
+from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
+from ..utils.input_guardrail import check_chat_input, check_resume_input
 from ..utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation,
     claim_supervisor_decision_phase, decisions_for_child,
@@ -1183,6 +1184,33 @@ class RPC:
                 )
                 return {"error": "This message has already been submitted"}
 
+            # Checkpoint A (#6886): before the turn is stored, broadcast or used to
+            # name the conversation. A blocked turn leaves no trace; the refusal goes
+            # to the sender only, and REST callers get the error raised (422)
+            try:
+                parsed.user_input, input_guardrail_verdict = check_chat_input(
+                    parsed.user_input, parsed.project_id, current_user['id'],
+                )
+            except InputGuardrailBlockedError as blocked:
+                if not sid:
+                    raise
+                self.context.sio.emit(
+                    event=SioEvents.chat_predict.value,
+                    data={
+                        'type': 'input_guardrail_blocked',
+                        'stream_id': parsed.conversation_uuid,
+                        'message_id': parsed.question_id,
+                        'question_id': parsed.question_id,
+                        'content': blocked.message,
+                        'response_metadata': {
+                            'human_readable': blocked.message,
+                            'input_guardrail': blocked.verdict(),
+                        },
+                    },
+                    to=sid,
+                )
+                return {"error": blocked.type, **blocked.body()}
+
             self.check_and_generate_conversation_name(
                 parsed.project_id, parsed.user_input, room, conversation
             )
@@ -1259,6 +1287,8 @@ class RPC:
             if parsed.interaction_uuid:
                 # todo: add [30] min check last message for interaction_uuid
                 msg_group_meta['interaction_uuid'] = parsed.interaction_uuid
+            if input_guardrail_verdict:
+                msg_group_meta['input_guardrail'] = input_guardrail_verdict
             
             # Initialize context metadata for new message group
             if context_management_enabled:
@@ -1402,6 +1432,21 @@ class RPC:
                 room=room,
                 skip_sid=sid
             )
+            if sid and input_guardrail_verdict:
+                # The sender's optimistic copy still holds what they typed; replace it
+                # with the stored (redacted) text and show the notice (#6886)
+                self.context.sio.emit(
+                    event=SioEvents.chat_predict.value,
+                    data={
+                        'type': 'input_guardrail_notice',
+                        'stream_id': parsed.conversation_uuid,
+                        'message_id': parsed.question_id,
+                        'question_id': parsed.question_id,
+                        'content': parsed.user_input if input_guardrail_verdict.get('action') == 'redact' else None,
+                        'response_metadata': {'input_guardrail': input_guardrail_verdict},
+                    },
+                    to=sid,
+                )
 
             if parsed.user_ids:
                 mentioned_participants = session.query(Participant).filter(
@@ -1878,6 +1923,29 @@ class RPC:
         if self.is_chat_run_stopped(parsed.message_id):
             log.info("[PARALLEL] continue refused — run stopped (message_id=%s)", parsed.message_id)
             return {"stopped": True}
+
+        # Checkpoint A (#6886) for a resume: the replacement input and HITL edit or
+        # answer text, before a decision message is stored or any resume dispatches
+        try:
+            check_resume_input(parsed, parsed.project_id, current_user['id'])
+        except InputGuardrailBlockedError as blocked:
+            if not sid:
+                raise
+            self.context.sio.emit(
+                event=SioEvents.chat_predict.value,
+                data={
+                    'type': 'input_guardrail_blocked',
+                    'stream_id': str(parsed.conversation_uuid),
+                    'message_id': parsed.message_id,
+                    'content': blocked.message,
+                    'response_metadata': {
+                        'human_readable': blocked.message,
+                        'input_guardrail': blocked.verdict(),
+                    },
+                },
+                to=sid,
+            )
+            return {"error": blocked.type, **blocked.body()}
 
         # Parallel sub-agent HITL (#4993 Track 2): if this resume targets a
         # parked-fan-out child thread, replay that child directly (with

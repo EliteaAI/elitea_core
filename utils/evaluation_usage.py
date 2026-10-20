@@ -46,6 +46,7 @@ _NO_ENVELOPE_REASONS = {
     'timeout': 'timeout',
     'predict_exception': 'no_envelope',
     STATUS_BUDGET_BLOCKED: STATUS_BUDGET_BLOCKED,
+    'guardrail_blocked': 'guardrail_blocked',
 }
 
 # Validated on the API side by ``EvalSuiteBaseModel`` (models/pd/evaluation.py).
