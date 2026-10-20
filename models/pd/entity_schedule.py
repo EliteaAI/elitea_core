@@ -54,6 +54,7 @@ class ScheduleTiming(BaseModel):
 NAME_MAX = 256
 DESCRIPTION_MAX = 2304  # the entity_schedules.description column width
 RunMode = Literal['entry_point', 'prompt']
+ApprovalRule = Literal['pause_and_ask', 'run_without_asking']
 
 
 class ScheduleVariable(BaseModel):
@@ -72,6 +73,7 @@ class ScheduleCreate(ScheduleTiming):
     prompt: str | None = None
     variables: list[ScheduleVariable] = []
     enabled: bool = True
+    approval_rule: ApprovalRule = 'pause_and_ask'
 
 
 class ScheduleUpdate(BaseModel):
@@ -86,6 +88,7 @@ class ScheduleUpdate(BaseModel):
     timezone: str | None = None
     expires_at: date | None = None
     enabled: bool | None = None
+    approval_rule: ApprovalRule | None = None
 
     @field_validator('cron')
     @classmethod
