@@ -82,7 +82,6 @@ def feature_state(project_id, feature, user_id=None):
         "remaining": None if limit is None else max(0.0, limit - spent),
         "percent_used": None if not limit else round(spent / limit * 100, 2),
         "spend_available": bool(spend.get("available")),
-        "calls": int(spend.get("project_calls" if user_id is None else "member_calls") or 0),
     }
 
 
