@@ -50,6 +50,7 @@ class Harness:
         self.risk_warnings = []
         self.run_without_asking_allowed = False
         self.scans = []
+        self.path = ''
 
     def request_as(self, user_id, permissions):
         self.user_id, self.permissions = user_id, set(permissions)
@@ -75,8 +76,10 @@ class Harness:
         with self.session_factory() as session:
             return session.get(self.EntitySchedule, schedule_id)
 
-    def call(self, verb, body=None, schedule_id=None):
+    def call(self, verb, body=None, schedule_id=None, suffix=''):
+        """Call a handler verb; `suffix` is the URL tail the router matched, such as `/run`."""
         self.body = body
+        self.path = f'/schedule/prompt_lib/{PROJECT_ID}/{schedule_id or ""}{suffix}'
         handler = self.module.PromptLibAPI()
         handler.module = object()
         kwargs = {'project_id': PROJECT_ID}
@@ -99,10 +102,13 @@ def harness(isolated_sys_modules, monkeypatch):
 
     Base, Application, ApplicationVersion = sqlite_db.install_parent_models(PACKAGE)
     flask = types.ModuleType('flask')
-    flask.request = types.SimpleNamespace(
-        get_json=lambda *args, **kwargs: harness.body,
-        json=property(lambda self: harness.body),
-    )
+    class _Request:
+        path = property(lambda self: harness.path)
+
+        def get_json(self, *args, **kwargs):
+            return harness.body
+
+    flask.request = _Request()
     sys.modules['flask'] = flask
     sqlite_db.install_trace_span(harness.span)
 
@@ -154,6 +160,9 @@ def harness(isolated_sys_modules, monkeypatch):
     load('utils/schedule_access.py', 'utils.schedule_access')
     load('models/pd/index.py', 'models.pd.index')
     load('models/pd/entity_schedule.py', 'models.pd.entity_schedule')
+    load('models/pd/schedule_run.py', 'models.pd.schedule_run')
+    load('utils/schedule_claim.py', 'utils.schedule_claim')
+    load('utils/schedule_dispatch.py', 'utils.schedule_dispatch')
     load('utils/schedule_service.py', 'utils.schedule_service')
     harness.module = load('api/v2/schedule.py', 'api.v2.schedule')
 

@@ -3,9 +3,12 @@ from typing import ClassVar
 
 from flask import request
 from pydantic import ValidationError
+from sqlalchemy import select
 from tools import api_tools, auth, db, register_openapi
 
+from ...models.entity_schedule import EntityScheduleRun
 from ...models.pd.entity_schedule import ScheduleCreate, ScheduleDetails, ScheduleUpdate
+from ...models.pd.schedule_run import ScheduleRunRequest
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.schedule_access import (
     ScheduleScope,
@@ -13,6 +16,8 @@ from ...utils.schedule_access import (
     schedule_check_spec,
     schedule_scope,
 )
+from ...utils.schedule_claim import fail_run, insert_run
+from ...utils.schedule_dispatch import START_FAILED, start_schedule_run
 from ...utils.schedule_service import (
     ScheduleError,
     create_schedule,
@@ -54,6 +59,22 @@ def _read(row, scope: ScheduleScope, project_id: int) -> dict:
     return {**_details(row, scope), "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
 
 
+NOT_ALLOWED = {"error": "Method not allowed"}, 405
+
+
+def _on_run_path() -> bool:
+    """True for the `<project>/<schedule>/run` URL, which shares this resource with the schedule URL."""
+    return request.path.rstrip("/").endswith("/run")
+
+
+def _parse_body(model):
+    """The request body as `model`, or the 400 answer of its first error."""
+    try:
+        return model.model_validate(request.get_json(silent=True)), None
+    except ValidationError as e:
+        return None, _validation_response(e)
+
+
 def _validation_response(error: ValidationError) -> tuple[dict, int]:
     """Answer 400 with the first broken field and its plain reason."""
     first = error.errors()[0]
@@ -66,18 +87,27 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create Schedule",
-        description="Create a schedule owned by the caller. The owner is never taken from the body.",
+        description="Create a schedule owned by the caller. The owner is never taken from the body. "
+                    "POST .../{schedule_id}/run starts a run now or a test run of the caller's own schedule.",
         tags=[OPENAPI_TAG],
         request_body=ScheduleCreate,
         available_to_users=True,
     )
-    @auth.decorators.check_api(schedule_check_spec("create"))
     @api_tools.endpoint_metrics
-    def post(self, project_id: int, **kwargs):
-        try:
-            body = ScheduleCreate.model_validate(request.get_json(silent=True))
-        except ValidationError as e:
-            return _validation_response(e)
+    def post(self, project_id: int, schedule_id: int | None = None, **kwargs):
+        # The router matches by verb only, so the URL tail tells a run from a post to the schedule itself.
+        # Keyword arguments: check_api reads project_id from them for the project-scoped permission check.
+        if schedule_id is None:
+            return self._create(project_id=project_id)
+        if not _on_run_path():
+            return NOT_ALLOWED
+        return self._run(project_id=project_id, schedule_id=schedule_id)
+
+    @auth.decorators.check_api(schedule_check_spec("create"))
+    def _create(self, project_id: int):
+        body, error = _parse_body(ScheduleCreate)
+        if error:
+            return error
         refused = _refuse_unallowed_rule(project_id, body)
         if refused:
             return refused
@@ -91,6 +121,36 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return {"error": str(e)}, 409
             return _saved(row, scope, project_id), 201
 
+    @auth.decorators.check_api(schedule_check_spec("run"))
+    def _run(self, project_id: int, schedule_id: int):
+        body, error = _parse_body(ScheduleRunRequest)
+        if error:
+            return error
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                row = load_schedule_in_scope(session, schedule_id, scope)
+            except ScheduleError as e:
+                return e.response
+            if row.created_by != scope.user_id:  # an admin sees the row but never runs it as the owner
+                return {"error": "not_owner"}, 403
+            if row.version_id is None:
+                return {"error": "version_deleted"}, 409
+            entity_type = row.entity_type
+            run_id = insert_run(session, schedule_id, body.trigger, scope.user_id)
+            if run_id is None:
+                active_id = session.scalar(select(EntityScheduleRun.id).where(
+                    EntityScheduleRun.schedule_id == schedule_id,
+                    EntityScheduleRun.status.in_(("running", "waiting_for_approval")),
+                ))
+                return {"error": "A run of this schedule is active", "active_run_id": active_id}, 409
+            session.commit()
+            if not start_schedule_run(entity_type, project_id, schedule_id, run_id):
+                fail_run(session, run_id, START_FAILED)
+                session.commit()
+                return {"error": "The run could not start"}, 500
+            return {"run_id": run_id}, 202
+
     @register_openapi(
         name="Get Schedule",
         description="Read one schedule. Another owner's schedule answers 404 unless the caller is a schedules admin.",
@@ -100,6 +160,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("details"))
     @api_tools.endpoint_metrics
     def get(self, project_id: int, schedule_id: int, **kwargs):
+        if _on_run_path():  # only POST serves the run URL
+            return NOT_ALLOWED
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
@@ -117,10 +179,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("update"))
     @api_tools.endpoint_metrics
     def put(self, project_id: int, schedule_id: int, **kwargs):
-        try:
-            body = ScheduleUpdate.model_validate(request.get_json(silent=True))
-        except ValidationError as e:
-            return _validation_response(e)
+        if _on_run_path():  # only POST serves the run URL
+            return NOT_ALLOWED
+        body, error = _parse_body(ScheduleUpdate)
+        if error:
+            return error
         refused = _refuse_unallowed_rule(project_id, body)
         if refused:
             return refused
@@ -145,6 +208,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @auth.decorators.check_api(schedule_check_spec("delete"))
     @api_tools.endpoint_metrics
     def delete(self, project_id: int, schedule_id: int, **kwargs):
+        if _on_run_path():  # only POST serves the run URL
+            return NOT_ALLOWED
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
@@ -155,6 +220,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
 
 class API(api_tools.APIBase):
-    url_params: ClassVar[list] = api_tools.with_modes(["<int:project_id>", "<int:project_id>/<int:schedule_id>"])
+    url_params: ClassVar[list] = api_tools.with_modes([
+        "<int:project_id>", "<int:project_id>/<int:schedule_id>", "<int:project_id>/<int:schedule_id>/run",
+    ])
 
     mode_handlers: ClassVar[dict] = {PROMPT_LIB_MODE: PromptLibAPI}

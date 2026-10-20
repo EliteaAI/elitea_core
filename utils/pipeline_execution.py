@@ -12,7 +12,7 @@ Both scheduled and webhook pipeline triggers use identical patterns for:
 
 This module consolidates that shared logic to eliminate duplication.
 """
-from typing import Optional
+from typing import Literal
 
 from pylon.core.tools import log
 from tools import db, rpc_tools, this
@@ -31,6 +31,7 @@ class TriggerType:
     """Trigger type constants for conversation metadata."""
     SCHEDULED = "scheduled"
     WEBHOOK = "webhook"
+    MANUAL = "manual"
 
 
 def create_trigger_run_conversation(
@@ -40,7 +41,8 @@ def create_trigger_run_conversation(
     trigger_type: str,
     trigger_message: str,
     conversation_name: str,
-    extra_meta: Optional[dict] = None,
+    extra_meta: dict | None = None,
+    source: Literal["pipeline", "agent"] = "pipeline",
 ) -> tuple[str, int, str]:
     """
     Create a conversation for a triggered pipeline run (scheduled or webhook).
@@ -56,6 +58,7 @@ def create_trigger_run_conversation(
         trigger_message: Initial message content showing trigger info
         conversation_name: Name for the conversation (e.g., "Scheduled run: Pipeline Name")
         extra_meta: Additional metadata to include in conversation.meta
+        source: Conversation source, "pipeline" or "agent"
 
     Returns:
         Tuple of (conversation UUID string, pipeline participant ID, response message UUID)
@@ -92,7 +95,7 @@ def create_trigger_run_conversation(
         # Create conversation with proper metadata for History tab
         conversation = Conversation(
             name=conversation_name or f"{trigger_type.capitalize()} run: {pipeline_name}",
-            source="pipeline",
+            source=source,
             author_id=user_id,
             is_private=True,
             meta=conversation_meta,
@@ -190,7 +193,7 @@ def finish_trigger_run_with_error(project_id: int, response_message_id: str, err
                 'error': message,
             },
         })
-    except Exception:  # pylint: disable=W0703
+    except Exception:  # pylint: disable=W0703  # noqa: BLE001
         log.exception("Could not record trigger run failure: message_id=%s", response_message_id)
 
 
@@ -202,6 +205,7 @@ def execute_pipeline_via_predict_sio(
     response_message_id: str,
     user_input: str = "",
     trigger_source: str | None = None,
+    is_system_user: bool = True,
 ) -> dict:
     """
     Execute a pipeline using the applications_predict_sio RPC.
@@ -216,6 +220,7 @@ def execute_pipeline_via_predict_sio(
         conversation_uuid: UUID of the conversation (used as stream_id)
         response_message_id: UUID of the response message group
         user_input: Input to send to the pipeline (empty for scheduled, payload for webhook)
+        is_system_user: False runs as ``user_id`` itself, for owner-bound schedule runs
 
     Returns:
         Dict with task_id from the RPC call
@@ -236,7 +241,7 @@ def execute_pipeline_via_predict_sio(
         },
         await_task_timeout=-1,  # Don't wait for completion
         user_id=user_id,
-        is_system_user=True,
+        is_system_user=is_system_user,
         # Scheduled & webhook-triggered runs have no live UI consumer; suppress
         # streaming/UI-only events. DB persistence (full/partial_message) and
         # index/HITL/error state events are preserved. Redundant with the
