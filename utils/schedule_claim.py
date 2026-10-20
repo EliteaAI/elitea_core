@@ -1,7 +1,7 @@
 """Due query, claim and cron run insert of the schedule tick (EL-7011)."""
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
@@ -11,13 +11,16 @@ LEGACY_LOCK_BASE = 7011 << 32
 
 
 def select_due_schedules(session, entity_types, limit: int) -> list[EntitySchedule]:
-    """Enabled schedules of `entity_types` due by now, oldest `next_run` first, at most `limit`."""
+    """Enabled schedules of `entity_types` due by now or past their stop date, oldest `next_run` first, at most `limit`.
+
+    A schedule past its stop date is picked even when its next run is far away, so the tick disables it on time.
+    """
     return list(session.scalars(
         select(EntitySchedule)
         .where(
             EntitySchedule.enabled.is_(True),
             EntitySchedule.entity_type.in_(entity_types),
-            EntitySchedule.next_run <= func.now(),
+            or_(EntitySchedule.next_run <= func.now(), EntitySchedule.expires_at <= func.now()),
         )
         .order_by(EntitySchedule.next_run, EntitySchedule.id)
         .limit(limit)
