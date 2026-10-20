@@ -14,7 +14,7 @@ class ScheduleListFilters(BaseModel):
     entity_id: int | None = None
     search: str | None = None
     limit: int = Field(default=20, ge=1, le=100)
-    offset: int = Field(default=0, ge=0)
+    offset: int = Field(default=0, ge=0, le=2**31 - 1)  # the database integer range
 
     @field_validator('owner_ids', mode='before')
     @classmethod
