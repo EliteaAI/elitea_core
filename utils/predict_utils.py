@@ -532,6 +532,14 @@ def generate_predict_payload(
     if isinstance(parsed, ApplicationChatRequest):
         attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)
 
+    try:
+        # Stored OAuth logins (Microsoft toolkits) for runs that carry no browser token, e.g. schedules
+        from .mcp_oauth import refresh_token
+        from .stored_oauth_tokens import inject_stored_oauth_tokens
+        inject_stored_oauth_tokens(payload, this.module.get_redis_client(), refresh_token)
+    except Exception as e:
+        log.warning("Stored OAuth token injection skipped: %s", type(e).__name__)
+
     return payload
 
 

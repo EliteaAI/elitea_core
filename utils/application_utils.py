@@ -790,15 +790,15 @@ def validate_toolkit_details(
                 # and re-raise it as ToolkitConnectionError so the API can return
                 # connection_errors separately from settings_errors.
                 for err in e.errors():
+                    # pydantic keeps the raised ValueError in ctx.error; the sentinel dict is its first argument
+                    ctx_error = err.get('ctx', {}).get('error')
+                    payload = ctx_error.args[0] if getattr(ctx_error, 'args', None) else ctx_error
                     if (
                         err.get('type') == 'value_error'
-                        and isinstance(err.get('ctx', {}).get('error'), dict)
-                        and ToolValidatedDetails.CONNECTION_ERROR_SENTINEL
-                            in err['ctx']['error']
+                        and isinstance(payload, dict)
+                        and ToolValidatedDetails.CONNECTION_ERROR_SENTINEL in payload
                     ):
-                        raise ToolkitConnectionError(
-                            err['ctx']['error'][ToolValidatedDetails.CONNECTION_ERROR_SENTINEL]
-                        )
+                        raise ToolkitConnectionError(payload[ToolValidatedDetails.CONNECTION_ERROR_SENTINEL])
                 raise
     finally:
         if session_created:
@@ -971,7 +971,9 @@ def _check_configurations_connection_from_expanded_settings(
         # Skip delegated OAuth configurations (e.g. SharePoint with oauth_discovery_endpoint):
         # an access token is not available at validation time, so connection check would always
         # fail with McpAuthorizationRequired — same skip pattern as MCP toolkits.
-        if config_data.get('oauth_discovery_endpoint') and not config_data.get('access_token'):
+        # A stored login (refresh_token) lets the check run: the SDK exchanges it itself.
+        if (config_data.get('oauth_discovery_endpoint') and not config_data.get('access_token')
+                and not config_data.get('refresh_token')):
             log.debug(
                 f"Skipping connection check for {config_type}/{config_title}: "
                 f"delegated OAuth configured, no token available at validation time"
