@@ -1,7 +1,7 @@
 """Request model for schedule run-now and test-run API (EL-7011 US-15)."""
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ScheduleRunRequest(BaseModel):
@@ -11,6 +11,6 @@ class ScheduleRunRequest(BaseModel):
     that 'trigger' is 'manual' or 'test'.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{"trigger": "manual"}]})
 
-    trigger: Literal["manual", "test"]
+    trigger: Literal["manual", "test"] = Field(description="`manual` runs now; `test` is a test run")
