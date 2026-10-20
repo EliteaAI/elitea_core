@@ -12,13 +12,12 @@ import sys
 import types
 
 import pytest
+from fixtures.helpers import load_module_with_stubs
 from sqlalchemy import Column, Integer, Table, create_engine, event, null, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase, Session
-
-from fixtures.helpers import load_module_with_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PRINCIPAL = {"kind": "mandate"}
@@ -69,10 +68,10 @@ def session(tables):
 
 
 def _schedule(models, application_id=1, version_id=None, **overrides):
-    values = dict(
-        entity_type="agent", application_id=application_id, version_id=version_id, name="nightly",
-        cron="0 3 * * *", timezone="UTC", created_by=7, principal=PRINCIPAL,
-    )
+    values = {
+        "entity_type": "agent", "application_id": application_id, "version_id": version_id, "name": "nightly",
+        "cron": "0 3 * * *", "timezone": "UTC", "created_by": 7, "principal": PRINCIPAL,
+    }
     return models.EntitySchedule(**{**values, **overrides})
 
 
