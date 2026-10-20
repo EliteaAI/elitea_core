@@ -1,7 +1,10 @@
 """Pydantic models for the schedule list query arguments and rows."""
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
+
+DbId = Annotated[int, Field(ge=1, le=2**31 - 1)]  # the database integer range
 
 
 class ScheduleListFilters(BaseModel):
@@ -10,8 +13,8 @@ class ScheduleListFilters(BaseModel):
     entity_type: str | None = None
     status: str | None = None
     enabled: bool | None = None
-    owner_ids: list[int] | None = None
-    entity_id: int | None = None
+    owner_ids: list[DbId] | None = None
+    entity_id: DbId | None = None
     search: str | None = None
     limit: int = Field(default=20, ge=1, le=100)
     offset: int = Field(default=0, ge=0, le=2**31 - 1)  # the database integer range
