@@ -732,9 +732,10 @@ def test_do_predict_builds_the_http_request_and_webhooks_are_system_runs():
     assert 'entry_point="predict_api"' in text and "sid=None" in text and "version_row=application_version" in text
     assert 'run_kind="system" if webhook_signature is not None else "interactive"' in text
     assert "admission=admission," in text and "binding_project_id=project_id" in text
-    for route in ("api/v2/predict.py", "api/v2/webhook.py"):
-        route_text = source_of(route)
-        assert 'return {"code": e.reason_code, "error": e.message}, 403' in route_text
+    assert 'return {"code": e.reason_code, "error": e.message}, 403' in source_of("api/v2/predict.py")
+    # a webhook sender retries a 5xx and never a 403: "could not decide" is 503 (#6947), every other refusal 403
+    assert ('return {"code": e.reason_code, "error": e.message}, refusal_http_status(e.reason_code)'
+            in source_of("api/v2/webhook.py"))
 
 
 def test_pipeline_run_is_untouched_so_a_governed_ad_hoc_pipeline_has_no_admission():

@@ -47,6 +47,9 @@ class ExecutionSecurityContextView(BaseModel):
     agent_binding_ref: str
     policy_revision: str
     expires_at: datetime
+    # A mandate run only: when Main stops it, and the code that says which bound applied (#6947)
+    run_deadline: Optional[datetime] = None
+    run_deadline_code: Optional[str] = None
 
 
 def _holder(sid):

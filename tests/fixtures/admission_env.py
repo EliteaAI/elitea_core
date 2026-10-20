@@ -15,6 +15,7 @@ import importlib
 import json
 import os
 import sys
+import threading
 import types
 import uuid
 import warnings
@@ -223,6 +224,7 @@ class Env:  # pylint: disable=R0902,R0904
                 profile="governed" if governed else "legacy"),
             admission_settings=adm.AdmissionSettings(**settings),
             _context_by_task=OrderedDict(),
+            _context_lock=threading.Lock(),
             _mandate_tickets=self.ns.mandate_admission.TicketStore(),
             task_node=types.SimpleNamespace(stop_task=lambda task_id: None),
         )

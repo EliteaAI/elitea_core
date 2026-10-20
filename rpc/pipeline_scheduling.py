@@ -278,17 +278,15 @@ class RPC:
         Re-entrancy: an in-process lock prevents a slow tick from overlapping
         with the next minute's tick on the same pylon_main instance. For
         multi-replica deployments a Postgres advisory lock would be needed.
+
+        Governed platforms also sweep the runs this process tracks (``enforce_run_deadlines``). Known gap, accepted
+        for this release: the map of tracked runs is in memory, so after a Main restart a running mandate run is no
+        longer stopped by Main (it still cannot be restarted past its context expiry); slice 2 adds a column
+        to the context table so the sweep can run from the table.
         """
-        # Skip the tick while maintenance mode is on so no new pipeline runs
-        # are dispatched to task nodes that are rejecting/tearing down work.
-        if is_maintenance_active():
-            log.info(
-                "check_pipeline_scheduling: maintenance mode active, skipping tick"
-            )
-            return None
-        #
-        # Mandate runs past their time limit are stopped once a minute, whether or not the previous tick is still
-        # running; governed only (#6947)
+        # Governed runs that must stop (a mandate run past its time limit, a run whose context was revoked) are
+        # stopped once a minute, whether or not the previous tick is still running and also in maintenance mode:
+        # stopping work is never what maintenance mode holds back (#6947)
         if is_governed(self):
             try:
                 enforce_run_deadlines(self)
@@ -297,6 +295,14 @@ class RPC:
                     "check_pipeline_scheduling: run deadline sweep failed: exc_type=%s exc=%r",
                     type(exc).__name__, exc,
                 )
+        #
+        # Skip the tick while maintenance mode is on so no new pipeline runs
+        # are dispatched to task nodes that are rejecting/tearing down work.
+        if is_maintenance_active():
+            log.info(
+                "check_pipeline_scheduling: maintenance mode active, skipping tick"
+            )
+            return None
         #
         if not _check_pipeline_scheduling_lock.acquire(blocking=False):
             log.warning(
