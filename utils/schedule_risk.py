@@ -49,6 +49,20 @@ def _uses_personal_token(tool, expanded: dict) -> bool:
     return tool.type == 'openapi' and bool(expanded.get('oauth_discovery_endpoint'))
 
 
+def _sensitive_warnings(tool, name) -> list:
+    selected = (tool.settings or {}).get('selected_tools') or []
+    if not selected:
+        return []
+    from .toolkit_security import (
+        is_tool_sensitive,  # late: the policy reads the plugin descriptor
+    )
+    return [
+        _warning('sensitive_action', f'Tool "{tool_name}" of toolkit "{name}" needs approval',
+                 toolkit=name, tool=tool_name, risk_level='needs_approval')
+        for tool_name in selected if is_tool_sensitive(tool.type, tool_name)
+    ]
+
+
 def _toolkit_warnings(tool, project_id, owner_id) -> list:
     name = tool.name or tool.type
     try:
@@ -57,19 +71,27 @@ def _toolkit_warnings(tool, project_id, owner_id) -> list:
         if _error_types(ex.errors) & CREDENTIAL_ERRORS:
             return [_warning('missing_credential', f'Toolkit "{name}" has no usable credential for the owner', toolkit=name)]
         raise
+    warnings = []
     if _uses_personal_token(tool, expanded):
-        return [_warning('token_may_expire', f'Toolkit "{name}" signs in with a personal token', toolkit=name)]
-    return []
+        warnings.append(_warning('token_may_expire', f'Toolkit "{name}" signs in with a personal token', toolkit=name))
+    return warnings + _sensitive_warnings(tool, name)
 
 
 def scan_schedule_risks(project_id: int, version_id: int, owner_id: int) -> list:
-    """Warnings for one version run by one owner. Never raises: a failure is one scan_incomplete warning."""
+    """Warnings for one version run by one owner. Never raises: a failure is a scan_incomplete warning."""
     try:
         with db.get_session(project_id) as session:
-            version = session.get(ApplicationVersion, version_id)
+            version = session.get(ApplicationVersion, version_id) if version_id else None
+            if version is None:
+                return []
             warnings = _human_steps(version)
             for tool in version.tools:
-                warnings += _toolkit_warnings(tool, project_id, owner_id)
+                try:
+                    warnings += _toolkit_warnings(tool, project_id, owner_id)
+                except Exception:  # noqa: BLE001 - one toolkit fails, the other warnings stay
+                    log.exception('Schedule risk scan failed for toolkit %s of version %s', tool.name, version_id)
+                    warnings.append(_warning('scan_incomplete', f'Toolkit "{tool.name or tool.type}" could not be checked for risks',
+                                             toolkit=tool.name or tool.type))
         return warnings
     except Exception:  # noqa: BLE001 - any failure hides the scan, the save still succeeds
         log.exception('Schedule risk scan failed for version %s', version_id)

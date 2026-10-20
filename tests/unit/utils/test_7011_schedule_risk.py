@@ -54,7 +54,7 @@ def _version(agent_type='openai', meta=None, instructions=None, tools=()):
 
 @pytest.fixture
 def scan(isolated_sys_modules):
-    state = types.SimpleNamespace(version=None, expand_errors={}, expanded={}, calls=[], secrets={})
+    state = types.SimpleNamespace(version=None, expand_errors={}, expanded={}, calls=[], secrets={}, sensitive=set())
 
     def expand_toolkit_settings(type_, settings, project_id, user_id):
         state.calls.append((type_, project_id, user_id))
@@ -87,6 +87,9 @@ def scan(isolated_sys_modules):
     models_all = types.ModuleType(f'{PKG}.models.all')
     models_all.ApplicationVersion = type('ApplicationVersion', (), {})
     sys.modules[models_all.__name__] = models_all
+    security = types.ModuleType(f'{PKG}.utils.toolkit_security')
+    security.is_tool_sensitive = lambda type_, tool_name: (type_, tool_name) in state.sensitive
+    sys.modules[security.__name__] = security
     app_tools = types.ModuleType(f'{PKG}.utils.application_tools')
     app_tools.ConfigurationExpandError = ConfigurationExpandError
     app_tools.expand_toolkit_settings = expand_toolkit_settings
@@ -136,14 +139,20 @@ class TestEL7011R1HumanSteps:
         scan.version = _version('pipeline', instructions=instructions)
         assert _codes(scan.run()) == ['scan_incomplete']
 
-    def test_r1_3_missing_version_gives_one_scan_incomplete(self, scan):
+    @pytest.mark.parametrize('version_id', [None, 999])
+    def test_el7011_r1_3_missing_version_returns_no_warning(self, scan, version_id):
         scan.version = _version()
-        assert _codes(scan.run(version_id=999)) == ['scan_incomplete']
+        assert scan.run(version_id=version_id) == []
 
-    def test_r1_3_non_credential_expansion_error_gives_one_scan_incomplete(self, scan):
-        scan.version = _version(meta={'internal_tools': ['ask_user']}, tools=[_tool()])
-        scan.expand_errors['jira'] = [{'loc': ('x',), 'msg': 'boom'}]
-        assert _codes(scan.run()) == ['scan_incomplete']
+    def test_el7011_r1_3_expansion_error_of_one_toolkit_keeps_the_other_warnings(self, scan):
+        scan.version = _version(
+            meta={'internal_tools': ['ask_user']},
+            tools=[_tool('jira', 'Jira'), _tool('git', 'Git'), _tool('mcp', 'Remote')],
+        )
+        scan.expand_errors = {'jira': [{'loc': ('x',), 'msg': 'boom'}], 'git': [_error('a', 'credential_not_found')]}
+        warnings = scan.run()
+        assert _codes(warnings) == ['human_input_step', 'scan_incomplete', 'missing_credential', 'token_may_expire']
+        assert warnings[1]['toolkit'] == 'Jira'
 
 
 class TestEL7011R2Credentials:
@@ -199,6 +208,26 @@ class TestEL7011R2PersonalToken:
     def test_r2_2_warning_text_holds_no_secret(self, scan):
         scan.version = _version(tools=[_tool('openapi', 'Api', settings={'oauth_discovery_endpoint': 'https://idp', 'token': 's3cret'})])
         assert 's3cret' not in json.dumps(scan.run())
+
+
+class TestEL7011R2SensitiveActions:
+    def test_el7011_r2_3_sensitive_selected_tool_gives_one_needs_approval_warning(self, scan):
+        scan.sensitive = {('jira', 'delete_issue')}
+        scan.version = _version(tools=[_tool(settings={'selected_tools': ['get_issue', 'delete_issue']})])
+        [warning] = scan.run()
+        assert warning == {
+            'code': 'sensitive_action', 'message': warning['message'],
+            'toolkit': 'Jira', 'tool': 'delete_issue', 'risk_level': 'needs_approval',
+        }
+
+    def test_el7011_r2_3_unlisted_tool_gives_no_warning(self, scan):
+        scan.sensitive = {('jira', 'delete_issue')}
+        scan.version = _version(tools=[_tool(settings={'selected_tools': ['get_issue']})])
+        assert scan.run() == []
+
+    def test_el7011_r2_3_no_policy_gives_no_warning(self, scan):
+        scan.version = _version(tools=[_tool(settings={'selected_tools': ['delete_issue']})])
+        assert scan.run() == []
 
 
 @pytest.mark.parametrize(('secrets', 'allowed'), [
