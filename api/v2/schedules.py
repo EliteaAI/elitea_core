@@ -19,6 +19,8 @@ from ...utils.schedule_queries import list_schedules
 
 def _owner_names(owner_ids: set[int]) -> dict[int, str | None]:
     """Map owner id to name; a failed lookup gives an empty map, so every name is null (R1.3)."""
+    if not owner_ids:  # an empty id list makes auth_core return every user
+        return {}
     try:
         return {user["id"]: user.get("name") for user in get_authors_data(sorted(owner_ids))}
     except Exception as e:  # noqa: BLE001  # pylint: disable=W0718 -- names must never break the list (R1.3)
@@ -39,8 +41,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, project_id: int, **kwargs):
         """Return `{"total", "rows"}` for one page (R1.1-R5.3)."""
+        args = request.args.to_dict()
+        owner_ids = request.args.getlist('owner_ids')
+        if owner_ids:  # to_dict keeps only the first value of a repeated key
+            args['owner_ids'] = ','.join(owner_ids)
         try:
-            filters = ScheduleListFilters(**request.args.to_dict())
+            filters = ScheduleListFilters(**args)
         except ValidationError as e:
             name = e.errors()[0]["loc"][0]
             if name == "limit":
