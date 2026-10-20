@@ -9,6 +9,7 @@ import importlib.util
 import pathlib
 import sys
 import types
+from datetime import UTC, datetime
 
 import pytest
 
@@ -291,6 +292,15 @@ def test_r4_3_el7011_stored_description_and_run_mode_are_returned(env):
     env.rows = [make_row(1, 5, description="Weekday ticket summary", entity_type="pipeline", run_mode="entry_point")]
     row = ok(env)["rows"][0]
     assert (row["description"], row["run_mode"]) == ("Weekday ticket summary", "entry_point")
+
+
+# R4.3: the UI parses next_run and last_run with new Date()
+def test_r4_3_el7011_dates_are_iso_strings_with_one_offset(env):
+    env.grant(5, "list")
+    env.rows = [make_row(1, 5, next_run=datetime(2026, 10, 21, 6, 0, tzinfo=UTC))]
+    row = ok(env)["rows"][0]
+    assert row["next_run"] == "2026-10-21T06:00:00Z"
+    assert row["last_run"] is None
 
 
 # R5.2 (TC-US05-19)
