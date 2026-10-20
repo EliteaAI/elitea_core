@@ -15,8 +15,10 @@ def dispatch(monkeypatch):
     return module
 
 
-def test_7011_r3_5_starter_map_starts_empty():
-    assert load(DISPATCH, fresh=True).RUN_STARTERS == {}
+def test_7011_r3_5_starter_map_holds_only_the_agent_starter():
+    starters = load(DISPATCH, fresh=True).RUN_STARTERS
+    assert "agent" in starters
+    assert "pipeline" not in starters
 
 
 def test_7011_r3_5_start_returns_before_the_starter_finishes(dispatch):
