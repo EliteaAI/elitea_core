@@ -23,6 +23,55 @@ NOT_ALLOWED = {"error": "Method not allowed"}, 405
 MAX_ID = 2147483647  # the schedule id column is a 32-bit integer
 MAX_EXPORT_IDS = 500
 
+OPENAPI_TAG = "elitea_core/schedules"
+# Pinned: register_api_class would pick any of the URLs that share a handler class (BUG-11)
+PROJECT_PATH = "<string:mode>/<int:project_id>"
+LIST_QUERY_PARAMS = [
+    {"name": "entity_type", "in": "query", "schema": {"type": "string", "enum": ["agent", "pipeline"]},
+     "description": "Only schedules of this entity kind"},
+    {"name": "status", "in": "query", "schema": {"type": "string", "enum": [
+        "running", "success", "failed", "skipped", "blocked", "waiting_for_approval"]},
+     "description": "Only schedules whose last run has this status"},
+    {"name": "enabled", "in": "query", "schema": {"type": "boolean"}, "description": "True: active, false: paused"},
+    {"name": "owner_ids", "in": "query", "schema": {"type": "array", "items": {"type": "integer"}},
+     "description": "Only schedules of these owners, repeated or comma-separated; schedules admin only"},
+    {"name": "entity_id", "in": "query", "schema": {"type": "integer"},
+     "description": "Only schedules of this agent or pipeline"},
+    {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Match on schedule or entity name"},
+    {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20,
+                                                 "minimum": 1, "maximum": 100}, "description": "Rows per page"},
+    {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0, "minimum": 0},
+     "description": "Rows to skip"},
+    {"name": "sort_by", "in": "query", "schema": {"type": "string", "default": "next_run", "enum": [
+        "name", "entity_name", "entity_type", "next_run", "last_run", "enabled"]}, "description": "Sort column"},
+    {"name": "sort_order", "in": "query", "schema": {"type": "string", "enum": ["asc", "desc"], "default": "asc"},
+     "description": "Sort direction"},
+]
+IMPORT_BODY = {"required": True, "content": {"multipart/form-data": {"schema": {
+    "type": "object", "required": ["file"],
+    "properties": {"file": {"type": "string", "format": "binary",
+                            "description": "Schedule YAML file, as Export writes it"}},
+}}}}
+ADMIN_FILE_RESPONSES = {
+    "400": {"description": "Invalid ids or file; the body has the error"},
+    "403": {"description": "No permission; schedules admin only"},
+}
+# The router serves this URL with the list handler, so register_api_class cannot list it;
+# Module._register_openapi registers it (BUG-11)
+OPENAPI_SUB_ACTIONS = [{
+    "path": f"/api/v2/elitea_core/schedules/{PROJECT_PATH}/export", "method": "get", "name": "Export Schedules",
+    "description": "Download the schedules of the project as a YAML file. Schedules admin only.",
+    "parameters": [
+        {"name": "mode", "in": "path", "required": True, "schema": {"type": "string", "default": PROMPT_LIB_MODE},
+         "description": f"Mode (default: {PROMPT_LIB_MODE})"},
+        {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"},
+         "description": "Project id"},
+        {"name": "ids", "in": "query", "schema": {"type": "string"},
+         "description": f"Comma-separated schedule ids, at most {MAX_EXPORT_IDS}; all schedules when absent"},
+    ],
+    "responses": {"200": {"description": "The YAML file (application/x-yaml)"}, **ADMIN_FILE_RESPONSES},
+}]
+
 
 def _last_segment() -> str:
     """The URL tail that tells the list from `export` and `import`; the resource shares one verb per URL."""
@@ -54,9 +103,15 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="List Schedules",
-        description="List schedules with filters and paging; owner names and allowed actions per row.",
-        tags=["elitea_core/schedules"],
+        description="List schedules with filters and paging; owner names and allowed actions per row. "
+                    "A caller without schedules admin sees own schedules only.",
+        tags=[OPENAPI_TAG],
+        parameters=LIST_QUERY_PARAMS,
+        responses={"200": {"description": "Success: `total` and one page of `rows`"},
+                   "400": {"description": "Invalid query option; the error names it"},
+                   "403": {"description": "No permission"}},
         available_to_users=True,
+        path_suffix_override=PROJECT_PATH,
     )
     @api_tools.endpoint_metrics
     def get(self, project_id: int, **kwargs):
@@ -69,8 +124,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Import Schedules",
         description="Import a schedule YAML file (multipart `file`). Every created schedule is disabled "
                     "and owned by the caller. Answers the created, skipped and failed items.",
-        tags=["elitea_core/schedules"],
+        tags=[OPENAPI_TAG],
+        request_body=IMPORT_BODY,
+        responses={"200": {"description": "Success: the created, skipped and failed items"}, **ADMIN_FILE_RESPONSES},
         available_to_users=True,
+        path_suffix_override=f"{PROJECT_PATH}/import",
     )
     @api_tools.endpoint_metrics
     def post(self, project_id: int, **kwargs):
