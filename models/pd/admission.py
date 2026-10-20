@@ -22,12 +22,16 @@ class AdmissionRequest(BaseModel):
     binding_project_id: int
     application_id: Optional[int] = None
     version_id: Optional[int] = None
-    run_kind: Literal["interactive", "system"]
-    entry_point: Literal["chat_sio", "chat_sio_llm", "predict_api"]
-    caller_type: Literal["user", "token", "public"]
+    run_kind: Literal["interactive", "system", "mandate"]
+    entry_point: Literal["chat_sio", "chat_sio_llm", "predict_api", "schedule", "webhook"]
+    caller_type: Literal["user", "token", "public", "trigger"]
     caller_id: Optional[int] = None
     caller_reference: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)
     trace_ref: Optional[str] = None
+    # A run under an autonomous mandate (#6947): the mandate id and the trigger that fired it
+    # (``schedule:version:<id>`` / ``webhook:version:<id>``). Only the trusted trigger paths build these.
+    mandate_ref: Optional[str] = None
+    trigger_ref: Optional[str] = None
 
 
 class ExecutionSecurityContextView(BaseModel):
@@ -43,6 +47,9 @@ class ExecutionSecurityContextView(BaseModel):
     agent_binding_ref: str
     policy_revision: str
     expires_at: datetime
+    # A mandate run only: when Main stops it, and the code that says which bound applied (#6947)
+    run_deadline: Optional[datetime] = None
+    run_deadline_code: Optional[str] = None
 
 
 def _holder(sid):

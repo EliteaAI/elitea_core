@@ -194,6 +194,30 @@ def finish_trigger_run_with_error(project_id: int, response_message_id: str, err
         log.exception("Could not record trigger run failure: message_id=%s", response_message_id)
 
 
+def is_trigger_refusal(result) -> bool:
+    """Did ``predict_sio`` refuse the run (a governed admission denial, returned as ``{code, error}``)?"""
+    return isinstance(result, dict) and isinstance(result.get("code"), str) and "task_id" not in result
+
+
+def finish_trigger_run_refused(project_id: int, response_message_id: str, refusal: dict) -> None:
+    """End a refused run's placeholder with the readable refusal (fixed text, no ids), so History shows why."""
+    message = f"Pipeline run was not started: {refusal.get('error')}"
+    try:
+        this.module.context.event_manager.fire_event('chat_message_stream_end', {
+            'message_id': response_message_id,
+            'content': message,
+            'response_metadata': {
+                'project_id': project_id,
+                'chat_project_id': project_id,
+                'is_error': True,
+                'error': message,
+                'code': refusal.get('code'),
+            },
+        })
+    except Exception:  # pylint: disable=W0703
+        log.exception("Could not record trigger run refusal: message_id=%s", response_message_id)
+
+
 def execute_pipeline_via_predict_sio(
     project_id: int,
     version: ApplicationVersion,
@@ -202,6 +226,7 @@ def execute_pipeline_via_predict_sio(
     response_message_id: str,
     user_input: str = "",
     trigger_source: str | None = None,
+    mandate_ticket: str | None = None,
 ) -> dict:
     """
     Execute a pipeline using the applications_predict_sio RPC.
@@ -216,10 +241,12 @@ def execute_pipeline_via_predict_sio(
         conversation_uuid: UUID of the conversation (used as stream_id)
         response_message_id: UUID of the response message group
         user_input: Input to send to the pipeline (empty for scheduled, payload for webhook)
+        mandate_ticket: single-use ticket of a governed run under an autonomous mandate; sent only when there is one
 
     Returns:
-        Dict with task_id from the RPC call
+        Dict with task_id from the RPC call, or ``{code, error}`` when a governed admission refused the run
     """
+    extra = {"mandate_ticket": mandate_ticket} if mandate_ticket is not None else {}
     result = rpc_tools.RpcMixin().rpc.timeout(5).applications_predict_sio(
         sid=None,  # No socket connection for triggered runs
         sio_event=SioEvents.chat_predict.value,  # Required for metadata persistence
@@ -243,6 +270,7 @@ def execute_pipeline_via_predict_sio(
         # sid-is-None auto-derive (sid=None here), but kept to document intent.
         non_interactive=True,
         trigger_source=trigger_source,
+        **extra,
     )
 
     log.debug(

@@ -453,8 +453,10 @@ def pure(ns, **over):
         expires_at=now + timedelta(hours=1), can_use=over.pop("can_use", lambda: True))
     use = cd.CredentialUse("1", "credentials", "u-1", over.pop("selector", "uuid"), 1)
     reference = {"ref_id": "r-1", "state": "active", "generation": 1, "configuration_generation": 3,
-                 "store_kind": "database", "ownership_class": "project_shared", "revocation_epoch": 2}
-    grant = {"grant_id": "g-1", "state": "active", "revocation_epoch": 4, "valid_from": None, "valid_until": None}
+                 "store_kind": "database", "ownership_class": "project_shared", "revocation_epoch": 2,
+                 "custodian_user_id": None}
+    grant = {"grant_id": "g-1", "state": "active", "subject_kind": "user_delegation", "revocation_epoch": 4,
+             "valid_from": None, "valid_until": None}
     grant.update(over.pop("grant", {}))
     facts = cd.CredentialFacts(
         {"u-1": {"id": 5, "project_id": 1, "section": "credentials", "generation": 3}}, {5: reference},
@@ -773,7 +775,8 @@ def test_the_decision_runs_after_binding_and_subject_and_before_the_context_row(
     body = text[text.index("def _admit("):text.index("def admit_execution")]
     order = [body.index(marker) for marker in (
         "_verify_identity(request, settings)", "_find_binding(request, settings)", "_subject_of(principal)",
-        "_decide_credentials(module, request, subject, binding, payload, expires_at)",
-        "session.add(ExecutionSecurityContext(", "security_audit_record(session")]
+        "_decide_credentials(module, request, subject, binding, payload, expires_at)", "_store_admission(")]
     assert order == sorted(order)
+    store = text[text.index("def _store_admission("):text.index("# --- autonomous mandates")]
+    assert store.index("session.add(ExecutionSecurityContext(") < store.index("security_audit_record(session")
     assert "payload=payload" in text[text.index("def admit_dispatch"):text.index("def _parent_covered")]

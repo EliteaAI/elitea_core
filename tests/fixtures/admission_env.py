@@ -15,6 +15,7 @@ import importlib
 import json
 import os
 import sys
+import threading
 import types
 import uuid
 import warnings
@@ -99,6 +100,9 @@ class Env:  # pylint: disable=R0902,R0904
         self.epoch_calls = []
         self.epochs = {42: {"active": True, "user": 3, "token": 0}, 43: {"active": True, "user": 5, "token": 0}}
         self.epochs_raise = False
+        self.idp_links = {}             # (issuer, tid, oid) -> user row, for auth.get_user_by_idp_subject (#6947)
+        self.idp_raises = None
+        self.facts_version = 2          # credential_facts_version of the secrets plugin
         self.verifier_configured = True
         self.auth_mode = "rpc"
         self.has_audit_method = True
@@ -220,6 +224,9 @@ class Env:  # pylint: disable=R0902,R0904
                 profile="governed" if governed else "legacy"),
             admission_settings=adm.AdmissionSettings(**settings),
             _context_by_task=OrderedDict(),
+            _context_lock=threading.Lock(),
+            _mandate_tickets=self.ns.mandate_admission.TicketStore(),
+            task_node=types.SimpleNamespace(stop_task=lambda task_id: None),
         )
 
     def request(self, **over):
@@ -276,9 +283,14 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
 
     @compiler.compiles(sa.sql.elements.BinaryExpression, "sqlite")
     def _jsonb_contains(element, compiler_, **kw):
-        """SQLite has no ``@>``: emulate the one probe the plugin sends, a list holding one ``credential_ref``."""
+        """SQLite has no ``@>``: emulate the two probes the plugin sends, a list holding one ``credential_ref`` and
+        an object with some keys."""
         if getattr(element.operator, "opstring", None) == "@>":
             left, right = compiler_.process(element.left, **kw), compiler_.process(element.right, **kw)
+            probe = getattr(element.right, "value", None)
+            if isinstance(probe, dict):   # an object holding these keys (the mandate subject of a context, #6947)
+                return " AND ".join(
+                    f"json_extract({left}, '$.{key}') = json_extract({right}, '$.{key}')" for key in probe)
             return (f"EXISTS (SELECT 1 FROM json_each({left}) AS je WHERE "
                     f"json_extract(je.value, '$.credential_ref') = json_extract({right}, '$[0].credential_ref'))")
         return compiler_.visit_binary(element, **kw)
@@ -323,8 +335,11 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.pd_admission = load("models/pd", "admission")
     ns.caps = load("utils", "worker_capabilities")
     ns.credential_decision = load("utils", "credential_decision")
+    ns.mandate_state = load("utils", "mandate_state")
+    ns.trigger_principal = load("utils", "trigger_principal")
     ns.adm = load("utils", "admission")
     ns.binding_admin = load("utils", "binding_admin")
+    ns.mandate_admission = load("utils", "mandate_admission")
     ns.real_now = ns.adm._now  # pylint: disable=W0212
 
     class CountingSession(sa_orm.Session):
@@ -439,17 +454,22 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                     references[row["configuration_id"]] = {
                         key: row[key] for key in ("ref_id", "state", "generation", "configuration_generation",
                                                   "store_kind", "ownership_class", "revocation_epoch")}
+                    references[row["configuration_id"]]["custodian_user_id"] = row.get("custodian_user_id")
             for key in ("|".join(item) for item in grant_keys):
                 grant = env.grants.get((project_id, key))
                 if grant is not None and grant["state"] != "revoked":
                     grants[key] = dict(grant)
+                    # as secrets facts v2: the kind follows the subject unless a test sets it (None = absent)
+                    grants[key].setdefault("subject_kind", "mandate" if key.split("|")[-1].startswith("mandate:")
+                                           else "user_delegation")
             return {"references": references, "grants": grants}
 
         def modules():
             return {
                 "tracing": tracing_module(),
                 "configurations": types.SimpleNamespace(configuration_credential_facts=configuration_credential_facts),
-                "secrets": types.SimpleNamespace(credential_use_facts=credential_use_facts),
+                "secrets": types.SimpleNamespace(credential_use_facts=credential_use_facts,
+                                                 credential_facts_version=lambda: env.facts_version),
             }
 
         def for_module(name):
@@ -466,6 +486,14 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             return set(env.permissions.get(user_id, set()))
 
         tools.auth.get_user_permissions = get_user_permissions
+
+        def get_user_by_idp_subject(issuer, tid, oid):
+            if env.idp_raises:
+                raise env.idp_raises
+            user = env.idp_links.get((issuer, tid, oid))
+            return dict(user) if user is not None else None
+
+        tools.auth.get_user_by_idp_subject = get_user_by_idp_subject
 
         def find_schema(tool_type, project_id, user_id):
             env.schema_calls.append((tool_type, project_id, user_id))

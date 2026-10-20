@@ -16,6 +16,7 @@ import arbiter  # pylint: disable=E0401
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.admission import admit_dispatch, check_governed_startup, load_admission_settings, track_context
 from .utils.governance import init_governance
+from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
 from .utils.worker_capabilities import (
     CAPABILITIES_EVENT,
@@ -130,6 +131,9 @@ class Module(module.ModuleModel):
         self.callback_tasks = {}
         # task_id -> (project_id, context_ref) of governed runs admitted by this process (#6756); bounded
         self._context_by_task = OrderedDict()
+        self._context_lock = Lock()   # the map is read by the deadline sweep while dispatch threads change it
+        # single-use tickets of autonomous (mandate) runs, minted and taken in this process only; bounded (#6947)
+        self._mandate_tickets = TicketStore()
         self.active_index_tasks = OrderedDict()
         self.active_index_tasks_max = 4096
         self.recently_stopped_index_tasks = OrderedDict()
@@ -759,9 +763,11 @@ class Module(module.ModuleModel):
             )
             stamp_predict_run_id(kwargs)
             context_ref = admit_dispatch(self, args[0] if args else kwargs.get("name"), kwargs, admission)
+            # a mandate run carries its time limit here (admit_dispatch); it is for Main only, the worker never sees it
+            deadline = (kwargs.get("meta") or {}).pop("context_deadline", None) if context_ref else None
             task_id = _original_start_task(*args, **kwargs)
             if context_ref:
-                track_context(self, task_id, admission.project_id, context_ref)
+                track_context(self, task_id, admission.project_id, context_ref, deadline=deadline)
             return task_id
 
         self.task_node.start_task = _maintenance_gated_start_task

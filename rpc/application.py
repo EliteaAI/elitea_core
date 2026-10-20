@@ -38,6 +38,7 @@ from ..utils.application_utils import (
     ApplicationToolExpandedError
 )
 from ..models.pd.admission import admission_request_from
+from ..utils.mandate_admission import take_trigger_admission
 from ..utils.exceptions import (
     AdmissionDenied, PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError,
 )
@@ -200,6 +201,7 @@ class RPC:
                     invoked_skills: Optional[list] = None,
                     applied_skills: Optional[list] = None,
                     sid_project_id: Optional[int] = None,
+                    mandate_ticket: Optional[str] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -399,7 +401,13 @@ class RPC:
 
         # Governed runs are admitted from the authenticated connection and the version row loaded above,
         # never from user_id / user_context / ids in the payload; None when governance is off (#6756)
-        admission = admission_request_from(
+        # An autonomous run (scheduler tick, webhook API) brings a single-use ticket for the request its trusted caller
+        # built; anything else (no ticket, a forged, spent or foreign one) is the ordinary request, which for a
+        # system user is refused as MANDATE_REQUIRED (#6947)
+        admission = take_trigger_admission(
+            self, mandate_ticket, project_id=parsed.project_id, binding_project_id=application_project_id,
+            version_id=getattr(admission_version_row, "id", None),
+        ) or admission_request_from(
             self, sid=sid, project_id=parsed.project_id, binding_project_id=application_project_id,
             version_row=admission_version_row, run_kind="system" if is_system_user else "interactive",
             entry_point="chat_sio",

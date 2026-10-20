@@ -128,6 +128,11 @@ def env(monkeypatch):
             'SioEvents': types.SimpleNamespace(chat_predict=types.SimpleNamespace(value='chat_predict'))},
         'plugins.elitea_core.utils.cron_utils': {'is_cron_due': lambda cron, last, tz: state.due},
         'plugins.elitea_core.utils.maintenance_gate': {'is_maintenance_active': lambda: False},
+        # governance is off here: no mandate, no ticket, no sweep (the governed paths are test_6947_mandate_triggers)
+        'plugins.elitea_core.utils.governance': {'is_governed': lambda module: False},
+        'plugins.elitea_core.utils.admission': {'enforce_run_deadlines': lambda module: 0},
+        'plugins.elitea_core.utils.mandate_admission': {
+            'prepare_trigger_run': lambda **kwargs: (kwargs['default_user_id'], None)},
         'plugins.elitea_core.utils.utils': {
             'make_yield_to_hub': lambda runtime: (lambda: None), 'end_ambient_transaction': lambda: None},
     }.items():

@@ -27,6 +27,7 @@ USE_PERMISSION = "credentials.use"
 STORE_KINDS = frozenset({"database", "corporate_vault"})
 ALLOWED = "CREDENTIAL_USE_ALLOWED"
 WHOLE_TARGET = "*"
+MANDATE_SUBJECT_PREFIX = "mandate:"
 NESTED_FIELD = "<nested>"
 # The shape a stored toolkit credential has (``_expand_toolkit_settings`` accepts exactly this)
 CREDENTIAL_KEYS = frozenset({"elitea_title", "private", "configuration_uuid", "configuration_project_id"})
@@ -64,6 +65,10 @@ class CredentialDecisionContext:
     now: datetime
     expires_at: datetime
     can_use: Callable[[], bool]   # ``credentials.use`` of the verified user; asked only once a use reaches it
+    # Whose authority the run has. A mandate subject acts for its owner: a personal credential is usable only when the
+    # owner is its custodian, and only a grant made to the mandate (not to the person) counts (#6947)
+    subject_kind: str = "user_delegation"
+    subject_user_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,11 @@ def binding_ref(decision: Decision) -> dict:
         "grant_id": decision.grant_id, "grant_epoch": decision.grant_epoch,
         "configuration_generation": decision.configuration_generation, "decision_id": decision.decision_id,
     }
+
+
+def subject_kind_of(subject_ref) -> str:
+    """The kind of grant a subject reference is for: ``mandate:<uuid>`` or (``idp:<tid>:<oid>``) a user delegation."""
+    return "mandate" if str(subject_ref).startswith(MANDATE_SUBJECT_PREFIX) else "user_delegation"
 
 
 def grant_key(binding_ref_, toolkit_instance_id, credential_ref, subject_ref) -> str:
@@ -294,7 +304,9 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
                  credential_generation=reference.get("generation"))
     if reference.get("state") != "active" or reference.get("store_kind") not in STORE_KINDS:   # 4. in force
         return verdict(False, "CREDENTIAL_REFERENCE_INACTIVE")
-    if reference.get("ownership_class") == "personal":                             # 5. not a personal credential
+    if reference.get("ownership_class") == "personal" and not (                    # 5. not a personal credential,
+            ctx.subject_kind == "mandate" and ctx.subject_user_id is not None      #    unless the owner of a
+            and _int_or_none(reference.get("custodian_user_id")) == ctx.subject_user_id):   # mandate holds it
         return verdict(False, "CREDENTIAL_CLASS_NOT_ALLOWED")
     approved = reference.get("configuration_generation")                          # 6. unchanged since approval
     if approved is None or config.get("generation") != approved:
@@ -303,8 +315,8 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
         return verdict(False, "DENIED_RBAC")
     grant = facts.grants.get(grant_key(                                            # 8, 9. this binding, toolkit, user
         ctx.agent_binding_ref, use.toolkit_instance_id, reference.get("ref_id"), ctx.subject_ref))
-    if not grant_in_force(grant, ctx.now):
-        return verdict(False, "DENIED_GRANT")
+    if not grant_in_force(grant, ctx.now) or grant.get("subject_kind") != ctx.subject_kind:
+        return verdict(False, "DENIED_GRANT")                                      # a missing kind is no grant
     return verdict(True, ALLOWED, reference_epoch=reference.get("revocation_epoch"),
                    grant_id=grant.get("grant_id"), grant_epoch=grant.get("revocation_epoch"))
 
@@ -386,7 +398,7 @@ def recheck_credentials(project_id, entries, subject_ref, agent_binding_ref, now
                 or config.get("generation") != entry["configuration_generation"]):
             return "CREDENTIAL_GENERATION_MISMATCH"
         grant = grants.get(grant_key(agent_binding_ref, entry["toolkit_instance_id"], entry["credential_ref"], subject_ref))
-        if not grant_in_force(grant, now):
+        if not grant_in_force(grant, now) or grant.get("subject_kind") != subject_kind_of(subject_ref):
             return "DENIED_GRANT"
         if grant.get("revocation_epoch") != entry["grant_epoch"]:
             return "EPOCH_MISMATCH"
