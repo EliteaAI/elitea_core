@@ -12,9 +12,9 @@ import json
 import pathlib
 import sys
 import types
-from unittest.mock import MagicMock
 
 import pytest
+from fixtures import schedule_sqlite as sqlite_db
 from fixtures.helpers import load_module_with_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -27,48 +27,6 @@ PERMISSION_PREFIX = 'models.applications.schedules.'
 EDITOR = {PERMISSION_PREFIX + verb for verb in ('list', 'details', 'create', 'update', 'delete', 'run')}
 ADMIN = EDITOR | {PERMISSION_PREFIX + 'admin'}
 NOT_FOUND = {'error': 'Schedule not found'}
-
-
-def _real_sqlalchemy():
-    """Real sqlalchemy modules, even when an earlier suite left stubs (no `__file__`) in sys.modules."""
-    stubs = {n: m for n, m in sys.modules.items()
-             if (n == 'sqlalchemy' or n.startswith('sqlalchemy.')) and not hasattr(m, '__file__')}
-    for name in stubs:
-        del sys.modules[name]
-    try:
-        import sqlalchemy.dialects.postgresql
-        import sqlalchemy.exc
-        import sqlalchemy.ext.compiler
-        import sqlalchemy.orm  # noqa: F401
-        return {n: m for n, m in sys.modules.items() if n == 'sqlalchemy' or n.startswith('sqlalchemy.')}
-    finally:
-        sys.modules.update(stubs)
-
-
-REAL_SQLALCHEMY = _real_sqlalchemy()
-sa = REAL_SQLALCHEMY['sqlalchemy']
-orm = REAL_SQLALCHEMY['sqlalchemy.orm']
-
-
-@REAL_SQLALCHEMY['sqlalchemy.ext.compiler'].compiles(REAL_SQLALCHEMY['sqlalchemy.dialects.postgresql'].JSONB, 'sqlite')
-def _jsonb_as_json(type_, compiler, **kw):
-    return 'JSON'
-
-
-def _package(name):
-    module = types.ModuleType(name)
-    module.__path__ = []
-    sys.modules[name] = module
-    return module
-
-
-class _LenientModule(types.ModuleType):
-    """A module whose unknown names are mocks, for imports the handler never exercises."""
-
-    def __getattr__(self, name):
-        if name.startswith('__'):
-            raise AttributeError(name)
-        return MagicMock(name=name)
 
 
 class FakeSpan:
@@ -122,74 +80,35 @@ class Harness:
         return getattr(handler, verb)(**kwargs)
 
     def seed(self, created_by=OWNER_ID, **fields):
-        values = {
-            'entity_type': 'agent', 'application_id': 1, 'version_id': 10, 'name': 'Nightly',
-            'cron': '0 9 * * *', 'timezone': 'Etc/UTC', 'prompt': 'Say hi', 'variables': [], 'enabled': True,
-            'created_by': created_by, 'principal': {'kind': 'delegation', 'ref': created_by},
-        }
-        values.update(fields)
-        with self.session_factory() as session:
-            row = self.EntitySchedule(**values)
-            session.add(row)
-            session.commit()
-            return row.id
+        return sqlite_db.seed_schedule(self.session_factory, self.EntitySchedule, created_by, **fields)
 
 
 @pytest.fixture
 def harness(isolated_sys_modules, monkeypatch):
-    for name, module in REAL_SQLALCHEMY.items():
+    for name, module in sqlite_db.REAL_SQLALCHEMY.items():
         monkeypatch.setitem(sys.modules, name, module)
     harness = Harness()
     for name in ('plugins', PACKAGE, f'{PACKAGE}.api', f'{PACKAGE}.api.v2', f'{PACKAGE}.utils',
                  f'{PACKAGE}.models', f'{PACKAGE}.models.enums', f'{PACKAGE}.models.pd', 'pylon', 'pylon.core'):
-        _package(name)
+        sqlite_db.package(name)
 
-    class Base(orm.DeclarativeBase):
-        pass
-
-    class Application(Base):
-        __tablename__ = 'applications'
-        __table_args__ = ({'schema': 'tenant'},)
-        id = sa.Column(sa.Integer, primary_key=True)
-        name = sa.Column(sa.String, default='Entity')
-
-    class ApplicationVersion(Base):
-        __tablename__ = 'application_versions'
-        __table_args__ = ({'schema': 'tenant'},)
-        id = sa.Column(sa.Integer, primary_key=True)
-        application_id = sa.Column(sa.Integer, sa.ForeignKey('tenant.applications.id'))
-        agent_type = sa.Column(sa.String, default='openai')
-
-    models = sys.modules[f'{PACKAGE}.models']
-    models.db = types.SimpleNamespace(Base=Base)
-    models.db_tools = types.SimpleNamespace(AbstractBaseMixin=type('Mixin', (), {}))
-    models.config = types.SimpleNamespace(POSTGRES_TENANT_SCHEMA='tenant')
-    all_models = types.ModuleType(f'{PACKAGE}.models.all')
-    all_models.Application, all_models.ApplicationVersion = Application, ApplicationVersion
-    sys.modules[all_models.__name__] = all_models
-
-    sys.modules['pylon.core.tools'] = types.SimpleNamespace(
-        log=types.SimpleNamespace(debug=print, info=print, warning=print, error=print, exception=print),
-    )
+    Base, Application, ApplicationVersion = sqlite_db.install_parent_models(PACKAGE)
     flask = types.ModuleType('flask')
     flask.request = types.SimpleNamespace(
         get_json=lambda *args, **kwargs: harness.body,
         json=property(lambda self: harness.body),
     )
     sys.modules['flask'] = flask
-    otel = types.ModuleType('opentelemetry')
-    otel.trace = types.SimpleNamespace(get_current_span=lambda: harness.span)
-    sys.modules['opentelemetry'] = otel
-    sys.modules['opentelemetry.trace'] = otel.trace
+    sqlite_db.install_trace_span(harness.span)
 
-    engine = sa.create_engine('sqlite://').execution_options(schema_translate_map={'tenant': None})
+    engine = sqlite_db.sqlite_engine()
 
-    class _Session(orm.Session):
+    class _Session(sqlite_db.orm.Session):
         def __exit__(self, *exc):
             self.close()
 
     harness.session_factory = lambda: _Session(engine)
-    tools = _LenientModule('tools')
+    tools = sqlite_db.LenientModule('tools')
     tools.api_tools = types.SimpleNamespace(
         APIModeHandler=type('APIModeHandler', (), {}),
         APIBase=type('APIBase', (), {}),
@@ -220,10 +139,7 @@ def harness(isolated_sys_modules, monkeypatch):
     sys.modules[folder_access.__name__] = folder_access
     sys.modules[notifications.__name__] = notifications
 
-    load('models/enums/all.py', 'models.enums.all')
-    harness.EntitySchedule = load('models/entity_schedule.py', 'models.entity_schedule').EntitySchedule
-    harness.EntitySchedule.__table__.c.variables.server_default = None  # `::jsonb` is not SQLite
-    Base.metadata.create_all(engine)
+    harness.EntitySchedule = sqlite_db.create_schedule_table(load, Base, engine)
     load('utils/constants.py', 'utils.constants')
     load('utils/schedule_timing.py', 'utils.schedule_timing')
     load('utils/schedule_access.py', 'utils.schedule_access')
@@ -232,14 +148,7 @@ def harness(isolated_sys_modules, monkeypatch):
     load('utils/schedule_service.py', 'utils.schedule_service')
     harness.module = load('api/v2/schedule.py', 'api.v2.schedule')
 
-    with harness.session_factory() as session:
-        session.add_all([Application(id=1), Application(id=2)])
-        session.flush()
-        session.add_all([
-            ApplicationVersion(id=10, application_id=1, agent_type='openai'),
-            ApplicationVersion(id=11, application_id=2, agent_type='pipeline'),
-        ])
-        session.commit()
+    sqlite_db.add_agent_and_pipeline(harness.session_factory, Application, ApplicationVersion)
     return harness
 
 
