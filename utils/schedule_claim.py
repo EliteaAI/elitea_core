@@ -19,7 +19,7 @@ def select_due_schedules(session, entity_types, limit: int) -> list[EntitySchedu
             EntitySchedule.entity_type.in_(entity_types),
             EntitySchedule.next_run <= func.now(),
         )
-        .order_by(EntitySchedule.next_run)
+        .order_by(EntitySchedule.next_run, EntitySchedule.id)
         .limit(limit)
     ))
 
@@ -44,6 +44,15 @@ def insert_cron_run(session, schedule_id: int) -> int | None:
     except IntegrityError:
         return None
     return run.id
+
+
+def fail_run(session, run_id: int, reason: str) -> None:
+    """Close a cron run that never started, so the active-run index does not block the schedule."""
+    session.execute(
+        update(EntityScheduleRun)
+        .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running')
+        .values(status='failed', reason=reason, finished_at=func.now())
+    )
 
 
 def legacy_lock_key(project_id: int) -> int:

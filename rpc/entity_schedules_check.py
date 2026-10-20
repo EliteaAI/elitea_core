@@ -9,11 +9,12 @@ from tools import db, rpc_tools, this
 from ..utils.maintenance_gate import is_maintenance_active
 from ..utils.schedule_claim import (
     claim_schedule,
+    fail_run,
     insert_cron_run,
     legacy_lock_key,
     select_due_schedules,
 )
-from ..utils.schedule_dispatch import RUN_STARTERS, start_schedule_run
+from ..utils.schedule_dispatch import RUN_STARTERS, START_FAILED, start_schedule_run
 from ..utils.schedule_timing import compute_next_run
 from ..utils.utils import end_ambient_transaction, make_yield_to_hub
 
@@ -59,24 +60,38 @@ def _run_legacy_step(project_ids: list[int], yield_to_hub) -> None:
 
 
 def _dispatch_project(project_id: int, entity_types: list[str], room: int) -> int:
-    """Claim and start due rows of one project, at most `room`; return how many runs started."""
+    """Claim and start due rows of one project, at most `room`; return how many runs started.
+
+    The cap counts started runs; a row whose claim is lost or whose active run blocks it uses no room.
+    """
     started = 0
     with db.get_session(project_id) as session:
-        for schedule in select_due_schedules(session, entity_types, room):
+        # Plain values, read once: a commit expires ORM rows, and a reloaded next_run that another
+        # replica already moved would let this claim match and start the schedule twice (R1.1)
+        due = [
+            (row.id, row.entity_type, row.cron, row.timezone, row.next_run)
+            for row in select_due_schedules(session, entity_types, room)
+        ]
+        for schedule_id, entity_type, cron, timezone, seen_next_run in due:
             try:
-                next_run = compute_next_run(schedule.cron, schedule.timezone, datetime.now(UTC))
-                if not claim_schedule(session, schedule.id, schedule.next_run, next_run):
+                next_run = compute_next_run(cron, timezone, datetime.now(UTC))
+                if not claim_schedule(session, schedule_id, seen_next_run, next_run):
                     session.rollback()
                     continue  # another replica took this due time
-                run_id = insert_cron_run(session, schedule.id)
+                run_id = insert_cron_run(session, schedule_id)
                 session.commit()  # the claim stays even when an active run blocks this one
-                if run_id is not None and start_schedule_run(schedule.entity_type, project_id, schedule.id, run_id):
+                if run_id is None:
+                    continue
+                if start_schedule_run(entity_type, project_id, schedule_id, run_id):
                     started += 1
+                else:  # a running run that never starts would block the schedule for good (R2.1)
+                    fail_run(session, run_id, START_FAILED)
+                    session.commit()
             except Exception as exc:  # noqa: BLE001 -- one bad row must not stop the tick (R1.4)
                 session.rollback()
                 log.exception(
                     "entity_schedules_check: skipped schedule: project_id=%s schedule_id=%s exc=%r",
-                    project_id, schedule.id, exc,
+                    project_id, schedule_id, exc,
                 )
     return started
 

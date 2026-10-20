@@ -52,16 +52,22 @@ def test_7011_r3_5_starter_runs_in_a_daemon_thread(dispatch):
     assert seen[0].daemon
 
 
-def test_7011_r3_5_starter_error_does_not_reach_the_caller(dispatch):
-    done = threading.Event()
+def test_7011_r3_5_starter_error_does_not_reach_the_caller_and_closes_the_run(dispatch, monkeypatch):
+    closed = threading.Event()
+    calls = []
+
+    def close(*args):
+        calls.append(args)
+        closed.set()
 
     def starter(*_):
-        done.set()
         raise RuntimeError("boom")
 
+    monkeypatch.setattr(dispatch, "_close_unstarted_run", close)
     dispatch.RUN_STARTERS["agent"] = starter
     dispatch.start_schedule_run("agent", 1, 2, 3)
-    assert done.wait(WAIT)
+    assert closed.wait(WAIT)
+    assert calls == [(1, 2, 3)]
 
 
 def test_7011_r3_5_type_without_starter_is_not_started(dispatch):

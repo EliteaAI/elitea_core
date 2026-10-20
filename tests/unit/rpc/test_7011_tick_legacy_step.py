@@ -102,9 +102,11 @@ def world(monkeypatch):
         "utils.utils": {"make_yield_to_hub": lambda _runtime: quiet, "end_ambient_transaction": quiet},
         "utils.schedule_claim": {
             "select_due_schedules": world.select_due, "claim_schedule": None, "insert_cron_run": None,
-            "legacy_lock_key": lambda project_id: 1000 + project_id,
+            "legacy_lock_key": lambda project_id: 1000 + project_id, "fail_run": None,
         },
-        "utils.schedule_dispatch": {"RUN_STARTERS": {"pipeline": print}, "start_schedule_run": None},
+        "utils.schedule_dispatch": {
+            "RUN_STARTERS": {"pipeline": print}, "start_schedule_run": None, "START_FAILED": "",
+        },
         "utils.schedule_timing": {"compute_next_run": None},
         "rpc.pipeline_scheduling": {
             "_check_project_pipelines": world.check_project, "_check_pipeline_scheduling_lock": world.legacy_lock,

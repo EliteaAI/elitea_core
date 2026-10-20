@@ -40,7 +40,8 @@ class World:
         self.config = {"agent_scheduling_enabled": True, "dispatch_cap": 100}
         self.maintenance, self.fail_claim, self.lost, self.conflict = False, set(), set(), set()
         self.fail_projects, self.listed = set(), False
-        self.selects, self.claims, self.started, self.sessions = [], [], [], []
+        self.selects, self.claims, self.started, self.sessions, self.failed = [], [], [], [], []
+        self.no_start, self.moved_by_another_replica = set(), []
 
     def select_due(self, session, entity_types, limit):
         self.selects.append((session.project_id, list(entity_types), limit))
@@ -50,12 +51,16 @@ class World:
         if schedule_id in self.fail_claim:
             raise RuntimeError("db down")
         self.claims.append((schedule_id, seen, new))
+        for row in self.moved_by_another_replica:
+            row.next_run = NEXT
         return schedule_id not in self.lost
 
     def insert_run(self, session, schedule_id):
         return None if schedule_id in self.conflict else schedule_id * 10
 
     def start(self, entity_type, project_id, schedule_id, run_id):
+        if schedule_id in self.no_start:
+            return False
         self.started.append((project_id, schedule_id, run_id))
         return True
 
@@ -81,9 +86,11 @@ def world(monkeypatch):
         "utils.schedule_claim": {
             "select_due_schedules": world.select_due, "claim_schedule": world.claim,
             "insert_cron_run": world.insert_run, "legacy_lock_key": lambda project_id: project_id,
+            "fail_run": lambda session, run_id, reason: world.failed.append((run_id, reason)),
         },
         "utils.schedule_dispatch": {
             "RUN_STARTERS": {"agent": print, "pipeline": print}, "start_schedule_run": world.start,
+            "START_FAILED": "the run could not start",
         },
         "utils.schedule_timing": {"compute_next_run": lambda cron, zone, after: NEXT},
     }
@@ -204,3 +211,19 @@ def test_7011_r1_3_lost_claim_and_active_run_start_nothing(world):
     world.rows = {1: [_row(1), _row(2), _row(3)]}
     world.tick()
     assert world.started == [(1, 3, 30)]
+
+
+def test_7011_r2_1_a_run_that_cannot_start_is_failed_so_it_does_not_block(world):
+    world.no_start = {1}
+    world.rows = {1: [_row(1), _row(2)]}
+    world.tick()
+    assert world.failed == [(10, "the run could not start")]
+    assert world.started == [(1, 2, 20)]
+
+
+def test_7011_r1_1_claims_use_the_next_run_read_by_the_due_query(world):
+    """R1.1: a commit must not reload next_run; a reloaded value moved by another replica would match."""
+    rows = [_row(1), _row(2)]
+    world.rows, world.moved_by_another_replica = {1: rows}, [rows[1]]  # moved after the due query
+    world.tick()
+    assert [claim[1] for claim in world.claims] == [NOW, NOW]
