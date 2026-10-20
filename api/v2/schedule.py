@@ -1,5 +1,5 @@
 """Create, read, update and delete of one entity schedule (EL-7011, ADR-0004)."""
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, get_args
 
 from flask import request
 from pydantic import BaseModel, Field, ValidationError
@@ -31,6 +31,27 @@ from ...utils.schedule_service import (
 from ...utils.schedule_timing import ScheduleLimitError
 
 OPENAPI_TAG = "elitea_core/schedules"
+# Pinned: register_api_class would pick any of the URLs that share a handler class (BUG-11)
+PROJECT_PATH = "<string:mode>/<int:project_id>"
+SCHEDULE_PATH = f"{PROJECT_PATH}/<int:schedule_id>"
+SCHEDULE_URL = f"/api/v2/elitea_core/schedule/{SCHEDULE_PATH}"
+RESPONSE_TEXT = {
+    200: "Success",
+    201: "Created",
+    202: "The run started; the body has `run_id`",
+    204: "Deleted",
+    400: "Invalid input; the body names the error and the field",
+    403: "No permission, or not the owner",
+    404: "Schedule not found, or another owner's schedule",
+    409: "Conflict: schedule limit, deleted version or an active run",
+    500: "Server error",
+    503: "A service the check needs is unavailable",
+}
+
+
+def _responses(*codes: int) -> dict:
+    """The documented answers of an operation, by status code."""
+    return {str(code): {"description": RESPONSE_TEXT[code]} for code in codes}
 
 
 def _iso(moment) -> str | None:
@@ -84,15 +105,51 @@ def _on_runs_path() -> bool:
     return request.path.rstrip("/").endswith("/runs")
 
 
+RunStatus = Literal["running", "success", "failed", "skipped", "blocked", "waiting_for_approval"]
+
+
 class RunsQuery(BaseModel):
     """Query of the run records list; `limit` above the cap is lowered to it (R3.3, R3.5)."""
 
     limit: int = Field(default=20, ge=1)
     offset: int = Field(default=0, ge=0)
-    status: Literal["running", "success", "failed", "skipped", "blocked", "waiting_for_approval"] | None = None
+    status: RunStatus | None = None
 
 
 MAX_RUNS_LIMIT = 100
+PATH_PARAMS = [
+    {"name": "mode", "in": "path", "required": True, "schema": {"type": "string", "default": PROMPT_LIB_MODE},
+     "description": f"Mode (default: {PROMPT_LIB_MODE})"},
+    {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"}, "description": "Project id"},
+    {"name": "schedule_id", "in": "path", "required": True, "schema": {"type": "integer"},
+     "description": "Schedule id"},
+]
+RUNS_QUERY_PARAMS = [
+    {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20, "minimum": 1},
+     "description": f"Rows per page; a value above {MAX_RUNS_LIMIT} is lowered to {MAX_RUNS_LIMIT}"},
+    {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0, "minimum": 0},
+     "description": "Rows to skip"},
+    {"name": "status", "in": "query", "schema": {"type": "string", "enum": list(get_args(RunStatus))},
+     "description": "Only runs with this status"},
+]
+OWNER_BODY = {"required": True, "content": {"application/json": {"schema": {
+    "type": "object", "required": ["owner_id"],
+    "properties": {"owner_id": {"type": "integer", "description": "User id of the new owner, a project member"}},
+}, "examples": {"example1": {"value": {"owner_id": 20}}}}}}
+# The router serves these URLs with the handlers below, so register_api_class cannot list them;
+# Module._register_openapi registers them (BUG-11)
+OPENAPI_SUB_ACTIONS = [
+    {"path": f"{SCHEDULE_URL}/run", "method": "post", "name": "Run Schedule",
+     "description": "Start a run now (`manual`) or a test run (`test`) of the caller's own schedule.",
+     "parameters": PATH_PARAMS, "request_body": ScheduleRunRequest,
+     "responses": _responses(202, 400, 403, 404, 409, 500)},
+    {"path": f"{SCHEDULE_URL}/owner", "method": "post", "name": "Change Schedule Owner",
+     "description": "Set a new owner. Schedules admin only; the old and the new owner get a notice.",
+     "parameters": PATH_PARAMS, "request_body": OWNER_BODY, "responses": _responses(200, 400, 403, 404, 503)},
+    {"path": f"{SCHEDULE_URL}/runs", "method": "get", "name": "List Schedule Runs",
+     "description": "Run records of one schedule, newest first, with the total before paging.",
+     "parameters": PATH_PARAMS + RUNS_QUERY_PARAMS, "responses": _responses(200, 400, 403, 404)},
+]
 RUN_FIELDS = (
     "id", "trigger", "status", "reason", "conversation_id", "requested_by", "started_at", "finished_at",
 )
@@ -127,12 +184,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Create Schedule",
-        description="Create a schedule owned by the caller. The owner is never taken from the body. "
-                    "POST .../{schedule_id}/run starts a run now or a test run of the caller's own schedule. "
-                    "POST .../{schedule_id}/owner with {owner_id} sets a new owner (schedules admin only).",
+        description="Create a schedule owned by the caller. The owner is never taken from the body.",
         tags=[OPENAPI_TAG],
         request_body=ScheduleCreate,
+        responses=_responses(201, 400, 403, 404, 409),
         available_to_users=True,
+        path_suffix_override=PROJECT_PATH,
     )
     @api_tools.endpoint_metrics
     def post(self, project_id: int, schedule_id: int | None = None, **kwargs):
@@ -228,7 +285,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Get Schedule",
         description="Read one schedule. Another owner's schedule answers 404 unless the caller is a schedules admin.",
         tags=[OPENAPI_TAG],
+        responses=_responses(200, 403, 404),
         available_to_users=True,
+        path_suffix_override=SCHEDULE_PATH,
     )
     @auth.decorators.check_api(schedule_check_spec("details"))
     @api_tools.endpoint_metrics
@@ -274,7 +333,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         description="Edit, pause or resume a schedule. The owner never changes.",
         tags=[OPENAPI_TAG],
         request_body=ScheduleUpdate,
+        responses=_responses(200, 400, 403, 404, 409),
         available_to_users=True,
+        path_suffix_override=SCHEDULE_PATH,
     )
     @auth.decorators.check_api(schedule_check_spec("update"))
     @api_tools.endpoint_metrics
@@ -303,7 +364,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         name="Delete Schedule",
         description="Delete a schedule. Run conversations stay.",
         tags=[OPENAPI_TAG],
+        responses=_responses(204, 403, 404),
         available_to_users=True,
+        path_suffix_override=SCHEDULE_PATH,
     )
     @auth.decorators.check_api(schedule_check_spec("delete"))
     @api_tools.endpoint_metrics

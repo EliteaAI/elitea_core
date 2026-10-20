@@ -57,9 +57,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "warnings for every field it could not use. Nothing is saved."
         ),
         request_body=GenerateScheduleDraftRequest,
+        responses={
+            "200": {"description": "Success: the checked `draft` and its `warnings`"},
+            "400": {"description": "Invalid body, or no default LLM in the project"},
+            "403": {"description": "No permission to create schedules"},
+            "500": {"description": "The service prompt is not configured"},
+            "502": {"description": "The model failed or its answer could not be used"},
+            "503": {"description": "The service is busy; retry after `retry_after` seconds"},
+        },
         tags=["elitea_core/schedules"],
         mcp_tool=False,
-        available_to_users=False,
+        available_to_users=True,
     )
     @auth.decorators.check_api({
         "permissions": ["models.applications.schedules.create"],
