@@ -46,13 +46,20 @@ def insert_cron_run(session, schedule_id: int) -> int | None:
     return run.id
 
 
-def fail_run(session, run_id: int, reason: str) -> None:
-    """Close a cron run that never started, so the active-run index does not block the schedule."""
-    session.execute(
+def fail_run(session, run_id: int, reason: str) -> int | None:
+    """Close a running run as failed and copy the status to its schedule; the schedule id, None when not running.
+
+    A running run that never ends would make the active-run index block the schedule.
+    """
+    schedule_id = session.scalar(
         update(EntityScheduleRun)
         .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running')
         .values(status='failed', reason=reason, finished_at=func.now())
+        .returning(EntityScheduleRun.schedule_id)
     )
+    if schedule_id is not None:
+        session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status='failed'))
+    return schedule_id
 
 
 def legacy_lock_key(project_id: int) -> int:
