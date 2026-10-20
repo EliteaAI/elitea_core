@@ -9,8 +9,8 @@ it is only useful while it keeps matching the admin schema.
 import ast
 import collections
 import json
-import types
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -18,8 +18,7 @@ import pytest
 PLUGIN_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(PLUGIN_ROOT / "tests"))
 
-from fixtures.helpers import load_utils_module  # noqa: E402
-
+from fixtures.helpers import load_utils_module
 
 _LogLine = collections.namedtuple("_LogLine", "level template args rendered")
 
@@ -126,7 +125,7 @@ def test_real_booleans_are_honoured(bindings):
 def test_plan_carries_the_expected_handler(bindings):
     plan = {e["name"]: e for e in bindings.build_scheduler_sync_plan({})}
     assert plan["index_scheduling"]["rpc_func"] == "applications_check_index_scheduling"
-    assert plan["pipeline_scheduling"]["rpc_func"] == "pipelines_check_scheduling"
+    assert plan["pipeline_scheduling"]["rpc_func"] == "entity_schedules_check"
 
 
 def test_index_handler_matches_the_rpc_this_plugin_registers(bindings):
@@ -140,6 +139,29 @@ def test_index_handler_matches_the_rpc_this_plugin_registers(bindings):
         if isinstance(arg, ast.Constant)
     }
     assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["index_scheduling"] in registered
+
+
+def _rpc_names(module_file):
+    return {
+        arg.value
+        for node in ast.walk(ast.parse((PLUGIN_ROOT / "rpc" / module_file).read_text()))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "rpc"
+        for arg in node.args
+        if isinstance(arg, ast.Constant)
+    }
+
+
+def test_r4_4_el_7011_pipeline_row_is_bound_to_the_generic_tick(bindings):
+    assert bindings.SCHEDULER_CONFIG_RPC_FUNCS["pipeline_scheduling"] in _rpc_names(
+        "entity_schedules_check.py"
+    )
+
+
+def test_r4_4_el_7011_the_old_rpc_registration_is_dropped(bindings):
+    assert "pipelines_check_scheduling" not in _rpc_names("pipeline_scheduling.py")
+    assert "pipelines_check_scheduling" not in bindings.SCHEDULER_CONFIG_RPC_FUNCS.values()
 
 
 def test_every_binding_declares_a_handler(bindings):

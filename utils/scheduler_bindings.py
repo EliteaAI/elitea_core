@@ -1,7 +1,6 @@
 """Platform schedules whose cadence is owned by the elitea_core admin config."""
 
 from croniter import croniter
-
 from pylon.core.tools import log
 
 SCHEDULER_CONFIG_BINDINGS = {
@@ -24,7 +23,7 @@ SCHEDULER_CONFIG_DEFAULTS = {
 
 SCHEDULER_CONFIG_RPC_FUNCS = {
     'index_scheduling': 'applications_check_index_scheduling',
-    'pipeline_scheduling': 'pipelines_check_scheduling',
+    'pipeline_scheduling': 'entity_schedules_check',
 }
 
 
