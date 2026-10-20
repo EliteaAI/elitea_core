@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    desc,
     func,
     text,
     true,
@@ -88,6 +89,8 @@ class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
             'uq_entity_schedule_runs_active', 'schedule_id', unique=True,
             postgresql_where=text(ACTIVE_RUN_STATUSES), sqlite_where=text(ACTIVE_RUN_STATUSES),
         ),
+        # Serves the runs list: one schedule, newest first
+        Index('ix_entity_schedule_runs_schedule_started', 'schedule_id', desc('started_at'), desc('id')),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
