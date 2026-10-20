@@ -47,12 +47,15 @@ VERSIONS = {
     8: ("pipeline", TRIGGER),
 }
 FOUND = [1, 2, 3, 4, 5, 8]
+AUTHOR = 9  # holds the row of a trigger without a usable creator (R3.1)
 
 
 class BlockingLock(LockConnection):
     """The tick's lock fake, also answering the blocking pg_advisory_lock of the migration."""
 
-    def execute(self, statement, params):
+    def execute(self, statement, params=None):
+        if "lock_timeout" in str(statement):
+            return types.SimpleNamespace(scalar=lambda: None)
         if "pg_advisory_lock(" in str(statement):
             self.world.locks.append(("block", params["key"]))
             return types.SimpleNamespace(scalar=lambda: None)
@@ -80,13 +83,14 @@ def project(tables, session, parents, migration, monkeypatch):  # noqa: F811 -- 
         application_id: Mapped[int]
         name: Mapped[str] = mapped_column(String)
         agent_type: Mapped[str] = mapped_column(String)
+        author_id: Mapped[int]
         pipeline_settings: Mapped[dict] = mapped_column(JSON)
 
     App.__table__.create(engine)
     Version.__table__.create(engine)
-    session.execute(parents["application_versions"].insert(), [{"id": 3}, {"id": 4}])
+    session.execute(parents["application_versions"].insert(), [{"id": 3}, {"id": 4}, {"id": 5}])
     session.add(App(id=1, name="Nightly"))
-    session.add_all([Version(id=v, application_id=1, name=f"v{v}", agent_type=kind,
+    session.add_all([Version(id=v, application_id=1, name=f"v{v}", agent_type=kind, author_id=AUTHOR,
                              pipeline_settings={**SETTINGS, "trigger": trigger})
                      for v, (kind, trigger) in VERSIONS.items()])
     session.commit()
@@ -128,7 +132,8 @@ def _expected(enabled, errors):
     return {
         "project_id": PROJECT, "found": len(FOUND), "migrated_enabled": enabled,
         "migrated_disabled": [{"version_id": 2, "created_by": 7, "reason": "invalid_cron"},
-                              {"version_id": 3, "created_by": 8, "reason": "owner_lost_access"}],
+                              {"version_id": 3, "created_by": 8, "reason": "owner_lost_access"},
+                              {"version_id": 5, "created_by": AUTHOR, "reason": "owner_lost_access"}],
         "below_minimum_interval": [{"version_id": 4, "cron": "* * * * *"}],
         "above_project_cap": False, "errors": errors,
         "original_triggers": [{"version_id": v, "trigger": VERSIONS[v][1]} for v in FOUND],
@@ -139,7 +144,7 @@ def _expected(enabled, errors):
 def test_7011_r1_1_r1_2_dry_run_reports_and_writes_nothing(project):
     module, _events, stored = project
     report = module.migrate_project(PROJECT, dry_run=True)
-    assert report == _expected(3, [{"version_id": 5, "error": "owner_lost_access"}])
+    assert report == _expected(3, [])
     assert stored() == ([], BEFORE)
 
 
@@ -148,12 +153,12 @@ def test_7011_r3_3_real_run_moves_and_reports(project):
     module, _events, stored = project
     report = module.migrate_project(PROJECT, dry_run=False)
     errors = report.pop("errors")
-    assert [e["version_id"] for e in errors] == [5, 8]
-    assert errors[0]["error"] == "owner_lost_access"
+    assert [e["version_id"] for e in errors] == [8]
     assert {**report, "errors": []} == _expected(2, [])
     rows, settings = stored()
-    assert rows == [(1, True, None), (2, False, "invalid_cron"), (3, False, "owner_lost_access"), (4, True, None)]
-    assert settings == {**BEFORE, **{v: MOVED for v in (1, 2, 3, 4)}}
+    assert rows == [(1, True, None), (2, False, "invalid_cron"), (3, False, "owner_lost_access"), (4, True, None),
+                    (5, False, "owner_lost_access")]
+    assert settings == {**BEFORE, **{v: MOVED for v in (1, 2, 3, 4, 5)}}
 
 
 # TC-US24 / R3.3: the report flags a project whose enabled rows pass the cap; the rows still move
@@ -163,7 +168,7 @@ def test_7011_r3_3_report_flags_the_project_cap(project, monkeypatch):
     config = sys.modules["plugins.elitea_core.utils.schedule_timing"].this.module.descriptor.config
     monkeypatch.setitem(config, "scheduler", {"schedules": {"max_enabled_per_project": 1}})
     assert module.migrate_project(PROJECT, dry_run=False)["above_project_cap"] is True
-    assert [r[0] for r in stored()[0]] == [1, 2, 3, 4]
+    assert [r[0] for r in stored()[0]] == [1, 2, 3, 4, 5]
 
 
 # TC-US24 / R3.4: a second run finds only the versions that failed and changes nothing
@@ -172,8 +177,8 @@ def test_7011_r3_4_second_run_finds_only_the_failed(project):
     module.migrate_project(PROJECT, dry_run=False)
     after = stored()
     report = module.migrate_project(PROJECT, dry_run=False)
-    assert (report["found"], report["migrated_enabled"], report["migrated_disabled"]) == (2, 0, [])
-    assert [e["version_id"] for e in report["errors"]] == [5, 8]
+    assert (report["found"], report["migrated_enabled"], report["migrated_disabled"]) == (1, 0, [])
+    assert [e["version_id"] for e in report["errors"]] == [8]
     assert stored() == after
 
 

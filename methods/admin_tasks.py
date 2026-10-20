@@ -2085,7 +2085,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             except Exception as exc:  # noqa: BLE001 - one failing project must not stop the others (R1.3)
                 log.exception("migrate_legacy_pipeline_schedules: error in project %s", project_id)
                 report["errors"].append({"project_id": project_id, "error": str(exc)})
-        log.info("%sExiting migrate_legacy_pipeline_schedules — %s", prefix, report)
+        # Counts only: the full report (with every original trigger) goes back to the caller
+        counts = [
+            (p.get("project_id"), p.get("found", 0), p.get("migrated_enabled", 0),
+             len(p.get("migrated_disabled", [])), len(p.get("errors", [])))
+            for p in report["projects"]
+        ]
+        log.info(
+            "%sExiting migrate_legacy_pipeline_schedules — (project, found, enabled, disabled, errors)=%s "
+            "failed_projects=%s",
+            prefix, counts, len(report["errors"]),
+        )
         return report
 
     @web.method()

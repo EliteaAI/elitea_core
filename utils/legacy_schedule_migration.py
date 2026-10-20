@@ -2,6 +2,7 @@
 from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
+from pylon.core.tools import log
 from sqlalchemy import func, select, text
 
 from ..models.pd.index import _cron_gaps
@@ -18,6 +19,9 @@ PARAMS_FORMAT = 'project_id= is required. Format: project_id=<all|N>[;dry_run=fa
 NAME_LIMIT = 256  # entity_schedules.name is String(256)
 # Blocking, on the key the tick try-locks: the tick skips the project while it moves
 PROJECT_LOCK = text('SELECT pg_advisory_lock(:key)')
+# Bound the wait so a stuck holder sends the project to errors, not the whole run
+LOCK_WAIT = text("SET lock_timeout = '30s'")
+LOCK_WAIT_RESET = text('RESET lock_timeout')
 PROJECT_UNLOCK = text('SELECT pg_advisory_unlock(:key)')
 
 
@@ -57,24 +61,28 @@ def _last_run(value) -> datetime | None:
 
 def migrated_row(
     project_id: int, application_id: int, version_id: int, pipeline_name: str, version_name: str,
-    trigger: dict, now: datetime,
+    trigger: dict, now: datetime, fallback_owner: int | None = None,
 ) -> dict:
     """EntitySchedule values for one legacy schedule trigger; `now` must be timezone-aware.
 
-    Raises LegacyTriggerError when no row can be made: no usable creator (the row needs one) or the
+    A trigger without a usable creator gives a disabled row owned by `fallback_owner`.
+    Raises LegacyTriggerError when no row can be made: no usable creator and no fallback owner, or the
     owner check could not answer.
     """
     cron, zone = str(trigger.get('cron') or '').strip(), str(trigger.get('timezone') or '')
-    reason = None
     try:
         PipelineTriggerSchedule.model_validate(trigger)
+        failed = set()
     except ValidationError as error:
-        failed = {problem['loc'][0] for problem in error.errors()}
-        if 'created_by' in failed:
-            raise LegacyTriggerError(DISABLED_OWNER_LOST_ACCESS) from error
-        if failed & {'cron', 'timezone'}:
-            reason = DISABLED_INVALID_CRON
-    owner = int(trigger['created_by'])
+        failed = {loc for problem in error.errors() for loc in problem['loc'][:1]}
+    reason = DISABLED_INVALID_CRON if failed & {'cron', 'timezone'} else None
+    if 'created_by' in failed:
+        if fallback_owner is None:
+            raise LegacyTriggerError(DISABLED_OWNER_LOST_ACCESS)
+        # created_by is NOT NULL: the version author holds the row until an admin changes the owner
+        owner, reason = fallback_owner, DISABLED_OWNER_LOST_ACCESS
+    else:
+        owner = int(trigger['created_by'])
     if reason is None:
         verdict = check_owner_access(project_id, owner)
         if verdict == ACCESS_CHECK_UNAVAILABLE:
@@ -139,12 +147,16 @@ def _migrate_versions(session, project_id: int, dry_run: bool) -> dict:
     )
     now = datetime.now(UTC)
     for version, pipeline_name in _legacy_versions(session):
-        version_id, trigger = version.id, version.pipeline_settings['trigger']
-        report['found'] += 1
-        report['original_triggers'].append({'version_id': version_id, 'trigger': trigger})
+        version_id = version.id
         try:
+            trigger = (version.pipeline_settings or {}).get('trigger') or {}
+            if trigger.get('type') != 'schedule':
+                continue
+            report['found'] += 1
+            report['original_triggers'].append({'version_id': version_id, 'trigger': trigger})
             row = migrated_row(project_id, version.application_id, version_id, pipeline_name, version.name,
-                               trigger, now)
+                               trigger, now, fallback_owner=version.author_id)
+            fast = row['disabled_reason'] != DISABLED_INVALID_CRON and below_minimum(row['cron'])
             if not dry_run:
                 migrate_version(session, version, row)
         except Exception as error:  # noqa: BLE001 -- one bad version must not stop the project
@@ -156,7 +168,7 @@ def _migrate_versions(session, project_id: int, dry_run: bool) -> dict:
             report['migrated_disabled'].append(
                 {'version_id': version_id, 'created_by': row['created_by'], 'reason': row['disabled_reason']}
             )
-        if row['disabled_reason'] != DISABLED_INVALID_CRON and below_minimum(row['cron']):
+        if fast:
             report['below_minimum_interval'].append({'version_id': version_id, 'cron': row['cron']})
     cap = schedule_limits().max_enabled_per_project
     report['above_project_cap'] = enabled_before + report['migrated_enabled'] > cap
@@ -166,7 +178,8 @@ def _migrate_versions(session, project_id: int, dry_run: bool) -> dict:
 def migrate_project(project_id: int, dry_run: bool) -> dict:
     """Move every legacy schedule trigger of one project while holding its advisory lock; the project report.
 
-    A dry run writes nothing. The lock is released when the project ends or fails; a failure is raised.
+    A dry run writes nothing. The lock wait is bounded; a timeout or a failure is raised. The lock is
+    released when the project ends or fails; a failed release is logged and closes the connection.
     """
     # Imported here, as above: tools.db and the claim helpers need the running plugin
     from tools import db
@@ -176,13 +189,22 @@ def migrate_project(project_id: int, dry_run: bool) -> dict:
     key = {'key': legacy_lock_key(project_id)}
     # A session lock is freed only by the connection that took it; autocommit keeps no transaction open
     with db.engine.connect().execution_options(isolation_level='AUTOCOMMIT') as connection:
-        connection.execute(PROJECT_LOCK, key)
+        connection.execute(LOCK_WAIT)
+        try:
+            connection.execute(PROJECT_LOCK, key)
+        finally:
+            connection.execute(LOCK_WAIT_RESET)
         try:
             with db.get_session(project_id) as session:
                 return _migrate_versions(session, project_id, dry_run)
         finally:
-            try:
-                connection.execute(PROJECT_UNLOCK, key)
-            except Exception:
-                connection.invalidate()  # closing the server session frees the lock for the tick
-                raise
+            _unlock_project(connection, key, project_id)
+
+
+def _unlock_project(connection, key: dict, project_id: int) -> None:
+    """Release the project lock; on failure log it and close the server session, which frees the lock."""
+    try:
+        connection.execute(PROJECT_UNLOCK, key)
+    except Exception:  # noqa: BLE001 -- the project already committed; its report must still return
+        log.exception('Project %s: the legacy migration lock release failed', project_id)
+        connection.invalidate()

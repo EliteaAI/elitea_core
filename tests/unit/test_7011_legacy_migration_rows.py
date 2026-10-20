@@ -3,6 +3,7 @@
 Contract under test: utils/legacy_schedule_migration.py. The trigger model, the cron check and the
 timing helper are real; only the plugin shell around them and the auth RPC are stubbed.
 """
+import contextlib
 import sys
 import types
 from datetime import UTC, datetime
@@ -109,17 +110,29 @@ def test_el7011_r31_lost_owner_gives_a_disabled_row(migration):
     assert row["cron"] == "0 9 * * *"
 
 
-@pytest.mark.parametrize("bad", [{"created_by": None}, {"created_by": 0}, {"created_by": "x"}])
-def test_el7011_r31_unusable_creator_cannot_make_a_row(migration, bad):
+UNUSABLE_CREATORS = [{"created_by": None}, {"created_by": 0}, {"created_by": "x"}, {"created_by": ...}]
+
+
+def _trigger(**changes):
+    """TRIGGER with `changes`; a value of `...` drops the key."""
+    merged = {**TRIGGER, **changes}
+    return {key: value for key, value in merged.items() if value is not ...}
+
+
+@pytest.mark.parametrize("bad", UNUSABLE_CREATORS)
+def test_el7011_r31_unusable_creator_gives_a_disabled_row_owned_by_the_author(migration, bad):
+    row = migration.migrated_row(5, 11, 21, "p", "v", _trigger(**bad), NOW, fallback_owner=3)
+    assert (row["enabled"], row["disabled_reason"], row["next_run"]) == (False, "owner_lost_access", None)
+    assert (row["created_by"], row["principal"]) == (3, {"kind": "delegation", "ref": 3})
+    assert migration.calls == []
+
+
+@pytest.mark.parametrize("bad", UNUSABLE_CREATORS)
+def test_el7011_r31_unusable_creator_without_an_author_cannot_make_a_row(migration, bad):
+    trigger = _trigger(**bad)
     with pytest.raises(migration.LegacyTriggerError) as error:
-        _row(migration, **bad)
-    assert error.value.reason == "owner_lost_access"
-
-
-def test_el7011_r31_missing_creator_cannot_make_a_row(migration):
-    trigger = {k: v for k, v in TRIGGER.items() if k != "created_by"}
-    with pytest.raises(migration.LegacyTriggerError):
         migration.migrated_row(5, 11, 21, "p", "v", trigger, NOW)
+    assert error.value.reason == "owner_lost_access"
 
 
 def test_el7011_r31_unavailable_access_check_keeps_the_legacy_trigger(migration):
@@ -152,3 +165,122 @@ def test_el7011_r33_fast_cron_still_moves_and_is_reported_below_minimum(migratio
     assert row["enabled"] is True
     assert migration.below_minimum("* * * * *") is True
     assert migration.below_minimum("*/5 * * * *") is False
+
+
+# ── The project loop and its lock ────────────────────────────────────────
+
+
+class FakeSession:
+    """Counts no enabled schedule; `migrate_version` is replaced, so nothing else is read."""
+
+    def scalar(self, _statement):
+        return 0
+
+
+@pytest.fixture
+def project_loop(migration, monkeypatch):
+    """The module with versions from `project_loop.versions` and `migrate_version` recording moves."""
+    from sqlalchemy import column, table
+
+    schedules = table("entity_schedules", column("enabled"))
+    schedules.enabled = schedules.c.enabled
+    _stub(monkeypatch, "plugins.elitea_core.models.entity_schedule", EntitySchedule=schedules)
+    migration.versions, migration.moved = [], []
+    monkeypatch.setattr(migration, "_legacy_versions", lambda _session: migration.versions)
+    monkeypatch.setattr(migration, "migrate_version", lambda _s, version, _row: migration.moved.append(version.id))
+    return migration
+
+
+def _version(version_id, trigger):
+    settings = {"trigger": trigger} if trigger is not None else {}
+    return (types.SimpleNamespace(id=version_id, application_id=11, name="v1", author_id=3,
+                                  pipeline_settings=settings), "Nightly")
+
+
+def test_el7011_r31_missing_creator_is_counted_as_migrated_disabled(project_loop):
+    project_loop.versions = [_version(1, _trigger(created_by=...))]
+    report = project_loop._migrate_versions(FakeSession(), 5, dry_run=False)
+    assert report["migrated_disabled"] == [{"version_id": 1, "created_by": 3, "reason": "owner_lost_access"}]
+    assert (report["errors"], project_loop.moved) == ([], [1])
+
+
+def test_el7011_r21_version_without_a_schedule_trigger_is_skipped(project_loop):
+    project_loop.versions = [_version(1, None), _version(2, {"type": "chat_message"}), _version(3, TRIGGER)]
+    report = project_loop._migrate_versions(FakeSession(), 5, dry_run=False)
+    assert (report["found"], report["errors"], project_loop.moved) == (1, [], [3])
+
+
+def test_el7011_r33_failed_floor_check_keeps_the_legacy_trigger(project_loop, monkeypatch):
+    def broken(_cron):
+        raise RuntimeError("no floor")
+
+    monkeypatch.setattr(project_loop, "below_minimum", broken)
+    project_loop.versions = [_version(1, TRIGGER)]
+    report = project_loop._migrate_versions(FakeSession(), 5, dry_run=False)
+    assert (report["errors"], project_loop.moved) == ([{"version_id": 1, "error": "no floor"}], [])
+
+
+class FakeLockConnection:
+    """Records each statement; the lock or the unlock raises when asked to."""
+
+    def __init__(self, fail_on=None):
+        self.statements, self.fail_on, self.invalidated = [], fail_on, False
+
+    def execution_options(self, **_options):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def execute(self, statement, _params=None):
+        sql = str(statement)
+        self.statements.append(sql)
+        if self.fail_on and self.fail_on in sql:
+            raise RuntimeError("canceling statement due to lock timeout")
+
+    def invalidate(self):
+        self.invalidated = True
+
+
+@pytest.fixture
+def locked(migration, monkeypatch):
+    """(module, connection factory) with `tools.db` and the key helper stubbed; the project report is fixed."""
+    sessions = []
+
+    @contextlib.contextmanager
+    def get_session(project_id):
+        sessions.append(project_id)
+        yield FakeSession()
+
+    def use(connection):
+        engine = types.SimpleNamespace(connect=lambda: connection)
+        monkeypatch.setattr(sys.modules["tools"], "db", types.SimpleNamespace(engine=engine, get_session=get_session),
+                            raising=False)
+        return sessions
+
+    _stub(monkeypatch, "plugins.elitea_core.utils.schedule_claim", legacy_lock_key=lambda project_id: project_id)
+    monkeypatch.setattr(migration, "_migrate_versions", lambda _s, project_id, _dry: {"project_id": project_id})
+    return migration, use
+
+
+def test_el7011_r42_project_lock_wait_is_bounded(locked):
+    module, use = locked
+    connection = FakeLockConnection(fail_on="pg_advisory_lock(")
+    sessions = use(connection)
+    with pytest.raises(RuntimeError, match="lock timeout"):
+        module.migrate_project(5, dry_run=False)
+    timeout = next(i for i, sql in enumerate(connection.statements) if "lock_timeout" in sql)
+    lock = next(i for i, sql in enumerate(connection.statements) if "pg_advisory_lock(" in sql)
+    assert timeout < lock
+    assert sessions == []
+
+
+def test_el7011_r42_failed_unlock_still_returns_the_report(locked):
+    module, use = locked
+    connection = FakeLockConnection(fail_on="pg_advisory_unlock")
+    use(connection)
+    assert module.migrate_project(5, dry_run=False) == {"project_id": 5}
+    assert connection.invalidated is True
