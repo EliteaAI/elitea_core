@@ -18,11 +18,11 @@ from ...utils.schedule_queries import list_schedules
 
 
 def _owner_names(owner_ids: set[int]) -> dict[int, str | None]:
-    """Map owner id to name; a failed lookup gives an empty map, so every name is null (R1.3)."""
+    """Map owner id to name, or the email when the user has no name; a failed lookup gives an empty map (R1.3)."""
     if not owner_ids:  # an empty id list makes auth_core return every user
         return {}
     try:
-        return {user["id"]: user.get("name") for user in get_authors_data(sorted(owner_ids))}
+        return {user["id"]: user.get("name") or user.get("email") for user in get_authors_data(sorted(owner_ids))}
     except Exception as e:  # noqa: BLE001  # pylint: disable=W0718 -- names must never break the list (R1.3)
         log.warning(f"Schedule owner names lookup failed: {e}")
         return {}

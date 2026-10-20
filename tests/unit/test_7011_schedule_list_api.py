@@ -159,7 +159,8 @@ def env(monkeypatch):
         env.author_calls.append(list(author_ids))
         if env.names_error:
             raise env.names_error
-        return [{"id": uid, "name": env.names[uid]} for uid in author_ids if uid in env.names]
+        users = {uid: v if isinstance(v, dict) else {"name": v} for uid, v in env.names.items()}
+        return [{"id": uid, **users[uid]} for uid in author_ids if uid in users]
 
     authors = _register(monkeypatch, f"{PKG}.utils.authors", types.ModuleType(f"{PKG}.utils.authors"))
     authors.get_authors_data = get_authors_data
@@ -200,6 +201,14 @@ def test_r1_2_el7011_every_row_has_owner_id_and_name(env):
     body = ok(env)
     assert [r["owner"] for r in body["rows"]] == [{"id": 5, "name": "Ann"}, {"id": 6, "name": "Bob"}]
     assert len(env.author_calls) == 1 and set(env.author_calls[0]) == {5, 6}
+
+
+def test_r1_2_el7011_owner_without_a_name_shows_the_email(env):
+    """BUG-15: a user with no display name shows the email, like the Owner filter does."""
+    env.grant(9, "list", "admin")
+    env.rows = [make_row(1, 5)]
+    env.names = {5: {"name": None, "email": "sched.user01@centry.user"}}
+    assert ok(env)["rows"][0]["owner"] == {"id": 5, "name": "sched.user01@centry.user"}
 
 
 # R1.3 (TC-US05-03)
