@@ -372,3 +372,10 @@ CREATE INDEX IF NOT EXISTS ix_audit_events_model_name ON centry.audit_events (mo
 CREATE INDEX IF NOT EXISTS ix_audit_events_project_timestamp ON centry.audit_events (project_id, timestamp);
 CREATE INDEX IF NOT EXISTS ix_audit_events_tool_name ON centry.audit_events (tool_name) WHERE tool_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_audit_events_is_error ON centry.audit_events (is_error) WHERE is_error IS TRUE;
+
+# Issue #6756 (C-1009): agent identity tables - agent_identity_binding and execution_security_context
+# in every project schema. Nothing reads them yet, so this is not urgent; new projects get them via
+# create_all and the startup safety net creates them for existing projects. Run the task to report
+# (dry_run) or re-run. Idempotent: schemas that have both tables are left alone.
+Run admin task create_agent_identity_tables with param: project_id=all;dry_run
+Run admin task create_agent_identity_tables with param: project_id=all
