@@ -1,6 +1,7 @@
 import re
 from datetime import datetime
 from typing import List, Optional
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, constr, ConfigDict, model_validator
@@ -34,6 +35,16 @@ class ConversationListExtended(ConversationList):
     message_groups_count: int
     users_count: int
     duration: float = 0.0
+    execution_type: Literal['manual', 'scheduled'] = 'manual'
+
+    @model_validator(mode='after')
+    def compute_execution_type(self):
+        stored = self.meta.get('execution_type')
+        if stored in ('manual', 'scheduled'):
+            self.execution_type = stored
+        elif self.meta.get('scheduled_run') is True:
+            self.execution_type = 'scheduled'
+        return self
 
     @model_validator(mode='after')
     def strip_support_user_prefix(self):
