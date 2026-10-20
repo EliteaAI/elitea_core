@@ -8,10 +8,10 @@ DISPATCH = "utils/schedule_dispatch.py"
 STARTER = "plugins.elitea_core.utils.schedule_run_starter"
 
 
-def test_7011_r1_1_agent_starter_is_registered_and_pipeline_is_not():
+def test_7011_r1_1_agent_and_pipeline_starters_are_registered():
     starters = load(DISPATCH, fresh=True).RUN_STARTERS
     assert callable(starters["agent"])
-    assert "pipeline" not in starters
+    assert callable(starters["pipeline"])
 
 
 def test_7011_r1_1_agent_starter_calls_run_owner_schedule(monkeypatch):
