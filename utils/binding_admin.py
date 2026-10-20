@@ -97,7 +97,10 @@ def parse_binding_param(param):
     return values, None
 
 
-def _lifecycle_event(values, binding, target, actor_user_id, epoch, previous_digest=None):
+def _lifecycle_event(values, binding, target, actor_user_id, epoch):
+    """The ``lifecycle`` audit event of one state change, with only the fields the event schema has today. The rebind
+    event therefore does not carry the definition digests (new and previous); a ``definition_digest`` and
+    ``previous_digest`` pair is to be added to the tracing event model as a follow-up (#7105)."""
     reason = "BINDING_REBIND_PENDING_APPROVAL" if values["action"] == "rebind" else f"BINDING_{target.upper()}"
     event = {
         "event_type": "lifecycle", "reason_code": reason, "outcome": "success",
@@ -108,8 +111,6 @@ def _lifecycle_event(values, binding, target, actor_user_id, epoch, previous_dig
     if target == "active":   # what the row holds now: the approver's own text for an activation, the stored one for a resume
         event["approver_ref"] = binding.approval_ref
         event["policy_revision"] = binding.policy_revision
-    if values["action"] == "rebind":   # the event schema has no digest field: the definition goes in target_ref
-        event["target_ref"], event["operation_id"] = binding.definition_digest, f"previous:{previous_digest}"
     return {key: value for key, value in event.items() if value is not None}
 
 
@@ -161,7 +162,7 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
                 "from": binding.state, "to": list(path)}
     current_digest = digest_for_version(session, values["version_id"]) if path[-1] == "active" or action == "rebind" else None
     settings = getattr(module, "admission_settings", None)
-    state, previous_digest = binding.state, binding.definition_digest
+    state = binding.state
     # Only an activation takes the request's approval, and it takes nothing else. A resume carries the stored approval
     # (it is checked, never rewritten); every other action carries none.
     approval_ref = values.get("approval_ref") if action == "activate" else (
@@ -181,7 +182,7 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
         if bumps_epoch(state, target):
             revoke_binding_contexts(session, binding_id)
         tracing.security_audit_record(
-            session, _lifecycle_event(values, binding, target, actor_user_id, binding.revocation_epoch, previous_digest))
+            session, _lifecycle_event(values, binding, target, actor_user_id, binding.revocation_epoch))
         state = target
     session.commit()
     return {"action": action, "binding_ref": str(binding_id), "state": state, "dry_run": False}

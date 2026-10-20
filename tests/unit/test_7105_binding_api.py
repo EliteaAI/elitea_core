@@ -958,13 +958,13 @@ def test_two_creates_that_race_are_a_conflict_not_a_503(ns, env, monkeypatch):
 
 # --- the rebind event -------------------------------------------------------------------------------------
 
-def test_the_rebind_event_names_the_new_and_the_previous_definition(ns, env):
+def test_the_rebind_event_keeps_target_ref_and_operation_id_unused(ns, env):
     binding_id = reach(ns, env, "active")
     env.digests[70] = NEW_DIGEST
     act(ns, binding_id, "rebind", "active")
     event = env.recorded[-1][1]
-    assert (event["reason_code"], event["target_ref"], event["operation_id"]) == (
-        "BINDING_REBIND_PENDING_APPROVAL", NEW_DIGEST, f"previous:{DIGEST}")
+    assert event["reason_code"] == "BINDING_REBIND_PENDING_APPROVAL"
+    assert "target_ref" not in event and "operation_id" not in event
 
 
 # --- the application_id filter ---------------------------------------------------------------------------

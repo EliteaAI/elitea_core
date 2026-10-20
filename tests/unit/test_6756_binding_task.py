@@ -700,13 +700,14 @@ def test_a_create_that_loses_the_race_to_the_unique_key_is_binding_exists_not_an
 
 # --- the rebind event carries both digests (#7105 review) -------------------------------------------------------
 
-def test_the_rebind_event_names_the_new_definition_and_the_previous_one(ns, env):
+def test_the_rebind_event_carries_only_the_fields_the_schema_has(ns, env):
     activate(ns, env)
     env.digests[70] = NEW_DIGEST
     run(ns, env, f"{ONE};action=rebind", actor=9)
     event = env.recorded[-1][1]
-    assert (event["target_ref"], event["operation_id"]) == (NEW_DIGEST, f"previous:{DIGEST}")
-    assert all("target_ref" not in other and "operation_id" not in other for _, other in env.recorded[:-1])
+    assert event["reason_code"] == "BINDING_REBIND_PENDING_APPROVAL"
+    assert "target_ref" not in event and "operation_id" not in event
+    assert NEW_DIGEST not in json_text(event) and DIGEST not in json_text(event)
 
 
 # --- the admin task method ---------------------------------------------------------------------
