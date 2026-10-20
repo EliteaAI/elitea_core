@@ -35,6 +35,25 @@ def _details(row, scope: ScheduleScope) -> dict:
     }).model_dump(mode="json")
 
 
+def _refuse_unallowed_rule(project_id: int, body):
+    """Answer 400 when the body asks for "run without asking" and the project does not allow it."""
+    from ...utils.schedule_risk import is_run_without_asking_allowed
+    if body.approval_rule == "run_without_asking" and not is_run_without_asking_allowed(project_id):
+        return {"error": "approval_rule_not_allowed", "field": "approval_rule"}, 400
+    return None
+
+
+def _saved(row, scope: ScheduleScope, project_id: int) -> dict:
+    """Details of a saved row, with the save warnings; a warning never blocks or changes the save (R2.4)."""
+    from ...utils.schedule_risk import scan_schedule_risks
+    return {**_read(row, scope, project_id), "warnings": scan_schedule_risks(project_id, row.version_id, row.created_by)}
+
+
+def _read(row, scope: ScheduleScope, project_id: int) -> dict:
+    from ...utils.schedule_risk import is_run_without_asking_allowed
+    return {**_details(row, scope), "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
+
+
 def _validation_response(error: ValidationError) -> tuple[dict, int]:
     """Answer 400 with the first broken field and its plain reason."""
     first = error.errors()[0]
@@ -59,6 +78,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             body = ScheduleCreate.model_validate(request.get_json(silent=True))
         except ValidationError as e:
             return _validation_response(e)
+        refused = _refuse_unallowed_rule(project_id, body)
+        if refused:
+            return refused
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
@@ -67,7 +89,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return e.response
             except ScheduleLimitError as e:
                 return {"error": str(e)}, 409
-            return _details(row, scope), 201
+            return _saved(row, scope, project_id), 201
 
     @register_openapi(
         name="Get Schedule",
@@ -81,7 +103,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
-                return _details(load_schedule_in_scope(session, schedule_id, scope), scope), 200
+                return _read(load_schedule_in_scope(session, schedule_id, scope), scope, project_id), 200
             except ScheduleError as e:
                 return e.response
 
@@ -99,11 +121,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
             body = ScheduleUpdate.model_validate(request.get_json(silent=True))
         except ValidationError as e:
             return _validation_response(e)
+        refused = _refuse_unallowed_rule(project_id, body)
+        if refused:
+            return refused
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
                 row = load_schedule_in_scope(session, schedule_id, scope)
-                return _details(update_schedule(session, project_id, row, body, scope), scope), 200
+                return _saved(update_schedule(session, project_id, row, body, scope), scope, project_id), 200
             except ScheduleError as e:
                 return e.response
             except ScheduleLimitError as e:

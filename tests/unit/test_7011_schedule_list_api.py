@@ -69,6 +69,7 @@ class Env:
         self.query_calls = []
         self.author_calls = []
         self.args = FakeArgs()
+        self.run_without_asking_allowed = False
 
     def grant(self, user_id, *verbs):
         self.user_id = user_id
@@ -176,6 +177,9 @@ def env(monkeypatch):
     queries = _register(monkeypatch, f"{PKG}.utils.schedule_queries", types.ModuleType(f"{PKG}.utils.schedule_queries"))
     queries.list_schedules = list_schedules
 
+    risk = _register(monkeypatch, f"{PKG}.utils.schedule_risk", types.ModuleType(f"{PKG}.utils.schedule_risk"))
+    risk.is_run_without_asking_allowed = lambda project_id: env.run_without_asking_allowed
+
     env.handler = _load(monkeypatch, "api/v2/schedules.py", f"{PKG}.api.v2.schedules")
     return env
 
@@ -216,7 +220,7 @@ def test_r1_3_el7011_owner_name_is_null_when_lookup_fails(env, error):
 def test_r1_2_el7011_empty_page_skips_owner_lookup(env):
     env.grant(9, "list", "admin")
     body = ok(env)
-    assert body == {"total": 0, "rows": []}
+    assert body == {"total": 0, "rows": [], "run_without_asking_allowed": False}
     assert env.author_calls == []
 
 
