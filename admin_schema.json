@@ -492,6 +492,31 @@
         "maximum": 1000
       }
     },
+    "agent_scheduling_enabled": {
+      "type": "boolean",
+      "title": "Agent Scheduling Enabled",
+      "description": "When disabled, agent schedules are skipped and their next_run is unchanged. Pipeline schedules still run. Enable to include agent schedules in the tick.",
+      "path": "scheduler.schedules.agent_scheduling_enabled",
+      "section": "runtime",
+      "strict_type": true,
+      "default": true
+    },
+    "schedules_dispatch_cap": {
+      "type": "integer",
+      "title": "Schedules Dispatch Cap",
+      "description": "Maximum number of due schedules dispatched per tick, across all projects. Rows left over keep their next_run and go in the next tick. Allowed range: 1–10000.",
+      "path": "scheduler.schedules.dispatch_cap",
+      "section": "runtime",
+      "default": 100,
+      "minimum": 1,
+      "maximum": 10000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10000
+      }
+    },
     "index_scheduling_enabled": {
       "type": "boolean",
       "title": "Index Scheduling Enabled",

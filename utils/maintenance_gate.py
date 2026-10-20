@@ -2,7 +2,7 @@
 Cross-plugin helper for cron RPCs that need to skip work while
 the platform is in maintenance mode.
 
-Cron ticks (`pipelines_check_scheduling`, `applications_check_index_scheduling`)
+Cron ticks (`entity_schedules_check`, `applications_check_index_scheduling`)
 are wired directly to arbiter events, so they bypass the maintenance splash
 router hook. Each cron RPC should call `is_maintenance_active()` and bail
 out early to avoid dispatching new work to task nodes that are rejecting
