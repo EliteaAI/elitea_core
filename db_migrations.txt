@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_runs (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_schedule_runs_active
     ON {pid}.entity_schedule_runs (schedule_id)
     WHERE status IN ('running', 'waiting_for_approval');
+CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_schedule_started
+    ON {pid}.entity_schedule_runs (schedule_id, started_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_preferences (
     user_id INTEGER PRIMARY KEY,

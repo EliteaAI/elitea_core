@@ -51,6 +51,7 @@ class Harness:
         self.run_without_asking_allowed = False
         self.scans = []
         self.path = ''
+        self.query = {}
 
     def request_as(self, user_id, permissions):
         self.user_id, self.permissions = user_id, set(permissions)
@@ -76,9 +77,9 @@ class Harness:
         with self.session_factory() as session:
             return session.get(self.EntitySchedule, schedule_id)
 
-    def call(self, verb, body=None, schedule_id=None, suffix=''):
+    def call(self, verb, body=None, schedule_id=None, suffix='', query=None):
         """Call a handler verb; `suffix` is the URL tail the router matched, such as `/run`."""
-        self.body = body
+        self.body, self.query = body, query or {}
         self.path = f'/schedule/prompt_lib/{PROJECT_ID}/{schedule_id or ""}{suffix}'
         handler = self.module.PromptLibAPI()
         handler.module = object()
@@ -104,6 +105,7 @@ def harness(isolated_sys_modules, monkeypatch):
     flask = types.ModuleType('flask')
     class _Request:
         path = property(lambda self: harness.path)
+        args = property(lambda self: harness.query)
 
         def get_json(self, *args, **kwargs):
             return harness.body
