@@ -30,8 +30,9 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
             S.name.icontains(filters.search, autoescape=True),
             Application.name.icontains(filters.search, autoescape=True),
         ))
-    joined = select(S).join(Application, Application.id == S.application_id).where(*conditions)
-    total = session.scalar(select(func.count()).select_from(joined.subquery()))
+    total = session.scalar(
+        select(func.count(S.id)).select_from(S).join(Application, Application.id == S.application_id).where(*conditions)
+    )
     page = (
         select(
             S.id, S.name, S.description, S.entity_type, S.run_mode, S.application_id,
