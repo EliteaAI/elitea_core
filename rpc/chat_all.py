@@ -691,9 +691,11 @@ def generate_application_version_payload(
         app_version_details['tools'].extend(participants_toolkits)
     # Pass current participant ID so SDK can identify self for loop prevention
     app_version_details['current_participant_id'] = msg_group.sent_to_id
+    # Identifiers only: the payload carries expanded toolkit configurations (credential material)
     log.debug(
-        'Generated chat application version details payload for question_id=%s:\n%s',
-        predict_payload.question_id, app_version_details
+        'Generated chat application version details payload for question_id=%s: application_id=%s version_id=%s tools=%d',
+        predict_payload.question_id, app_version_details.get('application_id'), app_version_details.get('id'),
+        len(app_version_details.get('tools') or []),
     )
     return app_version_details
 
