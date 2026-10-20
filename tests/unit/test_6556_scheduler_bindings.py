@@ -159,6 +159,15 @@ def test_r3_4_el_7011_pipeline_scheduling_off_makes_the_tick_row_inactive(bindin
     )
 
 
+def test_r4_4_el_7011_every_rpc_module_keeps_the_rpc_class_the_loader_expects():
+    modules = [path for path in (PLUGIN_ROOT / "rpc").glob("*.py") if path.name != "__init__.py"]
+    missing = [
+        path.name for path in modules
+        if not any(isinstance(node, ast.ClassDef) and node.name == "RPC" for node in ast.parse(path.read_text()).body)
+    ]
+    assert missing == []
+
+
 def test_r4_4_el_7011_the_old_rpc_registration_is_dropped(bindings):
     assert "pipelines_check_scheduling" not in _rpc_names("pipeline_scheduling.py")
     assert "pipelines_check_scheduling" not in bindings.SCHEDULER_CONFIG_RPC_FUNCS.values()

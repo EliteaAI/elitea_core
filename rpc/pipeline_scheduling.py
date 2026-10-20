@@ -239,3 +239,7 @@ def _execute_pipeline(
         raise
 
     return result
+
+
+class RPC:  # pylint: disable=R0903
+    """No RPC is registered here any more; the plugin loader still expects the class in every rpc module."""
