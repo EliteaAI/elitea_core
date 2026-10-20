@@ -1,6 +1,7 @@
 """Create, update and delete of an entity schedule: owner, scope, audit and run input rules (EL-7011)."""
 import re
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from opentelemetry import trace as otel_trace
 from pylon.core.tools import log
@@ -141,10 +142,12 @@ def _is_admin_change(row: EntitySchedule, scope: ScheduleScope) -> bool:
     return scope.is_admin and row.created_by != scope.user_id
 
 
-def _notify_owner(project_id: int, owner_id: int, schedule: EntitySchedule) -> None:
+def _notify_owner(project_id: int, owner_id: int, schedule, action: str = 'edited') -> None:
     """Send the admin-change notice; a failure is logged and the committed change stays."""
     try:
-        notify_schedule_event(project_id, owner_id, NotificationEventTypes.schedule_edited_by_admin, schedule)
+        notify_schedule_event(
+            project_id, owner_id, NotificationEventTypes.schedule_edited_by_admin, schedule, extra={'action': action},
+        )
     except Exception as e:  # noqa: BLE001 -- the change is committed; a lost notice must not fail the save
         log.error('Schedule %s: cannot send the admin change notice: %s', schedule.id, e)
 
@@ -226,7 +229,8 @@ def delete_schedule(session, project_id: int, row: EntitySchedule, scope: Schedu
     admin_change = _is_admin_change(row, scope)
     if admin_change:
         mark_audit_span(row)
+    owner_id, deleted = row.created_by, SimpleNamespace(id=row.id, name=row.name)  # read before the row is gone
     session.delete(row)
     session.commit()
     if admin_change:
-        _notify_owner(project_id, row.created_by, row)
+        _notify_owner(project_id, owner_id, deleted, action='deleted')

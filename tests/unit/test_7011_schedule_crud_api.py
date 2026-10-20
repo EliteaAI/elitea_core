@@ -44,6 +44,7 @@ class Harness:
         self.body = None
         self.span = FakeSpan()
         self.notices = []
+        self.notice_extras = []
         self.notice_error = None
         self.access_error = None
 
@@ -64,6 +65,7 @@ class Harness:
         if self.notice_error:
             raise self.notice_error
         self.notices.append((owner_id, str(event_type), schedule.id))
+        self.notice_extras.append(extra)
         return True
 
     def row(self, schedule_id):
@@ -286,6 +288,36 @@ def test_7011_r4_4_failed_notice_keeps_the_change_committed(harness):
     schedule_id, (_, status) = admin_edit(harness)
     assert status == 200
     assert harness.row(schedule_id).name == 'Edited by admin'
+
+
+def admin_delete(harness):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, ADMIN)
+    return schedule_id, harness.call('delete', schedule_id=schedule_id)
+
+
+def test_7011_r4_2_r4_3_admin_delete_marks_the_span_and_tells_the_owner(harness):
+    schedule_id, (_, status) = admin_delete(harness)
+    assert status == 204
+    assert harness.row(schedule_id) is None
+    assert {key: str(value) for key, value in harness.span.attributes.items()} == {
+        'entity.type': 'schedule', 'entity.id': str(schedule_id), 'entity.name': 'Nightly',
+    }
+    assert harness.notices == [(OTHER_ID, 'schedule_edited_by_admin', schedule_id)]
+    assert harness.notice_extras == [{'action': 'deleted'}]
+
+
+def test_7011_r4_3_owner_delete_sends_no_notice_and_no_span_mark(harness):
+    schedule_id = harness.seed()
+    assert harness.call('delete', schedule_id=schedule_id)[1] == 204
+    assert (harness.notices, harness.span.attributes) == ([], {})
+
+
+def test_7011_r4_4_failed_delete_notice_keeps_the_delete(harness):
+    harness.notice_error = RuntimeError('socket down')
+    schedule_id, (_, status) = admin_delete(harness)
+    assert status == 204
+    assert harness.row(schedule_id) is None
 
 
 # --- R5.1, R5.2, R5.4, R5.5, R5.6, R5.7: run input rules

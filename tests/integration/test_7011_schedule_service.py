@@ -133,6 +133,19 @@ def test_7011_r5_3_create_stores_variables_as_name_value_items(env):
     assert env.row(row.id).variables == [{'name': 'who', 'value': 'Ann'}]
 
 
+@pytest.mark.parametrize('enabled, saved', [(True, 1), (False, 2)])
+def test_7011_r2_4_create_checks_the_cap_only_when_enabled(env, enabled, saved):
+    env.config['scheduler'] = {'schedules': {'max_enabled_per_project': 1}}
+    env.seed(name='Active')
+    if enabled:
+        with pytest.raises(env.timing.ScheduleLimitError):
+            env.run('create_schedule', env.body(enabled=True), env.scope(OWNER_ID))
+    else:
+        env.run('create_schedule', env.body(enabled=False), env.scope(OWNER_ID))
+    with env.session_factory() as session:
+        assert session.query(env.EntitySchedule).count() == saved
+
+
 # --- R2.1: owner fixed on every write
 
 @pytest.mark.parametrize('changes', [{'name': 'Renamed'}, {'enabled': False}, {'cron': '30 6 * * *'}])
