@@ -517,6 +517,22 @@
         "maximum": 10000
       }
     },
+    "schedules_stale_run_minutes": {
+      "type": "integer",
+      "title": "Schedules Stale Run Minutes",
+      "description": "Minutes a scheduled run may stay in running state before the tick fails it with the reason 'the run did not finish in time'. Allowed range: 1–10080.",
+      "path": "scheduler.schedules.stale_run_minutes",
+      "section": "runtime",
+      "default": 120,
+      "minimum": 1,
+      "maximum": 10080,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10080
+      }
+    },
     "index_scheduling_enabled": {
       "type": "boolean",
       "title": "Index Scheduling Enabled",
