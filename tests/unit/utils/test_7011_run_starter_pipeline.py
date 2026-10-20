@@ -20,21 +20,18 @@ def _module(name, **attrs):
     return module
 
 
-@pytest.fixture
-def world(monkeypatch):
-    calls = types.SimpleNamespace(conversation=[], predict=[])
-    trigger = types.SimpleNamespace(SCHEDULED="scheduled")
+def load_starter(monkeypatch, create, predict, prerun):
+    """The real starter on faked neighbours; also used by test_7011_no_system_user_runs."""
     stubs = {
         "models.all": {"Application": object, "ApplicationVersion": object},
         "models.conversation": {"Conversation": object},
         "models.entity_schedule": {"EntitySchedule": object, "EntityScheduleRun": object},
         "utils.pipeline_execution": {
-            "TriggerType": trigger,
-            "create_trigger_run_conversation": lambda **kw: calls.conversation.append(kw) or ("uuid-1", 7, "resp-1"),
-            "execute_pipeline_via_predict_sio": lambda **kw: calls.predict.append(kw),
+            "TriggerType": types.SimpleNamespace(SCHEDULED="scheduled"),
+            "create_trigger_run_conversation": create,
+            "execute_pipeline_via_predict_sio": predict,
             "finish_trigger_run_with_error": lambda *a: None},
-        "utils.schedule_prerun": {
-            "run_prerun_check": lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER)},
+        "utils.schedule_prerun": {"run_prerun_check": prerun},
         "utils.schedule_runs": {"fail_schedule_run": lambda *a: None},
     }
     for dotted, attrs in stubs.items():
@@ -42,6 +39,18 @@ def world(monkeypatch):
     monkeypatch.setitem(sys.modules, "tools", _module("tools", db=types.SimpleNamespace()))
     starter = load("utils/schedule_run_starter.py", fresh=True)
     monkeypatch.setattr(starter, "_link_conversation", lambda *a: True)
+    return starter
+
+
+@pytest.fixture
+def world(monkeypatch):
+    calls = types.SimpleNamespace(conversation=[], predict=[])
+    starter = load_starter(
+        monkeypatch,
+        create=lambda **kw: calls.conversation.append(kw) or ("uuid-1", 7, "resp-1"),
+        predict=lambda **kw: calls.predict.append(kw),
+        prerun=lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER),
+    )
 
     def run(entity_type="pipeline", run_mode=None, prompt="", variables=()):
         loaded = types.SimpleNamespace(
