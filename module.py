@@ -15,6 +15,7 @@ import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.admission import AdmissionSettings, admit_dispatch, track_context
+from .utils.binding_api import PERMISSIONS as BINDING_PERMISSIONS, registration as binding_registration
 from .utils.governance import init_governance
 from .utils.governance_settings import has_live_contexts, record_boot_preflight
 from .utils.mandate_admission import TicketStore
@@ -792,10 +793,14 @@ class Module(module.ModuleModel):
             auth.register_permissions({
                 "permissions": [permission],
                 "recommended_roles": {
-                    "administration": {**roles, "viewer": False, "editor": False},
-                    "default": {"super_admin": False, "admin": False, "viewer": False, "editor": False},
+                    "administration": {**roles, "viewer": False, "editor": False, "system": False},
+                    "default": {"super_admin": False, "admin": False, "viewer": False, "editor": False, "system": False},
                 }
             })
+        # Agent identity bindings (#7105, C-1009): the operator REST API. Platform administration only in this slice
+        # (roles in binding_api.RECOMMENDED_ROLES). Registered whatever the governance flag says.
+        for permission in BINDING_PERMISSIONS:
+            auth.register_permissions(binding_registration(permission))
 
         # self.init_db()
         # TaskNode

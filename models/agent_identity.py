@@ -22,6 +22,8 @@ CONTEXT_STATES = ('admitted', 'running', 'completed', 'revoked')
 MANDATE_STATES = ('draft', 'pending_approval', 'active', 'suspended', 'expired', 'revoked')
 LIVE_MANDATE_STATES = ('draft', 'pending_approval', 'active', 'suspended')
 SUSPENDED_REASONS = ('MANUAL', 'OWNER_SUSPENDED')
+# approval_ref and policy_revision of a binding approval: printable reference text, no spaces
+REFERENCE_PATTERN = r'^[A-Za-z0-9._:/@-]{1,128}$'
 # Columns that never change after the row exists; ``approved_by`` is set once (a second fence behind the
 # conditional UPDATEs in ``utils/mandate_state.py``, which are the only writers of the state columns)
 MANDATE_IMMUTABLE = frozenset({

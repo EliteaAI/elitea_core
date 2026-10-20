@@ -535,7 +535,7 @@ def test_the_module_registers_the_two_permissions_with_the_super_admin_pin():
     assert '("governance.settings.view", {"super_admin": True, "admin": True})' in text
     assert '("governance.settings.manage", {"super_admin": True, "admin": False})' in text
     block = text[text.index('("governance.settings.view"'):][:900]
-    assert '"default": {"super_admin": False, "admin": False, "viewer": False, "editor": False}' in block
+    assert '"default": {"super_admin": False, "admin": False, "viewer": False, "editor": False, "system": False}' in block
     assert textwrap.dedent(block).count('"viewer": False, "editor": False') >= 1
 
 

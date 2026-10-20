@@ -663,7 +663,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Modes: dedicated_agent, runtime_domain_binding, elitea_native.
         Actions: create (draft, digest of the current definition), submit (draft -> pending_approval),
-        activate (needs approval_ref and policy_revision), suspend, resume, retire.
+        activate (needs approval_ref and policy_revision, and another operator than the one who created or
+        submitted the binding), suspend, resume, retire, rebind (active or suspended -> pending_approval for the
+        definition as it is now: digest recomputed, approval cleared, live runs revoked).
 
         Examples:
             "project_id=3;application_id=7;version_id=21;mode=elitea_native;action=create"
