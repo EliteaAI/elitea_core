@@ -32,9 +32,14 @@ from ..utils.attachments import (
 )
 from ..utils.token_limit_continuation import trim_continuation_overlap
 from ..utils.pipeline_hitl_history import persist_pipeline_hitl_prompt
+from ..utils.schedule_runs import finish_schedule_run, pause_schedule_run
 
 from ..utils.sio_utils import SioEvents
 
+
+def _schedule_run_id(conversation):
+    """The schedule run a conversation belongs to (EL-7011); None for every other chat."""
+    return (conversation.meta or {}).get('schedule_run_id') if conversation else None
 
 
 class Event:
@@ -284,6 +289,15 @@ class Event:
                         event=SioEvents.chat_message_sync,
                         data=user_payload,
                         room=room,
+                    )
+
+                run_id = _schedule_run_id(msg_group.conversation)
+                if run_id:
+                    metadata = payload['response_metadata']
+                    is_error = metadata.get('is_error')
+                    finish_schedule_run(
+                        metadata['chat_project_id'], run_id, 'failed' if is_error else 'success',
+                        metadata.get('error') if is_error else None, msg_group.conversation.id,
                     )
 
     @web.event('chat_message_stream_partial_save')
@@ -566,5 +580,8 @@ class Event:
 
                 session.add(msg_group)
                 session.commit()
+                run_id = _schedule_run_id(msg_group.conversation)
+                if run_id:
+                    pause_schedule_run(chat_project_id, run_id, response_metadata)
                 log.debug(f'chat_message_stream_pause: Set is_streaming={msg_group.is_streaming} for message {message_id}'
                           f'{" (HITL interrupt persisted)" if hitl_interrupt or hitl_interrupts else ""}')
