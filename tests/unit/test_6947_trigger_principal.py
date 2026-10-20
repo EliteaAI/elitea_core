@@ -318,8 +318,10 @@ def test_no_row_holds_a_secret_shaped_value(ns, env, report):
     values = [value for row in rows for value in row.values() if isinstance(value, str)]
     assert values
     for value in values:
-        ns.event_model.assert_no_secret_shaped(value)
+        if ns.event_model is not None:  # the tracing plugin's own secret-shape check, when it is checked out
+            ns.event_model.assert_no_secret_shaped(value)
         assert not value.startswith(("eyJ", "sk-", "ghp_"))
+        assert len(value) < 128 and " " not in value or value.count(" ") < 8
 
 
 def test_outcomes_are_the_documented_set(ns, env, report):
