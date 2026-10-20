@@ -138,7 +138,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
         Update the trigger configuration for a pipeline version.
 
         For 'chat_message' type: No additional fields required.
-        For 'schedule' type: cron and timezone are required.
+        For 'schedule' type: rejected with 400, schedules live in the Schedules API.
         For 'webhook' type: webhook_type is required, secret is auto-generated.
         """
         payload = dict(request.json)
@@ -153,12 +153,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "error": f"Validation error: {e.errors()}"
             }, 400
 
-        # Additional validation for schedule type
-        if update_data.type == TriggerType.schedule.value:
-            if not update_data.cron:
-                return {"ok": False, "error": "cron is required for schedule trigger"}, 400
-            if not update_data.timezone:
-                return {"ok": False, "error": "timezone is required for schedule trigger"}, 400
+        # Compared as a string: importing TriggerType here is a circular import (see US-23).
+        if update_data.type == "schedule":
+            return {
+                "ok": False,
+                "error": "Schedules moved. Use the Schedules API: "
+                         f"/elitea_core/schedule/prompt_lib/{project_id}",
+            }, 400
 
         # Additional validation for webhook type
         if update_data.type == TriggerType.webhook.value:
