@@ -5,16 +5,14 @@ utils/schedule_timing.py (compute_next_run, end_of_day, schedule_limits, check_e
 """
 import sys
 import types
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 from croniter import croniter
 from pydantic import ValidationError
-
 from unit._tool_spend_loader import load
 
-UTC = timezone.utc
 TIMING = "utils/schedule_timing.py"
 MODEL = "models/pd/entity_schedule.py"
 DAILY = "0 9 * * *"
@@ -61,6 +59,7 @@ def timing(config, monkeypatch):
     for dotted in ("utils.schedule_timing", "models.pd.entity_schedule"):
         monkeypatch.setitem(sys.modules, "plugins.elitea_core." + dotted, None)
     module = load(TIMING, fresh=True)
+    load("models/pd/index.py")  # the model reuses its cron checks
     module.model = load(MODEL, fresh=True)
     return module
 
