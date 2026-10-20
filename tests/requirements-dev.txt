@@ -4,3 +4,5 @@ sqlalchemy>=2.0.0
 PyYAML>=6.0.0
 croniter>=2.0.0
 cryptography>=42.0.0
+werkzeug>=2.0
+flask>=2.0
