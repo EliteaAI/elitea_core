@@ -15,6 +15,7 @@ import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.run_id import stamp_predict_run_id
+from .utils.schedule_access import register_schedule_permissions
 from .utils.scheduler_bindings import (
     advertised_bindings,
     build_scheduler_sync_plan,
@@ -614,6 +615,9 @@ class Module(module.ModuleModel):
                 "default": {"admin": True, "viewer": False, "editor": False},
             }
         })
+
+        # Register schedule permissions for schedules permission family (EL-7011)
+        register_schedule_permissions()
 
         # self.init_db()
         # TaskNode
