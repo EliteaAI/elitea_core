@@ -6,6 +6,7 @@ import importlib.util
 import os
 import sys
 import types
+import uuid
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from test_6724_chat_templates import _make_migration_stubs  # noqa: E402  pylint
 
 ONE = "project_id=1;application_id=7;version_id=70;mode=elitea_native"
 APPROVE = "approval_ref=CHG-12;policy_revision=rev-1"
+APPROVER = 8   # activation needs another operator than the creator (actor 7 in `run`), #7105
 DIGEST = "adv1:" + "1" * 64
 
 
@@ -54,7 +56,7 @@ def reasons(env):
 def activate(ns, env, module=None):
     for action in ("create", "submit"):
         assert "error" not in run(ns, env, f"{ONE};action={action}", module=module)
-    return run(ns, env, f"{ONE};action=activate;{APPROVE}", module=module)
+    return run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER, module=module)
 
 
 # --- parser -----------------------------------------------------------------------------------
@@ -194,7 +196,7 @@ def test_activate_records_who_approved_and_under_which_policy(ns, env):
     row = binding(env, ns)
     assert result["state"] == "active" and (row.state, row.approval_ref, row.policy_revision) == (
         "active", "CHG-12", "rev-1")
-    assert row.state_changed_by == 7 and row.revocation_epoch == 0
+    assert row.state_changed_by == APPROVER and row.created_by == 7 and row.revocation_epoch == 0
     event = env.recorded[-1][1]
     assert (event["reason_code"], event["approver_ref"], event["policy_revision"]) == ("BINDING_ACTIVE", "CHG-12", "rev-1")
 
@@ -203,7 +205,7 @@ def test_activate_refuses_a_definition_that_changed_since_the_binding_was_create
     run(ns, env, f"{ONE};action=create")
     run(ns, env, f"{ONE};action=submit")
     env.digests[70] = "adv1:" + "2" * 64
-    assert run(ns, env, f"{ONE};action=activate;{APPROVE}")["error"].startswith("BINDING_DIGEST_MISMATCH")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["error"].startswith("BINDING_DIGEST_MISMATCH")
     assert binding(env, ns).state == "pending_approval"
 
 
@@ -211,8 +213,9 @@ def test_a_runtime_domain_binding_is_activated_only_with_the_operators_allow(ns,
     param = "project_id=1;application_id=7;version_id=70;mode=runtime_domain_binding"
     for action in ("create", "submit"):
         run(ns, env, f"{param};action={action}")
-    assert run(ns, env, f"{param};action=activate;{APPROVE}")["error"].startswith("DENIED_BINDING")
-    allowed = run(ns, env, f"{param};action=activate;{APPROVE}", module=env.module(allow_runtime_domain_binding=True))
+    assert run(ns, env, f"{param};action=activate;{APPROVE}", actor=APPROVER)["error"].startswith("DENIED_BINDING")
+    allowed = run(ns, env, f"{param};action=activate;{APPROVE}", actor=APPROVER,
+                  module=env.module(allow_runtime_domain_binding=True))
     assert allowed["state"] == "active"
 
 
@@ -311,7 +314,7 @@ def test_dry_run_reports_the_plan_and_writes_nothing(ns, env, action, extra):
     if action in ("activate", "suspend"):
         run(ns, env, f"{ONE};action=submit")
     if action == "suspend":
-        run(ns, env, f"{ONE};action=activate;{APPROVE}")
+        run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)
     before = (binding(env, ns).state, binding(env, ns).revocation_epoch, len(env.recorded))
     result = run(ns, env, f"{ONE};action={action}{extra};dry_run")
     assert result["dry_run"] is True and result["from"] == before[0] and result["to"]
@@ -366,6 +369,198 @@ def test_the_task_works_with_governance_off_and_on_alike(ns, env):
     env.add_version(1, 70, 7)
     env.digests[70] = DIGEST
     assert run(ns, env, f"{ONE};action=create", module=env.module())["state"] == "draft"
+
+
+# --- self-approval (#7105) --------------------------------------------------------------------------
+
+def values_of(ns, param, **more):
+    values, error = parsed(ns, param)
+    assert error is None
+    return {**values, **more}
+
+
+def test_the_creator_cannot_approve_their_own_binding(ns, env):
+    run(ns, env, f"{ONE};action=create")
+    run(ns, env, f"{ONE};action=submit", actor=APPROVER)
+    events = len(env.recorded)
+    result = run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=7)
+    assert result["error"].startswith("SELF_APPROVAL")
+    assert (binding(env, ns).state, len(env.recorded)) == ("pending_approval", events)
+
+
+def test_whoever_submitted_the_binding_cannot_approve_it(ns, env):
+    run(ns, env, f"{ONE};action=create")
+    run(ns, env, f"{ONE};action=submit", actor=9)
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=9)["error"].startswith("SELF_APPROVAL")
+    assert binding(env, ns).state == "pending_approval"
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+
+
+def test_the_task_without_an_identified_operator_cannot_approve(ns, env):
+    run(ns, env, f"{ONE};action=create")
+    run(ns, env, f"{ONE};action=submit")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=0)["error"].startswith("SELF_APPROVAL")
+
+
+def test_a_resume_is_not_an_approval_and_the_one_who_suspended_may_resume(ns, env):
+    activate(ns, env)
+    run(ns, env, f"{ONE};action=suspend", actor=APPROVER)
+    assert run(ns, env, f"{ONE};action=resume", actor=APPROVER)["state"] == "active"
+
+
+# --- rebind (#7105) ---------------------------------------------------------------------------------
+
+NEW_DIGEST = "adv1:" + "2" * 64
+
+
+def test_rebind_takes_an_active_binding_back_to_approval_for_the_definition_as_it_is(ns, env):
+    activate(ns, env)
+    ref = ns.adm.admit_execution(env.module(), env.request(), run_id="run-1").context_ref
+    env.digests[70] = NEW_DIGEST   # the agent was edited
+    result = run(ns, env, f"{ONE};action=rebind", actor=9)
+    row = binding(env, ns)
+    assert result == {"action": "rebind", "binding_ref": str(row.id), "state": "pending_approval", "dry_run": False}
+    assert (row.state, row.definition_digest, row.approval_ref, row.policy_revision) == (
+        "pending_approval", NEW_DIGEST, None, None)
+    assert (row.revocation_epoch, row.state_changed_by, row.created_by) == (1, 9, 7)
+    [context] = env.query(1, ns.models.ExecutionSecurityContext)
+    assert str(context.id) == ref and (context.state, context.revoked_reason) == ("revoked", "EPOCH_MISMATCH")
+    event = env.recorded[-1][1]
+    assert (event["reason_code"], event["revocation_epoch"], event["outcome"], event["caller_ref"]) == (
+        "BINDING_REBIND_PENDING_APPROVAL", 1, "success", "operator:9")
+    assert "approver_ref" not in event and "policy_revision" not in event
+
+
+def test_a_rebound_binding_admits_nothing_until_it_is_approved_again(ns, env):
+    activate(ns, env)
+    run(ns, env, f"{ONE};action=rebind", actor=9)
+    with pytest.raises(ns.adm.AdmissionDenied):
+        ns.adm.admit_execution(env.module(), env.request(), run_id="run-2")
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=10)["state"] == "active"
+    assert ns.adm.admit_execution(env.module(), env.request(), run_id="run-3").context_ref
+
+
+def test_a_rebound_binding_is_approved_by_neither_the_creator_nor_the_rebinder(ns, env):
+    activate(ns, env)
+    run(ns, env, f"{ONE};action=rebind", actor=9)
+    for actor in (7, 9):
+        assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=actor)["error"].startswith("SELF_APPROVAL")
+    # the first approver (8) may approve the new definition: they did not create or rebind it
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=APPROVER)["state"] == "active"
+
+
+def test_a_rebind_is_approved_for_the_new_definition_only(ns, env):
+    activate(ns, env)
+    env.digests[70] = NEW_DIGEST
+    run(ns, env, f"{ONE};action=rebind", actor=9)
+    env.digests[70] = "adv1:" + "3" * 64   # edited again before the approval
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=10)["error"].startswith("BINDING_DIGEST_MISMATCH")
+    env.digests[70] = NEW_DIGEST
+    assert run(ns, env, f"{ONE};action=activate;{APPROVE}", actor=10)["state"] == "active"
+
+
+def test_rebind_works_from_suspended_and_raises_the_epoch_once_more(ns, env):
+    activate(ns, env)
+    run(ns, env, f"{ONE};action=suspend")
+    env.digests[70] = NEW_DIGEST
+    assert run(ns, env, f"{ONE};action=rebind", actor=9)["state"] == "pending_approval"
+    row = binding(env, ns)
+    assert (row.revocation_epoch, row.definition_digest, row.approval_ref) == (2, NEW_DIGEST, None)
+    assert reasons(env)[-2:] == ["BINDING_SUSPENDED", "BINDING_REBIND_PENDING_APPROVAL"]
+
+
+@pytest.mark.parametrize("state", ["draft", "pending_approval", "retired"])
+def test_rebind_is_refused_where_there_is_nothing_live_to_rebind(ns, env, state):
+    run(ns, env, f"{ONE};action=create")
+    if state != "draft":
+        run(ns, env, f"{ONE};action=submit")
+    if state == "retired":
+        run(ns, env, f"{ONE};action=retire")
+    before = (binding(env, ns).state, binding(env, ns).definition_digest, len(env.recorded))
+    assert run(ns, env, f"{ONE};action=rebind") == {"error": f"cannot rebind a binding in state '{state}'"}
+    assert (binding(env, ns).state, binding(env, ns).definition_digest, len(env.recorded)) == before
+
+
+def test_rebind_dry_run_reports_the_plan_and_writes_nothing(ns, env):
+    activate(ns, env)
+    before = (binding(env, ns).state, binding(env, ns).revocation_epoch, len(env.recorded))
+    result = run(ns, env, f"{ONE};action=rebind;dry_run")
+    assert (result["from"], result["to"], result["dry_run"]) == ("active", ["pending_approval"], True)
+    assert (binding(env, ns).state, binding(env, ns).revocation_epoch, len(env.recorded)) == before
+
+
+def test_a_rebind_whose_audit_event_cannot_be_written_changes_nothing(ns, env):
+    activate(ns, env)
+    env.digests[70] = NEW_DIGEST
+    env.record_raises = RuntimeError("outbox full")
+    assert "error" in run(ns, env, f"{ONE};action=rebind")
+    row = binding(env, ns)
+    assert (row.state, row.revocation_epoch, row.approval_ref, row.definition_digest) == ("active", 0, "CHG-12", DIGEST)
+
+
+def test_the_parser_knows_rebind(ns):
+    assert parsed(ns, f"{ONE};action=rebind")[0]["action"] == "rebind"
+
+
+# --- run_binding_action: the one function the task and the API call (#7105) -----------------------------
+
+def raised(ns, env, param, actor=7, **more):
+    with pytest.raises(ns.binding_admin.BindingActionError) as err:
+        ns.binding_admin.run_binding_action(env.module(governed=False), values_of(ns, param, **more), actor)
+    return err.value
+
+
+@pytest.mark.parametrize("setup, param, more, code", [
+    ([], f"{ONE};action=suspend", {}, "NOT_FOUND"),
+    (["create"], f"{ONE};action=create", {}, "BINDING_EXISTS"),
+    (["create"], f"{ONE};action=resume", {}, "INVALID_STATE"),
+    (["create"], f"{ONE};action=submit", {"expected_state": "active"}, "CONCURRENT_CHANGE"),
+    (["create", "submit"], f"{ONE};action=activate;{APPROVE}", {}, "SELF_APPROVAL"),
+    (["create", "submit"], f"{ONE};action=activate", {}, "APPROVAL_REQUIRED"),
+    ([], "project_id=1;application_id=8;version_id=70;mode=elitea_native;action=create", {}, "NOT_FOUND"),
+])
+def test_a_refusal_carries_a_stable_code_and_nothing_is_written(ns, env, setup, param, more, code):
+    for action in setup:
+        run(ns, env, f"{ONE};action={action}")
+    before = (len(env.query(1, ns.models.AgentIdentityBinding)), len(env.recorded))
+    assert raised(ns, env, param, **more).code == code
+    assert (len(env.query(1, ns.models.AgentIdentityBinding)), len(env.recorded)) == before
+
+
+def test_the_messages_of_a_refusal_name_no_id(ns, env):
+    env.digests.pop(70)
+    err = raised(ns, env, f"{ONE};action=create")
+    assert err.code == "VERSION_NOT_FOUND" and err.message == "the version does not exist in this application"
+    assert err.task_text.startswith("VERSION_NOT_FOUND")   # the task prints what it always printed
+
+
+def test_an_unexpected_failure_is_the_audit_message_with_its_own_code(ns, env):
+    env.record_raises = RuntimeError("outbox full")
+    err = raised(ns, env, f"{ONE};action=create")
+    assert (err.code, err.message) == ("AUDIT_UNAVAILABLE", "failed; nothing was changed (is the audit trail available?)")
+
+
+def test_a_row_is_named_by_id_and_only_inside_its_project(ns, env):
+    run(ns, env, f"{ONE};action=create")
+    other_project = "project_id=2;application_id=7;version_id=70;mode=elitea_native;action=submit"
+    env.add_version(2, 70, 7)
+    mine = str(binding(env, ns).id)
+    assert raised(ns, env, other_project, binding_id=uuid.UUID(mine)).code == "NOT_FOUND"
+    assert binding(env, ns).state == "draft" and env.query(2, ns.models.AgentIdentityBinding) == []
+    result = ns.binding_admin.run_binding_action(
+        env.module(governed=False), values_of(ns, f"{ONE};action=submit", binding_id=uuid.UUID(mine)), 7)
+    assert result["state"] == "pending_approval"
+
+
+def test_the_task_text_of_every_code_is_unchanged(ns, env):
+    """The task prints the plain message, or ``CODE: message`` for the codes that always had a prefix."""
+    assert run(ns, env, f"{ONE};action=suspend") == {"error": "no such binding; create it first"}
+    run(ns, env, f"{ONE};action=create")
+    assert run(ns, env, f"{ONE};action=create") == {"error": "binding already exists; use another action"}
+    assert run(ns, env, f"{ONE};action=resume") == {"error": "cannot resume a binding in state 'draft'"}
+    run(ns, env, f"{ONE};action=submit")
+    assert run(ns, env, f"{ONE};action=activate")["error"].startswith(
+        "APPROVAL_REQUIRED: activation needs an approval and a policy revision")
 
 
 # --- the admin task method ---------------------------------------------------------------------

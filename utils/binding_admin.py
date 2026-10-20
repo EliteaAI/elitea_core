@@ -5,6 +5,10 @@ Works with governance off, so bindings can be prepared before the flag is switch
 change is recorded as a ``lifecycle`` audit event in the same transaction as the change; suspending
 or retiring also revokes the live contexts of the binding that sit in the same project schema
 (contexts in other schemas see the raised epoch when the worker validates them).
+
+``run_binding_action`` is the one implementation of the lifecycle: the admin task parses its parameter into
+values and calls it, and so does the operator REST API (#7105). It raises ``BindingActionError`` with a stable
+``code``; ``manage_binding`` renders that as the task's readable text.
 """
 from pylon.core.tools import log
 from sqlalchemy import select
@@ -12,13 +16,13 @@ from tools import db, this
 
 from ..models.agent_identity import IDENTITY_MODES, AgentIdentityBinding
 from .admission import revoke_binding_contexts, version_application_id
-from .binding_state import BUMPS_EPOCH, InvalidTransition, transition_binding
+from .binding_state import InvalidTransition, bumps_epoch, transition_binding
 from .definition_digest import DigestError, digest_for_version
 
-ACTIONS = ("create", "submit", "activate", "suspend", "resume", "retire")
+ACTIONS = ("create", "submit", "activate", "suspend", "resume", "retire", "rebind")
 USAGE = (
     "Format: project_id=N;application_id=A;version_id=V;mode=<dedicated_agent|runtime_domain_binding|elitea_native>;"
-    "action=<create|submit|activate|suspend|resume|retire>[;approval_ref=...][;policy_revision=...][;dry_run]"
+    "action=<create|submit|activate|suspend|resume|retire|rebind>[;approval_ref=...][;policy_revision=...][;dry_run]"
 )
 INT_KEYS = ("project_id", "application_id", "version_id")
 TEXT_KEYS = ("mode", "action", "approval_ref", "policy_revision")
@@ -32,7 +36,21 @@ PATHS = {
         "active": ("retiring", "retired"), "suspended": ("retiring", "retired"), "retiring": ("retired",),
         "draft": ("retired",), "provisioning": ("retired",), "pending_approval": ("retired",),
     },
+    # back to approval for the definition as it is now: the digest is recomputed, the approval cleared, the epoch raised
+    "rebind": {"active": ("pending_approval",), "suspended": ("pending_approval",)},
 }
+# Fixed readable text for the codes the lifecycle raises with a message that names an id
+FIXED_MESSAGES = {"VERSION_NOT_FOUND": "the version does not exist in this application"}
+
+
+class BindingActionError(Exception):
+    """A binding action that was refused or failed with nothing written. ``code`` is stable; ``message`` is fixed
+    text without ids; ``task_text`` is what the admin task has always printed for it."""
+
+    def __init__(self, code, message, task_text=None):
+        super().__init__(message)
+        self.code, self.message = code, message
+        self.task_text = task_text or message
 
 
 def parse_binding_param(param):
@@ -68,8 +86,9 @@ def parse_binding_param(param):
 
 
 def _lifecycle_event(values, binding, target, actor_user_id, epoch):
+    reason = "BINDING_REBIND_PENDING_APPROVAL" if values["action"] == "rebind" else f"BINDING_{target.upper()}"
     event = {
-        "event_type": "lifecycle", "reason_code": f"BINDING_{target.upper()}", "outcome": "success",
+        "event_type": "lifecycle", "reason_code": reason, "outcome": "success",
         "project_id": values["project_id"], "application_id": values["application_id"],
         "agent_binding_ref": str(binding.id), "revocation_epoch": epoch,
         "caller_ref": f"operator:{actor_user_id}" if actor_user_id else "operator",
@@ -82,7 +101,7 @@ def _lifecycle_event(values, binding, target, actor_user_id, epoch):
 
 def _create(session, tracing, values, actor_user_id):
     if session.execute(_find(values)).scalar_one_or_none() is not None:
-        return {"error": "binding already exists; use another action"}
+        raise BindingActionError("BINDING_EXISTS", "binding already exists; use another action")
     digest = digest_for_version(session, values["version_id"])
     if values["dry_run"]:
         return {"dry_run": True, "action": "create", "state": "draft", "definition_digest": digest}
@@ -101,6 +120,9 @@ def _create(session, tracing, values, actor_user_id):
 
 
 def _find(values):
+    if values.get("binding_id") is not None:   # the REST API names the row; the project is still part of the match
+        return select(AgentIdentityBinding).where(
+            AgentIdentityBinding.project_id == values["project_id"], AgentIdentityBinding.id == values["binding_id"])
     return select(AgentIdentityBinding).where(
         AgentIdentityBinding.project_id == values["project_id"],
         AgentIdentityBinding.application_id == values["application_id"],
@@ -113,15 +135,17 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
     action = values["action"]
     binding = session.execute(_find(values)).scalar_one_or_none()
     if binding is None:
-        return {"error": "no such binding; create it first"}
+        raise BindingActionError("NOT_FOUND", "no such binding; create it first")
     binding_id = binding.id
+    if values.get("expected_state") and binding.state != values["expected_state"]:
+        raise BindingActionError("CONCURRENT_CHANGE", "the binding changed while this ran; read it again and retry")
     path = PATHS[action].get(binding.state)
     if path is None:
-        return {"error": f"cannot {action} a binding in state '{binding.state}'"}
+        raise BindingActionError("INVALID_STATE", f"cannot {action} a binding in state '{binding.state}'")
     if values["dry_run"]:
         return {"dry_run": True, "action": action, "binding_ref": str(binding_id),
                 "from": binding.state, "to": list(path)}
-    current_digest = digest_for_version(session, values["version_id"]) if path[-1] == "active" else None
+    current_digest = digest_for_version(session, values["version_id"]) if path[-1] == "active" or action == "rebind" else None
     settings = getattr(module, "admission_settings", None)
     state = binding.state
     for target in path:
@@ -133,9 +157,9 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
             allow_runtime_domain_binding=bool(settings and settings.allow_runtime_domain_binding),
         ):
             session.rollback()
-            return {"error": "the binding changed while this ran; read it again and retry"}
+            raise BindingActionError("CONCURRENT_CHANGE", "the binding changed while this ran; read it again and retry")
         session.expire(binding)  # the UPDATE bypassed the instance
-        if target in BUMPS_EPOCH:
+        if bumps_epoch(state, target):
             revoke_binding_contexts(session, binding_id)
         tracing.security_audit_record(
             session, _lifecycle_event(values, binding, target, actor_user_id, binding.revocation_epoch))
@@ -144,26 +168,41 @@ def _transition(module, session, tracing, values, actor_user_id):  # pylint: dis
     return {"action": action, "binding_ref": str(binding_id), "state": state, "dry_run": False}
 
 
-def manage_binding(module, param, actor_user_id=0):
-    """Run one binding action. Returns a result dict, or ``{"error": ...}`` with nothing written."""
-    values, error = parse_binding_param(param)
-    if error:
-        log.error("manage_agent_identity_binding: %s", error)
-        return {"error": error}
+def run_binding_action(module, values, actor_user_id=0):
+    """Run one binding action for parsed ``values`` (what ``parse_binding_param`` returns; the REST API adds
+    ``binding_id`` to name the row and ``expected_state`` to refuse a stale view). Returns the result dict, or raises
+    ``BindingActionError`` with nothing written. Both the admin task and the API call this."""
     try:
         tracing = this.for_module("tracing").module
         with db.get_session(values["project_id"]) as session:
             try:
                 if version_application_id(session, values["version_id"]) != values["application_id"]:
-                    return {"error": "the version does not exist in this application"}
+                    raise BindingActionError("NOT_FOUND", FIXED_MESSAGES["VERSION_NOT_FOUND"])
                 if values["action"] == "create":
                     return _create(session, tracing, values, actor_user_id)
                 return _transition(module, session, tracing, values, actor_user_id)
             except Exception:
                 session.rollback()
                 raise
+    except BindingActionError:
+        raise
     except (InvalidTransition, DigestError) as exc:
-        return {"error": f"{exc.reason_code}: {exc}"}
+        raise BindingActionError(
+            exc.reason_code, FIXED_MESSAGES.get(exc.reason_code, str(exc)), f"{exc.reason_code}: {exc}") from None
     except Exception as exc:  # pylint: disable=W0703
         log.error("manage_agent_identity_binding: failed (%s)", type(exc).__name__)
-        return {"error": "failed; nothing was changed (is the audit trail available?)"}
+        raise BindingActionError(
+            "AUDIT_UNAVAILABLE", "failed; nothing was changed (is the audit trail available?)") from None
+
+
+def manage_binding(module, param, actor_user_id=0):
+    """Run one binding action from the admin task's parameter. Returns a result dict, or ``{"error": ...}`` with
+    nothing written."""
+    values, error = parse_binding_param(param)
+    if error:
+        log.error("manage_agent_identity_binding: %s", error)
+        return {"error": error}
+    try:
+        return run_binding_action(module, values, actor_user_id)
+    except BindingActionError as exc:
+        return {"error": exc.task_text}

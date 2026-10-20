@@ -15,6 +15,7 @@ import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.admission import admit_dispatch, check_governed_startup, load_admission_settings, track_context
+from .utils.binding_api import PERMISSIONS as BINDING_PERMISSIONS
 from .utils.governance import init_governance
 from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
@@ -718,6 +719,17 @@ class Module(module.ModuleModel):
                 "recommended_roles": {
                     "administration": {"admin": default_roles["admin"], "viewer": False, "editor": False},
                     "default": default_roles,
+                }
+            })
+
+        # Agent identity bindings (#7105, C-1009): the operator REST API. Platform administration only in this slice;
+        # the default (project) mode is all false. Registered whatever the governance flag says.
+        for permission in BINDING_PERMISSIONS:
+            auth.register_permissions({
+                "permissions": [permission],
+                "recommended_roles": {
+                    "administration": {"admin": True, "viewer": False, "editor": False},
+                    "default": {"admin": False, "viewer": False, "editor": False},
                 }
             })
 

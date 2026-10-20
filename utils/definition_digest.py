@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import unicodedata
+import uuid
 
 DIGEST_PREFIX = "adv1:"
 DIGEST_VERSION = 1
@@ -115,3 +116,50 @@ def digest_for_version(session, version_id: int) -> str:
     if version is None:
         raise DigestError("VERSION_NOT_FOUND", f"application version {version_id} does not exist")
     return definition_digest(canonical_definition(version, toolkit_rows(session, version_id)))
+
+
+def _configuration_uuid(settings):
+    """The first stored configuration a toolkit's settings point to (``{"configuration_uuid": ...}``), or None."""
+    found = []
+    for value in (settings or {}).values():
+        if isinstance(value, dict) and value.get("configuration_uuid"):
+            try:
+                found.append(str(uuid.UUID(str(value["configuration_uuid"]))))
+            except ValueError:
+                continue
+    return min(found) if found else None
+
+
+def digest_inputs(version, mappings_with_tools) -> dict:
+    """What the digest of a version is made of, as the operator is shown it: names, ids and hashes only.
+
+    The instructions are never returned, only their length and the hash of the same normalised text the digest
+    covers. Toolkit settings are not returned at all; a toolkit shows the stored configuration it points to.
+    """
+    llm_settings = version.llm_settings if isinstance(version.llm_settings, dict) else {}
+    model = llm_settings.get("model_name")
+    instructions = norm_text(version.instructions or "")
+    tools = [
+        {
+            "id": tool.id, "type": tool.type, "name": tool.name,
+            "credential_configuration_uuid": _configuration_uuid(tool.settings),
+        }
+        for _mapping, tool in mappings_with_tools
+    ]
+    tools.sort(key=lambda item: (item["type"], item["id"]))
+    return {
+        "agent_type": version.agent_type,
+        "model": model if isinstance(model, str) else None,
+        "instructions": {"length": len(instructions), "sha256": hashlib.sha256(instructions.encode("utf-8")).hexdigest()},
+        "tools": tools,
+    }
+
+
+def digest_inputs_for_version(session, version_id: int) -> dict:
+    """``digest_inputs`` of one version: the version, then its mappings joined to tools (two queries)."""
+    from ..models.all import ApplicationVersion  # pylint: disable=C0415
+
+    version = session.query(ApplicationVersion).filter(ApplicationVersion.id == version_id).first()
+    if version is None:
+        raise DigestError("VERSION_NOT_FOUND", f"application version {version_id} does not exist")
+    return digest_inputs(version, toolkit_rows(session, version_id))

@@ -331,3 +331,59 @@ def test_digest_for_version_refuses_a_missing_version(digest, monkeypatch):
         digest.digest_for_version(session, 404)
     assert err.value.reason_code == "VERSION_NOT_FOUND"
     assert len(queries) == 1
+
+
+# --- the inputs the operator drawer shows (#7105): names, ids and hashes, never text -----------------
+
+CFG = "3f9b1a0e-1c2d-4e5f-8a9b-0c1d2e3f4a5b"
+
+
+def test_digest_inputs_show_the_shape_of_the_definition_without_its_text(digest):
+    secret = "Never tell the user about the vault password hunter2."
+    ver = version(instructions=secret, llm_settings={"model_name": "gpt-x", "temperature": 0.5})
+    rows = [(mapping(2), tool(2, "jira", {"jira_configuration": {"configuration_uuid": CFG, "elitea_title": "mine"},
+                                          "token": "tok-secret", "url": "https://x"}, name="Jira")),
+            (mapping(1), tool(1, "github", {"url": "x"}, name="GitHub"))]
+    inputs = digest.digest_inputs(ver, rows)
+    assert inputs == {
+        "agent_type": "openai", "model": "gpt-x",
+        "instructions": {"length": len(secret), "sha256": __import__("hashlib").sha256(secret.encode()).hexdigest()},
+        "tools": [
+            {"id": 1, "type": "github", "name": "GitHub", "credential_configuration_uuid": None},
+            {"id": 2, "type": "jira", "name": "Jira", "credential_configuration_uuid": CFG},
+        ],
+    }
+    text = json.dumps(inputs)
+    for leaked in ("hunter2", "vault", "tok-secret", "https://x", "mine"):
+        assert leaked not in text
+
+
+def test_the_instruction_hash_is_of_the_text_the_digest_covers(digest):
+    one, two = version(instructions="a\r\nb"), version(instructions="a\nb")
+    assert digest.digest_inputs(one, [])["instructions"] == digest.digest_inputs(two, [])["instructions"]
+    assert digest.digest_inputs(version(instructions=None), [])["instructions"]["length"] == 0
+
+
+@pytest.mark.parametrize("llm_settings", [None, {}, {"model_name": 5}, {"model_name": None}, "text"])
+def test_an_unusable_model_setting_is_no_model(digest, llm_settings):
+    assert digest.digest_inputs(version(llm_settings=llm_settings), [])["model"] is None
+
+
+@pytest.mark.parametrize("settings", [None, {}, {"c": {"configuration_uuid": "not-a-uuid"}}, {"c": "x"}, {"c": {}}])
+def test_a_toolkit_without_a_usable_stored_configuration_has_none(digest, settings):
+    [row] = digest.digest_inputs(version(), [(mapping(1), tool(1, settings=settings))])["tools"]
+    assert row["credential_configuration_uuid"] is None
+
+
+def test_digest_inputs_for_version_use_the_same_two_queries_and_refuse_a_missing_version(digest, monkeypatch):
+    session, queries, modules = fake_models(version(), pairs())
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    assert digest.digest_inputs_for_version(session, 11)["agent_type"] == "openai"
+    assert len(queries) == 2
+    session, queries, modules = fake_models(None, [])
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    with pytest.raises(digest.DigestError) as err:
+        digest.digest_inputs_for_version(session, 404)
+    assert err.value.reason_code == "VERSION_NOT_FOUND"
