@@ -10,7 +10,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from ...utils.governance import is_governed
+from ...utils.governance import is_auditing, is_governed
 
 CALLER_TYPES = ("user", "token")
 
@@ -69,11 +69,12 @@ def _holder(sid):
 def admission_request_from(  # pylint: disable=R0913
     module, *, sid, project_id, binding_project_id, version_row, run_kind, entry_point,
 ) -> Optional[AdmissionRequest]:
-    """The admission request for this call, or ``None`` when governance is off (nothing is built or read).
+    """The admission request for this call, or ``None`` when governance is off (nothing is built or read). Audit only
+    builds it too: the same request is evaluated, and nothing is refused.
 
     An unreadable or unknown holder is the ``public`` caller, which admission refuses.
     """
-    if not is_governed(module):
+    if not (is_governed(module) or is_auditing(module)):
         return None
     holder = _holder(sid)
     caller_type, caller_id, reference = "public", None, None

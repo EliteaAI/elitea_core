@@ -663,7 +663,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Modes: dedicated_agent, runtime_domain_binding, elitea_native.
         Actions: create (draft, digest of the current definition), submit (draft -> pending_approval),
-        activate (needs approval_ref and policy_revision), suspend, resume, retire.
+        activate (needs approval_ref and policy_revision, and another operator than the one who created or
+        submitted the binding), suspend, resume, retire, rebind (active or suspended -> pending_approval for the
+        definition as it is now: digest recomputed, approval cleared, live runs revoked).
 
         Examples:
             "project_id=3;application_id=7;version_id=21;mode=elitea_native;action=create"
@@ -708,6 +710,32 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         )
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed,
                 "dry_run": values["dry_run"]}
+
+    @web.method()
+    def create_governance_settings_tables(self, *args, **kwargs):
+        """Admin task: create the tables of the credential governance switch in the public schema (R-2.0.8, #7120, C-1009).
+
+        Creates ``credential_governance_settings`` and ``credential_governance_settings_history`` where they are
+        missing. They are not created at startup, so until this runs the switch reads as "no stored row" (governance
+        off) and the Admin UI cannot save. Idempotent.
+
+        Param format (optional):
+            "dry_run"  - report which tables would be created (``would_create``) and create nothing
+        """
+        from ..utils.governance_settings import create_tables  # pylint: disable=C0415
+
+        param = (kwargs.get("param", "") or "").strip()
+        if param and param.lower() != "dry_run":
+            log.error("create_governance_settings_tables: unknown param '%s'. Format: [dry_run]", param)
+            return {"created": [], "error": "unknown param. Format: [dry_run]"}
+        dry_run = bool(param)
+        try:
+            result = create_tables(dry_run=dry_run)
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("create_governance_settings_tables: failed (%s)", type(exc).__name__)
+            return {"created": [], "error": "failed; nothing was changed"}
+        log.info("%screate_governance_settings_tables: %s", "[DRY RUN] " if dry_run else "", result)
+        return result
 
     @web.method()
     def manage_autonomous_mandate(self, *args, **kwargs):

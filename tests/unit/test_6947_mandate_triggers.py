@@ -514,9 +514,9 @@ def test_flag_off_the_pipeline_helper_adds_the_ticket_only_when_there_is_one(ns,
 def test_flag_off_the_deadline_sweep_is_not_called_by_the_tick_rpc(ns, env):
     text = source_of("rpc/pipeline_scheduling.py")
     rpc_part = text[text.index("class RPC"):]
-    assert rpc_part.index("if is_governed(self):") < rpc_part.index("enforce_run_deadlines(self)") < rpc_part.index(
+    assert rpc_part.index("if governance_lifecycle_active(self):") < rpc_part.index("enforce_run_deadlines(self)") < rpc_part.index(
         "is_maintenance_active()") < rpc_part.index("_check_pipeline_scheduling_lock.acquire")
-    assert "Main restart" in rpc_part[:rpc_part.index("if is_governed(self):")]   # the accepted gap is documented
+    assert "Main restart" in rpc_part[:rpc_part.index("if governance_lifecycle_active(self):")]   # the accepted gap is documented
 
 
 def test_the_tick_rpc_sweeps_once_when_governed_and_not_at_all_when_not(ns, env, monkeypatch):

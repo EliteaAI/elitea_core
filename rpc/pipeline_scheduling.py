@@ -18,7 +18,7 @@ from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
 from ..utils.admission import enforce_run_deadlines
 from ..utils.cron_utils import is_cron_due
-from ..utils.governance import is_governed
+from ..utils.governance import governance_lifecycle_active
 from ..utils.maintenance_gate import is_maintenance_active
 from ..utils.mandate_admission import prepare_trigger_run
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
@@ -287,7 +287,7 @@ class RPC:
         # Governed runs that must stop (a mandate run past its time limit, a run whose context was revoked) are
         # stopped once a minute, whether or not the previous tick is still running and also in maintenance mode:
         # stopping work is never what maintenance mode holds back (#6947)
-        if is_governed(self):
+        if governance_lifecycle_active(self):
             try:
                 enforce_run_deadlines(self)
             except Exception as exc:  # pylint: disable=W0703
