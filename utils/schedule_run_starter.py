@@ -1,4 +1,4 @@
-"""Owner run starter of an agent schedule (EL-7011 US-11, ADR-0002, ADR-0008)."""
+"""Owner run starter of an agent or pipeline schedule (EL-7011 US-11, US-12, ADR-0002, ADR-0008)."""
 import re
 from types import SimpleNamespace
 
@@ -21,6 +21,7 @@ NOT_FOUND = 'schedule or version not found'
 RUN_NOT_FOUND = 'run not found'
 START_FAILED = 'the run could not start'
 PREDICT_FAILED = 'the agent call failed'
+ENTRY_POINT_MESSAGE = '[Scheduled execution triggered]'  # the text the legacy tick stores
 PLACEHOLDER = re.compile(r'\{\{\s*(\w+)\s*\}\}')
 
 
@@ -41,6 +42,7 @@ def _load(project_id: int, schedule_id: int) -> SimpleNamespace | None:
         return SimpleNamespace(
             schedule=SimpleNamespace(
                 id=schedule.id, name=schedule.name, principal=schedule.principal, created_by=schedule.created_by,
+                entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id),
             version=SimpleNamespace(id=version.id, application_id=version.application_id),
             agent_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []))
@@ -58,7 +60,7 @@ def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> 
 
 
 def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
-    """Start one claimed agent run as its owner and return without waiting for the answer.
+    """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
     Every failure after the pre-run check closes the run as failed: a running run blocks the schedule.
     """
@@ -69,15 +71,19 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     check = run_prerun_check(project_id, loaded.schedule, run_id)
     if not check.ok:
         return
-    prompt = fill_placeholders(loaded.prompt, loaded.variables)
+    source = loaded.schedule.entity_type
+    if source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':
+        user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
+    else:
+        user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
     try:
         # lean: a conversation stays when the link fails after it; the run still closes as failed
         conversation_uuid, _, response_id = create_trigger_run_conversation(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
-            trigger_type=TriggerType.SCHEDULED, trigger_message=prompt,
+            trigger_type=TriggerType.SCHEDULED, trigger_message=message,
             conversation_name=f'Scheduled run: {loaded.agent_name}',
             extra_meta={'schedule_id': schedule_id, 'schedule_run_id': run_id, 'execution_type': 'scheduled'},
-            source='agent',
+            source=source,
         )
         linked = _link_conversation(project_id, run_id, conversation_uuid)
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule
@@ -90,7 +96,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     try:
         execute_pipeline_via_predict_sio(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
-            conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=prompt,
+            conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
             trigger_source='scheduled', is_system_user=False,
         )
     except Exception as error:  # noqa: BLE001 -- the run message ends with the reason (R2.5)
