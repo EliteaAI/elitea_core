@@ -22,7 +22,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from tools import auth, config as c, db, this
 
-from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
+from ..models.agent_identity import AgentIdentityBinding, AutonomousMandate, ExecutionSecurityContext
 from ..models.pd.admission import AdmissionRequest, ExecutionSecurityContextView
 from ..models.pd.task_envelope import PROFILE_GOVERNED
 from .credential_decision import (
@@ -33,7 +33,9 @@ from .credential_decision import (
 from .definition_digest import DigestError, digest_for_version
 from .exceptions import AdmissionDenied
 from .governance import CONFIG_SECTION, is_governed
+from .mandate_state import expire_if_due, suspend_owner_mandates
 from .run_id import PREDICT_RUN_ID_KWARGS_KEY
+from .trigger_principal import OPERATION_OF
 
 ADMITTED_TASKS = frozenset({"indexer_agent", "indexer_predict_agent"})
 SCHEMA_VERSION = 1
@@ -44,12 +46,29 @@ LIVE_STATES = ("admitted", "running")
 REVOKE_CODES = frozenset({
     "EPOCH_MISMATCH", "BINDING_DIGEST_MISMATCH", "DENIED_BINDING",
     "CREDENTIAL_REFERENCE_INACTIVE", "CREDENTIAL_GENERATION_MISMATCH", "DENIED_GRANT",
+    "MANDATE_INACTIVE", "MANDATE_EXPIRED", "RUNTIME_LIMIT_EXCEEDED",
 })
 _CODE = re.compile(r"^[A-Z0-9_]{1,64}$")
+PREDICT_PERMISSION = "models.applications.predict.post"
+# The mandate operation each trigger entry point needs (the scheduler and both webhook kinds, #6947)
+MANDATE_OPERATION_OF = {"schedule": OPERATION_OF["pipeline_schedule"], "webhook": OPERATION_OF["pipeline_webhook"]}
+SUBJECT_COLUMNS = ("kind", "ref", "delegation_ref", "owner", "evidence")   # what a context row remembers of its subject
+MANDATE_COLUMNS = (
+    AutonomousMandate.id, AutonomousMandate.project_id, AutonomousMandate.application_id,
+    AutonomousMandate.agent_version, AutonomousMandate.agent_binding_ref, AutonomousMandate.owner_user_id,
+    AutonomousMandate.owner_user_ref, AutonomousMandate.allowed_operations, AutonomousMandate.max_runtime_s,
+    AutonomousMandate.valid_until, AutonomousMandate.state, AutonomousMandate.revocation_epoch,
+)
 
 MESSAGES = {
     "AUDIT_UNAVAILABLE": "The security audit trail is unavailable; the run was not started. Try again later.",
-    "MANDATE_REQUIRED": "This run needs a user mandate that is not available yet; it was not started.",
+    "MANDATE_REQUIRED": "This scheduled or webhook run has no approved mandate; it was not started.",
+    "AUTHORIZATION_REQUIRED": "This schedule runs on a user's behalf, which needs the user's renewed authorization; "
+                              "it was not started.",
+    "DENIED_OPERATION": "The mandate does not allow this kind of trigger; the run was not started.",
+    "MANDATE_INACTIVE": "The mandate for this autonomous run is suspended or revoked; the run was not started.",
+    "MANDATE_EXPIRED": "The mandate for this autonomous run has expired; renew it to run again.",
+    "RUNTIME_LIMIT_EXCEEDED": "The run exceeded the time its mandate allows and was stopped.",
     "IDENTITY_EVIDENCE_MISSING": "No verifiable user identity came with this run; it was not started.",
     "IDENTITY_SUBJECT_UNLINKED": "The signed-in user does not match the verified identity; the run was not started.",
     "IDENTITY_KIND_NOT_ADMITTED": "This kind of credential cannot run governed agents; the run was not started.",
@@ -136,6 +155,16 @@ def check_governed_startup(module):
             provided = False
         if not provided:
             problems.append(f"the {plugin} plugin must provide {method}")
+    for method in ("get_user_by_idp_subject", "get_user_permissions"):
+        if not callable(getattr(auth, method, None)):   # the mandate owner proof and the owner's RBAC (#6947)
+            problems.append(f"auth.{method} must be callable")
+    try:
+        facts_version = this.for_module("secrets").module.credential_facts_version()
+        facts_current = isinstance(facts_version, int) and not isinstance(facts_version, bool) and facts_version >= 2
+    except Exception:  # pylint: disable=W0703
+        facts_current = False
+    if not facts_current:   # grant facts without subject_kind would refuse every mandate grant
+        problems.append("the secrets plugin must provide credential facts version 2 or newer")
     if getattr(c, "SECRETS_ENGINE", None) == "database" and not getattr(c, "SECRETS_MASTER_KEY", None):
         problems.append("SECRETS_MASTER_KEY must be set when SECRETS_ENGINE is 'database'")
     if problems:
@@ -212,6 +241,8 @@ def _denied(code, audit=None) -> AdmissionDenied:
 
 
 def _caller_ref(request: AdmissionRequest) -> str:
+    if request.caller_type == "trigger":
+        return request.trigger_ref or "trigger"
     return "public" if request.caller_id is None else f"{request.caller_type}:{request.caller_id}"
 
 
@@ -310,16 +341,18 @@ def _subject_of(principal: dict) -> dict:
 def _decide_credentials(module, request: AdmissionRequest, subject: dict, binding, payload, expires_at) -> list:
     """Step 5b: may this agent use each credential it uses, for this user? The allowed decisions (none for an
     agent without governed credentials), or ``AdmissionDenied`` for the first refusal."""
+    user_id = subject.get("user_id", request.caller_id)   # a mandate acts for its owner
     context = CredentialDecisionContext(
         binding_project_id=request.binding_project_id, agent_binding_ref=str(binding.id), subject_ref=subject["ref"],
         policy_revision=module.governance_profile.policy_revision, now=_now(), expires_at=expires_at,
-        can_use=user_may_use_credentials(request.caller_id, request.binding_project_id),
+        can_use=user_may_use_credentials(user_id, request.binding_project_id),
+        subject_kind="mandate" if subject["kind"] == "mandate" else "user_delegation", subject_user_id=user_id,
     )
     try:
         with db.get_session(request.binding_project_id) as session:
             candidates = collect_credential_uses(
                 session, request.binding_project_id, request.version_id, payload,
-                lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, request.caller_id))
+                lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, user_id))
         return decide_credential_uses(context, candidates)
     except CredentialDecisionError as exc:
         error = exc
@@ -330,34 +363,15 @@ def _decide_credentials(module, request: AdmissionRequest, subject: dict, bindin
     raise _denied(error.reason_code, error.audit)
 
 
-def _admit(module, request: AdmissionRequest, run_id, payload=None) -> ExecutionSecurityContextView:  # pylint: disable=R0914
+def _store_admission(  # pylint: disable=R0913,R0914
+    module, request: AdmissionRequest, run_id, *, binding, subject, decisions, user_epochs, extra_epochs, caller,
+    expires_at,
+) -> ExecutionSecurityContextView:
+    """Step 6: the context row and the allow events, in one transaction."""
     settings = module.admission_settings
     policy_revision = module.governance_profile.policy_revision
-    # 1. the audit trail can take a decision
-    try:
-        audit_allowed = _tracing().security_audit_admission_allowed_local()
-    except Exception:  # pylint: disable=W0703
-        audit_allowed = False
-    if not audit_allowed:
-        raise _denied("AUDIT_UNAVAILABLE")
-    # 2. a run with no person behind it needs a mandate
-    if request.run_kind == "system":
-        raise _denied("MANDATE_REQUIRED")
-    if not run_id:
-        raise _denied("DEPENDENCY_UNAVAILABLE")
-    # 3. who is asking
-    principal = _verify_identity(request, settings)
-    # 4. which approved agent definition runs
-    binding = _find_binding(request, settings)
-    # 5. on whose behalf
-    subject = _subject_of(principal)
-    expires_at = _now() + timedelta(seconds=settings.context_ttl_s)
-    # 5b. which credentials the run uses, and whether the agent may use them for this user
-    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at)
-    # 6. context row and allow events, atomically
-    epochs = principal.get("epochs") if isinstance(principal.get("epochs"), dict) else {}
+    user_ref = subject.get("user_ref", subject["ref"])
     context_id = uuid.uuid4()
-    caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
     for _ in range(3):
         with db.get_session(request.project_id) as session:
             try:
@@ -370,12 +384,12 @@ def _admit(module, request: AdmissionRequest, run_id, payload=None) -> Execution
                     policy_revision=policy_revision, tenant=subject["tid"], environment=settings.environment,
                     project_id=request.project_id, binding_project_id=request.binding_project_id,
                     entry_point=request.entry_point, caller=caller,
-                    subject={key: subject[key] for key in ("kind", "ref", "delegation_ref")},
+                    subject={key: subject[key] for key in SUBJECT_COLUMNS if key in subject},
                     agent_binding_ref=binding.id, application_id=request.application_id,
                     version_id=request.version_id, definition_digest=binding.definition_digest,
                     run_id=run_id, attempt=attempt,
-                    revocation_epochs={"user": epochs.get("user"), "token": epochs.get("token"),
-                                       "binding": binding.revocation_epoch, "project": None,
+                    revocation_epochs={"user": user_epochs.get("user"), "token": user_epochs.get("token"),
+                                       "binding": binding.revocation_epoch, "project": None, **extra_epochs,
                                        "credential": {d.credential_ref: d.reference_epoch for d in decisions} or None},
                     allowed_bindings=[binding_ref(d) for d in decisions],
                     trace_ref=request.trace_ref, expires_at=expires_at, state="admitted",
@@ -385,7 +399,8 @@ def _admit(module, request: AdmissionRequest, run_id, payload=None) -> Execution
                         event_type="decision", decision="allow", reason_code=CREDENTIAL_USE_ALLOWED,
                         event_id=decision.decision_id, tenant=subject["tid"], project_id=request.project_id,
                         application_id=request.application_id, environment=settings.environment,
-                        caller_ref=caller["ref"], user_ref=subject["ref"], agent_binding_ref=str(binding.id),
+                        caller_ref=caller["ref"], user_ref=user_ref, mandate_ref=subject.get("mandate_ref"),
+                        agent_binding_ref=str(binding.id),
                         run_id=run_id, attempt=attempt, credential_ref=decision.credential_ref,
                         credential_generation=decision.credential_generation,
                         toolkit_instance_id=decision.toolkit_instance_id, target_ref=WHOLE_TARGET,
@@ -395,7 +410,8 @@ def _admit(module, request: AdmissionRequest, run_id, payload=None) -> Execution
                 _tracing().security_audit_record(session, _event(
                     event_type="admission", decision="allow", reason_code="ADMITTED",
                     tenant=subject["tid"], project_id=request.project_id, application_id=request.application_id,
-                    environment=settings.environment, caller_ref=caller["ref"], user_ref=subject["ref"],
+                    environment=settings.environment, caller_ref=caller["ref"], user_ref=user_ref,
+                    mandate_ref=subject.get("mandate_ref"),
                     agent_binding_ref=str(binding.id), run_id=run_id, attempt=attempt,
                     policy_revision=policy_revision, revocation_epoch=binding.revocation_epoch,
                     traceparent=request.trace_ref,
@@ -420,6 +436,196 @@ def _admit(module, request: AdmissionRequest, run_id, payload=None) -> Execution
     )
 
 
+# --- autonomous mandates (#6947) -------------------------------------------------------------
+
+def _mandate_event(mandate, reason) -> dict:
+    """The lifecycle event of a change the platform made to a mandate by itself (expiry, owner suspension)."""
+    return _event(
+        event_type="lifecycle", reason_code=reason, outcome="success", project_id=mandate.project_id,
+        application_id=mandate.application_id, agent_binding_ref=str(mandate.agent_binding_ref),
+        mandate_ref=str(mandate.id), caller_ref="system:admission", revocation_epoch=mandate.revocation_epoch,
+    )
+
+
+def _read_mandate(project_id, mandate_id):
+    with db.get_session(project_id) as session:
+        return session.execute(select(*MANDATE_COLUMNS).where(AutonomousMandate.id == mandate_id)).one_or_none()
+
+
+def _overdue(mandate) -> bool:
+    return mandate.state in ("active", "suspended") and _aware(mandate.valid_until) <= _now()
+
+
+def _expire_mandate(project_id, mandate_id) -> None:
+    """Persist a lazy expiry (state, epoch, live contexts, event) in its own transaction. The caller has already read
+    the clock and refuses the run either way, so a failure here is only logged: the next check does it again."""
+    try:
+        with db.get_session(project_id) as session:
+            if not expire_if_due(session, mandate_id, now=_now()):
+                return
+            mandate = session.execute(select(*MANDATE_COLUMNS).where(AutonomousMandate.id == mandate_id)).one()
+            revoke_mandate_contexts(session, mandate_id, "MANDATE_EXPIRED")
+            _tracing().security_audit_record(session, _mandate_event(mandate, "MANDATE_EXPIRED"))
+            session.commit()
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: a mandate expiry could not be recorded (%s)", type(exc).__name__)
+
+
+def suspend_owner_in_project(project_id, owner_user_id) -> list:
+    """The owner is no longer active: suspend every active mandate they own in this project, revoke the live runs
+    of each and record the event, in one transaction of its own. The ids suspended."""
+    with db.get_session(project_id) as session:
+        suspended = suspend_owner_mandates(session, owner_user_id)
+        if not suspended:
+            return []
+        for mandate in session.execute(select(*MANDATE_COLUMNS).where(AutonomousMandate.id.in_(suspended))).all():
+            revoke_mandate_contexts(session, mandate.id, "MANDATE_INACTIVE")
+            _tracing().security_audit_record(session, _mandate_event(mandate, "MANDATE_OWNER_SUSPENDED"))
+        session.commit()
+        return suspended
+
+
+def _suspend_owner(project_id, owner_user_id) -> None:
+    try:
+        suspend_owner_in_project(project_id, owner_user_id)
+    except Exception as exc:  # pylint: disable=W0703
+        # the run is refused either way; the next firing or the owner event suspends the mandate
+        log.error("admission: the mandate of an inactive owner could not be suspended (%s)", type(exc).__name__)
+
+
+def _admit_mandate(  # pylint: disable=R0912,R0914
+    module, request: AdmissionRequest, run_id, payload,
+) -> ExecutionSecurityContextView:
+    """Steps 2 to 6 of a run under an autonomous mandate: the mandate, its owner, the binding, the owner's right to
+    run the agent and use credentials, then the context. The mandate is read from the table at this moment; the
+    request only names it."""
+    settings = module.admission_settings
+    operation = MANDATE_OPERATION_OF.get(request.entry_point)
+    try:
+        mandate_id = uuid.UUID(str(request.mandate_ref))
+    except ValueError:
+        raise _denied("MANDATE_REQUIRED") from None
+    if (request.caller_type != "trigger" or not request.trigger_ref or operation is None
+            or request.version_id is None or request.application_id is None):
+        raise _denied("MANDATE_REQUIRED")
+    if not run_id:
+        raise _denied("DEPENDENCY_UNAVAILABLE")
+    # 2. the mandate exists for this agent version, is in time, active and allows this kind of trigger
+    mandate = _read_mandate(request.binding_project_id, mandate_id)
+    if (mandate is None or mandate.project_id != request.binding_project_id
+            or mandate.agent_version != request.version_id or mandate.application_id != request.application_id):
+        raise _denied("MANDATE_REQUIRED")
+    if _overdue(mandate):
+        _expire_mandate(request.binding_project_id, mandate_id)
+        raise _denied("MANDATE_EXPIRED")
+    if mandate.state == "expired":
+        raise _denied("MANDATE_EXPIRED")
+    if mandate.state != "active":
+        raise _denied("MANDATE_INACTIVE")
+    if operation not in (mandate.allowed_operations or []):
+        raise _denied("DENIED_OPERATION")
+    # 3. the owner is active and still the person the mandate was made for
+    owner = mandate.owner_user_id
+    try:
+        epochs = auth.read_identity_epochs("user", owner)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: owner epochs unreadable (%s)", type(exc).__name__)
+        epochs = None
+    if not isinstance(epochs, dict):
+        raise _denied("DEPENDENCY_UNAVAILABLE")
+    if not epochs.get("active"):
+        _suspend_owner(request.binding_project_id, owner)
+        raise _denied("MANDATE_INACTIVE")
+    ref = mandate.owner_user_ref if isinstance(mandate.owner_user_ref, dict) else {}
+    issuer, tid, oid = ref.get("issuer"), ref.get("tid"), ref.get("oid")
+    if not (isinstance(issuer, str) and isinstance(tid, str) and isinstance(oid, str) and issuer and tid and oid):
+        raise _denied("IDENTITY_SUBJECT_UNLINKED")
+    try:
+        linked = auth.get_user_by_idp_subject(issuer, tid, oid)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the owner link could not be read (%s)", type(exc).__name__)
+        raise _denied("DEPENDENCY_UNAVAILABLE") from None
+    if not isinstance(linked, dict) or linked.get("id") != owner:
+        raise _denied("IDENTITY_SUBJECT_UNLINKED")
+    # 4. the approved agent definition the mandate was made for is the one that runs
+    binding = _find_binding(request, settings)
+    if str(binding.id) != str(mandate.agent_binding_ref):
+        raise _denied("DENIED_BINDING")
+    # 4a. the owner may still run agents in this project
+    try:
+        permitted = PREDICT_PERMISSION in set(
+            auth.get_user_permissions(owner, mode="default", project_id=request.binding_project_id))
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the owner permissions could not be read (%s)", type(exc).__name__)
+        raise _denied("DEPENDENCY_UNAVAILABLE") from None
+    if not permitted:
+        raise _denied("DENIED_RBAC")
+    # 5. on whose authority: the mandate, vouched for by the platform (never turned into a verified user)
+    owner_ref = f"idp:{tid}:{oid}"
+    subject = {
+        "kind": "mandate", "ref": f"mandate:{mandate.id}", "delegation_ref": None, "tid": tid, "owner": owner_ref,
+        "evidence": {"type": "asserted_user", "issuer": "elitea:mandate", "subject": owner_ref,
+                     "mandate_ref": str(mandate.id)},
+        "user_ref": owner_ref, "user_id": owner, "mandate_ref": str(mandate.id),
+    }
+    now = _now()
+    expires_at = min(now + timedelta(seconds=settings.context_ttl_s), now + timedelta(seconds=mandate.max_runtime_s),
+                     _aware(mandate.valid_until))
+    # 5b. which credentials the run uses, and whether the agent may use them for the mandate
+    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at)
+    # 6. context row and allow events, atomically
+    caller = {"kind": "trigger", "ref": _caller_ref(request), "user_id": owner}
+    return _store_admission(
+        module, request, run_id, binding=binding, subject=subject, decisions=decisions, caller=caller,
+        user_epochs={"user": epochs.get("user"), "token": None},
+        extra_epochs={"mandate": mandate.revocation_epoch}, expires_at=expires_at)
+
+
+def refuse_index_schedule(module, principal, *, project_id, toolkit_id) -> str:
+    """A scheduled index run is not admitted in this release (no agent binding to hold a mandate): refuse it, record
+    the refusal and return its code: ``AUTHORIZATION_REQUIRED`` for a per-user schedule (it acts on a user's behalf
+    and has no renewed authorization), ``MANDATE_REQUIRED`` for a team schedule (it ran as the system user)."""
+    code = "AUTHORIZATION_REQUIRED" if principal.kind == "delegation" else "MANDATE_REQUIRED"
+    _record_deny(module, code, project_id=project_id, caller_ref=f"schedule:index:{toolkit_id}")
+    _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "deny", code)
+    return code
+
+
+def _admit(  # pylint: disable=R0914
+    module, request: AdmissionRequest, run_id, payload=None,
+) -> ExecutionSecurityContextView:
+    settings = module.admission_settings
+    # 1. the audit trail can take a decision
+    try:
+        audit_allowed = _tracing().security_audit_admission_allowed_local()
+    except Exception:  # pylint: disable=W0703
+        audit_allowed = False
+    if not audit_allowed:
+        raise _denied("AUDIT_UNAVAILABLE")
+    if request.run_kind == "mandate":
+        return _admit_mandate(module, request, run_id, payload)
+    # 2. a run with no person behind it needs a mandate
+    if request.run_kind == "system":
+        raise _denied("MANDATE_REQUIRED")
+    if not run_id:
+        raise _denied("DEPENDENCY_UNAVAILABLE")
+    # 3. who is asking
+    principal = _verify_identity(request, settings)
+    # 4. which approved agent definition runs
+    binding = _find_binding(request, settings)
+    # 5. on whose behalf
+    subject = _subject_of(principal)
+    expires_at = _now() + timedelta(seconds=settings.context_ttl_s)
+    # 5b. which credentials the run uses, and whether the agent may use them for this user
+    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at)
+    # 6. context row and allow events, atomically
+    epochs = principal.get("epochs") if isinstance(principal.get("epochs"), dict) else {}
+    caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
+    return _store_admission(
+        module, request, run_id, binding=binding, subject=subject, decisions=decisions, caller=caller,
+        user_epochs=epochs, extra_epochs={}, expires_at=expires_at)
+
+
 def admit_execution(module, request: AdmissionRequest, *, run_id: str, payload=None) -> ExecutionSecurityContextView:
     """Admit one governed run or raise ``AdmissionDenied``. Every decision is counted and audited.
     ``payload`` is the dispatched payload; it is cross-checked against the agent's stored credentials, never trusted."""
@@ -436,7 +642,8 @@ def admit_execution(module, request: AdmissionRequest, *, run_id: str, payload=N
     _record_deny(
         module, error.reason_code, project_id=request.project_id, application_id=request.application_id,
         caller_ref=_caller_ref(request), run_id=run_id if isinstance(run_id, str) else None,
-        traceparent=request.trace_ref, **error.audit,
+        traceparent=request.trace_ref,
+        **{**({"mandate_ref": request.mandate_ref} if request.run_kind == "mandate" else {}), **error.audit},
     )
     _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "deny", error.reason_code)
     raise error
@@ -454,6 +661,7 @@ def admit_dispatch(module, task_name, call_kwargs, admission: Optional[Admission
         meta = call_kwargs["meta"] = {}
     run_id = payload.get(PREDICT_RUN_ID_KWARGS_KEY)
     envelope = payload.get("envelope")
+    meta.pop("context_deadline", None)   # Main-side only (below); never taken from the caller
     #
     if not isinstance(envelope, dict) or envelope.get("security_profile") != PROFILE_GOVERNED:
         # no governed envelope to carry the context (e.g. a parent started before governance was
@@ -472,6 +680,8 @@ def admit_dispatch(module, task_name, call_kwargs, admission: Optional[Admission
     view = admit_execution(module, admission, run_id=run_id, payload=payload)
     envelope["context_ref"] = view.context_ref
     meta["context_ref"] = view.context_ref
+    if admission.run_kind == "mandate":
+        meta["context_deadline"] = view.expires_at   # the wrapper takes it out again: the run is stopped at this moment
     return view.context_ref
 
 
@@ -573,8 +783,9 @@ def revoke_credential_contexts(session, credential_ref, reason="CREDENTIAL_REFER
     ).rowcount
 
 
-def track_context(module, task_id, project_id, context_ref):
-    """After ``start_task`` returned: remember which task runs the context, or revoke it if none started."""
+def track_context(module, task_id, project_id, context_ref, deadline=None):
+    """After ``start_task`` returned: remember which task runs the context, or revoke it if none started.
+    A run with a ``deadline`` (a mandate run) is remembered with it, for ``enforce_run_deadlines``."""
     try:
         if task_id is None:
             with db.get_session(project_id) as session:
@@ -582,7 +793,7 @@ def track_context(module, task_id, project_id, context_ref):
                 session.commit()
             return
         tracked = module._context_by_task  # pylint: disable=W0212
-        tracked[task_id] = (project_id, context_ref)
+        tracked[task_id] = (project_id, context_ref) if deadline is None else (project_id, context_ref, deadline)
         while len(tracked) > MAX_TRACKED_CONTEXTS:
             tracked.popitem(last=False)
     except Exception as exc:  # pylint: disable=W0703
@@ -596,10 +807,62 @@ def complete_context(module, task_id):
     found = module._context_by_task.pop(task_id, None)  # pylint: disable=W0212
     if found is None:
         return
-    project_id, context_ref = found
+    project_id, context_ref = found[:2]
     with db.get_session(project_id) as session:
         _set_state(session, uuid.UUID(context_ref), "completed")
         session.commit()
+
+
+def enforce_run_deadlines(module, now=None) -> int:
+    """Stop every tracked mandate run whose context ran out (``max_runtime_s``): the worker has no deadline of its
+    own. Called once a minute by the pipeline scheduler tick. Governed only. The number of runs stopped.
+
+    A run whose task Main no longer tracks (Main restarted) is not stopped here; it cannot be restarted past the
+    context's ``expires_at`` either (``validate_context``)."""
+    if not is_governed(module):
+        return 0
+    now = now or _now()
+    tracked = module._context_by_task  # pylint: disable=W0212
+    stopped = 0
+    for task_id, entry in list(tracked.items()):
+        if len(entry) < 3 or entry[2] > now:
+            continue
+        if tracked.pop(task_id, None) is None:   # the task finished meanwhile
+            continue
+        project_id, context_ref = entry[:2]
+        try:
+            module.task_node.stop_task(task_id)
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("admission: a run past its time limit could not be stopped (%s)", type(exc).__name__)
+        try:
+            _revoke_for_runtime_limit(module, project_id, context_ref)
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("admission: a run past its time limit could not be recorded (%s)", type(exc).__name__)
+        stopped += 1
+    return stopped
+
+
+def _revoke_for_runtime_limit(module, project_id, context_ref):
+    context_id = uuid.UUID(context_ref)
+    with db.get_session(project_id) as session:
+        row = session.execute(
+            select(ExecutionSecurityContext.run_id, ExecutionSecurityContext.attempt,
+                   ExecutionSecurityContext.application_id, ExecutionSecurityContext.agent_binding_ref,
+                   ExecutionSecurityContext.subject)
+            .where(ExecutionSecurityContext.id == context_id)
+        ).one_or_none()
+        changed = _set_state(session, context_id, "revoked", "RUNTIME_LIMIT_EXCEEDED")
+        session.commit()
+    if row is None or not changed:
+        return
+    subject_ref = (row.subject or {}).get("ref")
+    _record_deny(
+        module, "RUNTIME_LIMIT_EXCEEDED", event_type="decision", project_id=project_id,
+        application_id=row.application_id, run_id=row.run_id, attempt=row.attempt,
+        agent_binding_ref=str(row.agent_binding_ref),
+        mandate_ref=subject_ref[len("mandate:"):] if isinstance(subject_ref, str) else None,
+    )
+    _metric(CONTEXT_VALIDATION, "execution_context_validation_total", "result", "deny", "RUNTIME_LIMIT_EXCEEDED")
 
 
 # --- validation on behalf of the worker ------------------------------------------------------
@@ -611,6 +874,31 @@ def _read_binding(project_id, binding_ref):
                    AgentIdentityBinding.definition_digest)
             .where(AgentIdentityBinding.id == binding_ref)
         ).one_or_none()
+
+
+def _mandate_revoke_code(row, stamped) -> Optional[str]:
+    """Does the mandate a run was admitted under still stand? ``None`` when it does, else the code to revoke with."""
+    subject_ref = (row.subject or {}).get("ref")
+    try:
+        mandate_id = uuid.UUID(str(subject_ref)[len("mandate:"):])
+    except ValueError:
+        return "MANDATE_INACTIVE"
+    project_id = row.binding_project_id or row.project_id
+    mandate = _read_mandate(project_id, mandate_id)
+    if mandate is None:
+        return "MANDATE_INACTIVE"
+    if _overdue(mandate):
+        _expire_mandate(project_id, mandate_id)
+        return "MANDATE_EXPIRED"
+    if mandate.state == "expired":
+        return "MANDATE_EXPIRED"
+    if mandate.state != "active":
+        return "MANDATE_INACTIVE"
+    if mandate.revocation_epoch != stamped.get("mandate"):
+        return "EPOCH_MISMATCH"
+    if str(mandate.agent_binding_ref) != str(row.agent_binding_ref):
+        return "DENIED_BINDING"
+    return None
 
 
 def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,R0914,R0915
@@ -633,6 +921,9 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
         if row is None:
             raise _denied("STALE_CONTEXT")
         known.update(application_id=row.application_id, agent_binding_ref=str(row.agent_binding_ref))
+        is_mandate = (row.subject or {}).get("kind") == "mandate"
+        if is_mandate and str((row.subject or {}).get("ref")).startswith("mandate:"):
+            known["mandate_ref"] = str(row.subject["ref"])[len("mandate:"):]
         if row.schema_version != SCHEMA_VERSION or row.profile != "governed":
             raise _denied("UNKNOWN_SCHEMA_VERSION")
         if (caller.get("kind") != "indexer_worker" or caller.get("task_name") not in ADMITTED_TASKS
@@ -660,6 +951,10 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
             epochs = None
         if not isinstance(epochs, dict):
             raise _denied("DEPENDENCY_UNAVAILABLE")  # unknown, not revoked: the run may be retried
+        if not epochs.get("active") and is_mandate:
+            # the owner is gone: the mandate goes with them, for every run, not only this one
+            _suspend_owner(row.binding_project_id or project_id, user_id)
+            raise revoke("MANDATE_INACTIVE")
         if not epochs.get("active") or epochs.get("user") != stamped.get("user"):
             raise revoke("EPOCH_MISMATCH")
         #
@@ -670,6 +965,11 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
             raise revoke("EPOCH_MISMATCH")
         if binding.definition_digest != row.definition_digest:
             raise revoke("BINDING_DIGEST_MISMATCH")
+        #
+        if is_mandate:
+            code = _mandate_revoke_code(row, stamped)
+            if code is not None:
+                raise revoke(code)
         #
         if isinstance(row.allowed_bindings, list) and row.allowed_bindings:
             try:

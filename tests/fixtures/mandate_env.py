@@ -23,12 +23,15 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:
     def load(name):
         return load_module_with_stubs(plugin_root / "utils" / f"{name}.py", f"{admission_env.PKG}.utils.{name}")
 
-    ns.mandate_state = load("mandate_state")
-    ns.trigger_principal = load("trigger_principal")
     ns.mandate_admin = load("mandate_admin")
     ns.trigger_report = load("trigger_report")
     ns.Mandate = ns.models.AutonomousMandate
     ns.users = {}
+    ns.projects = [1]   # what ``project_list`` answers to the owner-event scan
+    ns.tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=types.SimpleNamespace(
+        timeout=lambda seconds: types.SimpleNamespace(
+            project_list=lambda filter_=None: [{"id": project_id} for project_id in ns.projects]))))
+    ns.mandate_owner = load("mandate_owner")
     return ns
 
 
@@ -47,8 +50,11 @@ def prepare(ns, env):
         return dict(ns.users[user_id])
 
     ns.tools.auth.get_user = get_user
-    ns.tools.auth.read_identity_epochs = lambda kind, ident: env.epochs.get(ident)
     env.epochs[OWNER] = {"active": True, "user": 1, "token": 0}
+    # what admission of a mandate run asks of the identity service about the owner
+    env.idp_links[("https://issuer.example", "tid-1", "oid-5")] = {"id": OWNER}
+    env.permissions[OWNER] = {"models.applications.predict.post", "credentials.use"}
+    ns.adm._now = lambda: NOW  # pylint: disable=W0212
     return env
 
 

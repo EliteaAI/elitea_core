@@ -695,7 +695,7 @@ def test_the_wrapper_pops_admission_first_and_admits_between_stamping_and_dispat
     assert lines[0].startswith('admission = kwargs.pop("admission", None)')
     order = [wrapper.index(marker) for marker in (
         "apply_envelope_gate(", "stamp_predict_run_id(kwargs)", "admit_dispatch(self,", "_original_start_task(*args, **kwargs)",
-        "track_context(self, task_id, admission.project_id, context_ref)")]
+        "track_context(self, task_id, admission.project_id, context_ref, deadline=deadline)")]
     assert order == sorted(order)
     eval_wrapper = source[source.index("def _maintenance_gated_eval_start_task"):source.index("self.eval_task_node.start_task = ")]
     assert "admit" not in eval_wrapper  # the eval node runs locally in Main

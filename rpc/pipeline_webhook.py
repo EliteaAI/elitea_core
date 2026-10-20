@@ -18,7 +18,9 @@ from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
+    finish_trigger_run_refused,
     finish_trigger_run_with_error,
+    is_trigger_refusal,
 )
 
 
@@ -41,6 +43,7 @@ def execute_pipeline_webhook(
     user_id: int,
     webhook_type: str,
     payload: dict,
+    mandate_ticket: str | None = None,
 ) -> dict:
     """
     Execute a pipeline via webhook trigger.
@@ -54,9 +57,11 @@ def execute_pipeline_webhook(
         user_id: User ID for execution context
         webhook_type: Type of webhook (github, gitlab, custom)
         payload: Parsed JSON payload from webhook
+        mandate_ticket: single-use ticket of a governed run under an autonomous mandate; only the webhook API
+            (after the signature check) has one, the cross-pylon RPC never does
 
     Returns:
-        Dict with task_id, conversation_id, and status
+        Dict with task_id, conversation_id, and status; or ``{code, error}`` when a governed admission refused the run
     """
     payload_str = json.dumps(payload, indent=2)
     payload_preview = payload_str[:500] + "..." if len(payload_str) > 500 else payload_str
@@ -90,6 +95,7 @@ def execute_pipeline_webhook(
             response_message_id=response_message_id,
             user_input=payload_str,  # Full payload as input for webhook
             trigger_source="webhook",
+            mandate_ticket=mandate_ticket,
         )
     except PoolSaturationError:
         # Mark the response placeholder as not streaming to avoid stuck History entry
@@ -98,6 +104,10 @@ def execute_pipeline_webhook(
     except Exception as exc:
         finish_trigger_run_with_error(project_id, response_message_id, exc)
         raise
+
+    if is_trigger_refusal(result):
+        finish_trigger_run_refused(project_id, response_message_id, result)
+        return {"code": result["code"], "error": result.get("error")}
 
     log.info(
         f"Webhook pipeline execution started: project={project_id}, "
