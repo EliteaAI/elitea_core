@@ -32,7 +32,9 @@ def load_starter(monkeypatch, create, predict, prerun):
             "execute_pipeline_via_predict_sio": predict,
             "finish_trigger_run_with_error": lambda *a: None},
         "utils.schedule_prerun": {"run_prerun_check": prerun},
-        "utils.schedule_runs": {"fail_schedule_run": lambda *a: None},
+        "utils.schedule_runs": {"fail_schedule_run": lambda *a: None, "block_schedule_run": lambda *a: None},
+        "utils.budget_door": {"closed_budget_scope": lambda *a: None},
+        "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
     }
     for dotted, attrs in stubs.items():
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", _module(f"{PKG}.{dotted}", **attrs))

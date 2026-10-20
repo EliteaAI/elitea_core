@@ -153,6 +153,8 @@ def world(monkeypatch):
         "utils.sio_utils": {"SioEvents": types.SimpleNamespace(chat_predict=types.SimpleNamespace(value="chat_predict"))},
         "utils.schedule_notifications": {"notify_schedule_event": lambda _p, owner_id, event, _s, run=None, extra=None:
                                              notices.append((owner_id, event, run.reason))},
+        "utils.budget_door": {"closed_budget_scope": lambda *_args: None},  # US-13 budget gate: always open here
+        "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
     }
     for dotted, attrs in stubs.items():
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", _module(f"{PKG}.{dotted}", **attrs))

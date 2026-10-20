@@ -102,7 +102,11 @@ def world(monkeypatch):
         "models.entity_schedule": {"EntitySchedule": type("EntitySchedule", (), {}),
                                    "EntityScheduleRun": type("EntityScheduleRun", (), {})},
         "utils.schedule_prerun": {"run_prerun_check": prerun},
-        "utils.schedule_runs": {"fail_schedule_run": lambda *args: state.calls.append(("fail", *args))},
+        "utils.schedule_runs": {
+            "fail_schedule_run": lambda *args: state.calls.append(("fail", *args)),
+            "block_schedule_run": lambda *args: state.calls.append(("block", *args))},
+        "utils.budget_door": {"closed_budget_scope": lambda *args: None},
+        "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
         "utils.pipeline_execution": {
             "TriggerType": SimpleNamespace(SCHEDULED="scheduled"),
             "create_trigger_run_conversation": create,
