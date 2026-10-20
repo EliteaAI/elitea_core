@@ -7,9 +7,8 @@ from pylon.core.tools import log
 START_FAILED = 'the run could not start'
 
 
-
 def _start_agent_run(project_id: int, schedule_id: int, run_id: int) -> None:
-    # Imported here: the starter map loads without the database layer
+    # Imported here, so the wrapper is needed: the starter map loads without the database layer
     from .schedule_run_starter import run_owner_schedule
     run_owner_schedule(project_id, schedule_id, run_id)
 

@@ -12,6 +12,7 @@ Both scheduled and webhook pipeline triggers use identical patterns for:
 
 This module consolidates that shared logic to eliminate duplication.
 """
+from typing import Literal
 
 from pylon.core.tools import log
 from tools import db, rpc_tools, this
@@ -30,7 +31,6 @@ class TriggerType:
     """Trigger type constants for conversation metadata."""
     SCHEDULED = "scheduled"
     WEBHOOK = "webhook"
-    MANUAL = "manual"
 
 
 def create_trigger_run_conversation(
@@ -41,7 +41,7 @@ def create_trigger_run_conversation(
     trigger_message: str,
     conversation_name: str,
     extra_meta: dict | None = None,
-    source: str = "pipeline",
+    source: Literal["pipeline", "agent"] = "pipeline",
 ) -> tuple[str, int, str]:
     """
     Create a conversation for a triggered pipeline run (scheduled or webhook).

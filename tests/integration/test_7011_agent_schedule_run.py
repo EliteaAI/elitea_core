@@ -3,13 +3,11 @@
 Real: `run_owner_schedule`, `run_prerun_check`, the run writers, `create_trigger_run_conversation`,
 `execute_pipeline_via_predict_sio` and the schedule models, over SQLite tables.
 Faked: the predict RPC, the auth RPC, the credential step and the notice helper; the chat tables are
-small SQLite stand-ins. The prompt fill is the jinja2 one of `_resolve_variables` when jinja2 imports
-(the integration environment may not have it); otherwise a one-pass regex fill with the same result.
+small SQLite stand-ins.
 
 Run via:
     python tests/run_tests.py -m integration -v integration/test_7011_agent_schedule_run.py
 """
-import re
 import sys
 import types
 import uuid
@@ -26,17 +24,6 @@ PROMPT = "Summarize open bugs"
 VERSION_VARIABLES = [{"name": "region", "value": "EU"}]
 
 _sa, _orm = REAL_SQLALCHEMY["sqlalchemy"], REAL_SQLALCHEMY["sqlalchemy.orm"]
-
-
-def _fill(text, variables):
-    """`_resolve_variables` of models/pd/chat.py: jinja2 with DebugUndefined, else the same one-pass fill."""
-    values = {item.name: item.value for item in variables}
-    try:
-        from jinja2 import DebugUndefined, Environment
-        environment = Environment(undefined=DebugUndefined)  # other suites leave a jinja2 stub that cannot build one
-    except (ImportError, TypeError):
-        return re.sub(r"\{\{\s*(\w+)\s*\}\}", lambda m: values.get(m.group(1), m.group(0)), text)
-    return environment.from_string(text).render(**values)
 
 
 def _chat_models(base):
@@ -161,7 +148,6 @@ def world(monkeypatch):
         "models.pd.participant": {
             "ParticipantEntityApplication": lambda id, project_id: types.SimpleNamespace(id=id),
             "ParticipantEntityUser": lambda id: types.SimpleNamespace(id=id)},
-        "models.pd.chat": {"_resolve_variables": _fill},
         "utils.participant_utils": {"get_or_create_one": lambda session, entity_name, entity_meta: _participant(
             session, chat, entity_name, entity_meta)},
         "utils.sio_utils": {"SioEvents": types.SimpleNamespace(chat_predict=types.SimpleNamespace(value="chat_predict"))},
@@ -187,8 +173,12 @@ def world(monkeypatch):
 
     monkeypatch.setattr(tools.db, "get_session", get_session)
 
+    predict_errors = []
+
     def predict(**kwargs):
         predictions.append(kwargs)
+        if predict_errors:
+            raise predict_errors[0]
         return {"task_id": "task-1"}
 
     auth = FakeAuth(members={OWNER}, users={OWNER: {"id": OWNER, "suspended": False}})
@@ -213,12 +203,12 @@ def world(monkeypatch):
         session.commit()
         ids = types.SimpleNamespace(schedule=schedule.id, run=1)
 
-    def run(trigger="cron", **changes):
+    def run(**changes):
         with _orm.Session(engine) as session:
             for field, value in changes.items():
                 setattr(session.get(schedules.EntitySchedule, ids.schedule), field, value)
             session.commit()
-        starter.run_owner_schedule(PROJECT_ID, ids.schedule, ids.run, trigger=trigger)
+        starter.run_owner_schedule(PROJECT_ID, ids.schedule, ids.run)
 
     def conversations(agent_id=AGENT_ID, source="agent"):
         """Conversations of one agent with `source`, the filter `list_conversations_rpc` applies for Agent Run History."""
@@ -238,7 +228,8 @@ def world(monkeypatch):
         with _orm.Session(engine) as session:
             return session.get(chat.ApplicationVersion, VERSION_ID).variables
 
-    return types.SimpleNamespace(run=run, predictions=predictions, conversations=conversations, auth=auth,
+    return types.SimpleNamespace(run=run, predictions=predictions, predict_errors=predict_errors,
+                                 conversations=conversations, auth=auth,
                                  first_message=first_message, run_row=run_row, notices=notices,
                                  agent_version=agent_version)
 
@@ -335,10 +326,18 @@ def test_7011_r3_2_run_conversation_is_not_listed_under_another_agent(world):
     assert world.conversations(agent_id=OTHER_AGENT_ID) == []
 
 
-# R3.1: a manual run is not a scheduled one (ADR-0008)
-def test_7011_r3_1_manual_run_sends_no_trigger_source_and_sets_no_scheduled_flag(world):
-    world.run(trigger="manual")
+# R2.3: template logic in the saved prompt does not run; unknown names stay as written
+def test_7011_r2_3_prompt_template_logic_is_not_run(world):
+    prompt = "{% if true %}yes{% endif %} {{ ''.__class__ }} {{ who }} {{region}}"
+    world.run(prompt=prompt, variables=[{"name": "region", "value": "US"}])
 
-    (conversation,) = world.conversations()
-    assert world.predictions[0]["trigger_source"] is None
-    assert "scheduled_run" not in conversation.meta and conversation.meta["execution_type"] == "manual"
+    assert world.first_message() == "{% if true %}yes{% endif %} {{ ''.__class__ }} {{ who }} US"
+
+
+# R2.5: a predict error closes the run as failed, so it does not block the schedule
+def test_7011_r2_5_predict_error_closes_the_run_as_failed(world):
+    world.predict_errors.append(RuntimeError("rpc down"))
+
+    world.run()
+
+    assert (world.run_row().status, world.run_row().reason) == ("failed", "the agent call failed")

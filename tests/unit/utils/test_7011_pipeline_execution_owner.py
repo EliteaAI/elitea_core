@@ -154,14 +154,6 @@ def test_7011_r1_4_scheduled_run_meta_has_schedule_fields(world):
     assert {k: conversation.meta[k] for k in SCHEDULE_META} == SCHEDULE_META
 
 
-def test_7011_r1_4_manual_run_meta_has_no_scheduled_run_flag(world):
-    manual_meta = {**SCHEDULE_META, "execution_type": "manual"}
-    assert world.execution.TriggerType.MANUAL == "manual"
-    conversation = _create(world, world.execution.TriggerType.MANUAL, source="agent", extra_meta=manual_meta)
-    assert "scheduled_run" not in conversation.meta
-    assert conversation.meta["execution_type"] == "manual"
-
-
 def test_7011_r2_1_owner_run_predicts_as_the_owner(world):
     call = _predict(world, is_system_user=False, user_input="Report on sales", trigger_source="scheduled")
     assert call["is_system_user"] is False
