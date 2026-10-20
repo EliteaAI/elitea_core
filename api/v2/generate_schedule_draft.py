@@ -91,8 +91,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         llm_settings.update(temperature=_DEFAULT_TEMPERATURE, max_tokens=_DEFAULT_MAX_TOKENS)
 
         locked = req.locked_entity.model_dump() if req.locked_entity else None
+        roster = schedule_roster(project_id)
         system_prompt = build_schedule_draft_prompt(
-            template, req.current, schedule_roster(project_id), req.timezone, locked,
+            template, req.current, roster, req.timezone, locked,
         )
 
         try:
@@ -136,7 +137,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not isinstance(parsed, dict):
             return {"error": "LLM returned no JSON draft"}, 502
 
-        draft, warnings = validate_schedule_draft(project_id, parsed, locked)
+        try:
+            draft, warnings = validate_schedule_draft(project_id, parsed, locked, roster)
+        except Exception:  # noqa: BLE001 -- the model answer was paid for; answer a short reason, not a 500
+            log.exception("generate_schedule_draft: the draft could not be checked")
+            return {"error": "The draft could not be checked"}, 502
         return GenerateScheduleDraftResponse(draft=draft, warnings=warnings).model_dump(mode="json"), 200
 
 

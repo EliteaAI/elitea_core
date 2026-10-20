@@ -3,6 +3,7 @@ import json
 from datetime import date
 
 from pydantic import ValidationError
+from pylon.core.tools import log
 
 from ..models.pd.entity_schedule import ScheduleTiming
 from ..models.pd.generate_schedule_draft import ScheduleDraft
@@ -58,20 +59,30 @@ def build_schedule_draft_prompt(
     if locked_entity:
         name = next((row['name'] for row in roster if row['application_id'] == locked_entity['application_id']), None)
         locked = f"{locked_entity['entity_type']} {name or locked_entity['application_id']}"
-    return template.format_map(_KeepUnknown(
+    values = _KeepUnknown(
         today=date.today().isoformat(),
         timezone=timezone or 'UTC',
         agents=_entity_lines(roster, pipeline=False),
         pipelines=_entity_lines(roster, pipeline=True),
         current_values=json.dumps(current or {}, ensure_ascii=False, default=str),
         locked_entity=locked,
-    ))
+    )
+    try:
+        return template.format_map(values)
+    except (ValueError, IndexError):  # an admin-edited prompt with single braces, such as a JSON example
+        for key, value in values.items():
+            template = template.replace('{' + key + '}', value)
+        return template
 
 
 def _allows_run_without_asking(project_id: int) -> bool:
     from tools import VaultClient  # pylint: disable=E0401,C0415
 
-    secret = VaultClient(project_id).get_all_secrets().get(ALLOW_SECRET)
+    try:
+        secret = VaultClient(project_id).get_all_secrets().get(ALLOW_SECRET)
+    except Exception:  # noqa: BLE001 -- an unreadable secret never allows "Run without asking" (R2.4)
+        log.exception('Project %s: cannot read the %s secret', project_id, ALLOW_SECRET)
+        return False
     return str(secret).strip().lower() in TRUE_VALUES
 
 
@@ -90,7 +101,7 @@ def _check_schedule(raw: dict, out: dict, warn) -> None:
             warn(field, str(error))
 
 
-def _resolve_entity(project_id: int, raw: dict, locked: dict | None, out: dict, warn) -> None:
+def _resolve_entity(rows: list[dict], raw: dict, locked: dict | None, out: dict, warn) -> None:
     """Names map to ids from the project roster; the model's own ids are never trusted."""
     entity_type = locked['entity_type'] if locked else raw.get('entity_type')
     if entity_type not in ('agent', 'pipeline'):
@@ -98,7 +109,6 @@ def _resolve_entity(project_id: int, raw: dict, locked: dict | None, out: dict, 
             warn('entity_type', 'The type must be agent or pipeline')
         return
     out['entity_type'] = entity_type
-    rows = schedule_roster(project_id)
     if locked:
         out['application_id'] = locked['application_id']
         rows = [row for row in rows if row['application_id'] == out['application_id']]
@@ -132,7 +142,31 @@ def _apply_run_mode(raw: dict, out: dict, warn) -> None:
         warn('prompt', 'Entry point mode takes no prompt and no variables')
 
 
-def validate_schedule_draft(project_id: int, raw: dict, locked_entity: dict | None) -> tuple[ScheduleDraft, list[dict]]:
+def _check_stop_date(out: dict, warn) -> None:
+    """The stop date with the save rules of US-03: not past, and the schedule runs before it."""
+    if out.get('expires_at') is None or not (out.get('cron') and out.get('timezone')):
+        return
+    try:
+        ScheduleTiming(cron=out['cron'], timezone=out['timezone'], expires_at=out['expires_at'])
+    except ValidationError as error:
+        out.pop('expires_at')
+        warn('expires_at', error.errors()[0]['msg'].removeprefix('Value error, '))
+
+
+def _check_approval_rule(out: dict, warn) -> None:
+    """Only the two rules of the form; any other answer becomes the safe "Pause and ask me"."""
+    if out.get('approval_rule') is None:
+        return
+    rule = str(out['approval_rule']).strip().lower().replace(' ', '_')
+    if rule not in (PAUSE_AND_ASK, RUN_WITHOUT_ASKING):
+        warn('approval_rule', f"Unknown approval rule '{out['approval_rule']}'; set \"Pause and ask me\"")
+        rule = PAUSE_AND_ASK
+    out['approval_rule'] = rule
+
+
+def validate_schedule_draft(
+        project_id: int, raw: dict, locked_entity: dict | None, roster: list[dict] | None = None,
+) -> tuple[ScheduleDraft, list[dict]]:
     """Return the draft with each unusable field cleared, and one warning per change."""
     warnings: list[dict] = []
 
@@ -151,8 +185,10 @@ def validate_schedule_draft(project_id: int, raw: dict, locked_entity: dict | No
         except ValidationError as error:
             warn(field, error.errors()[0]['msg'])
     _check_schedule(raw, out, warn)
-    _resolve_entity(project_id, raw, locked_entity, out, warn)
+    _check_stop_date(out, warn)
+    _resolve_entity(schedule_roster(project_id) if roster is None else roster, raw, locked_entity, out, warn)
     _apply_run_mode(raw, out, warn)
+    _check_approval_rule(out, warn)
     if out.get('approval_rule') == RUN_WITHOUT_ASKING and not _allows_run_without_asking(project_id):
         out['approval_rule'] = PAUSE_AND_ASK
         warn('approval_rule', 'This project does not allow "Run without asking"; set "Pause and ask me"')

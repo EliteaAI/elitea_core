@@ -66,7 +66,7 @@ def endpoint():
     saved = {name: sys.modules.get(name) for name in ('flask', 'tools', 'pylon', 'pylon.core', 'pylon.core.tools')}
     state = types.SimpleNamespace(
         service_prompt='Draft a schedule.', default_model={'model_name': 'gpt-5-mini'},
-        permissions=[], seen={}, db_sessions=0,
+        permissions=[], seen={}, db_sessions=0, validate_error=None,
     )
     for pkg_name, path in (('', None), ('.api', None), ('.api.v2', None), ('.models', None), ('.utils', None),
                            ('.models.pd', PLUGIN_ROOT / 'models' / 'pd')):
@@ -76,8 +76,10 @@ def endpoint():
         state.seen.update(current=current, roster=roster, timezone=timezone, locked=locked_entity)
         return f'{template} current={json.dumps(current)}'
 
-    def validate(project_id, raw, locked_entity):
-        state.seen['raw'] = raw
+    def validate(project_id, raw, locked_entity, roster=None):
+        if state.validate_error:
+            raise state.validate_error
+        state.seen.update(raw=raw, validate_roster=roster)
         draft = schedule_models.ScheduleDraft(name=raw.get('name'), cron=raw.get('cron'))
         return draft, [{'field': 'timezone', 'reason': 'unknown'}]
 
@@ -149,6 +151,7 @@ def test_el_7011_r1_1_a_prompt_returns_the_draft_and_the_warnings(endpoint):
     assert payload['warnings'] == [{'field': 'timezone', 'reason': 'unknown'}]
     assert model.calls[0]['data']['user_input'] == 'every day at 9'
     assert model.calls[0]['skip_expansion'] is True
+    assert endpoint.seen['validate_roster'] is endpoint.seen['roster']
 
 
 def test_el_7011_r1_2_current_values_and_the_service_prompt_go_to_the_model(endpoint):
@@ -199,6 +202,13 @@ def test_el_7011_r1_6_a_model_failure_is_502_with_a_short_reason(endpoint, resul
     payload, status, _ = _post(endpoint, {'prompt': 'x'}, result, exc)
     assert status == 502
     assert payload['error']
+
+
+def test_el_7011_r1_6_a_failing_draft_check_is_502_with_a_short_reason(endpoint):
+    endpoint.validate_error = RuntimeError('vault down: secret=abc')
+    payload, status, _ = _post(endpoint, {'prompt': 'x'}, _answer(json.dumps(MODEL_DRAFT)))
+    assert status == 502
+    assert payload == {'error': 'The draft could not be checked'}
 
 
 def test_el_7011_r1_6_no_default_model_is_400(endpoint):

@@ -1,6 +1,7 @@
 """EL-7011 US-21 R2.1-R2.4, R3.1, R3.2 - validate_schedule_draft clears bad fields and warns."""
 import sys
 import types
+from datetime import date, timedelta
 
 import pytest
 from unit._tool_spend_loader import load
@@ -154,3 +155,58 @@ def test_el_7011_r3_1_variables_as_the_service_prompt_answers_them_become_name_v
     raw = {**PIPELINE, 'run_mode': 'prompt', 'prompt': 'Report for {{region}}', 'variables': {'region': 'EU'}}
     draft, warnings = validate(raw)
     assert (draft.variables, warnings) == ([{'name': 'region', 'value': 'EU'}], [])
+
+
+@pytest.mark.parametrize('rule, kept', [('Pause and ask', 'pause_and_ask'), (' PAUSE_AND_ASK ', 'pause_and_ask')])
+def test_el_7011_r2_4_an_approval_rule_in_other_case_or_spaces_is_normalised(validate, rule, kept):
+    draft, warnings = validate({'approval_rule': rule})
+    assert (draft.approval_rule, warnings) == (kept, [])
+
+
+def test_el_7011_r2_4_an_unknown_approval_rule_becomes_pause_and_ask(validate):
+    draft, warnings = validate({'approval_rule': 'always'})
+    assert draft.approval_rule == 'pause_and_ask'
+    assert _fields(warnings) == ['approval_rule']
+
+
+def test_el_7011_r2_4_a_normalised_run_without_asking_still_needs_the_secret(validate):
+    draft, warnings = validate({'approval_rule': 'Run without asking'})
+    assert draft.approval_rule == 'pause_and_ask'
+    assert _fields(warnings) == ['approval_rule']
+
+
+def test_el_7011_r2_4_an_unreadable_secret_never_allows_run_without_asking(monkeypatch):
+    module = load_draft_utils(monkeypatch)
+
+    def broken(project_id):
+        raise RuntimeError('vault down')
+    monkeypatch.setattr(sys.modules['tools'], 'VaultClient', broken)
+    draft, warnings = module.validate_schedule_draft(1, {'approval_rule': 'run_without_asking'}, None)
+    assert draft.approval_rule == 'pause_and_ask'
+    assert _fields(warnings) == ['approval_rule']
+
+
+@pytest.mark.parametrize('raw', [
+    {'cron': '0 9 * * *', 'timezone': 'UTC', 'expires_at': '2020-01-01'},  # in the past
+    {'cron': '0 9 1 1 *', 'timezone': 'UTC', 'expires_at': (date.today() + timedelta(days=1)).isoformat()},
+])
+def test_el_7011_r2_1_a_stop_date_that_fails_the_save_rules_is_cleared(validate, raw):
+    if raw['cron'] == '0 9 1 1 *' and date.today() + timedelta(days=1) >= date(date.today().year + 1, 1, 1):
+        pytest.skip('the next run of 1 January falls inside the window')
+    draft, warnings = validate(raw)
+    assert (draft.cron, draft.expires_at) == (raw['cron'], None)
+    assert _fields(warnings) == ['expires_at']
+    assert warnings[0]['reason']
+
+
+def test_el_7011_r2_1_a_future_stop_date_is_kept(validate):
+    stop = date.today() + timedelta(days=30)
+    draft, warnings = validate({'cron': '0 9 * * *', 'timezone': 'UTC', 'expires_at': stop.isoformat()})
+    assert (draft.expires_at, warnings) == (stop, [])
+
+
+def test_el_7011_p3_a_given_roster_is_used_instead_of_a_new_read(monkeypatch):
+    module = load_draft_utils(monkeypatch)
+    monkeypatch.setattr(module, 'schedule_roster', lambda project_id: pytest.fail('roster read twice'))
+    draft, _ = module.validate_schedule_draft(1, AGENT, None, ROSTER)
+    assert draft.application_id == 42

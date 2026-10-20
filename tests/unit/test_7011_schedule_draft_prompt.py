@@ -37,3 +37,8 @@ def test_el_7011_r1_2_the_locked_entity_is_named_from_the_roster(build):
 def test_el_7011_r1_2_an_empty_roster_says_none(build):
     prompt = build('{agents}|{pipelines}', {}, [], 'UTC')
     assert prompt == '(none)|(none)'
+
+
+def test_el_7011_r1_2_a_prompt_with_single_braces_still_gets_its_placeholders(build):
+    prompt = build('Answer as {"name": "..."} for {timezone} with {agents}', None, ROSTER, 'UTC')
+    assert prompt == 'Answer as {"name": "..."} for UTC with - Digest agent (versions: base)'
