@@ -5,8 +5,8 @@ from ..models.entity_schedule import EntitySchedulePreference
 from ..models.enums.all import NotificationEventTypes as Types
 from .sio_utils import SioEvents, get_event_room
 
-# One fixed text per event type; {link} is the schedule name as a markdown link, the only form the bell renders
-# as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty
+# One fixed text per event type; {link} is the schedule name as an empty-target markdown link `[name]()`, the
+# only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty
 MESSAGES = {
     Types.schedule_run_failed: 'Schedule "{link}" failed{reason}',
     Types.schedule_run_succeeded: 'Schedule "{link}" ran successfully',
@@ -22,12 +22,9 @@ MESSAGES = {
 _NAME_BRACKETS = str.maketrans('[]', '［］')
 
 
-def _schedule_link(schedule, run) -> str:
-    """The name linked to the edit page; a run adds `history_run_id`, so the page opens with that run (US-41 R1.2)."""
-    href = f'/settings/schedules/{schedule.id}'
-    if run is not None and run.conversation_id:
-        href += f'?history_run_id={run.conversation_id}'
-    return f'[{schedule.name.translate(_NAME_BRACKETS)}]({href})'
+def _schedule_link(schedule) -> str:
+    """The name as an empty-target link, `[name]()`; the bell builds the real target from event_type and meta."""
+    return f'[{str(schedule.name or "").translate(_NAME_BRACKETS)}]()'
 
 
 def get_notified_for(session, user_id: int) -> bool:
@@ -49,7 +46,9 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
         reason = getattr(run, 'reason', None) or extra.get('reason')
         meta = {
             'message': MESSAGES[event_type].format(
-                link=_schedule_link(schedule, run), reason=f': {reason}' if reason else '', action=extra.get('action', 'edited'),
+                link=_schedule_link(schedule),
+                reason=f': {reason}' if reason else '',
+                action=extra.get('action', 'edited'),
             ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,
