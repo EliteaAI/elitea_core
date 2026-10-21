@@ -70,13 +70,13 @@ def test_el_7011_r1_2_scheduled_run_flag_gives_scheduled(model):
     assert _row(model, {"scheduled_run": True}).execution_type == "scheduled"
 
 
-def test_el_7011_r1_2_false_flag_gives_manual(model):
-    """TC-US16-04: scheduled_run false gives manual."""
-    assert _row(model, {"scheduled_run": False}).execution_type == "manual"
+def test_el_7011_r1_2_false_flag_gives_chat(model):
+    """TC-US16-04: scheduled_run false gives chat (owner decision 2026-10-21, US-50 R3.1)."""
+    assert _row(model, {"scheduled_run": False}).execution_type == "chat"
 
 
 # TC-US16-02: R1.3 - default
 @pytest.mark.parametrize("meta", [{}, {"execution_type": "other"}])
-def test_el_7011_r1_3_no_usable_field_gives_manual(model, meta):
-    """TC-US16-02: neither field (or an unknown value) gives manual; the list never fails."""
-    assert _row(model, meta).execution_type == "manual"
+def test_el_7011_r1_3_no_usable_field_gives_chat(model, meta):
+    """TC-US16-02: neither field (or an unknown value) gives chat; the list never fails (owner decision 2026-10-21)."""
+    assert _row(model, meta).execution_type == "chat"
