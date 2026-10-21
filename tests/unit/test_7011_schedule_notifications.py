@@ -141,11 +141,12 @@ class TestEL7011R1Sender:
         assert meta['schedule_name'] == 'Daily report'
         assert meta['run_id'] == 301
         assert meta['conversation_id'] == 55
-        assert meta['message'] == 'Schedule "[Daily report](/settings/schedules/7?history_run_id=55)" failed: credential not found'
+        assert meta['message'] == 'Schedule "[Daily report]()" failed: credential not found'
 
     @pytest.mark.parametrize('extra, message', [
-        (None, 'Schedule "[Daily report](/settings/schedules/7)" was switched off'),
-        ({'reason': 'the agent was deleted'}, 'Schedule "[Daily report](/settings/schedules/7)" was switched off: the agent was deleted'),
+        (None, 'Schedule "[Daily report]()" was switched off'),
+        ({'reason': 'the agent was deleted'},
+         'Schedule "[Daily report]()" was switched off: the agent was deleted'),
     ])
     def test_r1_2_a_notice_without_a_reason_has_no_dangling_colon(self, notifications, recorder, extra, message):
         _send(notifications, 'schedule_disabled', extra=extra)
@@ -153,8 +154,8 @@ class TestEL7011R1Sender:
         assert recorder.fired[0][1]['meta']['message'] == message
 
     @pytest.mark.parametrize('extra, message', [
-        (None, 'An admin edited your schedule "[Daily report](/settings/schedules/7)"'),
-        ({'action': 'deleted'}, 'An admin deleted your schedule "[Daily report](/settings/schedules/7)"'),
+        (None, 'An admin edited your schedule "[Daily report]()"'),
+        ({'action': 'deleted'}, 'An admin deleted your schedule "[Daily report]()"'),
     ])
     def test_r1_2_the_admin_notice_names_the_action(self, notifications, recorder, extra, message):
         _send(notifications, 'schedule_edited_by_admin', extra=extra)
@@ -167,7 +168,7 @@ class TestEL7011R1Sender:
         meta = recorder.fired[0][1]['meta']
         assert meta['run_id'] is None
         assert meta['conversation_id'] is None
-        assert meta['message'] == 'Schedule "[Daily report](/settings/schedules/7)" reached its stop date and is switched off'
+        assert meta['message'] == 'Schedule "[Daily report]()" reached its stop date and is switched off'
 
     def test_r1_3_owner_change_adds_both_owner_ids(self, notifications, recorder):
         _send(notifications, 'schedule_owner_changed', extra={'old_owner_id': 42, 'new_owner_id': 43})
@@ -192,39 +193,55 @@ class TestEL7011R1Sender:
 
 
 ALL_TYPES = ALWAYS_SENT + ['schedule_run_succeeded']
-SCHEDULE_LINK = '[Daily report](/settings/schedules/7)'
-RUN_LINK = '[Daily report](/settings/schedules/7?history_run_id=55)'
+SCHEDULE_LINK = '[Daily report]()'
 
 
 class TestEL7011NoticeLinks:
-    """QA bug 2026-10-21: the bell renders a link only for a markdown link in meta.message (US-40, US-41 R1.2)."""
+    """QA bug 2026-10-21 (BUG-21): the bell renders a link only for a markdown link in meta.message; the name
+    is the empty-target link `[name]()` and the bell builds the target from event_type and meta (US-40 R2.1-R2.5)."""
 
     @pytest.mark.parametrize('event_type', ALL_TYPES)
-    def test_every_notice_links_the_name_to_the_schedule_edit_page(self, notifications, recorder, event_type):
+    def test_every_notice_links_the_name_with_an_empty_target(self, notifications, recorder, event_type):
         _send(notifications, event_type)
 
         meta = recorder.fired[0][1]['meta']
         assert f'"{SCHEDULE_LINK}"' in meta['message']
+        assert '/settings' not in meta['message']
         assert meta['schedule_name'] == 'Daily report'
         assert meta['schedule_id'] == 7
 
     @pytest.mark.parametrize('event_type, message', [
-        ('schedule_approval_needed', f'Schedule "{RUN_LINK}" waits for your approval'),
-        ('schedule_approval_expired', f'Schedule "{RUN_LINK}" was not approved in 24 hours and the run stopped'),
-        ('schedule_run_failed', f'Schedule "{RUN_LINK}" failed: credential not found'),
-        ('schedule_run_succeeded', f'Schedule "{RUN_LINK}" ran successfully'),
+        ('schedule_approval_needed', f'Schedule "{SCHEDULE_LINK}" waits for your approval'),
+        ('schedule_approval_expired',
+         f'Schedule "{SCHEDULE_LINK}" was not approved in 24 hours and the run stopped'),
+        ('schedule_run_failed', f'Schedule "{SCHEDULE_LINK}" failed: credential not found'),
+        ('schedule_run_succeeded', f'Schedule "{SCHEDULE_LINK}" ran successfully'),
     ])
-    def test_a_run_notice_selects_its_run_on_the_edit_page(self, notifications, recorder, event_type, message):
+    def test_a_run_notice_keeps_the_run_in_meta_not_in_the_message(
+        self, notifications, recorder, event_type, message,
+    ):
         _send(notifications, event_type, run=RUN)
 
         meta = recorder.fired[0][1]['meta']
         assert meta['message'] == message
         assert meta['conversation_id'] == 55
+        assert meta['run_id'] == 301
 
-    def test_any_notice_with_a_conversation_carries_the_run_id(self, notifications, recorder):
-        _send(notifications, 'schedule_disabled', run=RUN)
+    def test_owner_changed_embeds_nothing_and_keeps_the_owner_ids(self, notifications, recorder):
+        _send(notifications, 'schedule_owner_changed', extra={'old_owner_id': 42, 'new_owner_id': 43})
 
-        assert recorder.fired[0][1]['meta']['message'].startswith(f'Schedule "{RUN_LINK}" was switched off')
+        meta = recorder.fired[0][1]['meta']
+        assert meta['message'] == f'The owner of schedule "{SCHEDULE_LINK}" changed'
+        assert meta['schedule_id'] == 7
+
+    def test_a_missing_name_gives_an_empty_link_text_and_still_sends(self, notifications, recorder):
+        schedule = types.SimpleNamespace(id=7, name=None)
+
+        assert notifications.notify_schedule_event(12, 42, 'schedule_expired', schedule) is True
+
+        assert recorder.fired[0][1]['meta']['message'] == (
+            'Schedule "[]()" reached its stop date and is switched off'
+        )
 
     def test_brackets_in_the_name_cannot_break_the_link(self, notifications, recorder):
         schedule = types.SimpleNamespace(id=7, name='[Q1] report [draft]')
@@ -233,8 +250,7 @@ class TestEL7011NoticeLinks:
 
         meta = recorder.fired[0][1]['meta']
         assert meta['message'] == (
-            'Schedule "[［Q1］ report ［draft］](/settings/schedules/7)" '
-            'reached its stop date and is switched off'
+            'Schedule "[［Q1］ report ［draft］]()" reached its stop date and is switched off'
         )
         assert meta['schedule_name'] == '[Q1] report [draft]'
 
