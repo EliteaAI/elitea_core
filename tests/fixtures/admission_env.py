@@ -531,6 +531,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.envelope = load("models/pd", "task_envelope")
     ns.run_id = load("utils", "run_id")
     ns.pd_admission = load("models/pd", "admission")
+    load("utils", "security_metrics_client")  # worker_capabilities counts through it (#6754)
     ns.caps = load("utils", "worker_capabilities")
     ns.schema_registry_version = load("utils", "schema_registry_version")
     ns.credential_decision = load("utils", "credential_decision")

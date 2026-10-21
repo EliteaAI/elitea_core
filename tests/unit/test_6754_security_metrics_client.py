@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -50,6 +51,7 @@ def test_without_the_tool_it_counts_locally_and_logs_the_structured_line(client)
     counter = client.mod.SecurityCounter("governed_dispatch_unavailable_total", "d")
 
     counter.inc()
+    client.mod._clock = lambda: time.monotonic() + 3600  # past the log rate-cap window
     counter.inc()
 
     assert counter.total() == 2
