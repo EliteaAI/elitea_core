@@ -2,16 +2,25 @@
 
 GET .../schedules/prompt_lib/{project_id} lists; GET .../export writes the file; POST .../import reads one.
 """
-from typing import ClassVar
+from typing import ClassVar, get_args
 
 from flask import request
 from pydantic import ValidationError
 from pylon.core.tools import log
 from tools import api_tools, auth, db, register_openapi
 
-from ...models.pd.schedule_list import ScheduleListFilters, ScheduleListItem
+from ...models.pd.schedule_list import (
+    EntityType,
+    RunStatus,
+    ScheduleListFilters,
+    ScheduleListItem,
+    SortBy,
+    SortOrder,
+)
 from ...utils.authors import get_authors_data
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.constants import SCHEDULES_OPENAPI_TAG as OPENAPI_TAG
+from ...utils.constants import SCHEDULES_PROJECT_PATH as PROJECT_PATH
 from ...utils.schedule_access import (
     allowed_actions,
     schedule_check_spec,
@@ -23,14 +32,10 @@ NOT_ALLOWED = {"error": "Method not allowed"}, 405
 MAX_ID = 2147483647  # the schedule id column is a 32-bit integer
 MAX_EXPORT_IDS = 500
 
-OPENAPI_TAG = "elitea_core/schedules"
-# Pinned: register_api_class would pick any of the URLs that share a handler class (BUG-11)
-PROJECT_PATH = "<string:mode>/<int:project_id>"
 LIST_QUERY_PARAMS = [
-    {"name": "entity_type", "in": "query", "schema": {"type": "string", "enum": ["agent", "pipeline"]},
+    {"name": "entity_type", "in": "query", "schema": {"type": "string", "enum": list(get_args(EntityType))},
      "description": "Only schedules of this entity kind"},
-    {"name": "status", "in": "query", "schema": {"type": "string", "enum": [
-        "running", "success", "failed", "skipped", "blocked", "waiting_for_approval"]},
+    {"name": "status", "in": "query", "schema": {"type": "string", "enum": list(get_args(RunStatus))},
      "description": "Only schedules whose last run has this status"},
     {"name": "enabled", "in": "query", "schema": {"type": "boolean"}, "description": "True: active, false: paused"},
     {"name": "owner_ids", "in": "query", "schema": {"type": "array", "items": {"type": "integer"}},
@@ -42,9 +47,9 @@ LIST_QUERY_PARAMS = [
                                                  "minimum": 1, "maximum": 100}, "description": "Rows per page"},
     {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0, "minimum": 0},
      "description": "Rows to skip"},
-    {"name": "sort_by", "in": "query", "schema": {"type": "string", "default": "next_run", "enum": [
-        "name", "entity_name", "entity_type", "next_run", "last_run", "enabled"]}, "description": "Sort column"},
-    {"name": "sort_order", "in": "query", "schema": {"type": "string", "enum": ["asc", "desc"], "default": "asc"},
+    {"name": "sort_by", "in": "query", "schema": {"type": "string", "default": "next_run", "enum": list(get_args(SortBy))},
+     "description": "Sort column"},
+    {"name": "sort_order", "in": "query", "schema": {"type": "string", "enum": list(get_args(SortOrder)), "default": "asc"},
      "description": "Sort direction"},
 ]
 IMPORT_BODY = {"required": True, "content": {"multipart/form-data": {"schema": {

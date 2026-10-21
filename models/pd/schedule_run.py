@@ -13,4 +13,5 @@ class ScheduleRunRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{"trigger": "manual"}]})
 
-    trigger: Literal["manual", "test"] = Field(description="`manual` runs now; `test` is a test run")
+    trigger: Literal["manual", "test"] = Field(description="`manual` runs now; `test` is a test run",
+                                               examples=["manual"])

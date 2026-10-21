@@ -76,7 +76,8 @@ def history(world, monkeypatch):
         "utils.context_analytics": {"set_context_strategy": None},
         "utils.exceptions": {"PoolSaturationError": Exception},
         "utils.model_defaults": {"creation_llm_settings": None, "chat_request_default": None},
-        "utils.constants": {"PROMPT_LIB_MODE": "prompt_lib"},
+        "utils.constants": {"PROMPT_LIB_MODE": "prompt_lib", "SCHEDULES_OPENAPI_TAG": "elitea_core/schedules",
+                            "SCHEDULES_PROJECT_PATH": "<string:mode>/<int:project_id>"},
         "utils.skill_participant_utils": {"SkillParticipantError": Exception, "validate_skill_participants": None},
     }
     for dotted, attrs in sibling_stubs.items():
@@ -233,7 +234,7 @@ def runs(world, history, monkeypatch):
         merged = {k: v for k, v in attrs.items() if not k.startswith("__")}
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", _module(f"{PKG}.{dotted}", **merged))
     for dotted in ("utils.schedule_timing", "models.pd.index", "models.pd.entity_schedule", "models.pd.schedule_run",
-                   "utils.schedule_access", "utils.schedule_dispatch", "utils.schedule_service", "api.v2.schedule"):
+                   "models.pd.schedule_list", "utils.schedule_access", "utils.schedule_dispatch", "utils.schedule_service", "api.v2.schedule"):
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", None)
         load(dotted.replace(".", "/") + ".py", fresh=True)
     handler = sys.modules[f"{PKG}.api.v2.schedule"].PromptLibAPI

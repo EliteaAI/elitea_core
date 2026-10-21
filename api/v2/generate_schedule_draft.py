@@ -26,7 +26,7 @@ from ...models.pd.generate_schedule_draft import (
     GenerateScheduleDraftRequest,
     GenerateScheduleDraftResponse,
 )
-from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.constants import PROMPT_LIB_MODE, SCHEDULES_OPENAPI_TAG
 from ...utils.draft_llm_utils import (
     describe_predict_failure,
     extract_answer,
@@ -65,7 +65,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "502": {"description": "The model failed or its answer could not be used"},
             "503": {"description": "The service is busy; retry after `retry_after` seconds"},
         },
-        tags=["elitea_core/schedules"],
+        tags=[SCHEDULES_OPENAPI_TAG],
         mcp_tool=False,
         available_to_users=True,
     )
