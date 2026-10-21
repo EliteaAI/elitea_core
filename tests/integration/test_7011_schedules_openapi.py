@@ -171,7 +171,6 @@ def _route_shape(registry):
 def _body_schemas(spec):
     """Every request body schema: the referenced models with their nested ones, and the inline bodies."""
     schemas = dict(spec['components']['schemas'])
-    schemas.pop('SchedulePreferenceUpdate')  # schedule_preferences.py is outside BUG-11
     for (method, path), operation in _operations(spec).items():
         for content in operation.get('requestBody', {}).get('content', {}).values():
             if '$ref' not in content['schema']:
@@ -197,15 +196,17 @@ def test_r1_6_el7011_paths_do_not_depend_on_url_params_order(monkeypatch):
 
 # R1.2: the list and the run records publish their query options with type, enum and default
 def test_r1_2_el7011_list_and_runs_publish_query_enums(spec):
-    filters = sys.modules[f'{PKG}.models.pd.schedule_list'].ScheduleListFilters.model_fields
-    run_statuses = list(get_args(sys.modules[f'{PKG}.api.v2.schedule'].RunStatus))
+    list_models = sys.modules[f'{PKG}.models.pd.schedule_list']
+    filters = list_models.ScheduleListFilters.model_fields
+    run_statuses = list(get_args(list_models.RunStatus))
+    assert sys.modules[f'{PKG}.api.v2.schedule'].RunStatus is list_models.RunStatus  # one source of the values
     listing = _query(spec, 'get', LIST)
     assert set(listing) == {'entity_type', 'status', 'enabled', 'owner_ids', 'entity_id', 'search',
                             'limit', 'offset', 'sort_by', 'sort_order'}
     for name in ('sort_by', 'sort_order'):  # the published options are the ones the model accepts
         assert listing[name]['schema']['enum'] == list(get_args(filters[name].annotation))
         assert listing[name]['schema']['default'] == filters[name].default
-    assert listing['entity_type']['schema']['enum'] == ['agent', 'pipeline']
+    assert listing['entity_type']['schema']['enum'] == list(get_args(list_models.EntityType)) == ['agent', 'pipeline']
     assert listing['status']['schema']['enum'] == run_statuses
     assert listing['limit']['schema'] == {'type': 'integer', 'default': 20, 'minimum': 1, 'maximum': 100}
     assert listing['enabled']['schema']['type'] == 'boolean'
@@ -254,6 +255,27 @@ def test_r1_3_el7011_body_fields_have_descriptions(spec):
     for name, schema in schemas.items():
         for field, prop in schema.get('properties', {}).items():
             assert prop.get('description'), f'{name}.{field}'
+
+
+# R1.3 (AC3, D6): every field of the create, update, owner, run, draft and preference bodies shows an example
+def test_r1_3_el7011_body_fields_have_examples(spec):
+    schemas = _body_schemas(spec)
+    assert {'ScheduleCreate', 'ScheduleUpdate', 'ScheduleRunRequest', 'GenerateScheduleDraftRequest',
+            'SchedulePreferenceUpdate', f'post {SCHEDULE}/{{schedule_id}}/owner'} <= set(schemas)
+    schemas.pop(f'post {LIST}/import')  # a file upload: no example value fits a binary part
+    for name, schema in schemas.items():
+        for field, prop in schema.get('properties', {}).items():
+            assert prop.get('examples'), f'{name}.{field}'
+
+
+# R1.3: the list query and row models describe each field; the query fields show an example
+def test_r1_3_el7011_list_models_describe_fields(spec):
+    list_models = sys.modules[f'{PKG}.models.pd.schedule_list']
+    for model in (list_models.ScheduleListFilters, list_models.ScheduleListItem, list_models.ScheduleOwner):
+        for field, info in model.model_fields.items():
+            assert info.description, f'{model.__name__}.{field}'
+    for field, info in list_models.ScheduleListFilters.model_fields.items():
+        assert info.examples, f'ScheduleListFilters.{field}'
 
 
 @pytest.mark.parametrize('method, path', [

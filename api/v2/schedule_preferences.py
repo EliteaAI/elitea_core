@@ -2,20 +2,21 @@
 from typing import ClassVar
 
 from flask import request
-from pydantic import BaseModel, StrictBool, ValidationError
+from pydantic import BaseModel, Field, StrictBool, ValidationError
 from sqlalchemy.exc import IntegrityError
 from tools import api_tools, auth, db, register_openapi
 
 from ...models.entity_schedule import EntitySchedulePreference
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.constants import SCHEDULES_OPENAPI_TAG as OPENAPI_TAG
 from ...utils.schedule_access import schedule_check_spec
 
-OPENAPI_TAG = "elitea_core/schedules"
 INVALID_BODY = {"error": "get_notified must be true or false"}
 
 
 class SchedulePreferenceUpdate(BaseModel):
-    get_notified: StrictBool
+    get_notified: StrictBool = Field(description="True sends the caller a notice when a schedule run succeeds",
+                                     examples=[False])
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
