@@ -54,7 +54,7 @@ DAY = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
 
 
 def _filters(**overrides):
-    values = {"entity_type": None, "status": None, "enabled": None, "owner_ids": None, "entity_id": None, "search": None,
+    values = {"entity_type": None, "status": None, "enabled": None, "owner_ids": None, "entity_id": None, "version_id": None, "search": None,
               "sort_by": "next_run", "sort_order": "asc"}
     return types.SimpleNamespace(**{**values, **overrides})
 
@@ -186,6 +186,16 @@ def test_7011_r3_3_search_name_or_entity_name(env):
     assert _names(_list(env, search="NIGHTLY")) == ["Nightly sync"]
     assert _names(_list(env, search="digest")) == ["weekly"]
     assert _names(_list(env, search="%")) == ["100% done"]
+
+
+# R4.1: version_id keeps only that version's rows; no version_id keeps every row
+def test_7011_r4_1_version_id_filter(env):
+    _add(env, name="on-v1", version_id=1)
+    _add(env, name="on-v2", version_id=2)
+    assert _names(_list(env, version_id=2)) == ["on-v2"]
+    assert _names(_list(env, version_id=1)) == ["on-v1"]
+    assert _list(env, version_id=1)[0] == 1
+    assert sorted(_names(_list(env))) == ["on-v1", "on-v2"]
 
 
 # R4.2: the reason of the latest run is returned
