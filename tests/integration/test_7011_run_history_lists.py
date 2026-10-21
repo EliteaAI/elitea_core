@@ -153,7 +153,7 @@ def _types(body):
     return {row["id"]: row["execution_type"] for row in body["rows"]}
 
 
-# TC-US16-03, TC-US16-04 / R1.2: the cron, manual and legacy rows of a schedule in the list
+# TC-US16-03, TC-US16-04 / R1.2: the cron, manual and legacy rows of a schedule in the list; no stored type lists as chat (owner decision 2026-10-21)
 def test_7011_r1_2_cron_manual_and_legacy_rows_carry_their_execution_type(world, history):
     world.run(trigger="cron")
     (cron,) = world.conversations()
@@ -168,7 +168,7 @@ def test_7011_r1_2_cron_manual_and_legacy_rows_carry_their_execution_type(world,
 
     assert status == 200
     assert _types(body) == {cron.id: "scheduled", manual.id: "schedule_manual", legacy: "scheduled",
-                            flag_off: "manual", no_flag: "manual"}
+                            flag_off: "chat", no_flag: "chat"}
 
 
 # TC-US16-03 / R1.2: a cron run saved before execution_type existed still lists as scheduled
