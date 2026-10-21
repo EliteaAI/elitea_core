@@ -35,6 +35,7 @@ ROUTES = {
     ("put", "preferences"): "_save_preferences",
     ("get", "settings"): "_get_settings",
     ("put", "settings"): "_save_settings",
+    ("post", "check"): "_check_risks",
 }
 NOT_ALLOWED = {"error": "Method not allowed"}, 405
 
@@ -66,7 +67,7 @@ class PromptLibAPI(ScheduleItemHandlers, ScheduleProjectHandlers, ScheduleDraftH
 
     @api_tools.endpoint_metrics
     def post(self, project_id: int, schedule_id: int | None = None, **kwargs):
-        """Create, pause, resume, run, change owner, import and draft."""
+        """Create, check risks, pause, resume, run, change owner, import and draft."""
         return self._dispatch("post", project_id, schedule_id)
 
     @api_tools.endpoint_metrics

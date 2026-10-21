@@ -6,7 +6,7 @@ checks that both tables match. `Module._register_openapi` registers every entry 
 """
 from typing import get_args
 
-from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit
+from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
 from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
 from ..models.pd.schedule_list import EntityType, RunStatus, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunRequest
@@ -102,6 +102,46 @@ DRAFT_EXAMPLE = {"draft": {
     "timezone": "Europe/Warsaw", "expires_at": None, "approval_rule": "pause_and_ask",
 }, "warnings": [{"field": "version_id", "reason": "unknown"}]}
 
+SIGNIN_FINDING = {
+    "code": "personal_signin_required", "message": "Toolkit \"github-personal\" needs a personal sign-in; "
+    "a scheduled run cannot sign in", "toolkit": "github-personal", "toolkit_type": "github",
+    "reason": "needs a personal sign-in", "fix": {"entity_type": "agent", "id": 42, "version_id": 420},
+}
+SENSITIVE_FINDING = {
+    "code": "sensitive_action", "message": "Tool \"send_email\" of toolkit \"Outlook\" needs approval",
+    "toolkit": "Outlook", "toolkit_type": "outlook", "tool": "send_email", "risk_level": "needs_approval",
+    "badge": "sends_messages", "effect": "Sends e-mail to people inside and outside the company",
+}
+FINGERPRINT = "3f1c9a0e5b7d4c2a8e6f0b1d3c5a7e9f2b4d6f8a0c2e4a6b8d0f2a4c6e8b0d2f"
+CHECK_EXAMPLE = {
+    "blocking": [], "sensitive": [SENSITIVE_FINDING],
+    "notices": [{"code": "token_may_expire", "message": "The token of toolkit \"Jira\" may expire"}],
+    "run_without_asking_allowed": True, "fingerprint": FINGERPRINT,
+}
+SAVE_CONFLICTS = (
+    ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed` (the body has the findings and "
+     "the `fingerprint`), or the project limit of active schedules"), {
+        "code": "risk_confirmation_required",
+        "error": "Review the sensitive tools, then save again with `risk_ack` and this fingerprint",
+        "blocking": [], "sensitive": [SENSITIVE_FINDING], "notices": [], "fingerprint": FINGERPRINT,
+    })
+SAVE_BAD_INPUT = (
+    ("An invalid field; \"Run without asking\" is not allowed (`approval_rule_not_allowed`); or the "
+     "`risk_ack` name does not match (`risk_name_mismatch`, `field: risk_ack`)"), {
+        "code": "risk_name_mismatch", "error": "Type the schedule name exactly to confirm \"Run without asking\"",
+        "field": "risk_ack", "blocking": [], "sensitive": [SENSITIVE_FINDING], "notices": [],
+        "fingerprint": FINGERPRINT,
+    })
+RISK_REVIEW_TEXT = (
+    "The risk review runs first and every refusal has a stable `code`, a human `error` text, the findings "
+    "(`blocking`, `sensitive`, `notices`) and the `fingerprint`. A blocking finding answers 409 "
+    "`schedule_blocked`: fix the agent or pipeline. Sensitive tools without an acknowledgement answer 409 "
+    "`risk_confirmation_required`: save again with `risk_ack: {fingerprint, confirmed_name}`. For "
+    "\"Run without asking\", `confirmed_name` must equal the schedule name, else 400 `risk_name_mismatch` "
+    "(`field: risk_ack`). A fingerprint that no longer matches the tools answers 409 `risk_changed`: review "
+    "the new findings and confirm again. A confirmed \"Run without asking\" records who confirmed and when."
+)
+
 ERRORS = {
     400: "Invalid input; the body names the error and, for a field, the `field`",
     403: "No permission for this operation",
@@ -150,15 +190,36 @@ OPERATIONS = {
         "summary": "Create a schedule",
         "description": _text(
             "Create a schedule for an agent or a pipeline version. The caller becomes the owner; "
-            "the body never sets the owner. The answer has save `warnings`, which never block the save.",
+            "the body never sets the owner. The answer has the findings of the risk review as `warnings`. "
+            + RISK_REVIEW_TEXT,
             "a project member with `schedules.create`",
-            "400 an invalid field, or \"run without asking\" is not allowed in the project; 403 no permission; "
-            "404 the agent or pipeline is not found or not visible; 409 the project limit of active schedules"),
+            "400 an invalid field, `approval_rule_not_allowed` or `risk_name_mismatch` (`risk_ack`); "
+            "403 no permission; 404 the agent or pipeline is not found or not visible; 409 "
+            "`schedule_blocked`, `risk_confirmation_required`, `risk_changed`, or the project limit of active schedules"),
         "parameters": PROJECT_PARAMS,
         "request_body": ScheduleCreate,
         "responses": _responses(201, "Created: the schedule details and `warnings`", SAVED_EXAMPLE, {
-            400: None, 403: None, 404: "The agent, pipeline or version is not found or not visible",
-            409: "The project limit of active schedules is reached"}),
+            400: SAVE_BAD_INPUT, 403: None, 404: "The agent, pipeline or version is not found or not visible",
+            409: SAVE_CONFLICTS}),
+    },
+    ("post", "check"): {
+        "name": "Check the risks of a schedule",
+        "summary": "Check the risks before a save",
+        "description": _text(
+            "Run the risk review of a version before a save; nothing is written. `blocking` findings refuse "
+            "the save (personal sign-in, human input step, missing credential); each has `fix`, the agent or "
+            "pipeline version to open. `sensitive` tools need `risk_ack` on the save; each has `toolkit_type`, "
+            "`badge` and `effect`. `notices` never block. `run_without_asking_allowed` is false when the project "
+            "does not allow the rule or a tool could not be checked. Send the `fingerprint` back in `risk_ack`.",
+            "a project member with `schedules.create`, as for a create",
+            "400 an invalid field, or a version that is not of the agent or pipeline; 403 no permission; "
+            "404 the agent or pipeline is not visible"),
+        "parameters": PROJECT_PARAMS,
+        "request_body": ScheduleRiskCheck,
+        "responses": _responses(200, "The risk review", CHECK_EXAMPLE, {
+            400: ("A version that is not of the agent or pipeline", {
+                "error": "The version does not belong to this agent or pipeline", "field": "version_id"}),
+            403: None, 404: "The agent or pipeline is not visible"}),
     },
     ("get", ITEM): {
         "name": "Read a schedule",
@@ -176,14 +237,20 @@ OPERATIONS = {
         "description": _text(
             "Change the fields of a schedule; send only the fields to change. The owner never changes. "
             "This call does not pause or resume: a body with `enabled` answers 400, use the pause and "
-            "resume actions. When an admin edits another owner's schedule, the owner gets a notice.",
+            "resume actions. When an admin edits another owner's schedule, the owner gets a notice. "
+            "The risk review checks the resulting version, name and rule. " + RISK_REVIEW_TEXT
+            + " A change back to \"Pause and ask me\" clears the recorded confirmation.",
             OWNER_OR_ADMIN.format(permission="schedules.update"),
-            "400 an invalid field, `enabled` in the body, or \"run without asking\" is not allowed; "
-            "403 no permission; 404 not found"),
+            "400 an invalid field, `enabled` in the body, `approval_rule_not_allowed` or `risk_name_mismatch` "
+            "(`risk_ack`); 403 no permission; 404 not found; 409 `schedule_blocked`, "
+            "`risk_confirmation_required` or `risk_changed`"),
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleEdit,
         "responses": _responses(200, "The schedule details and `warnings`", SAVED_EXAMPLE, {
-            400: (None, ENABLED_NOT_EDITABLE), 403: None, 404: None}),
+            400: (SAVE_BAD_INPUT[0] + "; or `enabled` in the body", ENABLED_NOT_EDITABLE), 403: None, 404: None,
+            409: ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed`; the body has the findings",
+                  {**SAVE_CONFLICTS[1], "code": "schedule_blocked", "sensitive": [], "blocking": [SIGNIN_FINDING],
+                   "error": "You can't save this schedule: a scheduled run cannot do what the blocking findings need"})}),
     },
     ("delete", ITEM): {
         "name": "Delete a schedule",

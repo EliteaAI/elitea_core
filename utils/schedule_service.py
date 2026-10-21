@@ -24,6 +24,7 @@ TEMPLATE_MARK = re.compile(r'{{|}}|{%|%}|{#|#}')
 # Update fields where null clears the value; null elsewhere means "not sent"
 CLEARABLE = {'description', 'run_mode', 'prompt', 'expires_at'}
 NEXT_RUN_FIELDS = {'cron', 'timezone', 'enabled'}
+CONFIRMED_EVENT = 'schedule_run_without_asking_confirmed'
 
 
 class ScheduleError(Exception):
@@ -101,7 +102,7 @@ def _check_variables(prompt: str, variables: list[dict]) -> None:
         )
 
 
-def _check_entity(session, project_id: int, entity_type: str, application_id: int, version_id: int) -> None:
+def check_entity(session, project_id: int, entity_type: str, application_id: int, version_id: int) -> None:
     """Raise unless the version belongs to the project entity, fits `entity_type` and the folder allows a write."""
     if session.get(Application, application_id) is None:
         raise _field_error('application_id', 'The agent or pipeline is not in this project')
@@ -153,17 +154,38 @@ def _notify_owner(project_id: int, owner_id: int, schedule, action: str = 'edite
         log.error('Schedule %s: cannot send the admin change notice: %s', schedule.id, e)
 
 
+def _apply_confirmation(row: EntitySchedule, confirmed: dict | None, user_id: int) -> None:
+    """Store who confirmed "Run without asking" and the fingerprint they saw; the rule "Pause and ask me" clears it."""
+    if confirmed is not None:
+        row.approval_confirmed_by, row.approval_confirmed_at = user_id, datetime.now(UTC)
+        row.approval_fingerprint = confirmed['fingerprint']
+    elif row.approval_rule == 'pause_and_ask':
+        row.approval_confirmed_by = row.approval_confirmed_at = row.approval_fingerprint = None
+
+
+def _audit_confirmation(project_id: int, row: EntitySchedule, user_id: int, confirmed: dict) -> None:
+    """One audit trail event: the tracing plugin writes a row for this span, with the tools in its action."""
+    tools = ', '.join(sorted(f"{item['toolkit']}.{item['tool']}" for item in confirmed['sensitive']))
+    otel_trace.get_tracer(__name__).start_span(f'{CONFIRMED_EVENT}: {tools}', attributes={
+        'telemetry.data_type': 'schedule_execution', 'user.id': user_id, 'project.id': project_id,
+        'entity.type': 'schedule', 'entity.id': str(row.id), 'entity.name': row.name,
+    }).end()
+
+
 def create_schedule(
         session, project_id: int, body: ScheduleCreate, scope: ScheduleScope, key: UUID | None = None,
+        confirmed: dict | None = None,
 ) -> EntitySchedule:
     """Store a new schedule owned by the caller and running as the caller; `key` sets the uuid (import only).
+
+    `confirmed` is the risk review the caller confirmed for "Run without asking"; it is recorded and audited.
 
     Raises:
         ScheduleError: When an entity or run input rule fails.
         ScheduleLimitError: When an enabled schedule passes the project cap.
     """
-    _check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
-    values = body.model_dump()
+    check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
+    values = body.model_dump(exclude={'risk_ack'})
     check_run_input(body.entity_type, body.run_mode, body.prompt, values['variables'])
     if body.enabled:
         check_enabled_cap(session)
@@ -177,15 +199,22 @@ def create_schedule(
     )
     if key is not None:
         row.uuid = key
+    _apply_confirmation(row, confirmed, scope.user_id)
     session.add(row)
     session.commit()
+    if confirmed is not None:
+        _audit_confirmation(project_id, row, scope.user_id, confirmed)
     return row
 
 
 def update_schedule(
         session, project_id: int, row: EntitySchedule, body: ScheduleUpdate, scope: ScheduleScope,
+        confirmed: dict | None = None,
 ) -> EntitySchedule:
     """Apply an edit, pause or resume; the owner and the principal never change.
+
+    `confirmed` is the risk review the caller confirmed for "Run without asking"; it is recorded and audited.
+    A change back to "Pause and ask me" clears the recorded confirmation.
 
     Raises:
         ScheduleError: When a resume has no version, or an entity or run input rule fails.
@@ -193,14 +222,14 @@ def update_schedule(
         pydantic.ValidationError: When the stop date does not fit the resulting cron and time zone.
     """
     changes = {
-        key: value for key, value in body.model_dump(exclude_unset=True).items()
+        key: value for key, value in body.model_dump(exclude_unset=True, exclude={'risk_ack'}).items()
         if value is not None or key in CLEARABLE
     }
     resuming = changes.get('enabled') is True and not row.enabled
     if resuming and changes.get('version_id', row.version_id) is None:
         raise _field_error('version_id', 'Choose a version before you resume this schedule')
     if 'version_id' in changes:
-        _check_entity(session, project_id, row.entity_type, row.application_id, changes['version_id'])
+        check_entity(session, project_id, row.entity_type, row.application_id, changes['version_id'])
     check_run_input(
         row.entity_type,
         changes.get('run_mode', row.run_mode),
@@ -218,12 +247,15 @@ def update_schedule(
     for key, value in changes.items():
         setattr(row, key, value)
     row.updated_by = scope.user_id
+    _apply_confirmation(row, confirmed, scope.user_id)
     if NEXT_RUN_FIELDS & changes.keys():
         row.next_run = compute_next_run(cron, timezone, datetime.now(UTC))
     admin_change = _is_admin_change(row, scope)
     if admin_change:
         mark_audit_span(row)
     session.commit()
+    if confirmed is not None:
+        _audit_confirmation(project_id, row, scope.user_id, confirmed)
     if admin_change:
         _notify_owner(project_id, row.created_by, row)
     return row

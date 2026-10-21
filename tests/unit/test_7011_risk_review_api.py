@@ -12,7 +12,14 @@ import sys
 import types
 
 import pytest
-from unit.test_7011_schedule_crud_api import EDITOR, OWNER_ID, PACKAGE, PERMISSION_PREFIX, PROJECT_ID, agent_body
+from unit.test_7011_schedule_crud_api import (
+    EDITOR,
+    OWNER_ID,
+    PACKAGE,
+    PERMISSION_PREFIX,
+    PROJECT_ID,
+    agent_body,
+)
 from unit.test_7011_schedule_crud_api import harness as _crud_harness
 
 harness = _crud_harness  # the CRUD harness fixture, shared

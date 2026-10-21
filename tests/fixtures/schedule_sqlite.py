@@ -1,5 +1,4 @@
 """Shared SQLite set-up of the EL-7011 schedule tests: real sqlalchemy, parent tables, schedule table, rows."""
-import contextlib
 import sys
 import types
 from unittest.mock import MagicMock
@@ -104,10 +103,9 @@ class _Tracer:
     def __init__(self, started):
         self.started = started
 
-    @contextlib.contextmanager
-    def start_as_current_span(self, name, attributes=None):
+    def start_span(self, name, attributes=None):
         self.started.append((name, dict(attributes or {})))
-        yield None
+        return types.SimpleNamespace(end=lambda: None)
 
 
 def install_trace_span(span, started=None):
