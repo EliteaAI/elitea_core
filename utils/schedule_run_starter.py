@@ -17,7 +17,12 @@ from .pipeline_execution import (
     finish_trigger_run_with_error,
 )
 from .schedule_prerun import run_prerun_check
-from .schedule_runs import block_schedule_run, fail_schedule_run
+from .schedule_runs import (
+    block_schedule_run,
+    fail_schedule_run,
+    record_run_events,
+    run_event,
+)
 
 NOT_FOUND = 'schedule or version not found'
 RUN_NOT_FOUND = 'run not found'
@@ -48,7 +53,7 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
                 approval_rule=schedule.approval_rule),
-            version=SimpleNamespace(id=version.id, application_id=version.application_id),
+            version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
             trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
 
@@ -73,19 +78,53 @@ def _setting_allows_auto_approve(project_id: int) -> bool:
     return is_run_without_asking_allowed(project_id)
 
 
+def _owner_label(owner_id: int) -> str:
+    """The account the run uses: its owner by name, else email, else id."""
+    try:
+        # Late: only the run log needs the auth lookup
+        from .authors import get_authors_data
+        user = next(iter(get_authors_data([owner_id])), None) or {}
+    except Exception as e:  # noqa: BLE001 -- a name must never stop a run
+        log.warning('Schedule run owner %s: name lookup failed: %s', owner_id, e)
+        user = {}
+    return f"{user.get('name') or user.get('email') or f'user {owner_id}'} (schedule owner)"
+
+
+def _risk_check(project_id: int, version_id: int, owner_id: int, auto_approve: bool) -> tuple[str, dict]:
+    """The risk outcome of the version for the run log: `ok`, `needs_approval` or `unknown`, and its event."""
+    # Late: the scan pulls the toolkit expansion
+    from .schedule_risk import scan_schedule_risks
+    warnings = scan_schedule_risks(project_id, version_id, owner_id)
+    sensitive = [f"{item.get('toolkit')} · {item.get('tool')}" for item in warnings if item['code'] == 'sensitive_action']
+    if sensitive:
+        text = 'Risk check: needs approval for ' + ', '.join(sensitive)
+        return 'needs_approval', run_event(
+            'risk_check', text + ('; Run without asking is on' if auto_approve else ''), 'warning')
+    if any(item['code'] == 'scan_incomplete' for item in warnings):
+        return 'unknown', run_event('risk_check', 'Risk check: not complete', 'warning')
+    return 'ok', run_event('risk_check', 'Risk check: OK')
+
+
 def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
     A closed budget blocks the run. Every other failure after the pre-run check closes the run as failed:
-    a running run blocks the schedule.
+    a running run blocks the schedule. Each step adds its line to the run log.
     """
     loaded = _load(project_id, schedule_id, run_id)
     if loaded is None:
         fail_schedule_run(project_id, run_id, NOT_FOUND)
         return
+    trigger = getattr(loaded, 'trigger', 'cron')
+    record_run_events(project_id, run_id, run_event(
+        'started', f"{'Test run' if trigger == 'test' else 'Run'} started · trigger: {trigger} · "
+                   f"version {loaded.version.name}", trigger=trigger, version_id=loaded.version.id,
+    ), version_id=loaded.version.id)
     check = run_prerun_check(project_id, loaded.schedule, run_id)
     if not check.ok:
         return
+    label = _owner_label(check.owner_id)
+    record_run_events(project_id, run_id, run_event('account', f'Account: {label}'), principal_label=label)
     scope = closed_budget_scope(project_id, check.owner_id)  # fails open (R2.2)
     if scope:
         block_schedule_run(project_id, run_id, BUDGET_CLOSED.format(scope))
@@ -96,7 +135,9 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
     auto_approve = loaded.schedule.approval_rule == 'run_without_asking' and _setting_allows_auto_approve(project_id)
-    manual = getattr(loaded, 'trigger', 'cron') in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
+    outcome, risk_line = _risk_check(project_id, loaded.version.id, check.owner_id, auto_approve)
+    record_run_events(project_id, run_id, risk_line, risk_outcome=outcome)
+    manual = trigger in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
     try:
         # lean: a conversation stays when the link fails after it; the run still closes as failed
@@ -115,6 +156,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     if not linked:
         fail_schedule_run(project_id, run_id, RUN_NOT_FOUND)
         return
+    record_run_events(project_id, run_id, run_event(
+        'agent_started', f"{'Pipeline' if source == 'pipeline' else 'Agent'} started: {loaded.entity_name}"))
     try:
         execute_pipeline_via_predict_sio(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,

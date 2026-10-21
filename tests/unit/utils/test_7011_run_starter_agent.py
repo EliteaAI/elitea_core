@@ -64,7 +64,7 @@ class World:
         self.run = SimpleNamespace(id=RUN_ID, conversation_id=None)
         self.rows = {
             ("EntitySchedule", SCHEDULE_ID): self.schedule,
-            ("ApplicationVersion", VERSION_ID): Row(_world=self, id=VERSION_ID, application_id=AGENT_ID),
+            ("ApplicationVersion", VERSION_ID): Row(_world=self, id=VERSION_ID, application_id=AGENT_ID, name="v3"),
             ("Application", AGENT_ID): Row(_world=self, name="Daily report"),
             ("EntityScheduleRun", RUN_ID): self.run,
         }
@@ -104,7 +104,10 @@ def world(monkeypatch):
         "utils.schedule_prerun": {"run_prerun_check": prerun},
         "utils.schedule_runs": {
             "fail_schedule_run": lambda *args: state.calls.append(("fail", *args)),
-            "block_schedule_run": lambda *args: state.calls.append(("block", *args))},
+            "block_schedule_run": lambda *args: state.calls.append(("block", *args)),
+            "record_run_events": lambda *args, **kwargs: None,  # the run log has its own tests
+            "run_event": lambda *args, **kwargs: {}},
+        "utils.schedule_risk": {"scan_schedule_risks": lambda *args: []},
         "utils.budget_door": {"closed_budget_scope": lambda *args: None},
         "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
         "utils.pipeline_execution": {

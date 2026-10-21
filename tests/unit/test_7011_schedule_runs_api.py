@@ -25,7 +25,10 @@ from test_7011_schedule_crud_api import harness as _crud_harness
 
 harness = _crud_harness  # the CRUD harness fixture, shared
 
-FIELDS = {'id', 'trigger', 'status', 'reason', 'conversation_id', 'requested_by', 'started_at', 'finished_at'}
+FIELDS = {
+    'id', 'trigger', 'status', 'reason', 'conversation_id', 'requested_by', 'started_at', 'finished_at',
+    'version_id', 'duration_ms',  # owner CR 2026-10-21: the Version and Duration columns of the Runs table
+}
 
 
 def add_runs(harness, schedule_id, *specs):
@@ -63,6 +66,19 @@ def test_7011_r3_1_tc_us16_08_runs_are_listed_newest_first_with_every_field(harn
     assert (manual['conversation_id'], manual['reason'], manual['requested_by']) == (9120, None, OWNER_ID)
     assert manual['finished_at'].startswith('2026-10-01T01:00')
     assert get_runs(harness, empty_id) == ({'total': 0, 'rows': []}, 200)
+
+
+def test_7011_cr_el7011_rows_have_the_version_and_the_duration_of_a_finished_run(harness):
+    """Owner CR 2026-10-21: `version_id` and `duration_ms`; no duration while the run is active."""
+    schedule_id = harness.seed()
+    add_runs(
+        harness, schedule_id,
+        {'version_id': 10, 'finished_at': datetime.datetime(2026, 10, 1, 0, 0, 38, tzinfo=datetime.UTC)},
+        {'status': 'running', 'version_id': 11},
+    )
+    running, finished = get_runs(harness, schedule_id)[0]['rows']
+    assert (finished['version_id'], finished['duration_ms']) == (10, 38000)
+    assert (running['version_id'], running['duration_ms']) == (11, None)
 
 
 def test_7011_r3_3_tc_us16_09_limit_offset_and_status_page_and_filter(harness):

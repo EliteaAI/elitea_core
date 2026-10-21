@@ -16,6 +16,7 @@ from ...utils.schedule_item_handlers import ScheduleItemHandlers
 from ...utils.schedule_project_handlers import ScheduleProjectHandlers
 
 ITEM = "<int:schedule_id>"
+RUN = f"{ITEM}/runs/<int:run_id>"
 # (HTTP method, URL tail after the project id): handler method. The Swagger table has the same keys.
 ROUTES = {
     ("get", ""): "_list",
@@ -27,6 +28,7 @@ ROUTES = {
     ("post", f"{ITEM}/resume"): "_resume",
     ("post", f"{ITEM}/run"): "_run",
     ("get", f"{ITEM}/runs"): "_runs",
+    ("get", RUN): "_run_detail",
     ("post", f"{ITEM}/owner"): "_change_owner",
     ("get", "export"): "_export",
     ("post", "import"): "_import",
@@ -39,8 +41,10 @@ ROUTES = {
 NOT_ALLOWED = {"error": "Method not allowed"}, 405
 
 
-def _tail(schedule_id: int | None) -> str:
+def _tail(schedule_id: int | None, run_id: int | None) -> str:
     """The URL tail after the project id, in the form of the `ROUTES` keys."""
+    if run_id is not None:
+        return RUN
     last = request.path.rstrip("/").rsplit("/", 1)[-1]
     action = "" if last.isdigit() else last
     if schedule_id is None:
@@ -51,33 +55,33 @@ def _tail(schedule_id: int | None) -> str:
 class PromptLibAPI(ScheduleItemHandlers, ScheduleProjectHandlers, ScheduleDraftHandler, api_tools.APIModeHandler):
     """Answers every Schedules URL; an HTTP method a URL does not serve answers 405."""
 
-    def _dispatch(self, method: str, project_id: int, schedule_id: int | None):
-        name = ROUTES.get((method, _tail(schedule_id)))
+    def _dispatch(self, method: str, project_id: int, schedule_id: int | None, run_id: int | None):
+        name = ROUTES.get((method, _tail(schedule_id, run_id)))
         if name is None:
             return NOT_ALLOWED
         # Keyword arguments: check_api reads project_id from them for the project-scoped permission check
-        ids = {} if schedule_id is None else {"schedule_id": schedule_id}
+        ids = {key: value for key, value in (("schedule_id", schedule_id), ("run_id", run_id)) if value is not None}
         return getattr(self, name)(project_id=project_id, **ids)
 
     @api_tools.endpoint_metrics
-    def get(self, project_id: int, schedule_id: int | None = None, **kwargs):
-        """List, read one, run records, export, preferences and project settings."""
-        return self._dispatch("get", project_id, schedule_id)
+    def get(self, project_id: int, schedule_id: int | None = None, run_id: int | None = None, **kwargs):
+        """List, read one, run records, one run, export, preferences and project settings."""
+        return self._dispatch("get", project_id, schedule_id, run_id)
 
     @api_tools.endpoint_metrics
-    def post(self, project_id: int, schedule_id: int | None = None, **kwargs):
+    def post(self, project_id: int, schedule_id: int | None = None, run_id: int | None = None, **kwargs):
         """Create, pause, resume, run, change owner, import and draft."""
-        return self._dispatch("post", project_id, schedule_id)
+        return self._dispatch("post", project_id, schedule_id, run_id)
 
     @api_tools.endpoint_metrics
-    def put(self, project_id: int, schedule_id: int | None = None, **kwargs):
+    def put(self, project_id: int, schedule_id: int | None = None, run_id: int | None = None, **kwargs):
         """Edit a schedule, save preferences and save project settings."""
-        return self._dispatch("put", project_id, schedule_id)
+        return self._dispatch("put", project_id, schedule_id, run_id)
 
     @api_tools.endpoint_metrics
-    def delete(self, project_id: int, schedule_id: int | None = None, **kwargs):
+    def delete(self, project_id: int, schedule_id: int | None = None, run_id: int | None = None, **kwargs):
         """Delete a schedule."""
-        return self._dispatch("delete", project_id, schedule_id)
+        return self._dispatch("delete", project_id, schedule_id, run_id)
 
 
 class API(api_tools.APIBase):

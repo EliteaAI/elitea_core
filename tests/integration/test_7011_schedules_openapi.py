@@ -60,6 +60,7 @@ OTHER_TAGS = {
     'elitea_core/runtime', 'elitea_core/toolkits',
 }
 # The 15 rows of the owner's route table (CR 2026-10-21), plus GET and PUT settings (CR "Run without asking")
+# and the run detail of the Test schedule panel (CR 2026-10-21, test panel log)
 OPERATIONS = {
     ('get', BASE),
     ('post', BASE),
@@ -70,6 +71,7 @@ OPERATIONS = {
     ('post', f'{ITEM}/resume'),
     ('post', f'{ITEM}/run'),
     ('get', f'{ITEM}/runs'),
+    ('get', f'{ITEM}/runs/{{run_id}}'),
     ('post', f'{ITEM}/owner'),
     ('get', f'{BASE}/export'),
     ('post', f'{BASE}/import'),
@@ -190,7 +192,7 @@ def _body_schemas(spec):
 def test_r1_1_el7011_every_schedules_operation_has_its_own_path(spec):
     operations = _operations(spec)
     assert set(operations) == OPERATIONS
-    assert len(operations) == 17
+    assert len(operations) == 18
     for (method, path), operation in operations.items():
         path_params = {p['name'] for p in operation['parameters'] if p['in'] == 'path'}
         assert path_params == set(re.findall(r'{(\w+)}', path)), (method, path)
@@ -263,6 +265,20 @@ def test_cr_el7011_settings_publish_the_one_key_and_the_admin_rule(spec):
     assert '`schedules.admin`' in operations[('put', f'{BASE}/settings')]['description']
     assert '`schedules.list`' in operations[('get', f'{BASE}/settings')]['description']
     assert {'400', '403'} <= set(operations[('put', f'{BASE}/settings')]['responses'])
+
+
+# Owner CR 2026-10-21 (test panel log): the run detail shows its summary, its events and the polling rule
+def test_cr_el7011_the_run_detail_documents_summary_events_and_polling(spec):
+    operation = _operations(spec)[('get', f'{ITEM}/runs/{{run_id}}')]
+    example = operation['responses']['200']['content']['application/json']['example']
+    assert set(example['summary']) == {'duration_ms', 'tokens', 'cost_usd'}
+    assert {event['kind'] for event in example['events']} == {
+        'started', 'account', 'risk_check', 'agent_started', 'tool_call', 'paused', 'decision', 'finished'}
+    assert all({'at', 'kind', 'text', 'level'} <= set(event) for event in example['events'])
+    assert 'every 2 s' in operation['description'] and '`schedules.details`' in operation['description']
+    assert {'403', '404'} <= set(operation['responses'])
+    runs_row = _operations(spec)[('get', f'{ITEM}/runs')]['responses']['200']['content']['application/json']
+    assert {'version_id', 'duration_ms'} <= set(runs_row['example']['rows'][0])
 
 
 # R1.6: a restart reorders `with_modes`; the published paths stay the same
