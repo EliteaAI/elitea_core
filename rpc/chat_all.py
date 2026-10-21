@@ -78,7 +78,7 @@ from ..utils.pipeline_hitl_history import (
     create_pipeline_hitl_resume_segments,
     get_direct_pipeline_hitl_interrupt,
 )
-from ..utils.pipeline_execution import TriggerType
+from ..utils.pipeline_execution import TriggerType, with_execution_type
 
 
 TIMEOUT_CANCEL_TEXT = "No response, cancelled by timeout"
@@ -1241,6 +1241,7 @@ class RPC:
                 )
                 return {"error": "This message has already been submitted"}
 
+            conversation.meta = with_execution_type(conversation.meta, TriggerType.CHAT)
             self.check_and_generate_conversation_name(
                 parsed.project_id, parsed.user_input, room, conversation
             )
