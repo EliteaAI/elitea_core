@@ -47,6 +47,7 @@ def _chat_models(base):
         id = column(_sa.Integer, primary_key=True)
         application_id = column(_sa.Integer)
         variables = column(_sa.JSON, default=list)
+        name = column(_sa.String, default="v3")
 
     class Participant(base):
         locals().update(table("chat_participants"))
@@ -154,6 +155,7 @@ def world(monkeypatch):
         "utils.schedule_notifications": {"notify_schedule_event": lambda _p, owner_id, event, _s, run=None, extra=None:
                                              notices.append((owner_id, event, run.reason))},
         "utils.budget_door": {"closed_budget_scope": lambda *_args: None},  # US-13 budget gate: always open here
+        "utils.schedule_risk": {"scan_schedule_risks": lambda *_args: []},  # the run log risk line: nothing found
         "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
     }
     for dotted, attrs in stubs.items():

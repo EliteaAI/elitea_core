@@ -7,6 +7,7 @@
 # New projects get the tables via create_all() on project creation.
 # Idempotent: every statement is IF NOT EXISTS; constraints live inside CREATE TABLE.
 # The ADD COLUMN gives every row of a table made by an earlier run of this block its own uuid (CR-04).
+# The runs ADD COLUMN adds the run log columns of the Test schedule panel (owner CR 2026-10-21).
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedules (
     id SERIAL PRIMARY KEY,
     uuid UUID NOT NULL DEFAULT gen_random_uuid(),
@@ -60,8 +61,17 @@ CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_runs (
     approval_expires_at TIMESTAMPTZ NULL,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     resumed_at TIMESTAMPTZ NULL,
-    finished_at TIMESTAMPTZ NULL
+    finished_at TIMESTAMPTZ NULL,
+    events JSONB NULL,
+    version_id INTEGER NULL,
+    principal_label VARCHAR(256) NULL,
+    risk_outcome VARCHAR(32) NULL
 );
+ALTER TABLE {pid}.entity_schedule_runs
+    ADD COLUMN IF NOT EXISTS events JSONB NULL,
+    ADD COLUMN IF NOT EXISTS version_id INTEGER NULL,
+    ADD COLUMN IF NOT EXISTS principal_label VARCHAR(256) NULL,
+    ADD COLUMN IF NOT EXISTS risk_outcome VARCHAR(32) NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_schedule_runs_active
     ON {pid}.entity_schedule_runs (schedule_id)
     WHERE status IN ('running', 'waiting_for_approval');
