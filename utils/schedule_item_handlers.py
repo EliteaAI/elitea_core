@@ -24,7 +24,7 @@ from .schedule_access import (
     schedule_check_spec,
     schedule_scope,
 )
-from .schedule_claim import fail_run, insert_run
+from .schedule_claim import fail_run, insert_run, merge_events
 from .schedule_dispatch import START_FAILED, start_schedule_run
 from .schedule_notifications import notify_schedule_event
 from .schedule_service import (
@@ -316,7 +316,8 @@ class ScheduleItemHandlers:
     def _run_detail(self, project_id: int, schedule_id: int, run_id: int):
         """Answer one run of a schedule for the Test schedule panel, with its usage summary and event log.
 
-        The events are the stored ones and the tool calls of the run conversation, in time order.
+        The events are the stored ones and the tool calls of the run conversation, in time order, at most 200.
+        A tool call carries the full tool result in `summary`: raw tool output, up to 20 000 characters.
         Tokens and cost are null while the usage store has no row for the conversation.
         Who may call: the owner with `schedules.details`, or a schedules admin.
         Errors: 403; 404 the schedule or the run is not found, or another owner's schedule.
@@ -335,7 +336,7 @@ class ScheduleItemHandlers:
                 return RUN_NOT_FOUND, 404
             row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
             tokens, cost_usd = usage_summary(session, project_id, run)
-            events = [*(run.events or []), *tool_call_events(session, run.conversation_id)]
+            events = merge_events(run.events, tool_call_events(session, run.conversation_id))
             return {
                 **row,
                 "version_label": version_label(session, run.version_id),
@@ -344,8 +345,7 @@ class ScheduleItemHandlers:
                 "approval_rule": schedule.approval_rule,
                 "approval_expires_at": _iso(run.approval_expires_at),
                 "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
-                # UTC ISO times sort as text; the stable sort keeps the stored order of equal times; no time last
-                "events": sorted(events, key=lambda event: (event["at"] is None, event["at"] or "")),
+                "events": events,
             }, 200
 
     @auth.decorators.check_api(schedule_check_spec("admin"))

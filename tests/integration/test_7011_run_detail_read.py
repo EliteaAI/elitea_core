@@ -141,12 +141,24 @@ def test_cr_el7011_tool_calls_of_the_run_conversation_become_log_events_in_time_
 
     assert (first["at"], first["kind"], first["toolkit"], first["tool"], first["duration_ms"]) == (
         (START + timedelta(seconds=5)).isoformat(), "tool_call", "github", "list_issues", 1200)
-    assert first["summary"].startswith("12 open issues issue") and len(first["summary"]) == 120
+    # The owner and a schedules admin read the whole result (owner decision 2026-10-21)
+    assert first["summary"] == ("12 open issues\n" + "issue " * 100).strip()
     assert first["text"].startswith("Tool call: github · list_issues (1200 ms): 12 open issues")
     assert first["level"] == "info"
     assert (second["tool"], second["level"], second["summary"], "toolkit" in second) == (
         "create_issue", "error", "403 Forbidden", False)
     assert second["text"] == "Tool call: create_issue (1200 ms): 403 Forbidden"
+
+
+def test_cr_el7011_a_huge_tool_result_is_cut_at_the_upper_bound_with_a_marker(detail):
+    limit = detail.module.RESULT_LIMIT
+    detail.tool(1, tool_output="x" * (limit + 500))
+    detail.tool(2, tool_output="y" * limit)
+
+    huge, exact = detail.module.tool_call_events(detail.session, CONVERSATION_ID)
+
+    assert huge["summary"] == "x" * limit + " (truncated)"
+    assert exact["summary"] == "y" * limit
 
 
 def test_cr_el7011_tool_call_events_are_capped_and_need_a_conversation(detail):

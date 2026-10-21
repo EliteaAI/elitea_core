@@ -109,6 +109,18 @@ def test_cr_el7011_a_sensitive_pause_logs_the_toolkit_and_tool_but_never_the_arg
     assert "secret" not in str(event)
 
 
+def test_cr_el7011_a_parallel_pause_names_the_first_tool_and_counts_the_rest(runs, session, sent):
+    run = _run(runs, session, _schedule(runs, session))
+    second = {**SENSITIVE["hitl_interrupt"], "tool_name": "delete_issue"}
+    third = {**SENSITIVE["hitl_interrupt"], "tool_name": "close_issue"}
+
+    runs.pause_schedule_run(1, run.id, {"hitl_interrupts": [SENSITIVE["hitl_interrupt"], second, third]})
+
+    (event,) = _events(session, run)
+    assert event["text"] == "Paused for approval: github · create_issue (+2 more)"
+    assert event["tool"] == "create_issue"
+
+
 def test_cr_el7011_a_human_step_pause_logs_only_the_failed_end(runs, session, sent):
     run = _run(runs, session, _schedule(runs, session))
 

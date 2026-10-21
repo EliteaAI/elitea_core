@@ -15,7 +15,11 @@ from ..models.message_group import ConversationMessageGroup
 from ..models.message_trace_step import MessageTraceStep
 from .schedule_claim import EVENT_LIMIT, TEXT_LIMIT
 
-SUMMARY_LIMIT = 120  # characters of a tool result in its log line
+# The owner and a schedules admin read the full tool result (owner decision 2026-10-21); only a huge
+# stored result is cut, at this many characters, and marked
+RESULT_LIMIT = 20_000
+TRUNCATED = ' (truncated)'
+PREVIEW_LIMIT = 120  # characters of a tool result in the one-line `text`
 NANO_USD = 10 ** 9
 # usage_event rows of a run fall inside the run; ts is the partition key, so the bounds keep the scan short
 USAGE_MARGIN = timedelta(minutes=5)
@@ -49,15 +53,17 @@ def _toolkit(attrs) -> str | None:
 
 def _tool_event(row) -> dict:
     """One tool call line: toolkit, tool, the start of its result on one line, and its duration."""
-    summary = ' '.join((row.output or '').split())[:SUMMARY_LIMIT] or None
+    output = (row.output or '').strip()
+    summary = (output[:RESULT_LIMIT] + TRUNCATED if len(output) > RESULT_LIMIT else output) or None
+    preview = ' '.join(output[:PREVIEW_LIMIT * 2].split())[:PREVIEW_LIMIT]
     duration_ms = (round((row.finished_at - row.started_at).total_seconds() * 1000)
                    if row.started_at and row.finished_at else None)
     toolkit, tool = _toolkit(row.attrs), row.tool_name or '?'
     text = f"Tool call: {f'{toolkit} · ' if toolkit else ''}{tool}"
     if duration_ms is not None:
         text += f' ({duration_ms} ms)'
-    if summary:
-        text += f': {summary}'
+    if preview:
+        text += f': {preview}'
     event = {'at': _utc_iso(row.started_at or row.finished_at), 'kind': 'tool_call', 'text': text[:TEXT_LIMIT],
              'level': 'error' if row.is_error else 'info', 'toolkit': toolkit, 'tool': tool,
              'summary': summary, 'duration_ms': duration_ms}
@@ -72,8 +78,8 @@ def tool_call_events(session, conversation_id: int | None) -> list[dict]:
         select(
             MessageTraceStep.started_at, MessageTraceStep.finished_at, MessageTraceStep.tool_name,
             MessageTraceStep.is_error, MessageTraceStep.attrs,
-            # Only the start of a tool result is shown; a large output stays in the database
-            func.substr(MessageTraceStep.tool_output, 1, SUMMARY_LIMIT * 4).label('output'),
+            # One character past the limit tells a cut result from an exact one; the rest stays in the database
+            func.substr(MessageTraceStep.tool_output, 1, RESULT_LIMIT + 1).label('output'),
         )
         .join(ConversationMessageGroup, ConversationMessageGroup.id == MessageTraceStep.message_group_id)
         .where(ConversationMessageGroup.conversation_id == conversation_id, MessageTraceStep.kind == 'tool_call')

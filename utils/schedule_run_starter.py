@@ -94,6 +94,7 @@ def _risk_check(project_id: int, version_id: int, owner_id: int, auto_approve: b
     """The risk outcome of the version for the run log: `ok`, `needs_approval` or `unknown`, and its event."""
     # Late: the scan pulls the toolkit expansion
     from .schedule_risk import scan_schedule_risks
+    # lean: the scan runs on every run start and may expand toolkits over the network; reuse the save-time result if latency shows
     warnings = scan_schedule_risks(project_id, version_id, owner_id)
     sensitive = [f"{item.get('toolkit')} · {item.get('tool')}" for item in warnings if item['code'] == 'sensitive_action']
     if sensitive:
