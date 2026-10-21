@@ -23,6 +23,8 @@ MANUAL_TOKENS_FLAG = 'manual_max_context_tokens_enabled'
 MANUAL_TOKENS_KEYS = ('manual_max_context_tokens', 'manual_set_by_admin', 'manual_set_by')
 MIN_MANUAL_CONTEXT_TOKENS = 1_000
 LEGACY_TRIGGER_KEY = 'legacy_trigger'
+# Set only through the context_strategy PUT, which validates them
+SERVER_OWNED_STRATEGY_KEYS = MANUAL_TOKENS_KEYS + ('context_window_mode', 'max_context_tokens', LEGACY_TRIGGER_KEY)
 _RPC_TIMEOUT = 3
 _CACHE_TTL_SECONDS = 60
 _cache_lock = threading.Lock()
@@ -195,6 +197,18 @@ def manual_change_denied(fields_set, new_value, current_strategy: Optional[dict]
     if new_value == (current_strategy or {}).get('manual_max_context_tokens'):
         return False
     return not allowed() or not is_admin(user_id)
+
+
+def keep_server_owned_strategy(incoming_strategy, stored_strategy: Optional[dict]):
+    """Client-supplied context_strategy with server-owned keys replaced by their stored values (dropped when unset)."""
+    if not isinstance(incoming_strategy, dict):
+        return incoming_strategy
+    stored_strategy = stored_strategy or {}
+    for key in SERVER_OWNED_STRATEGY_KEYS:
+        incoming_strategy.pop(key, None)
+        if key in stored_strategy:
+            incoming_strategy[key] = stored_strategy[key]
+    return incoming_strategy
 
 
 def legacy_context_tokens(strategy: Optional[dict]) -> Optional[int]:

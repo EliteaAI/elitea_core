@@ -39,7 +39,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             except ValidationError as e:
                 return {"error": e.errors(include_context=False, include_url=False)}, 400
 
-            meta = get_conversation_meta(project_id, conversation_id)
+            meta = get_conversation_meta(project_id, conversation_id, missing=False)
+            if meta is False:
+                return {"error": "Conversation not found"}, 404
             current_strategy = meta.get('context_strategy') or {}
 
             updated_strategy = {
