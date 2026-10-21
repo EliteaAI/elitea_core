@@ -5,17 +5,26 @@ from ..models.entity_schedule import EntitySchedulePreference
 from ..models.enums.all import NotificationEventTypes as Types
 from .sio_utils import SioEvents, get_event_room
 
-# One fixed text per event type; {reason} is ": <reason>" when the run or `extra` gives one, else empty
+# One fixed text per event type; {link} is the schedule name as an empty-target markdown link `[name]()`, the
+# only form the bell renders as a link; {reason} is ": <reason>" when the run or `extra` gives one, else empty
 MESSAGES = {
-    Types.schedule_run_failed: 'Schedule "{name}" failed{reason}',
-    Types.schedule_run_succeeded: 'Schedule "{name}" ran successfully',
-    Types.schedule_approval_needed: 'Schedule "{name}" waits for your approval',
-    Types.schedule_approval_expired: 'Schedule "{name}" was not approved in 24 hours and the run stopped',
-    Types.schedule_expired: 'Schedule "{name}" reached its stop date and is switched off',
-    Types.schedule_disabled: 'Schedule "{name}" was switched off{reason}',
-    Types.schedule_edited_by_admin: 'An admin {action} your schedule "{name}"',
-    Types.schedule_owner_changed: 'The owner of schedule "{name}" changed',
+    Types.schedule_run_failed: 'Schedule "{link}" failed{reason}',
+    Types.schedule_run_succeeded: 'Schedule "{link}" ran successfully',
+    Types.schedule_approval_needed: 'Schedule "{link}" waits for your approval',
+    Types.schedule_approval_expired: 'Schedule "{link}" was not approved in 24 hours and the run stopped',
+    Types.schedule_expired: 'Schedule "{link}" reached its stop date and is switched off',
+    Types.schedule_disabled: 'Schedule "{link}" was switched off{reason}',
+    Types.schedule_edited_by_admin: 'An admin {action} your schedule "{link}"',
+    Types.schedule_owner_changed: 'The owner of schedule "{link}" changed',
 }
+# The bell's parser takes the first "]" as the end of the link text and knows no backslash escape,
+# so brackets in a name become their full-width look-alikes; meta.schedule_name keeps the real name
+_NAME_BRACKETS = str.maketrans('[]', '［］')
+
+
+def _schedule_link(schedule) -> str:
+    """The name as an empty-target link, `[name]()`; the bell builds the real target from event_type and meta."""
+    return f'[{str(schedule.name or "").translate(_NAME_BRACKETS)}]()'
 
 
 def get_notified_for(session, user_id: int) -> bool:
@@ -37,7 +46,9 @@ def notify_schedule_event(project_id, owner_id, event_type, schedule, run=None, 
         reason = getattr(run, 'reason', None) or extra.get('reason')
         meta = {
             'message': MESSAGES[event_type].format(
-                name=schedule.name, reason=f': {reason}' if reason else '', action=extra.get('action', 'edited'),
+                link=_schedule_link(schedule),
+                reason=f': {reason}' if reason else '',
+                action=extra.get('action', 'edited'),
             ),
             'schedule_id': schedule.id,
             'schedule_name': schedule.name,
