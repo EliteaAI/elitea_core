@@ -7,6 +7,7 @@ the schedule models and the run event constants, over SQLite. The chat tables an
 Run via:
     python tests/run_tests.py -m integration -v integration/test_7011_run_detail_read.py
 """
+import json
 import sys
 import types
 import uuid
@@ -214,3 +215,25 @@ def test_cr_el7011_the_version_label_is_the_version_name(detail):
     assert detail.module.version_label(detail.session, 10) == "v3"
     assert detail.module.version_label(detail.session, 99) is None
     assert detail.module.version_label(detail.session, None) is None
+
+
+def test_cr_el7011_postgres_numeric_sums_become_json_numbers(detail, monkeypatch):
+    """Postgres SUM over BIGINT gives Decimal; the answer must still serialise as JSON."""
+    from decimal import Decimal
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, statement):
+            return types.SimpleNamespace(one=lambda: (5, Decimal(1119), Decimal(1581750)))
+
+    monkeypatch.setattr(sys.modules["tools"].db, "engine", types.SimpleNamespace(connect=Connection))
+    tokens, cost = detail.module.usage_summary(detail.session, PROJECT_ID, detail.run())
+
+    assert (tokens, cost) == (1119, 0.001582)
+    assert type(tokens) is int and type(cost) is float
+    json.dumps({"tokens": tokens, "cost_usd": cost})
