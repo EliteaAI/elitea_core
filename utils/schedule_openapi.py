@@ -289,7 +289,7 @@ OPERATIONS = {
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleEdit,
         "responses": _responses(200, "The schedule details and `warnings`", SAVED_EXAMPLE, {
-            400: (SAVE_BAD_INPUT[0] + "; or `enabled` in the body", ENABLED_NOT_EDITABLE), 403: None, 404: None,
+            400: (SAVE_BAD_INPUT[0] + "; or `enabled` in the body", ENABLED_NOT_EDITABLE[0]), 403: None, 404: None,
             409: ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed`; the body has the findings",
                   {**SAVE_CONFLICTS[1], "code": "schedule_blocked", "sensitive": [], "blocking": [SIGNIN_FINDING],
                    "error": "You can't save this schedule: a scheduled run cannot do what the blocking findings need"})}),
@@ -374,7 +374,7 @@ OPERATIONS = {
             "403 no permission; 404 the schedule or the run is not found, or another owner's schedule"),
         "parameters": RUN_PARAMS,
         "responses": _responses(200, "The run with `summary` and `events`", RUN_DETAIL_EXAMPLE, {
-            403: None, 404: ("The schedule or the run is not found", RUN_NOT_FOUND)}),
+            403: None, 404: ("The schedule or the run is not found", RUN_NOT_FOUND[0])}),
     },
     ("post", f"{ITEM}/owner"): {
         "name": "Change the owner",
