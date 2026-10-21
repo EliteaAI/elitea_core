@@ -115,6 +115,12 @@ class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
     )
     resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The run log of the Test schedule panel (owner CR 2026-10-21); NULL on a run made before it
+    events: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # The version the run started; no foreign key, so a deleted version keeps its id in the history
+    version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    principal_label: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    risk_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class EntitySchedulePreference(db_tools.AbstractBaseMixin, db.Base):
