@@ -327,8 +327,8 @@ def test_r1_2_el7011_list_and_runs_publish_query_enums(spec):
     run_statuses = list(get_args(list_models.RunStatus))
     assert sys.modules[f'{PKG}.utils.schedule_openapi'].RunStatus is list_models.RunStatus  # one source of the values
     listing = _query(spec, 'get', BASE)
-    assert set(listing) == {'entity_type', 'status', 'enabled', 'owner_ids', 'entity_id', 'search',
-                            'limit', 'offset', 'sort_by', 'sort_order'}
+    assert set(listing) == {'entity_type', 'status', 'enabled', 'owner_ids', 'entity_id', 'version_id',
+                            'search', 'limit', 'offset', 'sort_by', 'sort_order'}
     for name in ('sort_by', 'sort_order'):  # the published options are the ones the model accepts
         assert listing[name]['schema']['enum'] == list(get_args(filters[name].annotation))
         assert listing[name]['schema']['default'] == filters[name].default

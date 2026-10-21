@@ -27,6 +27,7 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
     for column, value in (
         (S.entity_type, filters.entity_type), (S.last_run_status, filters.status),
         (S.enabled, filters.enabled), (S.application_id, filters.entity_id),
+        (S.version_id, filters.version_id),
     ):
         if value is not None:
             conditions.append(column == value)

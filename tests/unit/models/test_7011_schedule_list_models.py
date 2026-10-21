@@ -24,14 +24,15 @@ def _item(**extra):
 def test_r3_4_filters_default_page(pd_list):
     f = pd_list.ScheduleListFilters()
     assert (f.limit, f.offset) == (20, 0)
-    assert f.enabled is None and f.owner_ids is None
+    assert f.enabled is None and f.owner_ids is None and f.version_id is None
 
 
 def test_r3_4_filters_parse_query_strings(pd_list):
-    f = pd_list.ScheduleListFilters(enabled='true', entity_id='5', owner_ids='1,2')
+    f = pd_list.ScheduleListFilters(enabled='true', entity_id='5', owner_ids='1,2', version_id='9')
     assert f.enabled is True
     assert f.entity_id == 5
     assert f.owner_ids == [1, 2]
+    assert f.version_id == 9
 
 
 @pytest.mark.parametrize('name', ['enabled', 'entity_id', 'owner_ids', 'offset'])
@@ -55,7 +56,7 @@ def test_r5_2_offset_past_integer_range(pd_list):
     assert exc.value.errors()[0]['loc'][0] == 'offset'
 
 
-@pytest.mark.parametrize('field, value', [('entity_id', 2**31), ('owner_ids', [5, 2**31])])
+@pytest.mark.parametrize('field, value', [('entity_id', 2**31), ('version_id', 2**31), ('owner_ids', [5, 2**31])])
 def test_r3_4_ids_past_integer_range(pd_list, field, value):
     with pytest.raises(ValidationError) as exc:
         pd_list.ScheduleListFilters(**{field: value})
