@@ -13,6 +13,7 @@ from ..models.pd.schedule_run import ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
 from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT
 from .schedule_project_handlers import MAX_EXPORT_IDS, SchedulePreferenceUpdate
+from .schedule_settings import ScheduleProjectSettings
 
 BASE_URL = f"/api/v2/elitea_core/schedules/{SCHEDULES_PROJECT_PATH}"
 ITEM = "<int:schedule_id>"
@@ -327,6 +328,34 @@ OPERATIONS = {
         "responses": _responses(200, "The saved value", {"get_notified": False}, {
             400: ("`get_notified` is not true or false", {"error": "get_notified must be true or false"}),
             403: None}),
+    },
+    ("get", "settings"): {
+        "name": "Read the project schedule settings",
+        "summary": "Read the project schedule settings",
+        "description": _text(
+            "Answer whether the project allows the \"Run without asking\" approval rule. False when never "
+            "saved, and false when the setting cannot be read.",
+            "a project member with `schedules.list`",
+            "403 no permission"),
+        "parameters": PROJECT_PARAMS,
+        "responses": _responses(200, "The project's value", {"allow_run_without_asking": False}, {403: None}),
+    },
+    ("put", "settings"): {
+        "name": "Save the project schedule settings",
+        "summary": "Save the project schedule settings",
+        "description": _text(
+            "Allow or forbid the \"Run without asking\" approval rule in the project. Saved schedules keep "
+            "their rule; while it is off, their runs pause and ask, and a save or an import with that rule "
+            "is refused or changed to \"Pause and ask me\".",
+            "a schedules admin (`schedules.admin`) only",
+            "400 an unknown key or a value that is not true or false (`field` names it); 403 no permission; "
+            "503 the settings store is unavailable"),
+        "parameters": PROJECT_PARAMS,
+        "request_body": ScheduleProjectSettings,
+        "responses": _responses(200, "The saved value", {"allow_run_without_asking": True}, {
+            400: ("An unknown key, or a value that is not true or false", {
+                "error": "enabled is not a schedule setting", "field": "enabled"}),
+            403: None, 503: "The settings store is unavailable"}),
     },
 }
 OPENAPI_ENDPOINTS = [
