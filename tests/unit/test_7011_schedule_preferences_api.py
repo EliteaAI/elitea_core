@@ -1,6 +1,6 @@
-"""EL-7011 US-06: the "Get notified" endpoint (R2.1-R2.4).
+"""EL-7011 US-06: the "Get notified" endpoint, `.../schedules/{mode}/{project_id}/preferences` (R2.1-R2.4).
 
-The endpoint module is loaded from source with a fake `tools`, a fake row model and a fake
+The route module and its project handlers load from source with a fake `tools`, a fake row model and a fake
 session; no Pylon runtime. The fake session offers `get`, `add`, `commit` and `rollback`.
 """
 import contextlib
@@ -11,6 +11,7 @@ import types
 
 import pytest
 from fixtures.helpers import load_module_with_stubs
+from fixtures.schedule_sqlite import LenientModule, handler_stubs
 from sqlalchemy.exc import IntegrityError
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -53,14 +54,14 @@ class Harness:
         self.permissions = {LIST_PERMISSION}
         self.rows = {}
         self.body = None
-        self.specs = []
+        self.specs = {}
         self.parallel_insert = False
 
     def check_api(self, spec):
-        self.specs.append(spec)
         required = set(spec['permissions'])
 
         def decorator(func):
+            self.specs[func.__name__] = spec['permissions']
             @functools.wraps(func)
             def wrapper(*args, **kwargs):
                 if not required & self.permissions:
@@ -99,6 +100,7 @@ def harness(isolated_sys_modules):
     flask.request = types.SimpleNamespace(
         get_json=lambda *args, **kwargs: harness.body,
         json=property(lambda self: harness.body),
+        path=f'/api/v2/elitea_core/schedules/prompt_lib/{PROJECT_ID}/preferences',
     )
     sys.modules['flask'] = flask
 
@@ -123,15 +125,19 @@ def harness(isolated_sys_modules):
     schedule_models.EntitySchedulePreference = FakePreference
     sys.modules[schedule_models.__name__] = schedule_models
 
+    for name in ('models.pd', 'models.pd.schedule_list', 'utils.authors', 'utils.schedule_queries'):
+        sys.modules[f'{PACKAGE}.{name}'] = LenientModule(f'{PACKAGE}.{name}')  # the list handler, not run here
     _load('utils/constants.py', f'{PACKAGE}.utils.constants')
     _load('utils/schedule_access.py', f'{PACKAGE}.utils.schedule_access')
-    harness.module = _load('api/v2/schedule_preferences.py', f'{PACKAGE}.api.v2.schedule_preferences')
+    harness.module = _load('utils/schedule_project_handlers.py', f'{PACKAGE}.utils.schedule_project_handlers')
+    sys.modules.update(handler_stubs(PACKAGE, real='schedule_project_handlers'))
+    harness.routes = _load('api/v2/schedules.py', f'{PACKAGE}.api.v2.schedules')
     return harness
 
 
 def _call(harness, verb, body=None):
     harness.body = body
-    handler = harness.module.PromptLibAPI()
+    handler = harness.routes.PromptLibAPI()
     handler.module = object()
     return getattr(handler, verb)(project_id=PROJECT_ID)
 
@@ -201,4 +207,4 @@ def test_7011_r2_4_without_schedules_list_is_403(harness, verb, body):
 
 
 def test_7011_r2_4_both_calls_need_schedules_list(harness):
-    assert [spec['permissions'] for spec in harness.specs] == [[LIST_PERMISSION]] * 2
+    assert [harness.specs[name] for name in ('_get_preferences', '_save_preferences')] == [[LIST_PERMISSION]] * 2

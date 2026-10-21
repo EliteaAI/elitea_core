@@ -1,8 +1,8 @@
-"""EL-7011 BUG-11: the Swagger entries of the Schedules API (R1.1-R1.6, R2.3, R2.4).
+"""EL-7011 BUG-11, owner CR 2026-10-21: the Swagger entries of the one Schedules resource (R1.1-R1.6, R2.3, R2.4).
 
 Runs the real `register_api_class` and `OpenAPIRegistry` of the `shared` plugin over the real
-`schedule.py`, `schedules.py`, `generate_schedule_draft.py` and `schedule_preferences.py`, plus the
-real `Module._register_openapi`. The request models are real; every helper module the handlers call
+`api/v2/schedules.py`, its three handler modules and `utils/schedule_openapi.py`, plus the real
+`Module._register_openapi`. The request models are real; every helper module the handlers call
 is a lenient stub, because no handler runs here.
 
 Run via:
@@ -35,12 +35,13 @@ pytestmark = pytest.mark.skipif(OPENAPI_TOOLS is None, reason='the shared plugin
 PKG = 'schedopenapi_7011'
 TAG = 'elitea_core/schedules'
 API_ROOT = '/api/v2/elitea_core'
-SCHEDULE = f'{API_ROOT}/schedule/{{mode}}/{{project_id}}'
-LIST = f'{API_ROOT}/schedules/{{mode}}/{{project_id}}'
-API_MODULES = ('schedule', 'schedules', 'generate_schedule_draft', 'schedule_preferences')
+BASE = f'{API_ROOT}/schedules/{{mode}}/{{project_id}}'
+ITEM = f'{BASE}/{{schedule_id}}'
+API_MODULES = ('schedules',)
 REAL_MODULES = (
     'utils/constants.py', 'models/pd/entity_schedule.py', 'models/pd/schedule_run.py',
-    'models/pd/schedule_list.py', 'models/pd/generate_schedule_draft.py',
+    'models/pd/schedule_list.py', 'models/pd/generate_schedule_draft.py', 'utils/schedule_item_handlers.py',
+    'utils/schedule_project_handlers.py', 'utils/schedule_draft_handler.py', 'utils/schedule_openapi.py',
 )
 LENIENT_MODULES = (
     'arbiter', f'{PKG}.models.entity_schedule', f'{PKG}.models.enums.all', f'{PKG}.models.pd.index',
@@ -57,21 +58,25 @@ OTHER_TAGS = {
     'elitea_core/discovery', 'elitea_core/mcp', 'elitea_core/project_context', 'elitea_core/skills',
     'elitea_core/runtime', 'elitea_core/toolkits',
 }
+# The 15 rows of the owner's route table (CR 2026-10-21)
 OPERATIONS = {
-    ('post', SCHEDULE),
-    ('get', f'{SCHEDULE}/{{schedule_id}}'),
-    ('put', f'{SCHEDULE}/{{schedule_id}}'),
-    ('delete', f'{SCHEDULE}/{{schedule_id}}'),
-    ('post', f'{SCHEDULE}/{{schedule_id}}/run'),
-    ('post', f'{SCHEDULE}/{{schedule_id}}/owner'),
-    ('get', f'{SCHEDULE}/{{schedule_id}}/runs'),
-    ('get', LIST),
-    ('get', f'{LIST}/export'),
-    ('post', f'{LIST}/import'),
-    ('post', f'{API_ROOT}/generate_schedule_draft/{{mode}}/{{project_id}}'),
-    ('get', f'{API_ROOT}/schedule_preferences/{{mode}}/{{project_id}}'),
-    ('put', f'{API_ROOT}/schedule_preferences/{{mode}}/{{project_id}}'),
+    ('get', BASE),
+    ('post', BASE),
+    ('get', ITEM),
+    ('put', ITEM),
+    ('delete', ITEM),
+    ('post', f'{ITEM}/pause'),
+    ('post', f'{ITEM}/resume'),
+    ('post', f'{ITEM}/run'),
+    ('get', f'{ITEM}/runs'),
+    ('post', f'{ITEM}/owner'),
+    ('get', f'{BASE}/export'),
+    ('post', f'{BASE}/import'),
+    ('post', f'{BASE}/draft'),
+    ('get', f'{BASE}/preferences'),
+    ('put', f'{BASE}/preferences'),
 }
+NO_JSON_SUCCESS = {('delete', ITEM), ('get', f'{BASE}/export')}  # 204 without a body, a YAML file
 
 
 def _with_modes(reverse):
@@ -182,9 +187,63 @@ def _body_schemas(spec):
 def test_r1_1_el7011_every_schedules_operation_has_its_own_path(spec):
     operations = _operations(spec)
     assert set(operations) == OPERATIONS
+    assert len(operations) == 15
     for (method, path), operation in operations.items():
         path_params = {p['name'] for p in operation['parameters'] if p['in'] == 'path'}
         assert path_params == set(re.findall(r'{(\w+)}', path)), (method, path)
+
+
+def _routes():
+    return sys.modules[f'{PKG}.api.v2.schedules']
+
+
+def _openapi_path(tail):
+    return re.sub(r'<\w+:(\w+)>', r'{\1}', f'{BASE}/{tail}'.rstrip('/'))
+
+
+# CR 2026-10-21: the live route table serves exactly the documented operations, all through `schedules`
+def test_cr_el7011_the_schedules_module_serves_every_documented_operation(registry):
+    routes = _routes()
+    assert {(method, _openapi_path(tail)) for method, tail in routes.ROUTES} == OPERATIONS
+    served = {_openapi_path(url.removeprefix('<string:mode>/').removeprefix('<int:project_id>').lstrip('/'))
+              for url in routes.API.url_params}
+    assert served == {path for _, path in OPERATIONS}
+
+
+# CR 2026-10-21: a docstring per handler, for the people who read the source
+def test_cr_el7011_every_handler_has_a_docstring(registry):
+    routes = _routes()
+    for name in routes.ROUTES.values():
+        assert (getattr(routes.PromptLibAPI, name).__doc__ or '').strip(), name
+
+
+# CR 2026-10-21: a short summary and a description for humans: what, who may call, the main errors
+def test_cr_el7011_every_operation_is_described_for_humans(spec):
+    for key, operation in _operations(spec).items():
+        assert 0 < len(operation['name']) <= 40, key
+        description = operation['description']
+        assert 'Who may call:' in description and 'Errors:' in description, key
+
+
+# CR 2026-10-21 (US-55): every JSON success answer shows an example
+def test_cr_el7011_success_answers_show_an_example(spec):
+    for key, operation in _operations(spec).items():
+        successes = {code: r for code, r in operation['responses'].items() if code.startswith('2')}
+        assert successes, key
+        if key in NO_JSON_SUCCESS:
+            continue
+        for code, response in successes.items():
+            assert response['content']['application/json']['example'], (key, code)
+
+
+# CR 2026-10-21: PUT edits fields only; pause and resume take no body
+def test_cr_el7011_put_has_no_enabled_field_and_pause_resume_have_no_body(spec):
+    operations = _operations(spec)
+    put_body = operations[('put', ITEM)]['requestBody']['content']['application/json']['schema']['$ref']
+    assert 'enabled' not in spec['components']['schemas'][put_body.rsplit('/', 1)[-1]]['properties']
+    assert '400' in operations[('put', ITEM)]['responses']
+    for action in ('pause', 'resume'):
+        assert 'requestBody' not in operations[('post', f'{ITEM}/{action}')]
 
 
 # R1.6: a restart reorders `with_modes`; the published paths stay the same
@@ -199,8 +258,8 @@ def test_r1_2_el7011_list_and_runs_publish_query_enums(spec):
     list_models = sys.modules[f'{PKG}.models.pd.schedule_list']
     filters = list_models.ScheduleListFilters.model_fields
     run_statuses = list(get_args(list_models.RunStatus))
-    assert sys.modules[f'{PKG}.api.v2.schedule'].RunStatus is list_models.RunStatus  # one source of the values
-    listing = _query(spec, 'get', LIST)
+    assert sys.modules[f'{PKG}.utils.schedule_openapi'].RunStatus is list_models.RunStatus  # one source of the values
+    listing = _query(spec, 'get', BASE)
     assert set(listing) == {'entity_type', 'status', 'enabled', 'owner_ids', 'entity_id', 'search',
                             'limit', 'offset', 'sort_by', 'sort_order'}
     for name in ('sort_by', 'sort_order'):  # the published options are the ones the model accepts
@@ -211,24 +270,26 @@ def test_r1_2_el7011_list_and_runs_publish_query_enums(spec):
     assert listing['limit']['schema'] == {'type': 'integer', 'default': 20, 'minimum': 1, 'maximum': 100}
     assert listing['enabled']['schema']['type'] == 'boolean'
 
-    runs = _query(spec, 'get', f'{SCHEDULE}/{{schedule_id}}/runs')
+    runs = _query(spec, 'get', f'{ITEM}/runs')
     assert set(runs) == {'limit', 'offset', 'status'}
     assert runs['status']['schema']['enum'] == run_statuses
     assert runs['limit']['schema']['default'] == 20
     assert runs['offset']['schema']['default'] == 0
 
-    assert _query(spec, 'get', f'{LIST}/export')['ids']['schema']['type'] == 'string'
+    assert _query(spec, 'get', f'{BASE}/export')['ids']['schema']['type'] == 'string'
     for params in (listing, runs):
         assert all(p['description'] for p in params.values())
 
 
 # R1.4: the codes the handlers really answer, not the generic default list
 @pytest.mark.parametrize('method, path, code', [
-    ('post', SCHEDULE, '201'),
-    ('post', f'{SCHEDULE}/{{schedule_id}}/run', '202'),
-    ('delete', f'{SCHEDULE}/{{schedule_id}}', '204'),
-    ('post', f'{SCHEDULE}/{{schedule_id}}/owner', '503'),
-    ('post', f'{API_ROOT}/generate_schedule_draft/{{mode}}/{{project_id}}', '502'),
+    ('post', BASE, '201'),
+    ('post', f'{ITEM}/run', '202'),
+    ('post', f'{ITEM}/run', '409'),
+    ('delete', ITEM, '204'),
+    ('post', f'{ITEM}/owner', '503'),
+    ('post', f'{ITEM}/resume', '409'),
+    ('post', f'{BASE}/draft', '502'),
 ])
 def test_r1_4_el7011_operations_publish_real_codes(spec, method, path, code):
     responses = _operations(spec)[(method, path)]['responses']
@@ -238,8 +299,8 @@ def test_r1_4_el7011_operations_publish_real_codes(spec, method, path, code):
 
 def test_r1_4_el7011_create_and_delete_do_not_publish_200(spec):
     operations = _operations(spec)
-    assert '200' not in operations[('post', SCHEDULE)]['responses']
-    assert '200' not in operations[('delete', f'{SCHEDULE}/{{schedule_id}}')]['responses']
+    assert '200' not in operations[('post', BASE)]['responses']
+    assert '200' not in operations[('delete', ITEM)]['responses']
 
 
 # R1.5: the tag has its description
@@ -251,7 +312,7 @@ def test_r1_5_el7011_tag_has_description(spec):
 # R1.3: every request field has a description; the JSON bodies show an example
 def test_r1_3_el7011_body_fields_have_descriptions(spec):
     schemas = _body_schemas(spec)
-    assert {'ScheduleCreate', 'ScheduleUpdate', 'ScheduleRunRequest', 'GenerateScheduleDraftRequest'} <= set(schemas)
+    assert {'ScheduleCreate', 'ScheduleEdit', 'ScheduleRunRequest', 'GenerateScheduleDraftRequest'} <= set(schemas)
     for name, schema in schemas.items():
         for field, prop in schema.get('properties', {}).items():
             assert prop.get('description'), f'{name}.{field}'
@@ -260,9 +321,9 @@ def test_r1_3_el7011_body_fields_have_descriptions(spec):
 # R1.3 (AC3, D6): every field of the create, update, owner, run, draft and preference bodies shows an example
 def test_r1_3_el7011_body_fields_have_examples(spec):
     schemas = _body_schemas(spec)
-    assert {'ScheduleCreate', 'ScheduleUpdate', 'ScheduleRunRequest', 'GenerateScheduleDraftRequest',
-            'SchedulePreferenceUpdate', f'post {SCHEDULE}/{{schedule_id}}/owner'} <= set(schemas)
-    schemas.pop(f'post {LIST}/import')  # a file upload: no example value fits a binary part
+    assert {'ScheduleCreate', 'ScheduleEdit', 'ScheduleRunRequest', 'GenerateScheduleDraftRequest',
+            'SchedulePreferenceUpdate', f'post {ITEM}/owner'} <= set(schemas)
+    schemas.pop(f'post {BASE}/import')  # a file upload: no example value fits a binary part
     for name, schema in schemas.items():
         for field, prop in schema.get('properties', {}).items():
             assert prop.get('examples'), f'{name}.{field}'
@@ -279,10 +340,10 @@ def test_r1_3_el7011_list_models_describe_fields(spec):
 
 
 @pytest.mark.parametrize('method, path', [
-    ('post', SCHEDULE),
-    ('put', f'{SCHEDULE}/{{schedule_id}}'),
-    ('post', f'{SCHEDULE}/{{schedule_id}}/run'),
-    ('post', f'{API_ROOT}/generate_schedule_draft/{{mode}}/{{project_id}}'),
+    ('post', BASE),
+    ('put', ITEM),
+    ('post', f'{ITEM}/run'),
+    ('post', f'{BASE}/draft'),
 ])
 def test_r1_3_el7011_json_bodies_show_an_example(spec, method, path):
     assert _operations(spec)[(method, path)]['requestBody']['content']['application/json']['examples']
@@ -298,8 +359,9 @@ def test_r2_4_el7011_other_tags_and_paths_are_unchanged(registry):
     tags = {tag['name'] for tag in registry._plugins['elitea_core']['tags']}
     assert tags == OTHER_TAGS | {TAG}
     for endpoint in registry._endpoints['elitea_core']:
-        assert endpoint['path'].startswith(tuple(f'{API_ROOT}/{name}/' for name in API_MODULES))
+        assert endpoint['path'].startswith(f'{API_ROOT}/schedules/')
         assert endpoint['tags'] == [TAG]
+        assert endpoint['mcp_tool'] is False
 
 
 def test_r2_4_el7011_registration_without_openapi_registry_does_not_fail(monkeypatch):

@@ -74,7 +74,7 @@ def test_7011_r1_1_same_owner_is_200_without_span_or_notice(harness, owner):
 def test_7011_r1_1_only_post_serves_the_owner_url(harness, owner, verb):
     schedule_id = harness.seed(created_by=OTHER_ID)
     body = {'owner_id': OWNER_ID} if verb == 'put' else None
-    assert harness.call(verb, body, schedule_id, suffix='/owner') == harness.module.NOT_ALLOWED
+    assert harness.call(verb, body, schedule_id, suffix='/owner') == harness.routes.NOT_ALLOWED
     assert unchanged(harness, schedule_id)
 
 

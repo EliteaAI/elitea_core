@@ -1,6 +1,6 @@
 """EL-7011 US-05: the schedules list handler, scope, filters and paging (R1.2-R5.3).
 
-Loads the real `api/v2/schedules.py`, the real pydantic models and the real `schedule_access`
+Loads the real `api/v2/schedules.py` with the real `utils/schedule_project_handlers.py`, the real pydantic models and the real `schedule_access`
 helper. Only the runtime edges are faked: `tools`, `flask`, the list query and the owner lookup.
 The fake query follows the contract of `list_schedules`: own-only scope for a regular caller,
 `owner_ids` for an admin, then the page and the total.
@@ -12,6 +12,7 @@ import types
 from datetime import UTC, datetime
 
 import pytest
+from fixtures.schedule_sqlite import handler_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = "schedulespkg_7011_list"
@@ -181,6 +182,11 @@ def env(monkeypatch):
     risk = _register(monkeypatch, f"{PKG}.utils.schedule_risk", types.ModuleType(f"{PKG}.utils.schedule_risk"))
     risk.is_run_without_asking_allowed = lambda project_id: env.run_without_asking_allowed
 
+    preferences = _register(monkeypatch, f"{PKG}.models.entity_schedule", types.ModuleType(f"{PKG}.models.entity_schedule"))
+    preferences.EntitySchedulePreference = object
+    _load(monkeypatch, "utils/schedule_project_handlers.py", f"{PKG}.utils.schedule_project_handlers")
+    for name, module in handler_stubs(PKG, real="schedule_project_handlers").items():
+        _register(monkeypatch, name, module)
     env.handler = _load(monkeypatch, "api/v2/schedules.py", f"{PKG}.api.v2.schedules")
     return env
 

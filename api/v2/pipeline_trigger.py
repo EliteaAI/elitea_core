@@ -148,7 +148,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {
                 "ok": False,
                 "error": "Schedules moved. Use the Schedules API: "
-                         f"/elitea_core/schedule/prompt_lib/{project_id}",
+                         f"/elitea_core/schedules/prompt_lib/{project_id}",
             }, 400
 
         # Validate input
