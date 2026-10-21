@@ -33,6 +33,8 @@ ROUTES = {
     ("post", "draft"): "_draft",
     ("get", "preferences"): "_get_preferences",
     ("put", "preferences"): "_save_preferences",
+    ("get", "settings"): "_get_settings",
+    ("put", "settings"): "_save_settings",
 }
 NOT_ALLOWED = {"error": "Method not allowed"}, 405
 
@@ -59,7 +61,7 @@ class PromptLibAPI(ScheduleItemHandlers, ScheduleProjectHandlers, ScheduleDraftH
 
     @api_tools.endpoint_metrics
     def get(self, project_id: int, schedule_id: int | None = None, **kwargs):
-        """List, read one, run records, export and preferences."""
+        """List, read one, run records, export, preferences and project settings."""
         return self._dispatch("get", project_id, schedule_id)
 
     @api_tools.endpoint_metrics
@@ -69,7 +71,7 @@ class PromptLibAPI(ScheduleItemHandlers, ScheduleProjectHandlers, ScheduleDraftH
 
     @api_tools.endpoint_metrics
     def put(self, project_id: int, schedule_id: int | None = None, **kwargs):
-        """Edit a schedule and save preferences."""
+        """Edit a schedule, save preferences and save project settings."""
         return self._dispatch("put", project_id, schedule_id)
 
     @api_tools.endpoint_metrics

@@ -1,7 +1,7 @@
 """EL-7011 US-17: save warnings and the approval rule on the schedule handlers (R2.4, R3.1-R3.4).
 
 Uses the US-07 harness (real handler, service and models, SQLite rows). The risk scan and the
-project secret check are stubbed there; their own tests live beside the scan module.
+project setting "Allow Run without asking" are stubbed there; their own tests live in unit/utils.
 
 Run via:
     python tests/run_tests.py unit/test_7011_approval_rule_api.py -v

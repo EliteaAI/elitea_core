@@ -77,13 +77,13 @@ def sandbox(monkeypatch, env, packages=()):
 
 
 def install_service_stubs(env):
-    """Stub the folder rights, the run-without-asking secret and the notifications the create service calls."""
+    """Stub the folder rights, the "Allow Run without asking" setting and the notifications the create service calls."""
     env.folder_error = None
     env.run_without_asking = False
     env.notices = []
     stubs = {
         'folder_access': {'entity_access_error': lambda *args, **kwargs: env.folder_error},
-        'schedule_risk': {'is_run_without_asking_allowed': lambda project_id: env.run_without_asking},
+        'schedule_settings': {'is_run_without_asking_allowed': lambda project_id: env.run_without_asking},
         'schedule_notifications': {'notify_schedule_event': lambda *args, **kwargs: env.notices.append(args) or True},
     }
     for name, attributes in stubs.items():
@@ -333,7 +333,7 @@ def test_7011_r2_2_import_reads_entity_names_with_one_query(env):
 @pytest.mark.parametrize('allowed, stored, noted', [
     (False, 'pause_and_ask', True), (True, 'run_without_asking', False),
 ])
-def test_7011_r2_5_run_without_asking_needs_the_project_secret(env, allowed, stored, noted):
+def test_7011_r2_5_run_without_asking_needs_the_project_setting(env, allowed, stored, noted):
     env.run_without_asking = allowed
     report = env.import_items(item(approval_rule='run_without_asking'))
     assert env.rows()[0].approval_rule == stored
