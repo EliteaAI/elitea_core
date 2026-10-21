@@ -84,6 +84,7 @@ class FakeRedis:
     def __init__(self):
         self.values, self.ttls, self.calls, self.raises = {}, {}, [], None
         self.lock = threading.Lock()   # MULTI/EXEC: a transaction pipeline runs its commands without interleaving
+        self.executes = 0               # pipelines sent: a round trip each, however many commands they carry
 
     def _hit(self, name, *args):
         self.calls.append((name, *args))
@@ -110,6 +111,11 @@ class FakeRedis:
         self._hit("exists", key)
         return 1 if key in self.values else 0
 
+    def decr(self, key):
+        self._hit("decr", key)
+        self.values[key] = int(self.values.get(key, 0)) - 1
+        return self.values[key]
+
     def incr(self, key):
         self._hit("incr", key)
         self.values[key] = int(self.values.get(key, 0)) + 1
@@ -132,6 +138,9 @@ class FakeRedis:
             def incr(self_inner, key):
                 queued.append(lambda: redis.incr(key))
 
+            def decr(self_inner, key):
+                queued.append(lambda: redis.decr(key))
+
             def set(self_inner, key, value, ex=None):
                 queued.append(lambda: redis.set(key, value, ex=ex))
 
@@ -142,6 +151,7 @@ class FakeRedis:
                 queued.append(lambda: redis.expire(key, seconds))
 
             def execute(self_inner):
+                redis.executes += 1
                 if not transaction:
                     return [step() for step in queued]
                 with redis.lock:
@@ -231,6 +241,8 @@ class Env:  # pylint: disable=R0902,R0904
         self.secrets_raises = None
         self.permissions_raise = None
         self.schemas = {}               # toolkit type -> schema (provider hub), as `find_toolkit_schema_by_type_everywhere`
+        self.static_types = set()       # the types of `schemas` that are static (the same for everyone)
+        self.schema_degraded = False    # the lookup could not read the personal project
         # credential release and probe fakes (#6946)
         self.secret_fields = {}         # configuration type -> secret field paths (`configuration_secret_fields`)
         self.unregistered_types = set() # types `configuration_secret_fields` leaves out
@@ -719,7 +731,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                 raise env.secret_fields_raises
             return {name: list(env.secret_fields.get(name, ["token"])) for name in types if name not in env.unregistered_types}
 
-        def release_credential_material(project_id, ref_id, generation, release_id, actor_ref, allow_validated=False,
+        def release_credential_material(project_id, ref_id, generation, release_id, actor_ref, *, allow_validated=False,
                                         allow_pending=False):
             env.release_calls.append((project_id, ref_id, generation, release_id, actor_ref, allow_validated))
             env.__dict__.setdefault("pending_release_calls", []).append(allow_pending)
@@ -737,7 +749,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             fields = {path: SecretStr(value) for path, value in env.material.get(str(ref_id), {}).items()}
             return {"ok": True, "value": types.SimpleNamespace(fields=fields, generation=generation)}
 
-        def release_credential_materials(project_id, items, release_id, actor_ref, allow_pending=False,
+        def release_credential_materials(project_id, items, release_id, actor_ref, *, allow_pending=False,
                                          allow_validated=False):
             env.batch_release_calls.append((project_id, [dict(item) for item in items], release_id, actor_ref))
             if env.release_raises:
@@ -794,9 +806,11 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
 
         tools.auth.get_user_by_idp_subject = get_user_by_idp_subject
 
-        def find_schema(tool_type, project_id, user_id):
+        def find_schema(tool_type, project_id, user_id, status=None):
             env.schema_calls.append((tool_type, project_id, user_id))
-            return env.schemas.get(tool_type), bool(env.schemas.get(tool_type))
+            if env.schema_degraded and status is not None:
+                status["degraded"] = True
+            return env.schemas.get(tool_type), bool(env.schemas.get(tool_type)) and tool_type not in env.static_types
 
         application_tools.find_toolkit_schema_by_type_everywhere = find_schema
 

@@ -277,8 +277,10 @@ def test_a_type_without_a_schema_is_looked_for_every_time(ns, env):
 
 
 def test_the_registry_counter_moves_on_every_provider_and_server_change():
-    source = {name: (PLUGIN_ROOT / name).read_text() for name in ("methods/providers.py", "utils/mcp_servers_storage.py")}
+    source = {name: (PLUGIN_ROOT / name).read_text() for name in (
+        "methods/providers.py", "utils/mcp_servers_storage.py", "methods/toolkits.py")}
     assert source["methods/providers.py"].count("schema_registry_version.bump()") == 2
+    assert source["methods/toolkits.py"].count("schema_registry_version.bump()") == 2
     assert source["utils/mcp_servers_storage.py"].count("schema_registry_version.bump()") == 4
     assert "schema_registry_version.bump()" in (PLUGIN_ROOT / "module.py").read_text()
 
@@ -427,8 +429,10 @@ def test_a_batch_release_is_one_read_one_audit_transaction_one_counter_round_tri
     env.batch_store = store == "batch"
     run = Run(ns, env, count)
     seen, stop = statements(env)
+    sent = env.redis.executes
     reply = run.release()
     stop()
+    assert env.redis.executes - sent == 1                           # every counter of the batch in one round trip
     assert reply["ok"] is True and len(reply["releases"]) == count
     opened = env.sessions
     assert len(opened) == 2                                         # the read, and the audit events: whatever the count
@@ -785,3 +789,196 @@ def test_one_binding_is_three_statements_and_reads_the_users_with_no_session_ope
     assert item["digest_inputs"]["tools"][0]["type"] == "github" and item["grants_count"] is None
     assert open_at in ([], [0])
     assert ns.binding_queries.get_detail(1, uuid.uuid4()) is None
+
+
+# --- review fixes ------------------------------------------------------------------------------------------------
+
+def counters(run):
+    return [int(run.env.redis.values.get(
+        f"{run.ns.credential_release.COUNTER_KEY}{run.ref}|{cred.tool_id}|credentials", 0)) for cred in run.creds]
+
+
+def test_a_refused_batch_gives_the_counters_back(ns, env, sealed):
+    env.batch_store = True
+    run = Run(ns, env, 3)
+    key = lambda cred: f"{ns.credential_release.COUNTER_KEY}{run.ref}|{cred.tool_id}|credentials"   # noqa: E731
+    env.redis.values[key(run.creds[0])] = 4
+    env.batch_reply = {"ok": False, "reason_code": "STORE_UNAVAILABLE", "ref_id": run.creds[1].ref_id}
+    sent = env.redis.executes
+    assert run.release()["reason_code"] == "STORE_UNAVAILABLE"
+    assert counters(run) == [4, 0, 0] and env.redis.executes - sent == 2   # the count, and one pipeline to give it back
+    env.batch_reply = None
+    assert run.release()["ok"] is True and counters(run) == [5, 1, 1]       # a release that happened is counted
+
+
+def test_rate_limited_on_the_middle_slot_refuses_the_batch_and_burns_nothing(ns, env, sealed):
+    run = Run(ns, env, 3)
+    key = f"{ns.credential_release.COUNTER_KEY}{run.ref}|{run.creds[1].tool_id}|credentials"
+    env.redis.values[key] = ns.credential_release.MAX_RELEASES_PER_FIELD
+    reply = run.release()
+    assert (reply["reason_code"], reply["toolkit_instance_id"]) == ("RATE_LIMITED", "2")
+    assert counters(run) == [0, 16, 0] and env.release_calls == [] and env.batch_release_calls == []
+    assert [e["decision"] for _, e in env.recorded] == ["deny"] * 3
+
+
+def test_a_seal_that_fails_for_the_second_slot_releases_nothing_and_gives_the_counters_back(ns, env, sealed, monkeypatch):
+    run = Run(ns, env, 3)
+    real = ns.credential_release._transport()   # pylint: disable=W0212
+    sealed_so_far = []
+
+    def seal(*args):
+        if sealed_so_far:
+            raise RuntimeError("no entropy")
+        sealed_so_far.append(1)
+        return real.seal(*args)
+
+    monkeypatch.setattr(ns.credential_release, "_transport", lambda: types.SimpleNamespace(seal=seal))
+    reply = run.release()
+    assert (reply["ok"], reply["reason_code"]) == (False, "DEPENDENCY_UNAVAILABLE") and "releases" not in reply
+    assert len(sealed_so_far) == 1                                         # the first slot was sealed, and dropped
+    assert [e["decision"] for _, e in env.recorded] == ["deny"] * 3         # no allow row for it
+    assert counters(run) == [0, 0, 0]
+
+
+def test_the_failing_slot_in_the_middle_is_named_on_the_per_reference_path(ns, env, sealed, monkeypatch):
+    run = Run(ns, env, 3)
+    assert env.batch_store is False
+    real = env.ns.tools.this.for_module
+
+    def for_module(name):
+        found = real(name)
+        if name != "secrets":
+            return found
+        single = found.module.release_credential_material
+
+        def release(project_id, ref_id, generation, release_id, actor_ref, **flags):
+            if ref_id == run.creds[1].ref_id:
+                return {"ok": False, "reason_code": "STORE_UNAVAILABLE"}
+            return single(project_id, ref_id, generation, release_id, actor_ref, **flags)
+
+        return types.SimpleNamespace(module=types.SimpleNamespace(
+            release_credential_material=release, credential_use_facts=found.module.credential_use_facts,
+            credential_facts_version=found.module.credential_facts_version))
+
+    monkeypatch.setattr(env.ns.tools.this, "for_module", for_module)
+    reply = run.release()
+    assert (reply["reason_code"], reply["toolkit_instance_id"], reply["field"]) == ("STORE_UNAVAILABLE", "2", "credentials")
+    assert counters(run) == [0, 0, 0]
+
+
+def test_deny_rows_that_cannot_be_written_are_logged_and_the_refusal_stands(ns, env, sealed):
+    run = Run(ns, env, 2)
+    env.record_raises = RuntimeError("outbox full")
+    reply = run.release()
+    assert (reply["ok"], reply["reason_code"]) == (False, "AUDIT_UNAVAILABLE") and env.recorded == []
+    assert any("deny events AUDIT_UNAVAILABLE were not recorded (RuntimeError)" in line for line in env.log.lines)
+    assert counters(run) == [0, 0] and "outbox full" not in "\n".join(env.log.lines)
+
+
+def test_a_counter_that_expired_meanwhile_is_not_left_below_zero(ns, env, sealed):
+    run = Run(ns, env, 1)
+    request = ns.credential_release._parse_batch(   # pylint: disable=W0212
+        1, run.ref, None, dict(CALLER), run.public, run.request()["slots"])
+    request[0].counter_key = "c1009:rel:gone"
+    ns.credential_release._refund(env.module(), request)   # pylint: disable=W0212
+    assert env.redis.values["c1009:rel:gone"] == 0
+
+
+def test_the_secret_fields_of_a_static_type_are_kept_for_everyone_and_a_degraded_lookup_is_not_kept(ns, env):
+    env.seed_agent()
+    env.schemas["static_kit"] = {"properties": {"api_key": {"secret": True}}}
+    env.schemas["mcp_a"] = {"properties": {"api_key": {"secret": True}}}
+    env.static_types = {"static_kit"}
+    env.add_toolkit(1, 70, 100, "static_kit", {"url": "https://x"})
+    env.add_toolkit(1, 70, 101, "mcp_a", {"url": "https://x"})
+    ns.adm.admit_execution(env.module(), env.request(), run_id="run-a", payload={})
+    assert sorted(call[0] for call in env.schema_calls) == ["mcp_a", "static_kit"]
+    env.schema_calls.clear()
+    env.verify_result = {"ok": True, "principal": admission_env.principal(43)}
+    ns.adm.admit_execution(env.module(), env.request(caller_id=43), run_id="run-b", payload={})
+    assert [call[0] for call in env.schema_calls] == ["mcp_a"]            # the static type is the same for another user
+    env.schema_calls.clear()
+    ns.credential_decision.forget_secret_fields()
+    env.schema_degraded = True
+    ns.adm.admit_execution(env.module(), env.request(caller_id=43), run_id="run-c", payload={})
+    ns.adm.admit_execution(env.module(), env.request(caller_id=43), run_id="run-d", payload={})
+    assert sorted(call[0] for call in env.schema_calls) == ["mcp_a", "mcp_a", "static_kit"]   # only the static one kept
+
+
+def _toolkits_loader():
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        import test_5695_mcp_configuration_reconciliation as loader   # noqa: PLC0415
+    finally:
+        sys.path.pop(0)
+    return loader
+
+
+def test_a_new_toolkit_snapshot_moves_the_schema_registry_counter(monkeypatch):
+    loader = _toolkits_loader()
+    module = loader._load_method(monkeypatch, loader._RpcManager([]))   # pylint: disable=W0212
+    counter = sys.modules["elitea_core_el5695.utils.schema_registry_version"]
+    instance = loader._method_instance(module)   # pylint: disable=W0212
+    seen = counter.current()
+    instance.toolkits_collected(None, [{"title": "github", "properties": {}}])
+    assert counter.current() != seen
+    seen = counter.current()
+    instance.toolkit_configurations_collected(None, {})
+    assert counter.current() != seen
+    source = (PLUGIN_ROOT / "methods" / "toolkits.py").read_text()
+    assert source.count("schema_registry_version.bump()") == 2
+
+
+def test_a_timeout_in_the_deferred_evaluation_does_not_change_the_dispatch_result(ns, env, monkeypatch):
+    creds = credentials(env, 1)
+
+    class Timeout(BaseException):   # a gevent.Timeout is not an Exception either
+        pass
+
+    def timed_out(*args, **kwargs):
+        raise Timeout()
+
+    monkeypatch.setattr(ns.adm, "_admit", timed_out)
+    task_id, calls, _ = audit_dispatch(ns, env, payload_of(*creds))
+    assert task_id == "task-1" and len(calls) == 1
+    assert any("interrupted (Timeout)" in line for line in env.log.lines)
+
+    class GreenletExit(BaseException):
+        pass
+
+    monkeypatch.setattr(ns.adm, "_admit", lambda *a, **k: (_ for _ in ()).throw(GreenletExit()))
+    with pytest.raises(GreenletExit):   # the greenlet being killed is let through
+        audit_dispatch(ns, env, payload_of(*creds))
+
+
+def _ensure_source():
+    text = (PLUGIN_ROOT / "module.py").read_text()
+    body = text[text.index("    def _ensure_governed_handlers_registered"):text.index("    def _unregister_governed_handlers")]
+    import textwrap  # noqa: PLC0415
+    return textwrap.dedent(body)
+
+
+@pytest.mark.parametrize("failing, ok, batch", [
+    ("restricted_release_credentials", True, False), ("restricted_release_credential", False, True),
+    ("restricted_validate_execution_context", False, True), (None, True, True)])
+def test_the_batch_handler_is_optional_when_the_enforce_switch_registers_handlers(failing, ok, batch):
+    lines = []
+    namespace = {"log": types.SimpleNamespace(
+        exception=lambda message, *args: lines.append(("exception", message % args)),
+        error=lambda message, *args: lines.append(("error", message % args)))}
+
+    def register(handler, name):
+        if name == failing:
+            raise RuntimeError("bus down")
+
+    namespace["this"] = types.SimpleNamespace(for_module=lambda name: types.SimpleNamespace(
+        module=types.SimpleNamespace(rpc_node=types.SimpleNamespace(register=register))))
+    exec(compile(_ensure_source(), "module.py", "exec"), namespace)   # pylint: disable=W0122
+    module = types.SimpleNamespace(
+        _governed_handlers={"validate": False, "release": False, "release_batch": False},
+        _governed_handlers_lock=threading.Lock(), validate_execution_context=object(), release_credential=object(),
+        release_credentials=object())
+    assert namespace["_ensure_governed_handlers_registered"](module) is ok
+    assert module._governed_handlers["release_batch"] is batch   # pylint: disable=W0212
+    if failing == "restricted_release_credentials":
+        assert lines == [("error", "Failed to register restricted_release_credentials (RuntimeError); batch release is not offered")]

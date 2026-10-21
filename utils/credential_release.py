@@ -117,6 +117,7 @@ class _Request:  # pylint: disable=R0902,R0903
             "project_id": project_id, "caller_ref": f"indexer_worker:{caller['task_name']}",
             "toolkit_instance_id": toolkit_instance_id, "credential_ref": slot["credential_ref"],
             "credential_generation": slot["credential_generation"], "run_id": caller.get("run_id")}
+        self.counter_key = None   # the release counter this request raised, until it is released or given back
 
     @property
     def ref(self) -> str:
@@ -188,6 +189,7 @@ def _denied_at(request: _Request, code) -> AdmissionDenied:
 def _deny_reply(module, code, requests, batch=False, failing=None) -> dict:
     """Audit and count the refusal, once for a slot request (as an event of its own, autocommit) and for a batch in one
     transaction with one event per slot, then the reply. A batch reply names the slot that caused it, when one did."""
+    _refund(module, requests)   # the cap counts releases, not attempts
     if batch:
         _record_denies(module, code, requests)
     else:
@@ -199,6 +201,26 @@ def _deny_reply(module, code, requests, batch=False, failing=None) -> dict:
     if batch and failing is not None:
         reply.update(toolkit_instance_id=failing.toolkit_instance_id, field=failing.field)
     return reply
+
+
+def _refund(module, requests) -> None:
+    """Give back what ``_count_releases`` took for a request that was refused: one pipeline of ``DECR``. A counter that
+    would go below zero (it expired meanwhile) is put back to zero. A failure is logged; the refusal stands."""
+    keys = [request.counter_key for request in requests if request.counter_key]
+    for request in requests:
+        request.counter_key = None
+    if not keys:
+        return
+    try:
+        client = module.get_redis_client()
+        pipe = client.pipeline(transaction=False)
+        for key in keys:
+            pipe.decr(key)
+        for key, left in zip(keys, pipe.execute()):
+            if _int(left) and left < 0:
+                client.incr(key)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("credential release: the release counter was not given back (%s)", type(exc).__name__)
 
 
 def _record_denies(module, code, requests) -> None:
@@ -473,6 +495,8 @@ def _count_releases(module, requests: list, ttl_s) -> None:
             pipe.incr(key)
             pipe.expire(key, ttl_s)
         counts = pipe.execute()[0::2]
+        for request, key in zip(requests, keys):
+            request.counter_key = key
         over = [request for request, count in zip(requests, counts) if not _int(count) or count > MAX_RELEASES_PER_FIELD]
         limit = MAX_RELEASES_PER_FIELD_INHERITED if over and client.exists(adm.INHERITED_KEY + requests[0].context_ref) \
             else MAX_RELEASES_PER_FIELD
@@ -521,7 +545,10 @@ def _check_probe(module, request: _Request) -> _Scope:
 def _read_store(module, requests: list, scope: _Scope, release_ids: list) -> dict:
     """Check 8: the values of the requested generations, ``{credential ref: value}`` (``fields`` and ``generation``).
     One secrets call for all the references of a request; a secrets plugin without the batch read goes one reference at
-    a time. The first refusal ends it (a revoke code revokes the run)."""
+    a time. The first refusal ends it (a revoke code revokes the run).
+
+    Known limit (follow-up, the secrets contract is unchanged): one ``release_id`` is given to the store for the whole
+    read, so the store's correlation ids of the second slot on match no audit event; the first slot's does."""
     wanted = {}
     for request in requests:
         wanted.setdefault(request.slot["credential_ref"], request.slot["credential_generation"])
@@ -541,7 +568,8 @@ def _read_store(module, requests: list, scope: _Scope, release_ids: list) -> dic
             for index, (ref, generation) in enumerate(wanted.items()):
                 one = secrets.release_credential_material(
                     scope.binding_project_id, ref, generation, release_ids[index if index < len(release_ids) else 0],
-                    caller_ref, scope.allow_validated, **({"allow_pending": True} if scope.allow_pending else {}))
+                    caller_ref, allow_validated=scope.allow_validated,
+                    **({"allow_pending": True} if scope.allow_pending else {}))
                 results.append((one, ref))
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: the store read failed (%s)", type(exc).__name__)

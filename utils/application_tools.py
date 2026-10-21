@@ -107,14 +107,14 @@ def find_toolkit_schema_by_type(toolkit_type: str) -> Optional[dict]:
         pass
 
 
-def find_toolkit_schema_by_type_everywhere(toolkit_type: str, project_id: int, user_id: int):
+def find_toolkit_schema_by_type_everywhere(toolkit_type: str, project_id: int, user_id: int, status: dict = None):
     from .toolkits_utils import get_toolkit_schemas
 
     external = False
     tk = find_toolkit_schema_by_type(toolkit_type)
     if tk is None:
         # try finding in mcp/provider_hub schemas
-        tk = get_toolkit_schemas(project_id, user_id).get(toolkit_type)
+        tk = get_toolkit_schemas(project_id, user_id, status).get(toolkit_type)
         if tk:
             external = True
     return tk, external

@@ -663,7 +663,7 @@ class Module(module.ModuleModel):
         """Register the worker bus handlers of a governed run: workers prove a run still holds its admission
         (#6756), and ask Main for the material of a credential slot, or of all the slots of a run in one call, sealed to
         the asking worker (#6946). Idempotent; a handler that could not be registered is tried again at the next
-        refresh of the switch. True when all are."""
+        refresh of the switch. True when the two required ones are (the batch release is optional)."""
         with self._governed_handlers_lock:
             for key, handler, name in (
                     ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
@@ -674,10 +674,13 @@ class Module(module.ModuleModel):
                 try:
                     this.for_module("worker_client").module.rpc_node.register(handler, name=name)
                     self._governed_handlers[key] = True
-                except Exception:  # pylint: disable=W0703
-                    log.exception("Failed to register %s", name)
+                except Exception as exc:  # pylint: disable=W0703
+                    if key == "release_batch":   # optional: workers then release slot by slot, and are not told otherwise
+                        log.error("Failed to register %s (%s); batch release is not offered", name, type(exc).__name__)
+                    else:
+                        log.exception("Failed to register %s", name)
             self.governed_handlers_registered = any(self._governed_handlers.values())
-            return all(self._governed_handlers.values())
+            return self._governed_handlers["validate"] and self._governed_handlers["release"]
 
     def _unregister_governed_handlers(self):
         with self._governed_handlers_lock:
@@ -869,7 +872,15 @@ class Module(module.ModuleModel):
                 return task_id
             finally:
                 for evaluate in after_dispatch:
-                    evaluate()   # never raises
+                    try:
+                        evaluate()
+                    except BaseException as exc:  # pylint: disable=W0703
+                        # the task is started: nothing the evaluation meets (a gevent Timeout included) may replace
+                        # that result, or the caller retries a run that is already going. Only the greenlet being
+                        # killed is let through.
+                        log.error("admission: the audit-only evaluation was interrupted (%s)", type(exc).__name__)
+                        if "GreenletExit" in {kind.__name__ for kind in type(exc).__mro__}:
+                            raise
 
         self.task_node.start_task = _maintenance_gated_start_task
 

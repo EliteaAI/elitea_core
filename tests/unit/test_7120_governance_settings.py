@@ -572,10 +572,11 @@ def test_a_registration_that_fails_publishes_enforce_as_unavailable_and_is_tried
     assert state.effective.unavailable is False and outcomes == []   # registered; admitting again
 
 
-def test_the_module_reports_whether_both_handlers_are_registered():
+def test_the_module_reports_whether_the_required_handlers_are_registered():
     text = (PLUGIN_ROOT / "module.py").read_text()
     ensure = text[text.index("def _ensure_governed_handlers_registered"):text.index("def _unregister_governed_handlers")]
-    assert "return all(self._governed_handlers.values())" in ensure
+    # the validate and the single-slot release are required; the batch release is optional (see the perf tests)
+    assert 'return self._governed_handlers["validate"] and self._governed_handlers["release"]' in ensure
     settings = (PLUGIN_ROOT / "utils" / "governance_settings.py").read_text()
     assert "if ensure is not None and ensure() is False:" in settings
 

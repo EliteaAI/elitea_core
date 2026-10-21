@@ -164,7 +164,7 @@ def _payload_toolkits(payload) -> list:
     return [tool for tools in lists if isinstance(tools, list) for tool in tools if isinstance(tool, dict)]
 
 
-_SECRET_FIELDS = {}   # (toolkit type, project id, user id) -> (registry version, field names)
+_SECRET_FIELDS = {}   # (toolkit type) or (toolkit type, project id, user id) -> (registry version, field names)
 
 
 def forget_secret_fields() -> None:
@@ -175,27 +175,31 @@ def forget_secret_fields() -> None:
 def toolkit_secret_fields(tool_type, project_id, user_id) -> frozenset:
     """Names of the provider-hub fields of a toolkit type that hold a secret inline (``secret: true``).
 
-    A type that has a schema is answered from this process for as long as the dynamic schemas did not change
+    A type that has a schema is answered from this process for as long as the schemas did not change
     (``schema_registry_version``): finding the schema of a provider-hub or MCP type aggregates every such schema of the
-    project and the user, which was done once per type and admission. A type with no schema is looked for every time (it
-    can appear, or stop being blocked, without a registration)."""
+    project and the user, which was done once per type and admission. A static type is the same for everyone and is kept
+    by its name; a provider-hub or MCP type depends on the project and the user and is kept by all three, and only when
+    everything it depends on was read. A type with no schema is looked for every time (it can appear, or stop being
+    blocked, without a registration)."""
     from .application_tools import find_toolkit_schema_by_type_everywhere  # pylint: disable=C0415
 
-    key, version = (tool_type, project_id, user_id), schema_registry_version.current()
-    hit = _SECRET_FIELDS.get(key)
-    if hit is not None and hit[0] == version:
-        return hit[1]
-    schema, _ = find_toolkit_schema_by_type_everywhere(tool_type, project_id, user_id)
+    static_key, key, version = (tool_type,), (tool_type, project_id, user_id), schema_registry_version.current()
+    for candidate in (static_key, key):
+        hit = _SECRET_FIELDS.get(candidate)
+        if hit is not None and hit[0] == version:
+            return hit[1]
+    status = {}
+    schema, external = find_toolkit_schema_by_type_everywhere(tool_type, project_id, user_id, status)
     properties = (schema or {}).get("properties") or {}
     names = frozenset(
         name for name, spec in properties.items()
         if isinstance(spec, dict) and spec.get("secret") is True
         and not (spec.get("configuration_types") or spec.get("configuration_sections") or spec.get("toolkit_types"))
     )
-    if schema:
+    if schema and (not external or not status.get("degraded")):
         if len(_SECRET_FIELDS) >= MAX_CACHED_SECRET_FIELDS:
             _SECRET_FIELDS.clear()
-        _SECRET_FIELDS[key] = (version, names)
+        _SECRET_FIELDS[key if external else static_key] = (version, names)
     return names
 
 

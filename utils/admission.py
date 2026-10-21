@@ -847,9 +847,9 @@ def _shadow_admit(  # pylint: disable=R0912
     free_form_secret = payload.pop(FREE_FORM_SECRET_MARK, False)   # Main-internal: never goes to the worker
     if admission is None or admission.run_kind != "interactive":
         return
+    run_id = payload.get(PREDICT_RUN_ID_KWARGS_KEY)   # bound before anything that can raise
     failure, snapshot = None, None
     try:
-        run_id = payload.get(PREDICT_RUN_ID_KWARGS_KEY)
         meta = call_kwargs.get("meta")
         if admission.trace_ref is None and isinstance(meta, dict) and isinstance(meta.get("traceparent"), str):
             admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
