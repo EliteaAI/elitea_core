@@ -95,7 +95,8 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
                     approval_expires_at=datetime.now(UTC) + timedelta(hours=APPROVAL_WAIT_HOURS))
         ).rowcount
         if paused:
-            append_run_events(session, run_id, _paused_event(sensitive))
+            append_run_events(session, run_id, _paused_event(sensitive, sum(
+                item.get('guardrail_type') == 'sensitive_tool' for item in interrupts) - 1))
         session.commit()
         if not paused:  # a run that is not running stays as it is, with no notice (R1.4)
             return
@@ -107,10 +108,11 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
             log.exception('Schedule run %s: cannot send the approval notice', run_id)
 
 
-def _paused_event(item: dict) -> dict:
-    """The pause line of the run log: toolkit and tool only, never the tool arguments."""
+def _paused_event(item: dict, more: int = 0) -> dict:
+    """The pause line of the run log: toolkit and tool only, never the tool arguments; `more` counts the other tools."""
     toolkit, tool = (str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name'))
-    return run_event('paused', f'Paused for approval: {toolkit} · {tool}', 'warning', toolkit=toolkit, tool=tool)
+    text = f'Paused for approval: {toolkit} · {tool}' + (f' (+{more} more)' if more > 0 else '')
+    return run_event('paused', text, 'warning', toolkit=toolkit, tool=tool)
 
 
 def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
@@ -236,7 +238,7 @@ def _end_runs(session, condition, status: str, reason: str | None, conversation_
               expected_status: str = 'running', level: str | None = None) -> list[int]:
     """End the runs in `expected_status` that match `condition`, copy the status to their schedules and log the end.
 
-    The run ids.
+    Returns the ids of the ended runs.
     """
     values = {'status': status, 'reason': reason, 'finished_at': func.now()}
     schedule_values = {'last_run_status': status}
@@ -254,6 +256,7 @@ def _end_runs(session, condition, status: str, reason: str | None, conversation_
             update(EntitySchedule).where(EntitySchedule.id.in_({schedule_id for _, schedule_id in ended}))
             .values(**schedule_values)
         )
+    # lean: one locked read per ended run; a sweep ends at most one batch (EXPIRE_BATCH); batch the read if it grows
     for run_id, _ in ended:
         append_run_events(session, run_id, finished_event(status, reason, level))
     return [run_id for run_id, _ in ended]

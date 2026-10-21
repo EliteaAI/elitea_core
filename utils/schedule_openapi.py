@@ -361,7 +361,9 @@ OPERATIONS = {
             "Answer one run for the Test schedule panel: the run fields, the version and its name, the account "
             "(`principal_label`), the risk check outcome, a `summary` (duration, tokens, cost) and `events`. "
             "Each event has `at`, `kind`, `text` and `level`; the kinds are started, account, risk_check, "
-            "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation. "
+            "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation; "
+            "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "
+            "returned it (raw output, so it can hold sensitive data; cut at 20 000 characters with \" (truncated)\"). "
             "Tokens and cost are null while the usage store has no row for the conversation. Poll every 2 s "
             "while the status is `running` or `waiting_for_approval`.",
             OWNER_OR_ADMIN.format(permission="schedules.details"),

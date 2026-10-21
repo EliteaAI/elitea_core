@@ -45,13 +45,13 @@ DETAIL_FIELDS = FIELDS | {
 @pytest.fixture
 def reads(monkeypatch):
     """The read helpers the handler imports late; `usage` is what the usage store answers."""
-    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[])
+    state = types.SimpleNamespace(usage=(2140, 0.03), conversations=[], tool_events=[TOOL])
     module = types.ModuleType(f'{PACKAGE}.utils.schedule_run_detail')
     module.version_label = lambda session, version_id: {10: 'v3'}.get(version_id)
 
     def tool_call_events(session, conversation_id):
         state.conversations.append(conversation_id)
-        return [TOOL] if conversation_id else []
+        return state.tool_events if conversation_id else []
 
     module.tool_call_events = tool_call_events
     module.usage_summary = lambda session, project_id, run: state.usage
@@ -95,6 +95,19 @@ def test_cr_el7011_the_detail_has_the_run_version_account_risk_summary_and_event
     # The stored events and the tool calls of the conversation, in time order
     assert [event['kind'] for event in body['events']] == ['started', 'tool_call', 'finished']
     assert reads.conversations == [901]
+
+
+def test_cr_el7011_the_merged_events_stay_at_the_event_limit_and_keep_the_last(harness, reads):
+    schedule_id = harness.seed()
+    start = datetime.datetime(2026, 10, 1, 1, tzinfo=datetime.UTC)
+    reads.tool_events = [
+        {**TOOL, 'at': (start + datetime.timedelta(seconds=n)).isoformat(), 'text': f'tool {n}'} for n in range(250)]
+    run_id = seed_run(harness, schedule_id)
+
+    body, _ = call_run(harness, 'get', schedule_id, run_id)
+
+    assert len(body['events']) == 200
+    assert (body['events'][0]['kind'], body['events'][-1]['text']) == ('started', 'tool 249')
 
 
 def test_cr_el7011_a_missing_usage_row_gives_null_tokens_and_cost(harness, reads):

@@ -28,6 +28,13 @@ def finished_event(status: str, reason: str | None = None, level: str | None = N
     return run_event('finished', text, level or FINISH_LEVELS.get(status, 'warning'), status=status)
 
 
+def merge_events(stored: list | None, tool_events: list[dict]) -> list[dict]:
+    """The stored events and the tool calls in time order, at most `EVENT_LIMIT`; the first stay and the newest ends it."""
+    # UTC ISO times sort as text; the stable sort keeps the stored order of equal times; no time last
+    merged = sorted([*(stored or []), *tool_events], key=lambda event: (event["at"] is None, event["at"] or ""))
+    return merged if len(merged) <= EVENT_LIMIT else [*merged[:EVENT_LIMIT - 1], merged[-1]]
+
+
 def append_run_events(session, run_id: int, *events: dict, **columns) -> None:
     """Add events to a run, and set `columns`, in the caller's transaction; the row is locked first.
 
