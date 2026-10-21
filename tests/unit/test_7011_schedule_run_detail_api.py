@@ -31,7 +31,7 @@ from test_7011_schedule_runs_api import FIELDS, add_runs
 harness = _crud_harness  # the CRUD harness fixture, shared
 
 START = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
-RUN_NOT_FOUND = {'error': 'Run not found'}
+RUN_NOT_FOUND = {'code': 'run_not_found', 'error': 'Run not found'}
 STARTED = {'at': '2026-10-01T00:00:00+00:00', 'kind': 'started', 'text': 'Test run started', 'level': 'info'}
 FINISHED = {'at': '2026-10-01T00:00:38+00:00', 'kind': 'finished', 'text': 'Run finished: success',
             'level': 'success', 'status': 'success'}

@@ -179,12 +179,15 @@ def test_el_7011_r1_3_the_draft_opens_no_write_session(endpoint):
     assert endpoint.db_sessions == 0
 
 
-@pytest.mark.parametrize('body', [{}, {'prompt': '   '}, {'prompt': 'x', 'locked_entity': {'entity_type': 'tool'}},
-                                  {'prompt': 'x', 'current': 'not a dict'}])
-def test_el_7011_r1_4_a_bad_body_is_400_with_the_errors_and_no_model_call(endpoint, body):
+@pytest.mark.parametrize('body, field', [
+    ({}, 'prompt'), ({'prompt': '   '}, 'prompt'),
+    ({'prompt': 'x', 'locked_entity': {'entity_type': 'tool'}}, 'locked_entity'),
+    ({'prompt': 'x', 'current': 'not a dict'}, 'current'),
+])
+def test_el_7011_r1_4_a_bad_body_is_400_with_code_field_and_no_model_call(endpoint, body, field):
     payload, status, model = _post(endpoint, body)
     assert status == 400
-    assert isinstance(payload, list) and payload[0]['loc']
+    assert (payload['code'], payload['field']) == ('invalid_input', field) and payload['error']
     assert model.calls == []
 
 
@@ -192,7 +195,8 @@ def test_el_7011_r1_5_a_missing_service_prompt_is_500_and_no_model_call(endpoint
     endpoint.service_prompt = ''
     payload, status, model = _post(endpoint, {'prompt': 'x'})
     assert status == 500
-    assert payload == {'error': "Service prompt 'generate_schedule_draft' is not configured"}
+    assert payload == {'code': 'service_prompt_missing',
+                       'error': "Service prompt 'generate_schedule_draft' is not configured"}
     assert model.calls == []
 
 
@@ -213,7 +217,7 @@ def test_el_7011_r1_6_a_failing_draft_check_is_502_with_a_short_reason(endpoint)
     endpoint.validate_error = RuntimeError('vault down: secret=abc')
     payload, status, _ = _post(endpoint, {'prompt': 'x'}, _answer(json.dumps(MODEL_DRAFT)))
     assert status == 502
-    assert payload == {'error': 'The draft could not be checked'}
+    assert payload == {'code': 'draft_check_failed', 'error': 'The draft could not be checked'}
 
 
 def test_el_7011_r1_6_no_default_model_is_400(endpoint):
