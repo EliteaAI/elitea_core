@@ -22,6 +22,7 @@ class ScheduleListFilters(BaseModel):
     owner_ids: list[DbId] | None = Field(None, description='Only schedules of these owners; schedules admin only',
                                          examples=[[3, 7]])
     entity_id: DbId | None = Field(None, description='Only schedules of this agent or pipeline', examples=[12])
+    version_id: DbId | None = Field(None, description='Only schedules that run this version', examples=[31])
     search: str | None = Field(None, description='Match on schedule or entity name', examples=['daily report'])
     limit: int = Field(default=20, ge=1, le=100, description='Rows per page', examples=[20])
     offset: int = Field(default=0, ge=0, le=2**31 - 1, description='Rows to skip',  # the database integer range
