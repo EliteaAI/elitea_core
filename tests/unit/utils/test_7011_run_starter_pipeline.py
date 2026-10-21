@@ -24,10 +24,22 @@ def _ignore(*_args):
     return None
 
 
+def clean_review():
+    """A risk review with no finding, as `utils/schedule_risk.scan_schedule` answers it."""
+    return {"blocking": [], "sensitive": [], "notices": [], "fingerprint": "fp-1"}
+
+
 def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, fail=_ignore, block=_ignore,
-                 budget_scope=_ignore, budget_error=None):
-    """The real starter on faked neighbours; also used by test_7011_no_system_user_runs and _budget."""
+                 budget_scope=_ignore, budget_error=None, review=None):
+    """The real starter on faked neighbours; also used by test_7011_no_system_user_runs and _budget.
+
+    `review(project_id, version_id, owner_id)` answers the risk review of the run (owner CR 2026-10-21);
+    by default it finds nothing.
+    """
     stubs = {
+        "utils.schedule_risk": {
+            "scan_schedule": review or (lambda *_args: clean_review()),
+            "scan_complete": lambda found: not any(n["code"] == "scan_incomplete" for n in found["notices"])},
         "models.all": {"Application": object, "ApplicationVersion": object},
         "models.conversation": {"Conversation": object},
         "models.entity_schedule": {"EntitySchedule": object, "EntityScheduleRun": object},

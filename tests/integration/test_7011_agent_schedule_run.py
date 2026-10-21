@@ -129,7 +129,7 @@ def world(monkeypatch):
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", None)
 
     engine = _sa.create_engine("sqlite://", execution_options={"schema_translate_map": {"tenant": None}})
-    predictions, notices = [], []
+    predictions, notices, blocking = [], [], []
     tools = _module("tools", db=types.SimpleNamespace(get_session=None), this=types.SimpleNamespace(),
                     rpc_tools=types.SimpleNamespace())
     monkeypatch.setitem(sys.modules, "tools", tools)
@@ -154,6 +154,11 @@ def world(monkeypatch):
         "utils.schedule_notifications": {"notify_schedule_event": lambda _p, owner_id, event, _s, run=None, extra=None:
                                              notices.append((owner_id, event, run.reason))},
         "utils.budget_door": {"closed_budget_scope": lambda *_args: None},  # US-13 budget gate: always open here
+        # The risk review (owner CR 2026-10-21) has its own tests; here it answers `blocking`
+        "utils.schedule_risk": {
+            "scan_schedule": lambda *_args: {"blocking": list(blocking), "sensitive": [], "notices": [],
+                                             "fingerprint": "fp-1"},
+            "scan_complete": lambda _review: True},
         "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
     }
     for dotted, attrs in stubs.items():
@@ -253,7 +258,7 @@ def world(monkeypatch):
 
     return types.SimpleNamespace(run=run, schedule=schedule, set_run_status=set_run_status, claim=claim_run,
                                  run_count=run_count, predictions=predictions, predict_errors=predict_errors,
-                                 conversations=conversations, auth=auth,
+                                 conversations=conversations, auth=auth, blocking=blocking,
                                  first_message=first_message, run_row=run_row, notices=notices,
                                  agent_version=agent_version)
 
@@ -286,6 +291,16 @@ def test_7011_r1_5_conversation_is_named_for_the_agent_and_holds_the_prompt_as_f
 
     assert world.conversations()[0].name == "Scheduled run: Daily report"
     assert world.first_message() == PROMPT
+
+
+# Owner CR 2026-10-21 (risk review): a blocking finding at run start ends the run as blocked with the reason
+def test_el7011_cr_blocking_finding_blocks_the_run_without_a_conversation(world):
+    world.blocking.append({"code": "personal_signin_required", "message": 'Toolkit "GitHub" needs a personal sign-in'})
+
+    world.run()
+
+    assert world.conversations() == [] and world.predictions == []
+    assert (world.run_row().status, world.run_row().reason) == ("blocked", 'Toolkit "GitHub" needs a personal sign-in')
 
 
 # TC-US11-02 / R1.3: a lost owner creates no conversation and starts no predict
