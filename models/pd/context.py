@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 from datetime import datetime
 
 from .llm import LLMSettingsWriteModel
@@ -7,7 +7,11 @@ from .llm import LLMSettingsWriteModel
 
 class ContextStrategyUpdate(BaseModel):
     summary_llm_settings: Optional[LLMSettingsWriteModel] = None
+    context_window_mode: Optional[Literal['balanced', 'full']] = None
+    # Deprecated (#6898): kept for public API clients, superseded by context_window_mode
     max_context_tokens: Optional[int] = Field(None, ge=1000)
+    # Platform admins only, when the platform toggle is on; null clears it
+    manual_max_context_tokens: Optional[int] = Field(None, ge=1000)
     preserve_recent_messages: Optional[int] = Field(None, ge=1)
     preserve_system_messages: Optional[bool] = None
     enable_summarization: Optional[bool] = None
@@ -18,17 +22,9 @@ class ContextStrategyUpdate(BaseModel):
     @model_validator(mode='after')
     def validate_summary_max_tokens(self):
         if self.summary_llm_settings is not None and self.summary_llm_settings.max_tokens is not None:
-            if self.max_context_tokens is not None and self.summary_llm_settings.max_tokens < 100:
+            if self.summary_llm_settings.max_tokens < 100:
                 raise ValueError(
                     f'Summary max tokens ({self.summary_llm_settings.max_tokens}) must be at least 100'
-                )
-            if (
-                self.max_context_tokens is not None
-                and self.summary_llm_settings.max_tokens >= self.max_context_tokens
-            ):
-                raise ValueError(
-                    f'Summary max tokens ({self.summary_llm_settings.max_tokens}) must be less than '
-                    f'max context tokens ({self.max_context_tokens})'
                 )
         return self
 
@@ -39,7 +35,8 @@ class ContextStrategy(BaseModel):
     enabled: bool = True
     enable_summarization: bool = True
     enable_context_editing: bool = False
-    max_context_tokens: int = Field(64000, ge=1000)
+    context_window_mode: Literal['balanced', 'full'] = 'balanced'
+    max_context_tokens: Optional[int] = Field(None, ge=1000)
     preserve_recent_messages: int = Field(5, ge=1, le=99)
     preserve_system_messages: bool = True
     summary_instructions: Optional[str] = 'Generate a concise summary of the following conversation messages'

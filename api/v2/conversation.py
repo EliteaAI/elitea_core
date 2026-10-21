@@ -7,6 +7,8 @@ from ...models.conversation import Conversation
 from ...models.pd.conversation import ConversationUpdate
 from ...utils.conversation_access import check_conversation_access, is_privileged_update, is_own_folder
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.chat_usage import strip_server_owned_meta
+from ...utils.context_window import MANUAL_TOKENS_KEYS
 from ...utils.support_utils import get_support_config
 
 
@@ -128,6 +130,16 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 return denied
             if data.get('folder_id') is not None and not is_own_folder(session, data['folder_id'], user_id):
                 return {'error': 'Folder not found'}, 404
+            # Usage, budget and analytics are server-owned; the admin-only manual summarization
+            # trigger is set via context_strategy PUT only
+            strip_server_owned_meta(data.get('meta'), conversation.meta)
+            incoming_strategy = (data.get('meta') or {}).get('context_strategy')
+            if isinstance(incoming_strategy, dict):
+                stored_strategy = (conversation.meta or {}).get('context_strategy') or {}
+                for key in MANUAL_TOKENS_KEYS:
+                    incoming_strategy.pop(key, None)
+                    if key in stored_strategy:
+                        incoming_strategy[key] = stored_strategy[key]
 
         kwargs = {
             'project_id': project_id,
