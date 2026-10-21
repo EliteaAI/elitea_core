@@ -143,7 +143,8 @@ RUNS_QUERY_PARAMS = [
 ]
 OWNER_BODY = {"required": True, "content": {"application/json": {"schema": {
     "type": "object", "required": ["owner_id"],
-    "properties": {"owner_id": {"type": "integer", "description": "User id of the new owner, a project member"}},
+    "properties": {"owner_id": {"type": "integer", "description": "User id of the new owner, a project member",
+                                 "examples": [20]}},
 }, "examples": {"example1": {"value": {"owner_id": 20}}}}}}
 # The router serves these URLs with the handlers below, so register_api_class cannot list them;
 # Module._register_openapi registers them (BUG-11)

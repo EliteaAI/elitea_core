@@ -171,7 +171,6 @@ def _route_shape(registry):
 def _body_schemas(spec):
     """Every request body schema: the referenced models with their nested ones, and the inline bodies."""
     schemas = dict(spec['components']['schemas'])
-    schemas.pop('SchedulePreferenceUpdate')  # schedule_preferences.py is outside BUG-11
     for (method, path), operation in _operations(spec).items():
         for content in operation.get('requestBody', {}).get('content', {}).values():
             if '$ref' not in content['schema']:
@@ -256,6 +255,17 @@ def test_r1_3_el7011_body_fields_have_descriptions(spec):
     for name, schema in schemas.items():
         for field, prop in schema.get('properties', {}).items():
             assert prop.get('description'), f'{name}.{field}'
+
+
+# R1.3 (AC3, D6): every field of the create, update, owner, run, draft and preference bodies shows an example
+def test_r1_3_el7011_body_fields_have_examples(spec):
+    schemas = _body_schemas(spec)
+    assert {'ScheduleCreate', 'ScheduleUpdate', 'ScheduleRunRequest', 'GenerateScheduleDraftRequest',
+            'SchedulePreferenceUpdate', f'post {SCHEDULE}/{{schedule_id}}/owner'} <= set(schemas)
+    schemas.pop(f'post {LIST}/import')  # a file upload: no example value fits a binary part
+    for name, schema in schemas.items():
+        for field, prop in schema.get('properties', {}).items():
+            assert prop.get('examples'), f'{name}.{field}'
 
 
 # R1.3: the list query and row models describe each field; the query fields show an example
