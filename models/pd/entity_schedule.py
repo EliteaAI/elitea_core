@@ -99,9 +99,9 @@ class ScheduleCreate(ScheduleTiming):
     approval_rule: ApprovalRule = Field('pause_and_ask', description=APPROVAL_TEXT, examples=['pause_and_ask'])
 
 
-class ScheduleUpdate(BaseModel):
-    """No owner or entity fields: the extra `created_by` and `principal` of a body are dropped (R2.2)."""
-    model_config = ConfigDict(json_schema_extra={'examples': [{'enabled': False}, {'cron': '30 8 * * *'}]})
+class ScheduleEdit(BaseModel):
+    """The PUT body: no owner, entity or `enabled` field; extra `created_by` and `principal` are dropped (R2.2)."""
+    model_config = ConfigDict(json_schema_extra={'examples': [{'cron': '30 8 * * *'}, {'name': NAME_EXAMPLE}]})
 
     name: str | None = Field(None, min_length=1, max_length=NAME_MAX, description=NAME_TEXT, examples=[NAME_EXAMPLE])
     description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT,
@@ -113,7 +113,6 @@ class ScheduleUpdate(BaseModel):
     cron: str | None = Field(None, description=CRON_TEXT, examples=['30 8 * * *'])
     timezone: str | None = Field(None, description=TIMEZONE_TEXT, examples=['Europe/Warsaw'])
     expires_at: date | None = Field(None, description=EXPIRES_TEXT, examples=['2026-12-31'])
-    enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it', examples=[False])
     approval_rule: ApprovalRule | None = Field(None, description=APPROVAL_TEXT, examples=['run_without_asking'])
 
     @field_validator('cron')
@@ -125,6 +124,13 @@ class ScheduleUpdate(BaseModel):
     @classmethod
     def validate_timezone(cls, v: str | None) -> str | None:
         return v if v is None else ScheduleTiming.validate_timezone(v)
+
+
+class ScheduleUpdate(ScheduleEdit):
+    """What the service applies: an edit, or `enabled` from the pause and resume actions and the file import."""
+    model_config = ConfigDict(json_schema_extra={'examples': [{'enabled': False}, {'cron': '30 8 * * *'}]})
+
+    enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it', examples=[False])
 
 
 class ScheduleOwner(BaseModel):

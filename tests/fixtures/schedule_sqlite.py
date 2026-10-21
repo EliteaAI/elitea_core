@@ -39,6 +39,24 @@ class LenientModule(types.ModuleType):
         return MagicMock(name=name)
 
 
+SCHEDULE_HANDLERS = {
+    'schedule_item_handlers': 'ScheduleItemHandlers',
+    'schedule_project_handlers': 'ScheduleProjectHandlers',
+    'schedule_draft_handler': 'ScheduleDraftHandler',
+}
+
+
+def handler_stubs(plugin_package, real):
+    """Modules with an empty handler class, so `api/v2/schedules.py` loads with only the `real` helper module."""
+    stubs = {}
+    for name, class_name in SCHEDULE_HANDLERS.items():
+        if name != real:
+            module = types.ModuleType(f'{plugin_package}.utils.{name}')
+            setattr(module, class_name, type(class_name, (), {}))
+            stubs[module.__name__] = module
+    return stubs
+
+
 def package(name):
     module = types.ModuleType(name)
     module.__path__ = []
