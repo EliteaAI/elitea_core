@@ -346,7 +346,9 @@ OPERATIONS = {
         "summary": "Import schedules from YAML",
         "description": _text(
             "Read a schedule YAML file (multipart `file`). An item that matches a schedule by key, else by "
-            "name, updates it. Every other item creates a paused schedule owned by the caller.",
+            "name, updates it. Every other item creates a paused schedule owned by the caller. An import never "
+            "confirms risks: an item with a blocking finding fails with the reason, and \"Run without asking\" "
+            "with sensitive tools is saved as \"Pause and ask me\" with a `note`.",
             "a schedules admin (`schedules.import`) only",
             "400 no file, a file over 1 MB, or not a schedule file; 403 no permission"),
         "parameters": PROJECT_PARAMS,
@@ -360,7 +362,8 @@ OPERATIONS = {
         "description": _text(
             "Draft the fields of a schedule form from a plain-text description and the current form values. "
             "Uses the project's default LLM. The server checks the draft and adds a warning for each field "
-            "it could not use. Nothing is saved.",
+            "it could not use. A draft never confirms risks: \"Run without asking\" with sensitive tools becomes "
+            "\"Pause and ask me\" with a warning. Nothing is saved.",
             "a project member with `schedules.create`",
             "400 an invalid body or no default LLM; 403 no permission; 500 the service prompt is not "
             "configured; 502 the model failed; 503 busy, retry after `retry_after` seconds"),
