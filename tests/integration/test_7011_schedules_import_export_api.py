@@ -139,6 +139,8 @@ def _install(env, Base, engine):
         ('utils/schedule_service.py', 'utils.schedule_service'), ('utils/schedule_yaml.py', 'utils.schedule_yaml'),
     ):
         load(path, name)
+    load('utils/schedule_project_handlers.py', 'utils.schedule_project_handlers')
+    sys.modules.update(sqlite_db.handler_stubs(PACKAGE, real='schedule_project_handlers'))
     env.module = load('api/v2/schedules.py', 'api.v2.schedules')
     with env.session_factory() as session:
         session.add(env.Application(id=1, name='Entity'))
@@ -295,6 +297,7 @@ def test_7011_r3_1_the_size_and_header_messages_are_in_schedule_words(env):
     )
 
 
-def test_7011_r3_4_a_post_to_the_list_url_is_not_allowed(env):
+@pytest.mark.parametrize('method, tail', [('post', 'export'), ('get', 'import'), ('put', 'import')])
+def test_7011_r3_4_a_method_the_file_urls_do_not_serve_is_not_allowed(env, method, tail):
     env.grant('import', 'export', 'list')
-    assert env.call('post', '')[1] == 405
+    assert env.call(method, tail)[1] == 405
