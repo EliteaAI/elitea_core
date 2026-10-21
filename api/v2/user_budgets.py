@@ -68,6 +68,15 @@ QUERY_PARAMS = [
         "in": "query",
         "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
     },
+    {
+        "name": "comparison_period",
+        "in": "query",
+        "schema": {"type": "string"},
+        "description": (
+            "YYYYMM period to compare against. When provided, each row gains a prev_spend "
+            "field with that period's spend for the same user (null when they had none)."
+        ),
+    },
 ]
 
 
@@ -144,7 +153,7 @@ def _system_row(project_spend, rows, currency):
     }
 
 
-def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_order, feature=None):
+def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_order, feature=None, comparison_period=None):
     """Per-member spend and budget for a project's current month.
 
     Members come from recorded spend where that is available, so someone who spent and then
@@ -252,6 +261,23 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
     total = len(rows)
     page = rows[offset:offset + limit]
     #
+    # Comparison period: fetch prior-period spend for the page's user ids only, so the
+    # frontend never needs a second full query just to build the "vs prior" column.
+    if comparison_period and page:
+        page_ids_for_comparison = [row["user_id"] for row in page]
+        prior_spend_scope = {"model_name": feature} if feature else {}
+        prior_data = _safe_rpc(
+            rpc, "usage_get_users_spend", 30, {},
+            project_id=project_id, user_ids=page_ids_for_comparison,
+            period=comparison_period, **prior_spend_scope,
+        ) or {}
+        prior_by_id = {
+            int(user_id): float(entry.get("spend") or 0)
+            for user_id, entry in prior_data.items()
+        }
+    else:
+        prior_by_id = {}
+
     # Limits are resolved for the page alone: this is the one call that costs per member
     page_ids = [row["user_id"] for row in page]
     limit_map = _safe_rpc(
@@ -277,6 +303,7 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
             "enabled": stored_row.get("enabled", False),
             "remaining": None if effective is None else max(0.0, effective - spend),
             "percent_used": None if not effective else round(spend / effective * 100, 2),
+            "prev_spend": prior_by_id.get(user_id),
         })
     #
     warning_pct = _safe_rpc(
@@ -314,6 +341,7 @@ def _listing_from_request(project_id: int):
         search=request.args.get("search") or None,
         sort_by=_safe_sort_field(request.args.get("sort_by", DEFAULT_SORT_FIELD)),
         sort_order=request.args.get("sort_order", "desc"),
+        comparison_period=request.args.get("comparison_period") or None,
     )
 
 
