@@ -15,6 +15,8 @@ tasks this process dispatched and tracks are reached (children that inherit a ma
 revocation means no new starts, and a running child finishes or hits its parent's deadline), and the map is lost when
 Main restarts (the context ``expires_at`` still bounds any restart).
 """
+import contextlib
+import contextvars
 import copy
 import importlib
 import re
@@ -37,10 +39,10 @@ from ..models.pd.task_envelope import CAPABILITY_ENVELOPE_V1, PROFILE_GOVERNED
 from .credential_decision import (
     ALLOWED as CREDENTIAL_USE_ALLOWED, WHOLE_TARGET, CredentialDecisionContext, CredentialDecisionError,
     binding_ref, collect_credential_uses, decide_credential_uses, read_configuration_facts, recheck_credentials,
-    toolkit_secret_fields, user_may_use_credentials,
+    toolkit_secret_fields, user_may_use_credentials, walk_scope,
 )
 from .credential_slots import FREE_FORM_SECRET_MARK, seal_payload
-from .definition_digest import DigestError, digest_for_version
+from .definition_digest import DigestError, digest_for_version, toolkit_rows
 from .exceptions import AdmissionDenied
 from .governance import MODE_AUDIT_ONLY, governance_lifecycle_active, is_auditing, is_governed, is_unavailable
 from .governance_settings import Check
@@ -62,6 +64,7 @@ REVOKE_CODES = frozenset({
 })
 _CODE = re.compile(r"^[A-Z0-9_]{1,64}$")
 STOP_CHUNK = 500   # context ids per query of the sweep
+INHERITED_KEY = "c1009:inh:"   # set when a context is reopened for its children: the release cap reads it
 # When Main stops a mandate run, and the code of the bound that applied (RUNTIME_LIMIT_EXCEEDED or MANDATE_EXPIRED)
 RunDeadline = namedtuple("RunDeadline", "at code")
 PREDICT_PERMISSION = "models.applications.predict.post"
@@ -370,14 +373,18 @@ def version_application_id(session, version_id):
 
 
 def _find_binding(request: AdmissionRequest, settings: AdmissionSettings):
-    """Step 4: the one active binding of this exact version, whose digest still matches the definition."""
+    """Step 4: the one active binding of this exact version, whose digest still matches the definition. One session
+    reads everything the admission needs of the agent: the version (once), the binding and the toolkit rows (once). The
+    binding and the toolkit rows are returned (the rows feed the credential decision, which reads nothing again)."""
     if request.version_id is None or request.application_id is None:
         raise _denied("DENIED_BINDING")
+    from ..models.all import ApplicationVersion  # pylint: disable=C0415
     modes = ["dedicated_agent", "elitea_native"]
     if settings.allow_runtime_domain_binding:
         modes.append("runtime_domain_binding")
     with db.get_session(request.binding_project_id) as session:
-        if version_application_id(session, request.version_id) != request.application_id:
+        version = session.query(ApplicationVersion).filter(ApplicationVersion.id == request.version_id).first()
+        if version is None or version.application_id != request.application_id:
             raise _denied("DENIED_BINDING")
         rows = session.execute(
             select(AgentIdentityBinding.id, AgentIdentityBinding.revocation_epoch,
@@ -393,13 +400,14 @@ def _find_binding(request: AdmissionRequest, settings: AdmissionSettings):
         if len(rows) != 1:
             raise _denied("DENIED_BINDING")
         binding = rows[0]
+        mappings = toolkit_rows(session, request.version_id)
         try:
-            current = digest_for_version(session, request.version_id)
+            current = digest_for_version(session, request.version_id, (version, mappings))
         except DigestError as exc:
             raise _denied("DENIED_BINDING" if exc.reason_code == "VERSION_NOT_FOUND" else "BINDING_DIGEST_MISMATCH") from None
         if current != binding.definition_digest:
             raise _denied("BINDING_DIGEST_MISMATCH")
-    return binding
+    return binding, mappings
 
 
 def _subject_of(principal: dict) -> dict:
@@ -416,11 +424,11 @@ def _subject_of(principal: dict) -> dict:
 
 
 def _decide_credentials(  # pylint: disable=R0913
-    module, request: AdmissionRequest, subject: dict, binding, payload, expires_at, shadow=False,
+    module, request: AdmissionRequest, subject: dict, binding, payload, expires_at, shadow=False, rows=None,
 ) -> list:
     """Step 5b: may this agent use each credential it uses, for this user? The allowed decisions (none for an
     agent without governed credentials), or ``AdmissionDenied`` for the first refusal. ``shadow``: audit only, the
-    refusal is counted as a ``would_deny``."""
+    refusal is counted as a ``would_deny``. ``rows``: the toolkit rows ``_find_binding`` has read."""
     user_id = subject.get("user_id", request.caller_id)   # a mandate acts for its owner
     context = CredentialDecisionContext(
         binding_project_id=request.binding_project_id, agent_binding_ref=str(binding.id), subject_ref=subject["ref"],
@@ -429,10 +437,14 @@ def _decide_credentials(  # pylint: disable=R0913
         subject_kind="mandate" if subject["kind"] == "mandate" else "user_delegation", subject_user_id=user_id,
     )
     try:
-        with db.get_session(request.binding_project_id) as session:
+        inline_fields = lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, user_id)  # noqa: E731
+        if rows is None:
+            with db.get_session(request.binding_project_id) as session:
+                candidates = collect_credential_uses(
+                    session, request.binding_project_id, request.version_id, payload, inline_fields)
+        else:   # no session is open while the schemas and the facts are read
             candidates = collect_credential_uses(
-                session, request.binding_project_id, request.version_id, payload,
-                lambda tool_type: toolkit_secret_fields(tool_type, request.binding_project_id, user_id))
+                None, request.binding_project_id, request.version_id, payload, inline_fields, rows=rows)
         return decide_credential_uses(context, candidates)
     except CredentialDecisionError as exc:
         error = exc
@@ -670,7 +682,7 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
     if not isinstance(linked, dict) or linked.get("id") != owner:
         raise _denied("IDENTITY_SUBJECT_UNLINKED")
     # 4. the approved agent definition the mandate was made for is the one that runs
-    binding = _find_binding(request, settings)
+    binding, rows = _find_binding(request, settings)
     if str(binding.id) != str(mandate.agent_binding_ref):
         raise _denied("DENIED_BINDING")
     # 4a. the owner may still run agents in this project
@@ -697,7 +709,7 @@ def _admit_mandate(  # pylint: disable=R0912,R0914
     deadline = (RunDeadline(by_validity, "MANDATE_EXPIRED") if by_validity < by_runtime
                 else RunDeadline(by_runtime, "RUNTIME_LIMIT_EXCEEDED"))
     # 5b. which credentials the run uses, and whether the agent may use them for the mandate
-    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at)
+    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at, rows=rows)
     # 6. context row and allow events, atomically
     caller = {"kind": "trigger", "ref": _caller_ref(request), "user_id": owner}
     view = _store_admission(
@@ -747,12 +759,12 @@ def _admit(  # pylint: disable=R0914
     # 3. who is asking
     principal = _verify_identity(request, settings)
     # 4. which approved agent definition runs
-    binding = _find_binding(request, settings)
+    binding, rows = _find_binding(request, settings)
     # 5. on whose behalf
     subject = _subject_of(principal)
     expires_at = _now() + timedelta(seconds=settings.context_ttl_s)
     # 5b. which credentials the run uses, and whether the agent may use them for this user
-    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow)
+    decisions = _decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows)
     caller = {"kind": request.caller_type, "ref": _caller_ref(request), "user_id": request.caller_id}
     if shadow:
         _record_shadow_allow(module, request, run_id, binding=binding, subject=subject, decisions=decisions,
@@ -791,28 +803,78 @@ def admit_execution(module, request: AdmissionRequest, *, run_id: str, payload=N
     raise error
 
 
+def _toolkit_snapshot(payload) -> dict:
+    """The part of a dispatched payload that the credential decision and the seal read, copied: the toolkit lists of
+    the request, of the application version and of the prefetched sub-agents. The history, the input and the
+    instructions are not touched (a deep copy of a long chat is milliseconds on the event loop). The lists are copied
+    under one memo, so a tool dict that two of them share is still one dict in the copy."""
+    memo = {}
+
+    def copied(tools):
+        return copy.deepcopy(tools, memo) if isinstance(tools, list) else None
+
+    application = payload.get("application") if isinstance(payload.get("application"), dict) else {}
+    details = application.get("version_details") if isinstance(application.get("version_details"), dict) else {}
+    prefetched = application.get("subagent_version_details")
+    return {
+        "project_id": payload.get("project_id"),
+        "tools": copied(payload.get("tools")),
+        "application": {
+            "version_details": {"tools": copied(details.get("tools"))},
+            "subagent_version_details": None if not isinstance(prefetched, dict) else {
+                key: {"tools": copied(value.get("tools"))} for key, value in prefetched.items() if isinstance(value, dict)},
+        },
+    }
+
+
 def _shadow_admit(  # pylint: disable=R0912
-    module, call_kwargs, admission: Optional[AdmissionRequest], unavailable=False,
+    module, call_kwargs, admission: Optional[AdmissionRequest], unavailable=False, deferred=None,
 ) -> None:
-    """Audit only: evaluate this dispatch exactly as enforce would, inline, and record what enforce would have done.
+    """Audit only: evaluate this dispatch exactly as enforce would, and record what enforce would have done.
     Nothing here refuses or raises into ``start_task``, and the real payload is never changed (but for the marker
     the entry point left on it): a denial becomes a ``would_deny`` event, any other failure a ``would_deny_error``
     metric and a log line (the type of the exception only).
 
     Evaluated: a person's run (``interactive``). Not evaluated: a run with no person behind it (a schedule, a webhook,
     a system user: enforce refuses those without a mandate, and a mandate cannot be rehearsed without its trigger
-    ticket), a mandate run, and a dispatch with no request (a child)."""
+    ticket), a mandate run, and a dispatch with no request (a child).
+
+    Nothing in audit only waits for the evaluation, so with a ``deferred`` list only what must see the call as it is
+    now is done here (the marker is taken off, the toolkit lists are copied) and the evaluation is appended to the
+    list: the caller runs it after ``start_task``, in the same greenlet. Without one it runs here."""
     payload = call_kwargs.get("kwargs")
     payload = payload if isinstance(payload, dict) else {}
     free_form_secret = payload.pop(FREE_FORM_SECRET_MARK, False)   # Main-internal: never goes to the worker
     if admission is None or admission.run_kind != "interactive":
         return
-    started, span, decision = time.perf_counter(), None, "would_allow"
+    failure, snapshot = None, None
     try:
         run_id = payload.get(PREDICT_RUN_ID_KWARGS_KEY)
         meta = call_kwargs.get("meta")
         if admission.trace_ref is None and isinstance(meta, dict) and isinstance(meta.get("traceparent"), str):
             admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
+        if not (free_form_secret or unavailable):
+            snapshot = _toolkit_snapshot(payload)
+    except Exception as exc:  # pylint: disable=W0703
+        failure = exc
+
+    def evaluate():
+        _shadow_evaluate(module, admission, run_id, snapshot, free_form_secret, unavailable, failure)
+
+    if deferred is None:
+        evaluate()
+    else:
+        deferred.append(evaluate)
+
+
+def _shadow_evaluate(  # pylint: disable=R0912,R0913
+    module, admission: AdmissionRequest, run_id, snapshot, free_form_secret, unavailable, failure,
+) -> None:
+    """The evaluation of ``_shadow_admit``. Never raises."""
+    started, span, decision = time.perf_counter(), None, "would_allow"
+    try:
+        if failure is not None:
+            raise failure
         try:
             if free_form_secret:   # enforce refuses a {{secret.*}} outside a credential configuration before admitting
                 _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "would_deny",
@@ -820,10 +882,11 @@ def _shadow_admit(  # pylint: disable=R0912
                 raise _denied("CREDENTIAL_REFERENCE_REQUIRED")
             if unavailable:   # enforce would refuse every run: say so for this one
                 raise _denied("DEPENDENCY_UNAVAILABLE")
-            allowed = _admit(module, admission, run_id, payload, shadow=True)
-            span = time.perf_counter() - started   # as for enforce: the admission, not the sealing that follows it
-            if allowed is not None:   # the seal enforce does after admitting, on a copy: the real payload stays as it is
-                _seal_dispatch(copy.deepcopy(payload), lambda: allowed, decided=True, shadow=True)
+            with walk_scope():
+                allowed = _admit(module, admission, run_id, snapshot, shadow=True)
+                span = time.perf_counter() - started   # as for enforce: the admission, not the sealing that follows it
+                if allowed is not None:   # the seal enforce does after admitting, on the copy of the toolkits
+                    _seal_dispatch(snapshot, lambda: allowed, decided=True, shadow=True)
         except AdmissionDenied as exc:
             decision = "would_deny"
             if exc.reason_code != "AUDIT_UNAVAILABLE":   # the audit trail cannot take it: a metric and a log line only
@@ -875,12 +938,15 @@ def _carries_parent_context(call_kwargs) -> bool:
 
 
 def admit_dispatch(  # pylint: disable=R0911
-    module, task_name, call_kwargs, admission: Optional[AdmissionRequest], effective=None,
+    module, task_name, call_kwargs, admission: Optional[AdmissionRequest], effective=None, deferred=None,
 ) -> Optional[str]:
     """Admit the run behind a ``start_task`` call. Returns the new ``context_ref``, or ``None`` when
     nothing was admitted here (governance off or audit only, a task that is not admitted, or a context inherited
     from the parent run). Sets ``context_ref`` in the envelope and in the task meta. Under audit only the run is
     evaluated as enforce would and the call is left untouched.
+
+    ``deferred``: a list the caller runs after ``start_task`` (see ``_shadow_admit``); audit only appends its evaluation
+    to it. Without one the evaluation runs here, before the call returns.
 
     ``effective`` is the state the caller read once for this dispatch (so the envelope and the admission agree).
     A child or reconcile dispatch of a run admitted under enforce is sealed against its parent's decisions whatever
@@ -896,7 +962,7 @@ def admit_dispatch(  # pylint: disable=R0911
         governed, auditing, unavailable = is_governed(module), is_auditing(module), is_unavailable(module)
     if not governed:
         if auditing:
-            _shadow_admit(module, call_kwargs, admission, unavailable)   # never refuses: the run goes on as a legacy run
+            _shadow_admit(module, call_kwargs, admission, unavailable, deferred)   # never refuses: the run goes on as a legacy run
         if not _carries_parent_context(call_kwargs):
             return None
     payload = call_kwargs.setdefault("kwargs", {})
@@ -932,23 +998,39 @@ def admit_dispatch(  # pylint: disable=R0911
     #
     if admission.trace_ref is None and isinstance(meta.get("traceparent"), str):
         admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
-    view = admit_execution(module, admission, run_id=run_id, payload=payload)
-    try:
-        # admission decided every credential of this payload: those are sealed, anything else is not a credential
-        _seal_dispatch(payload, lambda: view.allowed_bindings, decided=True)
-    except AdmissionDenied as denied:
-        track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
-        _record_deny(
-            module, denied.reason_code, project_id=admission.project_id, application_id=admission.application_id,
-            caller_ref=_caller_ref(admission), run_id=run_id if isinstance(run_id, str) else None,
-            traceparent=admission.trace_ref, **denied.audit)
-        raise
+    with walk_scope():   # the decision and the seal walk the settings of a toolkit once
+        view = admit_execution(module, admission, run_id=run_id, payload=payload)
+        try:
+            # admission decided every credential of this payload: those are sealed, anything else is not a credential
+            _seal_dispatch(payload, lambda: view.allowed_bindings, decided=True)
+        except AdmissionDenied as denied:
+            track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
+            _record_deny(
+                module, denied.reason_code, project_id=admission.project_id, application_id=admission.application_id,
+                caller_ref=_caller_ref(admission), run_id=run_id if isinstance(run_id, str) else None,
+                traceparent=admission.trace_ref, **denied.audit)
+            raise
     envelope["context_ref"] = view.context_ref
     meta["context_ref"] = view.context_ref
     if admission.run_kind == "mandate":
         # the wrapper takes it out again; Main stops the run at this moment (not the context ttl)
         meta["context_deadline"] = RunDeadline(view.run_deadline, view.run_deadline_code)
     return view.context_ref
+
+
+_PARENTS = contextvars.ContextVar("c1009_parent_entries", default=None)
+
+
+@contextlib.contextmanager
+def parent_entries_scope():
+    """Within this scope the decisions of a parent context are read once, however many children are dispatched under it
+    (one fan-out, ``parallel_dispatch``). They do not change after the admission; whether the parent still holds its
+    admission is checked by each child's own ``validate_context``."""
+    token = _PARENTS.set({})
+    try:
+        yield
+    finally:
+        _PARENTS.reset(token)
 
 
 def _parent_entries(project_id, context_ref) -> list:
@@ -959,12 +1041,17 @@ def _parent_entries(project_id, context_ref) -> list:
         context_id = uuid.UUID(str(context_ref))
     except ValueError:
         raise _denied("STALE_CONTEXT") from None
+    read = _PARENTS.get()
+    if read is not None and (project_id, context_id) in read:
+        return read[(project_id, context_id)]
     with db.get_session(project_id) as session:
         entries = session.execute(
             select(ExecutionSecurityContext.allowed_bindings).where(ExecutionSecurityContext.id == context_id)
         ).scalar_one_or_none()
     if not isinstance(entries, list):
         raise _denied("STALE_CONTEXT")
+    if read is not None:
+        read[(project_id, context_id)] = entries
     return entries
 
 
@@ -1118,27 +1205,52 @@ def _revoked_among(entries) -> set:
 
 def reopen_contexts(module, project_id, context_refs) -> int:
     """A parked parent stops when it fans out, which completes its context, but its children and the reconcile run
-    still run under that context: bring each one back to ``running`` when it is neither expired nor revoked. The
-    number reopened. Governed only (also after a switch to off: the children keep the admission of their parent); a
-    failure is logged and the children then fail at ``validate_context``."""
+    still run under that context: bring each one back to ``running`` when it is neither expired nor revoked, in one
+    statement for all of them. The number reopened. Governed only (also after a switch to off: the children keep the
+    admission of their parent); a failure is logged and the children then fail at ``validate_context``.
+
+    Each context is also marked as inherited (``INHERITED_KEY``): its children and reconcile runs build the parent's
+    toolkits again, which the release counter allows more of than the parent's own."""
     if not governance_lifecycle_active(module):
         return 0
-    reopened = 0
-    for context_ref in {ref for ref in context_refs if isinstance(ref, str) and ref}:
+    wanted = []
+    for context_ref in sorted({ref for ref in context_refs if isinstance(ref, str) and ref}):
         try:
-            with db.get_session(project_id) as session:
-                changed = session.execute(
+            wanted.append(uuid.UUID(context_ref))
+        except ValueError:
+            log.error("admission: a context could not be reopened for its children (ValueError)")
+    if not wanted:
+        return 0
+    reopened = 0
+    try:
+        with db.get_session(project_id) as session:
+            for start in range(0, len(wanted), STOP_CHUNK):
+                reopened += session.execute(
                     update(ExecutionSecurityContext)
-                    .where(ExecutionSecurityContext.id == uuid.UUID(context_ref),
+                    .where(ExecutionSecurityContext.id.in_(wanted[start:start + STOP_CHUNK]),
                            ExecutionSecurityContext.state == "completed",
                            ExecutionSecurityContext.expires_at > _now())
                     .values(state="running", ended_at=None).execution_options(synchronize_session=False)
                 ).rowcount
-                session.commit()
-            reopened += changed
-        except Exception as exc:  # pylint: disable=W0703
-            log.error("admission: a context could not be reopened for its children (%s)", type(exc).__name__)
+            session.commit()
+    except Exception as exc:  # pylint: disable=W0703
+        reopened = 0
+        log.error("admission: a context could not be reopened for its children (%s)", type(exc).__name__)
+    _mark_inherited(module, wanted)
     return reopened
+
+
+def _mark_inherited(module, context_ids) -> None:
+    """One Redis round trip for all the contexts of a fan-out. Without the mark the children are held to the lower
+    release bound, which refuses (``RATE_LIMITED``) rather than lets through, so a failure is only logged."""
+    try:
+        ttl = max(1, int(module.admission_settings.context_ttl_s))
+        pipe = module.get_redis_client().pipeline(transaction=False)
+        for context_id in context_ids:
+            pipe.set(INHERITED_KEY + str(context_id), "1", ex=ttl)
+        pipe.execute()
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("admission: the inherited mark of a context was not stored (%s)", type(exc).__name__)
 
 
 def enforce_run_deadlines(module, now=None) -> int:
@@ -1250,6 +1362,10 @@ def _mandate_revoke_code(row, stamped) -> Optional[str]:
 
 
 def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,R0914,R0915
+    """Is this run still the one that was admitted? No database connection is held while anything else is asked: the
+    context (and, in the same project, its binding) is read in a short session, the identity service and the facts are
+    asked with none open, and the state is written in a short session of its own, as a conditional update (a context
+    that left its live states meanwhile is not moved)."""
     if isinstance(project_id, bool) or not isinstance(project_id, int):
         raise _denied("STALE_CONTEXT")
     known["project_id"] = project_id
@@ -1262,86 +1378,102 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
     if isinstance(caller.get("run_id"), str):
         known["run_id"] = caller["run_id"]
     #
+    columns = ExecutionSecurityContext
     with db.get_session(project_id) as session:
         row = session.execute(
-            select(ExecutionSecurityContext).where(ExecutionSecurityContext.id == context_id)
-        ).scalar_one_or_none()
-        if row is None:
-            raise _denied("STALE_CONTEXT")
-        known.update(application_id=row.application_id, agent_binding_ref=str(row.agent_binding_ref),
-                     policy_revision=row.policy_revision, environment=row.environment)   # as admitted, not as today
-        is_mandate = (row.subject or {}).get("kind") == "mandate"
-        if is_mandate and str((row.subject or {}).get("ref")).startswith("mandate:"):
-            known["mandate_ref"] = str(row.subject["ref"])[len("mandate:"):]
-        if row.schema_version != SCHEMA_VERSION or row.profile != "governed":
-            raise _denied("UNKNOWN_SCHEMA_VERSION")
-        if (caller.get("kind") != "indexer_worker" or caller.get("task_name") not in ADMITTED_TASKS
-                or caller.get("run_id") != row.run_id):
-            raise _denied("STALE_CONTEXT")
-        if row.state not in LIVE_STATES:
-            reason = row.revoked_reason if row.state == "revoked" else None
-            raise _denied(reason if reason in REVOKE_CODES else "STALE_CONTEXT")
-        if _now() >= _aware(row.expires_at):
-            raise _denied("STALE_CONTEXT")
-        #
-        def revoke(code):
+            select(columns.schema_version, columns.profile, columns.state, columns.revoked_reason, columns.expires_at,
+                   columns.run_id, columns.attempt, columns.project_id, columns.application_id, columns.version_id,
+                   columns.agent_binding_ref, columns.binding_project_id, columns.subject, columns.caller,
+                   columns.definition_digest, columns.policy_revision, columns.environment, columns.revocation_epochs,
+                   columns.allowed_bindings)
+            .where(columns.id == context_id)
+        ).one_or_none()
+        binding = None
+        if row is not None and (row.binding_project_id or project_id) == project_id:   # the same schema: the same read
+            binding = session.execute(
+                select(AgentIdentityBinding.state, AgentIdentityBinding.revocation_epoch,
+                       AgentIdentityBinding.definition_digest)
+                .where(AgentIdentityBinding.id == row.agent_binding_ref)
+            ).one_or_none()
+    if row is None:
+        raise _denied("STALE_CONTEXT")
+    known.update(application_id=row.application_id, agent_binding_ref=str(row.agent_binding_ref),
+                 policy_revision=row.policy_revision, environment=row.environment)   # as admitted, not as today
+    is_mandate = (row.subject or {}).get("kind") == "mandate"
+    if is_mandate and str((row.subject or {}).get("ref")).startswith("mandate:"):
+        known["mandate_ref"] = str(row.subject["ref"])[len("mandate:"):]
+    if row.schema_version != SCHEMA_VERSION or row.profile != "governed":
+        raise _denied("UNKNOWN_SCHEMA_VERSION")
+    if (caller.get("kind") != "indexer_worker" or caller.get("task_name") not in ADMITTED_TASKS
+            or caller.get("run_id") != row.run_id):
+        raise _denied("STALE_CONTEXT")
+    if row.state not in LIVE_STATES:
+        reason = row.revoked_reason if row.state == "revoked" else None
+        raise _denied(reason if reason in REVOKE_CODES else "STALE_CONTEXT")
+    if _now() >= _aware(row.expires_at):
+        raise _denied("STALE_CONTEXT")
+    #
+    def revoke(code):
+        with db.get_session(project_id) as session:
             _set_state(session, context_id, "revoked", code)
             session.commit()
-            return _denied(code)
-        #
-        stamped = row.revocation_epochs if isinstance(row.revocation_epochs, dict) else {}
-        user_id = (row.caller or {}).get("user_id")
-        if isinstance(user_id, bool) or not isinstance(user_id, int):
-            raise revoke("EPOCH_MISMATCH")
+        return _denied(code)
+    #
+    stamped = row.revocation_epochs if isinstance(row.revocation_epochs, dict) else {}
+    user_id = (row.caller or {}).get("user_id")
+    if isinstance(user_id, bool) or not isinstance(user_id, int):
+        raise revoke("EPOCH_MISMATCH")
+    try:
+        epochs = auth.read_identity_epochs("user", user_id)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("validate_context: user epochs unreadable (%s)", type(exc).__name__)
+        epochs = None
+    if not isinstance(epochs, dict):
+        raise _denied("DEPENDENCY_UNAVAILABLE")  # unknown, not revoked: the run may be retried
+    if is_mandate and epochs.get("active") is False:
+        # the owner is gone: the mandate goes with them, for every run, not only this one
+        _suspend_owner(row.binding_project_id or project_id, user_id)
+        raise revoke("MANDATE_INACTIVE")
+    if is_mandate and epochs.get("active") is not True:
+        raise _denied("DEPENDENCY_UNAVAILABLE")   # no verdict: unknown, not revoked
+    if not epochs.get("active") or epochs.get("user") != stamped.get("user"):
+        raise revoke("EPOCH_MISMATCH")
+    #
+    if (row.binding_project_id or project_id) != project_id:   # the agent lives in another project
+        binding = _read_binding(row.binding_project_id, row.agent_binding_ref)
+    if binding is None or binding.state != "active":
+        raise revoke("DENIED_BINDING")
+    if binding.revocation_epoch != stamped.get("binding"):
+        raise revoke("EPOCH_MISMATCH")
+    if binding.definition_digest != row.definition_digest:
+        raise revoke("BINDING_DIGEST_MISMATCH")
+    #
+    if is_mandate:
+        code = _mandate_revoke_code(row, stamped)
+        if code is not None:
+            raise revoke(code)
+    #
+    if isinstance(row.allowed_bindings, list) and row.allowed_bindings:
         try:
-            epochs = auth.read_identity_epochs("user", user_id)
+            code = recheck_credentials(
+                row.binding_project_id or project_id, row.allowed_bindings, (row.subject or {}).get("ref"),
+                str(row.agent_binding_ref), _now())
         except Exception as exc:  # pylint: disable=W0703
-            log.error("validate_context: user epochs unreadable (%s)", type(exc).__name__)
-            epochs = None
-        if not isinstance(epochs, dict):
-            raise _denied("DEPENDENCY_UNAVAILABLE")  # unknown, not revoked: the run may be retried
-        if is_mandate and epochs.get("active") is False:
-            # the owner is gone: the mandate goes with them, for every run, not only this one
-            _suspend_owner(row.binding_project_id or project_id, user_id)
-            raise revoke("MANDATE_INACTIVE")
-        if is_mandate and epochs.get("active") is not True:
-            raise _denied("DEPENDENCY_UNAVAILABLE")   # no verdict: unknown, not revoked
-        if not epochs.get("active") or epochs.get("user") != stamped.get("user"):
-            raise revoke("EPOCH_MISMATCH")
-        #
-        binding = _read_binding(row.binding_project_id or project_id, row.agent_binding_ref)
-        if binding is None or binding.state != "active":
-            raise revoke("DENIED_BINDING")
-        if binding.revocation_epoch != stamped.get("binding"):
-            raise revoke("EPOCH_MISMATCH")
-        if binding.definition_digest != row.definition_digest:
-            raise revoke("BINDING_DIGEST_MISMATCH")
-        #
-        if is_mandate:
-            code = _mandate_revoke_code(row, stamped)
-            if code is not None:
-                raise revoke(code)
-        #
-        if isinstance(row.allowed_bindings, list) and row.allowed_bindings:
-            try:
-                code = recheck_credentials(
-                    row.binding_project_id or project_id, row.allowed_bindings, (row.subject or {}).get("ref"),
-                    str(row.agent_binding_ref), _now())
-            except Exception as exc:  # pylint: disable=W0703
-                log.error("validate_context: credential facts unreadable (%s)", type(exc).__name__)
-                raise _denied("DEPENDENCY_UNAVAILABLE") from None   # unknown, not revoked: the run may be retried
-            if code is not None:
-                raise revoke(code)
-        #
+            log.error("validate_context: credential facts unreadable (%s)", type(exc).__name__)
+            raise _denied("DEPENDENCY_UNAVAILABLE") from None   # unknown, not revoked: the run may be retried
+        if code is not None:
+            raise revoke(code)
+    #
+    with db.get_session(project_id) as session:
         if _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
             raise _denied("STALE_CONTEXT")
         session.commit()
-        return {
-            "context_ref": str(context_id), "run_id": row.run_id, "attempt": row.attempt,
-            "project_id": row.project_id, "application_id": row.application_id, "version_id": row.version_id,
-            "agent_binding_ref": str(row.agent_binding_ref), "policy_revision": row.policy_revision,
-            "expires_at": _aware(row.expires_at).isoformat(),
-        }
+    return {
+        "context_ref": str(context_id), "run_id": row.run_id, "attempt": row.attempt,
+        "project_id": row.project_id, "application_id": row.application_id, "version_id": row.version_id,
+        "agent_binding_ref": str(row.agent_binding_ref), "policy_revision": row.policy_revision,
+        "expires_at": _aware(row.expires_at).isoformat(),
+    }
 
 
 def validate_context(module, project_id, context_ref, caller) -> dict:
@@ -1359,7 +1491,10 @@ def validate_context(module, project_id, context_ref, caller) -> dict:
         code = "DEPENDENCY_UNAVAILABLE"
     else:
         _metric(CONTEXT_VALIDATION, "execution_context_validation_total", "result", "allow", "VALIDATED")
-        return {"ok": True, "context": context}
+        reply = {"ok": True, "context": context}
+        if (getattr(module, "_governed_handlers", None) or {}).get("release_batch"):
+            reply["batch_release"] = True   # the worker may ask for all the slots of the run in one release
+        return reply
     _record_deny(module, code, event_type="decision", **known)
     _metric(CONTEXT_VALIDATION, "execution_context_validation_total", "result", "deny", code)
     return {"ok": False, "reason_code": code, "message": MESSAGES.get(code, GENERIC_MESSAGE)}

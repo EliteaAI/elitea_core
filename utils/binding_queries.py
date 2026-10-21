@@ -9,7 +9,9 @@ from sqlalchemy import func, select
 from tools import auth, db
 
 from ..models.agent_identity import AgentIdentityBinding as Binding
-from .definition_digest import DigestError, digest_for_version, digest_inputs_for_version, digests_for_versions
+from .definition_digest import (
+    DigestError, digest_for_version, digest_inputs_for_version, digests_for_versions, read_definition,
+)
 
 MAX_VERSIONS_PER_AGENT = 50
 SORTS = ("updated_at", "created_at", "state", "application_name")
@@ -31,10 +33,11 @@ def digest_prefix(digest):
     return (digest or "").split(":", 1)[-1][:DIGEST_PREFIX_LENGTH]
 
 
-def digest_now(session, version_id):
-    """The digest of the version's definition as it is now, or None when it cannot be computed."""
+def digest_now(session, version_id, loaded=None):
+    """The digest of the version's definition as it is now, or None when it cannot be computed. ``loaded``: the
+    ``(version, mappings_with_tools)`` the caller has read already."""
     try:
-        return digest_for_version(session, version_id)
+        return digest_for_version(session, version_id, loaded)
     except DigestError:
         return None
 
@@ -91,28 +94,32 @@ def list_page(project_id, *, state=None, identity_mode=None, application_id=None
               sort_by="updated_at", sort_order="desc", limit=20, offset=0):
     """``{total, rows}``: one page of the project's bindings. The digest is recomputed for the page's rows only."""
     statement, application = _select(project_id)
+    conditions = []
     if state:
-        statement = statement.where(Binding.state == state)
+        conditions.append(Binding.state == state)
     if identity_mode:
-        statement = statement.where(Binding.identity_mode == identity_mode)
+        conditions.append(Binding.identity_mode == identity_mode)
     if application_id:
-        statement = statement.where(Binding.application_id == application_id)
+        conditions.append(Binding.application_id == application_id)
     if search:
-        statement = statement.where(application.name.ilike(_like(search), escape="\\"))
+        conditions.append(application.name.ilike(_like(search), escape="\\"))
+    statement = statement.where(*conditions)
+    # only a search on the application name needs the joins to count; the rows of the page are the same either way
+    counted = statement if search else select(Binding.id).where(Binding.project_id == project_id, *conditions)
     column = application.name if sort_by == "application_name" else getattr(Binding, sort_by if sort_by in SORTS else "updated_at")
     order = column.asc() if sort_order == "asc" else column.desc()
     with db.get_session(project_id) as session:
-        total = session.execute(select(func.count()).select_from(statement.subquery())).scalar_one()
+        total = session.execute(select(func.count()).select_from(counted.subquery())).scalar_one()
         page = session.execute(statement.order_by(order, Binding.id).limit(limit).offset(offset)).all()
-        users = users_by_id([uid for binding, _, _ in page for uid in (binding.created_by, binding.state_changed_by)])
         # one digest per distinct version of the page, from two queries in all
         current = digests_for_versions(session, {binding.version_id for binding, _, _ in page})
-        rows = []
-        for binding, application_name, version_name in page:
-            item = _row(binding, application_name, version_name, users)
-            item["definition_digest"] = digest_prefix(binding.definition_digest)
-            item["digest_status"] = digest_status(binding.definition_digest, current.get(binding.version_id))
-            rows.append(item)
+    users = users_by_id([uid for binding, _, _ in page for uid in (binding.created_by, binding.state_changed_by)])
+    rows = []   # the identity service is asked with no connection held
+    for binding, application_name, version_name in page:
+        item = _row(binding, application_name, version_name, users)
+        item["definition_digest"] = digest_prefix(binding.definition_digest)
+        item["digest_status"] = digest_status(binding.definition_digest, current.get(binding.version_id))
+        rows.append(item)
     return {"total": total, "rows": rows}
 
 
@@ -134,17 +141,22 @@ def get_detail(project_id, binding_id):
         if row is None:
             return None
         binding, application_name, version_name = row
-        users = users_by_id([binding.created_by, binding.state_changed_by])
-        item = _row(binding, application_name, version_name, users)
-        current = digest_now(session, binding.version_id)
-        item["definition_digest"] = binding.definition_digest
-        item["digest_now"] = current
-        item["digest_status"] = digest_status(binding.definition_digest, current)
-        try:
-            item["digest_inputs"] = digest_inputs_for_version(session, binding.version_id)
+        try:   # the version and its toolkits are read once for the digest and for what it is made of
+            loaded = read_definition(session, binding.version_id)
         except DigestError:
-            item["digest_inputs"] = None
-        item["grants_count"] = None   # the grants live in the secrets plugin; no count is exposed to this plugin yet
+            loaded = None
+        current = digest_now(session, binding.version_id, loaded) if loaded is not None else None
+        try:
+            inputs = digest_inputs_for_version(session, binding.version_id, loaded) if loaded is not None else None
+        except DigestError:
+            inputs = None
+    users = users_by_id([binding.created_by, binding.state_changed_by])   # with no connection held
+    item = _row(binding, application_name, version_name, users)
+    item["definition_digest"] = binding.definition_digest
+    item["digest_now"] = current
+    item["digest_status"] = digest_status(binding.definition_digest, current)
+    item["digest_inputs"] = inputs
+    item["grants_count"] = None   # the grants live in the secrets plugin; no count is exposed to this plugin yet
     return item
 
 

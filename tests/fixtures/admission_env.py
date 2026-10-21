@@ -106,6 +106,10 @@ class FakeRedis:
         self.ttls.pop(key, None)
         return 1 if self.values.pop(key, None) is not None else 0
 
+    def exists(self, key):
+        self._hit("exists", key)
+        return 1 if key in self.values else 0
+
     def incr(self, key):
         self._hit("incr", key)
         self.values[key] = int(self.values.get(key, 0)) + 1
@@ -127,6 +131,12 @@ class FakeRedis:
 
             def incr(self_inner, key):
                 queued.append(lambda: redis.incr(key))
+
+            def set(self_inner, key, value, ex=None):
+                queued.append(lambda: redis.set(key, value, ex=ex))
+
+            def exists(self_inner, key):
+                queued.append(lambda: redis.exists(key))
 
             def expire(self_inner, key, seconds):
                 queued.append(lambda: redis.expire(key, seconds))
@@ -179,6 +189,8 @@ class Env:  # pylint: disable=R0902,R0904
         self.dir.mkdir()
         self.engines = {}
         self.sessions = []              # (project_id, session) in the order they were opened
+        self.open_sessions = 0          # how many are open right now (a pooled connection each)
+        self.max_open_sessions = 0
         self.log = self.ns.log
         self.log.lines.clear()
         self.sio_users = {}
@@ -227,6 +239,9 @@ class Env:  # pylint: disable=R0902,R0904
         self.material = {}              # credential ref id -> {field path: value}
         self.release_calls = []         # (project_id, ref_id, generation, release_id, actor_ref, allow_validated)
         self.release_reply = None       # a fixed answer of `release_credential_material`
+        self.batch_store = False        # does the secrets plugin offer `release_credential_materials` (perf PR 2)
+        self.batch_release_calls = []   # (project_id, items, release_id, actor_ref) of `release_credential_materials`
+        self.batch_reply = None         # a fixed answer of `release_credential_materials`
         self.release_raises = None
         self.redis = FakeRedis()
         self.capable = True             # does a live worker support the governed tasks
@@ -249,6 +264,7 @@ class Env:  # pylint: disable=R0902,R0904
         self.fail_commit_once = None
         self.digest_calls = 0
         self.ns.adm._now = self.ns.real_now  # pylint: disable=W0212
+        self.ns.credential_decision.forget_secret_fields()
         if hasattr(self.ns, "install_fakes"):
             self.ns.install_fakes(self)
 
@@ -294,10 +310,13 @@ class Env:  # pylint: disable=R0902,R0904
             def __enter__(self_inner):
                 self_inner.session = env.ns.CountingSession(env, bind=env.engine(project_id))
                 env.sessions.append((project_id, self_inner.session))
+                env.open_sessions += 1
+                env.max_open_sessions = max(env.max_open_sessions, env.open_sessions)
                 return self_inner.session
 
             def __exit__(self_inner, *exc):
                 self_inner.session.close()
+                env.open_sessions -= 1
                 return False
 
         return _Scope()
@@ -501,6 +520,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.run_id = load("utils", "run_id")
     ns.pd_admission = load("models/pd", "admission")
     ns.caps = load("utils", "worker_capabilities")
+    ns.schema_registry_version = load("utils", "schema_registry_version")
     ns.credential_decision = load("utils", "credential_decision")
     ns.credential_slots = load("utils", "credential_slots")
     ns.mandate_state = load("utils", "mandate_state")
@@ -656,8 +676,9 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             return {item: dict(env.configurations[(project_id, item)]) for item in uuids if (project_id, item) in env.configurations}
 
         def credential_use_facts(project_id, config_ids, grant_keys, ref_ids=None, personal_subject_ref=None,
-                                 personal_user_id=None):
+                                 personal_user_id=None, grants_for=None):
             env.secrets_calls.append((project_id, list(config_ids), list(grant_keys), None if ref_ids is None else list(ref_ids)))
+            env.__dict__.setdefault("grants_for_calls", []).append(None if grants_for is None else [tuple(k) for k in grants_for])
             env.__dict__.setdefault("caller_calls", []).append((personal_subject_ref, personal_user_id))   # who it was read for
             if env.secrets_raises:
                 raise env.secrets_raises
@@ -678,7 +699,12 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                                                       "store_kind", "ownership_class", "revocation_epoch")}
                         references[row["configuration_id"]]["custodian_user_id"] = row.get("custodian_user_id")
                         references[row["configuration_id"]]["custodian_subject_ref"] = row.get("custodian_subject_ref")
-            for key in ("|".join(item) for item in grant_keys):
+            asked = ["|".join(item) for item in grant_keys]
+            for binding, toolkit, config_id, target, subject in (grants_for or ()):   # facts v4: the grant of the reference found
+                found = references.get(config_id)
+                if found is not None:
+                    asked.append("|".join((str(binding), str(toolkit), found["ref_id"], target, subject)))
+            for key in asked:
                 grant = env.grants.get((project_id, key))
                 if grant is not None and grant["state"] != "revoked":
                     grants[key] = dict(grant)
@@ -711,14 +737,38 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             fields = {path: SecretStr(value) for path, value in env.material.get(str(ref_id), {}).items()}
             return {"ok": True, "value": types.SimpleNamespace(fields=fields, generation=generation)}
 
+        def release_credential_materials(project_id, items, release_id, actor_ref, allow_pending=False,
+                                         allow_validated=False):
+            env.batch_release_calls.append((project_id, [dict(item) for item in items], release_id, actor_ref))
+            if env.release_raises:
+                raise env.release_raises
+            if env.batch_reply is not None:
+                return env.batch_reply
+            values = {}
+            from pydantic import SecretStr
+            for item in items:
+                row = next((r for r in env.references if r["ref_id"] == str(item["ref_id"]) and r["project_id"] == project_id), None)
+                allowed = (("pending", "validated", "active") if allow_pending else ("validated", "active")
+                           if allow_validated else ("active",))
+                if row is None or row["state"] not in allowed:
+                    return {"ok": False, "reason_code": "CREDENTIAL_REFERENCE_INACTIVE", "ref_id": item["ref_id"]}
+                if row["generation"] != item["generation"]:
+                    return {"ok": False, "reason_code": "CREDENTIAL_GENERATION_MISMATCH", "ref_id": item["ref_id"]}
+                fields = {path: SecretStr(value) for path, value in env.material.get(str(item["ref_id"]), {}).items()}
+                values[item["ref_id"]] = types.SimpleNamespace(fields=fields, generation=item["generation"])
+            return {"ok": True, "values": values}
+
         def modules():
+            secrets = types.SimpleNamespace(credential_use_facts=credential_use_facts,
+                                            credential_facts_version=lambda: env.facts_version,
+                                            release_credential_material=release_credential_material)
+            if env.batch_store:
+                secrets.release_credential_materials = release_credential_materials
             return {
                 "tracing": tracing_module(),
                 "configurations": types.SimpleNamespace(configuration_credential_facts=configuration_credential_facts,
                                                         configuration_secret_fields=configuration_secret_fields),
-                "secrets": types.SimpleNamespace(credential_use_facts=credential_use_facts,
-                                                 credential_facts_version=lambda: env.facts_version,
-                                                 release_credential_material=release_credential_material),
+                "secrets": secrets,
             }
 
         def for_module(name):
@@ -750,7 +800,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
 
         application_tools.find_toolkit_schema_by_type_everywhere = find_schema
 
-        def digest_for_version(session, version_id):  # pylint: disable=W0613
+        def digest_for_version(session, version_id, loaded=None):  # pylint: disable=W0613
             env.digest_calls += 1
             if version_id not in env.digests:
                 raise ns.digest.DigestError("VERSION_NOT_FOUND", "no such version")
@@ -768,7 +818,7 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
         ns.binding_queries.digests_for_versions = digests_for_versions
         ns.real_digests_for_versions = ns.digest.digests_for_versions
 
-        def digest_inputs_for_version(session, version_id):  # pylint: disable=W0613
+        def digest_inputs_for_version(session, version_id, loaded=None):  # pylint: disable=W0613
             if version_id not in env.digest_inputs:
                 raise ns.digest.DigestError("VERSION_NOT_FOUND", "no such version")
             return env.digest_inputs[version_id]

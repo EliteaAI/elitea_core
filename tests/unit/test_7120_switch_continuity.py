@@ -203,7 +203,7 @@ def test_the_wrapper_passes_the_state_it_read_to_the_gate_and_to_admission():
     text = (PLUGIN_ROOT / "module.py").read_text()
     wrapper = text[text.index("def _maintenance_gated_start_task"):text.index("self.task_node.start_task = _maintenance_gated_start_task")]
     assert wrapper.count("self.governance_effective") == 1 and "self.governance_profile" not in wrapper
-    assert "effective.profile, self.worker_capabilities" in wrapper and "kwargs, admission, effective)" in wrapper
+    assert "effective.profile, self.worker_capabilities" in wrapper and "kwargs, admission, effective, after_dispatch)" in wrapper
 
 
 # --- the events of a run that was admitted earlier --------------------------------------------------------------------

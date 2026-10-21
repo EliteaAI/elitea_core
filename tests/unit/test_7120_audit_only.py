@@ -585,12 +585,12 @@ def test_enforce_and_audit_only_observe_the_same_histogram_with_the_mode_as_a_la
 
 def test_audit_only_runs_the_same_admission_code_inline_on_the_dispatch_path():
     text = (PLUGIN_ROOT / "utils" / "admission.py").read_text()
-    shadow = text[text.index("def _shadow_admit("):text.index("def admit_dispatch(")]
-    assert "_admit(module, admission, run_id, payload, shadow=True)" in shadow   # the same function enforce runs
-    assert "Thread" not in text and "spawn" not in text and "apply_async" not in text   # inline, not deferred
+    shadow = text[text.index("def _shadow_evaluate("):text.index("class _AsOf")]
+    assert "_admit(module, admission, run_id, snapshot, shadow=True)" in shadow   # the same function enforce runs
+    assert "Thread" not in text and "spawn" not in text and "apply_async" not in text   # the same greenlet, no pool
     dispatch_part = text[text.index("def admit_dispatch("):text.index("def _parent_entries(")]
     assert dispatch_part.index("task_name not in ADMITTED_TASKS") < dispatch_part.index(
-        "_shadow_admit(module, call_kwargs, admission, unavailable)")
+        "_shadow_admit(module, call_kwargs, admission, unavailable, deferred)")
 
 
 def test_runs_admitted_under_enforce_are_looked_after_after_a_switch_to_off(ns, env):

@@ -134,12 +134,12 @@ class Module(module.ModuleModel):
         # task_id -> (project_id, context_ref) of governed runs admitted by this process (#6756); bounded
         self._context_by_task = OrderedDict()
         self._context_lock = Lock()   # the map is read by the deadline sweep while dispatch threads change it
-        # Credential governance (#7120): the snapshot of the switch (built in init), and which of the two worker bus
-        # handlers of a governed run are registered. They are registered on the first move into enforce and stay until
-        # deinit, so runs admitted under enforce keep validating after a switch to off; booting in off registers none
+        # Credential governance (#7120): the snapshot of the switch (built in init), and which of the worker bus
+        # handlers of a governed run (validate, release one slot, release a batch) are registered. They are registered on
+        # the first move into enforce and stay until deinit, so runs admitted under enforce keep validating after a switch to off; booting in off registers none
         self.governance_state = None
         self.governed_handlers_registered = False
-        self._governed_handlers = {"validate": False, "release": False}
+        self._governed_handlers = {"validate": False, "release": False, "release_batch": False}
         self._governed_handlers_lock = Lock()
         # single-use tickets of autonomous (mandate) runs, minted and taken in this process only; bounded (#6947)
         self._mandate_tickets = TicketStore()
@@ -661,12 +661,14 @@ class Module(module.ModuleModel):
 
     def _ensure_governed_handlers_registered(self):
         """Register the worker bus handlers of a governed run: workers prove a run still holds its admission
-        (#6756), and ask Main for the material of a credential slot, sealed to the asking worker (#6946). Idempotent;
-        a handler that could not be registered is tried again at the next refresh of the switch. True when both are."""
+        (#6756), and ask Main for the material of a credential slot, or of all the slots of a run in one call, sealed to
+        the asking worker (#6946). Idempotent; a handler that could not be registered is tried again at the next
+        refresh of the switch. True when all are."""
         with self._governed_handlers_lock:
             for key, handler, name in (
                     ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
-                    ("release", self.release_credential, "restricted_release_credential")):
+                    ("release", self.release_credential, "restricted_release_credential"),
+                    ("release_batch", self.release_credentials, "restricted_release_credentials")):
                 if self._governed_handlers[key]:
                     continue
                 try:
@@ -681,7 +683,8 @@ class Module(module.ModuleModel):
         with self._governed_handlers_lock:
             for key, handler, name in (
                     ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
-                    ("release", self.release_credential, "restricted_release_credential")):
+                    ("release", self.release_credential, "restricted_release_credential"),
+                    ("release_batch", self.release_credentials, "restricted_release_credentials")):
                 if not self._governed_handlers[key]:
                     continue
                 try:
@@ -854,13 +857,19 @@ class Module(module.ModuleModel):
                 kwargs, effective.profile, self.worker_capabilities,
             )
             stamp_predict_run_id(kwargs)
-            context_ref = admit_dispatch(self, args[0] if args else kwargs.get("name"), kwargs, admission, effective)
-            # a mandate run carries its time limit here (admit_dispatch); it is for Main only, the worker never sees it
-            deadline = (kwargs.get("meta") or {}).pop("context_deadline", None) if context_ref else None
-            task_id = _original_start_task(*args, **kwargs)
-            if context_ref:
-                track_context(self, task_id, admission.project_id, context_ref, deadline=deadline)
-            return task_id
+            after_dispatch = []   # audit only: its evaluation waits for nothing, so it runs once the task is started
+            try:
+                name = args[0] if args else kwargs.get("name")
+                context_ref = admit_dispatch(self, name, kwargs, admission, effective, after_dispatch)
+                # a mandate run carries its time limit here (admit_dispatch); it is for Main only, the worker never sees it
+                deadline = (kwargs.get("meta") or {}).pop("context_deadline", None) if context_ref else None
+                task_id = _original_start_task(*args, **kwargs)
+                if context_ref:
+                    track_context(self, task_id, admission.project_id, context_ref, deadline=deadline)
+                return task_id
+            finally:
+                for evaluate in after_dispatch:
+                    evaluate()   # never raises
 
         self.task_node.start_task = _maintenance_gated_start_task
 
@@ -1509,6 +1518,8 @@ class Module(module.ModuleModel):
         # Cleanup provider storage
         if hasattr(self, 'present_providers'):
             self.present_providers.clear()
+            from .utils import schema_registry_version  # pylint: disable=C0415
+            schema_registry_version.bump()
         if hasattr(self, 'unhealthy_providers'):
             self.unhealthy_providers.clear()
 

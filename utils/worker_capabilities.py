@@ -43,6 +43,14 @@ GOVERNED_TASK_CAPABILITIES = {
     "indexer_predict_agent": (CAPABILITY_CREDENTIAL_SLOTS_V1,),
     "indexer_governed_check_connection": (CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_GOVERNED_OPS_POOL_V1),
 }
+# A worker that announces this asks for all the slots of a run in one release (``restricted_release_credentials``). It
+# is preferred and not required: a worker without it releases slot by slot (``restricted_release_credential``), which
+# Main still serves, so a rolling upgrade never leaves a governed task without a worker.
+CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1 = "credential_slots_batch.v1"
+GOVERNED_TASK_PREFERRED_CAPABILITIES = {
+    "indexer_agent": (CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1,),
+    "indexer_predict_agent": (CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1,),
+}
 
 
 class _Counter:
@@ -69,6 +77,10 @@ class _Counter:
 GOVERNED_DISPATCH_UNAVAILABLE = _Counter(
     "governed_dispatch_unavailable_total",
     "Governed tasks refused at dispatch because no live worker supports them",
+)
+GOVERNED_DISPATCH_WITHOUT_BATCH = _Counter(
+    "governed_dispatch_without_slot_batch_total",
+    "Governed tasks dispatched while no live worker announces the batch release of credential slots",
 )
 
 
@@ -129,3 +141,6 @@ def apply_envelope_gate(task_name, call_kwargs, profile, registry):
             task_name, sorted(required),
         )
         raise WorkerCapabilityUnavailable(task_name, tuple(sorted(required)))
+    preferred = frozenset(GOVERNED_TASK_PREFERRED_CAPABILITIES.get(task_name, ()))
+    if preferred and not registry.has_capable_worker(required | preferred):   # never a refusal: counted only
+        GOVERNED_DISPATCH_WITHOUT_BATCH.inc()

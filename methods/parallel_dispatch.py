@@ -211,6 +211,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
     @web.method()
     def parallel_dispatch_launch_children(self, parent_task_id, parent_meta, parent_result):
+        """Launch the children of a parked parent (see ``_parallel_launch_children``). Governed only (C-1009): the
+        decisions of the parent's admission, which each child is sealed against, are read once for the whole batch."""
+        if not self._parallel_governance_active():
+            return self._parallel_launch_children(parent_task_id, parent_meta, parent_result)
+        from ..utils.admission import parent_entries_scope  # pylint: disable=C0415
+        with parent_entries_scope():
+            return self._parallel_launch_children(parent_task_id, parent_meta, parent_result)
+
+    @web.method()
+    def _parallel_launch_children(self, parent_task_id, parent_meta, parent_result):
         """Launch one durable indexer_agent per parked child spec.
 
         Reads the parked parent's result (specs + per-child launch payloads +
