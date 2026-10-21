@@ -54,7 +54,7 @@ def _version(agent_type='openai', meta=None, instructions=None, tools=()):
 
 @pytest.fixture
 def scan(isolated_sys_modules):
-    state = types.SimpleNamespace(version=None, expand_errors={}, expanded={}, calls=[], secrets={}, sensitive=set())
+    state = types.SimpleNamespace(version=None, expand_errors={}, expanded={}, calls=[], sensitive=set())
 
     def expand_toolkit_settings(type_, settings, project_id, user_id):
         state.calls.append((type_, project_id, user_id))
@@ -67,17 +67,6 @@ def scan(isolated_sys_modules):
         sys.modules[name].__path__ = []
     tools = types.ModuleType('tools')
     tools.db = types.SimpleNamespace(get_session=lambda project_id: FakeSession(state.version))
-
-    class VaultClient:
-        def __init__(self, project_id):
-            self.project_id = project_id
-
-        def get_all_secrets(self):
-            if isinstance(state.secrets, Exception):
-                raise state.secrets
-            return state.secrets
-
-    tools.VaultClient = VaultClient
     sys.modules['tools'] = tools
     pylon_tools = types.ModuleType('pylon.core.tools')
     pylon_tools.log = types.SimpleNamespace(exception=lambda *a, **k: None, warning=lambda *a, **k: None)
@@ -97,7 +86,7 @@ def scan(isolated_sys_modules):
     load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'pipeline_utils.py', f'{PKG}.utils.pipeline_utils')
     module = load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_risk.py', f'{PKG}.utils.schedule_risk')
     state.run = lambda version_id=VERSION_ID: module.scan_schedule_risks(12, version_id, 42)
-    state.allowed = lambda: module.is_run_without_asking_allowed(12)
+    state.module = module
     return state
 
 
@@ -230,15 +219,7 @@ class TestEL7011R2SensitiveActions:
         assert scan.run() == []
 
 
-@pytest.mark.parametrize(('secrets', 'allowed'), [
-    ({'schedules_allow_run_without_asking': 'true'}, True),
-    ({'schedules_allow_run_without_asking': ' YES '}, True),
-    ({'schedules_allow_run_without_asking': '1'}, True),
-    ({'schedules_allow_run_without_asking': 'no'}, False),
-    ({}, False),
-    (RuntimeError('vault down'), False),
-])
-def test_el7011_r3_2_run_without_asking_needs_the_project_secret(scan, secrets, allowed):
-    """R3.2 (design D5): only a truthy project secret allows the rule; a store error refuses it."""
-    scan.secrets = secrets
-    assert scan.allowed() is allowed
+def test_el7011_cr_the_scan_no_longer_owns_the_run_without_asking_check(scan):
+    """Owner CR 2026-10-21: the project setting replaces the secret; utils/schedule_settings.py owns the check."""
+    assert not hasattr(scan.module, 'is_run_without_asking_allowed')
+    assert not hasattr(scan.module, 'ALLOW_RUN_WITHOUT_ASKING_SECRET')

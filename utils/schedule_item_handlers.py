@@ -82,7 +82,7 @@ def _details(row, scope: ScheduleScope) -> dict:
 
 def _refuse_unallowed_rule(project_id: int, body):
     """Answer 400 when the body asks for "run without asking" and the project does not allow it."""
-    from .schedule_risk import is_run_without_asking_allowed
+    from .schedule_settings import is_run_without_asking_allowed
     if body.approval_rule == "run_without_asking" and not is_run_without_asking_allowed(project_id):
         return {"error": "approval_rule_not_allowed", "field": "approval_rule"}, 400
     return None
@@ -95,7 +95,7 @@ def _saved(row, scope: ScheduleScope, project_id: int) -> dict:
 
 
 def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
-    from .schedule_risk import is_run_without_asking_allowed
+    from .schedule_settings import is_run_without_asking_allowed
     return {**_details(row, scope), "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}
 
 

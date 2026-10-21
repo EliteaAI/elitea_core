@@ -233,7 +233,7 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
     # late: the export loads without these modules
     from ..models.pd.schedule_yaml import ScheduleFileItem
     from .schedule_access import ScheduleScope
-    from .schedule_risk import is_run_without_asking_allowed
+    from .schedule_settings import is_run_without_asking_allowed
     scope = ScheduleScope(user_id=admin_id, is_admin=True, permissions=frozenset())
     may_run_without_asking = is_run_without_asking_allowed(project_id)
     report = {'created': [], 'updated': [], 'skipped': [], 'failed': []}

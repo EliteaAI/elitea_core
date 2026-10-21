@@ -16,16 +16,20 @@ PIPELINE = {'entity_type': 'pipeline', 'entity_name': 'Report flow', 'version_na
 
 
 @pytest.fixture
-def secrets():
-    return {}
+def setting():
+    """The project setting "Allow Run without asking" and the project ids it was read for."""
+    return types.SimpleNamespace(allowed=False, reads=[])
 
 
-def load_draft_utils(monkeypatch, secrets=None):
-    """schedule_draft_utils on its real models, with the roster above and the given project secrets."""
+def load_draft_utils(monkeypatch, setting=None):
+    """schedule_draft_utils on its real models, with the roster above and the given project setting."""
+    setting = setting or types.SimpleNamespace(allowed=False, reads=[])
     stub = types.ModuleType('tools')
     stub.this = types.SimpleNamespace(module=types.SimpleNamespace(descriptor=types.SimpleNamespace(config={})))
-    stub.VaultClient = lambda project_id: types.SimpleNamespace(get_all_secrets=lambda: secrets or {})
     monkeypatch.setitem(sys.modules, 'tools', stub)
+    settings = types.ModuleType('plugins.elitea_core.utils.schedule_settings')
+    settings.is_run_without_asking_allowed = lambda project_id: setting.reads.append(project_id) or setting.allowed
+    monkeypatch.setitem(sys.modules, settings.__name__, settings)
     for dotted in ('utils.schedule_timing', 'models.pd.entity_schedule', 'models.pd.generate_schedule_draft',
                    'utils.schedule_draft_utils'):
         monkeypatch.setitem(sys.modules, 'plugins.elitea_core.' + dotted, None)
@@ -39,8 +43,8 @@ def load_draft_utils(monkeypatch, secrets=None):
 
 
 @pytest.fixture
-def validate(secrets, monkeypatch):
-    module = load_draft_utils(monkeypatch, secrets)
+def validate(setting, monkeypatch):
+    module = load_draft_utils(monkeypatch, setting)
     return lambda raw, locked=None: module.validate_schedule_draft(1, raw, locked)
 
 
@@ -100,19 +104,18 @@ def test_el_7011_r2_3_locked_pipeline_keeps_type_id_and_drafted_prompt(validate)
     assert (draft.run_mode, draft.prompt, warnings) == ('prompt', 'Build the {{region}} report', [])
 
 
-@pytest.mark.parametrize('secret, rule, warned', [
-    (None, 'run_without_asking', True),
-    ('false', 'run_without_asking', True),
-    ('true', 'run_without_asking', False),
-    ('yes', 'run_without_asking', False),
-    (None, 'pause_and_ask', False),
+@pytest.mark.parametrize('allowed, rule, warned', [
+    (False, 'run_without_asking', True),
+    (True, 'run_without_asking', False),
+    (False, 'pause_and_ask', False),
+    (True, 'pause_and_ask', False),
 ])
-def test_el_7011_r2_4_run_without_asking_needs_the_project_secret(validate, secrets, secret, rule, warned):
-    if secret is not None:
-        secrets['schedules_allow_run_without_asking'] = secret
+def test_el_7011_r2_4_run_without_asking_needs_the_project_setting(validate, setting, allowed, rule, warned):
+    setting.allowed = allowed
     draft, warnings = validate({'approval_rule': rule})
     assert draft.approval_rule == ('pause_and_ask' if warned else rule)
     assert _fields(warnings) == (['approval_rule'] if warned else [])
+    assert setting.reads == ([1] if rule == 'run_without_asking' else [])
 
 
 def test_el_7011_r3_1_prompt_mode_keeps_prompt_and_variables(validate):
@@ -169,19 +172,8 @@ def test_el_7011_r2_4_an_unknown_approval_rule_becomes_pause_and_ask(validate):
     assert _fields(warnings) == ['approval_rule']
 
 
-def test_el_7011_r2_4_a_normalised_run_without_asking_still_needs_the_secret(validate):
+def test_el_7011_r2_4_a_normalised_run_without_asking_still_needs_the_setting(validate):
     draft, warnings = validate({'approval_rule': 'Run without asking'})
-    assert draft.approval_rule == 'pause_and_ask'
-    assert _fields(warnings) == ['approval_rule']
-
-
-def test_el_7011_r2_4_an_unreadable_secret_never_allows_run_without_asking(monkeypatch):
-    module = load_draft_utils(monkeypatch)
-
-    def broken(project_id):
-        raise RuntimeError('vault down')
-    monkeypatch.setattr(sys.modules['tools'], 'VaultClient', broken)
-    draft, warnings = module.validate_schedule_draft(1, {'approval_rule': 'run_without_asking'}, None)
     assert draft.approval_rule == 'pause_and_ask'
     assert _fields(warnings) == ['approval_rule']
 

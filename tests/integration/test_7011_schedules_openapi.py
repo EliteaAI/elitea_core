@@ -41,7 +41,8 @@ API_MODULES = ('schedules',)
 REAL_MODULES = (
     'utils/constants.py', 'models/pd/entity_schedule.py', 'models/pd/schedule_run.py',
     'models/pd/schedule_list.py', 'models/pd/generate_schedule_draft.py', 'utils/schedule_item_handlers.py',
-    'utils/schedule_project_handlers.py', 'utils/schedule_draft_handler.py', 'utils/schedule_openapi.py',
+    'utils/schedule_settings.py', 'utils/schedule_project_handlers.py', 'utils/schedule_draft_handler.py',
+    'utils/schedule_openapi.py',
 )
 LENIENT_MODULES = (
     'arbiter', f'{PKG}.models.entity_schedule', f'{PKG}.models.enums.all', f'{PKG}.models.pd.index',
@@ -58,7 +59,7 @@ OTHER_TAGS = {
     'elitea_core/discovery', 'elitea_core/mcp', 'elitea_core/project_context', 'elitea_core/skills',
     'elitea_core/runtime', 'elitea_core/toolkits',
 }
-# The 15 rows of the owner's route table (CR 2026-10-21)
+# The 15 rows of the owner's route table (CR 2026-10-21), plus GET and PUT settings (CR "Run without asking")
 OPERATIONS = {
     ('get', BASE),
     ('post', BASE),
@@ -75,6 +76,8 @@ OPERATIONS = {
     ('post', f'{BASE}/draft'),
     ('get', f'{BASE}/preferences'),
     ('put', f'{BASE}/preferences'),
+    ('get', f'{BASE}/settings'),
+    ('put', f'{BASE}/settings'),
 }
 NO_JSON_SUCCESS = {('delete', ITEM), ('get', f'{BASE}/export')}  # 204 without a body, a YAML file
 
@@ -187,7 +190,7 @@ def _body_schemas(spec):
 def test_r1_1_el7011_every_schedules_operation_has_its_own_path(spec):
     operations = _operations(spec)
     assert set(operations) == OPERATIONS
-    assert len(operations) == 15
+    assert len(operations) == 17
     for (method, path), operation in operations.items():
         path_params = {p['name'] for p in operation['parameters'] if p['in'] == 'path'}
         assert path_params == set(re.findall(r'{(\w+)}', path)), (method, path)
@@ -250,6 +253,16 @@ def test_cr_el7011_put_has_no_enabled_field_and_pause_resume_have_no_body(spec):
     assert '400' in operations[('put', ITEM)]['responses']
     for action in ('pause', 'resume'):
         assert 'requestBody' not in operations[('post', f'{ITEM}/{action}')]
+
+
+# Owner CR 2026-10-21 "Run without asking": any member reads the setting, only a schedules admin saves it
+def test_cr_el7011_settings_publish_the_one_key_and_the_admin_rule(spec):
+    operations = _operations(spec)
+    body = operations[('put', f'{BASE}/settings')]['requestBody']['content']['application/json']['schema']['$ref']
+    assert set(spec['components']['schemas'][body.rsplit('/', 1)[-1]]['properties']) == {'allow_run_without_asking'}
+    assert '`schedules.admin`' in operations[('put', f'{BASE}/settings')]['description']
+    assert '`schedules.list`' in operations[('get', f'{BASE}/settings')]['description']
+    assert {'400', '403'} <= set(operations[('put', f'{BASE}/settings')]['responses'])
 
 
 # R1.6: a restart reorders `with_modes`; the published paths stay the same
@@ -328,7 +341,7 @@ def test_r1_3_el7011_body_fields_have_descriptions(spec):
 def test_r1_3_el7011_body_fields_have_examples(spec):
     schemas = _body_schemas(spec)
     assert {'ScheduleCreate', 'ScheduleEdit', 'ScheduleRunRequest', 'GenerateScheduleDraftRequest',
-            'SchedulePreferenceUpdate', f'post {ITEM}/owner'} <= set(schemas)
+            'SchedulePreferenceUpdate', 'ScheduleProjectSettings', f'post {ITEM}/owner'} <= set(schemas)
     schemas.pop(f'post {BASE}/import')  # a file upload: no example value fits a binary part
     for name, schema in schemas.items():
         for field, prop in schema.get('properties', {}).items():

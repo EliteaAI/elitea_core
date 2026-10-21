@@ -59,7 +59,6 @@ def real_scan(harness):
     sys.modules[f'{PACKAGE}.utils.application_tools'] = types.SimpleNamespace(
         ConfigurationExpandError=Exception, expand_toolkit_settings=lambda *args: {},
     )
-    sys.modules['tools'].VaultClient = lambda project_id: types.SimpleNamespace(get_all_secrets=dict)
     sys.modules['tools'].db = types.SimpleNamespace(get_session=lambda project_id: FakeScanSession(version))
     policy = {'toolkit_security': {'sensitive_tools': {'jira': ['delete_issue']}}}
     sys.modules['tools'].this = types.SimpleNamespace(module=types.SimpleNamespace(
