@@ -39,6 +39,13 @@ class TriggerType:
     VALUES = (CHAT, API, MCP, WEBHOOK, SCHEDULED, SCHEDULE_MANUAL, MANUAL)
 
 
+def with_execution_type(meta: dict | None, trigger_source: str) -> dict:
+    """Conversation meta with the entry point's execution_type; a stored value is kept (BUG-12, US-16 R1.5)."""
+    if (meta or {}).get('execution_type'):
+        return meta
+    return {**(meta or {}), 'execution_type': trigger_source}
+
+
 def create_trigger_run_conversation(
     project_id: int,
     version: ApplicationVersion,
@@ -96,6 +103,7 @@ def create_trigger_run_conversation(
 
         if extra_meta:
             conversation_meta.update(extra_meta)
+        conversation_meta = with_execution_type(conversation_meta, trigger_type)
 
         # Create conversation with proper metadata for History tab
         conversation = Conversation(
