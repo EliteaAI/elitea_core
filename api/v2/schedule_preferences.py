@@ -8,9 +8,9 @@ from tools import api_tools, auth, db, register_openapi
 
 from ...models.entity_schedule import EntitySchedulePreference
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.constants import SCHEDULES_OPENAPI_TAG as OPENAPI_TAG
 from ...utils.schedule_access import schedule_check_spec
 
-OPENAPI_TAG = "elitea_core/schedules"
 INVALID_BODY = {"error": "get_notified must be true or false"}
 
 

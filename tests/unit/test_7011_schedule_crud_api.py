@@ -163,6 +163,7 @@ def harness(isolated_sys_modules, monkeypatch):
     load('models/pd/index.py', 'models.pd.index')
     load('models/pd/entity_schedule.py', 'models.pd.entity_schedule')
     load('models/pd/schedule_run.py', 'models.pd.schedule_run')
+    load('models/pd/schedule_list.py', 'models.pd.schedule_list')
     load('utils/schedule_claim.py', 'utils.schedule_claim')
     load('utils/schedule_dispatch.py', 'utils.schedule_dispatch')
     load('utils/schedule_service.py', 'utils.schedule_service')

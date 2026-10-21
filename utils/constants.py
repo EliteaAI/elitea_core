@@ -2,6 +2,11 @@ from enum import Enum
 
 PROMPT_LIB_MODE = 'prompt_lib'
 
+# The Swagger tag and the pinned path of the Schedules routes (EL-7011 US-55); register_api_class
+# would pick any of the URLs that share a handler class (BUG-11)
+SCHEDULES_OPENAPI_TAG = 'elitea_core/schedules'
+SCHEDULES_PROJECT_PATH = '<string:mode>/<int:project_id>'
+
 ENTITY_DESCRIPTION_LEN_LIMITATION_4_LIST_API: int = 210
 
 ICON_PATH_DELIMITER: str = '___'
