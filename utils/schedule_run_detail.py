@@ -114,4 +114,5 @@ def usage_summary(session, project_id: int, run) -> tuple[int | None, float | No
         return None, None
     if not count:
         return None, None
-    return int(tokens or 0), round((cost_nano_usd or 0) / NANO_USD, 6)
+    # Postgres SUM over BIGINT gives Decimal, which the JSON answer cannot hold
+    return int(tokens or 0), round(float(cost_nano_usd or 0) / NANO_USD, 6)
