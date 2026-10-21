@@ -2,6 +2,7 @@
 
 The import updates the schedule an item matches, by key or else by natural key, through the update path of the
 schedule service; an unmatched item is created disabled, through the create path."""
+from datetime import UTC
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,7 @@ from ..models.all import Application, ApplicationVersion
 from ..models.entity_schedule import EntitySchedule
 from .pipeline_utils import from_str_to_yaml, validate_yaml_from_str
 from .schedule_service import ScheduleError
+from .schedule_timing import end_of_day
 
 FILE_KIND = 'elitea_schedules'
 SCHEMA_VERSION = 2
@@ -180,6 +182,17 @@ def _match(by_key: dict, by_name: dict, seen_keys: set, item, application_id: in
     return rows[0] if rows else None
 
 
+def _unchanged(row: EntitySchedule, values: dict, version_id: int) -> bool:
+    """True when the update would store what the row holds: the stop date as the service stores it."""
+    expires_at = values['expires_at'] and end_of_day(values['expires_at'], values['timezone'])
+    stored = row.expires_at
+    if stored is not None and stored.tzinfo is None:  # a driver without time zones returns naive UTC
+        stored = stored.replace(tzinfo=UTC)
+    return row.version_id == version_id and stored == expires_at and all(
+        getattr(row, field) == values[field] for field in UPDATE_FIELDS if field != 'expires_at'
+    )
+
+
 def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, ids: tuple[int, int]):
     """Update the schedule the item matches, else create a disabled one; return ('updated' or 'created', row)."""
     # late: the export loads without these modules
@@ -188,6 +201,8 @@ def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, i
     by_key, by_name, _ = indexes
     application_id, version_id = ids
     row = _match(*indexes, item, *ids)
+    if row is not None and _unchanged(row, values, version_id):
+        return 'updated', row  # no write, so no admin-edit notice and no new updated_by or next_run (R5.5)
     if row is not None:
         old_key = (row.application_id, row.version_id, row.name)
         body = ScheduleUpdate(**{field: values[field] for field in UPDATE_FIELDS}, version_id=version_id)
