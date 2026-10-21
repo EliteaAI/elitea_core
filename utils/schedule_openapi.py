@@ -362,9 +362,6 @@ OPERATIONS = {
             "(`principal_label`), the risk check outcome, a `summary` (duration, tokens, cost) and `events`. "
             "Each event has `at`, `kind`, `text` and `level`; the kinds are started, account, risk_check, "
             "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation. "
-            "Only the owner sees the tool result: for a caller who is not the owner, such as a schedules admin, "
-            "a `tool_call` event keeps `toolkit`, `tool` and `duration_ms`, has no `summary`, and its `text` has "
-            "no result part (\"Tool call: github · get_issues (487 ms)\"). "
             "Tokens and cost are null while the usage store has no row for the conversation. Poll every 2 s "
             "while the status is `running` or `waiting_for_approval`.",
             OWNER_OR_ADMIN.format(permission="schedules.details"),
