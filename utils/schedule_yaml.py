@@ -189,8 +189,13 @@ def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, i
     application_id, version_id = ids
     row = _match(*indexes, item, *ids)
     if row is not None:
+        old_key = (row.application_id, row.version_id, row.name)
         body = ScheduleUpdate(**{field: values[field] for field in UPDATE_FIELDS}, version_id=version_id)
-        return 'updated', update_schedule(session, project_id, row, body, scope)
+        update_schedule(session, project_id, row, body, scope)
+        if row.version_id != old_key[1]:  # a later keyless item of the file finds the row under its new version
+            by_name[old_key].remove(row)
+            by_name.setdefault((row.application_id, row.version_id, row.name), []).append(row)
+        return 'updated', row
     body = ScheduleCreate(**values, application_id=application_id, version_id=version_id, enabled=False)
     row = create_schedule(session, project_id, body, scope, key=item.key)
     by_key[row.uuid] = row  # a later item of the file then updates this row
@@ -231,7 +236,7 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
                     values['approval_rule'] = 'pause_and_ask'
                     entry['note'] = 'Run without asking is not allowed in this project; saved as Pause and ask me'
                 group, row = _save(session, project_id, scope, indexes, item, values, ids)
-                entry['schedule_id'] = row.id
+                entry.update(name=row.name, schedule_id=row.id)  # a key match keeps the stored name
                 report[group].append(entry)
             except _Skipped as e:
                 report['skipped'].append({**entry, 'reason': str(e)})

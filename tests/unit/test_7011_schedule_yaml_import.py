@@ -124,6 +124,13 @@ class Env:
             ))
             session.commit()
 
+    def add_version(self, application_id, version_id, name):
+        with self.session_factory() as session:
+            session.add(self.ApplicationVersion(
+                id=version_id, application_id=application_id, name=name, agent_type='openai',
+            ))
+            session.commit()
+
 
 @pytest.fixture
 def env(monkeypatch):
@@ -419,10 +426,27 @@ def test_7011_r4_5_a_new_key_is_stored_and_matches_next_import(env):
     env.import_items(keyed(), schema_version=2)
     assert str(env.rows()[0].uuid) == KEY
     report = env.import_items(keyed(name='Renamed in the file'), schema_version=2)
-    assert [entry['name'] for entry in report['updated']] == ['Renamed in the file']
+    assert len(report['updated']) == 1
     assert [row.name for row in env.rows()] == ['Daily digest']  # R5.1: the name stays
 
 
 def test_7011_r5_6_a_version_1_file_without_keys_still_imports(env):
     report = env.import_items(item(), schema_version=1)
     assert [entry['name'] for entry in report['created']] == ['Daily digest']
+
+
+# P2 review: a key update that moves the version also moves the natural key for later items of the file
+def test_7011_r4_2_a_keyless_item_after_a_key_update_of_the_version_updates_that_row(env):
+    env.add_version(1, 12, 'v2')
+    env.import_items(keyed(), schema_version=2)
+    report = env.import_items(keyed(version_name='v2', cron='0 7 * * *'), item(version_name='v2'), schema_version=2)
+    (row,) = env.rows()
+    assert [len(report[group]) for group in ('created', 'updated', 'skipped', 'failed')] == [0, 2, 0, 0]
+    assert row.version_id == 12
+
+
+# P3 review: an updated entry names the stored schedule, which a key match never renames
+def test_7011_r4_1_an_updated_entry_names_the_stored_schedule(env):
+    env.import_items(keyed(), schema_version=2)
+    report = env.import_items(keyed(name='Renamed in the file'), schema_version=2)
+    assert [entry['name'] for entry in report['updated']] == ['Daily digest']
