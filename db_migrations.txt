@@ -316,6 +316,18 @@ Run admin task migrate_eval_case_usage_columns with param: project_id=all
 # a same-named non-built-in entry is reported under "conflicts" and left alone.
 Run admin task seed_eval_trajectory_dimensions
 
+# Performance P-2: two built-in latency dimensions (performance.latency,
+# performance.final_answer_time) added to the same registry. Re-run the same task after
+# deploying this build; it inserts only the two new entries and reports the seven trajectory
+# checks as "present". No params. Idempotent.
+Run admin task seed_eval_trajectory_dimensions
+
+# Performance P-5: eval_dataset_case gets an optional time_limit_seconds (integer 10..900,
+# nullable, no backfill; null means the suite's limit). Fresh environments get it from
+# create_all; existing p_N schemas get it from the same dataset-columns task, so re-run it once
+# on upgrade. Idempotent (ADD COLUMN IF NOT EXISTS).
+Run admin task migrate_eval_dataset_columns with param: project_id=all
+
 # Dimension tier=agent_adhoc scoping: eval_dimension gets an owning agent_id (nullable, for rows
 # created before this column existed, which stay visible everywhere). Fresh environments get it
 # from create_all; existing p_N schemas need the column backfilled. Per-project loop.
@@ -372,3 +384,22 @@ CREATE INDEX IF NOT EXISTS ix_audit_events_model_name ON centry.audit_events (mo
 CREATE INDEX IF NOT EXISTS ix_audit_events_project_timestamp ON centry.audit_events (project_id, timestamp);
 CREATE INDEX IF NOT EXISTS ix_audit_events_tool_name ON centry.audit_events (tool_name) WHERE tool_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_audit_events_is_error ON centry.audit_events (is_error) WHERE is_error IS TRUE;
+
+# Issue #6756 (C-1009): agent identity tables - agent_identity_binding and execution_security_context
+# in every project schema. Nothing reads them yet, so this is not urgent; new projects get them via
+# create_all and the startup safety net creates them for existing projects. Run the task to report
+# (dry_run) or re-run. Idempotent: schemas that have both tables are left alone.
+Run admin task create_agent_identity_tables with param: project_id=all;dry_run
+Run admin task create_agent_identity_tables with param: project_id=all
+
+# Issue #6947 (C-1009): autonomous mandate table - autonomous_mandate in every project schema. Nothing
+# reads it yet (WP-1C PR C does), so this is not urgent; new projects get it via create_all and the startup
+# safety net creates it for existing projects. Run the task to report (dry_run) or re-run. Idempotent.
+Run admin task create_mandate_tables with param: project_id=all;dry_run
+Run admin task create_mandate_tables with param: project_id=all
+
+# Issue #7120 (C-1009): the credential governance switch - credential_governance_settings and its history table in the
+# public schema. They are NOT created at startup (the switch reads as "no stored row", i.e. off, until they exist). Run
+# the task once per environment, then choose the mode under Admin UI -> Governance -> Overview. Idempotent.
+Run admin task create_governance_settings_tables with param: dry_run
+Run admin task create_governance_settings_tables

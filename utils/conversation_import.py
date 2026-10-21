@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
 from pylon.core.tools import log
-from tools import MinioClient, VaultClient, rpc_tools
+from tools import MinioClient, VaultClient, auth, rpc_tools
 
 from ..models.all import Application
 from ..models.conversation import Conversation
@@ -38,6 +38,7 @@ from ..models.pd.conversation_import import (
     ImportTextItem,
 )
 from ..models.pd.participant import ParticipantCreate
+from .authors import get_authors_data
 from .attachments import FileToAIProcessorCollector, NotSupportableProcessorExtension, parse_filepath
 from .chat_crypto import (
     CHAT_ENVELOPE,
@@ -594,8 +595,35 @@ def _create_attachment(group, order_index: int, item: ImportAttachmentItem, uplo
     )
 
 
+def _author_key(ref) -> tuple:
+    return ref.email, ref.name
+
+
+def _resolve_imported_avatars(messages) -> dict[tuple, str]:
+    """Avatars of original human authors that exist in this environment, looked up by email (or name for old files)."""
+    user_ids = {}
+    for message in messages:
+        ref = message.author
+        if ref is None or ref.entity_name != ParticipantTypes.user.value or not (ref.email or ref.name):
+            continue
+        key = _author_key(ref)
+        if key in user_ids:
+            continue
+        try:
+            user = auth.get_user(email=ref.email) if ref.email else auth.get_user(name=ref.name)
+            user_ids[key] = user['id']
+        except Exception:  # pylint: disable=W0703
+            user_ids[key] = None
+    ids = [i for i in user_ids.values() if i is not None]
+    if not ids:
+        return {}
+    avatars = {a['id']: a.get('avatar') for a in get_authors_data(ids)}
+    return {key: avatars[i] for key, i in user_ids.items() if i is not None and avatars.get(i)}
+
+
 def _import_messages(session, conversation, messages, participants: dict, uploader) -> int:
     user_id, dummy_id, ai_map = participants['user'], participants['dummy'], participants['ai']
+    avatars = _resolve_imported_avatars(messages)
 
     def resolve(ref):
         if ref is None:
@@ -620,6 +648,12 @@ def _import_messages(session, conversation, messages, participants: dict, upload
         group_meta = {}
         if message.author is not None and message.author.name:
             group_meta['imported_author'] = {'entity_name': message.author.entity_name, 'name': message.author.name}
+            avatar = avatars.get(_author_key(message.author))
+            if avatar:
+                group_meta['imported_author']['avatar'] = avatar
+        if message.is_error:
+            group_meta['is_error'] = True
+            group_meta['error'] = message.error or ''
         group = ConversationMessageGroup(
             conversation=conversation,
             author_participant_id=author_id,

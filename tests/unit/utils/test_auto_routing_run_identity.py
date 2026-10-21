@@ -48,7 +48,7 @@ def test_actual_chat_dispatch_metadata_owns_run_identity_on_resume():
                    'parsed':SimpleNamespace(stream_id='thread',message_id=123,project_id=7,user_input='Hi'),
                    'payload':payload,'start_event_content':{},'sio_event':'chat_predict',
                    'chat_project_id':7,'user_id':2,'user_context':{},'non_interactive':False,
-                   'add_trace_context_to_meta':lambda x:x, 'serialize':lambda x:x,
+                   'add_trace_context_to_meta':lambda x:x, 'serialize':lambda x:x, 'admission':None,
                    'user_input_preview':lambda x:x}
             eval(compile(ast.Expression(call),str(path),'eval'),env)
             envelope = start_task.call_args.kwargs

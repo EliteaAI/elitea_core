@@ -11,14 +11,16 @@ Row shape (both formats)::
     {'input': str, 'variables': dict, 'expected_output': Optional[str], 'source_ref': Optional[str]}
 
 plus ``'expected_trajectory': dict`` when the row carries one (#6809 item 4; see
-``evaluation_expected_trajectory``). A malformed one rejects the row.
+``evaluation_expected_trajectory``), and ``'time_limit_seconds': int`` when it sets its own case
+time limit (performance P-5, 10..900). A malformed one rejects the row.
 
 CSV convention: a header row is required. ``input``, ``expected_output``, ``expected_trajectory``
-(a JSON object in the cell) and ``source_ref`` are reserved columns; every other column becomes a
+(a JSON object in the cell), ``time_limit_seconds`` and ``source_ref`` are reserved columns; every other column becomes a
 ``variables`` key (string value). ``input`` is required.
 JSON convention: a top-level array of objects, or an object with a ``cases`` array. Each object
 carries ``input`` (required), optional ``expected_output``, optional ``expected_trajectory``
-(object), optional ``variables`` (object), optional ``source_ref``.
+(object), optional ``time_limit_seconds`` (integer), optional ``variables`` (object), optional
+``source_ref``.
 JSONL convention: one such object per line; blank lines are ignored. Rows are numbered by line.
 """
 
@@ -32,7 +34,11 @@ from .evaluation_expected_trajectory import validate_or_error as _validate_expec
 Rows = List[dict]
 Errors = List[dict]
 
-_RESERVED = {'input', 'expected_output', 'expected_trajectory', 'source_ref'}
+_RESERVED = {'input', 'expected_output', 'expected_trajectory', 'time_limit_seconds', 'source_ref'}
+
+# Same bounds as the suite's ``case_time_limit_seconds`` (models/pd/evaluation.py, kept stdlib here).
+MIN_CASE_TIME_LIMIT_SECONDS = 10
+MAX_CASE_TIME_LIMIT_SECONDS = 900
 
 # Import is a single synchronous request that inserts one row per case and then every run over the
 # dataset invokes the agent once per case, so an unbounded file is both a request-time and a
@@ -46,6 +52,19 @@ def _clean_expected(value) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _time_limit_or_error(value, row_no: int) -> Tuple[Optional[int], Optional[dict]]:
+    """A case's own time limit: an integer, or the digits of a CSV cell. Blank keeps the suite's."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not MIN_CASE_TIME_LIMIT_SECONDS <= value <= MAX_CASE_TIME_LIMIT_SECONDS):
+        return None, {'row': row_no, 'error': '"time_limit_seconds" must be an integer '
+                                              f'{MIN_CASE_TIME_LIMIT_SECONDS}..{MAX_CASE_TIME_LIMIT_SECONDS}'}
+    return value, None
 
 
 def _normalize_row(raw: dict, row_no: int) -> Tuple[Optional[dict], Optional[dict]]:
@@ -70,6 +89,9 @@ def _normalize_row(raw: dict, row_no: int) -> Tuple[Optional[dict], Optional[dic
     expected_trajectory, error = _validate_expected_trajectory(raw.get('expected_trajectory'), row_no)
     if error:
         return None, error
+    time_limit, error = _time_limit_or_error(raw.get('time_limit_seconds'), row_no)
+    if error:
+        return None, error
 
     source_ref = raw.get('source_ref')
     row = {
@@ -80,12 +102,14 @@ def _normalize_row(raw: dict, row_no: int) -> Tuple[Optional[dict], Optional[dic
     }
     if expected_trajectory is not None:
         row['expected_trajectory'] = expected_trajectory
+    if time_limit is not None:
+        row['time_limit_seconds'] = time_limit
     return row, None
 
 
 def parse_csv(content: str) -> Tuple[Rows, Errors]:
-    """Parse CSV text. ``input``/``expected_output``/``expected_trajectory``/``source_ref`` are
-    reserved columns;
+    """Parse CSV text. ``input``/``expected_output``/``expected_trajectory``/``time_limit_seconds``/
+    ``source_ref`` are reserved columns;
     all other columns fold into ``variables``. Data rows are numbered from 1 (header excluded)."""
     rows: Rows = []
     errors: Errors = []
@@ -108,6 +132,7 @@ def parse_csv(content: str) -> Tuple[Rows, Errors]:
                 'input': record.get('input'),
                 'expected_output': record.get('expected_output'),
                 'expected_trajectory': record.get('expected_trajectory'),
+                'time_limit_seconds': record.get('time_limit_seconds'),
                 'source_ref': record.get('source_ref'),
                 'variables': variables,
             },

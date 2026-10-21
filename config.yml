@@ -15,9 +15,12 @@ max_published_versions_per_agent: 3
 # Stop the worker when a blocking predict exceeds await_task_timeout
 cancel_on_timeout: true
 
-# Send expanded sub-agent versions with the predict task (runtime falls back to fetching on a miss)
+# Bounds for expanding sub-agents before a predict; what is cut off is fetched by the runtime
 predict:
-  prefetch_subagents: true
+  subagent_prefetch:
+    max_nodes: 200
+    max_bytes: 15728640
+    max_seconds: 40
 
 scheduler:
   pipeline_scheduling:
@@ -61,11 +64,15 @@ cost_budgets:
       personal_project_monthly_limit: null
       user_monthly_limit: null
 
-# Enterprise credential governance (C-1009, #6754). Operator-owned: set it here in the
-# deployment config only. Deliberately NOT declared in admin_schema.json, so the admin
-# config editor cannot change it. Default off = legacy behaviour, nothing changes.
-# When enabled is true, policy_revision must be a non-empty string; a non-boolean
-# enabled value or a missing revision fails plugin startup.
+# Enterprise credential governance (C-1009, #6754, #7120). The mode (off, audit_only, enforce), the policy revision and
+# both admission flags are set in the Admin UI (Governance) and stored in the database, not here. The deployment keeps
+# three environment variables, read from the process environment (never from this file):
+#   ELITEA_CREDENTIAL_GOVERNANCE_MAX_MODE     off | audit-only | enforce (default enforce): the highest mode allowed
+#   ELITEA_CREDENTIAL_GOVERNANCE_ENABLED      deprecated alias of the ceiling: true = enforce, false = off; it does not
+#                                             switch governance on. Setting both and disagreeing refuses startup
+#   ELITEA_CREDENTIAL_GOVERNANCE_ENVIRONMENT  label recorded on contexts and audit events; when set, it is read-only in the UI
+# Any other former key (enabled, policy_revision, environment, admit_legacy_pat, allow_runtime_domain_binding, or the
+# POLICY_REVISION, MODE, ADMIT_LEGACY_PAT and ALLOW_RUNTIME_DOMAIN_BINDING variables) is ignored with a warning.
+# Deliberately NOT declared in admin_schema.json, so the admin config editor cannot change it.
 enterprise_credential_governance:
-  enabled: false
-  policy_revision: null
+  context_ttl_s: 3600                   # how long an admitted run may start or restart (60..86400)

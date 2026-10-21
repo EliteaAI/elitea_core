@@ -196,8 +196,11 @@ def test_metrics_from_recorded_run(execution):
     assert metrics == {
         'llm_calls': 3, 'tool_calls': 1, 'distinct_tools': 1, 'tool_errors': 0,
         'retries': 0, 'redundant_calls': 0, 'step_limit_hit': False,
-        'guardrail_events': 0, 'latency_ms': 47_000,
+        'guardrail_events': 0, 'latency_ms': 47_000, 'final_answer_ms': metrics['final_answer_ms'],
     }
+    # The run diff reads this stored value instead of the trajectory (performance §3.4).
+    trajectory = execution.extract_execution(_envelope(), status='ok', latency_ms=47_000)['trajectory']
+    assert metrics['final_answer_ms'] == execution.final_answer_ms(trajectory)
 
 
 def test_redundant_retries_and_guardrails(execution):
@@ -346,6 +349,7 @@ def test_trajectory_rollup_averages_only_recorded_cases(execution):
     assert rollup['averages']['tool_calls'] == 2
     assert rollup['totals']['redundant_calls'] == 2
     assert rollup['step_limit_hits'] == 1
+    assert rollup['timed_out_cases'] == 1
     # The timed-out case's latency is not averaged in: it has no trajectory to compare against.
     assert rollup['average_latency_ms'] == 2000
     assert (rollup['p50_latency_ms'], rollup['p95_latency_ms']) == (1000, 3000)
@@ -382,6 +386,13 @@ def test_trajectory_rollup_is_none_without_rows(execution):
 def test_trajectory_meta_omits_the_key_without_rows(orchestration):
     assert orchestration.trajectory_meta([]) == {}
     assert orchestration.trajectory_meta([_exec_row('recorded')])['trajectory_rollup']['recorded_cases'] == 1
+
+
+def test_trajectory_meta_carries_the_case_time_limit(orchestration):
+    rollup = orchestration.trajectory_meta([_exec_row('recorded')], 10)['trajectory_rollup']
+    assert rollup['case_time_limit_seconds'] == 10
+    assert 'case_time_limit_seconds' not in orchestration.trajectory_meta([_exec_row('recorded')])['trajectory_rollup']
+    assert orchestration.trajectory_meta([], 10) == {}
 
 
 def _sized(execution, total):

@@ -56,9 +56,10 @@ def _usage_mode_settings():
 
 
 def _tool_spend_availability():
-    """Per-feature availability; project-level resolution needs ?project_id (TS2 adds the Default config)."""
+    """Per-feature availability; project-level resolution needs ?project_id."""
     from flask import request  # pylint: disable=C0415
     from ...utils.tool_spend_features import feature_defaults, feature_map  # pylint: disable=C0415
+    from ...utils.web_search import WEB_SEARCH_FEATURE, web_search_availability  # pylint: disable=C0415
     #
     try:
         features = feature_map(this.module.toolkit_schemas)
@@ -66,6 +67,11 @@ def _tool_spend_availability():
         user = auth.current_user() or {}
         result = {}
         for feature in features:
+            if feature == WEB_SEARCH_FEATURE:
+                availability = web_search_availability(project_id, user.get("id"))
+                availability.pop("resolved", None)
+                result[feature] = availability
+                continue
             if not feature_defaults(this.module.descriptor.config, feature).get("enabled", False):
                 result[feature] = {"available": False, "reason": "disabled_platform"}
                 continue

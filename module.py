@@ -14,7 +14,11 @@ from tools import db, config as c, auth, context, this
 import arbiter  # pylint: disable=E0401
 
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
+from .utils.admission import AdmissionSettings, admit_dispatch, track_context
+from .utils.binding_api import PERMISSIONS as BINDING_PERMISSIONS, registration as binding_registration
 from .utils.governance import init_governance
+from .utils.governance_settings import has_live_contexts, record_boot_preflight
+from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
 from .utils.worker_capabilities import (
     CAPABILITIES_EVENT,
@@ -127,6 +131,18 @@ class Module(module.ModuleModel):
         # Must be initialized here in __init__ — the callback is registered in init() via
         # task_node.subscribe_to_task_statuses, which can fire before ready() runs.
         self.callback_tasks = {}
+        # task_id -> (project_id, context_ref) of governed runs admitted by this process (#6756); bounded
+        self._context_by_task = OrderedDict()
+        self._context_lock = Lock()   # the map is read by the deadline sweep while dispatch threads change it
+        # Credential governance (#7120): the snapshot of the switch (built in init), and which of the worker bus
+        # handlers of a governed run (validate, release one slot, release a batch) are registered. They are registered on
+        # the first move into enforce and stay until deinit, so runs admitted under enforce keep validating after a switch to off; booting in off registers none
+        self.governance_state = None
+        self.governed_handlers_registered = False
+        self._governed_handlers = {"validate": False, "release": False, "release_batch": False}
+        self._governed_handlers_lock = Lock()
+        # single-use tickets of autonomous (mandate) runs, minted and taken in this process only; bounded (#6947)
+        self._mandate_tickets = TicketStore()
         self.active_index_tasks = OrderedDict()
         self.active_index_tasks_max = 4096
         self.recently_stopped_index_tasks = OrderedDict()
@@ -375,6 +391,7 @@ class Module(module.ModuleModel):
 
     def ready(self):
         self._register_managed_schedules()
+        self._register_input_guardrail_redactor()
         self._bootstrap_platform_schedules()
 
         # ORM create_all() creates missing tenant tables but never expands an
@@ -517,11 +534,37 @@ class Module(module.ModuleModel):
                 "migrate_eval_case_usage_columns", self.migrate_eval_case_usage_columns,
                 group="R-2.0.8",
             )
+            this.for_module("admin").module.register_admin_task(
+                "create_agent_identity_tables", self.create_agent_identity_tables,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "manage_agent_identity_binding", self.manage_agent_identity_binding,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "create_mandate_tables", self.create_mandate_tables,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "manage_autonomous_mandate", self.manage_autonomous_mandate,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "report_trigger_principals", self.report_trigger_principals,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "create_governance_settings_tables", self.create_governance_settings_tables,
+                group="R-2.0.8",
+            )
         except Exception as e:
             log.exception("Failed to register admin tasks: %s", e)
 
         self._ensure_skill_publish_schema()
         self._ensure_share_token_schema()
+        self._ensure_agent_identity_schema()
+        self._start_governance()
 
         self.handle_pylon_modules_initialized()
 
@@ -580,6 +623,81 @@ class Module(module.ModuleModel):
         except Exception as e:
             log.warning('Failed to register provider RPC method: %s', e)
 
+
+    # --- credential governance switch (#7120, C-1009) ---------------------------------------------------------------
+
+    @property
+    def governance_effective(self):
+        """What is in effect now (the snapshot; no I/O)."""
+        return self.governance_state.effective
+
+    @property
+    def governance_profile(self):
+        """``enabled`` is true under enforce only; audit only keeps the legacy profile."""
+        return self.governance_state.effective.profile
+
+    @property
+    def admission_settings(self):
+        effective = self.governance_state.effective
+        return AdmissionSettings(
+            allow_runtime_domain_binding=effective.allow_runtime_domain_binding,
+            admit_legacy_pat=effective.admit_legacy_pat, context_ttl_s=self.governance_state.context_ttl_s,
+            environment=effective.environment,
+        )
+
+    def _start_governance(self):
+        """Once every plugin is up: read the switch again (the first read ran in init, before the plugins it needs
+        were loaded), keep serving the runs admitted before this restart, start the refresher, and say so if the mode
+        is on and the platform cannot honour it."""
+        state = self.governance_state
+        state.refresh()
+        if not self.governed_handlers_registered and has_live_contexts():
+            # booting into off (or audit only) with governed runs still live: their workers still validate them and ask
+            # for their credentials, so the handlers (and the sweep of their deadlines) stay until the next restart
+            log.warning("Credential governance: governed runs admitted before this start are still live; "
+                        "their worker handlers are registered")
+            self._ensure_governed_handlers_registered()
+        state.start()
+        record_boot_preflight(self)
+
+    def _ensure_governed_handlers_registered(self):
+        """Register the worker bus handlers of a governed run: workers prove a run still holds its admission
+        (#6756), and ask Main for the material of a credential slot, or of all the slots of a run in one call, sealed to
+        the asking worker (#6946). Idempotent; a handler that could not be registered is tried again at the next
+        refresh of the switch. True when the two required ones are (the batch release is optional)."""
+        with self._governed_handlers_lock:
+            for key, handler, name in (
+                    ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
+                    ("release", self.release_credential, "restricted_release_credential"),
+                    ("release_batch", self.release_credentials, "restricted_release_credentials")):
+                if self._governed_handlers[key]:
+                    continue
+                try:
+                    this.for_module("worker_client").module.rpc_node.register(handler, name=name)
+                    self._governed_handlers[key] = True
+                except Exception as exc:  # pylint: disable=W0703
+                    if key == "release_batch":   # optional: workers then release slot by slot, and are not told otherwise
+                        log.error("Failed to register %s (%s); batch release is not offered", name, type(exc).__name__)
+                    else:
+                        log.exception("Failed to register %s", name)
+            self.governed_handlers_registered = any(self._governed_handlers.values())
+            return self._governed_handlers["validate"] and self._governed_handlers["release"]
+
+    def _unregister_governed_handlers(self):
+        with self._governed_handlers_lock:
+            for key, handler, name in (
+                    ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
+                    ("release", self.release_credential, "restricted_release_credential"),
+                    ("release_batch", self.release_credentials, "restricted_release_credentials")):
+                if not self._governed_handlers[key]:
+                    continue
+                try:
+                    this.for_module("worker_client").module.rpc_node.unregister(handler, name=name)
+                except Exception:  # pylint: disable=W0703
+                    log.exception("Failed to unregister %s", name)
+                self._governed_handlers[key] = False
+            self.governed_handlers_registered = False
+
     def _ensure_share_token_schema(self):
         """Startup safety net: create share-token tables in any project schema (and
         the public schema) that predates them. Runs off-thread; guarded by catalog
@@ -598,8 +716,34 @@ class Module(module.ModuleModel):
 
         Thread(target=_run, daemon=True).start()
 
+    def _ensure_agent_identity_schema(self):
+        """Startup safety net: create the agent identity and mandate tables in any project schema that predates
+        them (#6756, #6947). Runs off-thread; guarded by a catalog check so steady-state boots issue no DDL.
+        New projects are already covered by create_all."""
+        def _run():
+            try:
+                from .utils.agent_identity_schema import (
+                    IDENTITY_TABLES, MANDATE_TABLES,
+                    project_ids_missing_tables,
+                    apply_tables,
+                )
+                tables = IDENTITY_TABLES + MANDATE_TABLES
+                pending = project_ids_missing_tables(tables)
+                if not pending:
+                    return
+                log.info("agent identity schema: auto-migrating %s project(s)", len(pending))
+                migrated, failed = apply_tables(pending, tables)
+                log.info(
+                    "agent identity schema: auto-migration done (migrated=%s failed=%s)",
+                    len(migrated), len(failed),
+                )
+            except Exception:  # pylint: disable=W0703
+                log.exception("agent identity schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
+
     def init(self):
-        # Fail fast on a misconfigured governance flag, before anything can consult it
+        # Fail fast on a misconfigured governance ceiling, before anything can consult the switch
         init_governance(self)
         #
         self.bp = self.descriptor.init_all(url_prefix="/app")
@@ -631,6 +775,40 @@ class Module(module.ModuleModel):
             }
         })
 
+        # Autonomous mandates (#6947, C-1009), in the governance.* family of the operator UI. Registered whatever
+        # the governance flag says, so roles can be assigned before it is switched on; nothing evaluates them yet
+        # (the operator tasks are the only writers).
+        for permission, default_roles in (
+                ("governance.mandates.manage", {"admin": True, "viewer": False, "editor": False}),
+                ("governance.mandates.approve", {"admin": True, "viewer": False, "editor": False}),
+                ("governance.mandates.view", {"admin": True, "viewer": False, "editor": False}),
+        ):
+            auth.register_permissions({
+                "permissions": [permission],
+                "recommended_roles": {
+                    "administration": {"admin": default_roles["admin"], "viewer": False, "editor": False},
+                    "default": default_roles,
+                }
+            })
+
+        # The governance switch (#7120): anyone with `view` sees it; changing it needs `manage`, which the endpoint also
+        # pins to the super_admin role, so a role matrix edit cannot widen it. Nothing here is reachable in default mode.
+        for permission, roles in (
+                ("governance.settings.view", {"super_admin": True, "admin": True}),
+                ("governance.settings.manage", {"super_admin": True, "admin": False}),
+        ):
+            auth.register_permissions({
+                "permissions": [permission],
+                "recommended_roles": {
+                    "administration": {**roles, "viewer": False, "editor": False, "system": False},
+                    "default": {"super_admin": False, "admin": False, "viewer": False, "editor": False, "system": False},
+                }
+            })
+        # Agent identity bindings (#7105, C-1009): the operator REST API. Platform administration only in this slice
+        # (roles in binding_api.RECOMMENDED_ROLES). Registered whatever the governance flag says.
+        for permission in BINDING_PERMISSIONS:
+            auth.register_permissions(binding_registration(permission))
+
         # self.init_db()
         # TaskNode
         self.task_node.start()
@@ -647,11 +825,13 @@ class Module(module.ModuleModel):
         _original_start_task = self.task_node.start_task
 
         def _maintenance_gated_start_task(*args, **kwargs):
+            admission = kwargs.pop("admission", None)  # built by the entry point from its trusted caller; None when ungoverned
             from .utils.maintenance_gate import is_maintenance_active
             from .utils.budget_door import (
                 closed_budget_scope, dispatch_may_use_llm, dispatch_owner, dispatch_uses_own_model,
             )
             from .utils.exceptions import BudgetDoorClosedError, MaintenanceInProgressError
+            from .utils.input_guardrail import apply_input_guardrail
             if is_maintenance_active():
                 task_name = args[0] if args else kwargs.get("task_name") or "?"
                 log.info(
@@ -674,12 +854,38 @@ class Module(module.ModuleModel):
                 )
                 raise BudgetDoorClosedError(scope=closed_scope, project_id=project_id)
             # Versioned worker envelope; a governed task with no capable worker is refused here
+            # the state is read once, so a switch in the middle of a dispatch cannot give it a governed envelope and an
+            # ungoverned admission (or the other way round)
+            effective = self.governance_effective
             apply_envelope_gate(
                 args[0] if args else kwargs.get("name"),
-                kwargs, self.governance_profile, self.worker_capabilities,
+                kwargs, effective.profile, self.worker_capabilities,
             )
+            # Input guardrail: raises InputGuardrailBlockedError on block, rewrites the
+            # payload on redact; inert while input_guardrail.enabled is false
+            apply_input_guardrail(kwargs)
             stamp_predict_run_id(kwargs)
-            return _original_start_task(*args, **kwargs)
+            after_dispatch = []   # audit only: its evaluation waits for nothing, so it runs once the task is started
+            try:
+                name = args[0] if args else kwargs.get("name")
+                context_ref = admit_dispatch(self, name, kwargs, admission, effective, after_dispatch)
+                # a mandate run carries its time limit here (admit_dispatch); it is for Main only, the worker never sees it
+                deadline = (kwargs.get("meta") or {}).pop("context_deadline", None) if context_ref else None
+                task_id = _original_start_task(*args, **kwargs)
+                if context_ref:
+                    track_context(self, task_id, admission.project_id, context_ref, deadline=deadline)
+                return task_id
+            finally:
+                for evaluate in after_dispatch:
+                    try:
+                        evaluate()
+                    except BaseException as exc:  # pylint: disable=W0703
+                        # the task is started: nothing the evaluation meets (a gevent Timeout included) may replace
+                        # that result, or the caller retries a run that is already going. Only the greenlet being
+                        # killed is let through.
+                        log.error("admission: the audit-only evaluation was interrupted (%s)", type(exc).__name__)
+                        if "GreenletExit" in {kind.__name__ for kind in type(exc).__mro__}:
+                            raise
 
         self.task_node.start_task = _maintenance_gated_start_task
 
@@ -697,6 +903,7 @@ class Module(module.ModuleModel):
             from .utils.maintenance_gate import is_maintenance_active
             from .utils.budget_door import closed_budget_scope, dispatch_owner
             from .utils.exceptions import BudgetDoorClosedError, MaintenanceInProgressError
+            from .utils.input_guardrail import apply_input_guardrail
             if is_maintenance_active():
                 raise MaintenanceInProgressError(task_name=EVAL_RUN_TASK_NAME)
             project_id, owner_id = dispatch_owner(kwargs)
@@ -707,6 +914,7 @@ class Module(module.ModuleModel):
                     closed_scope, project_id,
                 )
                 raise BudgetDoorClosedError(scope=closed_scope, project_id=project_id)
+            apply_input_guardrail(kwargs)
             stamp_predict_run_id(kwargs)
             return _original_eval_start_task(*args, **kwargs)
 
@@ -941,6 +1149,19 @@ class Module(module.ModuleModel):
             to=p.sid,
         )
 
+    def _register_input_guardrail_redactor(self):
+        """Tracing span payloads carry the redacted text, not the detected value (#6886).
+
+        The redactor reads the live policy, so it is inert while the guardrail is off. It
+        returns None for a value it could not fully inspect: tracing masks the whole value.
+        """
+        try:
+            from tools import this  # pylint: disable=E0401,C0415
+            from .utils.input_guardrail import redact_value
+            this.for_module("tracing").module.register_value_redactor(redact_value)
+        except Exception as e:  # pylint: disable=W0703
+            log.debug(f"Input guardrail: tracing redactor not registered: {e}")
+
     def deinit(self):
         log.info('De-initializing')
         self.thread._stop()
@@ -976,10 +1197,13 @@ class Module(module.ModuleModel):
         self.event_node.unsubscribe("voice_asr_vad_flush", self.voice_asr_vad_flush)
 
         # TaskNode
+        if self.governance_state is not None:
+            self.governance_state.stop()
         self.eval_task_node.stop()
         self.task_node.stop()
         try:
             from tools import this
+            self._unregister_governed_handlers()
             this.for_module("admin").module.unregister_admin_task(
                 "eliminate_prompts", prompt_2_agent_migration
             )
@@ -1048,6 +1272,24 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "set_index_schedule_expiration", self.set_index_schedule_expiration
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "create_agent_identity_tables", self.create_agent_identity_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "manage_agent_identity_binding", self.manage_agent_identity_binding
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "create_mandate_tables", self.create_mandate_tables
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "manage_autonomous_mandate", self.manage_autonomous_mandate
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "report_trigger_principals", self.report_trigger_principals
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "create_governance_settings_tables", self.create_governance_settings_tables
             )
         except Exception as e:
             log.exception("Failed to unregister admin tasks: %s", e)
@@ -1307,6 +1549,8 @@ class Module(module.ModuleModel):
         # Cleanup provider storage
         if hasattr(self, 'present_providers'):
             self.present_providers.clear()
+            from .utils import schema_registry_version  # pylint: disable=C0415
+            schema_registry_version.bump()
         if hasattr(self, 'unhealthy_providers'):
             self.unhealthy_providers.clear()
 

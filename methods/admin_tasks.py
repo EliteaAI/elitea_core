@@ -588,12 +588,228 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed}
 
     @web.method()
+    def create_agent_identity_tables(self, *args, **kwargs):
+        """Admin task: create the agent identity tables in each project schema (R-2.0.8, #6756, C-1009).
+
+        Creates ``agent_identity_binding`` and ``execution_security_context`` where they are missing.
+        New projects get them from ``create_all`` and a startup guard covers the rest, so this is the
+        operator's way to report (dry run) and re-run. Idempotent; schemas that have both are left alone.
+
+        Param format (required):
+            "project_id=<all|N>[;dry_run]"
+
+        Examples:
+            "project_id=all;dry_run"  - report which projects lack the tables (``migrated`` = would create)
+            "project_id=all"          - create them everywhere they are missing
+            "project_id=3"            - project 3 only
+        """
+        from ..utils.agent_identity_schema import (  # pylint: disable=C0415
+            apply_identity_tables, project_ids_missing_identity_tables,
+        )
+
+        param = kwargs.get("param", "") or ""
+        dry_run = False
+        project_id_filter = None
+        project_id_found = False
+
+        for seg in [s.strip() for s in param.split(";")]:
+            seg_lower = seg.lower()
+            if seg_lower.startswith("project_id="):
+                project_id_found = True
+                value = seg[len("project_id="):].strip()
+                if value.lower() != "all":
+                    try:
+                        project_id_filter = int(value)
+                    except ValueError:
+                        log.error("create_agent_identity_tables: invalid project_id '%s'", value)
+                        return {"migrated": 0, "error": f"invalid project_id: '{value}'"}
+            elif seg_lower == "dry_run":
+                dry_run = True
+
+        if not project_id_found:
+            log.error("create_agent_identity_tables: project_id= is required. Format: project_id=<all|N>[;dry_run]")
+            return {"migrated": 0, "error": "project_id= is required. Format: project_id=<all|N>[;dry_run]"}
+
+        try:
+            if project_id_filter is not None:
+                project_ids = [project_id_filter]
+            else:
+                project_ids = [
+                    p["id"] for p in (
+                        self.context.rpc_manager.call.project_list(filter_={"create_success": True}) or []
+                    )
+                ]
+            missing = set(project_ids_missing_identity_tables())
+        except Exception:  # pylint: disable=W0703
+            log.exception("create_agent_identity_tables: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_identity_tables([pid for pid in project_ids if pid in missing], dry_run=dry_run)
+        log.info(
+            "%screate_agent_identity_tables: migrated=%s failed=%s",
+            "[DRY RUN] " if dry_run else "", len(migrated), len(failed),
+        )
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed, "dry_run": dry_run}
+
+    @web.method()
+    def manage_agent_identity_binding(self, *args, **kwargs):
+        """Admin task: create a binding for one agent version and move it through its lifecycle (R-2.0.8, #6756, C-1009).
+
+        Works with credential governance off, so bindings can be prepared before it is switched on.
+        Every change is audited in the same transaction. Suspend and retire revoke the binding's live runs.
+
+        Param format (required):
+            "project_id=N;application_id=A;version_id=V;mode=<m>;action=<a>[;approval_ref=...][;policy_revision=...][;dry_run]"
+
+        Modes: dedicated_agent, runtime_domain_binding, elitea_native.
+        Actions: create (draft, digest of the current definition), submit (draft -> pending_approval),
+        activate (needs approval_ref and policy_revision, and another operator than the one who created or
+        submitted the binding), suspend, resume, retire, rebind (active or suspended -> pending_approval for the
+        definition as it is now: digest recomputed, approval cleared, live runs revoked).
+
+        Examples:
+            "project_id=3;application_id=7;version_id=21;mode=elitea_native;action=create"
+            "project_id=3;application_id=7;version_id=21;mode=elitea_native;action=activate;approval_ref=CHG-12;policy_revision=2026-10-1"
+        """
+        from ..utils.binding_admin import manage_binding  # pylint: disable=C0415
+
+        result = manage_binding(self, kwargs.get("param", "") or "", kwargs.get("_executing_user_id") or 0)
+        log.info("manage_agent_identity_binding: %s", {k: v for k, v in result.items() if k != "definition_digest"})
+        return result
+
+    @web.method()
+    def create_mandate_tables(self, *args, **kwargs):
+        """Admin task: create the autonomous mandate table in each project schema (R-2.0.8, #6947, C-1009).
+
+        Creates ``autonomous_mandate`` where it is missing. New projects get it from ``create_all`` and a startup
+        guard covers the rest, so this is the operator's way to report (dry run) and re-run. Idempotent.
+
+        Param format (required):
+            "project_id=<all|N>[;dry_run]"
+        """
+        from ..utils.agent_identity_schema import (  # pylint: disable=C0415
+            apply_mandate_tables, project_ids_missing_mandate_tables,
+        )
+
+        param = kwargs.get("param", "") or ""
+        values, error = _parse_project_param("create_mandate_tables", param, "project_id=<all|N>[;dry_run]")
+        if error:
+            return {"migrated": 0, "error": error}
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+            missing = set(project_ids_missing_mandate_tables())
+        except Exception:  # pylint: disable=W0703
+            log.exception("create_mandate_tables: failed to list projects")
+            return {"migrated": 0, "error": "failed to list projects"}
+
+        migrated, failed = apply_mandate_tables(
+            [pid for pid in project_ids if pid in missing], dry_run=values["dry_run"])
+        log.info(
+            "%screate_mandate_tables: migrated=%s failed=%s",
+            "[DRY RUN] " if values["dry_run"] else "", len(migrated), len(failed),
+        )
+        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed,
+                "dry_run": values["dry_run"]}
+
+    @web.method()
+    def create_governance_settings_tables(self, *args, **kwargs):
+        """Admin task: create the tables of the credential governance switch in the public schema (R-2.0.8, #7120, C-1009).
+
+        Creates ``credential_governance_settings`` and ``credential_governance_settings_history`` where they are
+        missing. They are not created at startup, so until this runs the switch reads as "no stored row" (governance
+        off) and the Admin UI cannot save. Idempotent.
+
+        Param format (optional):
+            "dry_run"  - report which tables would be created (``would_create``) and create nothing
+        """
+        from ..utils.governance_settings import create_tables  # pylint: disable=C0415
+
+        param = (kwargs.get("param", "") or "").strip()
+        if param and param.lower() != "dry_run":
+            log.error("create_governance_settings_tables: unknown param '%s'. Format: [dry_run]", param)
+            return {"created": [], "error": "unknown param. Format: [dry_run]"}
+        dry_run = bool(param)
+        try:
+            result = create_tables(dry_run=dry_run)
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("create_governance_settings_tables: failed (%s)", type(exc).__name__)
+            return {"created": [], "error": "failed; nothing was changed"}
+        log.info("%screate_governance_settings_tables: %s", "[DRY RUN] " if dry_run else "", result)
+        return result
+
+    @web.method()
+    def manage_autonomous_mandate(self, *args, **kwargs):
+        """Admin task: create an autonomous mandate for one agent version and move it through its lifecycle
+        (R-2.0.8, #6947, C-1009).
+
+        Works with credential governance off, so mandates can be prepared before it is switched on. A mandate
+        is created as a draft against the version's active identity binding, and is approved by someone who is
+        neither its creator nor its owner. Every change is audited in the same transaction; leaving ``active``
+        revokes the mandate's live runs.
+
+        Param format (required):
+            "project_id=N;action=<a>;..." with, for create,
+            "version_id=V;owner_user_id=U;operations=run:schedule[,run:webhook];max_runtime_s=S;valid_until=<ISO-8601 with offset>",
+            for approve "mandate=M;approval_ref=...;policy_revision=...", for the others "mandate=M"; "[;dry_run]".
+
+        Actions: create, submit (draft -> pending_approval), reject (pending_approval -> draft), approve,
+        suspend, resume, revoke. Validity is at most 180 days; max_runtime_s is 60..86400.
+
+        Examples:
+            "project_id=3;action=create;version_id=21;owner_user_id=5;operations=run:schedule;max_runtime_s=600;valid_until=2026-12-01T00:00:00+00:00"
+            "project_id=3;action=approve;mandate=<uuid>;approval_ref=CHG-12;policy_revision=2026-10-1"
+        """
+        from ..utils.mandate_admin import manage_mandate  # pylint: disable=C0415
+
+        result = manage_mandate(self, kwargs.get("param", "") or "", kwargs.get("_executing_user_id") or 0)
+        log.info("manage_autonomous_mandate: %s", result)
+        return result
+
+    @web.method()
+    def report_trigger_principals(self, *args, **kwargs):
+        """Admin task: report the schedules and webhooks that run on the system user and what governance would
+        do with each (R-2.0.8, #6947, C-1009). Read-only; works with governance off.
+
+        Param format (required):
+            "project_id=<all|N>[;principal=<legacy_system|delegation|mandate>]"
+
+        Each row has the trigger kind, ids, enabled, the principal, the mandate and its state, and the governed
+        outcome (ADMISSIBLE, MANDATE_REQUIRED, MANDATE_INACTIVE, MANDATE_EXPIRED, DENIED_OPERATION,
+        AUTHORIZATION_REQUIRED, MANDATE_TABLE_MISSING). Projects that cannot be read are listed in failed_projects. No cron, secret, credential title or schedule body is ever returned.
+        """
+        from ..utils.trigger_report import PRINCIPALS, build_trigger_report  # pylint: disable=C0415
+
+        param = kwargs.get("param", "") or ""
+        values, error = _parse_project_param(
+            "report_trigger_principals", param, "project_id=<all|N>[;principal=<legacy_system|delegation|mandate>]",
+            ("principal",))
+        if error:
+            return {"error": error}
+        principal = values.get("principal")
+        if principal is not None and principal not in PRINCIPALS:
+            return {"error": f"invalid principal: '{principal}'"}
+        try:
+            project_ids = _target_project_ids(self.context.rpc_manager, param)
+        except Exception:  # pylint: disable=W0703
+            log.exception("report_trigger_principals: failed to list projects")
+            return {"error": "failed to list projects"}
+
+        rows, failed = build_trigger_report(project_ids, principal)
+        outcomes = {}
+        for row in rows:
+            outcomes[row["governed_outcome"]] = outcomes.get(row["governed_outcome"], 0) + 1
+        log.info("report_trigger_principals: rows=%s failed=%s outcomes=%s", len(rows), len(failed), outcomes)
+        return {"count": len(rows), "outcomes": outcomes, "failed": len(failed), "failed_projects": failed,
+                "rows": rows}
+
+    @web.method()
     def migrate_eval_dataset_columns(self, *args, **kwargs):
         """Admin task: add the dataset-scoping columns to each project schema.
 
         Adds ``agent_id`` (owning agent, nullable) and ``is_shared`` (opt-in
         sharing flag) to ``eval_dataset``, and ``expected_trajectory`` (JSONB,
-        nullable, #6809) to ``eval_dataset_case``, on every project schema. Idempotent
+        nullable, #6809) and ``time_limit_seconds`` (integer, nullable, performance P-5) to
+        ``eval_dataset_case``, on every project schema. Idempotent
         (``ADD COLUMN IF NOT EXISTS``): safe to run multiple times.
 
         Param format (optional):
@@ -879,9 +1095,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         Seven code-scored platform dimensions (trajectory.tool_match, .forbidden_tools,
         .tool_errors, .redundant_calls, .step_budget, .step_limit_hit, .guardrail_events; #6809
-        item 5). Their scripts ship with the plugin (utils/evaluation_trajectory_checks.py) and are
-        resolved at run time, so the registry rows carry only the definition and
-        meta.builtin_check.
+        item 5), plus the two latency dimensions performance.latency and .final_answer_time
+        (performance design §3.3). Their scripts ship with the plugin
+        (utils/evaluation_trajectory_checks.py) and are resolved at run time, so the registry rows
+        carry only the definition and meta.builtin_check.
 
         Insert-only and idempotent: an entry already present under its name is left as is, so an
         admin's weight/target edits survive a re-run. A same-named entry that is *not* the
@@ -4059,6 +4276,32 @@ def _run_ado_project_migration(  # pylint: disable=R0913,R0914
             session.commit()
 
     return results
+
+
+def _parse_project_param(task, param, usage, extra_keys=()):
+    """``(values, None)`` or ``(None, readable error)`` for ``project_id=<all|N>[;dry_run][;key=value]``.
+    ``values["project_id"]`` is ``"all"`` or the number."""
+    values = {"dry_run": False}
+    for seg in [s.strip() for s in param.split(";")]:
+        key, sep, value = seg.partition("=")
+        key, value = key.strip().lower(), value.strip()
+        if seg.lower() == "dry_run":
+            values["dry_run"] = True
+        elif key == "project_id" and sep:
+            if value.lower() == "all":
+                values[key] = "all"
+                continue
+            try:
+                values[key] = int(value)
+            except ValueError:
+                log.error("%s: invalid project_id '%s'", task, value)
+                return None, f"invalid project_id: '{value}'"
+        elif key in extra_keys and sep:
+            values[key] = value
+    if "project_id" not in values:
+        log.error("%s: project_id= is required", task)
+        return None, f"project_id= is required. Format: {usage}"
+    return values, None
 
 
 def _requested_project_id(param):

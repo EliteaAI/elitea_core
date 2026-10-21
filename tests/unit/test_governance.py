@@ -1,13 +1,13 @@
-"""C-1009 (#6754): operator-only enterprise credential governance flag.
+"""C-1009 (#6754, #7120): the governance mode helpers and the shipped config.
 
-The flag lives in the deployment config only. It must default to legacy
-behaviour, reject sloppy values at startup, and never be editable from the
-admin config editor.
+The mode itself (off, audit_only, enforce) is stored in the database and resolved by ``utils/governance_settings.py``
+(see ``test_7120_governance_settings.py``). Here: the readers every caller uses, the profile, and what ``config.yml`` and
+the admin schema still say about governance.
 """
 
 import json
-import types
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -36,89 +36,56 @@ def governance():
     )
 
 
-def _fake_module(config):
-    return types.SimpleNamespace(descriptor=types.SimpleNamespace(config=config))
+def _module(mode=None, unavailable=False, registered=None, enabled=False):
+    module = types.SimpleNamespace(governance_profile=types.SimpleNamespace(enabled=enabled))
+    if mode is not None:
+        module.governance_effective = types.SimpleNamespace(mode=mode, unavailable=unavailable)
+    if registered is not None:
+        module.governed_handlers_registered = registered
+    return module
 
 
-def test_missing_section_is_legacy(governance):
-    profile = governance.load_governance_profile({})
-    assert (profile.enabled, profile.policy_revision, profile.profile) == (False, None, "legacy")
+def test_the_modes_are_ordered_off_audit_only_enforce(governance):
+    assert governance.MODES == ("off", "audit_only", "enforce")
+    assert governance.MODE_RANK["off"] < governance.MODE_RANK["audit_only"] < governance.MODE_RANK["enforce"]
 
 
-def test_null_section_is_legacy(governance):
-    assert governance.load_governance_profile({SECTION: None}).profile == "legacy"
+def test_only_enforce_is_governed_and_only_audit_only_is_auditing(governance):
+    assert governance.is_governed(_module(enabled=True)) is True
+    assert governance.is_governed(_module(enabled=False)) is False
+    assert governance.is_auditing(_module("audit_only")) is True
+    assert governance.is_auditing(_module("enforce")) is False
+    assert governance.is_auditing(_module("off")) is False
+    assert governance.is_auditing(_module()) is False   # a module with no switch at all (older fakes)
 
 
-def test_disabled_is_legacy(governance):
-    profile = governance.load_governance_profile(
-        {SECTION: {"enabled": False, "policy_revision": None}}
-    )
-    assert profile.enabled is False
-    assert profile.profile == "legacy"
+def test_unavailable_is_read_from_the_effective_state_and_defaults_to_available(governance):
+    assert governance.is_unavailable(_module("enforce", unavailable=True)) is True
+    assert governance.is_unavailable(_module("enforce")) is False
+    assert governance.is_unavailable(_module()) is False
 
 
-def test_enabled_with_revision_is_governed(governance):
-    profile = governance.load_governance_profile(
-        {SECTION: {"enabled": True, "policy_revision": "2026-10-01"}}
-    )
-    assert profile.enabled is True
-    assert profile.policy_revision == "2026-10-01"
-    assert profile.profile == "governed"
-
-
-@pytest.mark.parametrize("bad", ["true", "false", "yes", 1, 0, [], None])
-def test_non_boolean_enabled_is_rejected(governance, bad):
-    with pytest.raises(ValueError, match="enabled"):
-        governance.load_governance_profile({SECTION: {"enabled": bad}})
-
-
-@pytest.mark.parametrize("revision", [None, "", "   ", 5])
-def test_enabled_without_usable_revision_is_rejected(governance, revision):
-    with pytest.raises(ValueError, match="policy_revision"):
-        governance.load_governance_profile(
-            {SECTION: {"enabled": True, "policy_revision": revision}}
-        )
-    with pytest.raises(ValueError, match="policy_revision"):
-        governance.load_governance_profile({SECTION: {"enabled": True}})
-
-
-@pytest.mark.parametrize("section", ["on", 1, ["enabled"]])
-def test_non_mapping_section_is_rejected(governance, section):
-    with pytest.raises(ValueError, match=SECTION):
-        governance.load_governance_profile({SECTION: section})
-
-
-def test_init_governance_stores_and_returns_profile(governance):
-    module = _fake_module(
-        {SECTION: {"enabled": True, "policy_revision": "r1"}}
-    )
-    profile = governance.init_governance(module)
-    assert module.governance_profile is profile
-    assert profile.profile == "governed" and profile.policy_revision == "r1"
-    assert governance.is_governed(module) is True
-
-
-def test_init_governance_defaults_to_legacy(governance):
-    module = _fake_module({})
-    governance.init_governance(module)
-    assert governance.is_governed(module) is False
-
-
-def test_init_governance_propagates_misconfiguration(governance):
-    with pytest.raises(ValueError):
-        governance.init_governance(_fake_module({SECTION: {"enabled": "true"}}))
+def test_lifecycle_work_continues_after_enforce_was_left(governance):
+    assert governance.governance_lifecycle_active(_module(enabled=True)) is True
+    assert governance.governance_lifecycle_active(_module(registered=True)) is True   # enforce earlier in this process
+    assert governance.governance_lifecycle_active(_module(registered=False)) is False
+    assert governance.governance_lifecycle_active(_module()) is False
 
 
 def test_profile_is_immutable(governance):
-    profile = governance.load_governance_profile({})
+    profile = governance.GovernanceProfile(False, None, governance.PROFILE_LEGACY)
     with pytest.raises(Exception):
         profile.enabled = True
 
 
-def test_config_yml_ships_the_section_disabled():
-    config = yaml.safe_load((PLUGIN_ROOT / "config.yml").read_text())
-    assert config[SECTION]["enabled"] is False
-    assert config[SECTION]["policy_revision"] is None
+def test_config_yml_keeps_only_the_context_ttl_in_the_section():
+    section = yaml.safe_load((PLUGIN_ROOT / "config.yml").read_text())[SECTION]
+    assert section == {"context_ttl_s": 3600}   # the switch is in the database; the deployment keys are environment
+
+
+def test_config_yml_does_not_expand_any_governance_variable():
+    text = (PLUGIN_ROOT / "config.yml").read_text()
+    assert "${ELITEA_CREDENTIAL_GOVERNANCE" not in text   # a pylon.db copy of the config can shadow the file (C9-SEC-11)
 
 
 def test_flag_is_not_declared_in_the_admin_schema():

@@ -79,11 +79,28 @@ def summarize_indexing_report(report):
         parts.append(f'{unchanged} unchanged')
     summary = ', '.join(parts)
 
-    dependent = totals.get('dependent_not_indexed') or 0
-    if dependent:
-        dependent_noun = _noun(dependent, report.get('dependent_labels'), DEFAULT_DEPENDENT_LABELS)
-        summary += f' ({dependent} {dependent_noun} not indexed)'
+    dependent_parts = _dependent_parts(report, totals)
+    if dependent_parts:
+        summary += f' ({", ".join(dependent_parts)} not indexed)'
     return summary
+
+
+def _dependent_parts(report, totals):
+    report_labels = report.get('dependent_labels') or DEFAULT_DEPENDENT_LABELS
+    counts = {}
+    for category in report.get('categories') or []:
+        for group in category.get('groups') or []:
+            if group.get('dependent') and group.get('count'):
+                labels = group.get('item_labels') or report_labels
+                key = (labels.get('singular'), labels.get('plural'))
+                counts[key] = counts.get(key, 0) + group['count']
+    if not counts:
+        dependent = totals.get('dependent_not_indexed') or 0
+        return [f'{dependent} {_noun(dependent, report_labels, DEFAULT_DEPENDENT_LABELS)}'] if dependent else []
+    return [
+        f'{count} {_noun(count, {"singular": singular, "plural": plural}, DEFAULT_DEPENDENT_LABELS)}'
+        for (singular, plural), count in counts.items()
+    ]
 
 
 def summarize_index_error(error):

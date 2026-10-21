@@ -14,10 +14,12 @@ run is only reaped once it has gone quiet: ``execute_run`` commits progress afte
 which bumps ``updated_at``, and that commit is the heartbeat. A live run is never silent for
 longer than one case.
 
-:data:`RUN_STALE_AFTER_SECONDS` is therefore a *ceiling on one case*, not on a whole run.
-Worst case per case today is roughly the agent timeout (120s) plus a few 60s judge/code
-dispatches, so 30 minutes leaves a wide margin; a run of any length keeps itself alive by
-finishing cases.
+:data:`RUN_STALE_AFTER_SECONDS` is therefore a *ceiling on one case*, not on a whole run; a run of
+any length keeps itself alive by finishing cases. Nothing commits between the bindings of a case, so
+the worst quiet gap is the slowest case's agent time limit (120s by default, at most 900s, see
+``MAX_CASE_TIME_LIMIT_SECONDS``) plus one 60s dispatch per AI/code binding. :func:`run_stale_after`
+derives that from the run's frozen snapshot and never goes below the 30-minute floor, so a run with
+a long limit and many bindings is not reaped while it is still working.
 
 Imports of pylon / ORM are local to the functions so the staleness decision itself stays
 importable and unit-testable without the platform present.
@@ -29,10 +31,32 @@ from typing import List, Optional
 # A ceiling on the quiet gap between two per-case progress commits, not on total run time.
 RUN_STALE_AFTER_SECONDS = 30 * 60
 
+# Per-case worst-case inputs for :func:`run_stale_after`. They mirror the orchestration defaults
+# (``DEFAULT_CASE_TIME_LIMIT_SECONDS``, the judge's and the code sandbox's 60s dispatch timeouts)
+# rather than importing them, so this module stays importable without the platform.
+_DEFAULT_CASE_TIME_LIMIT_SECONDS = 120
+_DISPATCH_TIMEOUT_SECONDS = 60
+_MACHINE_ENGINES = ('ai', 'code')
+_STALE_MARGIN_SECONDS = 5 * 60
+
 _REAPED_ERROR = (
     'Run was interrupted: the process executing it stopped (restart, deploy, or worker '
     'recycle) and it made no progress for over {minutes} minutes. Start a new run.'
 )
+
+
+def run_stale_after(snapshot: Optional[dict], floor_seconds: int = RUN_STALE_AFTER_SECONDS) -> int:
+    """Seconds a ``running`` row may stay quiet before it is reaped: the slowest case's frozen time
+    limit plus one dispatch per AI/code binding, plus a margin, and never under ``floor_seconds``."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    suite_limit = ((snapshot.get('suite') or {}).get('case_time_limit_seconds')
+                   or _DEFAULT_CASE_TIME_LIMIT_SECONDS)
+    limits = [c.get('time_limit_seconds') or suite_limit
+              for c in snapshot.get('cases') or [] if isinstance(c, dict)]
+    machine = sum(1 for b in snapshot.get('bindings') or []
+                  if isinstance(b, dict) and b.get('engine') in _MACHINE_ENGINES)
+    worst_case = max(limits or [suite_limit]) + machine * _DISPATCH_TIMEOUT_SECONDS
+    return max(floor_seconds, worst_case + _STALE_MARGIN_SECONDS)
 
 
 def is_stale_run(
@@ -68,10 +92,11 @@ def reap_project(
     with db.get_session(project_id) as session:
         rows = session.query(EvalRun).filter(EvalRun.status == EvalRunStatus.running).all()
         for run in rows:
-            if not is_stale_run(run.started_at, run.updated_at, now, stale_after_seconds):
+            ceiling = run_stale_after(run.snapshot, stale_after_seconds)
+            if not is_stale_run(run.started_at, run.updated_at, now, ceiling):
                 continue
             run.status = EvalRunStatus.errored
-            run.error = _REAPED_ERROR.format(minutes=stale_after_seconds // 60)
+            run.error = _REAPED_ERROR.format(minutes=ceiling // 60)
             run.finished_at = now
             reaped.append(run.id)
         if reaped:

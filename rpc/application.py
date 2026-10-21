@@ -37,9 +37,14 @@ from ..utils.application_utils import (
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
+from ..models.pd.admission import admission_request_from
+from ..utils.mandate_admission import take_trigger_admission
+from ..utils.credential_slots import has_free_form_secret, mark_free_form_secret
 from ..utils.exceptions import (
-    PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError,
+    AdmissionDenied, PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError,
+    InputGuardrailBlockedError,
 )
+from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
@@ -65,6 +70,18 @@ from ..utils.run_id import PREDICT_RUN_ID_KWARGS_KEY
 from ..utils.usage_attribution import ENTITY_KWARGS_KEY, ROOT_ENTITY_KWARGS_KEY
 from ..utils.validator_cache import make_validator_cache_key, toolkit_validator_cache
 from ..utils.toolkit_test_rooms import guard_test_stream
+
+
+def _toolkit_config_log_summary(toolkit_config) -> dict:
+    """Loggable view of a toolkit config: settings values may hold unsecreted credentials, so keep keys only."""
+    toolkit_config = toolkit_config if isinstance(toolkit_config, dict) else {}
+    settings = toolkit_config.get('settings')
+    return {
+        'id': toolkit_config.get('id', toolkit_config.get('toolkit_id')),
+        'type': toolkit_config.get('type'),
+        'toolkit_name': toolkit_config.get('toolkit_name'),
+        'settings_keys': sorted(settings) if isinstance(settings, dict) else [],
+    }
 
 
 def _cancel_abandoned_task(module, task_id: str, timeout: int, label: str) -> None:
@@ -118,6 +135,69 @@ def _report_budget_door_closed(
             'additional_response_meta': {'budget_error_code': budget_error.code},
         },
     })
+
+
+def _report_input_guardrail_blocked(
+    module, blocked_error, parsed, payload: dict, chat_project_id: Optional[int],
+    sio_event, start_event_content: Optional[dict],
+) -> None:
+    # Same start/terminal/persist sequence as a budget refusal, with its own event type so
+    # the UI renders a block card rather than an error (#6886). Rule ids only, never the value.
+    verdict = blocked_error.verdict()
+    question_id = (start_event_content or {}).get('question_id')
+    module.stream_response(sio_event, {
+        'type': 'start_task',
+        'stream_id': parsed.stream_id,
+        'message_id': parsed.message_id,
+        'sio_event': f'{sio_event}',
+        'content': {'task_id': None, **(start_event_content or {})},
+        'interaction_uuid': parsed.interaction_uuid,
+    })
+    module.stream_response(sio_event, {
+        'type': 'input_guardrail_blocked',
+        'stream_id': parsed.stream_id,
+        'message_id': parsed.message_id,
+        # Same shape as the chat pre-persist block, so the UI can match either id
+        **({'question_id': question_id} if question_id else {}),
+        'sio_event': f'{sio_event}',
+        'content': blocked_error.message,
+        'response_metadata': {
+            'human_readable': blocked_error.message,
+            'input_guardrail': verdict,
+        },
+    })
+    module.context.event_manager.fire_event('chat_message_stream_end', {
+        'message_id': parsed.message_id,
+        'content': blocked_error.message,
+        'execution_generation': payload.get('execution_generation'),
+        'response_metadata': {
+            'project_id': parsed.project_id,
+            'chat_project_id': chat_project_id or parsed.project_id,
+            'is_error': True,
+            'error': blocked_error.message,
+            'additional_response_meta': {'input_guardrail': verdict},
+        },
+    })
+
+
+def _raise_input_guardrail_blocked(
+    module, blocked_error, sid, parsed, payload: dict, chat_project_id: Optional[int],
+    sio_event, start_event_content: Optional[dict],
+):
+    # REST callers map this to a 422; only the SIO shape is translated here
+    if sid:
+        _report_input_guardrail_blocked(
+            module, blocked_error, parsed, payload, chat_project_id, sio_event, start_event_content,
+        )
+        raise SioValidationError(
+            sio=module.context.sio,
+            sid=None,
+            event=sio_event,
+            error=blocked_error.message,
+            stream_id=parsed.stream_id,
+            message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
+        )
+    raise blocked_error
 
 
 class RPC:
@@ -187,6 +267,7 @@ class RPC:
                     invoked_skills: Optional[list] = None,
                     applied_skills: Optional[list] = None,
                     sid_project_id: Optional[int] = None,
+                    mandate_ticket: Optional[str] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -215,6 +296,7 @@ class RPC:
             log.warning("Sid %s is not in project %s", sid, sid_project_id)
             return  # FIXME: need some proper error?
 
+        admission_version_row = None  # the row governed admission binds to, never ids from the payload
         if parsed.version_id:
             application_name = None
             with db.get_session(parsed.project_id) as session:
@@ -228,6 +310,7 @@ class RPC:
                         stream_id=data.get("stream_id"),
                         message_id=data.get("message_id")
                     )
+                admission_version_row = application_version
 
                 # Resolve llm_settings only when completely missing (original behavior). The
                 # family-conflict case (issue #5821) is handled by write-time rejection
@@ -351,8 +434,17 @@ class RPC:
             }
 
         # TODO probably better move to toolkits expand, check OpenAPI
+        # Governed: a {{secret.*}} outside a credential configuration is noticed before it is resolved (#6946)
+        free_form_secret = has_free_form_secret(self, payload)
         vc = VaultClient(parsed.project_id)
-        payload = vc.unsecret(payload)
+        # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
+        try:
+            payload = inspect_and_unsecret(payload, vc, parsed.project_id, user_id)
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
+        mark_free_form_secret(payload, free_form_secret)
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a
@@ -382,12 +474,26 @@ class RPC:
                     "project_id": application_project_id, **usage_entity["root"],
                 }
 
+        # Governed runs are admitted from the authenticated connection and the version row loaded above,
+        # never from user_id / user_context / ids in the payload; None when governance is off (#6756)
+        # An autonomous run (scheduler tick, webhook API) brings a single-use ticket for the request its trusted caller
+        # built; anything else (no ticket, a forged, spent or foreign one) is the ordinary request, which for a
+        # system user is refused as MANDATE_REQUIRED (#6947)
+        admission = take_trigger_admission(
+            self, mandate_ticket, project_id=parsed.project_id, binding_project_id=application_project_id,
+            version_id=getattr(admission_version_row, "id", None),
+        ) or admission_request_from(
+            self, sid=sid, project_id=parsed.project_id, binding_project_id=application_project_id,
+            version_row=admission_version_row, run_kind="system" if is_system_user else "interactive",
+            entry_point="chat_sio",
+        )
         try:
             task_id = self.task_node.start_task(
                 "indexer_agent",
                 args=[parsed.stream_id, parsed.message_id],
                 kwargs=payload,
                 pool="agents",
+                admission=admission,
                 meta=add_trace_context_to_meta({
                     "task_name": "indexer_agent",
                     "project_id": parsed.project_id,
@@ -422,6 +528,21 @@ class RPC:
                     message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
                 )
             raise
+        except AdmissionDenied as denied:
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error={"code": denied.reason_code, "error": denied.message},
+                    stream_id=parsed.stream_id,
+                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
+                )
+            return {"code": denied.reason_code, "error": denied.message}
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
         except MaintenanceInProgressError:
             error_payload = {
                 "error": "maintenance_in_progress",
@@ -606,8 +727,17 @@ class RPC:
                 raise PredictPayloadError(str(e))
 
         # TODO probably better move to toolkits expand, check OpenAPI
+        # Governed: a {{secret.*}} outside a credential configuration is noticed before it is resolved (#6946)
+        free_form_secret = has_free_form_secret(self, payload)
         vc = VaultClient(parsed.project_id)
-        payload = vc.unsecret(payload)
+        # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
+        try:
+            payload = inspect_and_unsecret(payload, vc, parsed.project_id, user_id)
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
+        mark_free_form_secret(payload, free_form_secret)
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a
@@ -621,12 +751,19 @@ class RPC:
                 parsed.project_id, e
             )
 
+        # Plain LLM chat has no agent version, so governed admission refuses it (#6756)
+        admission = admission_request_from(
+            self, sid=sid, project_id=parsed.project_id, binding_project_id=parsed.project_id,
+            version_row=None, run_kind="system" if is_system_user else "interactive",
+            entry_point="chat_sio_llm",
+        )
         try:
             task_id = self.task_node.start_task(
                 "indexer_predict_agent",
                 args=[parsed.stream_id, parsed.message_id],
                 kwargs=payload,
                 pool="agents",
+                admission=admission,
                 meta=add_trace_context_to_meta({
                     "task_name": "indexer_predict_agent",
                     "project_id": parsed.project_id,
@@ -661,6 +798,21 @@ class RPC:
                     message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
                 )
             raise
+        except AdmissionDenied as denied:
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error={"code": denied.reason_code, "error": denied.message},
+                    stream_id=parsed.stream_id,
+                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
+                )
+            return {"code": denied.reason_code, "error": denied.message}
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
         except MaintenanceInProgressError:
             error_payload = {
                 "error": "maintenance_in_progress",
@@ -1455,7 +1607,7 @@ class RPC:
 
         log.debug("Expanding toolkit configurations: user_id=%s, project_id=%s", user_id, project_id)
         try:
-            log.debug("Original toolkit_config: %s", data.get('toolkit_config', {}))
+            log.debug("Original toolkit_config: %s", _toolkit_config_log_summary(data.get('toolkit_config')))
 
             toolkit_config = data.get('toolkit_config', {})
             toolkit_type = toolkit_config.get('type', 'unknown_toolkit')
@@ -1474,7 +1626,7 @@ class RPC:
                 'settings': toolkit_settings_expanded
             }
 
-            log.debug("Expanded toolkit_config: %s", data['toolkit_config'])
+            log.debug("Expanded toolkit_config: %s", _toolkit_config_log_summary(data['toolkit_config']))
         except Exception as e:
             log.error(f"Error expanding toolkit configurations: {str(e)}")
             # Continue with original config if expansion fails

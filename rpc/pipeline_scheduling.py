@@ -16,13 +16,19 @@ from tools import db, rpc_tools
 from ..models.all import Application, ApplicationVersion
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
+from ..utils.admission import enforce_run_deadlines
 from ..utils.cron_utils import is_cron_due
+from ..utils.governance import governance_lifecycle_active
 from ..utils.maintenance_gate import is_maintenance_active
+from ..utils.mandate_admission import prepare_trigger_run
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
+    finish_trigger_run_refused,
+    finish_trigger_run_with_error,
+    is_trigger_refusal,
 )
 
 
@@ -150,8 +156,8 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
         f"last_run={schedule.last_run}, user_id={schedule.created_by}"
     )
 
-    # Execute the pipeline. Failures here must not prevent last_run update
-    # nor poison the session for the next pipeline in this tick.
+    # A failed dispatch still consumes this cron slot: otherwise the schedule stays due
+    # and every tick opens another run that fails the same way (#7064)
     try:
         _execute_pipeline(
             project_id=project_id,
@@ -169,7 +175,6 @@ def _process_pipeline_version(project_id: int, version: ApplicationVersion, sess
             project_id, version.id, schedule.cron,
             type(exc).__name__, exc,
         )
-        return
 
     # Update last_run timestamp
     try:
@@ -207,11 +212,20 @@ def _execute_pipeline(
     Creates a conversation with initial message for the run to track it in History,
     then executes the pipeline using the shared execution utility.
 
+    A governed platform runs it under the version's autonomous mandate: as the mandate owner, with a single-use
+    ticket for the admission request built here. Without a mandate it is refused at admission (``MANDATE_REQUIRED``);
+    the refusal is written into the run's History entry, and the cron slot is consumed as for any failed dispatch.
+
     Args:
         project_id: Project ID
         version: ApplicationVersion instance
         creator_id: User ID who created the schedule
     """
+    # Who the run acts for, and the ticket that proves a mandate run is ours: one read, governed only
+    creator_id, mandate_ticket = prepare_trigger_run(
+        trigger_kind="pipeline_schedule", project_id=project_id, version=version, entry_point="schedule",
+        trigger_ref=f"schedule:version:{version.id}", default_user_id=creator_id,
+    )
     # Get application name for conversation
     with db.get_session(project_id) as session:
         application = session.query(Application).get(version.application_id)
@@ -228,15 +242,23 @@ def _execute_pipeline(
     )
 
     # Execute using shared utility
-    result = execute_pipeline_via_predict_sio(
-        project_id=project_id,
-        version=version,
-        user_id=creator_id,
-        conversation_uuid=conversation_uuid,
-        response_message_id=response_message_id,
-        user_input="",  # Empty input for scheduled runs
-        trigger_source="scheduled",
-    )
+    try:
+        result = execute_pipeline_via_predict_sio(
+            project_id=project_id,
+            version=version,
+            user_id=creator_id,
+            conversation_uuid=conversation_uuid,
+            response_message_id=response_message_id,
+            user_input="",  # Empty input for scheduled runs
+            trigger_source="scheduled",
+            mandate_ticket=mandate_ticket,
+        )
+    except Exception as exc:
+        finish_trigger_run_with_error(project_id, response_message_id, exc)
+        raise
+
+    if is_trigger_refusal(result):
+        finish_trigger_run_refused(project_id, response_message_id, result)
 
     return result
 
@@ -256,7 +278,24 @@ class RPC:
         Re-entrancy: an in-process lock prevents a slow tick from overlapping
         with the next minute's tick on the same pylon_main instance. For
         multi-replica deployments a Postgres advisory lock would be needed.
+
+        Governed platforms also sweep the runs this process tracks (``enforce_run_deadlines``). Known gap, accepted
+        for this release: the map of tracked runs is in memory, so after a Main restart a running mandate run is no
+        longer stopped by Main (it still cannot be restarted past its context expiry); slice 2 adds a column
+        to the context table so the sweep can run from the table.
         """
+        # Governed runs that must stop (a mandate run past its time limit, a run whose context was revoked) are
+        # stopped once a minute, whether or not the previous tick is still running and also in maintenance mode:
+        # stopping work is never what maintenance mode holds back (#6947)
+        if governance_lifecycle_active(self):
+            try:
+                enforce_run_deadlines(self)
+            except Exception as exc:  # pylint: disable=W0703
+                log.exception(
+                    "check_pipeline_scheduling: run deadline sweep failed: exc_type=%s exc=%r",
+                    type(exc).__name__, exc,
+                )
+        #
         # Skip the tick while maintenance mode is on so no new pipeline runs
         # are dispatched to task nodes that are rejecting/tearing down work.
         if is_maintenance_active():

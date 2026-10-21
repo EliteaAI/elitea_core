@@ -9,11 +9,17 @@ from pylon.core.tools import log
 from tools import VaultClient, db, serialize, this
 from tools import auth, rpc_tools, VaultClient, serialize, context
 
+from .context_window import (
+    BALANCED, budget_for_model_config, is_platform_admin, manual_context_tokens, manual_context_tokens_allowed,
+    strategy_for_predict,
+)
 from .llm_settings import normalize_runtime_max_tokens
+from .mcp_oauth import refresh_token
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates
 from .skill_utils import consume_message_skills, resolve_runtime_skills
-from .subagent_prefetch import attach_subagent_prefetch
+from .stored_oauth_tokens import inject_stored_oauth_tokens
+from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
 from ..models.elitea_tools import EliteATool
 from ..models.enums.all import AgentTypes
 from ..models.pd.chat import ApplicationChatRequest, LLMChatRequest
@@ -99,6 +105,28 @@ def get_system_token(project_id: int) -> Optional[str]:
         create_if_not_exists=True
     )
     return system_token
+
+
+def get_expansion_user_id(project_id: int, user_id: int, is_system_user: bool) -> int:
+    # System-token runs expand as the project system user, exactly as the runtime's own fetch did
+    if not is_system_user:
+        return user_id
+    system_user = rpc_tools.RpcMixin().rpc.timeout(2).admin_get_project_system_user(project_id)
+    if not system_user:
+        raise PredictPayloadError(f"Project {project_id} has no system user")
+    return system_user['id']
+
+
+def expand_top_level_version(parsed: ApplicationChatRequest, expansion_user_id: int) -> Optional[dict]:
+    """Expanded details for a request that names a version but carries none, so the runtime needn't fetch them."""
+    if parsed.version_details or not (parsed.application_id and parsed.version_id):
+        return None
+    expanded = expand_version_for_runtime(
+        parsed.project_id, parsed.application_id, parsed.version_id, expansion_user_id,
+    )
+    if 'error' in expanded:
+        raise PredictPayloadError(expanded['error'])
+    return expanded
 
 
 def get_session_cookie_name() -> Optional[str]:
@@ -193,11 +221,99 @@ def load_context_settings_from_conversation(project_id: int, conversation_id: st
             ).first()
 
             if conversation and conversation.meta:
-                return conversation.meta.get('context_strategy')
+                # Pre-release chats with only the old max_context_tokens default follow Balanced (#6898)
+                return strategy_for_predict(conversation.meta.get('context_strategy'))
     except Exception as e:
         log.debug(f"Could not load context_settings from conversation {conversation_id}: {e}")
 
     return None
+
+
+def load_context_meta(project_id: int, conversation_id) -> dict:
+    """The stored context_strategy and context_budget of a conversation, in one read."""
+    try:
+        uuid.UUID(str(conversation_id))
+    except (ValueError, AttributeError, TypeError):
+        return {}
+    try:
+        from ..models.conversation import Conversation
+        with db.get_session(project_id) as session:
+            row = session.query(Conversation.meta).filter(Conversation.uuid == str(conversation_id)).first()
+        meta = (row[0] if row else None) or {}
+    except Exception as e:
+        log.debug(f"Could not load context meta for conversation {conversation_id}: {e}")
+        return {}
+    return {'context_strategy': meta.get('context_strategy') or {}, 'context_budget': meta.get('context_budget')}
+
+
+def allowed_manual_context_tokens(strategy: Optional[dict]) -> Optional[int]:
+    """Admin-set summarization trigger, only while the platform toggle is on (no checks without a stored value)."""
+    manual = manual_context_tokens(strategy)
+    if not manual or not manual_context_tokens_allowed() or not is_platform_admin((strategy or {}).get('manual_set_by')):
+        return None
+    return manual
+
+
+def apply_context_budget(
+        context_settings, model_configuration: dict, llm_max_tokens=None, manual_max_context_tokens=None,
+) -> Optional[dict]:
+    """Resolve the window mode against the request's model and set the SDK summarization trigger."""
+    if context_settings is None:
+        return None
+    mode = getattr(context_settings, 'context_window_mode', None)
+    legacy_trigger = getattr(context_settings, 'max_context_tokens', None)
+    budget = budget_for_model_config(mode or BALANCED, model_configuration, normalize_runtime_max_tokens(llm_max_tokens))
+    if mode is None and legacy_trigger:
+        log.warning('context_settings.max_context_tokens without context_window_mode is deprecated')
+        context_settings.max_context_tokens = min(int(legacy_trigger), budget['usable_input'])
+    else:
+        context_settings.context_window_mode = budget['window_mode']
+        if manual_max_context_tokens:
+            context_settings.max_context_tokens = min(int(manual_max_context_tokens), budget['usable_input'])
+        else:
+            context_settings.max_context_tokens = budget['compaction_threshold']
+        context_settings.count_overhead_in_trigger = True
+    context_settings.effective_window = budget['effective_window']
+    context_settings.reserved_output = budget['reserved_output']
+    context_settings.safety_margin = budget['safety_margin']
+    return budget
+
+
+def store_context_budget(project_id: int, conversation_id, budget: Optional[dict], stored: Optional[dict] = None) -> None:
+    """Keep the latest resolved budget on the conversation for the context status API (skipped when unchanged)."""
+    if not budget or not conversation_id or budget == stored:
+        return
+    try:
+        uuid.UUID(str(conversation_id))
+    except (ValueError, AttributeError, TypeError):
+        return
+    try:
+        from sqlalchemy import literal
+        from sqlalchemy.dialects.postgresql import JSONB
+        from ..models.conversation import Conversation
+        with db.get_session(project_id) as session:
+            session.query(Conversation).filter(Conversation.uuid == str(conversation_id)).update(
+                {Conversation.meta: Conversation.meta.op('||')(
+                    literal({'context_budget': budget}, type_=JSONB))},
+                synchronize_session=False,
+            )
+            session.commit()
+    except Exception as e:
+        log.warning(f"Could not store context budget for conversation {conversation_id}: {e}")
+
+
+def inject_stored_logins(payload: dict, project_id: int, expansion_user_id: int) -> None:
+    """Stored OAuth logins (Microsoft toolkits) for runs that carry no browser token, e.g. schedules."""
+    try:
+        rpc = rpc_tools.RpcMixin().rpc.timeout(5)
+        inject_stored_oauth_tokens(
+            payload, this.module.get_redis_client(), refresh_token,
+            lambda uuid_, type_: rpc.configurations_get_stored_login(
+                project_id=project_id, user_id=expansion_user_id,
+                configuration_uuid=uuid_, expected_type=type_),
+        )
+    except Exception as e:  # pylint: disable=W0703
+        log.warning("Stored OAuth token injection skipped: %s", type(e).__name__)
 
 
 def generate_predict_payload(
@@ -214,11 +330,20 @@ def generate_predict_payload(
     :param user_id: User ID
     :param sid: Socket.IO session id
     :param is_system_user: no real user behind the run (cron); implies skip_expansion
-    :param skip_expansion: skip tool/configuration expansion, but keep the real user's identity
+    :param skip_expansion: skip internal MCP resolution of request tools, but keep the real user's identity
     :return:
     """
     vault_client = VaultClient(parsed.project_id)
     skip_expansion = skip_expansion or is_system_user
+
+    expansion_user_id = user_id
+    if isinstance(parsed, ApplicationChatRequest) and parsed.application_id:
+        expansion_user_id = get_expansion_user_id(parsed.project_id, user_id, is_system_user)
+        expanded = expand_top_level_version(parsed, expansion_user_id)
+        if expanded is not None:
+            # Same shape chat sends: tools travel inside version_details, not the raw ORM rows
+            parsed.version_details = expanded
+            parsed.tools = []
 
     session_cookie_name = None
     if is_system_user:
@@ -267,6 +392,15 @@ def generate_predict_payload(
             continue
 
         model_parameters[param] = param_value
+
+    if parsed.context_settings is not None:
+        context_conversation_id = getattr(parsed, 'conversation_id', None) or parsed.stream_id
+        context_meta = load_context_meta(parsed.project_id, context_conversation_id)
+        context_budget = apply_context_budget(
+            parsed.context_settings, llm_model_configuration, getattr(parsed.llm_settings, 'max_tokens', None),
+            allowed_manual_context_tokens(context_meta.get('context_strategy')))
+        store_context_budget(
+            parsed.project_id, context_conversation_id, context_budget, context_meta.get('context_budget'))
 
     model_max_output_tokens = llm_model_configuration.get('max_output_tokens')
     if model_max_output_tokens is not None:
@@ -320,8 +454,6 @@ def generate_predict_payload(
                 #
                 "stream": True,  # hardcoded
                 "api_extra_headers": {
-                    'X-SECRET': all_secrets.get('secrets_header_value', 'secret'),
-                    'X-USERSESSION': auth_session if auth_session else '-',
                     'X-Project-Id': str(parsed.project_id),
                     # Runtime execution is already audited by the tracing plugin
                     # (LangChain/Langfuse generation spans) - tells the LLM proxy
@@ -488,6 +620,11 @@ def generate_predict_payload(
     # dedupe/resolve run — otherwise those tools are skipped and never get {project_id}/PAT filled.
     payload = serialize(payload)
 
+    inspected = getattr(parsed, 'input_guardrail_inspected', None)
+    if inspected:
+        # Accepted history (#6886): without it checkpoint B re-inspects those turns
+        payload['input_guardrail_inspected'] = list(inspected)
+
     if not skip_expansion:
         try:
             application = payload.get('application')
@@ -500,7 +637,10 @@ def generate_predict_payload(
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkits in predict payload: {e}")
 
-        attach_subagent_prefetch(payload, parsed.project_id, user_id)
+    if isinstance(parsed, ApplicationChatRequest):
+        attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)
+
+    inject_stored_logins(payload, parsed.project_id, expansion_user_id)
 
     return payload
 
@@ -555,27 +695,58 @@ def get_project_context(project_id: int) -> dict:
     }
 
 
+def default_tool_llm_settings(model_name, model_project_id, plain_model_temperature: Optional[float] = None) -> dict:
+    """The worker reads only top-level llm_model/llm_settings; without them the SDK picks a model itself."""
+    if not model_name:
+        return {}
+    settings = {"model_name": model_name, "model_project_id": model_project_id, "max_tokens": 1024}
+    try:
+        configuration = rpc_tools.RpcMixin().rpc.call.configurations_get_configuration_model(
+            model_project_id, model_name
+        ) or {}
+        settings["openai_compatible"] = bool(configuration.get("openai_compatible", False))
+        if plain_model_temperature is not None and not configuration.get("supports_reasoning"):
+            settings["temperature"] = plain_model_temperature
+    except Exception as e:  # pylint: disable=W0703
+        log.warning(f"Failed to resolve openai_compatible for default model {model_name!r}: {e}")
+    return settings
+
+
+EXPLICIT_MODEL_TEST_LLM_SETTINGS = {"max_tokens": 1024, "temperature": 0.1}
+
+
+def resolve_test_tool_llm(project_id: int, llm_model: Optional[str], llm_settings: Optional[dict]) -> tuple:
+    requested = llm_settings or {}
+    if llm_model or requested.get("model_name") or requested.get("selection"):
+        return llm_model, dict(EXPLICIT_MODEL_TEST_LLM_SETTINGS) if llm_settings is None else llm_settings
+    caller_chose_sampling = requested.get("temperature") is not None or requested.get("reasoning_effort") is not None
+    default_model = this.for_module('configurations').module.get_default_model(project_id)
+    resolved = default_tool_llm_settings(
+        default_model.get("model_name"), default_model.get("model_project_id"),
+        plain_model_temperature=None if caller_chose_sampling else EXPLICIT_MODEL_TEST_LLM_SETTINGS["temperature"],
+    )
+    return resolved.get("model_name"), {**resolved, **requested}
+
+
 def generate_test_tool_payload(project_id: int, user_id: int, toolkit_id: int, tool_name: str, tool_params: dict, sid: str = None) -> dict:
-    vault_client = VaultClient(project_id)
     token, auth_session = get_predict_token_and_session(project_id, user_id, sid)
     base_url = get_predict_base_url(project_id)
     llm_settings = this.for_module('configurations').module.get_default_model(project_id)
+    tool_llm_settings = default_tool_llm_settings(llm_settings.get("model_name"), llm_settings.get("model_project_id"))
     #
     # use default model settings
     llm_settings["max_tokens"] = 1024
     llm_settings["temperature"] = 0.7
     #
     payload = {
+        "llm_model": tool_llm_settings.get("model_name"),
+        "llm_settings": tool_llm_settings,
         "llm": {
             "kwargs": {
                 "model": llm_settings.get("model_name"),#llm_settings.model_name,
                 **llm_settings,
                 #
                 "stream": True,  # hardcoded
-                "api_extra_headers": {
-                    'X-SECRET': vault_client.get_all_secrets().get('secrets_header_value', 'secret'),
-                    'X-USERSESSION': auth_session if auth_session else '-',
-                }
             }
         },
         "deployment_url": base_url,

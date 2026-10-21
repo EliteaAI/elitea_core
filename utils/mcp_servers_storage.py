@@ -1,4 +1,5 @@
 from ..models.mcp import McpServer
+from . import schema_registry_version
 
 
 class ServersStorage:
@@ -13,6 +14,7 @@ class ServersStorage:
         if server.name not in self.project_id_to_server_name_to_server[project_id]:
             self.project_id_to_server_name_to_server[project_id][server.name] = server
             self.sid_to_project_id[server.sio_sid] = project_id
+            schema_registry_version.bump()
             #
             return True
         #
@@ -33,11 +35,13 @@ class ServersStorage:
             if new_server_version:
                 # Update the server with the new version in the storage
                 self.project_id_to_server_name_to_server[project_id][server_name] = new_server_version
+                schema_registry_version.bump()
                 #
                 return new_server_version
             #
             # If the server is no longer available, remove it from the storage
             self.project_id_to_server_name_to_server[project_id].pop(server_name, None)
+            schema_registry_version.bump()
         #
         return None
 
@@ -54,6 +58,7 @@ class ServersStorage:
             if not servers:
                 self.project_id_to_server_name_to_server.pop(project_id, None)
             self.sid_to_project_id.pop(sid, None)
+            schema_registry_version.bump()
             return removed_servers
         return []
 

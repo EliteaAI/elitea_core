@@ -16,10 +16,12 @@ from ...rpc.chat_all import CHAT_PREDICT_MAPPER, prepare_conversation_history, g
 from ...utils.chat_history import generate_chat_history
 from ...models.enums.all import ChatHistoryRole, AgentTypes
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.exceptions import InputGuardrailBlockedError
+from ...utils.input_guardrail import check_chat_input, participant_entity
 from ...utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation, retire_all_interrupts,
 )
-from ...utils.sio_utils import SioEvents
+from ...utils.sio_utils import SioEvents, SioValidationError
 from ...utils.skill_participant_utils import pop_chat_skills, pop_skill_dispatch, record_skill_run
 
 
@@ -59,15 +61,35 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             msg_entity_meta = msg_group.author_participant.entity_meta
 
+            guardrail_notice = None
             if parsed.updated_items:
+                # Checkpoint A (#6886): an edited turn is checked before it replaces the stored copy
+                checked = []
                 for update in parsed.updated_items:
                     item = next(
                         (i for i in reply_msg.message_items if str(i.uuid) == update.get('uuid')),
                         None,
                     )
                     if item and isinstance(item, TextMessageItem):
-                        item.content = update['content']
+                        try:
+                            content, verdict = check_chat_input(
+                                update['content'], project_id, auth.current_user().get('id'),
+                                entity=participant_entity(msg_group.author_participant),
+                            )
+                        except InputGuardrailBlockedError as e:
+                            session.rollback()
+                            return e.body(), 422
+                        checked.append((item, content, verdict))
+                for item, content, verdict in checked:
+                    item.content = content
+                    if verdict:
+                        reply_msg.meta = {**(reply_msg.meta or {}), 'input_guardrail': verdict}
+                        if guardrail_notice is None:
+                            guardrail_notice = {'verdict': verdict, 'content': content}
                     # canvas and other item types: reserved for future support
+                if checked and guardrail_notice is None and (reply_msg.meta or {}).get('input_guardrail'):
+                    # The edit is clean: the old notice no longer describes the stored text
+                    reply_msg.meta = {k: v for k, v in reply_msg.meta.items() if k != 'input_guardrail'}
                 session.commit()
                 session.refresh(reply_msg)
 
@@ -168,6 +190,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             # regeneration that applies no skill would inherit the discarded answer's.
             # Not in begin_execution_generation: that also runs on HITL resume, which keeps them.
             fresh_meta.pop('invoked_skills', None)
+            # The refusal belonged to the discarded answer; the question keeps its own verdict
+            # on reply_msg. The meta writer keeps keys a run does not report, so a stale block
+            # card would survive a successful retry on reload (#6886).
+            fresh_meta.pop('input_guardrail', None)
             msg_group.meta = fresh_meta
             # Clear the group's trace steps (rows are the accumulator; regenerate starts fresh).
             session.query(MessageTraceStep).filter(
@@ -177,6 +203,23 @@ class PromptLibAPI(api_tools.APIModeHandler):
             session.commit()
             session.refresh(msg_group)
 
+            if guardrail_notice and parsed.sid:
+                # The editor's bubble still shows what they typed; replace it with the stored
+                # (redacted) text and show the notice, as a new turn does (#6886). Never the value.
+                verdict = guardrail_notice['verdict']
+                self.module.context.sio.emit(
+                    event=SioEvents.chat_predict.value,
+                    data={
+                        'type': 'input_guardrail_notice',
+                        'stream_id': str(parsed.conversation_uuid or reply_msg.conversation.uuid),
+                        'message_id': str(reply_msg.uuid),
+                        'question_id': str(reply_msg.uuid),
+                        'content': guardrail_notice['content'] if verdict.get('action') == 'redact' else None,
+                        'response_metadata': {'input_guardrail': verdict},
+                    },
+                    to=parsed.sid,
+                )
+
             rpc_func = CHAT_PREDICT_MAPPER.get(msg_group.author_participant.entity_name)
             if rpc_func:
                 regenerate_payload[EXECUTION_GENERATION_KEY] = execution_generation
@@ -185,14 +228,30 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     'question_id': parsed.question_id,
                 })
                 record_skill_run(session, msg_group, start_event_content)
-                getattr(self.module.context.rpc_manager.call, rpc_func)(
-                    parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
-                    routing_projection=regenerate_payload.pop('_routing_projection', None),
-                    **pop_chat_skills(regenerate_payload),
-                    start_event_content=start_event_content,
-                    chat_project_id=project_id,
-                    **skill_rpc_kwargs,
-                )
+                try:
+                    getattr(self.module.context.rpc_manager.call, rpc_func)(
+                        parsed.sid, regenerate_payload, SioEvents.chat_predict.value,
+                        routing_projection=regenerate_payload.pop('_routing_projection', None),
+                        **pop_chat_skills(regenerate_payload),
+                        start_event_content=start_event_content,
+                        chat_project_id=project_id,
+                        **skill_rpc_kwargs,
+                    )
+                except InputGuardrailBlockedError as e:
+                    msg_group.is_streaming = False
+                    session.commit()
+                    return e.body(), 422
+                except SioValidationError as e:
+                    # A refusal at dispatch (budget, input guardrail) was already streamed to
+                    # the sid and stored on the group; the response must not turn it into a 500
+                    session.refresh(msg_group)
+                    if msg_group.is_streaming:
+                        msg_group.is_streaming = False
+                        session.commit()
+                        session.refresh(msg_group)
+                    if parsed.sid:
+                        return serialize(MessageGroupDetail.model_validate(msg_group)), 200
+                    return {'error': str(e.error)}, 400
                 # load new regenerated message items
                 session.refresh(msg_group)
                 return serialize(MessageGroupDetail.model_validate(msg_group)), 200

@@ -8,6 +8,7 @@ from ..models.message_group import ConversationMessageGroup
 from ..models.message_items.text import TextMessageItem
 from ..models.pd.message import MessageGroupDetail
 
+from ..utils.chat_usage import accumulate_chat_usage
 from ..utils.sio_utils import get_chat_room
 from ..utils.message_stream import (
     update_message_group_meta,
@@ -108,6 +109,8 @@ class Event:
                         'for message %s', payload['message_id'],
                     )
                     return
+                # Spend happened even when the run was stopped, so count it before that check (#6898)
+                accumulate_chat_usage(session, msg_group, payload.get('response_metadata') or {})
                 # A killed worker still emits stream_end; its bare "Error: " would land
                 # under the terminal text the stopper already wrote.
                 is_stopped = getattr(self, 'is_chat_run_stopped', None)
@@ -116,6 +119,7 @@ class Event:
                         'chat_message_stream_end: ignoring late end for stopped message %s',
                         payload['message_id'],
                     )
+                    session.commit()
                     return
                 content = parse_content_chunks(safe_decode_bytes_in_dict(payload['content']))
 

@@ -1027,6 +1027,8 @@ def _application_to_md(app: dict, toolkits: list, applications: list = None, ver
     # Export internal tools (pyodide, data_analysis, planner, swarm, etc.)
     if meta.get('internal_tools'):
         frontmatter['internal_tools'] = meta['internal_tools']
+    if meta.get('ignore_project_context') is not None:
+        frontmatter['ignore_project_context'] = meta['ignore_project_context']
 
     # Add welcome message and conversation starters to markdown export
     welcome_message = version.get('welcome_message', '')

@@ -76,3 +76,29 @@ def test_threshold_is_a_per_case_ceiling_not_a_run_ceiling(reaper):
 def test_threshold_is_overridable(reaper):
     assert reaper.is_stale_run(None, NOW - timedelta(minutes=5), NOW, 60) is True
     assert reaper.is_stale_run(None, NOW - timedelta(minutes=5), NOW, 3600) is False
+
+
+def _snapshot(suite_limit=None, case_limits=(), engines=()):
+    return {'suite': {'case_time_limit_seconds': suite_limit} if suite_limit else {},
+            'cases': [{'id': i, **({'time_limit_seconds': lim} if lim else {})}
+                      for i, lim in enumerate(case_limits)],
+            'bindings': [{'engine': e} for e in engines]}
+
+
+def test_a_short_run_keeps_the_floor(reaper):
+    assert reaper.run_stale_after(_snapshot(None, [None], ['ai', 'code'])) == reaper.RUN_STALE_AFTER_SECONDS
+    assert reaper.run_stale_after(None) == reaper.RUN_STALE_AFTER_SECONDS
+
+
+def test_a_long_limit_with_many_bindings_raises_the_ceiling(reaper):
+    """The reviewer's case: 900 s of agent time plus 16 sequential 60 s dispatches > 30 min."""
+    snapshot = _snapshot(120, [None, 900], ['ai'] * 10 + ['code'] * 6 + ['human'] * 3)
+    ceiling = reaper.run_stale_after(snapshot)
+    assert ceiling == 900 + 16 * 60 + 5 * 60  # human bindings never dispatch, so they add nothing
+    assert ceiling > reaper.RUN_STALE_AFTER_SECONDS
+
+
+def test_a_case_override_is_what_counts(reaper):
+    with_override = reaper.run_stale_after(_snapshot(60, [None, 900], ['ai'] * 16))
+    without = reaper.run_stale_after(_snapshot(60, [None, None], ['ai'] * 16))
+    assert with_override > without

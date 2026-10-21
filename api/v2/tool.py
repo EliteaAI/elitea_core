@@ -68,6 +68,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             tool_data = result.model_dump(mode='json')
 
+            # Every user is a public-project viewer, and viewers there hold tool.update
+            if expand and (tool_data.get('meta') or {}).get('shared'):
+                from ...utils.web_search import is_public_admin
+                if not is_public_admin(project_id, auth.current_user()['id']):
+                    return {'error': 'Expanding a shared toolkit requires project admin rights'}, 403
+
             # Expand credential configurations if requested
             if expand and tool_data.get('settings') and tool_data.get('type'):
                 try:
@@ -100,6 +106,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
     def delete(self, project_id, tool_id):
         with db.with_project_schema_session(project_id) as session:
             if tool := session.query(EliteATool).get(tool_id):
+                if (tool.meta or {}).get('shared'):
+                    from ...utils.web_search import invalidate_web_search_cache
+                    invalidate_web_search_cache()
                 session.delete(tool)
                 session.query(ApplicationVersion).filter(
                     ApplicationVersion.meta['attachment_toolkit_id'].astext == str(tool_id)
@@ -208,7 +217,17 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         update_data.fix_name(project_id)
 
+        from ...utils.web_search import shared_toolkit_error
         with db.with_project_schema_session(project_id) as session:
+            # Read the old flag under a row lock in the same transaction as the update
+            current = session.query(EliteATool.meta).filter(EliteATool.id == tool_id).with_for_update().first()
+            share_error = shared_toolkit_error(
+                project_id, payload['user_id'], update_data.type, update_data.settings, update_data.meta,
+                was_shared=bool(current and (current.meta or {}).get('shared')),
+            )
+            if share_error:
+                return {'error': share_error}, 403
+
             from tools import serialize, store_secrets
             from ...utils.toolkits_utils import get_mcp_schemas
             wrap_provider_hub_secret_fields(update_data.type, update_data.settings, project_id)
@@ -235,6 +254,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 serialize(update_data)
             )
             new_tool = tool_query.first()
+            if current and ((current.meta or {}).get('shared') or update_data.meta.get('shared')):
+                from ...utils.web_search import invalidate_web_search_cache
+                invalidate_web_search_cache()
 
             new_tool_parsed = ToolDetails.from_orm(new_tool)
             new_tool_parsed.fix_name(project_id)
