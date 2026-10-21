@@ -1,6 +1,6 @@
-"""EL-7011 US-21 - the generate_schedule_draft endpoint answers a draft, or the error of the SAD contract.
+"""EL-7011 US-21 - `POST .../schedules/{mode}/{project_id}/draft` answers a draft, or the error of the SAD contract.
 
-The handler loads into a synthetic package (like test_6416_draft_llm_failure_surfacing.py), so its
+The route module and the draft handler load into a synthetic package (like test_6416_draft_llm_failure_surfacing.py), so its
 relative imports resolve against fakes. The request and response models and the answer helpers of
 draft_llm_utils are real. The checks of schedule_draft_utils have their own unit tests; here the
 model call is mocked and the fake checks only record what the handler passes in.
@@ -12,6 +12,7 @@ import sys
 import types
 
 import pytest
+from fixtures.schedule_sqlite import handler_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKG = 'draftpkg_7011_test'
@@ -27,6 +28,7 @@ class _PoolSaturationError(Exception):
 
 class _Request:
     json = None  # set per test
+    path = f'/api/v2/elitea_core/schedules/prompt_lib/{PROJECT}/draft'
 
 
 class _Handler:
@@ -123,7 +125,9 @@ def endpoint():
     _module(f'{PKG}.utils.schedule_draft_utils', schedule_roster=lambda project_id: ROSTER,
             build_schedule_draft_prompt=build, validate_schedule_draft=validate)
     _load_real('utils.draft_llm_utils', 'utils/draft_llm_utils.py')
-    state.module = _load_real('api.v2.generate_schedule_draft', 'api/v2/generate_schedule_draft.py')
+    state.module = _load_real('utils.schedule_draft_handler', 'utils/schedule_draft_handler.py')
+    sys.modules.update(handler_stubs(PKG, real='schedule_draft_handler'))
+    state.routes = _load_real('api.v2.schedules', 'api/v2/schedules.py')
     yield state
     for name in list(sys.modules):
         if name.startswith(PKG):
@@ -137,7 +141,7 @@ def endpoint():
 
 def _post(state, body, result=None, exc=None):
     state.module.request.json = body
-    handler = state.module.PromptLibAPI()
+    handler = state.routes.PromptLibAPI()
     handler.module = _Handler(result=result, exc=exc)
     payload, status = handler.post(PROJECT)
     return payload, status, handler.module

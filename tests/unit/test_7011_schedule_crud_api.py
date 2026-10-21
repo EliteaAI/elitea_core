@@ -1,7 +1,9 @@
 """EL-7011 US-07: handler tests of the schedule resource (owner, scope, run input, notice).
 
-Covers R1.3-R1.6, R2.2, R2.5, R3.1, R4.2-R4.4 and R5.1, R5.2, R5.4-R5.7. The handler module, the
-service, the body models and the schedule table are real. The plugin package around them is
+Covers R1.3-R1.6, R2.2, R2.5, R3.1, R4.2-R4.4 and R5.1, R5.2, R5.4-R5.7, plus the pause and resume
+actions of the owner change request of 2026-10-21. The route module `api/v2/schedules.py`, the
+one-schedule handlers, the service, the body models and the schedule table are real. The other
+handler modules are empty classes. The plugin package around them is
 stubbed: `tools`, folder rights, notices, the trace span and the parent tables. Rows live in
 SQLite, so the own-only filter is checked against real queries.
 
@@ -80,8 +82,8 @@ class Harness:
     def call(self, verb, body=None, schedule_id=None, suffix='', query=None):
         """Call a handler verb; `suffix` is the URL tail the router matched, such as `/run`."""
         self.body, self.query = body, query or {}
-        self.path = f'/schedule/prompt_lib/{PROJECT_ID}/{schedule_id or ""}{suffix}'
-        handler = self.module.PromptLibAPI()
+        self.path = f'/schedules/prompt_lib/{PROJECT_ID}/{schedule_id or ""}{suffix}'
+        handler = self.routes.PromptLibAPI()
         handler.module = object()
         kwargs = {'project_id': PROJECT_ID}
         if schedule_id is not None:
@@ -167,7 +169,10 @@ def harness(isolated_sys_modules, monkeypatch):
     load('utils/schedule_claim.py', 'utils.schedule_claim')
     load('utils/schedule_dispatch.py', 'utils.schedule_dispatch')
     load('utils/schedule_service.py', 'utils.schedule_service')
-    harness.module = load('api/v2/schedule.py', 'api.v2.schedule')
+    harness.config = tools.this.module.descriptor.config
+    harness.module = load('utils/schedule_item_handlers.py', 'utils.schedule_item_handlers')
+    sys.modules.update(sqlite_db.handler_stubs(PACKAGE, real='schedule_item_handlers'))
+    harness.routes = load('api/v2/schedules.py', 'api.v2.schedules')
 
     sqlite_db.add_agent_and_pipeline(harness.session_factory, Application, ApplicationVersion)
     return harness
@@ -249,10 +254,78 @@ def test_7011_r2_2_update_ignores_created_by_and_principal(harness):
 
 def test_7011_r2_5_resume_without_a_version_is_400_and_stays_disabled(harness):
     schedule_id = harness.seed(version_id=None, enabled=False, disabled_reason='version_deleted')
-    assert harness.call('put', {'enabled': True}, schedule_id) == (
+    assert harness.call('post', None, schedule_id, suffix='/resume') == (
         {'error': 'Choose a version before you resume this schedule', 'field': 'version_id'}, 400,
     )
     assert harness.row(schedule_id).enabled is False
+
+
+# --- Owner CR 2026-10-21: PUT edits fields only; pause and resume are their own actions
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_7011_cr_put_with_enabled_is_400_and_names_pause_and_resume(harness, enabled):
+    schedule_id = harness.seed(enabled=not enabled)
+    body, status = harness.call('put', {'name': 'Renamed', 'enabled': enabled}, schedule_id)
+    assert (status, body['field']) == (400, 'enabled')
+    assert 'pause' in body['error'] and 'resume' in body['error']
+    row = harness.row(schedule_id)
+    assert (row.name, row.enabled) == ('Nightly', not enabled)
+
+
+def test_7011_cr_pause_disables_the_schedule_and_answers_the_details(harness):
+    schedule_id = harness.seed()
+    body, status = harness.call('post', None, schedule_id, suffix='/pause')
+    assert (status, body['id'], body['enabled']) == (200, schedule_id, False)
+    assert harness.row(schedule_id).enabled is False
+    assert harness.row(schedule_id).updated_by == OWNER_ID
+
+
+def test_7011_cr_resume_enables_the_schedule_and_computes_the_next_run(harness):
+    schedule_id = harness.seed(enabled=False, next_run=None)
+    body, status = harness.call('post', None, schedule_id, suffix='/resume')
+    row = harness.row(schedule_id)
+    assert (status, body['enabled'], row.enabled) == (200, True, True)
+    assert row.next_run is not None
+
+
+def test_7011_cr_resume_past_the_project_cap_is_409_and_stays_paused(harness):
+    harness.config['scheduler'] = {'schedules': {'max_enabled_per_project': 1}}
+    harness.seed(name='Running')
+    schedule_id = harness.seed(enabled=False)
+    body, status = harness.call('post', None, schedule_id, suffix='/resume')
+    assert status == 409 and body['error']
+    assert harness.row(schedule_id).enabled is False
+
+
+@pytest.mark.parametrize('action', ['/pause', '/resume'])
+def test_7011_cr_pause_and_resume_need_the_update_permission(harness, action):
+    schedule_id = harness.seed(enabled=action == '/pause')
+    harness.permissions.discard(PERMISSION_PREFIX + 'update')
+    assert harness.call('post', None, schedule_id, suffix=action)[1] == 403
+    assert harness.row(schedule_id).enabled is (action == '/pause')
+
+
+@pytest.mark.parametrize('action', ['/pause', '/resume'])
+def test_7011_cr_pause_and_resume_of_another_owners_schedule_is_404(harness, action):
+    schedule_id = harness.seed(created_by=OTHER_ID, enabled=action == '/pause')
+    assert harness.call('post', None, schedule_id, suffix=action) == (NOT_FOUND, 404)
+
+
+def test_7011_cr_admin_pause_marks_the_span_and_tells_the_owner(harness):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    harness.request_as(ADMIN_ID, ADMIN)
+    assert harness.call('post', None, schedule_id, suffix='/pause')[1] == 200
+    assert harness.span.attributes['entity.id'] == str(schedule_id)
+    assert harness.notices == [(OTHER_ID, 'schedule_edited_by_admin', schedule_id)]
+
+
+@pytest.mark.parametrize('verb, suffix', [
+    ('get', '/pause'), ('put', '/resume'), ('delete', '/pause'), ('post', ''), ('get', '/owner'),
+])
+def test_7011_cr_a_method_the_url_does_not_serve_is_405(harness, verb, suffix):
+    schedule_id = harness.seed()
+    assert harness.call(verb, {'name': 'x'}, schedule_id, suffix=suffix) == harness.routes.NOT_ALLOWED
+    assert (harness.row(schedule_id).name, harness.row(schedule_id).enabled) == ('Nightly', True)
 
 
 # --- R3.1: own-only scope

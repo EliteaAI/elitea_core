@@ -1,230 +1,86 @@
-"""Schedules list endpoint and the admin-only YAML file routes (EL-7011, US-05, US-22).
+"""The Schedules API (EL-7011): every operation under `/api/v2/elitea_core/schedules/{mode}/{project_id}`.
 
-GET .../schedules/prompt_lib/{project_id} lists; GET .../export writes the file; POST .../import reads one.
+Pylon serves all URLs of this module with one class, so `PromptLibAPI` picks the handler by the
+HTTP method and the URL tail, as `ROUTES` says. The handlers live in three helper modules:
+one schedule, the project's schedules, and the AI draft. The Swagger text of each operation is in
+`utils/schedule_openapi.py`; `Module._register_openapi` registers it.
 """
-from typing import ClassVar, get_args
+from typing import ClassVar
 
 from flask import request
-from pydantic import ValidationError
-from pylon.core.tools import log
-from tools import api_tools, auth, db, register_openapi
+from tools import api_tools
 
-from ...models.pd.schedule_list import (
-    EntityType,
-    RunStatus,
-    ScheduleListFilters,
-    ScheduleListItem,
-    SortBy,
-    SortOrder,
-)
-from ...utils.authors import get_authors_data
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.constants import SCHEDULES_OPENAPI_TAG as OPENAPI_TAG
-from ...utils.constants import SCHEDULES_PROJECT_PATH as PROJECT_PATH
-from ...utils.schedule_access import (
-    allowed_actions,
-    schedule_check_spec,
-    schedule_scope,
-)
-from ...utils.schedule_queries import list_schedules
+from ...utils.schedule_draft_handler import ScheduleDraftHandler
+from ...utils.schedule_item_handlers import ScheduleItemHandlers
+from ...utils.schedule_project_handlers import ScheduleProjectHandlers
 
-NOT_ALLOWED = {"error": "Method not allowed"}, 405
-MAX_ID = 2147483647  # the schedule id column is a 32-bit integer
-MAX_EXPORT_IDS = 500
-
-LIST_QUERY_PARAMS = [
-    {"name": "entity_type", "in": "query", "schema": {"type": "string", "enum": list(get_args(EntityType))},
-     "description": "Only schedules of this entity kind"},
-    {"name": "status", "in": "query", "schema": {"type": "string", "enum": list(get_args(RunStatus))},
-     "description": "Only schedules whose last run has this status"},
-    {"name": "enabled", "in": "query", "schema": {"type": "boolean"}, "description": "True: active, false: paused"},
-    {"name": "owner_ids", "in": "query", "schema": {"type": "array", "items": {"type": "integer"}},
-     "description": "Only schedules of these owners, repeated or comma-separated; schedules admin only"},
-    {"name": "entity_id", "in": "query", "schema": {"type": "integer"},
-     "description": "Only schedules of this agent or pipeline"},
-    {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Match on schedule or entity name"},
-    {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20,
-                                                 "minimum": 1, "maximum": 100}, "description": "Rows per page"},
-    {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0, "minimum": 0},
-     "description": "Rows to skip"},
-    {"name": "sort_by", "in": "query", "schema": {"type": "string", "default": "next_run", "enum": list(get_args(SortBy))},
-     "description": "Sort column"},
-    {"name": "sort_order", "in": "query", "schema": {"type": "string", "enum": list(get_args(SortOrder)), "default": "asc"},
-     "description": "Sort direction"},
-]
-IMPORT_BODY = {"required": True, "content": {"multipart/form-data": {"schema": {
-    "type": "object", "required": ["file"],
-    "properties": {"file": {"type": "string", "format": "binary",
-                            "description": "Schedule YAML file, as Export writes it"}},
-}}}}
-ADMIN_FILE_RESPONSES = {
-    "400": {"description": "Invalid ids or file; the body has the error"},
-    "403": {"description": "No permission; schedules admin only"},
+ITEM = "<int:schedule_id>"
+# (HTTP method, URL tail after the project id): handler method. The Swagger table has the same keys.
+ROUTES = {
+    ("get", ""): "_list",
+    ("post", ""): "_create",
+    ("get", ITEM): "_read",
+    ("put", ITEM): "_edit",
+    ("delete", ITEM): "_delete",
+    ("post", f"{ITEM}/pause"): "_pause",
+    ("post", f"{ITEM}/resume"): "_resume",
+    ("post", f"{ITEM}/run"): "_run",
+    ("get", f"{ITEM}/runs"): "_runs",
+    ("post", f"{ITEM}/owner"): "_change_owner",
+    ("get", "export"): "_export",
+    ("post", "import"): "_import",
+    ("post", "draft"): "_draft",
+    ("get", "preferences"): "_get_preferences",
+    ("put", "preferences"): "_save_preferences",
 }
-# The router serves this URL with the list handler, so register_api_class cannot list it;
-# Module._register_openapi registers it (BUG-11)
-OPENAPI_SUB_ACTIONS = [{
-    "path": f"/api/v2/elitea_core/schedules/{PROJECT_PATH}/export", "method": "get", "name": "Export Schedules",
-    "description": "Download the schedules of the project as a YAML file. Schedules admin only.",
-    "parameters": [
-        {"name": "mode", "in": "path", "required": True, "schema": {"type": "string", "default": PROMPT_LIB_MODE},
-         "description": f"Mode (default: {PROMPT_LIB_MODE})"},
-        {"name": "project_id", "in": "path", "required": True, "schema": {"type": "integer"},
-         "description": "Project id"},
-        {"name": "ids", "in": "query", "schema": {"type": "string"},
-         "description": f"Comma-separated schedule ids, at most {MAX_EXPORT_IDS}; all schedules when absent"},
-    ],
-    "responses": {"200": {"description": "The YAML file (application/x-yaml)"}, **ADMIN_FILE_RESPONSES},
-}]
+NOT_ALLOWED = {"error": "Method not allowed"}, 405
 
 
-def _last_segment() -> str:
-    """The URL tail that tells the list from `export` and `import`; the resource shares one verb per URL."""
-    return request.path.rstrip("/").rsplit("/", 1)[-1]
+def _tail(schedule_id: int | None) -> str:
+    """The URL tail after the project id, in the form of the `ROUTES` keys."""
+    last = request.path.rstrip("/").rsplit("/", 1)[-1]
+    action = "" if last.isdigit() else last
+    if schedule_id is None:
+        return action
+    return f"{ITEM}/{action}" if action else ITEM
 
 
-def _parse_ids(raw: str) -> list[int] | None:
-    """Ids of `1,2`; ASCII digits only, each a 32-bit id, at most 500. None when the text is not such a list."""
-    parts = raw.split(",")
-    if len(parts) > MAX_EXPORT_IDS or not all(part.isascii() and part.isdigit() for part in parts):
-        return None
-    ids = [int(part) for part in parts]
-    return ids if max(ids) <= MAX_ID else None
+class PromptLibAPI(ScheduleItemHandlers, ScheduleProjectHandlers, ScheduleDraftHandler, api_tools.APIModeHandler):
+    """Answers every Schedules URL; an HTTP method a URL does not serve answers 405."""
 
-
-def _owner_names(owner_ids: set[int]) -> dict[int, str | None]:
-    """Map owner id to name, or the email when the user has no name; a failed lookup gives an empty map (R1.3)."""
-    if not owner_ids:  # an empty id list makes auth_core return every user
-        return {}
-    try:
-        return {user["id"]: user.get("name") or user.get("email") for user in get_authors_data(sorted(owner_ids))}
-    except Exception as e:  # noqa: BLE001  # pylint: disable=W0718 -- names must never break the list (R1.3)
-        log.warning(f"Schedule owner names lookup failed: {e}")
-        return {}
-
-
-class PromptLibAPI(api_tools.APIModeHandler):
-    """Lists the schedules of a project; a regular caller sees own rows only."""
-
-    @register_openapi(
-        name="List Schedules",
-        description="List schedules with filters and paging; owner names and allowed actions per row. "
-                    "A caller without schedules admin sees own schedules only.",
-        tags=[OPENAPI_TAG],
-        parameters=LIST_QUERY_PARAMS,
-        responses={"200": {"description": "Success: `total` and one page of `rows`"},
-                   "400": {"description": "Invalid query option; the error names it"},
-                   "403": {"description": "No permission"}},
-        available_to_users=True,
-        path_suffix_override=PROJECT_PATH,
-    )
-    @api_tools.endpoint_metrics
-    def get(self, project_id: int, **kwargs):
-        # One check_api per helper, called with keyword arguments: each URL needs its own permission.
-        if _last_segment() == "export":
-            return self._export(project_id=project_id)
-        return self._list(project_id=project_id)
-
-    @register_openapi(
-        name="Import Schedules",
-        description="Import a schedule YAML file (multipart `file`). An item that matches a schedule by key, "
-                    "else by name, updates it; every created schedule is disabled and owned by the caller. "
-                    "Answers the created, updated, skipped and failed items.",
-        tags=[OPENAPI_TAG],
-        request_body=IMPORT_BODY,
-        responses={
-            "200": {"description": "Success: the created, updated, skipped and failed items"}, **ADMIN_FILE_RESPONSES,
-        },
-        available_to_users=True,
-        path_suffix_override=f"{PROJECT_PATH}/import",
-    )
-    @api_tools.endpoint_metrics
-    def post(self, project_id: int, **kwargs):
-        if _last_segment() != "import":
+    def _dispatch(self, method: str, project_id: int, schedule_id: int | None):
+        name = ROUTES.get((method, _tail(schedule_id)))
+        if name is None:
             return NOT_ALLOWED
-        return self._import(project_id=project_id)
+        # Keyword arguments: check_api reads project_id from them for the project-scoped permission check
+        ids = {} if schedule_id is None else {"schedule_id": schedule_id}
+        return getattr(self, name)(project_id=project_id, **ids)
 
-    @auth.decorators.check_api(schedule_check_spec("list"))
-    def _list(self, project_id: int):
-        """Return `{"total", "rows"}` for one page (R1.1-R5.3)."""
-        args = request.args.to_dict()
-        owner_ids = request.args.getlist('owner_ids')
-        if owner_ids:  # to_dict keeps only the first value of a repeated key
-            args['owner_ids'] = ','.join(owner_ids)
-        try:
-            filters = ScheduleListFilters(**args)
-        except ValidationError as e:
-            name = e.errors()[0]["loc"][0]
-            if name == "limit":
-                return {"error": "limit must be between 1 and 100"}, 400
-            return {"error": f"{name} is not valid"}, 400
+    @api_tools.endpoint_metrics
+    def get(self, project_id: int, schedule_id: int | None = None, **kwargs):
+        """List, read one, run records, export and preferences."""
+        return self._dispatch("get", project_id, schedule_id)
 
-        scope = schedule_scope(project_id)
-        with db.get_session(project_id) as session:
-            total, rows = list_schedules(session, scope, filters, filters.limit, filters.offset)
-        names = _owner_names({row.created_by for row in rows})
-        items = [
-            ScheduleListItem(
-                **row._mapping,
-                owner={"id": row.created_by, "name": names.get(row.created_by)},
-                allowed_actions=allowed_actions(row, scope),
-            ).model_dump(mode="json")  # one ISO offset per date; serialize() adds a second 'Z'
-            for row in rows
-        ]
-        from ...utils.schedule_risk import is_run_without_asking_allowed
-        return {"total": total, "rows": items, "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}, 200
+    @api_tools.endpoint_metrics
+    def post(self, project_id: int, schedule_id: int | None = None, **kwargs):
+        """Create, pause, resume, run, change owner, import and draft."""
+        return self._dispatch("post", project_id, schedule_id)
 
-    @auth.decorators.check_api(schedule_check_spec("export"))
-    def _export(self, project_id: int):
-        """Answer the YAML file of every schedule of the project, or of `?ids=1,2` (R1.1, R1.2, R1.4)."""
-        from flask import Response  # late: the list unit test fakes flask without it
+    @api_tools.endpoint_metrics
+    def put(self, project_id: int, schedule_id: int | None = None, **kwargs):
+        """Edit a schedule and save preferences."""
+        return self._dispatch("put", project_id, schedule_id)
 
-        from ...utils.export_import_utils import content_disposition_attachment
-        from ...utils.schedule_service import ScheduleError
-        from ...utils.schedule_yaml import export_schedules_yaml
-        raw_ids = request.args.get("ids")
-        ids = None if raw_ids is None else _parse_ids(raw_ids)
-        if raw_ids is not None and ids is None:
-            return {"error": "ids must be a comma-separated list of schedule ids"}, 400
-        try:
-            text = export_schedules_yaml(project_id, ids)
-        except ScheduleError as e:
-            return e.response
-        return Response(text, mimetype="application/x-yaml", headers={
-            "Content-Disposition": content_disposition_attachment(f"schedules_{project_id}.yaml"),
-        })
-
-    @auth.decorators.check_api(schedule_check_spec("import"))
-    def _import(self, project_id: int):
-        """Update or create a schedule per item of the uploaded file; answer the report (R2.6, R3.1, R4)."""
-        from ...utils.schedule_yaml import (
-            MAX_FILE_BYTES,
-            NOT_YAML,
-            TOO_LARGE,
-            import_schedules,
-            parse_schedules_file,
-        )
-        upload = request.files.get("file")
-        if upload is None:
-            return {"error": "No file provided"}, 400
-        if upload.seek(0, 2) > MAX_FILE_BYTES:
-            return {"error": TOO_LARGE}, 400
-        upload.seek(0)
-        try:
-            file = parse_schedules_file(upload.read().decode())
-        except UnicodeDecodeError:
-            return {"error": NOT_YAML}, 400
-        except ValueError as e:
-            return {"error": str(e)}, 400
-        return import_schedules(project_id, schedule_scope(project_id).user_id, file), 200
+    @api_tools.endpoint_metrics
+    def delete(self, project_id: int, schedule_id: int | None = None, **kwargs):
+        """Delete a schedule."""
+        return self._dispatch("delete", project_id, schedule_id)
 
 
 class API(api_tools.APIBase):
-    """URL patterns: /api/v2/elitea_core/schedules/prompt_lib/{project_id}, with `/export` and `/import`."""
-    url_params: ClassVar[list[str]] = api_tools.with_modes([
-        '<int:project_id>', '<int:project_id>/export', '<int:project_id>/import',
-    ])
+    url_params: ClassVar[list[str]] = api_tools.with_modes(sorted({
+        f"<int:project_id>/{tail}".rstrip("/") for _, tail in ROUTES
+    }))
 
-    mode_handlers: ClassVar[dict] = {
-        PROMPT_LIB_MODE: PromptLibAPI
-    }
+    mode_handlers: ClassVar[dict] = {PROMPT_LIB_MODE: PromptLibAPI}

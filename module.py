@@ -276,8 +276,9 @@ class Module(module.ModuleModel):
                 },
                 {
                     "name": "elitea_core/schedules",
-                    "description": "Run agents and pipelines on a cron schedule: create, edit, pause, run now, "
-                                   "change owner, list runs, export and import schedules, draft one with AI.",
+                    "description": "Run agents and pipelines on a cron schedule: create, edit, pause, resume, "
+                                   "run now, change owner, list runs, export and import schedules, draft one "
+                                   "with AI, and set your notices. All under /schedules/{mode}/{project_id}.",
                 },
                 {
                     "name": "elitea_core/skills",
@@ -296,11 +297,13 @@ class Module(module.ModuleModel):
         )
         if not hasattr(openapi_registry, "register_endpoint"):  # the preload stub registers nothing
             return
-        # URLs that share a handler class with another URL; the folder scan cannot see them (BUG-11)
-        from .api.v2 import schedule, schedules  # pylint: disable=C0415
-        for endpoint in schedule.OPENAPI_SUB_ACTIONS + schedules.OPENAPI_SUB_ACTIONS:
+        # One handler class serves every Schedules URL, so the folder scan cannot list them (BUG-11)
+        from .utils.constants import SCHEDULES_OPENAPI_TAG  # pylint: disable=C0415
+        from .utils.schedule_openapi import OPENAPI_ENDPOINTS  # pylint: disable=C0415
+        for endpoint in OPENAPI_ENDPOINTS:
             openapi_registry.register_endpoint(
-                plugin_name="elitea_core", tags=[schedule.OPENAPI_TAG], available_to_users=True, **endpoint)
+                plugin_name="elitea_core", tags=[SCHEDULES_OPENAPI_TAG], available_to_users=True, mcp_tool=False,
+                **endpoint)
 
     def _init_publish_validation_secret(self):
         """Initialize HMAC signing key for publish validation tokens."""

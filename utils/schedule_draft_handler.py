@@ -12,35 +12,36 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""Build with AI for a schedule form (EL-7011, US-21): the model drafts, the server checks, nothing is saved."""
+"""Build with AI for a schedule form (EL-7011, US-21): the model drafts, the server checks, nothing is saved.
+
+`api/v2/schedules.py` serves the handler; this module registers no route.
+"""
 import json
-from typing import ClassVar
 
 from flask import request
 from pydantic import ValidationError
 from pylon.core.tools import log
-from tools import api_tools, auth, register_openapi, rpc_tools
+from tools import auth, rpc_tools
 from tools import config as c
 
-from ...models.pd.generate_schedule_draft import (
+from ..models.pd.generate_schedule_draft import (
     GenerateScheduleDraftRequest,
     GenerateScheduleDraftResponse,
 )
-from ...utils.constants import PROMPT_LIB_MODE, SCHEDULES_OPENAPI_TAG
-from ...utils.draft_llm_utils import (
+from .draft_llm_utils import (
     describe_predict_failure,
     extract_answer,
     timeout_response,
 )
-from ...utils.exceptions import PoolSaturationError
-from ...utils.predict_utils import PredictPayloadError
-from ...utils.schedule_draft_utils import (  # pylint: disable=W0212
+from .exceptions import PoolSaturationError
+from .predict_utils import PredictPayloadError
+from .schedule_draft_utils import (  # pylint: disable=W0212
     build_schedule_draft_prompt,
     schedule_roster,
     validate_schedule_draft,
 )
-from ...utils.service_prompt_utils import get_service_prompt
-from ...utils.utils import extract_json_from_text
+from .service_prompt_utils import get_service_prompt
+from .utils import extract_json_from_text
 
 _SERVICE_PROMPT_KEY = "generate_schedule_draft"
 _AWAIT_TASK_TIMEOUT = 60
@@ -48,27 +49,9 @@ _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_TEMPERATURE = 0.3
 
 
-class PromptLibAPI(api_tools.APIModeHandler):
-    @register_openapi(
-        name="Generate Schedule Draft from Natural Language",
-        description=(
-            "Draft the fields of a schedule form from a plain-text description and the current form "
-            "values. Uses the project's default LLM. The server checks the draft and returns it with "
-            "warnings for every field it could not use. Nothing is saved."
-        ),
-        request_body=GenerateScheduleDraftRequest,
-        responses={
-            "200": {"description": "Success: the checked `draft` and its `warnings`"},
-            "400": {"description": "Invalid body, or no default LLM in the project"},
-            "403": {"description": "No permission to create schedules"},
-            "500": {"description": "The service prompt is not configured"},
-            "502": {"description": "The model failed or its answer could not be used"},
-            "503": {"description": "The service is busy; retry after `retry_after` seconds"},
-        },
-        tags=[SCHEDULES_OPENAPI_TAG],
-        mcp_tool=False,
-        available_to_users=True,
-    )
+class ScheduleDraftHandler:
+    """Draft a schedule with AI; `self.module` is the plugin module that runs the model call."""
+
     @auth.decorators.check_api({
         "permissions": ["models.applications.schedules.create"],
         "recommended_roles": {
@@ -76,8 +59,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
             c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
         }
     })
-    @api_tools.endpoint_metrics
-    def post(self, project_id: int):
+    def _draft(self, project_id: int):
+        """Draft the fields of a schedule form from plain text and the current form values; nothing is saved.
+
+        Who may call: a project member with `schedules.create`.
+        Errors: 400 invalid body or no default LLM; 403; 500 the service prompt is not configured;
+        502 the model failed or its answer cannot be used; 503 busy, retry after `retry_after` seconds.
+        """
         try:
             req = GenerateScheduleDraftRequest.model_validate(request.json)
         except ValidationError as e:
@@ -151,13 +139,3 @@ class PromptLibAPI(api_tools.APIModeHandler):
             log.exception("generate_schedule_draft: the draft could not be checked")
             return {"error": "The draft could not be checked"}, 502
         return GenerateScheduleDraftResponse(draft=draft, warnings=warnings).model_dump(mode="json"), 200
-
-
-class API(api_tools.APIBase):
-    url_params: ClassVar[list] = api_tools.with_modes([
-        '<int:project_id>',
-    ])
-
-    mode_handlers: ClassVar[dict] = {
-        PROMPT_LIB_MODE: PromptLibAPI,
-    }

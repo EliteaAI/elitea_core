@@ -12,6 +12,7 @@ import types
 from datetime import datetime
 
 import pytest
+from fixtures.schedule_sqlite import handler_stubs
 from integration.test_7011_agent_schedule_run import OWNER, PKG, PROJECT_ID, _module
 from integration.test_7011_agent_schedule_run import world as _agent_world
 from integration.test_7011_entity_schedule_tables import REAL_SQLALCHEMY
@@ -234,15 +235,19 @@ def runs(world, history, monkeypatch):
         merged = {k: v for k, v in attrs.items() if not k.startswith("__")}
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", _module(f"{PKG}.{dotted}", **merged))
     for dotted in ("utils.schedule_timing", "models.pd.index", "models.pd.entity_schedule", "models.pd.schedule_run",
-                   "models.pd.schedule_list", "utils.schedule_access", "utils.schedule_dispatch", "utils.schedule_service", "api.v2.schedule"):
+                   "models.pd.schedule_list", "utils.schedule_access", "utils.schedule_dispatch", "utils.schedule_service",
+                   "utils.schedule_item_handlers"):
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", None)
         load(dotted.replace(".", "/") + ".py", fresh=True)
-    handler = sys.modules[f"{PKG}.api.v2.schedule"].PromptLibAPI
+    for name, module in handler_stubs(PKG, real="schedule_item_handlers").items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setitem(sys.modules, f"{PKG}.api.v2.schedules", None)
+    handler = load("api/v2/schedules.py", fresh=True).PromptLibAPI
 
     def get(schedule_id=1, **query):
         history.args.clear()
         history.args.update(query)
-        history.request.path = f"/schedule/prompt_lib/{PROJECT_ID}/{schedule_id}/runs"
+        history.request.path = f"/schedules/prompt_lib/{PROJECT_ID}/{schedule_id}/runs"
         return handler().get(project_id=PROJECT_ID, schedule_id=schedule_id)
 
     return get
