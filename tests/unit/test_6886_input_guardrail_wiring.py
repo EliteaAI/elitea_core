@@ -159,3 +159,14 @@ def test_every_socket_block_event_names_the_question():
         ('rpc/chat_all.py', "**({'question_id': resume_question_id} if resume_question_id else {})"),
     ):
         assert marker in _source(relative), relative
+
+
+def test_resume_block_reads_the_question_through_the_foreign_key():
+    # ``reply_to`` has no remote_side, so it loads the reply; the question comes from reply_to_id
+    source = _source('rpc/chat_all.py')
+    assert 'resumed_group.reply_to if resumed_group' not in source
+    assert 'ConversationMessageGroup, resumed_group.reply_to_id' in source
+
+
+def test_continue_predict_debug_log_does_not_echo_the_input():
+    assert 'user_input=%s' not in _source('rpc/chat_all.py')

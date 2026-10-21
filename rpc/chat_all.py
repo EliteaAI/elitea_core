@@ -1982,14 +1982,14 @@ class RPC:
             "Continue predict: message_id=%s conversation_uuid=%s sid=%s "
             "hitl_resume=%s mcp_auth_resume=%s authorization_request_id=%s "
             "hitl_decisions=%d mcp_auth_decisions=%d "
-            "token_limit_continuation=%s user_input=%s",
+            "token_limit_continuation=%s user_input_chars=%d",
             data.get("message_id"), data.get("conversation_uuid"), sid,
             bool(data.get("hitl_resume")), bool(data.get("mcp_auth_resume")),
             data.get("authorization_request_id"),
             len(data.get("hitl_decisions") or []),
             len(data.get("mcp_auth_decisions") or []),
             bool(data.get("token_limit_continuation")),
-            data.get("user_input"),
+            len(data.get("user_input") or ""),
         )
         try:
             parsed = SioContinuePredictModel.model_validate(data)
@@ -2028,7 +2028,10 @@ class RPC:
                     ConversationMessageGroup.uuid == parsed.message_id
                 ).first()
                 resume_entity = participant_entity(resumed_group.author_participant if resumed_group else None)
-                resumed_question = resumed_group.reply_to if resumed_group else None
+                # Explicit FK: ``reply_to`` has no remote_side and loads the reply, not the question
+                resumed_question = session.get(
+                    ConversationMessageGroup, resumed_group.reply_to_id
+                ) if resumed_group and resumed_group.reply_to_id else None
                 resume_question_id = str(resumed_question.uuid) if resumed_question else None
             check_resume_input(parsed, parsed.project_id, current_user['id'], entity=resume_entity)
         except InputGuardrailBlockedError as blocked:
