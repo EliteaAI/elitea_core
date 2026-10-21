@@ -38,8 +38,9 @@ from ..utils.application_utils import (
     ApplicationToolExpandedError
 )
 from ..utils.exceptions import (
-    PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError,
+    PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError, InputGuardrailBlockedError,
 )
+from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
@@ -130,6 +131,69 @@ def _report_budget_door_closed(
             'additional_response_meta': {'budget_error_code': budget_error.code},
         },
     })
+
+
+def _report_input_guardrail_blocked(
+    module, blocked_error, parsed, payload: dict, chat_project_id: Optional[int],
+    sio_event, start_event_content: Optional[dict],
+) -> None:
+    # Same start/terminal/persist sequence as a budget refusal, with its own event type so
+    # the UI renders a block card rather than an error (#6886). Rule ids only, never the value.
+    verdict = blocked_error.verdict()
+    question_id = (start_event_content or {}).get('question_id')
+    module.stream_response(sio_event, {
+        'type': 'start_task',
+        'stream_id': parsed.stream_id,
+        'message_id': parsed.message_id,
+        'sio_event': f'{sio_event}',
+        'content': {'task_id': None, **(start_event_content or {})},
+        'interaction_uuid': parsed.interaction_uuid,
+    })
+    module.stream_response(sio_event, {
+        'type': 'input_guardrail_blocked',
+        'stream_id': parsed.stream_id,
+        'message_id': parsed.message_id,
+        # Same shape as the chat pre-persist block, so the UI can match either id
+        **({'question_id': question_id} if question_id else {}),
+        'sio_event': f'{sio_event}',
+        'content': blocked_error.message,
+        'response_metadata': {
+            'human_readable': blocked_error.message,
+            'input_guardrail': verdict,
+        },
+    })
+    module.context.event_manager.fire_event('chat_message_stream_end', {
+        'message_id': parsed.message_id,
+        'content': blocked_error.message,
+        'execution_generation': payload.get('execution_generation'),
+        'response_metadata': {
+            'project_id': parsed.project_id,
+            'chat_project_id': chat_project_id or parsed.project_id,
+            'is_error': True,
+            'error': blocked_error.message,
+            'additional_response_meta': {'input_guardrail': verdict},
+        },
+    })
+
+
+def _raise_input_guardrail_blocked(
+    module, blocked_error, sid, parsed, payload: dict, chat_project_id: Optional[int],
+    sio_event, start_event_content: Optional[dict],
+):
+    # REST callers map this to a 422; only the SIO shape is translated here
+    if sid:
+        _report_input_guardrail_blocked(
+            module, blocked_error, parsed, payload, chat_project_id, sio_event, start_event_content,
+        )
+        raise SioValidationError(
+            sio=module.context.sio,
+            sid=None,
+            event=sio_event,
+            error=blocked_error.message,
+            stream_id=parsed.stream_id,
+            message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
+        )
+    raise blocked_error
 
 
 class RPC:
@@ -364,7 +428,13 @@ class RPC:
 
         # TODO probably better move to toolkits expand, check OpenAPI
         vc = VaultClient(parsed.project_id)
-        payload = vc.unsecret(payload)
+        # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
+        try:
+            payload = inspect_and_unsecret(payload, vc, parsed.project_id, user_id)
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a
@@ -434,6 +504,10 @@ class RPC:
                     message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
                 )
             raise
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
         except MaintenanceInProgressError:
             error_payload = {
                 "error": "maintenance_in_progress",
@@ -619,7 +693,13 @@ class RPC:
 
         # TODO probably better move to toolkits expand, check OpenAPI
         vc = VaultClient(parsed.project_id)
-        payload = vc.unsecret(payload)
+        # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
+        try:
+            payload = inspect_and_unsecret(payload, vc, parsed.project_id, user_id)
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a
@@ -673,6 +753,10 @@ class RPC:
                     message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
                 )
             raise
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
         except MaintenanceInProgressError:
             error_payload = {
                 "error": "maintenance_in_progress",

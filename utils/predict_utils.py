@@ -620,6 +620,11 @@ def generate_predict_payload(
     # dedupe/resolve run — otherwise those tools are skipped and never get {project_id}/PAT filled.
     payload = serialize(payload)
 
+    inspected = getattr(parsed, 'input_guardrail_inspected', None)
+    if inspected:
+        # Accepted history (#6886): without it checkpoint B re-inspects those turns
+        payload['input_guardrail_inspected'] = list(inspected)
+
     if not skip_expansion:
         try:
             application = payload.get('application')

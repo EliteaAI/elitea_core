@@ -23,7 +23,7 @@ from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import merge_meta_expression, set_context_strategy
 from ..utils.chat_usage import strip_server_owned_meta
 from ..utils.context_window import get_project_default_mode
-from ..utils.exceptions import PoolSaturationError
+from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
 from ..utils.model_defaults import creation_llm_settings, chat_request_default
 
 # Hard cap on page size: defence-in-depth against unbounded IN(...) lists in
@@ -887,6 +887,8 @@ class RPC:
             )
         except SioValidationError as e:
             return {'success': False, 'error': f'Wrong input data: {e.error}'}
+        except InputGuardrailBlockedError as e:
+            return {'success': False, **e.body()}
         except PoolSaturationError as e:
             return {
                 'success': False,
