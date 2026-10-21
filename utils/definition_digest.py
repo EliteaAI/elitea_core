@@ -108,14 +108,23 @@ def toolkit_rows(session, version_id: int):
     )
 
 
-def digest_for_version(session, version_id: int) -> str:
-    """Two queries, whatever the number of toolkits: the version, then its mappings joined to tools."""
+def read_definition(session, version_id: int):
+    """``(version, mappings_with_tools)``: the version row, then its mappings joined to tools (two queries).
+    ``DigestError`` (``VERSION_NOT_FOUND``) when there is no such version."""
     from ..models.all import ApplicationVersion  # pylint: disable=C0415
 
     version = session.query(ApplicationVersion).filter(ApplicationVersion.id == version_id).first()
     if version is None:
         raise DigestError("VERSION_NOT_FOUND", f"application version {version_id} does not exist")
-    return definition_digest(canonical_definition(version, toolkit_rows(session, version_id)))
+    return version, toolkit_rows(session, version_id)
+
+
+def digest_for_version(session, version_id: int, loaded=None) -> str:
+    """Two queries, whatever the number of toolkits: the version, then its mappings joined to tools. ``loaded``: the
+    ``(version, mappings_with_tools)`` a caller has read already (``read_definition``), so nothing is queried again."""
+    if loaded is None:
+        loaded = read_definition(session, version_id)
+    return definition_digest(canonical_definition(*loaded))
 
 
 def digests_for_versions(session, version_ids) -> dict:
@@ -202,11 +211,9 @@ def digest_inputs(version, mappings_with_tools) -> dict:
     }
 
 
-def digest_inputs_for_version(session, version_id: int) -> dict:
-    """``digest_inputs`` of one version: the version, then its mappings joined to tools (two queries)."""
-    from ..models.all import ApplicationVersion  # pylint: disable=C0415
-
-    version = session.query(ApplicationVersion).filter(ApplicationVersion.id == version_id).first()
-    if version is None:
-        raise DigestError("VERSION_NOT_FOUND", f"application version {version_id} does not exist")
-    return digest_inputs(version, toolkit_rows(session, version_id))
+def digest_inputs_for_version(session, version_id: int, loaded=None) -> dict:
+    """``digest_inputs`` of one version: the version, then its mappings joined to tools (two queries; none when
+    ``loaded`` is the ``(version, mappings_with_tools)`` a caller has read already)."""
+    if loaded is None:
+        loaded = read_definition(session, version_id)
+    return digest_inputs(*loaded)

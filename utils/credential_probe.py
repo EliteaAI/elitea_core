@@ -18,13 +18,15 @@ events and is the user the ticket and the stored-configuration read are for. The
 authorised them already (the credential onboarding's REST layer).
 """
 import json
+import types
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from pylon.core.tools import log
 from tools import auth, db, this
 
 from . import admission as adm   # audit and counter helpers
-from .credential_decision import CREDENTIAL_SECTION, STORE_KINDS, read_configuration_facts
+from .credential_decision import CREDENTIAL_SECTION, MAX_FACT_SELECTORS, STORE_KINDS, read_configuration_facts
 from .credential_release import PROBE_KEY, PROBE_TASK
 from .credential_slots import (
     SLOT_KEY, configuration_secret_fields, has_secret_template, secret_paths_for, slot_of, strip_secret_fields,
@@ -39,6 +41,8 @@ PROBE_TTL_S = 90
 JOIN_TIMEOUT_S = 60
 EXPAND_TIMEOUT_S = 15
 POOL = "governed_ops"
+PROBE_PARALLEL = 4   # probes of one batch that run at the same time: the size of the governed_ops pool
+MAX_PROBE_BATCH = 64
 ALLOWED, SUCCEEDED, FAILED = "CREDENTIAL_PROBE_ALLOWED", "CREDENTIAL_PROBE_SUCCEEDED", "CREDENTIAL_PROBE_FAILED"
 GENERIC_PROBE_MESSAGE = "The credential check was refused."
 _STORE_MESSAGE = "The credential store is unavailable; the check was not run. Try again later."
@@ -104,19 +108,22 @@ def _may_probe(user_id, project_id) -> None:
         raise _deny("DENIED_RBAC")
 
 
-def _reference_of(project_id, configuration_uuid, config_type, user_id, known, onboarding=False) -> tuple:
+def _reference_of(project_id, configuration_uuid, config_type, user_id, known, onboarding=False, prefetched=None) -> tuple:  # pylint: disable=R0913
     """The configuration's facts and its credential reference; the refusal when it cannot be probed. ``onboarding``
     also admits a ``pending`` reference with a committed generation: the value the credential onboarding has just
-    written, probed before it is validated."""
+    written, probed before it is validated. ``prefetched``: the facts of a whole batch, read once
+    (``governed_check_connection_many``)."""
     try:
-        configuration = read_configuration_facts([(configuration_uuid, project_id)]).get(configuration_uuid)
+        configurations = read_configuration_facts([(configuration_uuid, project_id)]) if prefetched is None \
+            else prefetched.configurations
+        configuration = configurations.get(configuration_uuid)
         if not isinstance(configuration, dict):
             raise _deny("CREDENTIAL_REFERENCE_REQUIRED")
         if (configuration.get("section") != CREDENTIAL_SECTION or configuration.get("project_id") != project_id
                 or configuration.get("type") != config_type):
             raise _deny("CREDENTIAL_REFERENCE_REQUIRED")
-        found = this.for_module("secrets").module.credential_use_facts(   # the tester's own personal reference first
-            project_id, [configuration["id"]], [], None, personal_user_id=user_id)
+        found = prefetched.found if prefetched is not None else this.for_module("secrets").module.credential_use_facts(
+            project_id, [configuration["id"]], [], None, personal_user_id=user_id)   # the tester's own personal reference first
     except AdmissionDenied:
         raise
     except Exception as exc:  # pylint: disable=W0703
@@ -236,7 +243,8 @@ def _outcome(module, project_id, user_id, actor_user_id, reference, answer) -> N
         log.error("governed check_connection: the outcome was not recorded (%s)", type(exc).__name__)
 
 
-def _probe(module, project_id, configuration_uuid, config_type, user_id, known, actor_user_id=None, onboarding=False) -> dict:  # pylint: disable=R0913
+def _probe(module, project_id, configuration_uuid, config_type, user_id, known, actor_user_id=None, onboarding=False,  # pylint: disable=R0913
+           shared=None) -> dict:
     if not module.governance_profile.enabled:
         raise _deny("DEPENDENCY_UNAVAILABLE")
     actor_user_id = user_id if actor_user_id is None else actor_user_id
@@ -248,8 +256,10 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known, 
         audit_allowed = False
     if not audit_allowed:
         raise _deny("AUDIT_UNAVAILABLE")
-    _may_probe(actor_user_id, project_id)
-    _configuration, reference = _reference_of(project_id, configuration_uuid, config_type, user_id, known, onboarding)
+    if shared is None:   # a batch has asked once for all its probes
+        _may_probe(actor_user_id, project_id)
+    _configuration, reference = _reference_of(
+        project_id, configuration_uuid, config_type, user_id, known, onboarding, None if shared is None else shared.facts)
     required = {"task_envelope.v1", CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_GOVERNED_OPS_POOL_V1}
     if not module.worker_capabilities.has_capable_worker(required):
         raise _deny("WORKER_CAPABILITY_UNAVAILABLE")
@@ -286,7 +296,7 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known, 
 
 
 def governed_check_connection(  # pylint: disable=R0913
-    module, project_id, configuration_uuid, config_type, user_id, actor_user_id=None, onboarding=False,
+    module, project_id, configuration_uuid, config_type, user_id, actor_user_id=None, onboarding=False, shared=None,
 ) -> dict:
     """Test a saved credential through the governed path. Never raises. ``user_id``: whose personal reference is
     preferred; ``actor_user_id`` (default ``user_id``): who holds ``credentials.probe``; ``onboarding``: a ``pending``
@@ -297,7 +307,8 @@ def governed_check_connection(  # pylint: disable=R0913
     ``{"success": False, "code", "message"}`` (a refusal: permission, governance, capability, store)."""
     known = {}
     try:
-        return _probe(module, project_id, configuration_uuid, config_type, user_id, known, actor_user_id, onboarding)
+        return _probe(module, project_id, configuration_uuid, config_type, user_id, known, actor_user_id, onboarding,
+                      shared)
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703
@@ -306,3 +317,78 @@ def governed_check_connection(  # pylint: disable=R0913
     adm._record_deny(module, code, event_type="probe", **known)
     adm._metric(CREDENTIAL_PROBE, "credential_probe_total", "decision", "deny", code)
     return refusal(code)
+
+
+def _refuse(module, code, known) -> dict:
+    """The refusal ``governed_check_connection`` gives, audited and counted the same way."""
+    adm._record_deny(module, code, event_type="probe", **known)
+    adm._metric(CREDENTIAL_PROBE, "credential_probe_total", "decision", "deny", code)
+    return refusal(code)
+
+
+def _shared_checks(project_id, uuids, user_id, actor_user_id) -> types.SimpleNamespace:
+    """What every probe of a batch needs and the batch can ask once: the actor's permission, the facts of all the
+    configurations (``read_configuration_facts``) and of their references. Raises ``AdmissionDenied`` or whatever the
+    reads raise."""
+    _may_probe(actor_user_id, project_id)
+    configurations = read_configuration_facts([(item, project_id) for item in uuids])
+    ids = sorted({fact["id"] for fact in configurations.values() if isinstance(fact, dict) and "id" in fact})
+    references = {}
+    secrets = this.for_module("secrets").module
+    for start in range(0, len(ids), MAX_FACT_SELECTORS):
+        found = secrets.credential_use_facts(
+            project_id, ids[start:start + MAX_FACT_SELECTORS], [], None, personal_user_id=user_id)
+        references.update(found.get("references") or {})
+    return types.SimpleNamespace(facts=types.SimpleNamespace(configurations=configurations, found={"references": references}))
+
+
+def governed_check_connection_many(  # pylint: disable=R0913,R0914
+    module, project_id, items, user_id, actor_user_id=None, onboarding=False, parallel=PROBE_PARALLEL,
+) -> list:
+    """Test several saved credentials of one project: ``items`` is ``[{"configuration_uuid", "config_type"}]``. The
+    actor's permission and the facts of all the configurations are read once; the probes then run at the same time, at
+    most ``parallel`` of them (each is a task of the ``governed_ops`` pool, which has as many slots), instead of one
+    after the other on the greenlet of the request. One answer per item, in order, each as ``governed_check_connection``
+    answers it (a refusal of one item does not touch the others). Never raises."""
+    answers = [None] * len(items) if isinstance(items, (list, tuple)) else []
+    if not answers:
+        return answers
+    actor_user_id = user_id if actor_user_id is None else actor_user_id
+    known = {"project_id": project_id, "caller_ref": f"user:{actor_user_id}", "user_ref": f"user:{user_id}"}
+    valid = []
+    for index, item in enumerate(items):
+        configuration_uuid = item.get("configuration_uuid") if isinstance(item, dict) else None
+        config_type = item.get("config_type") if isinstance(item, dict) else None
+        try:
+            if index >= MAX_PROBE_BATCH:
+                raise _deny("RATE_LIMITED")
+            _check_arguments(project_id, configuration_uuid, config_type, user_id, actor_user_id)
+            valid.append((index, configuration_uuid, config_type))
+        except AdmissionDenied as denied:
+            answers[index] = _refuse(module, denied.reason_code, known)
+    if not valid:
+        return answers
+    try:
+        if not module.governance_profile.enabled:
+            raise _deny("DEPENDENCY_UNAVAILABLE")
+        shared = _shared_checks(project_id, sorted({item[1] for item in valid}), user_id, actor_user_id)
+    except AdmissionDenied as denied:
+        code = denied.reason_code
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("governed check_connection: the batch could not be prepared (%s)", type(exc).__name__)
+        code = "DEPENDENCY_UNAVAILABLE"
+    else:
+        code = None
+    if code is not None:
+        for index, _, _ in valid:
+            answers[index] = _refuse(module, code, known)
+        return answers
+
+    def probe(item):
+        index, configuration_uuid, config_type = item
+        answers[index] = governed_check_connection(
+            module, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding, shared)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(parallel, len(valid)))) as pool:
+        list(pool.map(probe, valid))
+    return answers

@@ -134,12 +134,12 @@ class Module(module.ModuleModel):
         # task_id -> (project_id, context_ref) of governed runs admitted by this process (#6756); bounded
         self._context_by_task = OrderedDict()
         self._context_lock = Lock()   # the map is read by the deadline sweep while dispatch threads change it
-        # Credential governance (#7120): the snapshot of the switch (built in init), and which of the two worker bus
-        # handlers of a governed run are registered. They are registered on the first move into enforce and stay until
-        # deinit, so runs admitted under enforce keep validating after a switch to off; booting in off registers none
+        # Credential governance (#7120): the snapshot of the switch (built in init), and which of the worker bus
+        # handlers of a governed run (validate, release one slot, release a batch) are registered. They are registered on
+        # the first move into enforce and stay until deinit, so runs admitted under enforce keep validating after a switch to off; booting in off registers none
         self.governance_state = None
         self.governed_handlers_registered = False
-        self._governed_handlers = {"validate": False, "release": False}
+        self._governed_handlers = {"validate": False, "release": False, "release_batch": False}
         self._governed_handlers_lock = Lock()
         # single-use tickets of autonomous (mandate) runs, minted and taken in this process only; bounded (#6947)
         self._mandate_tickets = TicketStore()
@@ -661,27 +661,33 @@ class Module(module.ModuleModel):
 
     def _ensure_governed_handlers_registered(self):
         """Register the worker bus handlers of a governed run: workers prove a run still holds its admission
-        (#6756), and ask Main for the material of a credential slot, sealed to the asking worker (#6946). Idempotent;
-        a handler that could not be registered is tried again at the next refresh of the switch. True when both are."""
+        (#6756), and ask Main for the material of a credential slot, or of all the slots of a run in one call, sealed to
+        the asking worker (#6946). Idempotent; a handler that could not be registered is tried again at the next
+        refresh of the switch. True when the two required ones are (the batch release is optional)."""
         with self._governed_handlers_lock:
             for key, handler, name in (
                     ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
-                    ("release", self.release_credential, "restricted_release_credential")):
+                    ("release", self.release_credential, "restricted_release_credential"),
+                    ("release_batch", self.release_credentials, "restricted_release_credentials")):
                 if self._governed_handlers[key]:
                     continue
                 try:
                     this.for_module("worker_client").module.rpc_node.register(handler, name=name)
                     self._governed_handlers[key] = True
-                except Exception:  # pylint: disable=W0703
-                    log.exception("Failed to register %s", name)
+                except Exception as exc:  # pylint: disable=W0703
+                    if key == "release_batch":   # optional: workers then release slot by slot, and are not told otherwise
+                        log.error("Failed to register %s (%s); batch release is not offered", name, type(exc).__name__)
+                    else:
+                        log.exception("Failed to register %s", name)
             self.governed_handlers_registered = any(self._governed_handlers.values())
-            return all(self._governed_handlers.values())
+            return self._governed_handlers["validate"] and self._governed_handlers["release"]
 
     def _unregister_governed_handlers(self):
         with self._governed_handlers_lock:
             for key, handler, name in (
                     ("validate", self.validate_execution_context, "restricted_validate_execution_context"),
-                    ("release", self.release_credential, "restricted_release_credential")):
+                    ("release", self.release_credential, "restricted_release_credential"),
+                    ("release_batch", self.release_credentials, "restricted_release_credentials")):
                 if not self._governed_handlers[key]:
                     continue
                 try:
@@ -854,13 +860,27 @@ class Module(module.ModuleModel):
                 kwargs, effective.profile, self.worker_capabilities,
             )
             stamp_predict_run_id(kwargs)
-            context_ref = admit_dispatch(self, args[0] if args else kwargs.get("name"), kwargs, admission, effective)
-            # a mandate run carries its time limit here (admit_dispatch); it is for Main only, the worker never sees it
-            deadline = (kwargs.get("meta") or {}).pop("context_deadline", None) if context_ref else None
-            task_id = _original_start_task(*args, **kwargs)
-            if context_ref:
-                track_context(self, task_id, admission.project_id, context_ref, deadline=deadline)
-            return task_id
+            after_dispatch = []   # audit only: its evaluation waits for nothing, so it runs once the task is started
+            try:
+                name = args[0] if args else kwargs.get("name")
+                context_ref = admit_dispatch(self, name, kwargs, admission, effective, after_dispatch)
+                # a mandate run carries its time limit here (admit_dispatch); it is for Main only, the worker never sees it
+                deadline = (kwargs.get("meta") or {}).pop("context_deadline", None) if context_ref else None
+                task_id = _original_start_task(*args, **kwargs)
+                if context_ref:
+                    track_context(self, task_id, admission.project_id, context_ref, deadline=deadline)
+                return task_id
+            finally:
+                for evaluate in after_dispatch:
+                    try:
+                        evaluate()
+                    except BaseException as exc:  # pylint: disable=W0703
+                        # the task is started: nothing the evaluation meets (a gevent Timeout included) may replace
+                        # that result, or the caller retries a run that is already going. Only the greenlet being
+                        # killed is let through.
+                        log.error("admission: the audit-only evaluation was interrupted (%s)", type(exc).__name__)
+                        if "GreenletExit" in {kind.__name__ for kind in type(exc).__mro__}:
+                            raise
 
         self.task_node.start_task = _maintenance_gated_start_task
 
@@ -1509,6 +1529,8 @@ class Module(module.ModuleModel):
         # Cleanup provider storage
         if hasattr(self, 'present_providers'):
             self.present_providers.clear()
+            from .utils import schema_registry_version  # pylint: disable=C0415
+            schema_registry_version.bump()
         if hasattr(self, 'unhealthy_providers'):
             self.unhealthy_providers.clear()
 

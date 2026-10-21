@@ -602,7 +602,7 @@ def test_a_release_is_one_read_transaction_one_audit_transaction_one_secrets_cal
     assert not [text for text in statements if text.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))]
     assert len(env.release_calls) == 1              # one secrets call, which is the one store read
     assert len(env.redis.calls) - redis_calls == 2  # the counter (INCR + EXPIRE, one round trip)
-    assert len(env.secrets_calls) - secrets_facts == 2   # the recheck of this one use: its reference, its grant
+    assert len(env.secrets_calls) - secrets_facts == 1   # the recheck of this one use: its reference and its grant, one read
 
 
 # --- a fan-out: the parent stops, the children and the reconcile run keep its context -------------

@@ -407,5 +407,6 @@ def test_the_release_scope_of_a_probe_follows_the_tickets_onboarding_flag(ns, en
         request = types.SimpleNamespace(
             slot={"credential_ref": "r-1", "credential_generation": 1}, toolkit_instance_id="probe", field="configuration",
             task_name=release.PROBE_TASK, caller={"run_id": None}, probe_ref=probe_ref, project_id=1)
-        scope = release._check_probe(env.module(), request, {"caller_ref": "indexer_worker:x"})   # pylint: disable=W0212
+        request.known = {"caller_ref": "indexer_worker:x"}
+        scope = release._check_probe(env.module(), request)   # pylint: disable=W0212
         assert (scope.allow_validated, scope.allow_pending) == (True, expected)

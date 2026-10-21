@@ -720,11 +720,14 @@ def test_flag_off_the_release_handler_and_the_probe_refuse_and_touch_nothing(ns,
 def test_the_module_registers_the_release_handler_lazily_and_the_methods_are_web_methods():
     text = (PLUGIN_ROOT / "module.py").read_text()
     assert text.count('"restricted_release_credential"') == 2   # the register and the unregister table
+    assert text.count('"restricted_release_credentials"') == 2   # the batch handler, next to it
     ensure = text[text.index("def _ensure_governed_handlers_registered"):text.index("def _unregister_governed_handlers")]
-    assert "self.release_credential" in ensure and ensure.count("rpc_node.register(") == 1
+    assert "self.release_credential" in ensure and "self.release_credentials" in ensure
+    assert ensure.count("rpc_node.register(") == 1   # one loop over the table
     methods = (PLUGIN_ROOT / "methods" / "governed_credentials.py").read_text()
     assert "def release_credential(" in methods and "def governed_check_connection(" in methods
-    assert methods.count("@web.method()") == 2
+    assert "def release_credentials(" in methods and "def governed_check_connection_many(" in methods
+    assert methods.count("@web.method()") == 4
 
 
 def test_the_preflight_needs_the_release_methods_and_the_transport(ns, env):

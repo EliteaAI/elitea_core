@@ -552,8 +552,8 @@ def test_a_queued_run_whose_decisions_still_hold_is_accepted_and_moves_to_runnin
     cred, ref = admitted(ns, env)
     result = validate(ns, env, ref)
     assert result["ok"] is True and contexts(env, ns)[0].state == "running"
-    assert env.secrets_calls[-2:] == [
-        (1, [], [], [cred.ref_id]), (1, [], [("%s" % cred.binding, "1", cred.ref_id, "*", SUBJECT)], None)]
+    # one read of the facts for the references and the grants (M5), then the configurations
+    assert env.secrets_calls[-1:] == [(1, [], [("%s" % cred.binding, "1", cred.ref_id, "*", SUBJECT)], [cred.ref_id])]
     assert env.configuration_calls[-1] == (1, [cred.uuid])
 
 
@@ -779,7 +779,8 @@ def test_the_decision_runs_after_binding_and_subject_and_before_the_context_row(
     body = text[text.index("def _admit("):text.index("def admit_execution")]
     order = [body.index(marker) for marker in (
         "_verify_identity(request, settings)", "_find_binding(request, settings)", "_subject_of(principal)",
-        "_decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow)", "_store_admission(")]
+        "_decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows)",
+        "_store_admission(")]
     assert order == sorted(order)
     store = text[text.index("def _store_admission("):text.index("# --- autonomous mandates")]
     assert store.index("session.add(ExecutionSecurityContext(") < store.index("security_audit_record(session")

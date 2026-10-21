@@ -44,7 +44,7 @@ from tools import auth, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
 from . import admission as adm   # the live checks of validate_context, the audit and counter helpers
-from .credential_decision import recheck_credentials
+from .credential_decision import MAX_GOVERNED_CREDENTIALS_PER_RUN, recheck_failure
 from .credential_slots import MAX_SLOT_FIELDS
 from .exceptions import AdmissionDenied
 from .governance import governance_lifecycle_active
@@ -52,6 +52,10 @@ from .governance import governance_lifecycle_active
 # pylint: disable=W0212
 
 MAX_RELEASES_PER_FIELD = 16
+# A context a fan-out reopened (``admission.reopen_contexts`` marks it) is built from again by every child (up to 16 per
+# parent) and by each reconcile round, so the bound of a use under it is higher. Still a bound: a loop is refused.
+MAX_RELEASES_PER_FIELD_INHERITED = 128
+MAX_BATCH_SLOTS = MAX_GOVERNED_CREDENTIALS_PER_RUN
 RELEASE_TTL_S = 300
 KEY_BYTES = 32
 PROBE_TASK = "indexer_governed_check_connection"
@@ -60,6 +64,8 @@ PROBE_FIELD = "configuration"
 PROBE_KEY = "c1009:probe:"       # single-use ticket of a probe: metadata only, minted by credential_probe
 COUNTER_KEY = "c1009:rel:"
 REQUEST_KEYS = ("project_id", "context_ref", "probe_ref", "caller", "toolkit_instance_id", "field", "slot", "recipient_key")
+BATCH_REQUEST_KEYS = ("project_id", "context_ref", "probe_ref", "caller", "recipient_key", "slots")
+BATCH_SLOT_KEYS = frozenset({"toolkit_instance_id", "field", "slot"})
 AAD_VERSION = "v1"
 RELEASED = "CREDENTIAL_RELEASED"
 EVENT = "credential_acquired"
@@ -107,6 +113,11 @@ class _Request:  # pylint: disable=R0902,R0903
         self.project_id, self.context_ref, self.probe_ref = project_id, context_ref, probe_ref
         self.caller, self.toolkit_instance_id, self.field = caller, toolkit_instance_id, field
         self.slot, self.recipient_key = slot, recipient_key
+        self.known = {   # what an audit event of a refusal may say about this slot
+            "project_id": project_id, "caller_ref": f"indexer_worker:{caller['task_name']}",
+            "toolkit_instance_id": toolkit_instance_id, "credential_ref": slot["credential_ref"],
+            "credential_generation": slot["credential_generation"], "run_id": caller.get("run_id")}
+        self.counter_key = None   # the release counter this request raised, until it is released or given back
 
     @property
     def ref(self) -> str:
@@ -168,10 +179,65 @@ def _reply(code) -> dict:
     return {"ok": False, "reason_code": code, "message": adm.MESSAGES.get(code, adm.GENERIC_MESSAGE)}
 
 
-def _deny_reply(module, code, known) -> dict:
-    adm._record_deny(module, code, event_type=EVENT, **known)
-    adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "deny", code)
-    return _reply(code)
+def _denied_at(request: _Request, code) -> AdmissionDenied:
+    """A refusal caused by one slot of a request: the batch reply names it."""
+    denied = adm._denied(code)
+    denied.slot = request
+    return denied
+
+
+def _deny_reply(module, code, requests, batch=False, failing=None) -> dict:
+    """Audit and count the refusal, once for a slot request (as an event of its own, autocommit) and for a batch in one
+    transaction with one event per slot, then the reply. A batch reply names the slot that caused it, when one did."""
+    _refund(module, requests)   # the cap counts releases, not attempts
+    if batch:
+        _record_denies(module, code, requests)
+    else:
+        for request in requests:
+            adm._record_deny(module, code, event_type=EVENT, **request.known)
+    for _ in requests:
+        adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "deny", code)
+    reply = _reply(code)
+    if batch and failing is not None:
+        reply.update(toolkit_instance_id=failing.toolkit_instance_id, field=failing.field)
+    return reply
+
+
+def _refund(module, requests) -> None:
+    """Give back what ``_count_releases`` took for a request that was refused: one pipeline of ``DECR``. A counter that
+    would go below zero (it expired meanwhile) is put back to zero. A failure is logged; the refusal stands."""
+    keys = [request.counter_key for request in requests if request.counter_key]
+    for request in requests:
+        request.counter_key = None
+    if not keys:
+        return
+    try:
+        client = module.get_redis_client()
+        pipe = client.pipeline(transaction=False)
+        for key in keys:
+            pipe.decr(key)
+        for key, left in zip(keys, pipe.execute()):
+            if _int(left) and left < 0:
+                client.incr(key)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("credential release: the release counter was not given back (%s)", type(exc).__name__)
+
+
+def _record_denies(module, code, requests) -> None:
+    """The refusals of a batch, one ``credential_acquired`` event per slot, in one transaction. A failure to write them
+    is logged; the refusal stands (as ``admission._record_deny``)."""
+    if not requests:
+        return
+    try:
+        with db.get_session(requests[0].project_id) as session:
+            for request in requests:
+                fields = {"policy_revision": module.governance_profile.policy_revision,
+                          "environment": module.admission_settings.environment, **request.known}
+                adm._tracing().security_audit_record(session, adm._event(
+                    event_type=EVENT, decision="deny", reason_code=code, **fields))
+            session.commit()
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("credential release: the deny events %s were not recorded (%s)", code, type(exc).__name__)
 
 
 def release_credential(  # pylint: disable=R0913
@@ -181,28 +247,78 @@ def release_credential(  # pylint: disable=R0913
     """Worker-bus handler: the material of one credential slot, sealed to ``recipient_key``. Never raises.
 
     ``{"ok": True, "release_id", "fields": [paths], "expires_at", "sealed": {v, epk, nonce, ct}}`` or
-    ``{"ok": False, "reason_code", "message"}``."""
-    known = {}
+    ``{"ok": False, "reason_code", "message"}``. A worker that asks for every slot of a run uses
+    ``release_credentials``."""
+    requests = []
     try:
-        request = _parse(project_id, context_ref, probe_ref, caller, toolkit_instance_id, field, slot, recipient_key)
-        known.update(
-            project_id=request.project_id, caller_ref=f"indexer_worker:{request.task_name}",
-            toolkit_instance_id=request.toolkit_instance_id, credential_ref=slot["credential_ref"],
-            credential_generation=slot["credential_generation"], run_id=request.caller.get("run_id"))
-        return _release(module, request, known)
+        requests = [_parse(project_id, context_ref, probe_ref, caller, toolkit_instance_id, field, slot, recipient_key)]
+        [release] = _release(module, requests)
+        return {"ok": True, **{key: release[key] for key in ("release_id", "fields", "expires_at", "sealed")}}
     except _Unaudited as rejected:
-        log.debug("credential release: request rejected (%s)", rejected.reason_code)
-        adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "rejected_request", rejected.reason_code)
-        return _reply(rejected.reason_code)
+        return _rejected(rejected)
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: unexpected failure (%s)", type(exc).__name__)
         code = "DEPENDENCY_UNAVAILABLE"
-    return _deny_reply(module, code, known)
+    return _deny_reply(module, code, requests)
 
 
-def _release(module, request: _Request, known: dict) -> dict:
+def release_credentials(  # pylint: disable=R0913
+    module, project_id=None, context_ref=None, probe_ref=None, caller=None, recipient_key=None, slots=None, **_ignored,
+) -> dict:
+    """Worker-bus handler: the material of every credential slot of a run, each sealed to ``recipient_key`` under the
+    binding of its own slot. One live check of the context, one counter round trip, one entry-scoped recheck for all the
+    uses, one secrets call, and one audit transaction with an event per slot. The first failure refuses the whole
+    batch: no slot of it is released. Never raises.
+
+    ``slots``: ``[{"toolkit_instance_id", "field", "slot"}]`` (at most ``MAX_BATCH_SLOTS``, a toolkit and field once).
+    ``{"ok": True, "releases": [{"toolkit_instance_id", "field", "release_id", "fields", "expires_at", "sealed"}]}`` in
+    the order of ``slots``, or ``{"ok": False, "reason_code", "message"}`` (with ``toolkit_instance_id`` and ``field``
+    when one slot caused it). A probe (``probe_ref``) asks for exactly one slot."""
+    requests = []
+    try:
+        requests = _parse_batch(project_id, context_ref, probe_ref, caller, recipient_key, slots)
+        releases = _release(module, requests)
+        return {"ok": True, "releases": releases}
+    except _Unaudited as rejected:
+        return _rejected(rejected)
+    except AdmissionDenied as denied:
+        code, failing = denied.reason_code, getattr(denied, "slot", None)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("credential release: unexpected failure (%s)", type(exc).__name__)
+        code, failing = "DEPENDENCY_UNAVAILABLE", None
+    return _deny_reply(module, code, requests, batch=True, failing=failing)
+
+
+def _rejected(rejected) -> dict:
+    log.debug("credential release: request rejected (%s)", rejected.reason_code)
+    adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "rejected_request", rejected.reason_code)
+    return _reply(rejected.reason_code)
+
+
+def _parse_batch(project_id, context_ref, probe_ref, caller, recipient_key, slots) -> list:
+    """Check 1 for every slot of a batch. Anything off is ``STALE_CONTEXT``."""
+    stale = _unaudited("STALE_CONTEXT")
+    if not isinstance(slots, list) or not 1 <= len(slots) <= MAX_BATCH_SLOTS:
+        raise stale
+    requests, seen = [], set()
+    for item in slots:
+        if not isinstance(item, dict) or set(item) != BATCH_SLOT_KEYS:
+            raise stale
+        request = _parse(project_id, context_ref, probe_ref, caller, item["toolkit_instance_id"], item["field"],
+                         item["slot"], recipient_key)
+        if (request.toolkit_instance_id, request.field) in seen:   # one slot per use: the counter and the AAD are per use
+            raise stale
+        seen.add((request.toolkit_instance_id, request.field))
+        requests.append(request)
+    if probe_ref is not None and len(requests) != 1:
+        raise stale
+    return requests
+
+
+def _release(module, requests: list) -> list:
+    """Checks 2 to 9 for the slots of one request (a single slot, or a batch). The releases, one per slot, in order."""
     if not governance_lifecycle_active(module):   # also after a switch to off: admitted runs keep their admission
         raise _unaudited("STALE_CONTEXT")
     try:
@@ -211,33 +327,36 @@ def _release(module, request: _Request, known: dict) -> dict:
         audit_allowed = False
     if not audit_allowed:
         raise _unaudited("AUDIT_UNAVAILABLE")   # nothing can be recorded, so nothing is
-    if request.context_ref is not None:
-        scope = _check_run(module, request, known)
+    if requests[0].context_ref is not None:
+        scope = _check_run(module, requests)
     else:
-        scope = _check_probe(module, request, known)
-    return _read_and_reply(module, request, known, scope)
+        scope = _check_probe(module, requests[0])
+    return _read_and_reply(module, requests, scope)
 
 
 # --- a run -----------------------------------------------------------------------------------
 
 class _Scope:  # pylint: disable=R0903
     """What the checks established and the reply needs: which project holds the credential, which reference states
-    may be released, the audit identity of the requester, and when the release stops being usable."""
+    may be released, the audit identity of the requester of each slot, and when the release stops being usable."""
 
-    def __init__(self, binding_project_id, allow_validated, expires_at, event, revocation_epoch=None, on_revoke=None,
+    def __init__(self, binding_project_id, allow_validated, expires_at, events, on_revoke=None,
                  allow_pending=False):  # pylint: disable=R0913
         self.binding_project_id, self.allow_validated, self.expires_at = binding_project_id, allow_validated, expires_at
-        self.event, self.revocation_epoch, self.on_revoke = event, revocation_epoch, on_revoke
+        self.events, self.on_revoke = events, on_revoke
         self.allow_pending = allow_pending   # a probe of a value the credential onboarding has just written
 
 
-def _check_run(module, request: _Request, known: dict) -> _Scope:  # pylint: disable=R0914
-    """Checks 3a to 7 of a run: one read transaction, the counter, the live checks."""
-    context_id = uuid.UUID(request.context_ref)
+def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
+    """Checks 3a to 7 of a run: one read transaction, the counter, the live checks. For every slot of the request, in
+    one pass: the context and the binding are read once, the counter is bumped in one round trip and the recheck of all
+    the uses is one read of the facts."""
+    first = requests[0]
+    context_id = uuid.UUID(first.context_ref)
     columns = ExecutionSecurityContext
     binding_columns = (AgentIdentityBinding.state, AgentIdentityBinding.revocation_epoch,
                        AgentIdentityBinding.definition_digest)
-    with db.get_session(request.project_id) as session:
+    with db.get_session(first.project_id) as session:
         row = session.execute(
             select(columns.schema_version, columns.profile, columns.state, columns.revoked_reason, columns.expires_at,
                    columns.run_id, columns.attempt, columns.application_id, columns.agent_binding_ref,
@@ -250,52 +369,58 @@ def _check_run(module, request: _Request, known: dict) -> _Scope:  # pylint: dis
             raise _unaudited("STALE_CONTEXT")   # no admitted run behind it
         binding_project_id = row.binding_project_id or row.project_id
         binding = session.execute(select(*binding_columns).where(AgentIdentityBinding.id == row.agent_binding_ref)
-                                  ).one_or_none() if binding_project_id == request.project_id else None
-    if binding_project_id != request.project_id:   # the agent lives in another project: a second read
+                                  ).one_or_none() if binding_project_id == first.project_id else None
+    if binding_project_id != first.project_id:   # the agent lives in another project: a second read
         binding = adm._read_binding(binding_project_id, row.agent_binding_ref)
     subject = row.subject if isinstance(row.subject, dict) else {}
     is_mandate = subject.get("kind") == "mandate"
-    known.update(
-        application_id=row.application_id, attempt=row.attempt, agent_binding_ref=str(row.agent_binding_ref),
-        run_id=row.run_id, traceparent=row.trace_ref, policy_revision=row.policy_revision, environment=row.environment,
-        mandate_ref=str(subject.get("ref"))[len("mandate:"):] if is_mandate else None)
+    for request in requests:
+        request.known.update(
+            application_id=row.application_id, attempt=row.attempt, agent_binding_ref=str(row.agent_binding_ref),
+            run_id=row.run_id, traceparent=row.trace_ref, policy_revision=row.policy_revision,
+            environment=row.environment,
+            mandate_ref=str(subject.get("ref"))[len("mandate:"):] if is_mandate else None)
     #   3a. a live, running context of this worker's run
     if row.schema_version != adm.SCHEMA_VERSION or row.profile != "governed":
         raise adm._denied("STALE_CONTEXT")
-    if request.task_name not in adm.ADMITTED_TASKS or request.caller.get("run_id") != row.run_id:
+    if first.task_name not in adm.ADMITTED_TASKS or first.caller.get("run_id") != row.run_id:
         raise adm._denied("STALE_CONTEXT")
     if row.state != "running":
         reason = row.revoked_reason if row.state == "revoked" else None
         raise adm._denied(reason if reason in adm.REVOKE_CODES else "STALE_CONTEXT")
     if adm._now() >= adm._aware(row.expires_at):
         raise adm._denied("STALE_CONTEXT")
-    #   4. the exact use the context was admitted for
-    slot = request.slot
-    wanted = (request.toolkit_instance_id, request.field, slot["credential_ref"], slot["credential_generation"],
-              slot["decision_id"])
-    entry = next((item for item in row.allowed_bindings or [] if isinstance(item, dict) and wanted == (
-        item.get("toolkit_instance_id"), item.get("field"), item.get("credential_ref"),
-        item.get("credential_generation"), item.get("decision_id"))), None)
-    if entry is None:
-        raise adm._denied("CREDENTIAL_REFERENCE_REQUIRED")
+    #   4. the exact use the context was admitted for, for every slot
+    entries = []
+    for request in requests:
+        slot = request.slot
+        wanted = (request.toolkit_instance_id, request.field, slot["credential_ref"], slot["credential_generation"],
+                  slot["decision_id"])
+        entry = next((item for item in row.allowed_bindings or [] if isinstance(item, dict) and wanted == (
+            item.get("toolkit_instance_id"), item.get("field"), item.get("credential_ref"),
+            item.get("credential_generation"), item.get("decision_id"))), None)
+        if entry is None:
+            raise _denied_at(request, "CREDENTIAL_REFERENCE_REQUIRED")
+        entries.append(entry)
     #   5. a bounded number of releases per use
     remaining = max(1, int((adm._aware(row.expires_at) - adm._now()).total_seconds()))
-    _count_release(module, request, remaining, MAX_RELEASES_PER_FIELD)
-    #   6, 7. the admission still stands for this use (read-only; a refusal with a revoke code ends the run)
-    _live_check(request, row, binding, entry, is_mandate)
+    _count_releases(module, requests, remaining)
+    #   6, 7. the admission still stands for these uses (read-only; a refusal with a revoke code ends the run)
+    _live_check(first, row, binding, entries, is_mandate, requests)
     user_ref = subject.get("owner") if is_mandate else subject.get("ref")
-    event = dict(
+    events = [dict(
         tenant=row.tenant, project_id=row.project_id, application_id=row.application_id,
-        caller_ref=known["caller_ref"], user_ref=user_ref, mandate_ref=known["mandate_ref"],
+        caller_ref=request.known["caller_ref"], user_ref=user_ref, mandate_ref=request.known["mandate_ref"],
         agent_binding_ref=str(row.agent_binding_ref), run_id=row.run_id, attempt=row.attempt,
-        toolkit_instance_id=request.toolkit_instance_id, credential_ref=slot["credential_ref"],
-        credential_generation=slot["credential_generation"], revocation_epoch=entry.get("reference_epoch"),
+        toolkit_instance_id=request.toolkit_instance_id, credential_ref=request.slot["credential_ref"],
+        credential_generation=request.slot["credential_generation"], revocation_epoch=entry.get("reference_epoch"),
         traceparent=row.trace_ref, policy_revision=row.policy_revision, environment=row.environment)
+        for request, entry in zip(requests, entries)]
 
     def on_revoke(code):   # a reference that changed between the recheck and the read ends the run, as the recheck would
-        _revoke(request, code)
+        _revoke(first, code)
 
-    return _Scope(binding_project_id, False, min(adm._aware(row.expires_at), _horizon()), event, on_revoke=on_revoke)
+    return _Scope(binding_project_id, False, min(adm._aware(row.expires_at), _horizon()), events, on_revoke=on_revoke)
 
 
 def _revoke(request: _Request, code) -> None:
@@ -306,10 +431,10 @@ def _revoke(request: _Request, code) -> None:
             session.commit()
 
 
-def _live_check(request: _Request, row, binding, entry, is_mandate) -> None:  # pylint: disable=R0912
-    """Checks 6 and 7 for one use: the checks of ``validate_context`` that decide whether the admission still stands
-    (user and binding epochs, digest, mandate, this use's credential decision), without its state write. A refusal with a
-    revoke code revokes the context; a fact that cannot be read is unknown, not revoked."""
+def _live_check(request: _Request, row, binding, entries, is_mandate, requests) -> None:  # pylint: disable=R0912,R0913
+    """Checks 6 and 7 for the uses of the slots: the checks of ``validate_context`` that decide whether the admission
+    still stands (user and binding epochs, digest, mandate, the credential decision of every use), without its state
+    write. A refusal with a revoke code revokes the context; a fact that cannot be read is unknown, not revoked."""
     def refuse(code):
         _revoke(request, code)
         return adm._denied(code)
@@ -342,38 +467,50 @@ def _live_check(request: _Request, row, binding, entry, is_mandate) -> None:  # 
         if code is not None:
             raise refuse(code)
     try:
-        code = recheck_credentials(
-            binding_project_id, [entry], (row.subject or {}).get("ref"), str(row.agent_binding_ref), adm._now())
+        code, failed = recheck_failure(
+            binding_project_id, entries, (row.subject or {}).get("ref"), str(row.agent_binding_ref), adm._now())
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: credential facts unreadable (%s)", type(exc).__name__)
         raise adm._denied("DEPENDENCY_UNAVAILABLE") from None
     if code is not None:
-        raise refuse(code)
+        denied = refuse(code)
+        denied.slot = next((item for item, entry in zip(requests, entries) if entry is failed), None)
+        raise denied
 
 
 def _horizon():
     return adm._now() + timedelta(seconds=RELEASE_TTL_S)
 
 
-def _count_release(module, request: _Request, ttl_s, limit) -> None:
-    """Check 5: ``INCR`` the release counter of a context's use (toolkit and field); over ``limit`` is ``RATE_LIMITED``.
-    Redis down is a refusal."""
-    key = "|".join((COUNTER_KEY + request.context_ref, request.toolkit_instance_id, request.field))   # '|' is not in a name
+def _count_releases(module, requests: list, ttl_s) -> None:
+    """Check 5: ``INCR`` the release counter of each use (toolkit and field) of a context, all in one round trip; over
+    the bound is ``RATE_LIMITED``. The bound of a use under a context a fan-out reopened (``INHERITED_KEY``) is higher,
+    and only a count over the lower one asks whether it is. Redis down is a refusal."""
+    base = COUNTER_KEY + requests[0].context_ref
+    keys = ["|".join((base, request.toolkit_instance_id, request.field)) for request in requests]   # '|' is not in a name
     try:
-        pipe = module.get_redis_client().pipeline(transaction=False)
-        pipe.incr(key)
-        pipe.expire(key, ttl_s)
-        count = pipe.execute()[0]
+        client = module.get_redis_client()
+        pipe = client.pipeline(transaction=False)
+        for key in keys:
+            pipe.incr(key)
+            pipe.expire(key, ttl_s)
+        counts = pipe.execute()[0::2]
+        for request, key in zip(requests, keys):
+            request.counter_key = key
+        over = [request for request, count in zip(requests, counts) if not _int(count) or count > MAX_RELEASES_PER_FIELD]
+        limit = MAX_RELEASES_PER_FIELD_INHERITED if over and client.exists(adm.INHERITED_KEY + requests[0].context_ref) \
+            else MAX_RELEASES_PER_FIELD
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: the release counter failed (%s)", type(exc).__name__)
         raise adm._denied("DEPENDENCY_UNAVAILABLE") from None
-    if not _int(count) or count > limit:
-        raise adm._denied("RATE_LIMITED")
+    for request, count in zip(requests, counts):
+        if not _int(count) or count > limit:
+            raise _denied_at(request, "RATE_LIMITED")
 
 
 # --- a probe ---------------------------------------------------------------------------------
 
-def _check_probe(module, request: _Request, known: dict) -> _Scope:
+def _check_probe(module, request: _Request) -> _Scope:
     """Check 3b: the single-use ticket minted by ``governed_check_connection`` for exactly this probe."""
     slot = request.slot
     if (request.toolkit_instance_id != PROBE_TOOLKIT_INSTANCE_ID or request.field != PROBE_FIELD
@@ -396,66 +533,112 @@ def _check_probe(module, request: _Request, known: dict) -> _Scope:
                                          request.task_name) or not _int(ticket.get("user_id")):
         raise adm._denied("STALE_CONTEXT")
     event = dict(
-        project_id=request.project_id, caller_ref=known["caller_ref"], user_ref=f"user:{ticket['user_id']}",
+        project_id=request.project_id, caller_ref=request.known["caller_ref"], user_ref=f"user:{ticket['user_id']}",
         toolkit_instance_id=request.toolkit_instance_id, credential_ref=slot["credential_ref"],
         credential_generation=slot["credential_generation"])
-    known.update(user_ref=event["user_ref"])
-    return _Scope(request.project_id, True, _horizon(), event, allow_pending=ticket.get("onboarding") is True)
+    request.known.update(user_ref=event["user_ref"])
+    return _Scope(request.project_id, True, _horizon(), [event], allow_pending=ticket.get("onboarding") is True)
 
 
 # --- the store read and the reply ------------------------------------------------------------
 
-def _read_and_reply(module, request: _Request, known: dict, scope: _Scope) -> dict:  # pylint: disable=R0914
-    """Checks 8 and 9: read exactly the requested generation, seal it, commit the release event, then answer."""
-    slot = request.slot
-    release_id = str(uuid.uuid4())   # the store's decision id (a Vault correlation id) and the audit event id
+def _read_store(module, requests: list, scope: _Scope, release_ids: list) -> dict:
+    """Check 8: the values of the requested generations, ``{credential ref: value}`` (``fields`` and ``generation``).
+    One secrets call for all the references of a request; a secrets plugin without the batch read goes one reference at
+    a time. The first refusal ends it (a revoke code revokes the run).
+
+    Known limit (follow-up, the secrets contract is unchanged): one ``release_id`` is given to the store for the whole
+    read, so the store's correlation ids of the second slot on match no audit event; the first slot's does."""
+    wanted = {}
+    for request in requests:
+        wanted.setdefault(request.slot["credential_ref"], request.slot["credential_generation"])
+    secrets = this.for_module("secrets").module
+    batch = getattr(secrets, "release_credential_materials", None)
+    caller_ref = requests[0].known["caller_ref"]
+    values = {}
     try:
-        result = this.for_module("secrets").module.release_credential_material(
-            scope.binding_project_id, slot["credential_ref"], slot["credential_generation"], release_id,
-            known["caller_ref"], scope.allow_validated, **({"allow_pending": True} if scope.allow_pending else {}))
+        if callable(batch):
+            result = batch(scope.binding_project_id,
+                           [{"ref_id": ref, "generation": generation} for ref, generation in wanted.items()],
+                           release_ids[0], caller_ref, allow_pending=scope.allow_pending,
+                           allow_validated=scope.allow_validated)
+            results = [(result, None)]
+        else:
+            results = []
+            for index, (ref, generation) in enumerate(wanted.items()):
+                one = secrets.release_credential_material(
+                    scope.binding_project_id, ref, generation, release_ids[index if index < len(release_ids) else 0],
+                    caller_ref, allow_validated=scope.allow_validated,
+                    **({"allow_pending": True} if scope.allow_pending else {}))
+                results.append((one, ref))
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: the store read failed (%s)", type(exc).__name__)
         raise adm._denied("DEPENDENCY_UNAVAILABLE") from None
-    if not isinstance(result, dict) or result.get("ok") is not True:
-        code = result.get("reason_code") if isinstance(result, dict) else None
-        code = code if isinstance(code, str) and code else "DEPENDENCY_UNAVAILABLE"
-        if scope.on_revoke is not None:
-            scope.on_revoke(code)
-        raise adm._denied(code)
-    value = result["value"]
-    result = None
-    if value.generation != slot["credential_generation"]:
-        raise adm._denied("CREDENTIAL_GENERATION_MISMATCH")
-    if not set(slot["fields"]) <= set(value.fields):
-        raise adm._denied("STORE_NOT_FOUND")   # nothing partial is released
-    plaintext = json.dumps({
-        "fields": {path: value.fields[path].get_secret_value() for path in slot["fields"]},
-        "generation": value.generation, "expires_at": scope.expires_at.isoformat(),
-    }).encode("utf-8")
-    value = None
-    aad = "|".join((AAD_VERSION, str(request.project_id), request.ref, request.toolkit_instance_id, request.field,
-                    request.decision_id, release_id)).encode("utf-8")
+    for result, ref in results:
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            code = result.get("reason_code") if isinstance(result, dict) else None
+            code = code if isinstance(code, str) and code else "DEPENDENCY_UNAVAILABLE"
+            if scope.on_revoke is not None:
+                scope.on_revoke(code)
+            failed = ref if ref is not None else (result.get("ref_id") if isinstance(result, dict) else None)
+            denied = adm._denied(code)
+            denied.slot = next((request for request in requests if request.slot["credential_ref"] == failed), None)
+            raise denied
+        if ref is None:
+            found = result.get("values")
+            values.update(found if isinstance(found, dict) else {})
+        else:
+            values[ref] = result["value"]
+    return values
+
+
+def _read_and_reply(module, requests: list, scope: _Scope) -> list:  # pylint: disable=R0914
+    """Checks 8 and 9: read exactly the requested generations, seal each slot, commit the release events in one
+    transaction, then answer. ``release_id`` is the audit event id and part of the binding of the slot's ciphertext; the
+    first one is also the store's decision id (a Vault correlation id) for the read of the whole batch."""
+    release_ids = [str(uuid.uuid4()) for _ in requests]
+    values = _read_store(module, requests, scope, release_ids)
+    releases = []
+    for request, release_id in zip(requests, release_ids):
+        slot = request.slot
+        value = values.get(slot["credential_ref"])
+        if value is None:
+            raise _denied_at(request, "STORE_NOT_FOUND")
+        if value.generation != slot["credential_generation"]:
+            raise _denied_at(request, "CREDENTIAL_GENERATION_MISMATCH")
+        if not set(slot["fields"]) <= set(value.fields):
+            raise _denied_at(request, "STORE_NOT_FOUND")   # nothing partial is released
+        plaintext = json.dumps({
+            "fields": {path: value.fields[path].get_secret_value() for path in slot["fields"]},
+            "generation": value.generation, "expires_at": scope.expires_at.isoformat(),
+        }).encode("utf-8")
+        value = None
+        aad = "|".join((AAD_VERSION, str(request.project_id), request.ref, request.toolkit_instance_id, request.field,
+                        request.decision_id, release_id)).encode("utf-8")
+        try:
+            sealed = _transport().seal(plaintext, request.recipient_key, aad)
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("credential release: the reply could not be sealed (%s)", type(exc).__name__)
+            raise adm._denied("DEPENDENCY_UNAVAILABLE") from None
+        finally:
+            plaintext = None   # noqa: F841  # pylint: disable=W0642
+        releases.append({
+            "toolkit_instance_id": request.toolkit_instance_id, "field": request.field, "release_id": release_id,
+            "fields": list(slot["fields"]), "expires_at": scope.expires_at.isoformat(), "sealed": sealed})
+    values = None
+    #   9. the events are committed before the reply leaves; if they cannot be, the sealed bytes are dropped with them
     try:
-        sealed = _transport().seal(plaintext, request.recipient_key, aad)
-    except Exception as exc:  # pylint: disable=W0703
-        log.error("credential release: the reply could not be sealed (%s)", type(exc).__name__)
-        raise adm._denied("DEPENDENCY_UNAVAILABLE") from None
-    finally:
-        plaintext = None   # noqa: F841  # pylint: disable=W0642
-    #   9. the event is committed before the reply leaves; if it cannot be, the sealed bytes are dropped with it
-    try:
-        with db.get_session(request.project_id) as session:
-            stamped = {"environment": module.admission_settings.environment,   # a probe has no admitted context
-                       "policy_revision": module.governance_profile.policy_revision}
-            stamped.update({key: item for key, item in scope.event.items() if item is not None})
-            adm._tracing().security_audit_record(session, adm._event(
-                event_type=EVENT, decision="allow", reason_code=RELEASED, event_id=release_id, **stamped))
+        with db.get_session(requests[0].project_id) as session:
+            for event, release_id in zip(scope.events, release_ids):
+                stamped = {"environment": module.admission_settings.environment,   # a probe has no admitted context
+                           "policy_revision": module.governance_profile.policy_revision}
+                stamped.update({key: item for key, item in event.items() if item is not None})
+                adm._tracing().security_audit_record(session, adm._event(
+                    event_type=EVENT, decision="allow", reason_code=RELEASED, event_id=release_id, **stamped))
             session.commit()
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: the release event was not recorded (%s)", type(exc).__name__)
         raise adm._denied("AUDIT_UNAVAILABLE") from None
-    adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "allow", RELEASED)
-    return {
-        "ok": True, "release_id": release_id, "fields": list(slot["fields"]),
-        "expires_at": scope.expires_at.isoformat(), "sealed": sealed,
-    }
+    for _ in requests:
+        adm._metric(CREDENTIAL_RELEASE, "credential_release_total", "decision", "allow", RELEASED)
+    return releases

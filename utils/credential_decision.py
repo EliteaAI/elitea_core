@@ -22,6 +22,8 @@ not re-read when a queued run is re-checked; the facts' fallback to another owne
 crowded configuration can crowd another out (both only change which refusal is named); and ``ref_ids`` are keyed by
 configuration id, so one configuration's two references asked for together return one.
 """
+import contextlib
+import contextvars
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -31,11 +33,14 @@ from pydantic import BaseModel, ConfigDict
 from pylon.core.tools import log
 from tools import auth, this
 
+from . import schema_registry_version
 from .definition_digest import toolkit_rows
 
 MAX_GOVERNED_CREDENTIALS_PER_RUN = 64
 MAX_CANDIDATE_CONFIGURATIONS = 256   # configurations looked up per run, platform-internal ones included
 MAX_FACT_SELECTORS = 64              # what one call of a facts method accepts
+GRANTS_FOR_FACTS_VERSION = 4         # the secrets facts that answer the grants of a configuration's reference in the same call
+MAX_CACHED_SECRET_FIELDS = 512
 CREDENTIAL_SECTION = "credentials"
 USE_PERMISSION = "credentials.use"
 STORE_KINDS = frozenset({"database", "corporate_vault"})
@@ -159,23 +164,80 @@ def _payload_toolkits(payload) -> list:
     return [tool for tools in lists if isinstance(tools, list) for tool in tools if isinstance(tool, dict)]
 
 
+_SECRET_FIELDS = {}   # (toolkit type) or (toolkit type, project id, user id) -> (registry version, field names)
+
+
+def forget_secret_fields() -> None:
+    """Drop what ``toolkit_secret_fields`` kept (tests)."""
+    _SECRET_FIELDS.clear()
+
+
 def toolkit_secret_fields(tool_type, project_id, user_id) -> frozenset:
-    """Names of the provider-hub fields of a toolkit type that hold a secret inline (``secret: true``)."""
+    """Names of the provider-hub fields of a toolkit type that hold a secret inline (``secret: true``).
+
+    A type that has a schema is answered from this process for as long as the schemas did not change
+    (``schema_registry_version``): finding the schema of a provider-hub or MCP type aggregates every such schema of the
+    project and the user, which was done once per type and admission. A static type is the same for everyone and is kept
+    by its name; a provider-hub or MCP type depends on the project and the user and is kept by all three, and only when
+    everything it depends on was read. A type with no schema is looked for every time (it can appear, or stop being
+    blocked, without a registration)."""
     from .application_tools import find_toolkit_schema_by_type_everywhere  # pylint: disable=C0415
 
-    schema, _ = find_toolkit_schema_by_type_everywhere(tool_type, project_id, user_id)
+    static_key, key, version = (tool_type,), (tool_type, project_id, user_id), schema_registry_version.current()
+    for candidate in (static_key, key):
+        hit = _SECRET_FIELDS.get(candidate)
+        if hit is not None and hit[0] == version:
+            return hit[1]
+    status = {}
+    schema, external = find_toolkit_schema_by_type_everywhere(tool_type, project_id, user_id, status)
     properties = (schema or {}).get("properties") or {}
-    return frozenset(
+    names = frozenset(
         name for name, spec in properties.items()
         if isinstance(spec, dict) and spec.get("secret") is True
         and not (spec.get("configuration_types") or spec.get("configuration_sections") or spec.get("toolkit_types"))
     )
+    if schema and (not external or not status.get("degraded")):
+        if len(_SECRET_FIELDS) >= MAX_CACHED_SECRET_FIELDS:
+            _SECRET_FIELDS.clear()
+        _SECRET_FIELDS[key if external else static_key] = (version, names)
+    return names
 
 
-def _declared_uses(session, version_id, binding_project_id, inline_fields) -> dict:
-    """D, the authority: ``{toolkit id: {field: use}}`` from the stored settings of the version's toolkits."""
+# --- one walk of a toolkit's settings per dispatch ---------------------------------------------
+
+_WALKS = contextvars.ContextVar("c1009_settings_walks", default=None)
+
+
+@contextlib.contextmanager
+def walk_scope():
+    """Within this scope the configurations found in one toolkit's settings are looked for once, whoever asks: the
+    credential decision at admission and the seal that follows it walk the same settings."""
+    token = _WALKS.set({})
+    try:
+        yield
+    finally:
+        _WALKS.reset(token)
+
+
+def configurations_in(settings) -> list:
+    """``_find_configurations_in_settings(settings)``, remembered by the identity of ``settings`` for the current
+    ``walk_scope``. The settings are not copied or changed here; a list found earlier is returned as it is."""
+    from .application_utils import _find_configurations_in_settings  # pylint: disable=C0415
+
+    walks = _WALKS.get()
+    if walks is None:
+        return _find_configurations_in_settings(settings)
+    hit = walks.get(id(settings))
+    if hit is None or hit[0] is not settings:   # the id of a collected object can be reused: hold the object itself
+        hit = walks[id(settings)] = (settings, _find_configurations_in_settings(settings))
+    return hit[1]
+
+
+def _declared_uses(rows, binding_project_id, inline_fields) -> dict:
+    """D, the authority: ``{toolkit id: {field: use}}`` from the stored settings of the version's toolkits
+    (``rows``: ``(mapping, toolkit)`` of the version)."""
     declared, secret_names = {}, {}
-    for _mapping, tool in toolkit_rows(session, version_id):
+    for _mapping, tool in rows:
         settings = tool.settings if isinstance(tool.settings, dict) else {}
         names = frozenset()
         if any(isinstance(value, str) and value for value in settings.values()):
@@ -195,18 +257,18 @@ def _declared_uses(session, version_id, binding_project_id, inline_fields) -> di
     return declared
 
 
-def collect_credential_uses(  # pylint: disable=R0914
-    session, binding_project_id, version_id, payload, inline_fields: Callable = lambda tool_type: (),
+def collect_credential_uses(  # pylint: disable=R0913,R0914
+    session, binding_project_id, version_id, payload, inline_fields: Callable = lambda tool_type: (), rows=None,
 ) -> list:
     """Every credential the run uses: the stored credentials of the version's toolkits (D) with the selection
     resolved from the dispatched payload (P), plus each configuration the payload carries that D does not
     declare at that toolkit and field (conversation participant toolkit, request-level tool, nested toolkit
     reference, sub-agent prefetch, a configuration swapped in the payload). Platform-internal sections are not
-    told apart here; ``decide_credential_uses`` drops them once the sections are known."""
-    from .application_utils import _find_configurations_in_settings  # pylint: disable=C0415
-
+    told apart here; ``decide_credential_uses`` drops them once the sections are known. ``rows``: the version's toolkit
+    rows when the caller has read them already (then ``session`` is not used)."""
     uses = {}
-    declared = _declared_uses(session, version_id, binding_project_id, inline_fields)
+    declared = _declared_uses(toolkit_rows(session, version_id) if rows is None else rows, binding_project_id,
+                              inline_fields)
     for fields in declared.values():
         for use in fields.values():
             uses[(use.toolkit_instance_id, use.field, use.configuration_uuid, use.selector)] = use
@@ -220,7 +282,7 @@ def collect_credential_uses(  # pylint: disable=R0914
             value = settings.get(field)
             if use.selector in ("uuid", "title") and isinstance(value, dict) and "configuration_type" in value:
                 claims[id(value)] = use
-        for found in _find_configurations_in_settings(settings):
+        for found in configurations_in(settings):
             data = found["data"]
             sent_uuid = _uuid_text(data.get("configuration_uuid"))
             sent_project = _int_or_none(data.get("configuration_project_id")) or binding_project_id
@@ -352,14 +414,33 @@ def authorize_credential_use(ctx: CredentialDecisionContext, use: CredentialUse,
                    grant_id=grant.get("grant_id"), grant_epoch=grant.get("revocation_epoch"))
 
 
+def facts_answer_grants() -> bool:
+    """Does the secrets plugin answer the grants of a configuration's reference in the same call as the reference
+    (``grants_for``, facts version 4)? An older one is asked twice. Unreadable counts as no."""
+    try:
+        version = this.for_module("secrets").module.credential_facts_version()
+    except Exception:  # pylint: disable=W0703
+        return False
+    return isinstance(version, int) and not isinstance(version, bool) and version >= GRANTS_FOR_FACTS_VERSION
+
+
 def _read_decision_facts(ctx, uses, configurations) -> CredentialFacts:
-    """References of the agent's own project's credentials, then the grants their ids key (two reads)."""
+    """References of the agent's own project's credentials, and the grants their ids key: one read when the secrets
+    plugin joins them (``grants_for``: ``(binding, toolkit, configuration id, "*", subject)`` per use, at most
+    ``MAX_FACT_SELECTORS``; the grant of the reference found for that configuration, keyed by its ``ref_id``), else
+    two."""
     named = [(use, configurations.get(use.configuration_uuid)) for use in uses if use.selector == "uuid"]
     own = {fact["id"] for _, fact in named
            if fact is not None and fact.get("section") == CREDENTIAL_SECTION
            and fact.get("project_id") == ctx.binding_project_id}
-    references = _credential_use_facts(
-        ctx.binding_project_id, sorted(own), [], **_caller_of(ctx))["references"] if own else {}
+    if not own:
+        return CredentialFacts(configurations, {}, {})
+    wanted = sorted({(ctx.agent_binding_ref, use.toolkit_instance_id, fact["id"], WHOLE_TARGET, ctx.subject_ref)
+                     for use, fact in named if fact is not None and fact.get("id") in own})
+    if len(wanted) <= MAX_FACT_SELECTORS and facts_answer_grants():
+        found = _credential_use_facts(ctx.binding_project_id, sorted(own), [], None, grants_for=wanted, **_caller_of(ctx))
+        return CredentialFacts(configurations, found["references"], found["grants"])
+    references = _credential_use_facts(ctx.binding_project_id, sorted(own), [], **_caller_of(ctx))["references"]
     keys = {(ctx.agent_binding_ref, use.toolkit_instance_id, references[fact["id"]]["ref_id"], WHOLE_TARGET, ctx.subject_ref)
             for use, fact in named if fact is not None and fact.get("id") in references}
     grants = _credential_use_facts(ctx.binding_project_id, [], sorted(keys))["grants"] if keys else {}
@@ -405,36 +486,41 @@ def user_may_use_credentials(user_id, project_id) -> Callable[[], bool]:
 
 # --- later: a queued run, an inherited dispatch ----------------------------------------------
 
-def recheck_credentials(project_id, entries, subject_ref, agent_binding_ref, now) -> Optional[str]:  # pylint: disable=R0911,R0914
+def recheck_credentials(project_id, entries, subject_ref, agent_binding_ref, now) -> Optional[str]:
     """Do the decisions recorded on an admitted context still hold? ``None`` when they do, else the code to
     revoke the context with. An unreadable fact raises: the run is neither passed nor revoked."""
+    return recheck_failure(project_id, entries, subject_ref, agent_binding_ref, now)[0]
+
+
+def recheck_failure(project_id, entries, subject_ref, agent_binding_ref, now) -> tuple:  # pylint: disable=R0911,R0914
+    """``recheck_credentials`` that also says which entry failed: ``(code, entry)``, ``(None, None)`` when all hold."""
     if not entries:
-        return None
-    refs = _credential_use_facts(project_id, [], [], [entry["credential_ref"] for entry in entries])["references"]
+        return None, None
+    keys = sorted({(agent_binding_ref, entry["toolkit_instance_id"], entry["credential_ref"], WHOLE_TARGET, subject_ref)
+                   for entry in entries})
+    facts = _credential_use_facts(project_id, [], keys, [entry["credential_ref"] for entry in entries])   # one read
+    refs, grants = facts["references"], facts["grants"]
     references = {reference["ref_id"]: reference for reference in refs.values()}
     uuids = sorted({entry["configuration_uuid"] for entry in entries})
     configurations = read_configuration_facts(((cfg_uuid, project_id) for cfg_uuid in uuids))
-    keys = sorted({(agent_binding_ref, entry["toolkit_instance_id"], entry["credential_ref"], WHOLE_TARGET, subject_ref)
-                   for entry in entries})
-    grants = _credential_use_facts(project_id, [], keys)["grants"]
     for entry in entries:
         reference = references.get(entry["credential_ref"])
         if reference is None or reference.get("state") != "active":
-            return "CREDENTIAL_REFERENCE_INACTIVE"
+            return "CREDENTIAL_REFERENCE_INACTIVE", entry
         if (reference.get("ownership_class") == "personal" and subject_kind_of(subject_ref) == "user_delegation"
                 and reference.get("custodian_subject_ref") != subject_ref):   # a mandate's owner is checked at admission
-            return "CREDENTIAL_CLASS_NOT_ALLOWED"
+            return "CREDENTIAL_CLASS_NOT_ALLOWED", entry
         if reference.get("revocation_epoch") != entry["reference_epoch"]:
-            return "EPOCH_MISMATCH"
+            return "EPOCH_MISMATCH", entry
         config = configurations.get(entry["configuration_uuid"])
         if config is None:
-            return "CREDENTIAL_REFERENCE_INACTIVE"
+            return "CREDENTIAL_REFERENCE_INACTIVE", entry
         if (reference.get("generation") != entry["credential_generation"]
                 or config.get("generation") != entry["configuration_generation"]):
-            return "CREDENTIAL_GENERATION_MISMATCH"
+            return "CREDENTIAL_GENERATION_MISMATCH", entry
         grant = grants.get(grant_key(agent_binding_ref, entry["toolkit_instance_id"], entry["credential_ref"], subject_ref))
         if not grant_in_force(grant, now) or grant.get("subject_kind") != subject_kind_of(subject_ref):
-            return "DENIED_GRANT"
+            return "DENIED_GRANT", entry
         if grant.get("revocation_epoch") != entry["grant_epoch"]:
-            return "EPOCH_MISMATCH"
-    return None
+            return "EPOCH_MISMATCH", entry
+    return None, None

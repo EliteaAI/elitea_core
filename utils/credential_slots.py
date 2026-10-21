@@ -32,7 +32,7 @@ from typing import Callable, Mapping, Optional
 from tools import this
 
 from .credential_decision import (
-    CREDENTIAL_SECTION, CredentialDecisionError, _int_or_none, _payload_toolkits, _uuid_text,
+    CREDENTIAL_SECTION, CredentialDecisionError, _int_or_none, _payload_toolkits, _uuid_text, configurations_in,
 )
 
 SLOT_KEY = "credential_slot"
@@ -299,8 +299,6 @@ def seal_payload(  # pylint: disable=R0912,R0913,R0914
     WP-1B) and are always classified. A configuration that two toolkits share by identity is refused: a slot names
     one decision.
     """
-    from .application_utils import _find_configurations_in_settings  # pylint: disable=C0415
-
     index = None
     toolkits_seen, handled = set(), {}
     to_seal, stray = [], []
@@ -312,7 +310,7 @@ def seal_payload(  # pylint: disable=R0912,R0913,R0914
         settings = tool.get("settings")
         if not isinstance(settings, dict):
             continue
-        found = _find_configurations_in_settings(settings)
+        found = configurations_in(settings)   # the walk the decision made, within one dispatch
         if not found:
             continue
         if index is None:

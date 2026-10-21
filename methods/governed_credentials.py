@@ -44,6 +44,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     "message": "A required service is unavailable; the run was not started. Try again."}
 
     @web.method()
+    def release_credentials(self, **kwargs):
+        """ Worker bus (``restricted_release_credentials``): the material of every credential slot of a run in one
+        call, each slot sealed to the requester's key under its own binding. Registered only when governed. Never
+        raises; only the request keys are read from ``kwargs``. """
+        from ..utils.credential_release import BATCH_REQUEST_KEYS, release_credentials  # pylint: disable=C0415
+        #
+        try:
+            return release_credentials(self, **{key: kwargs.get(key) for key in BATCH_REQUEST_KEYS})
+        except Exception:  # pylint: disable=W0703
+            return {"ok": False, "reason_code": "DEPENDENCY_UNAVAILABLE",
+                    "message": "A required service is unavailable; the run was not started. Try again."}
+
+    @web.method()
     def governed_check_connection(  # pylint: disable=R0913
         self, project_id, configuration_uuid, config_type, user_id, actor_user_id=None, onboarding=False,
     ):
@@ -57,3 +70,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         return governed_check_connection(
             self, project_id, configuration_uuid, config_type, user_id, actor_user_id, onboarding)
+
+    @web.method()
+    def governed_check_connection_many(  # pylint: disable=R0913
+        self, project_id, items, user_id, actor_user_id=None, onboarding=False,
+    ):
+        """ Same process (the batch check-connection route of ``configurations``): test several saved credentials of a
+        project through the governed path, the probes running at the same time (at most a few at once). ``items``:
+        ``[{"configuration_uuid", "config_type"}]``; the other arguments are those of ``governed_check_connection`` and
+        are the same for every item. Returns one answer per item, in order, each as ``governed_check_connection``
+        answers. Never raises. """
+        from ..utils.credential_probe import governed_check_connection_many  # pylint: disable=C0415
+        #
+        return governed_check_connection_many(self, project_id, items, user_id, actor_user_id, onboarding)
