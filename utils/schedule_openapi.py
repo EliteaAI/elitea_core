@@ -187,6 +187,9 @@ ERRORS = {
     502: "The model failed or its answer could not be used",
     503: "A service the operation needs is unavailable",
 }
+# The refusal body of every error answer: a stable `code`, a human `error`, and extra keys (`field`, findings)
+DEFAULT_CODES = {400: "invalid_input", 403: "forbidden", 404: "not_found", 409: "conflict", 500: "server_error",
+                 502: "model_failed", 503: "service_unavailable"}
 
 
 def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict:
@@ -197,9 +200,10 @@ def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict
     answers = {str(code): success}
     for error, value in errors.items():
         description, error_example = value if isinstance(value, tuple) else (value, None)
-        answers[str(error)] = {"description": description or ERRORS[error]}
-        if error_example:
-            answers[str(error)]["content"] = {"application/json": {"example": error_example}}
+        description = description or ERRORS[error]
+        refusal = {"code": DEFAULT_CODES[error], "error": description, **(error_example or {})}
+        answers[str(error)] = {"description": description,
+                               "content": {"application/json": {"example": refusal}}}
     return answers
 
 
@@ -285,7 +289,7 @@ OPERATIONS = {
         "parameters": ITEM_PARAMS,
         "request_body": ScheduleEdit,
         "responses": _responses(200, "The schedule details and `warnings`", SAVED_EXAMPLE, {
-            400: (SAVE_BAD_INPUT[0] + "; or `enabled` in the body", ENABLED_NOT_EDITABLE), 403: None, 404: None,
+            400: (SAVE_BAD_INPUT[0] + "; or `enabled` in the body", ENABLED_NOT_EDITABLE[0]), 403: None, 404: None,
             409: ("`schedule_blocked`, `risk_confirmation_required` or `risk_changed`; the body has the findings",
                   {**SAVE_CONFLICTS[1], "code": "schedule_blocked", "sensitive": [], "blocking": [SIGNIN_FINDING],
                    "error": "You can't save this schedule: a scheduled run cannot do what the blocking findings need"})}),
@@ -370,7 +374,7 @@ OPERATIONS = {
             "403 no permission; 404 the schedule or the run is not found, or another owner's schedule"),
         "parameters": RUN_PARAMS,
         "responses": _responses(200, "The run with `summary` and `events`", RUN_DETAIL_EXAMPLE, {
-            403: None, 404: ("The schedule or the run is not found", RUN_NOT_FOUND)}),
+            403: None, 404: ("The schedule or the run is not found", RUN_NOT_FOUND[0])}),
     },
     ("post", f"{ITEM}/owner"): {
         "name": "Change the owner",

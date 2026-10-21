@@ -47,6 +47,12 @@ _SERVICE_PROMPT_KEY = "generate_schedule_draft"
 _AWAIT_TASK_TIMEOUT = 60
 _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_TEMPERATURE = 0.3
+_MODEL_FAILED = "model_failed"
+
+
+def _refusal(code: str, text: str, status: int, **extra) -> tuple[dict, int]:
+    """The body of `schedule_service.refusal`; the draft tests load this module without the service."""
+    return {"code": code, "error": text, **extra}, status
 
 
 class ScheduleDraftHandler:
@@ -69,11 +75,12 @@ class ScheduleDraftHandler:
         try:
             req = GenerateScheduleDraftRequest.model_validate(request.json)
         except ValidationError as e:
-            return e.errors(), 400
+            first = e.errors()[0]
+            return _refusal("invalid_input", first["msg"], 400, field=first["loc"][0] if first["loc"] else "body")
 
         template = get_service_prompt(_SERVICE_PROMPT_KEY)
         if not template:
-            return {"error": f"Service prompt '{_SERVICE_PROMPT_KEY}' is not configured"}, 500
+            return _refusal("service_prompt_missing", f"Service prompt '{_SERVICE_PROMPT_KEY}' is not configured", 500)
 
         try:
             llm_settings = rpc_tools.RpcMixin().rpc.timeout(5).configurations_get_default_model(
@@ -83,7 +90,7 @@ class ScheduleDraftHandler:
             log.exception("generate_schedule_draft: failed to get default model")
             llm_settings = None
         if not llm_settings or not llm_settings.get("model_name"):
-            return {"error": "No default LLM model configured for this project"}, 400
+            return _refusal("no_default_model", "No default LLM model configured for this project", 400)
         llm_settings.update(temperature=_DEFAULT_TEMPERATURE, max_tokens=_DEFAULT_MAX_TOKENS)
 
         locked = req.locked_entity.model_dump() if req.locked_entity else None
@@ -108,35 +115,32 @@ class ScheduleDraftHandler:
                 return_chat_history=True,
             )
         except PredictPayloadError as exc:
-            return {"error": str(exc)}, 400
+            return _refusal("invalid_input", str(exc), 400)
         except PoolSaturationError as exc:
-            return {
-                "error": "temporarily_unavailable",
-                "message": "The service is busy. Please try again in a few seconds.",
-                "retry_after": exc.retry_after,
-            }, 503
+            busy = "The service is busy. Please try again in a few seconds."
+            return _refusal("temporarily_unavailable", busy, 503, message=busy, retry_after=exc.retry_after)
         except Exception:  # noqa: BLE001 -- any model failure is a 502 with a short reason (R1.6)
             log.exception("generate_schedule_draft: LLM call failed")
-            return {"error": "LLM generation failed"}, 502
+            return _refusal(_MODEL_FAILED, "LLM generation failed", 502)
 
         timed_out = timeout_response(result, _AWAIT_TASK_TIMEOUT)
         if timed_out:
-            return timed_out[0], 502
+            return _refusal("model_timeout", timed_out[0]["error"], 502)
 
         raw_text = extract_answer(result)
         if not raw_text:
-            return {"error": describe_predict_failure(result) or "LLM returned an empty response"}, 502
+            return _refusal(_MODEL_FAILED, describe_predict_failure(result) or "LLM returned an empty response", 502)
         try:
             parsed = json.loads(extract_json_from_text(raw_text))
         except json.JSONDecodeError:
-            return {"error": "LLM returned no JSON draft"}, 502
+            return _refusal(_MODEL_FAILED, "LLM returned no JSON draft", 502)
         if not isinstance(parsed, dict):
-            return {"error": "LLM returned no JSON draft"}, 502
+            return _refusal(_MODEL_FAILED, "LLM returned no JSON draft", 502)
 
         try:
             draft, warnings = validate_schedule_draft(
                 project_id, parsed, locked, roster, owner_id=auth.current_user().get("id"))
         except Exception:  # noqa: BLE001 -- the model answer was paid for; answer a short reason, not a 500
             log.exception("generate_schedule_draft: the draft could not be checked")
-            return {"error": "The draft could not be checked"}, 502
+            return _refusal("draft_check_failed", "The draft could not be checked", 502)
         return GenerateScheduleDraftResponse(draft=draft, warnings=warnings).model_dump(mode="json"), 200

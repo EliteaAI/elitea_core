@@ -39,7 +39,8 @@ ROUTES = {
     ("put", "settings"): "_save_settings",
     ("post", "check"): "_check_risks",
 }
-NOT_ALLOWED = {"error": "Method not allowed"}, 405
+# The body of `schedule_service.refusal`; the handler tests load this module without the service
+NOT_ALLOWED = {"code": "method_not_allowed", "error": "Method not allowed"}, 405
 
 
 def _tail(schedule_id: int | None, run_id: int | None) -> str:

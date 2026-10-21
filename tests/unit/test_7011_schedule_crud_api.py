@@ -28,7 +28,7 @@ ADMIN_ID = 99
 PERMISSION_PREFIX = 'models.applications.schedules.'
 EDITOR = {PERMISSION_PREFIX + verb for verb in ('list', 'details', 'create', 'update', 'delete', 'run')}
 ADMIN = EDITOR | {PERMISSION_PREFIX + 'admin'}
-NOT_FOUND = {'error': 'Schedule not found'}
+NOT_FOUND = {'code': 'not_found', 'error': 'Schedule not found'}
 
 
 class FakeSpan:
@@ -221,6 +221,16 @@ def pipeline_body(**changes):
     return body
 
 
+def assert_refusal(response, status, error=None, **extra):
+    """R8.1: a refusal carries a machine `code` and a human `error`; extra keys stay."""
+    body, got_status = response
+    assert got_status == status
+    assert isinstance(body.get('code'), str) and body['code']
+    assert body.get('error') if error is None else body.get('error') == error
+    for key, value in extra.items():
+        assert body[key] == value
+
+
 def assert_400_names(response, field):
     body, status = response
     assert status == 400
@@ -239,7 +249,7 @@ def test_7011_r1_3_version_of_another_entity_is_400_on_version_id(harness):
 
 def test_7011_r1_4_folder_rights_denial_is_returned_and_nothing_is_saved(harness):
     harness.access_error = ({'ok': False, 'error': 'No access'}, 404)
-    assert harness.call('post', agent_body()) == ({'ok': False, 'error': 'No access'}, 404)
+    assert_refusal(harness.call('post', agent_body()), 404, 'No access')
     assert harness.row(1) is None
 
 
@@ -279,8 +289,9 @@ def test_7011_r2_2_update_ignores_created_by_and_principal(harness):
 
 def test_7011_r2_5_resume_without_a_version_is_400_and_stays_disabled(harness):
     schedule_id = harness.seed(version_id=None, enabled=False, disabled_reason='version_deleted')
-    assert harness.call('post', None, schedule_id, suffix='/resume') == (
-        {'error': 'Choose a version before you resume this schedule', 'field': 'version_id'}, 400,
+    assert_refusal(
+        harness.call('post', None, schedule_id, suffix='/resume'), 400,
+        'Choose a version before you resume this schedule', field='version_id',
     )
     assert harness.row(schedule_id).enabled is False
 
@@ -333,7 +344,7 @@ def test_7011_cr_pause_and_resume_need_the_update_permission(harness, action):
 @pytest.mark.parametrize('action', ['/pause', '/resume'])
 def test_7011_cr_pause_and_resume_of_another_owners_schedule_is_404(harness, action):
     schedule_id = harness.seed(created_by=OTHER_ID, enabled=action == '/pause')
-    assert harness.call('post', None, schedule_id, suffix=action) == (NOT_FOUND, 404)
+    assert_refusal(harness.call('post', None, schedule_id, suffix=action), 404, NOT_FOUND['error'])
 
 
 def test_7011_cr_admin_pause_marks_the_span_and_tells_the_owner(harness):
@@ -359,7 +370,7 @@ def test_7011_cr_a_method_the_url_does_not_serve_is_405(harness, verb, suffix):
 def test_7011_r3_1_another_owners_schedule_is_404_for_a_regular_user(harness, verb):
     schedule_id = harness.seed(created_by=OTHER_ID)
     body = {'name': 'Hijacked'} if verb == 'put' else None
-    assert harness.call(verb, body, schedule_id) == (NOT_FOUND, 404)
+    assert_refusal(harness.call(verb, body, schedule_id), 404, NOT_FOUND['error'])
     assert harness.row(schedule_id).name == 'Nightly'
 
 

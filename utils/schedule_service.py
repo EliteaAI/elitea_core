@@ -25,23 +25,29 @@ TEMPLATE_MARK = re.compile(r'{{|}}|{%|%}|{#|#}')
 CLEARABLE = {'description', 'run_mode', 'prompt', 'expires_at'}
 NEXT_RUN_FIELDS = {'cron', 'timezone', 'enabled'}
 CONFIRMED_EVENT = 'schedule_run_without_asking_confirmed'
+INVALID_INPUT = 'invalid_input'
+
+
+def refusal(code: str, text: str, status: int = 400, **extra) -> tuple[dict, int]:
+    """The (body, status) of every Schedules refusal: a machine `code`, a human `error` and the extra keys (R8.1)."""
+    return {'code': code, 'error': text, **extra}, status
 
 
 class ScheduleError(Exception):
-    """A rule the request broke; `response` is the (body, status) the API answers."""
+    """A rule the request broke; `response` is the refusal the API answers."""
 
-    def __init__(self, body: dict, status: int = 400):
-        super().__init__(body.get('error'))
-        self.response = body, status
+    def __init__(self, code: str, text: str, status: int = 400, **extra):
+        super().__init__(text)
+        self.response = refusal(code, text, status, **extra)
 
 
 class ScheduleNotFound(ScheduleError):
     def __init__(self):
-        super().__init__({'error': 'Schedule not found'}, 404)
+        super().__init__('not_found', 'Schedule not found', 404)
 
 
 def _field_error(field: str, message: str) -> ScheduleError:
-    return ScheduleError({'error': message, 'field': field})
+    return ScheduleError(INVALID_INPUT, message, field=field)
 
 
 def prompt_placeholders(text: str | None) -> set[str]:
@@ -114,7 +120,8 @@ def check_entity(session, project_id: int, entity_type: str, application_id: int
     # The type is verified above, so the one folder type is exact
     access_error = entity_access_error(project_id, entity_type, application_id, write=True)
     if access_error:
-        raise ScheduleError(*access_error)
+        body, status = access_error
+        raise ScheduleError('not_found' if status == 404 else 'read_only', body['error'], status)
 
 
 def load_schedule_in_scope(session, schedule_id: int, scope: ScheduleScope) -> EntitySchedule:

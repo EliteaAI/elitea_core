@@ -16,9 +16,12 @@ from .schedule_queries import list_schedules
 
 MAX_ID = 2147483647  # the schedule id column is a 32-bit integer
 MAX_EXPORT_IDS = 500
-INVALID_PREFERENCE = {"error": "get_notified must be true or false"}
-INVALID_SETTING = {"error": "allow_run_without_asking must be true or false", "field": "allow_run_without_asking"}
-SETTINGS_UNAVAILABLE = {"error": "The project settings store is unavailable; try again later"}
+# The refusal body of `schedule_service.refusal`, written out: the handler tests load this module without the service
+INVALID_INPUT = "invalid_input"
+INVALID_PREFERENCE = {"code": INVALID_INPUT, "error": "get_notified must be true or false", "field": "get_notified"}
+INVALID_SETTING = {"code": INVALID_INPUT, "error": "allow_run_without_asking must be true or false",
+                   "field": "allow_run_without_asking"}
+SETTINGS_UNAVAILABLE = {"code": "settings_unavailable", "error": "The project settings store is unavailable; try again later"}
 
 
 class SchedulePreferenceUpdate(BaseModel):
@@ -33,6 +36,10 @@ def _parse_ids(raw: str) -> list[int] | None:
         return None
     ids = [int(part) for part in parts]
     return ids if max(ids) <= MAX_ID else None
+
+
+def _bad_file(text: str) -> tuple[dict, int]:
+    return {"code": INVALID_INPUT, "error": text, "field": "file"}, 400
 
 
 def _owner_names(owner_ids: set[int]) -> dict[int, str | None]:
@@ -64,9 +71,8 @@ class ScheduleProjectHandlers:
             filters = ScheduleListFilters(**args)
         except ValidationError as e:
             name = e.errors()[0]["loc"][0]
-            if name == "limit":
-                return {"error": "limit must be between 1 and 100"}, 400
-            return {"error": f"{name} is not valid"}, 400
+            text = "limit must be between 1 and 100" if name == "limit" else f"{name} is not valid"
+            return {"code": INVALID_INPUT, "error": text, "field": name}, 400
 
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
@@ -98,7 +104,7 @@ class ScheduleProjectHandlers:
         raw_ids = request.args.get("ids")
         ids = None if raw_ids is None else _parse_ids(raw_ids)
         if raw_ids is not None and ids is None:
-            return {"error": "ids must be a comma-separated list of schedule ids"}, 400
+            return {"code": INVALID_INPUT, "error": "ids must be a comma-separated list of schedule ids", "field": "ids"}, 400
         try:
             text = export_schedules_yaml(project_id, ids)
         except ScheduleError as e:
@@ -123,16 +129,16 @@ class ScheduleProjectHandlers:
         )
         upload = request.files.get("file")
         if upload is None:
-            return {"error": "No file provided"}, 400
+            return _bad_file("No file provided")
         if upload.seek(0, 2) > MAX_FILE_BYTES:
-            return {"error": TOO_LARGE}, 400
+            return _bad_file(TOO_LARGE)
         upload.seek(0)
         try:
             file = parse_schedules_file(upload.read().decode())
         except UnicodeDecodeError:
-            return {"error": NOT_YAML}, 400
+            return _bad_file(NOT_YAML)
         except ValueError as e:
-            return {"error": str(e)}, 400
+            return _bad_file(str(e))
         return import_schedules(project_id, schedule_scope(project_id).user_id, file), 200
 
     @auth.decorators.check_api(schedule_check_spec("list"))
@@ -196,7 +202,7 @@ class ScheduleProjectHandlers:
         except ValidationError as e:
             unknown = [error["loc"][0] for error in e.errors() if error["type"] == "extra_forbidden"]
             if unknown:
-                return {"error": f"{unknown[0]} is not a schedule setting", "field": unknown[0]}, 400
+                return {"code": INVALID_INPUT, "error": f"{unknown[0]} is not a schedule setting", "field": unknown[0]}, 400
             return INVALID_SETTING, 400
         try:
             return save_schedule_settings(project_id, settings), 200
