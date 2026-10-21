@@ -89,9 +89,11 @@ def _refuse_unallowed_rule(project_id: int, body):
 
 
 def _saved(row, scope: ScheduleScope, project_id: int) -> dict:
-    """Details of a saved row, with the save warnings; a warning never blocks or changes the save (R2.4)."""
-    from .schedule_risk import scan_schedule_risks
-    return {**_read_answer(row, scope, project_id), "warnings": scan_schedule_risks(project_id, row.version_id, row.created_by)}
+    """Details of a saved row, with every finding of the risk review as the save `warnings` (R2.4)."""
+    from .schedule_risk import scan_schedule
+    review = scan_schedule(project_id, row.version_id, row.created_by)
+    warnings = review["blocking"] + review["sensitive"] + review["notices"]
+    return {**_read_answer(row, scope, project_id), "warnings": warnings}
 
 
 def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:

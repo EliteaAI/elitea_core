@@ -54,7 +54,7 @@ class FakeScanSession:
 @pytest.fixture
 def real_scan(harness):
     """Swap the harness scan stub for the real module, fed by one HITL pipeline version."""
-    version = types.SimpleNamespace(agent_type='pipeline', instructions=PIPELINE_YAML, meta={}, tools=[])
+    version = types.SimpleNamespace(application_id=2, agent_type='pipeline', instructions=PIPELINE_YAML, meta={}, tools=[])
     sys.modules[f'{PACKAGE}.models.all'] = types.SimpleNamespace(ApplicationVersion=type('ApplicationVersion', (), {}))
     sys.modules[f'{PACKAGE}.utils.application_tools'] = types.SimpleNamespace(
         ConfigurationExpandError=Exception, expand_toolkit_settings=lambda *args: {},

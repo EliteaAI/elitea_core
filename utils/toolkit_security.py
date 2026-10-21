@@ -29,11 +29,12 @@ def get_toolkit_security_config() -> dict:
         return {
             'blocked_toolkits': config.get('blocked_toolkits', []) or [],
             'blocked_tools': config.get('blocked_tools', {}) or {},
-            'sensitive_tools': config.get('sensitive_tools', {}) or {}
+            'sensitive_tools': config.get('sensitive_tools', {}) or {},
+            'sensitive_tool_info': config.get('sensitive_tool_info', {}) or {},
         }
     except Exception as e:
         log.warning(f"Failed to load toolkit_security config: {e}")
-        return {'blocked_toolkits': [], 'blocked_tools': {}, 'sensitive_tools': {}}
+        return {'blocked_toolkits': [], 'blocked_tools': {}, 'sensitive_tools': {}, 'sensitive_tool_info': {}}
 
 
 def is_toolkit_blocked(toolkit_type: str) -> bool:
@@ -94,6 +95,23 @@ def is_tool_sensitive(toolkit_type: str, tool_name: str) -> bool:
         if tk.lower() == toolkit_lower and tool_lower in [t.lower() for t in (tools or [])]:
             return True
     return False
+
+
+SENSITIVE_BADGES = {'sends_messages', 'deletes_data', 'changes_data', 'runs_code', 'needs_approval'}
+DEFAULT_TOOL_INFO = {'badge': 'needs_approval', 'effect': 'This tool can change data outside ELITEA.'}
+
+
+def sensitive_tool_info(toolkit_type: str, tool_name: str) -> dict:
+    """The `badge` and `effect` text of a sensitive tool (toolkit_security.sensitive_tool_info).
+
+    Matches case-insensitively, like is_tool_sensitive. A missing value or an unknown badge takes the default.
+    """
+    info = {}
+    for tk, tools in get_toolkit_security_config()['sensitive_tool_info'].items():
+        if tk.lower() == toolkit_type.lower():
+            info = next((value or {} for name, value in (tools or {}).items() if name.lower() == tool_name.lower()), {})
+    badge = info.get('badge') if info.get('badge') in SENSITIVE_BADGES else DEFAULT_TOOL_INFO['badge']
+    return {'badge': badge, 'effect': info.get('effect') or DEFAULT_TOOL_INFO['effect']}
 
 
 def get_blocked_tools_for_toolkit(toolkit_type: str, config: dict = None) -> list:

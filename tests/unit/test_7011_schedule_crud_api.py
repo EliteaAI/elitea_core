@@ -50,6 +50,7 @@ class Harness:
         self.notice_error = None
         self.access_error = None
         self.risk_warnings = []
+        self.fingerprint = 'fp-1'
         self.run_without_asking_allowed = False
         self.scans = []
         self.path = ''
@@ -92,6 +93,28 @@ class Harness:
 
     def seed(self, created_by=OWNER_ID, **fields):
         return sqlite_db.seed_schedule(self.session_factory, self.EntitySchedule, created_by, **fields)
+
+
+BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
+
+
+def fake_risk_module(state):
+    """`utils/schedule_risk` that sorts `state.risk_warnings` as the real scan does and logs each scan."""
+    risk = types.ModuleType(f'{PACKAGE}.utils.schedule_risk')
+
+    def scan_schedule(*args):
+        state.scans.append(args)
+        found = list(state.risk_warnings)
+        return {
+            'blocking': [w for w in found if w['code'] in BLOCKING_CODES],
+            'sensitive': [w for w in found if w['code'] == 'sensitive_action'],
+            'notices': [w for w in found if w['code'] not in BLOCKING_CODES and w['code'] != 'sensitive_action'],
+            'fingerprint': state.fingerprint,
+        }
+
+    risk.scan_schedule = scan_schedule
+    risk.scan_complete = lambda review: not any(w['code'] == 'scan_incomplete' for w in review['notices'])
+    return risk
 
 
 @pytest.fixture
@@ -152,9 +175,7 @@ def harness(isolated_sys_modules, monkeypatch):
     notifications = types.ModuleType(f'{PACKAGE}.utils.schedule_notifications')
     notifications.notify_schedule_event = lambda *args, **kwargs: harness.notify(*args, **kwargs)
     sys.modules[folder_access.__name__] = folder_access
-    risk = types.ModuleType(f'{PACKAGE}.utils.schedule_risk')  # the scan has its own tests (US-17)
-    risk.scan_schedule_risks = lambda *args: harness.scans.append(args) or list(harness.risk_warnings)
-    sys.modules[risk.__name__] = risk
+    sys.modules[f'{PACKAGE}.utils.schedule_risk'] = fake_risk_module(harness)  # the scan has its own tests (US-17)
     settings = types.ModuleType(f'{PACKAGE}.utils.schedule_settings')
     settings.is_run_without_asking_allowed = lambda project_id: harness.run_without_asking_allowed
     sys.modules[settings.__name__] = settings
