@@ -7,6 +7,7 @@ Run via:
     python tests/run_tests.py unit/test_7011_schedule_yaml_import.py -v
 """
 import contextlib
+import datetime
 import pathlib
 import sys
 import types
@@ -433,6 +434,41 @@ def test_7011_r4_5_a_new_key_is_stored_and_matches_next_import(env):
 def test_7011_r5_6_a_version_1_file_without_keys_still_imports(env):
     report = env.import_items(item(), schema_version=1)
     assert [entry['name'] for entry in report['created']] == ['Daily digest']
+
+
+# CR-04 follow-up: an unchanged item makes no write and sends no notice (R4.1, R5.5)
+QUIET_RUN = datetime.datetime(2999, 1, 1, 9, 0)
+
+
+def import_owned_by_another(env, **overrides):
+    """Import one keyed item, then give the row to owner 42 with a marked next run; return the item."""
+    unchanged = keyed(
+        prompt='Hi {{ who }}', variables=[{'name': 'who', 'value': 'Ann'}], expires_at='2999-03-05',
+        approval_rule='run_without_asking', **overrides,
+    )
+    env.import_items(unchanged, schema_version=2)
+    with env.session_factory() as session:
+        (stored,) = session.query(env.EntitySchedule).all()
+        stored.created_by, stored.updated_by, stored.next_run = 42, 42, QUIET_RUN
+        session.commit()
+    return unchanged
+
+
+def test_7011_r4_1_a_second_import_of_an_unchanged_item_is_quiet_and_still_reported_as_updated(env):
+    unchanged = import_owned_by_another(env)
+    report = env.import_items(unchanged, schema_version=2)
+    (row,) = env.rows()
+    assert [entry['schedule_id'] for entry in report['updated']] == [row.id]
+    assert (row.updated_by, row.next_run, env.notices) == (42, QUIET_RUN, [])
+
+
+def test_7011_r5_5_an_import_that_changes_the_cron_still_sends_one_notice(env):
+    changed = {**import_owned_by_another(env), 'cron': '0 7 * * *'}
+    report = env.import_items(changed, schema_version=2)
+    (row,) = env.rows()
+    assert [entry['schedule_id'] for entry in report['updated']] == [row.id]
+    assert (row.cron, row.updated_by, len(env.notices)) == ('0 7 * * *', ADMIN_ID, 1)
+    assert row.next_run != QUIET_RUN
 
 
 # P2 review: a key update that moves the version also moves the natural key for later items of the file
