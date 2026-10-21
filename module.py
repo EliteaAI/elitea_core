@@ -16,6 +16,7 @@ import arbiter  # pylint: disable=E0401
 from .utils.evaluation_run_utils import EVAL_RUN_TASK_NAME, execute_run_task
 from .utils.run_id import stamp_predict_run_id
 from .utils.schedule_access import register_schedule_permissions
+from .utils.schedule_settings import register_schedule_settings_type
 from .utils.scheduler_bindings import (
     advertised_bindings,
     build_scheduler_sync_plan,
@@ -278,7 +279,8 @@ class Module(module.ModuleModel):
                     "name": "elitea_core/schedules",
                     "description": "Run agents and pipelines on a cron schedule: create, edit, pause, resume, "
                                    "run now, change owner, list runs, export and import schedules, draft one "
-                                   "with AI, and set your notices. All under /schedules/{mode}/{project_id}.",
+                                   "with AI, set your notices, and allow \"Run without asking\" in the "
+                                   "project. All under /schedules/{mode}/{project_id}.",
                 },
                 {
                     "name": "elitea_core/skills",
@@ -637,6 +639,7 @@ class Module(module.ModuleModel):
 
         # Register schedule permissions for schedules permission family (EL-7011)
         register_schedule_permissions()
+        register_schedule_settings_type()
 
         # self.init_db()
         # TaskNode
