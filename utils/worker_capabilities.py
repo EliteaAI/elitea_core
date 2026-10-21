@@ -54,24 +54,11 @@ GOVERNED_TASK_PREFERRED_CAPABILITIES = {
 }
 
 
-class _Counter:
-    """In-process count for the batch-release counter below; it is not one of the C-1009 security metrics."""
-
-    def __init__(self, name, documentation):
-        self.name, self.documentation, self._count = name, documentation, 0
-
-    def inc(self):
-        self._count += 1
-
-    def total(self):
-        return self._count
-
-
 GOVERNED_DISPATCH_UNAVAILABLE = SecurityCounter(
     "governed_dispatch_unavailable_total",
     "Governed tasks refused at dispatch because no live worker supports them",
 )
-GOVERNED_DISPATCH_WITHOUT_BATCH = _Counter(
+GOVERNED_DISPATCH_WITHOUT_BATCH = SecurityCounter(
     "governed_dispatch_without_slot_batch_total",
     "Governed tasks dispatched while no live worker announces the batch release of credential slots",
 )

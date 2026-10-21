@@ -95,5 +95,7 @@ def test_the_dispatch_gate_counts_through_the_shared_counter():
     source = (PLUGIN_ROOT / "utils" / "worker_capabilities.py").read_text()
 
     assert "GOVERNED_DISPATCH_UNAVAILABLE = SecurityCounter(" in source
+    assert "GOVERNED_DISPATCH_WITHOUT_BATCH = SecurityCounter(" in source
+    assert "_Counter(" not in source
     assert '"governed_dispatch_unavailable_total"' in source
     assert "prometheus_client" not in source
