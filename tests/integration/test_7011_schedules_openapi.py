@@ -290,6 +290,8 @@ def test_cr_el7011_risk_review_codes_are_documented_with_examples(spec):
     assert '`schedules.create`' in check['description'] and 'nothing' in check['description'].lower()
     example = check['responses']['200']['content']['application/json']['example']
     assert {'blocking', 'sensitive', 'notices', 'run_without_asking_allowed', 'fingerprint'} == set(example)
+    assert {item['code'] for item in example['sensitive']} == {'sensitive_action', 'personal_credential'}
+    assert 'personal_credential' in check['description']
     assert check['requestBody']['content']['application/json']['examples']
     for key in (('post', BASE), ('put', ITEM)):
         operation = operations[key]

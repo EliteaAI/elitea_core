@@ -97,6 +97,7 @@ class Harness:
 
 
 BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
+SENSITIVE_CODES = {'sensitive_action', 'personal_credential'}
 
 
 def fake_risk_module(state):
@@ -108,8 +109,8 @@ def fake_risk_module(state):
         found = list(state.risk_warnings)
         return {
             'blocking': [w for w in found if w['code'] in BLOCKING_CODES],
-            'sensitive': [w for w in found if w['code'] == 'sensitive_action'],
-            'notices': [w for w in found if w['code'] not in BLOCKING_CODES and w['code'] != 'sensitive_action'],
+            'sensitive': [w for w in found if w['code'] in SENSITIVE_CODES],
+            'notices': [w for w in found if w['code'] not in BLOCKING_CODES | SENSITIVE_CODES],
             'fingerprint': state.fingerprint,
         }
 

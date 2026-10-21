@@ -291,3 +291,51 @@ class TestEL7011CrRiskReviewSplit:
         review = scan.review(version_id=None)
         assert (review['blocking'], review['sensitive'], review['notices']) == ([], [], [])
         assert isinstance(review['fingerprint'], str)
+
+
+def _personal(type_='github', name='GitHub', private=True, **settings):
+    return _tool(type_, name, settings={f'{type_}_configuration': {'elitea_title': 'mine', 'private': private},
+                                        **settings})
+
+
+class TestEL7011CrPersonalCredential:
+    """Owner decision 2026-10-21: a personal credential is "warn and confirm", not silent and not blocked."""
+
+    @pytest.mark.parametrize('type_, name, label', [
+        ('github', 'GitHub', 'GitHub'), ('jira', 'Jira', 'Jira'), ('confluence', 'Docs', 'Confluence')])
+    def test_el7011_cr_a_personal_credential_is_a_sensitive_item(self, scan, type_, name, label):
+        scan.version = _version(tools=[_personal(type_, name)])
+        review = scan.review()
+        assert review['blocking'] == [] and review['notices'] == []
+        assert review['sensitive'] == [{
+            'code': 'personal_credential', 'message': f'Toolkit "{name}" runs with the owner\'s personal {label} credential',
+            'toolkit': name, 'toolkit_type': type_, 'tool': None, 'risk_level': 'needs_approval',
+            'badge': 'personal_credential', 'effect': f"Runs with the owner's personal {label} credential.",
+        }]
+
+    def test_el7011_cr_a_shared_credential_adds_nothing(self, scan):
+        scan.version = _version(tools=[_personal(private=False)])
+        assert scan.run() == []
+
+    def test_el7011_cr_the_personal_credential_is_in_the_fingerprint_as_toolkit_star(self, scan):
+        scan.version = _version(tools=[_personal()])
+        expected = hashlib.sha256(json.dumps([VERSION_ID, [['GitHub', '*']]]).encode()).hexdigest()
+        assert scan.review()['fingerprint'] == expected
+
+    def test_el7011_cr_personal_credential_and_sensitive_tool_are_both_listed(self, scan):
+        scan.sensitive = {('github', 'delete_file')}
+        scan.version = _version(tools=[_personal(selected_tools=['delete_file'])])
+        assert [(i['code'], i['tool']) for i in scan.review()['sensitive']] == [
+            ('personal_credential', None), ('sensitive_action', 'delete_file')]
+
+    def test_el7011_cr_an_interactive_sign_in_still_blocks_and_adds_no_personal_item(self, scan):
+        scan.version = _version(tools=[_personal('sharepoint', 'Docs')])
+        scan.expanded['sharepoint'] = {'sharepoint_configuration': {'oauth_discovery_endpoint': 'https://idp'}}
+        review = scan.review()
+        assert _codes(review['blocking']) == ['personal_signin_required'] and review['sensitive'] == []
+
+    def test_el7011_cr_a_missing_personal_credential_blocks_without_a_personal_item(self, scan):
+        scan.version = _version(tools=[_personal('jira', 'Jira')])
+        scan.expand_errors = {'jira': [_error('a', 'private_credential_not_found')]}
+        review = scan.review()
+        assert _codes(review['blocking']) == ['missing_credential'] and review['sensitive'] == []

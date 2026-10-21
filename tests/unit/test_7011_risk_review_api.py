@@ -233,3 +233,20 @@ def test_el7011_cr_a_save_scans_the_version_once(harness):
     body, status = harness.call('post', agent_body())
     assert (status, body['warnings']) == (201, [NOTICE])
     assert harness.scans == [(PROJECT_ID, 10, OWNER_ID)]
+
+
+# Owner decision 2026-10-21: a personal credential is "warn and confirm"
+PERSONAL = {'code': 'personal_credential', 'message': 'Toolkit "GitHub" runs with the owner\'s personal GitHub credential',
+            'toolkit': 'GitHub', 'toolkit_type': 'github', 'tool': None, 'risk_level': 'needs_approval',
+            'badge': 'personal_credential', 'effect': "Runs with the owner's personal GitHub credential."}
+
+
+def test_el7011_cr_a_personal_credential_needs_the_ack_and_is_audited_as_toolkit_star(named):
+    named.run_without_asking_allowed = True
+    named.risk_warnings = [PERSONAL]
+    body, status = named.call('post', _rwa())
+    assert (status, body['code'], body['sensitive']) == (409, 'risk_confirmation_required', [PERSONAL])
+    body, status = named.call('post', _rwa(risk_ack=_ack()))
+    assert status == 201 and body['warnings'] == [PERSONAL]
+    [(name, _)] = named.audit
+    assert name == 'schedule_run_without_asking_confirmed: GitHub.*'
