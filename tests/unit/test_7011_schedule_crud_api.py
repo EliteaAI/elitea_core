@@ -45,6 +45,7 @@ class Harness:
         self.user_id = OWNER_ID
         self.body = None
         self.span = FakeSpan()
+        self.audit = []  # spans the code starts: (name, attributes)
         self.notices = []
         self.notice_extras = []
         self.notice_error = None
@@ -137,7 +138,7 @@ def harness(isolated_sys_modules, monkeypatch):
 
     flask.request = _Request()
     sys.modules['flask'] = flask
-    sqlite_db.install_trace_span(harness.span)
+    sqlite_db.install_trace_span(harness.span, harness.audit)
 
     engine = sqlite_db.sqlite_engine()
 

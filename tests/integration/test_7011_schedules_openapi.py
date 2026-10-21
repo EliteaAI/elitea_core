@@ -60,6 +60,7 @@ OTHER_TAGS = {
     'elitea_core/runtime', 'elitea_core/toolkits',
 }
 # The 15 rows of the owner's route table (CR 2026-10-21), plus GET and PUT settings (CR "Run without asking")
+# and the dry-run risk check (CR risk review)
 OPERATIONS = {
     ('get', BASE),
     ('post', BASE),
@@ -78,6 +79,7 @@ OPERATIONS = {
     ('put', f'{BASE}/preferences'),
     ('get', f'{BASE}/settings'),
     ('put', f'{BASE}/settings'),
+    ('post', f'{BASE}/check'),
 }
 NO_JSON_SUCCESS = {('delete', ITEM), ('get', f'{BASE}/export')}  # 204 without a body, a YAML file
 
@@ -190,7 +192,7 @@ def _body_schemas(spec):
 def test_r1_1_el7011_every_schedules_operation_has_its_own_path(spec):
     operations = _operations(spec)
     assert set(operations) == OPERATIONS
-    assert len(operations) == 17
+    assert len(operations) == 18
     for (method, path), operation in operations.items():
         path_params = {p['name'] for p in operation['parameters'] if p['in'] == 'path'}
         assert path_params == set(re.findall(r'{(\w+)}', path)), (method, path)
@@ -263,6 +265,24 @@ def test_cr_el7011_settings_publish_the_one_key_and_the_admin_rule(spec):
     assert '`schedules.admin`' in operations[('put', f'{BASE}/settings')]['description']
     assert '`schedules.list`' in operations[('get', f'{BASE}/settings')]['description']
     assert {'400', '403'} <= set(operations[('put', f'{BASE}/settings')]['responses'])
+
+
+# Owner CR 2026-10-21 (risk review): the check and the save refusals are documented with their codes
+def test_cr_el7011_risk_review_codes_are_documented_with_examples(spec):
+    operations = _operations(spec)
+    check = operations[('post', f'{BASE}/check')]
+    assert '`schedules.create`' in check['description'] and 'nothing' in check['description'].lower()
+    example = check['responses']['200']['content']['application/json']['example']
+    assert {'blocking', 'sensitive', 'notices', 'run_without_asking_allowed', 'fingerprint'} == set(example)
+    assert check['requestBody']['content']['application/json']['examples']
+    for key in (('post', BASE), ('put', ITEM)):
+        operation = operations[key]
+        conflict = str(operation['responses']['409'])
+        for code in ('schedule_blocked', 'risk_confirmation_required', 'risk_changed'):
+            assert code in operation['description'] and code in conflict, (key, code)
+        assert 'risk_ack' in operation['description'] and 'risk_ack' in str(operation['responses']['400'])
+    body = operations[('post', BASE)]['requestBody']['content']['application/json']['schema']['$ref']
+    assert 'risk_ack' in spec['components']['schemas'][body.rsplit('/', 1)[-1]]['properties']
 
 
 # R1.6: a restart reorders `with_modes`; the published paths stay the same

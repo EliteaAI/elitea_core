@@ -1,4 +1,5 @@
 """Shared SQLite set-up of the EL-7011 schedule tests: real sqlalchemy, parent tables, schedule table, rows."""
+import contextlib
 import sys
 import types
 from unittest.mock import MagicMock
@@ -97,9 +98,23 @@ def install_parent_models(plugin_package):
     return Base, Application, ApplicationVersion
 
 
-def install_trace_span(span):
+class _Tracer:
+    """Records each started span as (name, attributes)."""
+
+    def __init__(self, started):
+        self.started = started
+
+    @contextlib.contextmanager
+    def start_as_current_span(self, name, attributes=None):
+        self.started.append((name, dict(attributes or {})))
+        yield None
+
+
+def install_trace_span(span, started=None):
+    """The current span is `span`; a span the code starts is appended to `started`."""
     otel = types.ModuleType('opentelemetry')
-    otel.trace = types.SimpleNamespace(get_current_span=lambda: span)
+    tracer = _Tracer([] if started is None else started)
+    otel.trace = types.SimpleNamespace(get_current_span=lambda: span, get_tracer=lambda _name: tracer)
     sys.modules['opentelemetry'] = otel
     sys.modules['opentelemetry.trace'] = otel.trace
 
