@@ -1,4 +1,4 @@
-"""EL-7011 US-22: the admin-only schedule file routes (R1.1, R1.2, R1.4, R2.6, R3.1, R3.3, R3.4) on SQLite.
+"""EL-7011 US-22: the admin-only schedule file routes (R1.1, R1.2, R1.4, R2.6, R3.1, R3.3, R3.4, R4.1) on SQLite.
 
 The routes, the file module, the create service, the access helper and the schedule table are real.
 Flask, the check_api decorator and the plugin package around them are stubbed. The check_api stub
@@ -158,7 +158,7 @@ def test_7011_r1_1_export_returns_one_yaml_file_with_every_schedule(env):
     env.seed('Second')
     response = env.export()
     data = yaml.safe_load(response.text)
-    assert (data['kind'], data['schema_version']) == ('elitea_schedules', 1)
+    assert (data['kind'], data['schema_version']) == ('elitea_schedules', 2)
     assert [entry['name'] for entry in data['schedules']] == ['First', 'Second']
     assert response.mimetype == 'application/x-yaml'
     assert 'schedules_35.yaml' in response.headers['Content-Disposition']
@@ -221,8 +221,22 @@ def test_7011_r2_6_import_answers_the_report_and_creates_disabled_rows(env):
     (row,) = env.rows()
     assert (row.enabled, row.created_by) == (False, ADMIN_ID)
     assert body['created'] == [{'name': 'Daily digest', 'schedule_id': row.id}]
+    assert body['updated'] == []
     assert [entry['name'] for entry in body['skipped']] == ['Lost']
     assert body['failed'] == []
+
+
+def test_7011_r4_1_an_exported_file_imported_twice_updates_the_one_row_and_creates_nothing(env):
+    env.grant('export', 'import')
+    stored = env.seed('Nightly', enabled=True)
+    text = env.export().text
+    for _ in range(2):
+        body, status = env.import_file(text)
+        assert (status, body) == (200, {
+            'created': [], 'updated': [{'name': 'Nightly', 'schedule_id': stored}], 'skipped': [], 'failed': [],
+        })
+    (row,) = env.rows()
+    assert (row.id, row.enabled, row.created_by) == (stored, True, ADMIN_ID)
 
 
 def test_7011_r2_6_an_item_with_an_unknown_key_is_failed_and_the_next_item_goes_on(env):
@@ -251,7 +265,7 @@ def test_7011_r3_4_import_without_the_import_permission_answers_403_and_creates_
 
 @pytest.mark.parametrize('data', [
     b'a: [', b'- 1\n- 2\n', b'', b'\xff\xfe\x00bad', b'x' * (1024 * 1024 + 1),
-    file_text(item(), kind='other').encode(), file_text(item(), schema_version=2).encode(),
+    file_text(item(), kind='other').encode(), file_text(item(), schema_version=3).encode(),
     yaml.safe_dump({'schedules': []}).encode(),
 ], ids=['broken', 'list', 'empty', 'not utf8', 'too large', 'wrong kind', 'wrong version', 'no header'])
 def test_7011_r3_1_a_bad_file_answers_400_and_creates_nothing(env, data):
@@ -279,7 +293,7 @@ def test_7011_r3_1_the_size_and_header_messages_are_in_schedule_words(env):
     env.grant('import')
     assert env.import_file(b'x' * (1024 * 1024 + 1))[0]['error'] == 'The schedule file is larger than 1 MB'
     assert env.import_file(file_text(item(), kind='other'))[0]['error'] == (
-        'This is not a schedule file of schema version 1'
+        'This is not a schedule file of schema version 1 or 2'
     )
 
 
