@@ -1,16 +1,17 @@
-"""EL-7011 US-22: file models of the schedule YAML file (R2.4, R3.2).
+"""EL-7011 US-22: file models of the schedule YAML file (R1.3, R2.4, R3.2, R5.6).
 
 Contract under test: models/pd/schedule_yaml.py (ScheduleFile, ScheduleFileItem).
 """
 import sys
 import types
+import uuid
 from datetime import date
 
 import pytest
 from pydantic import ValidationError
 from unit._tool_spend_loader import load
 
-WRONG_HEADER = "This is not a schedule file of schema version 1"
+WRONG_HEADER = "This is not a schedule file of schema version 1 or 2"
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def _item(**overrides):
 
 @pytest.mark.parametrize("header", [
     {"kind": "elitea_entities", "schema_version": 1},
-    {"kind": "elitea_schedules", "schema_version": 2},
+    {"kind": "elitea_schedules", "schema_version": 3},
     {"kind": "elitea_schedules", "schema_version": True},
 ])
 def test_r3_2_el_7011_wrong_header_is_rejected(model, header):
@@ -55,6 +56,24 @@ def test_r3_2_el_7011_right_header_keeps_items_raw(model):
     raw = {"name": "x", "bogus": 1}
     parsed = model.ScheduleFile(kind="elitea_schedules", schema_version=1, schedules=[raw, _item()])
     assert parsed.schedules[0] == raw
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_r3_2_el_7011_schema_versions_1_and_2_are_accepted(model, version):
+    assert model.ScheduleFile(kind="elitea_schedules", schema_version=version, schedules=[]).schema_version == version
+
+
+def test_r1_3_el_7011_item_reads_the_key_as_a_uuid(model):
+    assert model.ScheduleFileItem(**_item(key=str(uuid.UUID(int=5)))).key == uuid.UUID(int=5)
+
+
+def test_r1_3_el_7011_item_rejects_a_key_that_is_not_a_uuid(model):
+    with pytest.raises(ValidationError):
+        model.ScheduleFileItem(**_item(key="42"))
+
+
+def test_r5_6_el_7011_item_without_a_key_has_none(model):
+    assert model.ScheduleFileItem(**_item()).key is None
 
 
 def test_r2_4_el_7011_item_reads_all_allow_listed_keys(model):

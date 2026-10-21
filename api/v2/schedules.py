@@ -122,11 +122,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @register_openapi(
         name="Import Schedules",
-        description="Import a schedule YAML file (multipart `file`). Every created schedule is disabled "
-                    "and owned by the caller. Answers the created, skipped and failed items.",
+        description="Import a schedule YAML file (multipart `file`). An item that matches a schedule by key, "
+                    "else by name, updates it; every created schedule is disabled and owned by the caller. "
+                    "Answers the created, updated, skipped and failed items.",
         tags=[OPENAPI_TAG],
         request_body=IMPORT_BODY,
-        responses={"200": {"description": "Success: the created, skipped and failed items"}, **ADMIN_FILE_RESPONSES},
+        responses={
+            "200": {"description": "Success: the created, updated, skipped and failed items"}, **ADMIN_FILE_RESPONSES,
+        },
         available_to_users=True,
         path_suffix_override=f"{PROJECT_PATH}/import",
     )
@@ -188,7 +191,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
     @auth.decorators.check_api(schedule_check_spec("import"))
     def _import(self, project_id: int):
-        """Create a disabled schedule per matched item of the uploaded file; answer the report (R2.6, R3.1)."""
+        """Update or create a schedule per item of the uploaded file; answer the report (R2.6, R3.1, R4)."""
         from ...utils.schedule_yaml import (
             MAX_FILE_BYTES,
             NOT_YAML,
