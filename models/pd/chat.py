@@ -32,7 +32,13 @@ class ContextStrategyModel(BaseModel):
     enabled: Optional[bool] = True
     enable_summarization: Optional[bool] = True
     enable_context_editing: Optional[bool] = False
-    max_context_tokens: Optional[int] = 64000
+    context_window_mode: Optional[str] = None
+    # Summarization trigger the SDK reads; resolved from the window mode at predict time (#6898)
+    max_context_tokens: Optional[int] = None
+    effective_window: Optional[int] = None
+    reserved_output: Optional[int] = None
+    safety_margin: Optional[int] = None
+    count_overhead_in_trigger: Optional[bool] = None
     preserve_recent_messages: Optional[int] = 5
     summary_instructions: Optional[str] = 'Generate a concise summary of the following conversation messages'
     summary_llm_settings: Optional[LLMSettingsModel] = None
