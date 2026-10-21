@@ -140,6 +140,7 @@ def _report_input_guardrail_blocked(
     # Same start/terminal/persist sequence as a budget refusal, with its own event type so
     # the UI renders a block card rather than an error (#6886). Rule ids only, never the value.
     verdict = blocked_error.verdict()
+    question_id = (start_event_content or {}).get('question_id')
     module.stream_response(sio_event, {
         'type': 'start_task',
         'stream_id': parsed.stream_id,
@@ -152,6 +153,8 @@ def _report_input_guardrail_blocked(
         'type': 'input_guardrail_blocked',
         'stream_id': parsed.stream_id,
         'message_id': parsed.message_id,
+        # Same shape as the chat pre-persist block, so the UI can match either id
+        **({'question_id': question_id} if question_id else {}),
         'sio_event': f'{sio_event}',
         'content': blocked_error.message,
         'response_metadata': {

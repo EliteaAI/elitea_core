@@ -2021,12 +2021,15 @@ class RPC:
 
         # Checkpoint A (#6886) for a resume: the replacement input and HITL edit or
         # answer text, before a decision message is stored or any resume dispatches
+        resume_question_id = None
         try:
             with db.get_session(parsed.project_id) as session:
                 resumed_group = session.query(ConversationMessageGroup).filter(
                     ConversationMessageGroup.uuid == parsed.message_id
                 ).first()
                 resume_entity = participant_entity(resumed_group.author_participant if resumed_group else None)
+                resumed_question = resumed_group.reply_to if resumed_group else None
+                resume_question_id = str(resumed_question.uuid) if resumed_question else None
             check_resume_input(parsed, parsed.project_id, current_user['id'], entity=resume_entity)
         except InputGuardrailBlockedError as blocked:
             if not sid:
@@ -2037,6 +2040,7 @@ class RPC:
                     'type': 'input_guardrail_blocked',
                     'stream_id': str(parsed.conversation_uuid),
                     'message_id': parsed.message_id,
+                    **({'question_id': resume_question_id} if resume_question_id else {}),
                     'content': blocked.message,
                     'response_metadata': {
                         'human_readable': blocked.message,

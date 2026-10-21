@@ -149,3 +149,13 @@ def test_predict_payload_forwards_the_accepted_history_hashes():
         r"payload\['input_guardrail_inspected'\] = list\(inspected\)",
         _source('utils/predict_utils.py'),
     )
+
+
+def test_every_socket_block_event_names_the_question():
+    # The UI matches a block card by message_id or question_id; all emitters send both
+    for relative, marker in (
+        ('rpc/application.py', "**({'question_id': question_id} if question_id else {})"),
+        ('rpc/chat_all.py', "'question_id': parsed.question_id,"),
+        ('rpc/chat_all.py', "**({'question_id': resume_question_id} if resume_question_id else {})"),
+    ):
+        assert marker in _source(relative), relative
