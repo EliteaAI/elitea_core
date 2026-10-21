@@ -441,6 +441,22 @@
         "maximum": 50
       }
     },
+    "max_instructions_length": {
+      "type": "integer",
+      "title": "Skill Content Max Length",
+      "description": "Maximum number of characters in a skill's instructions. Lowering it never changes existing skills; it only blocks saving instructions longer than the new limit. Allowed range: 1–200000.",
+      "path": "skills.max_instructions_length",
+      "section": "runtime",
+      "default": 50000,
+      "minimum": 1,
+      "maximum": 200000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200000
+      }
+    },
     "pipeline_scheduling_enabled": {
       "type": "boolean",
       "title": "Pipeline Scheduling Enabled",
