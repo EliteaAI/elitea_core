@@ -150,7 +150,7 @@ def test_the_child_stash_is_written_after_the_seal_when_the_child_carries_a_gove
     assert "envelope.get('security_profile') == 'governed'" in part
     stash = text[text.index("governed = self._parallel_governance_active() or ("):]
     before_start = stash[:stash.index("child_task_id = self.task_node.start_task(")]
-    after_start = stash[stash.index("child_task_id = self.task_node.start_task("):][:900]
+    after_start = stash[stash.index("child_task_id = self.task_node.start_task("):][:1600]   # past the guardrail refusal handler (#6886)
     assert "if not governed:" in before_start and "if governed and child_task_id is not None:" in after_start
 
 

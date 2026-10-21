@@ -20,8 +20,10 @@ from ..utils.conversation_utils import (
 )
 from ..utils.participant_utils import add_participant_to_conversation
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
-from ..utils.context_analytics import set_context_strategy
-from ..utils.exceptions import PoolSaturationError
+from ..utils.context_analytics import merge_meta_expression, set_context_strategy
+from ..utils.chat_usage import strip_server_owned_meta
+from ..utils.context_window import get_project_default_mode
+from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
 from ..utils.model_defaults import creation_llm_settings, chat_request_default
 
 # Hard cap on page size: defence-in-depth against unbounded IN(...) lists in
@@ -120,24 +122,18 @@ class RPC:
         """
         with db.get_session(project_id) as session:
             try:
-                conversation = session.query(Conversation).filter(
-                    Conversation.id == conversation_id
-                ).first()
-
-                if not conversation:
-                    raise Exception(f"Conversation with ID {conversation_id} not found")
-
-                current_meta = conversation.meta or {}
-                updated_meta = {**current_meta, **meta_updates}
-
-                session.query(Conversation).filter(
+                updated = session.query(Conversation).filter(
                     Conversation.id == conversation_id
                 ).update(
-                    {Conversation.meta: updated_meta},
+                    {Conversation.meta: merge_meta_expression(meta_updates)},
                     synchronize_session=False
                 )
+                if not updated:
+                    raise Exception(f"Conversation with ID {conversation_id} not found")
 
                 session.commit()
+                row = session.query(Conversation.meta).filter(Conversation.id == conversation_id).first()
+                updated_meta = (row[0] if row else None) or {}
 
                 return {
                     "success": True,
@@ -177,9 +173,11 @@ class RPC:
 
         with db.get_session(project_id) as session:
             try:
-                conversation = session.query(Conversation).filter(
-                    Conversation.id == conversation_id
-                ).first()
+                query = session.query(Conversation).filter(Conversation.id == conversation_id)
+                if meta is not None or is_hidden is not None:
+                    # Whole-meta write: serialize with the stream-end usage merge so it is not lost
+                    query = query.with_for_update(of=Conversation)
+                conversation = query.first()
 
                 if not conversation:
                     return {'success': False, 'error': 'Conversation not found'}
@@ -228,7 +226,7 @@ class RPC:
 
                 if meta is not None:
                     conversation.meta = conversation.meta or {}
-                    conversation.meta.update(meta)
+                    conversation.meta.update(strip_server_owned_meta(dict(meta), conversation.meta))
                     # #5392: instructions are per-persona now, but meta['default_instructions'] was
                     # baked in at creation time from the then-active persona. When the persona
                     # changes here, re-resolve it from the owner's personalization so a switched
@@ -296,6 +294,9 @@ class RPC:
 
         conversation_meta = meta or {}
         effective_instructions = instructions
+        context_window_mode = None
+        if apply_context_strategy and get_context_manager_feature_flag(project_id):
+            context_window_mode = get_project_default_mode(project_id)
 
         if user_personalization:
             persona = user_personalization.get('persona')
@@ -349,12 +350,13 @@ class RPC:
                 session.flush()
 
             context_strategy = None
-            if apply_context_strategy and get_context_manager_feature_flag(project_id):
+            if context_window_mode is not None:
                 context_strategy = set_context_strategy(
                     project_id=project_id,
                     conversation_id=conversation.id,
                     user_context_defaults=user_context_defaults,
                     user_summarization_defaults=user_summarization_defaults,
+                    context_window_mode=context_window_mode,
                 )
 
             session.commit()
@@ -885,6 +887,8 @@ class RPC:
             )
         except SioValidationError as e:
             return {'success': False, 'error': f'Wrong input data: {e.error}'}
+        except InputGuardrailBlockedError as e:
+            return {'success': False, **e.body()}
         except PoolSaturationError as e:
             return {
                 'success': False,

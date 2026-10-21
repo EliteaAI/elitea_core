@@ -471,10 +471,10 @@ def test_every_predict_entry_point_checks_before_it_unsecrets_and_marks_after(pa
     assert len(sites) == count
     for lines in sites:
         at = {name: [line for line, other in lines if other == name] for name in
-              ("has_free_form_secret", "unsecret", "mark_free_form_secret", "start_task")}
+              ("has_free_form_secret", "unsecret", "inspect_and_unsecret", "mark_free_form_secret", "start_task")}
         assert len(at["has_free_form_secret"]) == len(at["mark_free_form_secret"]) == 1
         check, mark = at["has_free_form_secret"][0], at["mark_free_form_secret"][0]
-        payload_wide = [line for line in at["unsecret"] if line > check]   # (the webhook secret is unsecreted earlier)
+        payload_wide = sorted(line for line in at["unsecret"] + at["inspect_and_unsecret"] if line > check)   # (the webhook secret is unsecreted earlier; inspect_and_unsecret is the guardrail checkpoint B that resolves it, #6886)
         assert payload_wide and check < payload_wide[0] < mark < min(line for line in at["start_task"] if line > mark)
 
 

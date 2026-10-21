@@ -38,7 +38,10 @@ def build_wrapper(ns, module, original):
     budget.dispatch_may_use_llm = lambda kwargs: False
     budget.dispatch_owner = lambda kwargs: (None, None)
     budget.dispatch_uses_own_model = lambda *a, **k: False
+    guardrail = types.ModuleType(f"{admission_env.PKG}.utils.input_guardrail")
+    guardrail.apply_input_guardrail = lambda kwargs: None   # inert, as with input_guardrail.enabled false (#6886)
     sys.modules[gate.__name__], sys.modules[budget.__name__] = gate, budget
+    sys.modules[guardrail.__name__] = guardrail
     module.worker_capabilities = types.SimpleNamespace(has_capable_worker=lambda required: True)
     namespace = {
         "self": module, "log": ns.log, "_original_start_task": original,

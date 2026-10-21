@@ -17,6 +17,7 @@ from ..utils.mandate_admission import mandate_admission_request
 from ..utils.trigger_principal import resolve_trigger_principal
 from ..utils.utils import verify_signature
 from ..utils.exceptions import VerifySignatureError, PoolSaturationError
+from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.sio_utils import SioEvents
 from ..utils.vectorstore import get_pgvector_connection_string
 
@@ -123,9 +124,9 @@ class Method:
                 parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
-        # Same as predict_sio: resolve {{secret.*}} and hand the worker its pgvector connstr pre-fork
+        # Same as predict_sio: inspect, resolve {{secret.*}} and hand the worker its pgvector connstr pre-fork
         free_form_secret = has_free_form_secret(self, payload)   # governed: noticed before it is resolved (#6946)
-        payload = VaultClient(parsed.project_id).unsecret(payload)
+        payload = inspect_and_unsecret(payload, VaultClient(parsed.project_id), parsed.project_id, user_id)
         mark_free_form_secret(payload, free_form_secret)
         try:
             payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)

@@ -77,6 +77,17 @@ def _normalize_parallel_terminal_error(value):
     return normalized
 
 
+def _input_guardrail_terminal_error(error):
+    """The terminal envelope for a child refused by the input guardrail, else None.
+
+    Matched on the exception's type code, not its class, so this file stays importable
+    standalone (see _user_input_preview).
+    """
+    if getattr(error, 'type', None) != 'input_guardrail_blocked':
+        return None
+    return {'code': 'input_guardrail_blocked', 'user_message': str(getattr(error, 'message', '') or '')}
+
+
 def _user_input_preview(source):
     """Resolve the shared preview helper lazily; best-effort (None if unavailable).
 
@@ -427,7 +438,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     pool="agents",
                     meta=child_meta,
                 )
-            except Exception:  # pylint: disable=W0703
+            except Exception as e:  # pylint: disable=W0703
+                guardrail_error = _input_guardrail_terminal_error(e)
+                if guardrail_error is not None:
+                    # Not a dispatch failure: the child's task held a value the input
+                    # guardrail blocks (#6886). The parent reports it as such.
+                    log.info("[PARALLEL] child %s blocked by input guardrail", child_thread_id)
+                    self._parallel_settle_child(
+                        parent_thread_id, epoch, child_thread_id,
+                        terminal_error=guardrail_error,
+                    )
+                    continue
                 log.exception("[PARALLEL] start_task raised for child %s", child_thread_id)
                 child_task_id = None
             if governed and child_task_id is not None:
