@@ -537,6 +537,31 @@ def test_policy_cache_is_bounded(guardrail):
     assert len(guardrail._policy_cache) <= 8
 
 
+@pytest.mark.parametrize('broken', ['not-a-mapping', ['list'], 42])
+def test_unreadable_config_keeps_the_last_policy(guardrail, broken):
+    _enable(guardrail, on_error='fail_closed')
+    good = guardrail.policy_from_config()
+
+    guardrail.config['input_guardrail'] = broken
+
+    assert guardrail.policy_from_config() is good
+
+
+def test_unreadable_config_with_no_prior_policy_is_disabled(guardrail):
+    guardrail.config['input_guardrail'] = 'not-a-mapping'
+
+    assert not guardrail.policy_from_config().active
+
+
+def test_explicitly_empty_config_disables_after_a_good_one(guardrail):
+    _enable(guardrail)
+    assert guardrail.policy_from_config().active
+
+    guardrail.config['input_guardrail'] = {}
+
+    assert not guardrail.policy_from_config().active
+
+
 def test_bad_allow_pattern_does_not_disable_the_guardrail(guardrail):
     _enable(guardrail, allow_patterns=['a{4294967296}', '(' * 5000, 7, '(unclosed'])
 
@@ -623,6 +648,25 @@ def test_invalid_allow_patterns_are_dropped_by_policy_from_dict(guardrail):
     policy = d.policy_from_dict({'enabled': True, 'allow_patterns': ['a{4294967296}', '(' * 5000, 7, '(x', '^ok$']})
 
     assert len(policy.allow_patterns) == 1
+
+
+@pytest.mark.parametrize('pattern', [r'(a+)+$', r'(a*)*', r'(?:a|b+)*c', r'(?=(a+)+)'])
+def test_nested_quantifier_allow_patterns_are_dropped(guardrail, pattern):
+    d = guardrail.detector
+
+    policy = d.policy_from_dict({'enabled': True, 'allow_patterns': [pattern, r'AKIA[0-9]{4,16}', r'(foo|bar)+']})
+
+    assert [p.pattern for p in policy.allow_patterns] == [r'AKIA[0-9]{4,16}', r'(foo|bar)+']
+
+
+def test_detector_summary_bounds_not_inspected(guardrail):
+    d = guardrail.detector
+    policy = d.policy_from_dict({'enabled': True})
+    many = [f'type-{i}-' + 'x' * 100 for i in range(100)]
+
+    listed = d.summary(d.inspect([d.Segment('current_turn', 0, 'x')], policy, not_inspected=many), policy)['not_inspected']
+
+    assert len(listed) == 20 and all(len(t) <= 32 for t in listed)
 
 
 def test_participant_entity_names_an_application_only(guardrail):

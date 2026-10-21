@@ -16,6 +16,8 @@ import json
 import math
 import re
 import time
+from re import _constants as sre_constants
+from re import _parser as sre_parser
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple
 
@@ -39,6 +41,9 @@ WINDOW_STEP = WINDOW_CHARS - MAX_MATCH_CHARS
 ERROR_TIMEOUT = 'timeout'
 ERROR_INTERNAL = 'internal'
 ERROR_OVERSIZE = 'oversize'
+# not_inspected holds client-chosen block types, the one unbounded list in a summary
+MAX_NOT_INSPECTED = 20
+MAX_BLOCK_TYPE_CHARS = 32
 
 
 @dataclass(frozen=True)
@@ -95,12 +100,43 @@ class Policy:
         return self.categories.get(category, 'off')
 
 
+_REPEAT_OPCODES = (sre_constants.MAX_REPEAT, sre_constants.MIN_REPEAT)
+
+
+def _subpatterns(value) -> Iterable:
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, sre_parser.SubPattern):
+            yield item
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+
+
+def _has_nested_quantifier(parsed, inside_unbounded: bool = False) -> bool:
+    """True for ``(a+)+``-style shapes: a repeat inside an unbounded repeat backtracks
+    exponentially on a near-miss, and an allow pattern runs on every detection."""
+    for opcode, argument in parsed:
+        if opcode in _REPEAT_OPCODES:
+            _, max_count, body = argument
+            if inside_unbounded and max_count > 1:
+                return True
+            if _has_nested_quantifier(body, inside_unbounded or max_count == sre_constants.MAXREPEAT):
+                return True
+            continue
+        if any(_has_nested_quantifier(child, inside_unbounded) for child in _subpatterns(argument)):
+            return True
+    return False
+
+
 def policy_from_dict(raw: Optional[Dict[str, Any]]) -> Policy:
     """Build a Policy from the ``input_guardrail`` config block.
 
     Unknown actions fall back to the category default rather than raising: the admin
     schema validates on save, and a bad value here must not take the runtime down.
     Invalid allow patterns are dropped, and the error names the index, never the text.
+    So are nested quantifiers, which the admin save also rejects: a block written before
+    that check, or straight to the DB, must not reach the scan.
     """
     if not raw:
         return Policy()
@@ -111,11 +147,14 @@ def policy_from_dict(raw: Optional[Dict[str, Any]]) -> Policy:
     allow: List[Pattern] = []
     for pattern in raw.get('allow_patterns') or []:
         try:
-            allow.append(re.compile(pattern))
+            compiled = re.compile(pattern)
+            if _has_nested_quantifier(sre_parser.parse(pattern)):
+                continue
         except (re.error, TypeError, ValueError, OverflowError, RecursionError):
             # re.compile raises more than re.error: a{4294967296} overflows and deeply
             # nested groups exhaust the parser's recursion
             continue
+        allow.append(compiled)
     exempt = []
     for project_id in raw.get('exempt_project_ids') or []:
         try:
@@ -447,6 +486,10 @@ def audit_actions(result: InspectionResult, policy: Policy) -> List[Dict[str, An
     return entries
 
 
+def bounded_types(values: Iterable) -> List[str]:
+    return sorted({str(v)[:MAX_BLOCK_TYPE_CHARS] for v in values or []})[:MAX_NOT_INSPECTED]
+
+
 def summary(result: InspectionResult, policy: Policy) -> Dict[str, Any]:
     """The only shape that leaves the guardrail: rule ids, counts and offsets-free metadata."""
     return {
@@ -455,7 +498,7 @@ def summary(result: InspectionResult, policy: Policy) -> Dict[str, Any]:
         'rules': result.rules,
         'segments': sorted({d.segment_kind for d in result.detections}),
         'detection_count': len(result.detections),
-        'not_inspected': list(result.not_inspected),
+        'not_inspected': bounded_types(result.not_inspected),
         'error': result.error,
         'on_error': policy.on_error if result.error else None,
         'elapsed_ms': result.elapsed_ms,

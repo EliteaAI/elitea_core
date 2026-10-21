@@ -49,17 +49,21 @@ VERDICT_KEYS = ('action', 'categories', 'rules', 'segments', 'detection_count', 
 # Compiled policies by config content: the config is re-read on every call so an admin
 # change applies at once, but allow_patterns are only recompiled when the content changes
 _policy_cache: Dict[str, Policy] = {}
+_last_good_policy: Policy = Policy()
 
 
 def policy_from_config() -> Policy:
-    """The live policy. An unreadable block means disabled: it cannot express fail_closed."""
+    """The live policy. An unreadable block keeps the last policy that was read, so a
+    broken config cannot switch the guardrail off; with none read yet it is disabled."""
+    global _last_good_policy  # pylint: disable=W0603
     try:
         raw = this.descriptor.config.get(CONFIG_KEY) or {}
         if not isinstance(raw, dict):
-            log.error('[INPUT_GUARDRAIL] config is not a mapping; guardrail disabled')
-            return Policy()
+            log.error('[INPUT_GUARDRAIL] config is not a mapping; keeping the last policy')
+            return _last_good_policy
         if not raw:
-            return Policy()
+            _last_good_policy = Policy()
+            return _last_good_policy
         key = json.dumps(raw, sort_keys=True, default=str)
         policy = _policy_cache.get(key)
         if policy is None:
@@ -67,10 +71,11 @@ def policy_from_config() -> Policy:
             if len(_policy_cache) >= _POLICY_CACHE_SIZE:
                 _policy_cache.clear()
             _policy_cache[key] = policy
+        _last_good_policy = policy
         return policy
     except Exception:  # pylint: disable=W0703
-        log.error('[INPUT_GUARDRAIL] config unreadable; guardrail disabled')
-        return Policy()
+        log.error('[INPUT_GUARDRAIL] config unreadable; keeping the last policy')
+        return _last_good_policy
 
 
 def _applies(policy: Policy, project_id) -> bool:
