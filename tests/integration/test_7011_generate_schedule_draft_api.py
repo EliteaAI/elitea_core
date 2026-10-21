@@ -78,10 +78,10 @@ def endpoint():
         state.seen.update(current=current, roster=roster, timezone=timezone, locked=locked_entity)
         return f'{template} current={json.dumps(current)}'
 
-    def validate(project_id, raw, locked_entity, roster=None):
+    def validate(project_id, raw, locked_entity, roster=None, *, owner_id):
         if state.validate_error:
             raise state.validate_error
-        state.seen.update(raw=raw, validate_roster=roster)
+        state.seen.update(raw=raw, validate_roster=roster, owner_id=owner_id)
         draft = schedule_models.ScheduleDraft(name=raw.get('name'), cron=raw.get('cron'))
         return draft, [{'field': 'timezone', 'reason': 'unknown'}]
 
@@ -156,6 +156,7 @@ def test_el_7011_r1_1_a_prompt_returns_the_draft_and_the_warnings(endpoint):
     assert model.calls[0]['data']['user_input'] == 'every day at 9'
     assert model.calls[0]['skip_expansion'] is True
     assert endpoint.seen['validate_roster'] is endpoint.seen['roster']
+    assert endpoint.seen['owner_id'] == 7  # owner CR 2026-10-21: the risk review scans as the caller
 
 
 def test_el_7011_r1_2_current_values_and_the_service_prompt_go_to_the_model(endpoint):

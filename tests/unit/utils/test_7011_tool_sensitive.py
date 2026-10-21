@@ -54,3 +54,25 @@ def test_el7011_tc_us17_09_config_returns_sensitive_tools(security):
     assert cfg['blocked_toolkits'] == []
     security.config = {}
     assert security.module.get_toolkit_security_config()['sensitive_tools'] == {}
+
+
+DEFAULT_INFO = {'badge': 'needs_approval', 'effect': 'This tool can change data outside ELITEA.'}
+
+
+# Owner CR 2026-10-21 (risk review): the badge and effect text of a sensitive tool
+def test_el7011_cr_tool_info_comes_from_the_policy_ignoring_case(security):
+    _set(security, sensitive_tool_info={'Outlook': {'Send_Email': {'badge': 'sends_messages', 'effect': 'Sends e-mail'}}})
+    assert security.module.sensitive_tool_info('outlook', 'send_email') == {
+        'badge': 'sends_messages', 'effect': 'Sends e-mail'}
+
+
+def test_el7011_cr_tool_without_info_gets_the_default_badge_and_effect(security):
+    assert security.module.sensitive_tool_info('jira', 'delete_issue') == DEFAULT_INFO
+    _set(security, sensitive_tool_info={'jira': {'delete_issue': {'effect': 'Deletes an issue'}}})
+    assert security.module.sensitive_tool_info('jira', 'delete_issue') == {
+        'badge': 'needs_approval', 'effect': 'Deletes an issue'}
+
+
+def test_el7011_cr_an_unknown_badge_falls_back_to_needs_approval(security):
+    _set(security, sensitive_tool_info={'jira': {'delete_issue': {'badge': 'red', 'effect': 'Deletes'}}})
+    assert security.module.sensitive_tool_info('jira', 'delete_issue')['badge'] == 'needs_approval'

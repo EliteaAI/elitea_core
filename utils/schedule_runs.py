@@ -191,10 +191,13 @@ def record_skipped_run(session, schedule_id: int, reason: str) -> int:
     return run.id
 
 
-def block_schedule_run(project_id: int, run_id: int, reason: str) -> None:
-    """End a running run as `blocked` with `reason` and copy the status; no notice."""
+def block_schedule_run(project_id: int, run_id: int, reason: str, level: str | None = None) -> None:
+    """End a running run as `blocked` with `reason` and copy the status; no notice.
+
+    `level` overrides the level of the `finished` event: a blocking risk finding is an `error`.
+    """
     with db.get_session(project_id) as session:
-        _end_runs(session, EntityScheduleRun.id == run_id, 'blocked', reason)
+        _end_runs(session, EntityScheduleRun.id == run_id, 'blocked', reason, level=level)
         session.commit()
 
 
@@ -232,7 +235,7 @@ def expire_waiting_runs(project_id: int, now: datetime) -> int:
 
 
 def _end_runs(session, condition, status: str, reason: str | None, conversation_id: int | None = None,
-              expected_status: str = 'running') -> list[int]:
+              expected_status: str = 'running', level: str | None = None) -> list[int]:
     """End the runs in `expected_status` that match `condition`, copy the status to their schedules and log the end.
 
     Returns the ids of the ended runs.
@@ -255,7 +258,7 @@ def _end_runs(session, condition, status: str, reason: str | None, conversation_
         )
     # lean: one locked read per ended run; a sweep ends at most one batch (EXPIRE_BATCH); batch the read if it grows
     for run_id, _ in ended:
-        append_run_events(session, run_id, finished_event(status, reason))
+        append_run_events(session, run_id, finished_event(status, reason, level))
     return [run_id for run_id, _ in ended]
 
 

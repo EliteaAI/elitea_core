@@ -153,10 +153,26 @@ def _check_approval_rule(out: dict, warn) -> None:
     out['approval_rule'] = rule
 
 
+def _check_risks(project_id: int, owner_id: int, out: dict, warn) -> None:
+    """A draft never confirms sensitive tools (owner CR 2026-10-21): "Run without asking" with sensitive
+    tools, or with tools that could not be checked, becomes "Pause and ask me"."""
+    if out.get('approval_rule') != RUN_WITHOUT_ASKING or out.get('version_id') is None:
+        return
+    # late: the scan pulls in the toolkit expansion
+    from .schedule_risk import scan_complete, scan_schedule
+    review = scan_schedule(project_id, out['version_id'], owner_id)
+    if review['sensitive'] or not scan_complete(review):
+        out['approval_rule'] = PAUSE_AND_ASK
+        warn('approval_rule', 'Sensitive tools need a confirmation when you save; set "Pause and ask me"')
+
+
 def validate_schedule_draft(
-        project_id: int, raw: dict, locked_entity: dict | None, roster: list[dict] | None = None,
+        project_id: int, raw: dict, locked_entity: dict | None, roster: list[dict] | None = None, *, owner_id: int,
 ) -> tuple[ScheduleDraft, list[dict]]:
-    """Return the draft with each unusable field cleared, and one warning per change."""
+    """Return the draft with each unusable field cleared, and one warning per change.
+
+    `owner_id` is the caller: the risk review scans the drafted version as the owner who will save it.
+    """
     warnings: list[dict] = []
 
     def warn(field: str, reason: str) -> None:
@@ -183,4 +199,5 @@ def validate_schedule_draft(
     if out.get('approval_rule') == RUN_WITHOUT_ASKING and not is_run_without_asking_allowed(project_id):
         out['approval_rule'] = PAUSE_AND_ASK
         warn('approval_rule', 'This project does not allow "Run without asking"; set "Pause and ask me"')
+    _check_risks(project_id, owner_id, out, warn)
     return ScheduleDraft(**out), warnings
