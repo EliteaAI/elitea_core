@@ -23,6 +23,7 @@ class FakeConfigurations:
         self.records = {}
         self.calls = []
         self.error = None
+        self.old_register = False  # a configurations plugin from before owned types
 
     def timeout(self, _seconds):
         return self
@@ -52,6 +53,8 @@ class FakeConfigurations:
 
     def configurations_register(self, **kwargs):
         self._call('register', **kwargs)
+        if self.old_register and 'managed_by' in kwargs:
+            raise TypeError("configurations_register() got an unexpected keyword argument 'managed_by'")
 
 
 @pytest.fixture
@@ -61,7 +64,7 @@ def store(monkeypatch):
     tools = types.ModuleType('tools')
     tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=store))
     pylon_tools = types.ModuleType('pylon.core.tools')
-    pylon_tools.log = types.SimpleNamespace(exception=lambda *a, **k: None)
+    pylon_tools.log = types.SimpleNamespace(exception=lambda *a, **k: None, warning=lambda *a, **k: None)
     for name, module in (('tools', tools), ('pylon', types.ModuleType('pylon')),
                          ('pylon.core', types.ModuleType('pylon.core')), ('pylon.core.tools', pylon_tools)):
         monkeypatch.setitem(sys.modules, name, module)
@@ -128,12 +131,26 @@ def test_el7011_cr_a_save_error_propagates(store):
             allow_run_without_asking=True))
 
 
-def test_el7011_cr_the_type_is_registered_as_a_project_setting(store):
+PLAIN_REGISTRATION = {'type_name': 'schedule_settings', 'section': 'project_settings', 'replace': True}
+OWNER = {'managed_by': 'elitea_core', 'manage_url': '/api/v2/elitea_core/schedules/{mode}/{project_id}/settings'}
+
+
+def test_el7011_cr_the_type_is_registered_as_an_owned_project_setting(store):
+    """The configurations REST API then refuses writes; only the schedules settings PUT changes the record."""
     store.module.register_schedule_settings_type()
     [(name, kwargs)] = store.calls
     assert name == 'register'
-    assert kwargs == {'type_name': 'schedule_settings', 'section': 'project_settings',
-                      'model': store.module.ScheduleProjectSettings, 'replace': True}
+    assert kwargs == {**PLAIN_REGISTRATION, 'model': store.module.ScheduleProjectSettings, **OWNER}
+
+
+def test_el7011_cr_an_older_configurations_still_gets_the_type(store):
+    """A configurations plugin without owned types rejects the owner arguments: register the plain type."""
+    store.old_register = True
+    store.module.register_schedule_settings_type()
+    assert [kwargs for _name, kwargs in store.calls] == [
+        {**PLAIN_REGISTRATION, 'model': store.module.ScheduleProjectSettings, **OWNER},
+        {**PLAIN_REGISTRATION, 'model': store.module.ScheduleProjectSettings},
+    ]
 
 
 def test_el7011_cr_a_register_error_does_not_stop_the_plugin(store):

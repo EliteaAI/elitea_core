@@ -8,6 +8,7 @@ from pylon.core.tools import log
 
 SETTINGS_TYPE = "schedule_settings"
 RPC_TIMEOUT = 5
+MANAGE_URL = "/api/v2/elitea_core/schedules/{mode}/{project_id}/settings"
 
 
 class ScheduleProjectSettings(BaseModel):
@@ -30,10 +31,21 @@ def _rpc():
 
 
 def register_schedule_settings_type() -> None:
-    """Register the record type with the configurations plugin; a failure is logged, the plugin still starts."""
+    """Register the record type as owned by elitea_core; a failure is logged, the plugin still starts.
+
+    The owner makes the configurations REST API refuse writes of the record, so only the schedules
+    settings PUT (schedules admin) changes it. A configurations plugin from before owned types rejects
+    the owner arguments; the type is then registered without them, unguarded as before.
+    """
+    plain = {"type_name": SETTINGS_TYPE, "section": "project_settings", "model": ScheduleProjectSettings,
+             "replace": True}
     try:
-        _rpc().configurations_register(type_name=SETTINGS_TYPE, section="project_settings",
-                                       model=ScheduleProjectSettings, replace=True)
+        _rpc().configurations_register(**plain, managed_by="elitea_core", manage_url=MANAGE_URL)
+        return
+    except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- an older configurations has no owner arguments
+        log.warning("The configurations plugin refused the owner of %s; registering it unguarded", SETTINGS_TYPE)
+    try:
+        _rpc().configurations_register(**plain)
     except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- writes then fail with an unknown type
         log.exception("Could not register the %s configuration type", SETTINGS_TYPE)
 
