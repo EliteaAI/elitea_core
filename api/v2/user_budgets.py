@@ -69,6 +69,15 @@ QUERY_PARAMS = [
         "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
     },
     {
+        "name": "period",
+        "in": "query",
+        "schema": {"type": "string"},
+        "description": (
+            "YYYYMM period to load. Defaults to the current month. "
+            "Pass a past YYYYMM to retrieve a historical month's member spend."
+        ),
+    },
+    {
         "name": "comparison_period",
         "in": "query",
         "schema": {"type": "string"},
@@ -153,8 +162,8 @@ def _system_row(project_spend, rows, currency):
     }
 
 
-def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_order, feature=None, comparison_period=None):
-    """Per-member spend and budget for a project's current month.
+def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_order, feature=None, period=None, comparison_period=None):
+    """Per-member spend and budget for a project, defaulting to the current month.
 
     Members come from recorded spend where that is available, so someone who spent and then
     left the project is still reported instead of their spend vanishing from the breakdown.
@@ -172,7 +181,7 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
     #
     # A Tool Spend feature reads its own counters and tables; without one this is the LLM listing
     spend_scope = {"model_name": feature} if feature else {}
-    spend_data = _safe_rpc(rpc, "usage_list_member_spend", 30, None, project_id=project_id, **spend_scope)
+    spend_data = _safe_rpc(rpc, "usage_list_member_spend", 30, None, project_id=project_id, period=period, **spend_scope)
     degraded = spend_data is None
     #
     if degraded:
@@ -341,6 +350,7 @@ def _listing_from_request(project_id: int):
         search=request.args.get("search") or None,
         sort_by=_safe_sort_field(request.args.get("sort_by", DEFAULT_SORT_FIELD)),
         sort_order=request.args.get("sort_order", "desc"),
+        period=request.args.get("period") or None,
         comparison_period=request.args.get("comparison_period") or None,
     )
 
