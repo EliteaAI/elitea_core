@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS {pid}.entity_schedules (
     last_run_status VARCHAR(32) NULL,
     last_conversation_id INTEGER NULL,
     expires_at TIMESTAMPTZ NULL,
+    approval_confirmed_by INTEGER NULL,
+    approval_confirmed_at TIMESTAMPTZ NULL,
+    approval_fingerprint TEXT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT ck_entity_schedules_entity_type CHECK (entity_type IN ('agent', 'pipeline')),
@@ -49,6 +52,10 @@ CREATE INDEX IF NOT EXISTS ix_entity_schedules_application_version
     ON {pid}.entity_schedules (application_id, version_id);
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS uuid UUID NOT NULL DEFAULT gen_random_uuid();
 CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_schedules_uuid ON {pid}.entity_schedules (uuid);
+# Who confirmed "Run without asking" (owner CR 2026-10-21, risk review); null until someone confirms
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS approval_confirmed_by INTEGER NULL;
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS approval_confirmed_at TIMESTAMPTZ NULL;
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS approval_fingerprint TEXT NULL;
 
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_runs (
     id SERIAL PRIMARY KEY,

@@ -14,6 +14,7 @@ from ..models.pd.entity_schedule import (
     ScheduleCreate,
     ScheduleDetails,
     ScheduleEdit,
+    ScheduleRiskCheck,
     ScheduleUpdate,
 )
 from ..models.pd.schedule_list import RunStatus
@@ -29,6 +30,7 @@ from .schedule_dispatch import START_FAILED, start_schedule_run
 from .schedule_notifications import notify_schedule_event
 from .schedule_service import (
     ScheduleError,
+    check_entity,
     create_schedule,
     delete_schedule,
     load_schedule_in_scope,
@@ -46,6 +48,14 @@ ENABLED_NOT_EDITABLE = {
     "error": "enabled cannot be changed by an edit; use the pause or resume action of the schedule",
     "field": "enabled",
 }
+RUN_WITHOUT_ASKING = "run_without_asking"
+# The human texts of the save refusals (owner CR 2026-10-21, risk review)
+RULE_NOT_ALLOWED = 'This project does not allow "Run without asking"'
+BLOCKED = "You can't save this schedule: a scheduled run cannot do what the blocking findings need"
+SCAN_INCOMPLETE = 'Some tools could not be checked, so "Run without asking" is not allowed; use "Pause and ask me"'
+CONFIRM = "Review the sensitive tools, then save again with `risk_ack` and this fingerprint"
+CHANGED = "The sensitive tools changed since you reviewed them; review them again and confirm"
+NAME_MISMATCH = 'Type the schedule name exactly to confirm "Run without asking"'
 
 
 class RunsQuery(BaseModel):
@@ -82,11 +92,13 @@ def _owner_name(owner_id: int) -> str | None:
 
 
 def _details(row, scope: ScheduleScope) -> dict:
-    """Shape a row as the API answers it, with the owner's name for the edit page (US-32)."""
-    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions"}
+    """Shape a row as the API answers it, with the owner's and the confirmer's name for the edit page (US-32)."""
+    fields = ScheduleDetails.model_fields.keys() - {"owner", "allowed_actions", "approval_confirmed_by"}
+    confirmer = row.approval_confirmed_by
     return ScheduleDetails.model_validate({
         **{name: getattr(row, name) for name in fields},
         "owner": {"id": row.created_by, "name": _owner_name(row.created_by)},
+        "approval_confirmed_by": _owner_name(confirmer) if confirmer is not None else None,
         "allowed_actions": allowed_actions(row, scope),
     }).model_dump(mode="json")
 
@@ -94,15 +106,53 @@ def _details(row, scope: ScheduleScope) -> dict:
 def _refuse_unallowed_rule(project_id: int, body):
     """Answer 400 when the body asks for "run without asking" and the project does not allow it."""
     from .schedule_settings import is_run_without_asking_allowed
-    if body.approval_rule == "run_without_asking" and not is_run_without_asking_allowed(project_id):
-        return {"error": "approval_rule_not_allowed", "field": "approval_rule"}, 400
+    if body.approval_rule == RUN_WITHOUT_ASKING and not is_run_without_asking_allowed(project_id):
+        return {"code": "approval_rule_not_allowed", "error": RULE_NOT_ALLOWED, "field": "approval_rule"}, 400
     return None
 
 
-def _saved(row, scope: ScheduleScope, project_id: int) -> dict:
-    """Details of a saved row, with the save warnings; a warning never blocks or changes the save (R2.4)."""
-    from .schedule_risk import scan_schedule_risks
-    return {**_read_answer(row, scope, project_id), "warnings": scan_schedule_risks(project_id, row.version_id, row.created_by)}
+def _refusal(code: str, text: str, status: int, review: dict, **extra) -> ScheduleError:
+    """A save refusal: a stable `code`, a human `error` text and the findings, so a client can retry."""
+    return ScheduleError({"code": code, "error": text, **review, **extra}, status)
+
+
+def _review_save(project_id: int, version_id: int | None, owner_id: int, name: str, rule: str, ack):
+    """Check a save against the risk review; return the review and, for a confirmed "Run without asking", it again.
+
+    Raises:
+        ScheduleError: 409 `schedule_blocked`, `risk_confirmation_required` or `risk_changed`; 400
+            `approval_rule_not_allowed` (incomplete scan) or `risk_name_mismatch` (`field: risk_ack`).
+    """
+    from .schedule_risk import scan_complete, scan_schedule
+    review = scan_schedule(project_id, version_id, owner_id)
+    without_asking = rule == RUN_WITHOUT_ASKING
+    if review["blocking"]:
+        raise _refusal("schedule_blocked", BLOCKED, 409, review)
+    if without_asking and not scan_complete(review):
+        raise _refusal("approval_rule_not_allowed", SCAN_INCOMPLETE, 400, review, field="approval_rule")
+    if not review["sensitive"]:
+        return review, None
+    if ack is None:
+        raise _refusal("risk_confirmation_required", CONFIRM, 409, review)
+    if ack.fingerprint != review["fingerprint"]:
+        raise _refusal("risk_changed", CHANGED, 409, review)
+    if not without_asking:
+        return review, None
+    if ack.confirmed_name.strip() != name.strip():
+        raise _refusal("risk_name_mismatch", NAME_MISMATCH, 400, review, field="risk_ack")
+    return review, review
+
+
+def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = None) -> dict:
+    """Details of a saved row, with every finding of the risk review as the save `warnings` (R2.4).
+
+    `review` is the scan the save already ran; a pause or a resume scans here.
+    """
+    if review is None:
+        from .schedule_risk import scan_schedule
+        review = scan_schedule(project_id, row.version_id, row.created_by)
+    warnings = review["blocking"] + review["sensitive"] + review["notices"]
+    return {**_read_answer(row, scope, project_id), "warnings": warnings}
 
 
 def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
@@ -125,17 +175,27 @@ def _validation_response(error: ValidationError) -> tuple[dict, int]:
     return {"error": first["msg"].removeprefix("Value error, "), "field": field}, 400
 
 
-def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | ScheduleEdit):
+def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | ScheduleEdit, reviewed: bool = False):
     """Save an edit, a pause or a resume through the service and answer the details.
 
-    The service checks a resume (a version is needed, the project cap), computes the next run, and
-    marks the audit span and tells the owner when an admin changes another owner's schedule.
+    `reviewed` runs the risk review of an edit first; a pause or a resume skips it. The service checks
+    a resume (a version is needed, the project cap), computes the next run, and marks the audit span
+    and tells the owner when an admin changes another owner's schedule.
     """
     scope = schedule_scope(project_id)
     with db.get_session(project_id) as session:
         try:
             row = load_schedule_in_scope(session, schedule_id, scope)
-            return _saved(update_schedule(session, project_id, row, body, scope), scope, project_id), 200
+            review = confirmed = None
+            if reviewed:
+                if body.version_id is not None:  # no scan of a version the caller may not use
+                    check_entity(session, project_id, row.entity_type, row.application_id, body.version_id)
+                review, confirmed = _review_save(
+                    project_id, body.version_id or row.version_id, row.created_by, body.name or row.name,
+                    body.approval_rule or row.approval_rule, body.risk_ack,
+                )
+            row = update_schedule(session, project_id, row, body, scope, confirmed)
+            return _saved(row, scope, project_id, review), 200
         except ScheduleError as e:
             return e.response
         except ScheduleLimitError as e:
@@ -160,12 +220,40 @@ class ScheduleItemHandlers:
     """
 
     @auth.decorators.check_api(schedule_check_spec("create"))
+    def _check_risks(self, project_id: int):
+        """Answer the risk review of a version before a save; nothing is written.
+
+        The answer has `blocking` (the save is refused), `sensitive` (sensitive tools and personal
+        credentials, `personal_credential` with `tool` null: the save needs `risk_ack`),
+        `notices`, `run_without_asking_allowed` and the `fingerprint` that `risk_ack` must name.
+        Who may call: a project member with `schedules.create`, as for a create.
+        Errors: 400 invalid field, or a version that is not of the agent or pipeline; 403; 404 not visible.
+        """
+        from .schedule_risk import scan_complete, scan_schedule
+        from .schedule_settings import is_run_without_asking_allowed
+        body, error = _parse_body(ScheduleRiskCheck)
+        if error:
+            return error
+        with db.get_session(project_id) as session:
+            try:
+                check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
+            except ScheduleError as e:
+                return e.response
+        review = scan_schedule(project_id, body.version_id, auth.current_user()["id"])
+        allowed = bool(is_run_without_asking_allowed(project_id)) and scan_complete(review)
+        return {**review, "run_without_asking_allowed": allowed}, 200
+
+    @auth.decorators.check_api(schedule_check_spec("create"))
     def _create(self, project_id: int):
         """Create a schedule owned by the caller; the owner is never taken from the body.
 
+        The risk review runs first. A blocking finding refuses the save; sensitive tools need
+        `risk_ack` with the fingerprint, and with the schedule name for "Run without asking".
         Who may call: a project member with `schedules.create`.
-        Errors: 400 invalid field or "run without asking" not allowed; 403; 404 agent or pipeline
-        not found or not visible; 409 project limit of active schedules.
+        Errors: 400 invalid field, "run without asking" not allowed (`approval_rule_not_allowed`) or a
+        wrong confirmed name (`risk_name_mismatch`, `field: risk_ack`); 403; 404 agent or pipeline not
+        found or not visible; 409 `schedule_blocked`, `risk_confirmation_required`, `risk_changed`, or
+        the project limit of active schedules.
         """
         body, error = _parse_body(ScheduleCreate)
         if error:
@@ -176,12 +264,16 @@ class ScheduleItemHandlers:
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
-                row = create_schedule(session, project_id, body, scope)
+                check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
+                review, confirmed = _review_save(
+                    project_id, body.version_id, scope.user_id, body.name, body.approval_rule, body.risk_ack,
+                )
+                row = create_schedule(session, project_id, body, scope, confirmed=confirmed)
             except ScheduleError as e:
                 return e.response
             except ScheduleLimitError as e:
                 return {"error": str(e)}, 409
-            return _saved(row, scope, project_id), 201
+            return _saved(row, scope, project_id, review), 201
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _read(self, project_id: int, schedule_id: int):
@@ -201,8 +293,11 @@ class ScheduleItemHandlers:
     def _edit(self, project_id: int, schedule_id: int):
         """Change the fields of a schedule; the owner never changes. Pause and resume have their own actions.
 
+        The risk review runs on the resulting version, name and rule, as for a create.
         Who may call: the owner with `schedules.update`, or a schedules admin (the owner gets a notice).
-        Errors: 400 invalid field, `enabled` in the body, or "run without asking" not allowed; 403; 404.
+        Errors: 400 invalid field, `enabled` in the body, "run without asking" not allowed or a wrong
+        confirmed name (`field: risk_ack`); 403; 404; 409 `schedule_blocked`,
+        `risk_confirmation_required` or `risk_changed`.
         """
         raw = request.get_json(silent=True)
         if isinstance(raw, dict) and "enabled" in raw:
@@ -213,7 +308,7 @@ class ScheduleItemHandlers:
         refused = _refuse_unallowed_rule(project_id, body)
         if refused:
             return refused
-        return _apply_update(project_id, schedule_id, body)
+        return _apply_update(project_id, schedule_id, body, reviewed=True)
 
     @auth.decorators.check_api(schedule_check_spec("delete"))
     def _delete(self, project_id: int, schedule_id: int):

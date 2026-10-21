@@ -23,6 +23,7 @@ from integration.test_7011_agent_schedule_run import (  # noqa: F401
 
 SENSITIVE = {"hitl_interrupt": {"type": "hitl", "guardrail_type": "sensitive_tool", "toolkit_name": "github",
                                 "tool_name": "create_issue", "tool_args": {"title": "x"}}}
+BLOCKING_CODES = {"personal_signin_required", "human_input_step", "missing_credential"}
 GITHUB_WARNING = {"code": "sensitive_action", "message": "needs approval", "toolkit": "github", "tool": "create_issue"}
 
 
@@ -30,8 +31,15 @@ GITHUB_WARNING = {"code": "sensitive_action", "message": "needs approval", "tool
 def log(world, monkeypatch):
     """`world` with a risk scan and a name lookup the test sets; the run log and the run writers."""
     state = types.SimpleNamespace(warnings=[], world=world, runs=sys.modules[f"{PKG}.utils.schedule_runs"])
-    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_risk"], "scan_schedule_risks",
-                        lambda project_id, version_id, owner_id: list(state.warnings))
+    def scan_schedule(project_id, version_id, owner_id):  # the review of `state.warnings`, as the real scan sorts it
+        found = list(state.warnings)
+        return {"blocking": [w for w in found if w["code"] in BLOCKING_CODES],
+                "sensitive": [w for w in found if w["code"] == "sensitive_action"],
+                "notices": [w for w in found if w["code"] not in BLOCKING_CODES | {"sensitive_action"}],
+                "fingerprint": state.fingerprint}
+
+    state.fingerprint = "fp-1"
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_risk"], "scan_schedule", scan_schedule)
     authors = types.ModuleType(f"{PKG}.utils.authors")
     authors.get_authors_data = lambda ids: [{"id": OWNER, "name": "Ann Smith", "email": "ann@example.com"}]
     monkeypatch.setitem(sys.modules, authors.__name__, authors)
@@ -81,9 +89,38 @@ def test_cr_el7011_run_without_asking_says_so_in_the_risk_line(log, monkeypatch)
     monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_run_starter"], "_setting_allows_auto_approve",
                         lambda project_id: True)
 
-    log.world.run(approval_rule="run_without_asking")
+    log.world.run(approval_rule="run_without_asking", approval_fingerprint="fp-1")
 
     assert log.events()[2]["text"] == "Risk check: needs approval for github · create_issue; Run without asking is on"
+    assert log.world.predictions[0]["auto_approve_sensitive_actions"] is True
+
+
+# Owner CR 2026-10-21 (risk review): new sensitive tools since the confirmation turn the run back to asking
+def test_el7011_cr_a_changed_fingerprint_logs_needs_approval_and_pauses(log, monkeypatch):
+    log.warnings = [GITHUB_WARNING]
+    log.fingerprint = "fp-2"
+    monkeypatch.setattr(sys.modules[f"{PKG}.utils.schedule_run_starter"], "_setting_allows_auto_approve",
+                        lambda project_id: True)
+
+    log.world.run(approval_rule="run_without_asking", approval_fingerprint="fp-1")
+
+    assert (log.events()[2]["level"], log.world.run_row().risk_outcome) == ("warning", "needs_approval")
+    assert "pauses and asks" in log.events()[2]["text"]
+    assert log.world.predictions[0]["auto_approve_sensitive_actions"] is False
+
+
+# Owner CR 2026-10-21 (risk review): a blocking finding logs the risk line and ends the run as blocked
+def test_el7011_cr_a_blocking_finding_logs_blocked_and_a_finished_error(log):
+    log.warnings = [{"code": "personal_signin_required", "message": 'Toolkit "GitHub" needs a personal sign-in'}]
+
+    log.world.run(trigger="test")
+
+    assert log.kinds() == ["started", "account", "risk_check", "finished"]
+    risk, end = log.events()[2], log.events()[3]
+    assert (risk["text"], risk["level"]) == ('Risk check: blocked: Toolkit "GitHub" needs a personal sign-in', "error")
+    assert (end["level"], end["status"]) == ("error", "blocked")
+    assert (log.world.run_row().status, log.world.run_row().risk_outcome) == ("blocked", "blocked")
+    assert log.world.predictions == []
 
 
 def test_cr_el7011_an_incomplete_scan_is_not_reported_as_ok(log):

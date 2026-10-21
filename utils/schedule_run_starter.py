@@ -52,7 +52,7 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 id=schedule.id, name=schedule.name, principal=schedule.principal, created_by=schedule.created_by,
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
-                approval_rule=schedule.approval_rule),
+                approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
             trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
@@ -90,17 +90,38 @@ def _owner_label(owner_id: int) -> str:
     return f"{user.get('name') or user.get('email') or f'user {owner_id}'} (schedule owner)"
 
 
-def _risk_check(project_id: int, version_id: int, owner_id: int, auto_approve: bool) -> tuple[str, dict]:
-    """The risk outcome of the version for the run log: `ok`, `needs_approval` or `unknown`, and its event."""
-    # Late: the scan pulls the toolkit expansion
-    from .schedule_risk import scan_schedule_risks
-    warnings = scan_schedule_risks(project_id, version_id, owner_id)
-    sensitive = [f"{item.get('toolkit')} · {item.get('tool')}" for item in warnings if item['code'] == 'sensitive_action']
-    if sensitive:
-        text = 'Risk check: needs approval for ' + ', '.join(sensitive)
-        return 'needs_approval', run_event(
-            'risk_check', text + ('; Run without asking is on' if auto_approve else ''), 'warning')
-    if any(item['code'] == 'scan_incomplete' for item in warnings):
+def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
+    """"Run without asking" holds only for the confirmed tools (owner CR 2026-10-21, R3.2).
+
+    New sensitive tools since the confirmation, an incomplete scan or the setting off run as "Pause and ask me".
+    """
+    from .schedule_risk import scan_complete
+    if schedule.approval_rule != 'run_without_asking' or not scan_complete(review):
+        return False
+    if review['sensitive'] and review['fingerprint'] != schedule.approval_fingerprint:
+        return False
+    return _setting_allows_auto_approve(project_id)
+
+
+def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]:
+    """The risk outcome of the run for the run log and its `risk_check` event (owner CR 2026-10-21).
+
+    `blocked` (a blocking finding), `needs_approval` (sensitive tools, or "Run without asking" turned
+    back to "Pause and ask me"), `unknown` (a tool could not be checked) or `ok`.
+    """
+    from .schedule_risk import scan_complete
+    if review['blocking']:
+        reasons = '; '.join(item['message'] for item in review['blocking'])
+        return 'blocked', run_event('risk_check', f'Risk check: blocked: {reasons}', 'error')
+    if review['sensitive']:
+        tools = ', '.join(f"{item.get('toolkit')} · {item.get('tool') or '*'}" for item in review['sensitive'])
+        text = f'Risk check: needs approval for {tools}'
+        if auto_approve:
+            text += '; Run without asking is on'
+        elif rule == 'run_without_asking':
+            text += '; Run without asking does not hold, so the run pauses and asks'
+        return 'needs_approval', run_event('risk_check', text, 'warning')
+    if not scan_complete(review):
         return 'unknown', run_event('risk_check', 'Risk check: not complete', 'warning')
     return 'ok', run_event('risk_check', 'Risk check: OK')
 
@@ -108,8 +129,8 @@ def _risk_check(project_id: int, version_id: int, owner_id: int, auto_approve: b
 def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
-    A closed budget blocks the run. Every other failure after the pre-run check closes the run as failed:
-    a running run blocks the schedule. Each step adds its line to the run log.
+    A closed budget or a blocking risk finding blocks the run. Every other failure after the pre-run check
+    closes the run as failed: a running run blocks the schedule. Each step adds its line to the run log.
     """
     loaded = _load(project_id, schedule_id, run_id)
     if loaded is None:
@@ -129,14 +150,20 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     if scope:
         block_schedule_run(project_id, run_id, BUDGET_CLOSED.format(scope))
         return
+    # late: the scan pulls in the toolkit expansion
+    from .schedule_risk import scan_schedule
+    review = scan_schedule(project_id, loaded.version.id, check.owner_id)
+    auto_approve = not review['blocking'] and _may_auto_approve(project_id, loaded.schedule, review)
+    outcome, risk_line = _risk_check(review, loaded.schedule.approval_rule, auto_approve)
+    record_run_events(project_id, run_id, risk_line, risk_outcome=outcome)
+    if review['blocking']:  # a scheduled run cannot sign in or answer a person
+        block_schedule_run(project_id, run_id, '; '.join(item['message'] for item in review['blocking']), 'error')
+        return
     source = loaded.schedule.entity_type
     if source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
-    auto_approve = loaded.schedule.approval_rule == 'run_without_asking' and _setting_allows_auto_approve(project_id)
-    outcome, risk_line = _risk_check(project_id, loaded.version.id, check.owner_id, auto_approve)
-    record_run_events(project_id, run_id, risk_line, risk_outcome=outcome)
     manual = trigger in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
     try:

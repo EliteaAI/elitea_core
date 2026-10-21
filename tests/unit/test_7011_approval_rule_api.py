@@ -12,7 +12,7 @@ from unit.test_7011_schedule_crud_api import harness as _crud_harness
 
 harness = _crud_harness  # the CRUD harness fixture, shared
 
-WARNING = {'code': 'human_input_step', 'message': 'The agent can ask the user a question'}
+WARNING = {'code': 'token_may_expire', 'message': 'The token may expire'}  # a notice: never blocks a save
 
 
 def count_rows(harness):
@@ -62,14 +62,14 @@ def test_7011_r3_2_run_without_asking_is_stored_when_the_project_allows_it(harne
 
 def test_7011_r3_2_run_without_asking_is_400_and_saves_nothing_when_not_allowed(harness):
     body, status = harness.call('post', agent_body(approval_rule='run_without_asking'))
-    assert status == 400 and body['error'] == 'approval_rule_not_allowed'
+    assert status == 400 and body['code'] == 'approval_rule_not_allowed' and body['field'] == 'approval_rule'
     assert count_rows(harness) == 0
 
 
 def test_7011_r3_2_update_to_run_without_asking_is_400_and_keeps_the_rule(harness):
     schedule_id = harness.seed()
     body, status = harness.call('put', {'approval_rule': 'run_without_asking'}, schedule_id=schedule_id)
-    assert status == 400 and body['error'] == 'approval_rule_not_allowed'
+    assert status == 400 and body['code'] == 'approval_rule_not_allowed' and body['field'] == 'approval_rule'
     assert harness.row(schedule_id).approval_rule == 'pause_and_ask'
 
 

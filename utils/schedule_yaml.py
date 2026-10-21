@@ -27,6 +27,8 @@ TOO_MANY = f'The schedule file has more than {MAX_ITEMS} schedules'
 SAVE_FAILED = 'The schedule could not be saved'
 REPEATED_KEY = 'The key is used by an earlier schedule of this file'
 OTHER_ENTITY = 'The key belongs to a schedule of another agent or pipeline'
+UNCONFIRMED_NOTE = ('Sensitive tools need a confirmation in the schedule form, or some tools could not be '
+                    'checked; saved as Pause and ask me')
 UPDATE_FIELDS = (
     'description', 'run_mode', 'prompt', 'variables', 'cron', 'timezone', 'expires_at', 'approval_rule',
 )  # never enabled or name: an update keeps them (R5.1)
@@ -193,16 +195,40 @@ def _unchanged(row: EntitySchedule, values: dict, version_id: int) -> bool:
     )
 
 
+def _review_item(project_id: int, owner_id: int, version_id: int, values: dict) -> str | None:
+    """Apply the risk review to one item as the owner who will run it; return the note of a changed rule.
+
+    An import never carries an acknowledgement (owner CR 2026-10-21): "Run without asking" with sensitive
+    tools, or with tools that could not be checked, becomes "Pause and ask me".
+
+    Raises:
+        ScheduleError: When a blocking finding refuses the item; the error names the findings.
+    """
+    # late: the export loads without the scan
+    from .schedule_risk import scan_complete, scan_schedule
+    review = scan_schedule(project_id, version_id, owner_id)
+    if review['blocking']:
+        raise ScheduleError({'error': '; '.join(finding['message'] for finding in review['blocking'])})
+    if values['approval_rule'] == 'run_without_asking' and (review['sensitive'] or not scan_complete(review)):
+        values['approval_rule'] = 'pause_and_ask'
+        return UNCONFIRMED_NOTE
+    return None
+
+
 def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, ids: tuple[int, int]):
-    """Update the schedule the item matches, else create a disabled one; return ('updated' or 'created', row)."""
+    """Update the schedule the item matches, else create a disabled one; return (group, row, note).
+
+    The group is 'updated' or 'created'; the note is set when the risk review changed the rule.
+    """
     # late: the export loads without these modules
     from ..models.pd.entity_schedule import ScheduleCreate, ScheduleUpdate
     from .schedule_service import create_schedule, update_schedule
     by_key, by_name, _ = indexes
     application_id, version_id = ids
     row = _match(*indexes, item, *ids)
+    note = _review_item(project_id, scope.user_id if row is None else row.created_by, version_id, values)
     if row is not None and _unchanged(row, values, version_id):
-        return 'updated', row  # no write, so no admin-edit notice and no new updated_by or next_run (R5.5)
+        return 'updated', row, note  # no write, so no admin-edit notice and no new updated_by or next_run (R5.5)
     if row is not None:
         old_key = (row.application_id, row.version_id, row.name)
         body = ScheduleUpdate(**{field: values[field] for field in UPDATE_FIELDS}, version_id=version_id)
@@ -210,16 +236,19 @@ def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, i
         if row.version_id != old_key[1]:  # a later keyless item of the file finds the row under its new version
             by_name[old_key].remove(row)
             by_name.setdefault((row.application_id, row.version_id, row.name), []).append(row)
-        return 'updated', row
+        return 'updated', row, note
     body = ScheduleCreate(**values, application_id=application_id, version_id=version_id, enabled=False)
     row = create_schedule(session, project_id, body, scope, key=item.key)
     by_key[row.uuid] = row  # a later item of the file then updates this row
     by_name.setdefault((application_id, version_id, row.name), []).append(row)
-    return 'created', row
+    return 'created', row, note
 
 
 def import_schedules(project_id: int, admin_id: int, file) -> dict:
     """Update the schedule each item matches, else create a disabled one owned by the admin; return the report.
+
+    The risk review checks each item: a blocking finding fails the item with the reason, and "Run without
+    asking" with sensitive tools is saved as "Pause and ask me" with a note (an import never confirms).
 
     Args:
         project_id: The target project.
@@ -250,7 +279,9 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
                 if item.approval_rule == 'run_without_asking' and not may_run_without_asking:
                     values['approval_rule'] = 'pause_and_ask'
                     entry['note'] = 'Run without asking is not allowed in this project; saved as Pause and ask me'
-                group, row = _save(session, project_id, scope, indexes, item, values, ids)
+                group, row, note = _save(session, project_id, scope, indexes, item, values, ids)
+                if note:
+                    entry['note'] = note
                 entry.update(name=row.name, schedule_id=row.id)  # a key match keeps the stored name
                 report[group].append(entry)
             except _Skipped as e:

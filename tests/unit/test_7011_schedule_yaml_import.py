@@ -77,13 +77,26 @@ def sandbox(monkeypatch, env, packages=()):
 
 
 def install_service_stubs(env):
-    """Stub the folder rights, the "Allow Run without asking" setting and the notifications the create service calls."""
+    """Stub the folder rights, the "Allow Run without asking" setting, the risk review and the notifications.
+
+    The risk review answers `env.blocking`, `env.sensitive` and `env.risk_notices`; `env.risk_scans` logs each scan.
+    """
     env.folder_error = None
     env.run_without_asking = False
     env.notices = []
+    env.blocking, env.sensitive, env.risk_notices, env.risk_scans = [], [], [], []
+
+    def scan_schedule(*args):
+        env.risk_scans.append(args)
+        return {'blocking': list(env.blocking), 'sensitive': list(env.sensitive),
+                'notices': list(env.risk_notices), 'fingerprint': 'fp-1'}
+
     stubs = {
         'folder_access': {'entity_access_error': lambda *args, **kwargs: env.folder_error},
         'schedule_settings': {'is_run_without_asking_allowed': lambda project_id: env.run_without_asking},
+        'schedule_risk': {
+            'scan_schedule': scan_schedule,
+            'scan_complete': lambda review: not any(n['code'] == 'scan_incomplete' for n in review['notices'])},
         'schedule_notifications': {'notify_schedule_event': lambda *args, **kwargs: env.notices.append(args) or True},
     }
     for name, attributes in stubs.items():
@@ -342,6 +355,59 @@ def test_7011_r2_5_run_without_asking_needs_the_project_setting(env, allowed, st
 
 def test_7011_r2_5_pause_and_ask_needs_no_note(env):
     assert 'note' not in env.import_items(item())['created'][0]
+
+
+# --- Owner CR 2026-10-21 (risk review): an import never carries an acknowledgement
+
+SENSITIVE = {'code': 'sensitive_action', 'toolkit': 'Outlook', 'tool': 'send_email', 'message': 'needs approval'}
+BLOCKING = {'code': 'personal_signin_required', 'message': 'Toolkit "GitHub" needs a personal sign-in'}
+
+
+def test_el7011_cr_a_blocked_item_fails_with_the_reason_and_saves_nothing(env):
+    env.blocking = [BLOCKING]
+    report = env.import_items(item(name='Blocked'))
+    assert report['failed'] == [{'name': 'Blocked', 'reason': BLOCKING['message']}]
+    assert env.rows() == []
+
+
+def test_el7011_cr_a_blocked_update_fails_and_keeps_the_schedule(env):
+    env.import_items(item())
+    env.blocking = [BLOCKING]
+    report = env.import_items(item(cron='0 7 * * *'))
+    assert [entry['reason'] for entry in report['failed']] == [BLOCKING['message']]
+    assert env.rows()[0].cron == '0 9 * * 1-5'
+
+
+def test_el7011_cr_run_without_asking_with_sensitive_tools_saves_as_pause_and_ask_with_a_note(env):
+    env.run_without_asking = True
+    env.sensitive = [SENSITIVE]
+    report = env.import_items(item(approval_rule='run_without_asking'))
+    assert env.rows()[0].approval_rule == 'pause_and_ask'
+    assert 'Pause and ask me' in report['created'][0]['note']
+    assert env.rows()[0].approval_confirmed_by is None
+
+
+def test_el7011_cr_run_without_asking_with_an_incomplete_scan_saves_as_pause_and_ask(env):
+    env.run_without_asking = True
+    env.risk_notices = [{'code': 'scan_incomplete', 'message': 'x'}]
+    report = env.import_items(item(approval_rule='run_without_asking'))
+    assert env.rows()[0].approval_rule == 'pause_and_ask' and 'note' in report['created'][0]
+
+
+def test_el7011_cr_pause_and_ask_with_sensitive_tools_saves_without_a_note(env):
+    env.sensitive = [SENSITIVE]
+    report = env.import_items(item())
+    assert env.rows()[0].approval_rule == 'pause_and_ask' and 'note' not in report['created'][0]
+
+
+def test_el7011_cr_an_item_is_scanned_as_the_owner_who_will_run_it(env):
+    env.import_items(item())
+    with env.session_factory() as session:
+        session.query(env.EntitySchedule).one().created_by = 42
+        session.commit()
+    env.import_items(item(cron='0 7 * * *'), item(name='New one'))
+    assert [owner for _, _, owner in env.risk_scans] == [ADMIN_ID, 42, ADMIN_ID]
+    assert {version for _, version, _ in env.risk_scans} == {10}
 
 
 # --- R2.6: the report

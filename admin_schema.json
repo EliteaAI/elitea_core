@@ -64,6 +64,29 @@
         }
       ]
     },
+    "sensitive_tool_info": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "badge": {
+              "type": "string",
+              "enum": ["sends_messages", "deletes_data", "changes_data", "runs_code", "needs_approval"]
+            },
+            "effect": { "type": "string" }
+          }
+        }
+      },
+      "title": "Sensitive Tool Effects",
+      "description": "Optional badge and effect text per sensitive tool, shown when a schedule is saved. Map of toolkit type to tool name to {badge, effect}. A tool without an entry shows the badge \"needs_approval\" and the effect \"This tool can change data outside ELITEA.\"",
+      "path": "toolkit_security.sensitive_tool_info",
+      "section": "guardrails",
+      "default": {},
+      "requires_restart": false,
+      "enum_source_keys": "toolkit_names"
+    },
     "sensitive_action_company_name": {
       "type": "string",
       "title": "Company Name for Policy Message",
