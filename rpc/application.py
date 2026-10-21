@@ -40,6 +40,7 @@ from ..utils.application_utils import (
 from ..utils.exceptions import (
     PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError, InputGuardrailBlockedError,
 )
+from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.create_utils import create_application, create_version
 from ..utils.export_import import export_application
 from ..utils.publish_utils import get_default_agent_validation_rules
@@ -170,6 +171,26 @@ def _report_input_guardrail_blocked(
             'additional_response_meta': {'input_guardrail': verdict},
         },
     })
+
+
+def _raise_input_guardrail_blocked(
+    module, blocked_error, sid, parsed, payload: dict, chat_project_id: Optional[int],
+    sio_event, start_event_content: Optional[dict],
+):
+    # REST callers map this to a 422; only the SIO shape is translated here
+    if sid:
+        _report_input_guardrail_blocked(
+            module, blocked_error, parsed, payload, chat_project_id, sio_event, start_event_content,
+        )
+        raise SioValidationError(
+            sio=module.context.sio,
+            sid=None,
+            event=sio_event,
+            error=blocked_error.message,
+            stream_id=parsed.stream_id,
+            message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
+        )
+    raise blocked_error
 
 
 class RPC:
@@ -404,7 +425,13 @@ class RPC:
 
         # TODO probably better move to toolkits expand, check OpenAPI
         vc = VaultClient(parsed.project_id)
-        payload = vc.unsecret(payload)
+        # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
+        try:
+            payload = inspect_and_unsecret(payload, vc, parsed.project_id, user_id)
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a
@@ -475,20 +502,9 @@ class RPC:
                 )
             raise
         except InputGuardrailBlockedError as blocked_error:
-            # REST callers map this to a 422; only the SIO shape is translated here
-            if sid:
-                _report_input_guardrail_blocked(
-                    self, blocked_error, parsed, payload, chat_project_id, sio_event, start_event_content,
-                )
-                raise SioValidationError(
-                    sio=self.context.sio,
-                    sid=None,
-                    event=sio_event,
-                    error=blocked_error.message,
-                    stream_id=parsed.stream_id,
-                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
-                )
-            raise
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
         except MaintenanceInProgressError:
             error_payload = {
                 "error": "maintenance_in_progress",
@@ -674,7 +690,13 @@ class RPC:
 
         # TODO probably better move to toolkits expand, check OpenAPI
         vc = VaultClient(parsed.project_id)
-        payload = vc.unsecret(payload)
+        # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
+        try:
+            payload = inspect_and_unsecret(payload, vc, parsed.project_id, user_id)
+        except InputGuardrailBlockedError as blocked_error:
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a
@@ -729,20 +751,9 @@ class RPC:
                 )
             raise
         except InputGuardrailBlockedError as blocked_error:
-            # REST callers map this to a 422; only the SIO shape is translated here
-            if sid:
-                _report_input_guardrail_blocked(
-                    self, blocked_error, parsed, payload, chat_project_id, sio_event, start_event_content,
-                )
-                raise SioValidationError(
-                    sio=self.context.sio,
-                    sid=None,
-                    event=sio_event,
-                    error=blocked_error.message,
-                    stream_id=parsed.stream_id,
-                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
-                )
-            raise
+            _raise_input_guardrail_blocked(
+                self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
+            )
         except MaintenanceInProgressError:
             error_payload = {
                 "error": "maintenance_in_progress",

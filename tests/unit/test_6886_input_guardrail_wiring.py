@@ -121,3 +121,31 @@ def test_conversation_naming_does_not_log_the_input_or_the_name():
 
     assert 'user_input[:' not in source
     assert "'{generated_name}'" not in source
+
+
+@pytest.mark.parametrize('relative, count', [
+    ('rpc/application.py', 2),
+    ('methods/predict.py', 1),
+    ('methods/pipeline_run.py', 1),
+])
+def test_secrets_are_substituted_only_after_the_dispatch_check(relative, count):
+    source = _source(relative)
+
+    assert source.count('inspect_and_unsecret(payload, ') == count
+    assert not re.search(r'\.unsecret\(payload\)', source)
+
+
+@pytest.mark.parametrize('model', ['ApplicationChatRequest', 'LLMChatRequest'])
+def test_chat_request_models_keep_the_accepted_history_hashes(model):
+    source = _source('models/pd/chat.py')
+    body = source[source.index(f'class {model}('):]
+    body = body[:body.find('\nclass ', 1) if '\nclass ' in body[1:] else len(body)]
+
+    assert 'input_guardrail_inspected: Optional[List[str]] = None' in body
+
+
+def test_predict_payload_forwards_the_accepted_history_hashes():
+    assert re.search(
+        r"payload\['input_guardrail_inspected'\] = list\(inspected\)",
+        _source('utils/predict_utils.py'),
+    )

@@ -37,6 +37,11 @@ UNCHECKED_PLACEHOLDER = '[REDACTED:unchecked]'
 # Shorter than any text a rule can match (the shortest is a 19-char phone number)
 _MIN_INSPECT_CHARS = 8
 _POLICY_CACHE_SIZE = 8
+# History roles that hold model output, outside input-guardrail scope
+_MODEL_ROLES = ('assistant', 'ai')
+# not_inspected holds client-chosen block types: bound what a verdict carries
+_MAX_NOT_INSPECTED = 20
+_MAX_BLOCK_TYPE_CHARS = 32
 # Keys of the summary that may reach the stored message, the payload and the UI
 VERDICT_KEYS = ('action', 'categories', 'rules', 'segments', 'detection_count', 'not_inspected', 'error')
 
@@ -78,7 +83,13 @@ def _applies(policy: Policy, project_id) -> bool:
 
 
 def verdict_meta(result_summary: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: result_summary.get(key) for key in VERDICT_KEYS}
+    verdict = {key: result_summary.get(key) for key in VERDICT_KEYS}
+    verdict['not_inspected'] = _bounded_types(verdict.get('not_inspected'))
+    return verdict
+
+
+def _bounded_types(values) -> List[str]:
+    return sorted({str(v)[:_MAX_BLOCK_TYPE_CHARS] for v in values or []})[:_MAX_NOT_INSPECTED]
 
 
 # --- text helpers -----------------------------------------------------------------
@@ -126,8 +137,9 @@ def _payload_slots(payload: Dict[str, Any], not_inspected: List[str], kind: str 
         lambda text: payload.__setitem__('user_input', text),
     )
     for message in payload.get('chat_history') or []:
-        # User turns only: assistant output is outside input-guardrail scope
-        if isinstance(message, dict) and message.get('role') in ('user', 'human'):
+        # Every role but the model's own: a client can send any role (a system turn
+        # reaches the model as a SystemMessage), and assistant output is out of scope
+        if isinstance(message, dict) and str(message.get('role') or '').lower() not in _MODEL_ROLES:
             slots.extend(_content_slots(
                 'history', message.get('content'), not_inspected,
                 lambda text, m=message: m.__setitem__('content', text),
@@ -139,7 +151,20 @@ def _payload_slots(payload: Dict[str, Any], not_inspected: List[str], kind: str 
             slots.append(_Slot(
                 'instructions', owner['instructions'], lambda text, o=owner: o.__setitem__('instructions', text),
             ))
+    # Variable values are rendered into the system prompt: the request's own values are
+    # the caller's input for this turn, the version's stored defaults are the owner's
+    slots.extend(_variable_slots('current_turn', (application.get('variables') or {}).values()
+                                 if isinstance(application.get('variables'), dict) else []))
+    slots.extend(_variable_slots('instructions', version_details.get('variables') or []))
     return [s for s in slots if s.text]
+
+
+def _variable_slots(kind: str, variables: Iterable) -> List[_Slot]:
+    return [
+        _Slot(kind, v['value'], lambda text, v=v: v.__setitem__('value', text))
+        for v in variables or []
+        if isinstance(v, dict) and isinstance(v.get('value'), str)
+    ]
 
 
 def _segments(slots: List[_Slot]) -> List[Segment]:
@@ -451,9 +476,9 @@ def check_resume_input(
 def apply_input_guardrail(call_kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Checkpoint B: inspect a start_task payload in place.
 
-    Inspects user_input, user turns of chat_history and instructions; redacts them on
-    redact, raises InputGuardrailBlockedError on block, always masks the Active Tasks
-    preview, and lists the hashes of what it inspected for the SDK to skip. A segment
+    Inspects user_input, non-assistant turns of chat_history, instructions and variable
+    values; redacts them on redact, raises InputGuardrailBlockedError on block, always
+    masks the Active Tasks preview, and lists the hashes of what it inspected for the SDK to skip. A segment
     whose hash the caller already lists (checkpoint A) is not inspected again.
     """
     payload = call_kwargs.get('kwargs')
@@ -492,14 +517,35 @@ def apply_input_guardrail(call_kwargs: Dict[str, Any]) -> Optional[Dict[str, Any
     return None
 
 
+def inspect_and_unsecret(payload: Dict[str, Any], vault_client, project_id, user_id) -> Dict[str, Any]:
+    """Checkpoint B ahead of secret substitution, then ``vault_client.unsecret(payload)``.
+
+    A ``{{secret.NAME}}`` reference is inspected as written. The value a project secret
+    puts in its place is not input, so once every slot was inspected the substituted
+    texts are listed as inspected too, and the start_task wrapper and the SDK skip them.
+    Raises InputGuardrailBlockedError on block, as the wrapper does.
+    """
+    apply_input_guardrail({'kwargs': payload, 'meta': {'project_id': project_id, 'user_id': user_id}})
+    inspected = {h for h in payload.get(INSPECTED_PAYLOAD_KEY) or [] if isinstance(h, str)}
+    before = {segment_hash(s.text) for s in _payload_slots(payload, [])}
+    payload = vault_client.unsecret(payload)
+    # Only when the check covered every slot: off, exempt or failed open, nothing is listed
+    if before and before <= inspected:
+        after = {segment_hash(s.text) for s in _payload_slots(payload, [])}
+        payload[INSPECTED_PAYLOAD_KEY] = sorted(inspected | after)
+    return payload
+
+
 def _merge(current: Optional[Dict[str, Any]], incoming: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(current, dict):
         return incoming
     merged = dict(current)
     if ACTION_SEVERITY.get(incoming.get('action') or 'none', 0) > ACTION_SEVERITY.get(current.get('action') or 'none', 0):
         merged['action'] = incoming['action']
-    for key in ('categories', 'rules', 'segments', 'not_inspected'):
+    # categories, rules and segments are drawn from fixed sets; not_inspected is bounded
+    for key in ('categories', 'rules', 'segments'):
         merged[key] = sorted(set(current.get(key) or []) | set(incoming.get(key) or []))
+    merged['not_inspected'] = _bounded_types(set(current.get('not_inspected') or []) | set(incoming.get('not_inspected') or []))
     merged['detection_count'] = int(current.get('detection_count') or 0) + int(incoming.get('detection_count') or 0)
     merged['error'] = current.get('error') or incoming.get('error')
     return merged
@@ -507,6 +553,6 @@ def _merge(current: Optional[Dict[str, Any]], incoming: Dict[str, Any]) -> Dict[
 
 __all__ = [
     'CONFIG_KEY', 'INSPECTED_PAYLOAD_KEY', 'VERDICT_PAYLOAD_KEY', 'VERDICT_KEYS',
-    'apply_input_guardrail', 'check_chat_input', 'check_resume_input', 'emit_audit_spans', 'policy_from_config',
+    'apply_input_guardrail', 'check_chat_input', 'inspect_and_unsecret', 'check_resume_input', 'emit_audit_spans', 'policy_from_config',
     'participant_entity', 'redact_text', 'redact_value', 'redacted_input', 'verdict_meta', 'UNCHECKED_PLACEHOLDER',
 ]

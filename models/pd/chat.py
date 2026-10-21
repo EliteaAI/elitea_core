@@ -54,6 +54,8 @@ class ApplicationChatRequest(MergeUpdateBase):
     mcp_auth_decisions: Optional[List[Dict[str, Any]]] = None
     authorization_request_id: Optional[str] = None
     execution_generation: Optional[str] = None
+    # Segment hashes checkpoint A already settled (#6886); forwarded to checkpoint B
+    input_guardrail_inspected: Optional[List[str]] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
     variables: Optional[List[ApplicationVariableModel]] = None
@@ -145,6 +147,8 @@ class LLMChatRequest(MergeUpdateBase):
     mcp_auth_decisions: Optional[List[Dict[str, Any]]] = None
     authorization_request_id: Optional[str] = None
     execution_generation: Optional[str] = None
+    # Segment hashes checkpoint A already settled (#6886); forwarded to checkpoint B
+    input_guardrail_inspected: Optional[List[str]] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
     tools: Optional[List[dict]] = []

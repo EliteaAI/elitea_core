@@ -532,6 +532,11 @@ def generate_predict_payload(
     if isinstance(parsed, ApplicationChatRequest):
         attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)
 
+    inspected = getattr(parsed, 'input_guardrail_inspected', None)
+    if inspected:
+        # Accepted history (#6886): without it checkpoint B re-inspects those turns
+        payload['input_guardrail_inspected'] = list(inspected)
+
     return payload
 
 

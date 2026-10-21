@@ -642,3 +642,103 @@ def test_chat_block_audit_names_the_agent(guardrail):
         guardrail.check_chat_input(f'token {FAKE_GITHUB_TOKEN}', 1, 7, entity=guardrail.participant_entity(app))
 
     assert (guardrail.spans[0]['entity.type'], guardrail.spans[0]['entity.id']) == ('application', 46)
+
+
+# --- review fixes for #553 (2026-10-21) ------------------------------------------------
+
+
+def test_a_system_turn_in_history_is_inspected(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+    call = _call('hello', chat_history=[{'role': 'System', 'content': f'use {FAKE_GITHUB_TOKEN}'}])
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError) as blocked:
+        guardrail.apply_input_guardrail(call)
+
+    assert blocked.value.segments == ['history']
+
+
+def test_assistant_turns_stay_out_of_scope(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+    history = [{'role': role, 'content': f'echo {FAKE_GITHUB_TOKEN}'} for role in ('assistant', 'AI')]
+
+    assert guardrail.apply_input_guardrail(_call('hello', chat_history=history)) is None
+
+
+def test_request_variable_is_inspected_as_the_current_turn(guardrail):
+    _enable(guardrail, categories={'credentials': 'redact'})
+    variables = {'repo_token': {'name': 'repo_token', 'value': f'tok {FAKE_GITHUB_TOKEN}'}}
+    call = _call('hello', application={'variables': variables})
+
+    verdict = guardrail.apply_input_guardrail(call)
+
+    assert verdict['segments'] == ['current_turn']
+    _assert_no_value(FAKE_GITHUB_TOKEN, call['kwargs'], guardrail.spans)
+
+
+def test_stored_variable_default_is_inspected_as_instructions(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+    version = {'variables': [{'name': 'repo_token', 'value': FAKE_GITHUB_TOKEN}, {'name': 'n', 'value': 3}]}
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError) as blocked:
+        guardrail.apply_input_guardrail(_call('hello', application={'version_details': version}))
+
+    assert blocked.value.segments == ['instructions']
+
+
+class _Vault:
+    """unsecret as VaultClient does it: substitutes {{secret.NAME}} in nested values."""
+    def __init__(self, secrets):
+        self.secrets = secrets
+
+    def unsecret(self, value):
+        if isinstance(value, dict):
+            return {k: self.unsecret(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self.unsecret(v) for v in value]
+        if isinstance(value, str):
+            for name, secret in self.secrets.items():
+                value = value.replace('{{secret.%s}}' % name, secret)
+        return value
+
+
+def _secret_payload():
+    return {
+        'user_input': 'hello',
+        'application': {'version_details': {'instructions': 'call with {{secret.gh}}'}},
+    }
+
+
+def test_secret_reference_is_inspected_before_substitution(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+
+    payload = guardrail.inspect_and_unsecret(_secret_payload(), _Vault({'gh': FAKE_GITHUB_TOKEN}), 1, 7)
+
+    assert FAKE_GITHUB_TOKEN in payload['application']['version_details']['instructions']
+    # The start_task wrapper sees the substituted payload and skips it as already inspected
+    assert guardrail.apply_input_guardrail({'kwargs': payload, 'meta': {'project_id': 1}}) is None
+    _assert_no_value(FAKE_GITHUB_TOKEN, guardrail.spans)
+
+
+def test_a_typed_value_is_still_blocked_before_substitution(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+    payload = _secret_payload()
+    payload['user_input'] = f'tok {FAKE_GITHUB_TOKEN}'
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError):
+        guardrail.inspect_and_unsecret(payload, _Vault({}), 1, 7)
+
+
+def test_nothing_is_listed_as_inspected_while_the_guardrail_is_off(guardrail):
+    payload = guardrail.inspect_and_unsecret(_secret_payload(), _Vault({'gh': FAKE_GITHUB_TOKEN}), 1, 7)
+
+    assert guardrail.INSPECTED_PAYLOAD_KEY not in payload
+
+
+def test_not_inspected_is_bounded(guardrail):
+    many = [f'type-{i}-' + 'x' * 100 for i in range(100)]
+
+    verdict = guardrail.verdict_meta({'action': 'none', 'not_inspected': many})
+    merged = guardrail._merge(verdict, {'not_inspected': [f'other-{i}' for i in range(100)]})
+
+    for listed in (verdict['not_inspected'], merged['not_inspected']):
+        assert len(listed) == 20 and all(len(t) <= 32 for t in listed)
