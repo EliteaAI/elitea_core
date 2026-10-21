@@ -24,7 +24,7 @@ from .schedule_access import (
     schedule_check_spec,
     schedule_scope,
 )
-from .schedule_claim import fail_run, insert_run
+from .schedule_claim import fail_run, insert_run, merge_events
 from .schedule_dispatch import START_FAILED, start_schedule_run
 from .schedule_notifications import notify_schedule_event
 from .schedule_service import (
@@ -39,7 +39,9 @@ from .schedule_timing import ScheduleLimitError
 MAX_RUNS_LIMIT = 100
 RUN_FIELDS = (
     "id", "trigger", "status", "reason", "conversation_id", "requested_by", "started_at", "finished_at",
+    "version_id",
 )
+RUN_NOT_FOUND = {"error": "Run not found"}
 ENABLED_NOT_EDITABLE = {
     "error": "enabled cannot be changed by an edit; use the pause or resume action of the schedule",
     "field": "enabled",
@@ -56,6 +58,15 @@ class RunsQuery(BaseModel):
 
 def _iso(moment) -> str | None:
     return moment.isoformat() if moment else None
+
+
+def _run_row(row) -> dict:
+    """A run as the lists and the run detail answer it: ISO times and `duration_ms` once the run ended."""
+    started, finished = row["started_at"], row["finished_at"]
+    return {
+        **row, "started_at": _iso(started), "finished_at": _iso(finished),
+        "duration_ms": round((finished - started).total_seconds() * 1000) if started and finished else None,
+    }
 
 
 def _owner_name(owner_id: int) -> str | None:
@@ -299,9 +310,43 @@ class ScheduleItemHandlers:
                 .limit(min(query.limit, MAX_RUNS_LIMIT)).offset(query.offset)
             ).mappings().all()
             total = session.scalar(select(func.count()).select_from(EntityScheduleRun).where(*where))
-            return {"total": total, "rows": [{
-                **row, "started_at": _iso(row["started_at"]), "finished_at": _iso(row["finished_at"]),
-            } for row in rows]}, 200
+            return {"total": total, "rows": [_run_row(row) for row in rows]}, 200
+
+    @auth.decorators.check_api(schedule_check_spec("details"))
+    def _run_detail(self, project_id: int, schedule_id: int, run_id: int):
+        """Answer one run of a schedule for the Test schedule panel, with its usage summary and event log.
+
+        The events are the stored ones and the tool calls of the run conversation, in time order, at most 200.
+        A tool call carries the full tool result in `summary`: raw tool output, up to 20 000 characters.
+        Tokens and cost are null while the usage store has no row for the conversation.
+        Who may call: the owner with `schedules.details`, or a schedules admin.
+        Errors: 403; 404 the schedule or the run is not found, or another owner's schedule.
+        """
+        # Late, like schedule_risk: only this route reads the conversation and the usage store
+        from .schedule_run_detail import tool_call_events, usage_summary, version_label
+        scope = schedule_scope(project_id)
+        with db.get_session(project_id) as session:
+            try:
+                schedule = load_schedule_in_scope(session, schedule_id, scope)
+            except ScheduleError as e:
+                return e.response
+            run = session.scalar(select(EntityScheduleRun).where(
+                EntityScheduleRun.id == run_id, EntityScheduleRun.schedule_id == schedule_id))
+            if run is None:
+                return RUN_NOT_FOUND, 404
+            row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
+            tokens, cost_usd = usage_summary(session, project_id, run)
+            events = merge_events(run.events, tool_call_events(session, run.conversation_id))
+            return {
+                **row,
+                "version_label": version_label(session, run.version_id),
+                "principal_label": run.principal_label,
+                "risk_outcome": run.risk_outcome,
+                "approval_rule": schedule.approval_rule,
+                "approval_expires_at": _iso(run.approval_expires_at),
+                "summary": {"duration_ms": row["duration_ms"], "tokens": tokens, "cost_usd": cost_usd},
+                "events": events,
+            }, 200
 
     @auth.decorators.check_api(schedule_check_spec("admin"))
     def _change_owner(self, project_id: int, schedule_id: int):

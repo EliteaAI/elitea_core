@@ -6,7 +6,7 @@ from sqlalchemy import func, select, update
 from tools import db
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
-from .schedule_claim import fail_run
+from .schedule_claim import append_run_events, fail_run, finished_event, run_event
 
 STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
@@ -31,6 +31,16 @@ class ScheduleDecisionInvalid(Exception):
 
 class ScheduleRunNotWaiting(Exception):
     """The run of an approve or reject is not waiting for approval (R2.4)."""
+
+
+def record_run_events(project_id: int, run_id: int, *events: dict, **columns) -> None:
+    """Add events, and set `columns`, on one run in its own transaction; a failure is logged, the run goes on."""
+    try:
+        with db.get_session(project_id) as session:
+            append_run_events(session, run_id, *events, **columns)
+            session.commit()
+    except Exception:  # noqa: BLE001 -- the log is a view of the run; it must never stop the run
+        log.exception('Schedule run %s: cannot write the run log', run_id)
 
 
 def fail_schedule_run(project_id: int, run_id: int, reason: str) -> None:
@@ -70,7 +80,8 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
     """A sensitive-tool pause makes a running run wait for the owner (R1.2, R1.3); any other pause fails it."""
     # A parallel pause carries its interrupts in `hitl_interrupts`
     interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
-    if not any(item.get('guardrail_type') == 'sensitive_tool' for item in interrupts):
+    sensitive = next((item for item in interrupts if item.get('guardrail_type') == 'sensitive_tool'), None)
+    if sensitive is None:
         finish_schedule_run(project_id, run_id, 'failed', _human_step_reason(interrupt, interrupts))
         return
     # Late import, as in _announce
@@ -83,6 +94,9 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
             .values(status='waiting_for_approval', resumed_at=None,
                     approval_expires_at=datetime.now(UTC) + timedelta(hours=APPROVAL_WAIT_HOURS))
         ).rowcount
+        if paused:
+            append_run_events(session, run_id, _paused_event(sensitive, sum(
+                item.get('guardrail_type') == 'sensitive_tool' for item in interrupts) - 1))
         session.commit()
         if not paused:  # a run that is not running stays as it is, with no notice (R1.4)
             return
@@ -92,6 +106,13 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
             notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
         except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it (R1.3)
             log.exception('Schedule run %s: cannot send the approval notice', run_id)
+
+
+def _paused_event(item: dict, more: int = 0) -> dict:
+    """The pause line of the run log: toolkit and tool only, never the tool arguments; `more` counts the other tools."""
+    toolkit, tool = (str(item.get(key) or '?')[:NAME_LIMIT] for key in ('toolkit_name', 'tool_name'))
+    text = f'Paused for approval: {toolkit} · {tool}' + (f' (+{more} more)' if more > 0 else '')
+    return run_event('paused', text, 'warning', toolkit=toolkit, tool=tool)
 
 
 def _human_step_reason(interrupt: dict, interrupts: list[dict]) -> str:
@@ -132,29 +153,38 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
     """Write a checked decision: `approve` sets the run running, `reject` fails it (R2.1, R2.2).
 
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
+    The run log gets the decision; only the owner decides (the check), so the owner is who decided.
     """
     with db.get_session(project_id) as session:
-        if decision == 'approve':
-            resumed = session.execute(
-                update(EntityScheduleRun)
-                .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'waiting_for_approval')
+        # The lock holds the run in waiting_for_approval until the commit, so the writes below always apply
+        run = session.scalar(
+            select(EntityScheduleRun)
+            .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'waiting_for_approval')
+            .with_for_update()
+        )
+        if run is None:
+            raise ScheduleRunNotWaiting(run_id)
+        owner_id = session.scalar(select(EntitySchedule.created_by).where(EntitySchedule.id == run.schedule_id))
+        approved = decision == 'approve'
+        append_run_events(session, run_id, run_event(
+            'decision', f"{'Approved' if approved else 'Rejected'} by the schedule owner",
+            'info' if approved else 'warning', action=decision, by=owner_id))
+        if approved:
+            session.execute(
+                update(EntityScheduleRun).where(EntityScheduleRun.id == run_id)
                 .values(status='running', resumed_at=func.now(), approval_expires_at=None)
-            ).rowcount
-            session.commit()
-            if not resumed:
-                raise ScheduleRunNotWaiting(run_id)
-            return
-        conversation_id = session.scalar(
-            select(EntityScheduleRun.conversation_id).where(EntityScheduleRun.id == run_id))
-    if not finish_schedule_run(project_id, run_id, 'failed', REJECT_REASON, conversation_id=conversation_id,
-                               expected_status='waiting_for_approval', notice=False):
-        raise ScheduleRunNotWaiting(run_id)
+            )
+        else:  # no notice: the owner made this end (R2.2)
+            _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, run.conversation_id,
+                      expected_status='waiting_for_approval')
+        session.commit()
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:
     """Insert a finished `skipped` cron run without a conversation and copy the status; the run id."""
     run = EntityScheduleRun(
-        schedule_id=schedule_id, trigger='cron', status='skipped', reason=reason, finished_at=func.now())
+        schedule_id=schedule_id, trigger='cron', status='skipped', reason=reason, finished_at=func.now(),
+        events=[finished_event('skipped', reason)])
     session.add(run)
     session.flush()
     session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status='skipped'))
@@ -203,7 +233,10 @@ def expire_waiting_runs(project_id: int, now: datetime) -> int:
 
 def _end_runs(session, condition, status: str, reason: str | None, conversation_id: int | None = None,
               expected_status: str = 'running') -> list[int]:
-    """End the runs in `expected_status` that match `condition` and copy the status to their schedules; the run ids."""
+    """End the runs in `expected_status` that match `condition`, copy the status to their schedules and log the end.
+
+    Returns the ids of the ended runs.
+    """
     values = {'status': status, 'reason': reason, 'finished_at': func.now()}
     schedule_values = {'last_run_status': status}
     if conversation_id:
@@ -220,6 +253,9 @@ def _end_runs(session, condition, status: str, reason: str | None, conversation_
             update(EntitySchedule).where(EntitySchedule.id.in_({schedule_id for _, schedule_id in ended}))
             .values(**schedule_values)
         )
+    # lean: one locked read per ended run; a sweep ends at most one batch (EXPIRE_BATCH); batch the read if it grows
+    for run_id, _ in ended:
+        append_run_events(session, run_id, finished_event(status, reason))
     return [run_id for run_id, _ in ended]
 
 

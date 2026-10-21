@@ -207,9 +207,27 @@ def test_7011_r1_1_block_has_schedule_indexes(sql_block):
 
 # R1.2: every statement of the block is idempotent
 def test_7011_r1_2_every_statement_is_if_not_exists(sql_block):
-    assert len(sql_block) == 10  # 3 tables, 6 indexes, 1 column (US-16 runs list index, CR-04 uuid)
+    # 3 tables, 6 indexes, 2 column statements (US-16 runs list index, CR-04 uuid, CR 2026-10-21 run log)
+    assert len(sql_block) == 11
     for stmt in sql_block:
         assert re.match(
-            r"CREATE (UNIQUE )?(TABLE|INDEX) IF NOT EXISTS |ALTER TABLE \{pid\}\.entity_schedules ADD COLUMN IF NOT EXISTS ",
+            r"CREATE (UNIQUE )?(TABLE|INDEX) IF NOT EXISTS "
+            r"|ALTER TABLE \{pid\}\.entity_schedule(s|_runs) ADD COLUMN IF NOT EXISTS ",
             stmt,
         ), stmt
+
+
+# Owner CR 2026-10-21 (test panel log): a fresh table and an older one get the same run log columns as the model
+RUN_LOG_COLUMNS = {"events": "JSONB", "version_id": "INTEGER", "principal_label": "VARCHAR(256)",
+                   "risk_outcome": "VARCHAR(32)"}
+
+
+def test_cr_el7011_the_run_log_columns_are_in_the_table_the_alter_and_the_model(sql_block, entity_schedule_models):
+    create = next(s for s in sql_block if s.startswith("CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_runs "))
+    alter = next(s for s in sql_block if s.startswith("ALTER TABLE {pid}.entity_schedule_runs "))
+    columns = entity_schedule_models.EntityScheduleRun.__table__.c
+    for name, sql_type in RUN_LOG_COLUMNS.items():
+        assert f"{name} {sql_type} NULL" in create
+        assert f"ADD COLUMN IF NOT EXISTS {name} {sql_type} NULL" in alter
+        assert columns[name].nullable is True
+    assert not columns["version_id"].foreign_keys

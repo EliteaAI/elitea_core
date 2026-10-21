@@ -37,7 +37,9 @@ def load_starter(monkeypatch, create, predict, prerun, *, finish_error=_ignore, 
             "execute_pipeline_via_predict_sio": predict,
             "finish_trigger_run_with_error": finish_error},
         "utils.schedule_prerun": {"run_prerun_check": prerun},
-        "utils.schedule_runs": {"fail_schedule_run": fail, "block_schedule_run": block},
+        "utils.schedule_runs": {"fail_schedule_run": fail, "block_schedule_run": block,
+                                "record_run_events": lambda *args, **kwargs: None, "run_event": lambda *args, **kwargs: {}},
+        "utils.schedule_risk": {"scan_schedule_risks": lambda *args: []},
         "utils.budget_door": {"closed_budget_scope": budget_scope},
         "utils.exceptions": {
             "BudgetDoorClosedError": budget_error or type("BudgetDoorClosedError", (Exception,), {})},
@@ -63,7 +65,7 @@ def world(monkeypatch):
     def run(entity_type="pipeline", run_mode=None, prompt="", variables=()):
         loaded = types.SimpleNamespace(
             schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type=entity_type, run_mode=run_mode, approval_rule="pause_and_ask"),
-            version=types.SimpleNamespace(id=9), entity_name="Nightly flow", prompt=prompt, variables=list(variables))
+            version=types.SimpleNamespace(id=9, name="v3"), entity_name="Nightly flow", prompt=prompt, variables=list(variables))
         monkeypatch.setattr(starter, "_load", lambda *a: loaded)
         starter.run_owner_schedule(34, SCHEDULE_ID, RUN_ID)
         return calls

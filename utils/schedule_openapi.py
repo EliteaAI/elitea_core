@@ -11,7 +11,7 @@ from ..models.pd.generate_schedule_draft import GenerateScheduleDraftRequest
 from ..models.pd.schedule_list import EntityType, RunStatus, SortBy, SortOrder
 from ..models.pd.schedule_run import ScheduleRunRequest
 from .constants import PROMPT_LIB_MODE, SCHEDULES_PROJECT_PATH
-from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT
+from .schedule_item_handlers import ENABLED_NOT_EDITABLE, MAX_RUNS_LIMIT, RUN_NOT_FOUND
 from .schedule_project_handlers import MAX_EXPORT_IDS, SchedulePreferenceUpdate
 from .schedule_settings import ScheduleProjectSettings
 
@@ -26,6 +26,9 @@ PROJECT_PARAMS = [
 ]
 ITEM_PARAMS = [*PROJECT_PARAMS, {"name": "schedule_id", "in": "path", "required": True,
                                  "schema": {"type": "integer"}, "description": "Schedule id"}]
+RUN = f"{ITEM}/runs/<int:run_id>"
+RUN_PARAMS = [*ITEM_PARAMS, {"name": "run_id", "in": "path", "required": True,
+                             "schema": {"type": "integer"}, "description": "Run id, from the runs list or the run answer"}]
 LIST_QUERY_PARAMS = [
     {"name": "entity_type", "in": "query", "schema": {"type": "string", "enum": list(get_args(EntityType))},
      "description": "Only schedules of this entity kind"},
@@ -91,7 +94,34 @@ LIST_EXAMPLE = {"total": 1, "run_without_asking_allowed": False, "rows": [{
 RUNS_EXAMPLE = {"total": 1, "rows": [{
     "id": 77, "trigger": "cron", "status": "success", "reason": None, "conversation_id": 901, "requested_by": 20,
     "started_at": "2026-10-21T07:00:00+00:00", "finished_at": "2026-10-21T07:01:10+00:00",
+    "version_id": 420, "duration_ms": 70000,
 }]}
+RUN_DETAIL_EXAMPLE = {
+    "id": 78, "trigger": "test", "status": "success", "reason": None, "conversation_id": 902, "requested_by": 20,
+    "started_at": "2026-10-21T09:00:00+00:00", "finished_at": "2026-10-21T09:00:38+00:00", "version_id": 420,
+    "duration_ms": 38000, "version_label": "v3", "principal_label": "Ann Smith (schedule owner)",
+    "risk_outcome": "needs_approval", "approval_rule": "pause_and_ask", "approval_expires_at": None,
+    "summary": {"duration_ms": 38000, "tokens": 2140, "cost_usd": 0.03},
+    "events": [
+        {"at": "2026-10-21T09:00:00.120000+00:00", "kind": "started", "level": "info",
+         "text": "Test run started · trigger: test · version v3", "trigger": "test", "version_id": 420},
+        {"at": "2026-10-21T09:00:00.410000+00:00", "kind": "account", "level": "info",
+         "text": "Account: Ann Smith (schedule owner)"},
+        {"at": "2026-10-21T09:00:00.900000+00:00", "kind": "risk_check", "level": "warning",
+         "text": "Risk check: needs approval for github · create_issue"},
+        {"at": "2026-10-21T09:00:01.050000+00:00", "kind": "agent_started", "level": "info",
+         "text": "Agent started: Digest agent"},
+        {"at": "2026-10-21T09:00:06.300000+00:00", "kind": "tool_call", "level": "info",
+         "text": "Tool call: github · list_issues (1200 ms): 12 open issues", "toolkit": "github",
+         "tool": "list_issues", "summary": "12 open issues", "duration_ms": 1200},
+        {"at": "2026-10-21T09:00:09.000000+00:00", "kind": "paused", "level": "warning",
+         "text": "Paused for approval: github · create_issue", "toolkit": "github", "tool": "create_issue"},
+        {"at": "2026-10-21T09:00:30.000000+00:00", "kind": "decision", "level": "info",
+         "text": "Approved by the schedule owner", "action": "approve", "by": 20},
+        {"at": "2026-10-21T09:00:38.000000+00:00", "kind": "finished", "level": "success",
+         "text": "Run finished: success", "status": "success"},
+    ],
+}
 IMPORT_EXAMPLE = {
     "created": [{"name": "Weekly report", "schedule_id": 13}], "updated": [{"name": "Daily digest", "schedule_id": 12}],
     "skipped": [], "failed": [{"name": "Old job", "reason": "The agent of this schedule is not in the project"}],
@@ -248,6 +278,24 @@ OPERATIONS = {
             "400 an invalid query option; 403 no permission; 404 not found"),
         "parameters": ITEM_PARAMS + RUNS_QUERY_PARAMS,
         "responses": _responses(200, "`total` and one page of `rows`", RUNS_EXAMPLE, {400: None, 403: None, 404: None}),
+    },
+    ("get", RUN): {
+        "name": "Read a run of a schedule",
+        "summary": "Read a run with its event log",
+        "description": _text(
+            "Answer one run for the Test schedule panel: the run fields, the version and its name, the account "
+            "(`principal_label`), the risk check outcome, a `summary` (duration, tokens, cost) and `events`. "
+            "Each event has `at`, `kind`, `text` and `level`; the kinds are started, account, risk_check, "
+            "agent_started, tool_call, paused, decision and finished. Tool calls come from the run conversation; "
+            "the list holds at most 200 events. A tool call has `summary`, the full tool result as the tool "
+            "returned it (raw output, so it can hold sensitive data; cut at 20 000 characters with \" (truncated)\"). "
+            "Tokens and cost are null while the usage store has no row for the conversation. Poll every 2 s "
+            "while the status is `running` or `waiting_for_approval`.",
+            OWNER_OR_ADMIN.format(permission="schedules.details"),
+            "403 no permission; 404 the schedule or the run is not found, or another owner's schedule"),
+        "parameters": RUN_PARAMS,
+        "responses": _responses(200, "The run with `summary` and `events`", RUN_DETAIL_EXAMPLE, {
+            403: None, 404: ("The schedule or the run is not found", RUN_NOT_FOUND)}),
     },
     ("post", f"{ITEM}/owner"): {
         "name": "Change the owner",
