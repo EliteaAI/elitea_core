@@ -194,7 +194,8 @@ def test_7011_r2_2_put_saves_over_a_parallel_first_insert(harness):
 def test_7011_r2_3_put_without_a_boolean_is_400(harness, body):
     response_body, status = _call(harness, 'put', body)
     assert status == 400
-    assert response_body == {'error': 'get_notified must be true or false'}
+    assert response_body == {'code': 'invalid_input', 'error': 'get_notified must be true or false',
+                             'field': 'get_notified'}
     assert harness.rows == {}
 
 

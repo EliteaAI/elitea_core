@@ -29,11 +29,13 @@ from .schedule_claim import fail_run, insert_run, merge_events
 from .schedule_dispatch import START_FAILED, start_schedule_run
 from .schedule_notifications import notify_schedule_event
 from .schedule_service import (
+    INVALID_INPUT,
     ScheduleError,
     check_entity,
     create_schedule,
     delete_schedule,
     load_schedule_in_scope,
+    refusal,
     update_schedule,
 )
 from .schedule_timing import ScheduleLimitError
@@ -43,11 +45,12 @@ RUN_FIELDS = (
     "id", "trigger", "status", "reason", "conversation_id", "requested_by", "started_at", "finished_at",
     "version_id",
 )
-RUN_NOT_FOUND = {"error": "Run not found"}
-ENABLED_NOT_EDITABLE = {
-    "error": "enabled cannot be changed by an edit; use the pause or resume action of the schedule",
-    "field": "enabled",
-}
+RUN_NOT_FOUND = refusal("run_not_found", "Run not found", 404)
+ENABLED_NOT_EDITABLE = refusal(
+    INVALID_INPUT, "enabled cannot be changed by an edit; use the pause or resume action of the schedule",
+    field="enabled",
+)
+LIMIT_REACHED = "schedule_limit_reached"
 RUN_WITHOUT_ASKING = "run_without_asking"
 # The human texts of the save refusals (owner CR 2026-10-21, risk review)
 RULE_NOT_ALLOWED = 'This project does not allow "Run without asking"'
@@ -107,13 +110,8 @@ def _refuse_unallowed_rule(project_id: int, body):
     """Answer 400 when the body asks for "run without asking" and the project does not allow it."""
     from .schedule_settings import is_run_without_asking_allowed
     if body.approval_rule == RUN_WITHOUT_ASKING and not is_run_without_asking_allowed(project_id):
-        return {"code": "approval_rule_not_allowed", "error": RULE_NOT_ALLOWED, "field": "approval_rule"}, 400
+        return refusal("approval_rule_not_allowed", RULE_NOT_ALLOWED, field="approval_rule")
     return None
-
-
-def _refusal(code: str, text: str, status: int, review: dict, **extra) -> ScheduleError:
-    """A save refusal: a stable `code`, a human `error` text and the findings, so a client can retry."""
-    return ScheduleError({"code": code, "error": text, **review, **extra}, status)
 
 
 def _review_save(project_id: int, version_id: int | None, owner_id: int, name: str, rule: str, ack):
@@ -127,19 +125,19 @@ def _review_save(project_id: int, version_id: int | None, owner_id: int, name: s
     review = scan_schedule(project_id, version_id, owner_id)
     without_asking = rule == RUN_WITHOUT_ASKING
     if review["blocking"]:
-        raise _refusal("schedule_blocked", BLOCKED, 409, review)
+        raise ScheduleError("schedule_blocked", BLOCKED, 409, **review)
     if without_asking and not scan_complete(review):
-        raise _refusal("approval_rule_not_allowed", SCAN_INCOMPLETE, 400, review, field="approval_rule")
+        raise ScheduleError("approval_rule_not_allowed", SCAN_INCOMPLETE, field="approval_rule", **review)
     if not review["sensitive"]:
         return review, None
     if ack is None:
-        raise _refusal("risk_confirmation_required", CONFIRM, 409, review)
+        raise ScheduleError("risk_confirmation_required", CONFIRM, 409, **review)
     if ack.fingerprint != review["fingerprint"]:
-        raise _refusal("risk_changed", CHANGED, 409, review)
+        raise ScheduleError("risk_changed", CHANGED, 409, **review)
     if not without_asking:
         return review, None
     if ack.confirmed_name.strip() != name.strip():
-        raise _refusal("risk_name_mismatch", NAME_MISMATCH, 400, review, field="risk_ack")
+        raise ScheduleError("risk_name_mismatch", NAME_MISMATCH, field="risk_ack", **review)
     return review, review
 
 
@@ -172,7 +170,7 @@ def _validation_response(error: ValidationError) -> tuple[dict, int]:
     """Answer 400 with the first broken field and its plain reason."""
     first = error.errors()[0]
     field = first["loc"][0] if first["loc"] else "body"
-    return {"error": first["msg"].removeprefix("Value error, "), "field": field}, 400
+    return refusal(INVALID_INPUT, first["msg"].removeprefix("Value error, "), field=field)
 
 
 def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | ScheduleEdit, reviewed: bool = False):
@@ -199,7 +197,7 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
         except ScheduleError as e:
             return e.response
         except ScheduleLimitError as e:
-            return {"error": str(e)}, 409
+            return refusal(LIMIT_REACHED, str(e), 409)
         except ValidationError as e:  # the stop date does not fit the resulting cron and time zone
             return _validation_response(e)
 
@@ -272,7 +270,7 @@ class ScheduleItemHandlers:
             except ScheduleError as e:
                 return e.response
             except ScheduleLimitError as e:
-                return {"error": str(e)}, 409
+                return refusal(LIMIT_REACHED, str(e), 409)
             return _saved(row, scope, project_id, review), 201
 
     @auth.decorators.check_api(schedule_check_spec("details"))
@@ -301,7 +299,7 @@ class ScheduleItemHandlers:
         """
         raw = request.get_json(silent=True)
         if isinstance(raw, dict) and "enabled" in raw:
-            return ENABLED_NOT_EDITABLE, 400
+            return ENABLED_NOT_EDITABLE
         body, error = _parse_body(ScheduleEdit)
         if error:
             return error
@@ -361,9 +359,9 @@ class ScheduleItemHandlers:
             except ScheduleError as e:
                 return e.response
             if row.created_by != scope.user_id:  # an admin sees the row but never runs it as the owner
-                return {"error": "not_owner"}, 403
+                return refusal("not_owner", "Only the owner of this schedule can run it", 403)
             if row.version_id is None:
-                return {"error": "version_deleted"}, 409
+                return refusal("version_deleted", "The version of this schedule was deleted; choose a version", 409)
             entity_type = row.entity_type
             run_id = insert_run(session, schedule_id, body.trigger, scope.user_id)
             if run_id is None:
@@ -371,12 +369,12 @@ class ScheduleItemHandlers:
                     EntityScheduleRun.schedule_id == schedule_id,
                     EntityScheduleRun.status.in_(("running", "waiting_for_approval")),
                 ))
-                return {"error": "A run of this schedule is active", "active_run_id": active_id}, 409
+                return refusal("run_active", "A run of this schedule is active", 409, active_run_id=active_id)
             session.commit()
             if not start_schedule_run(entity_type, project_id, schedule_id, run_id):
                 fail_run(session, run_id, START_FAILED)
                 session.commit()
-                return {"error": "The run could not start"}, 500
+                return refusal("run_start_failed", "The run could not start", 500)
             return {"run_id": run_id}, 202
 
     @auth.decorators.check_api(schedule_check_spec("details"))
@@ -428,7 +426,7 @@ class ScheduleItemHandlers:
             run = session.scalar(select(EntityScheduleRun).where(
                 EntityScheduleRun.id == run_id, EntityScheduleRun.schedule_id == schedule_id))
             if run is None:
-                return RUN_NOT_FOUND, 404
+                return RUN_NOT_FOUND
             row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
             tokens, cost_usd = usage_summary(session, project_id, run)
             events = merge_events(run.events, tool_call_events(session, run.conversation_id))
@@ -461,7 +459,7 @@ class ScheduleItemHandlers:
         body = request.get_json(silent=True)
         owner_id = body.get("owner_id") if isinstance(body, dict) else None
         if type(owner_id) is not int:  # strict: "20", true and 20.0 are no owner ids (R2.3)
-            return {"error": "owner_id must be an integer", "field": "owner_id"}, 400
+            return refusal(INVALID_INPUT, "owner_id must be an integer", field="owner_id")
         scope = schedule_scope(project_id)
         with db.get_session(project_id) as session:
             try:
@@ -470,9 +468,9 @@ class ScheduleItemHandlers:
                 return e.response
             reason = validate_new_owner(project_id, owner_id)
             if reason == ACCESS_CHECK_UNAVAILABLE:
-                return {"error": reason}, 503
+                return refusal("access_check_unavailable", reason, 503)
             if reason:
-                return {"error": reason, "field": "owner_id"}, 400
+                return refusal(INVALID_INPUT, reason, field="owner_id")
             change = change_schedule_owner(session, row, owner_id, scope.user_id)
             if change:
                 mark_owner_change_span(row)

@@ -44,9 +44,9 @@ def env(monkeypatch):
         service = types.ModuleType(f'{PACKAGE}.utils.schedule_service')
 
         class ScheduleError(Exception):
-            def __init__(self, body, status=400):
-                super().__init__(body.get('error'))
-                self.response = body, status
+            def __init__(self, code, text, status=400, **extra):
+                super().__init__(text)
+                self.response = {'code': code, 'error': text, **extra}, status
 
         service.ScheduleError = ScheduleError
         sys.modules[service.__name__] = service
@@ -117,6 +117,7 @@ def test_7011_r1_4_export_with_unknown_ids_raises_400_listing_them(env):
         env.module.export_schedules_yaml(PROJECT_ID, [known, 901, 902])
     body, status = error.value.response
     assert status == 400
+    assert (body['code'], body['field']) == ('invalid_input', 'ids')
     assert body['error'] == 'Unknown schedule ids: 901, 902'
 
 
@@ -128,6 +129,7 @@ def test_7011_r1_4_export_above_the_import_cap_raises_400(env, monkeypatch):
         env.module.export_schedules_yaml(PROJECT_ID, None)
     body, status = error.value.response
     assert status == 400
+    assert body['code'] == 'too_many_schedules'
     assert 'export them in parts by ids' in body['error']
     assert len(env.items(ids[:2])) == 2
 
