@@ -1,5 +1,5 @@
-"""Due query, claim and cron run insert of the schedule tick (EL-7011)."""
-from datetime import datetime
+"""Due query, claim and cron run insert of the schedule tick, and the event list of a run (EL-7011)."""
+from datetime import UTC, datetime
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -8,6 +8,41 @@ from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 
 # Must stay stable across deploys: the legacy step of the tick and the migration (US-24) take the same keys
 LEGACY_LOCK_BASE = 7011 << 32
+# Stored events per run. A run writes about ten; a long approval loop keeps its first 199 and its newest one
+EVENT_LIMIT = 200
+TEXT_LIMIT = 300
+FINISH_LEVELS = {'success': 'success', 'failed': 'error'}  # blocked and skipped are warnings
+
+
+def run_event(kind: str, text: str, level: str = 'info', **data) -> dict:
+    """One event of the run log: time, kind, a short text, the level the log colours it by, and small data."""
+    return {
+        'at': datetime.now(UTC).isoformat(), 'kind': kind, 'text': str(text)[:TEXT_LIMIT], 'level': level,
+        **{key: value for key, value in data.items() if value is not None},
+    }
+
+
+def finished_event(status: str, reason: str | None = None) -> dict:
+    """The last event of a run: its final status and the reason."""
+    text = f'Run finished: {status}' + (f' ({reason})' if reason else '')
+    return run_event('finished', text, FINISH_LEVELS.get(status, 'warning'), status=status)
+
+
+def append_run_events(session, run_id: int, *events: dict, **columns) -> None:
+    """Add events to a run, and set `columns`, in the caller's transaction; the row is locked first.
+
+    Over `EVENT_LIMIT` the first events stay and the newest takes the last place, so the end is never lost.
+    """
+    run = session.scalar(
+        select(EntityScheduleRun).where(EntityScheduleRun.id == run_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if run is None:
+        return
+    merged = [*(run.events or []), *events]
+    run.events = merged if len(merged) <= EVENT_LIMIT else [*merged[:EVENT_LIMIT - 1], merged[-1]]
+    for name, value in columns.items():
+        setattr(run, name, value)
 
 
 def select_due_schedules(session, entity_types, limit: int) -> list[EntitySchedule]:
@@ -67,6 +102,7 @@ def fail_run(session, run_id: int, reason: str) -> int | None:
     )
     if schedule_id is not None:
         session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status='failed'))
+        append_run_events(session, run_id, finished_event('failed', reason))
     return schedule_id
 
 
