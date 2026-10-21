@@ -2,6 +2,7 @@
 import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from uuid import UUID
 
 from opentelemetry import trace as otel_trace
 from pylon.core.tools import log
@@ -152,8 +153,10 @@ def _notify_owner(project_id: int, owner_id: int, schedule, action: str = 'edite
         log.error('Schedule %s: cannot send the admin change notice: %s', schedule.id, e)
 
 
-def create_schedule(session, project_id: int, body: ScheduleCreate, scope: ScheduleScope) -> EntitySchedule:
-    """Store a new schedule owned by the caller and running as the caller.
+def create_schedule(
+        session, project_id: int, body: ScheduleCreate, scope: ScheduleScope, key: UUID | None = None,
+) -> EntitySchedule:
+    """Store a new schedule owned by the caller and running as the caller; `key` sets the uuid (import only).
 
     Raises:
         ScheduleError: When an entity or run input rule fails.
@@ -172,6 +175,8 @@ def create_schedule(session, project_id: int, body: ScheduleCreate, scope: Sched
         principal={'kind': 'delegation', 'ref': scope.user_id},
         next_run=compute_next_run(body.cron, body.timezone, datetime.now(UTC)),
     )
+    if key is not None:
+        row.uuid = key
     session.add(row)
     session.commit()
     return row

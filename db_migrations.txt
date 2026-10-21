@@ -6,9 +6,10 @@
 # Run for every existing project schema {pid} (e.g. p_1, p_2, …).
 # New projects get the tables via create_all() on project creation.
 # Idempotent: every statement is IF NOT EXISTS; constraints live inside CREATE TABLE.
-# No backfill: all three tables are new.
+# The ADD COLUMN gives every row of a table made by an earlier run of this block its own uuid (CR-04).
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedules (
     id SERIAL PRIMARY KEY,
+    uuid UUID NOT NULL DEFAULT gen_random_uuid(),
     entity_type VARCHAR(16) NOT NULL,
     application_id INTEGER NOT NULL REFERENCES {pid}.applications(id) ON DELETE CASCADE,
     version_id INTEGER NULL REFERENCES {pid}.application_versions(id) ON DELETE SET NULL,
@@ -45,6 +46,8 @@ CREATE INDEX IF NOT EXISTS ix_entity_schedules_created_by
     ON {pid}.entity_schedules (created_by);
 CREATE INDEX IF NOT EXISTS ix_entity_schedules_application_version
     ON {pid}.entity_schedules (application_id, version_id);
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS uuid UUID NOT NULL DEFAULT gen_random_uuid();
+CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_schedules_uuid ON {pid}.entity_schedules (uuid);
 
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_runs (
     id SERIAL PRIMARY KEY,

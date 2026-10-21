@@ -7,6 +7,7 @@ Run via:
 """
 import sys
 import types
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -17,7 +18,7 @@ from unit.test_7011_schedule_yaml_import import load_plugin_module, sandbox
 PACKAGE = 'plugins.elitea_core'
 PROJECT_ID = 7
 ALLOWED_KEYS = [
-    'name', 'description', 'entity_type', 'entity_name', 'version_name', 'run_mode', 'cron', 'timezone',
+    'key', 'name', 'description', 'entity_type', 'entity_name', 'version_name', 'run_mode', 'cron', 'timezone',
     'prompt', 'variables', 'expires_at', 'approval_rule',
 ]
 
@@ -61,7 +62,7 @@ def test_7011_r1_1_export_writes_the_header_and_every_schedule_of_every_owner(en
     env.seed(name='A', created_by=42)
     env.seed(name='B', created_by=43)
     data = env.export()
-    assert (data['kind'], data['schema_version']) == ('elitea_schedules', 1)
+    assert (data['kind'], data['schema_version']) == ('elitea_schedules', 2)
     assert [item['name'] for item in data['schedules']] == ['A', 'B']
 
 
@@ -81,6 +82,15 @@ def test_7011_r1_3_export_writes_only_the_allow_listed_keys_in_order(env):
     item = env.items()[0]
     assert list(item) == ALLOWED_KEYS
     assert (item['entity_name'], item['version_name'], item['description']) == ('Entity', 'base', 'Digest')
+
+
+def test_7011_r1_3_export_writes_the_schedule_uuid_as_the_key(env):
+    key = uuid.UUID(int=7)
+    env.seed(uuid=key)
+    env.seed(name='Other')
+    first, second = env.items()
+    assert first['key'] == str(key)
+    assert uuid.UUID(second['key']) != key
 
 
 def test_7011_r1_3_export_leaves_out_owner_state_and_run_data(env):
