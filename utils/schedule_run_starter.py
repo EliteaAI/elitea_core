@@ -64,9 +64,12 @@ def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> 
         return True
 
 
-def _secret_allows_auto_approve(project_id: int) -> bool:
-    """The project secret check (R3.2); the late import keeps the secret store off every other run."""
-    from .schedule_risk import is_run_without_asking_allowed
+def _setting_allows_auto_approve(project_id: int) -> bool:
+    """The project setting "Allow Run without asking" (R3.2); off or unreadable means pause and ask.
+
+    The late import keeps the settings store off every other run.
+    """
+    from .schedule_settings import is_run_without_asking_allowed
     return is_run_without_asking_allowed(project_id)
 
 
@@ -92,7 +95,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
-    auto_approve = loaded.schedule.approval_rule == 'run_without_asking' and _secret_allows_auto_approve(project_id)
+    auto_approve = loaded.schedule.approval_rule == 'run_without_asking' and _setting_allows_auto_approve(project_id)
     manual = getattr(loaded, 'trigger', 'cron') in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
     try:

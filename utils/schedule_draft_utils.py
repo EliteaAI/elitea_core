@@ -3,16 +3,14 @@ import json
 from datetime import date
 
 from pydantic import ValidationError
-from pylon.core.tools import log
 
 from ..models.pd.entity_schedule import ScheduleTiming
 from ..models.pd.generate_schedule_draft import ScheduleDraft
+from .schedule_settings import is_run_without_asking_allowed
 
 RUN_MODES = ('entry_point', 'prompt')
 RUN_WITHOUT_ASKING = 'run_without_asking'
 PAUSE_AND_ASK = 'pause_and_ask'
-ALLOW_SECRET = 'schedules_allow_run_without_asking'
-TRUE_VALUES = ('true', '1', 'yes')
 # Fields with no rule of their own: the response model decides whether the value fits
 PLAIN_FIELDS = ('name', 'description', 'prompt', 'variables', 'expires_at', 'approval_rule')
 
@@ -73,17 +71,6 @@ def build_schedule_draft_prompt(
         for key, value in values.items():
             template = template.replace('{' + key + '}', value)
         return template
-
-
-def _allows_run_without_asking(project_id: int) -> bool:
-    from tools import VaultClient  # pylint: disable=E0401,C0415
-
-    try:
-        secret = VaultClient(project_id).get_all_secrets().get(ALLOW_SECRET)
-    except Exception:  # noqa: BLE001 -- an unreadable secret never allows "Run without asking" (R2.4)
-        log.exception('Project %s: cannot read the %s secret', project_id, ALLOW_SECRET)
-        return False
-    return str(secret).strip().lower() in TRUE_VALUES
 
 
 def _same_name(left, right) -> bool:
@@ -193,7 +180,7 @@ def validate_schedule_draft(
     _resolve_entity(schedule_roster(project_id) if roster is None else roster, raw, locked_entity, out, warn)
     _apply_run_mode(raw, out, warn)
     _check_approval_rule(out, warn)
-    if out.get('approval_rule') == RUN_WITHOUT_ASKING and not _allows_run_without_asking(project_id):
+    if out.get('approval_rule') == RUN_WITHOUT_ASKING and not is_run_without_asking_allowed(project_id):
         out['approval_rule'] = PAUSE_AND_ASK
         warn('approval_rule', 'This project does not allow "Run without asking"; set "Pause and ask me"')
     return ScheduleDraft(**out), warnings
