@@ -28,7 +28,7 @@ ADMIN_ID = 99
 PERMISSION_PREFIX = 'models.applications.schedules.'
 EDITOR = {PERMISSION_PREFIX + verb for verb in ('list', 'details', 'create', 'update', 'delete', 'run')}
 ADMIN = EDITOR | {PERMISSION_PREFIX + 'admin'}
-NOT_FOUND = {'error': 'Schedule not found'}
+NOT_FOUND = {'code': 'not_found', 'error': 'Schedule not found'}
 
 
 class FakeSpan:
