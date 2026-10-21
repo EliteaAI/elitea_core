@@ -15,21 +15,29 @@ AGENT = {'entity_type': 'agent', 'entity_name': 'Digest agent', 'version_name': 
 PIPELINE = {'entity_type': 'pipeline', 'entity_name': 'Report flow', 'version_name': 'base'}
 
 
+OWNER_ID = 7
+
+
 @pytest.fixture
 def setting():
-    """The project setting "Allow Run without asking" and the project ids it was read for."""
-    return types.SimpleNamespace(allowed=False, reads=[])
+    """The project setting "Allow Run without asking", the project ids it was read for, and the risk review."""
+    return types.SimpleNamespace(allowed=False, reads=[], sensitive=[], notices=[], scans=[])
 
 
 def load_draft_utils(monkeypatch, setting=None):
-    """schedule_draft_utils on its real models, with the roster above and the given project setting."""
-    setting = setting or types.SimpleNamespace(allowed=False, reads=[])
+    """schedule_draft_utils on its real models, with the roster above, the given project setting and risk review."""
+    setting = setting or types.SimpleNamespace(allowed=False, reads=[], sensitive=[], notices=[], scans=[])
     stub = types.ModuleType('tools')
     stub.this = types.SimpleNamespace(module=types.SimpleNamespace(descriptor=types.SimpleNamespace(config={})))
     monkeypatch.setitem(sys.modules, 'tools', stub)
     settings = types.ModuleType('plugins.elitea_core.utils.schedule_settings')
     settings.is_run_without_asking_allowed = lambda project_id: setting.reads.append(project_id) or setting.allowed
     monkeypatch.setitem(sys.modules, settings.__name__, settings)
+    risk = types.ModuleType('plugins.elitea_core.utils.schedule_risk')
+    risk.scan_schedule = lambda *args: setting.scans.append(args) or {
+        'blocking': [], 'sensitive': list(setting.sensitive), 'notices': list(setting.notices), 'fingerprint': 'fp'}
+    risk.scan_complete = lambda review: not any(n['code'] == 'scan_incomplete' for n in review['notices'])
+    monkeypatch.setitem(sys.modules, risk.__name__, risk)
     for dotted in ('utils.schedule_timing', 'models.pd.entity_schedule', 'models.pd.generate_schedule_draft',
                    'utils.schedule_draft_utils'):
         monkeypatch.setitem(sys.modules, 'plugins.elitea_core.' + dotted, None)
@@ -45,7 +53,7 @@ def load_draft_utils(monkeypatch, setting=None):
 @pytest.fixture
 def validate(setting, monkeypatch):
     module = load_draft_utils(monkeypatch, setting)
-    return lambda raw, locked=None: module.validate_schedule_draft(1, raw, locked)
+    return lambda raw, locked=None: module.validate_schedule_draft(1, raw, locked, owner_id=OWNER_ID)
 
 
 def _fields(warnings):
@@ -200,7 +208,7 @@ def test_el_7011_r2_1_a_future_stop_date_is_kept(validate):
 def test_el_7011_p3_a_given_roster_is_used_instead_of_a_new_read(monkeypatch):
     module = load_draft_utils(monkeypatch)
     monkeypatch.setattr(module, 'schedule_roster', lambda project_id: pytest.fail('roster read twice'))
-    draft, _ = module.validate_schedule_draft(1, AGENT, None, ROSTER)
+    draft, _ = module.validate_schedule_draft(1, AGENT, None, ROSTER, owner_id=OWNER_ID)
     assert draft.application_id == 42
 
 
@@ -214,3 +222,35 @@ def test_el_7011_r2_2_a_version_without_an_entity_name_is_warned(validate):
     draft, warnings = validate({'entity_type': 'agent', 'version_name': 'base'})
     assert (draft.application_id, draft.version_id) == (None, None)
     assert _fields(warnings) == ['version_id']
+
+
+# Owner CR 2026-10-21 (risk review): Build with AI never confirms sensitive tools
+SENSITIVE = {'code': 'sensitive_action', 'toolkit': 'Outlook', 'tool': 'send_email', 'message': 'needs approval'}
+
+
+def test_el7011_cr_a_draft_with_sensitive_tools_becomes_pause_and_ask_with_a_warning(validate, setting):
+    setting.allowed, setting.sensitive = True, [SENSITIVE]
+    draft, warnings = validate({**AGENT, 'approval_rule': 'run_without_asking'})
+    assert draft.approval_rule == 'pause_and_ask'
+    assert _fields(warnings) == ['approval_rule'] and 'Pause and ask me' in warnings[0]['reason']
+    assert setting.scans == [(1, 420, OWNER_ID)]
+
+
+def test_el7011_cr_a_draft_with_an_incomplete_scan_becomes_pause_and_ask(validate, setting):
+    setting.allowed, setting.notices = True, [{'code': 'scan_incomplete', 'message': 'x'}]
+    draft, _ = validate({**AGENT, 'approval_rule': 'run_without_asking'})
+    assert draft.approval_rule == 'pause_and_ask'
+
+
+def test_el7011_cr_a_draft_without_sensitive_tools_keeps_run_without_asking(validate, setting):
+    setting.allowed = True
+    draft, warnings = validate({**AGENT, 'approval_rule': 'run_without_asking'})
+    assert (draft.approval_rule, warnings) == ('run_without_asking', [])
+
+
+def test_el7011_cr_a_draft_without_a_version_or_with_pause_and_ask_scans_nothing(validate, setting):
+    setting.allowed, setting.sensitive = True, [SENSITIVE]
+    draft, _ = validate({'approval_rule': 'run_without_asking'})
+    assert draft.approval_rule == 'run_without_asking'  # the form's check runs once a version is chosen
+    validate({**AGENT, 'approval_rule': 'pause_and_ask'})
+    assert setting.scans == []

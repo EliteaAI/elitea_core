@@ -78,6 +78,10 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     last_run_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_conversation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Who confirmed "Run without asking", when, and the fingerprint of the sensitive tools they saw
+    approval_confirmed_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    approval_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approval_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

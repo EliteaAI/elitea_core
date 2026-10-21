@@ -73,6 +73,29 @@ PROMPT_EXAMPLE = 'Summarize the open tickets'
 VARIABLES_EXAMPLE = [{'name': 'ticket_limit', 'value': '20'}]
 
 
+RISK_ACK_TEXT = ('The acknowledgement of the sensitive tools: send it again after a 409 '
+                 '`risk_confirmation_required` or `risk_changed`, with the `fingerprint` of that answer')
+
+
+class RiskAck(BaseModel):
+    """What the person confirmed in the dialog "Review risks before scheduling" (owner CR 2026-10-21)."""
+    fingerprint: str = Field(min_length=1, description='The `fingerprint` of the check or of the 409 answer',
+                             examples=['3f1c9a0e5b7d4c2a8e6f0b1d3c5a7e9f2b4d6f8a0c2e4a6b8d0f2a4c6e8b0d2f'])
+    confirmed_name: str = Field('', description='The schedule name the person typed; must equal the schedule '
+                                                'name when the rule is `run_without_asking`',
+                                examples=['Daily report'])
+
+
+class ScheduleRiskCheck(BaseModel):
+    """The body of the dry-run risk check: the version that would run."""
+    model_config = ConfigDict(json_schema_extra={'examples': [
+        {'entity_type': 'agent', 'application_id': 12, 'version_id': 34}]})
+
+    entity_type: Literal['agent', 'pipeline'] = Field(description='Kind of the scheduled entity', examples=['agent'])
+    application_id: int = Field(description='Id of the agent or pipeline', examples=[12])
+    version_id: int = Field(description=VERSION_TEXT, examples=[34])
+
+
 class ScheduleVariable(BaseModel):
     name: str = Field(min_length=1, description='Variable name of the agent prompt or the pipeline',
                       examples=['ticket_limit'])
@@ -97,6 +120,8 @@ class ScheduleCreate(ScheduleTiming):
     variables: list[ScheduleVariable] = Field([], description=VARIABLES_TEXT, examples=[VARIABLES_EXAMPLE])
     enabled: bool = Field(True, description='False saves the schedule paused', examples=[True])
     approval_rule: ApprovalRule = Field('pause_and_ask', description=APPROVAL_TEXT, examples=['pause_and_ask'])
+    risk_ack: RiskAck | None = Field(None, description=RISK_ACK_TEXT,
+                                     examples=[{'fingerprint': '3f1c9a0e', 'confirmed_name': NAME_EXAMPLE}])
 
 
 class ScheduleEdit(BaseModel):
@@ -114,6 +139,8 @@ class ScheduleEdit(BaseModel):
     timezone: str | None = Field(None, description=TIMEZONE_TEXT, examples=['Europe/Warsaw'])
     expires_at: date | None = Field(None, description=EXPIRES_TEXT, examples=['2026-12-31'])
     approval_rule: ApprovalRule | None = Field(None, description=APPROVAL_TEXT, examples=['run_without_asking'])
+    risk_ack: RiskAck | None = Field(None, description=RISK_ACK_TEXT,
+                                     examples=[{'fingerprint': '3f1c9a0e', 'confirmed_name': NAME_EXAMPLE}])
 
     @field_validator('cron')
     @classmethod
@@ -163,4 +190,6 @@ class ScheduleDetails(BaseModel):
     last_run_status: str | None
     disabled_reason: str | None
     approval_rule: str
+    approval_confirmed_by: str | None = None  # the name of who confirmed "Run without asking"
+    approval_confirmed_at: datetime | None = None
     allowed_actions: list[str]

@@ -1,7 +1,10 @@
 """EL-7011 US-17: the save-time risk scan (R1.1-R1.3, R2.1, R2.2) of utils/schedule_risk.py.
 
-The module loads alone behind stand-ins for `tools`, the models and the owner expansion.
+Owner CR 2026-10-21 (risk review): `scan_schedule` splits the findings into `blocking`, `sensitive`
+and `notices`, and gives the `fingerprint` of the sensitive tools. The module loads alone behind
+stand-ins for `tools`, the models and the owner expansion.
 """
+import hashlib
 import json
 import pathlib
 import sys
@@ -13,6 +16,7 @@ from fixtures.helpers import load_module_with_stubs
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
 PKG = 'plugins.elitea_core'
 VERSION_ID = 7
+DEFAULT_INFO = {'badge': 'needs_approval', 'effect': 'This tool can change data outside ELITEA.'}
 
 
 class ConfigurationExpandError(Exception):
@@ -54,7 +58,8 @@ def _version(agent_type='openai', meta=None, instructions=None, tools=()):
 
 @pytest.fixture
 def scan(isolated_sys_modules):
-    state = types.SimpleNamespace(version=None, expand_errors={}, expanded={}, calls=[], sensitive=set())
+    state = types.SimpleNamespace(version=None, expand_errors={}, expanded={}, calls=[], sensitive=set(),
+                                  tool_info={})
 
     def expand_toolkit_settings(type_, settings, project_id, user_id):
         state.calls.append((type_, project_id, user_id))
@@ -78,6 +83,7 @@ def scan(isolated_sys_modules):
     sys.modules[models_all.__name__] = models_all
     security = types.ModuleType(f'{PKG}.utils.toolkit_security')
     security.is_tool_sensitive = lambda type_, tool_name: (type_, tool_name) in state.sensitive
+    security.sensitive_tool_info = lambda type_, tool_name: state.tool_info.get((type_, tool_name), DEFAULT_INFO)
     sys.modules[security.__name__] = security
     app_tools = types.ModuleType(f'{PKG}.utils.application_tools')
     app_tools.ConfigurationExpandError = ConfigurationExpandError
@@ -85,9 +91,16 @@ def scan(isolated_sys_modules):
     sys.modules[app_tools.__name__] = app_tools
     load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'pipeline_utils.py', f'{PKG}.utils.pipeline_utils')
     module = load_module_with_stubs(PLUGIN_ROOT / 'utils' / 'schedule_risk.py', f'{PKG}.utils.schedule_risk')
-    state.run = lambda version_id=VERSION_ID: module.scan_schedule_risks(12, version_id, 42)
+    state.review = lambda version_id=VERSION_ID: module.scan_schedule(12, version_id, 42)
+    state.run = lambda version_id=VERSION_ID: _flat(state.review(version_id))
     state.module = module
     return state
+
+
+def _flat(review):
+    """Every finding in the order blocking, sensitive, notices; the fix link has its own test."""
+    return [{key: value for key, value in item.items() if key != 'fix'}
+            for item in review['blocking'] + review['sensitive'] + review['notices']]
 
 
 def _codes(warnings):
@@ -116,6 +129,7 @@ class TestEL7011R1HumanSteps:
         warnings = scan.run()
         assert _codes(warnings) == ['human_input_step'] * 2
         assert [w['step'] for w in warnings] == ['Review', 'Show']
+        assert [w['step_label'] for w in warnings] == ['Review', 'Show']
 
     def test_r1_1_version_without_human_steps_has_no_warning(self, scan):
         scan.version = _version(meta={'internal_tools': ['python']})
@@ -140,8 +154,8 @@ class TestEL7011R1HumanSteps:
         )
         scan.expand_errors = {'jira': [{'loc': ('x',), 'msg': 'boom'}], 'git': [_error('a', 'credential_not_found')]}
         warnings = scan.run()
-        assert _codes(warnings) == ['human_input_step', 'scan_incomplete', 'missing_credential', 'token_may_expire']
-        assert warnings[1]['toolkit'] == 'Jira'
+        assert _codes(warnings) == ['human_input_step', 'missing_credential', 'personal_signin_required', 'scan_incomplete']
+        assert warnings[3]['toolkit'] == 'Jira'
 
 
 class TestEL7011R2Credentials:
@@ -172,16 +186,20 @@ class TestEL7011R2PersonalToken:
         _tool('mcp_github', 'Hub', meta={'mcp': True}),
         _tool('openapi', 'Api', settings={'oauth_discovery_endpoint': 'https://idp'}),
     ])
-    def test_r2_2_mcp_and_inline_openapi_endpoint_warn(self, scan, tool):
+    def test_el7011_cr_mcp_and_inline_openapi_endpoint_block_the_save(self, scan, tool):
         scan.version = _version(tools=[tool])
-        [warning] = scan.run()
-        assert warning == {'code': 'token_may_expire', 'message': warning['message'], 'toolkit': tool.name}
+        [warning] = scan.review()['blocking']
+        assert warning == {
+            'code': 'personal_signin_required', 'message': warning['message'], 'toolkit': tool.name,
+            'toolkit_type': tool.type, 'reason': 'needs a personal sign-in',
+            'fix': {'entity_type': 'agent', 'id': 3, 'version_id': VERSION_ID},
+        }
 
     @pytest.mark.parametrize('type_', ['sharepoint', 'openapi'])
-    def test_r2_2_credential_with_discovery_endpoint_warns(self, scan, type_):
+    def test_r2_2_credential_with_discovery_endpoint_blocks(self, scan, type_):
         scan.version = _version(tools=[_tool(type_, 'Docs', settings={f'{type_}_configuration': {'elitea_title': 'c'}})])
         scan.expanded[type_] = {f'{type_}_configuration': {'oauth_discovery_endpoint': 'https://idp'}}
-        assert _codes(scan.run()) == ['token_may_expire']
+        assert _codes(scan.run()) == ['personal_signin_required']
 
     @pytest.mark.parametrize('type_', ['sharepoint', 'openapi'])
     def test_r2_2_app_only_credential_does_not_warn(self, scan, type_):
@@ -196,7 +214,7 @@ class TestEL7011R2PersonalToken:
 
     def test_r2_2_warning_text_holds_no_secret(self, scan):
         scan.version = _version(tools=[_tool('openapi', 'Api', settings={'oauth_discovery_endpoint': 'https://idp', 'token': 's3cret'})])
-        assert 's3cret' not in json.dumps(scan.run())
+        assert 's3cret' not in json.dumps(scan.review())
 
 
 class TestEL7011R2SensitiveActions:
@@ -205,8 +223,8 @@ class TestEL7011R2SensitiveActions:
         scan.version = _version(tools=[_tool(settings={'selected_tools': ['get_issue', 'delete_issue']})])
         [warning] = scan.run()
         assert warning == {
-            'code': 'sensitive_action', 'message': warning['message'],
-            'toolkit': 'Jira', 'tool': 'delete_issue', 'risk_level': 'needs_approval',
+            'code': 'sensitive_action', 'message': warning['message'], 'toolkit': 'Jira', 'toolkit_type': 'jira',
+            'tool': 'delete_issue', 'risk_level': 'needs_approval', **DEFAULT_INFO,
         }
 
     def test_el7011_r2_3_unlisted_tool_gives_no_warning(self, scan):
@@ -223,3 +241,53 @@ def test_el7011_cr_the_scan_no_longer_owns_the_run_without_asking_check(scan):
     """Owner CR 2026-10-21: the project setting replaces the secret; utils/schedule_settings.py owns the check."""
     assert not hasattr(scan.module, 'is_run_without_asking_allowed')
     assert not hasattr(scan.module, 'ALLOW_RUN_WITHOUT_ASKING_SECRET')
+
+
+class TestEL7011CrRiskReviewSplit:
+    """Owner CR 2026-10-21: what blocks a save, what needs a confirmation, what is only a notice."""
+
+    def test_el7011_cr_blocking_findings_carry_the_fix_link_of_the_entity(self, scan):
+        scan.version = _version('pipeline', instructions=PIPELINE, tools=[_tool('git', 'Git'), _tool('mcp', 'Remote')])
+        scan.expand_errors = {'git': [_error('a', 'credential_not_found')]}
+        review = scan.review()
+        assert _codes(review['blocking']) == [
+            'human_input_step', 'human_input_step', 'missing_credential', 'personal_signin_required']
+        assert all(item['fix'] == {'entity_type': 'pipeline', 'id': 3, 'version_id': VERSION_ID}
+                   for item in review['blocking'])
+        assert review['sensitive'] == [] and review['notices'] == []
+
+    def test_el7011_cr_sensitive_tools_take_badge_and_effect_from_the_policy(self, scan):
+        scan.sensitive = {('outlook', 'send_email')}
+        scan.tool_info = {('outlook', 'send_email'): {'badge': 'sends_messages', 'effect': 'Sends e-mail'}}
+        scan.version = _version(tools=[_tool('outlook', 'Outlook', settings={'selected_tools': ['send_email']})])
+        [item] = scan.review()['sensitive']
+        assert (item['toolkit_type'], item['tool'], item['badge'], item['effect']) == (
+            'outlook', 'send_email', 'sends_messages', 'Sends e-mail')
+
+    def test_el7011_cr_a_scan_failure_is_a_notice_and_the_scan_is_incomplete(self, scan):
+        scan.version = _version(tools=[_tool('jira', 'Jira')])
+        scan.expand_errors = {'jira': [{'loc': ('x',), 'msg': 'boom'}]}
+        review = scan.review()
+        assert review['blocking'] == [] and _codes(review['notices']) == ['scan_incomplete']
+        assert scan.module.scan_complete(review) is False
+        scan.expand_errors = {}
+        assert scan.module.scan_complete(scan.review()) is True
+
+    def test_el7011_cr_fingerprint_is_sha256_of_version_and_sorted_sensitive_tools(self, scan):
+        scan.sensitive = {('jira', 'delete_issue'), ('jira', 'create_issue')}
+        scan.version = _version(tools=[_tool(settings={'selected_tools': ['delete_issue', 'create_issue']})])
+        expected = hashlib.sha256(json.dumps(
+            [VERSION_ID, [['Jira', 'create_issue'], ['Jira', 'delete_issue']]]).encode()).hexdigest()
+        assert scan.review()['fingerprint'] == expected
+
+    def test_el7011_cr_fingerprint_changes_when_a_sensitive_tool_is_added(self, scan):
+        scan.sensitive = {('jira', 'delete_issue'), ('jira', 'create_issue')}
+        scan.version = _version(tools=[_tool(settings={'selected_tools': ['delete_issue']})])
+        before = scan.review()['fingerprint']
+        scan.version.tools = [_tool(settings={'selected_tools': ['delete_issue', 'create_issue']})]
+        assert scan.review()['fingerprint'] != before
+
+    def test_el7011_cr_missing_version_gives_an_empty_review(self, scan):
+        review = scan.review(version_id=None)
+        assert (review['blocking'], review['sensitive'], review['notices']) == ([], [], [])
+        assert isinstance(review['fingerprint'], str)

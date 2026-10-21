@@ -1,4 +1,9 @@
-"""Save-time risk scan of a schedule's target version (EL-7011, US-17)."""
+"""Risk review of a schedule's target version (EL-7011, US-17; owner CR 2026-10-21).
+
+`scan_schedule` sorts the findings in three groups. `blocking` stops a save and a run. `sensitive`
+needs a confirmation that names the `fingerprint`. `notices` never stop anything.
+"""
+import hashlib
 import json
 
 from pylon.core.tools import log
@@ -10,6 +15,9 @@ from .pipeline_utils import validate_yaml_from_str
 
 CREDENTIAL_ERRORS = {'private_credential_not_found', 'credential_not_found', 'credential_type_mismatch'}
 HUMAN_NODE_TYPES = {'hitl', 'printer'}
+BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
+SENSITIVE_CODE = 'sensitive_action'
+INCOMPLETE_CODE = 'scan_incomplete'
 
 
 def _warning(code, message, **extra):
@@ -20,7 +28,8 @@ def _human_steps(version) -> list:
     if version.agent_type == 'pipeline':
         nodes = validate_yaml_from_str(version.instructions).get('nodes') or []
         return [
-            _warning('human_input_step', f'Node "{node.get("id")}" waits for a person', step=node.get('id'))
+            _warning('human_input_step', f'Node "{node.get("id")}" waits for a person',
+                     step=node.get('id'), step_label=node.get('name') or node.get('id'))
             for node in nodes if isinstance(node, dict) and node.get('type') in HUMAN_NODE_TYPES
         ]
     if 'ask_user' in ((version.meta or {}).get('internal_tools') or []):
@@ -53,12 +62,14 @@ def _sensitive_warnings(tool, name) -> list:
     selected = (tool.settings or {}).get('selected_tools') or []
     if not selected:
         return []
-    from .toolkit_security import (
-        is_tool_sensitive,  # late: the policy reads the plugin descriptor
+    from .toolkit_security import (  # late: the policy reads the plugin descriptor
+        is_tool_sensitive,
+        sensitive_tool_info,
     )
     return [
-        _warning('sensitive_action', f'Tool "{tool_name}" of toolkit "{name}" needs approval',
-                 toolkit=name, tool=tool_name, risk_level='needs_approval')
+        _warning(SENSITIVE_CODE, f'Tool "{tool_name}" of toolkit "{name}" needs approval',
+                 toolkit=name, toolkit_type=tool.type, tool=tool_name, risk_level='needs_approval',
+                 **sensitive_tool_info(tool.type, tool_name))
         for tool_name in selected if is_tool_sensitive(tool.type, tool_name)
     ]
 
@@ -69,30 +80,60 @@ def _toolkit_warnings(tool, project_id, owner_id) -> list:
         expanded = expand_toolkit_settings(tool.type, tool.settings or {}, project_id, owner_id)
     except ConfigurationExpandError as ex:
         if _error_types(ex.errors) & CREDENTIAL_ERRORS:
-            return [_warning('missing_credential', f'Toolkit "{name}" has no usable credential for the owner', toolkit=name)]
+            return [_warning('missing_credential', f'Toolkit "{name}" has no usable credential for the owner',
+                             toolkit=name, toolkit_type=tool.type)]
         raise
     warnings = []
     if _uses_personal_token(tool, expanded):
-        warnings.append(_warning('token_may_expire', f'Toolkit "{name}" signs in with a personal token', toolkit=name))
+        warnings.append(_warning('personal_signin_required',
+                                 f'Toolkit "{name}" needs a personal sign-in; a scheduled run cannot sign in',
+                                 toolkit=name, toolkit_type=tool.type, reason='needs a personal sign-in'))
     return warnings + _sensitive_warnings(tool, name)
 
 
-def scan_schedule_risks(project_id: int, version_id: int, owner_id: int) -> list:
-    """Warnings for one version run by one owner. Never raises: a failure is a scan_incomplete warning."""
+def _findings(project_id: int, version_id: int, owner_id: int) -> tuple[list, dict | None]:
+    """Every finding of one version run by one owner, and the fix link of its entity. Never raises."""
     try:
         with db.get_session(project_id) as session:
             version = session.get(ApplicationVersion, version_id) if version_id else None
             if version is None:
-                return []
+                return [], None
+            fix = {'entity_type': 'pipeline' if version.agent_type == 'pipeline' else 'agent',
+                   'id': version.application_id, 'version_id': version_id}
             warnings = _human_steps(version)
             for tool in version.tools:
                 try:
                     warnings += _toolkit_warnings(tool, project_id, owner_id)
                 except Exception:  # noqa: BLE001 - one toolkit fails, the other warnings stay
                     log.exception('Schedule risk scan failed for toolkit %s of version %s', tool.name, version_id)
-                    warnings.append(_warning('scan_incomplete', f'Toolkit "{tool.name or tool.type}" could not be checked for risks',
+                    warnings.append(_warning(INCOMPLETE_CODE, f'Toolkit "{tool.name or tool.type}" could not be checked for risks',
                                              toolkit=tool.name or tool.type))
-        return warnings
-    except Exception:  # noqa: BLE001 - any failure hides the scan, the save still succeeds
+        return warnings, fix
+    except Exception:  # noqa: BLE001 - any failure is a notice; the caller decides what it allows
         log.exception('Schedule risk scan failed for version %s', version_id)
-        return [_warning('scan_incomplete', 'The version could not be fully checked for risks')]
+        return [_warning(INCOMPLETE_CODE, 'The version could not be fully checked for risks')], None
+
+
+def _fingerprint(version_id: int | None, sensitive: list) -> str:
+    """sha256 of the version id and the sorted (toolkit, tool) pairs of the sensitive tools."""
+    pairs = sorted([item['toolkit'], item['tool']] for item in sensitive)
+    return hashlib.sha256(json.dumps([version_id, pairs]).encode()).hexdigest()
+
+
+def scan_schedule(project_id: int, version_id: int | None, owner_id: int) -> dict:
+    """The risk review of one version run by one owner: `blocking`, `sensitive`, `notices`, `fingerprint`.
+
+    A blocking finding carries `fix`, the agent or pipeline version to open. Never raises: a failure is
+    a `scan_incomplete` notice.
+    """
+    findings, fix = _findings(project_id, version_id, owner_id)
+    blocking = [{**item, 'fix': fix} for item in findings if item['code'] in BLOCKING_CODES]
+    sensitive = [item for item in findings if item['code'] == SENSITIVE_CODE]
+    notices = [item for item in findings if item['code'] not in BLOCKING_CODES and item['code'] != SENSITIVE_CODE]
+    return {'blocking': blocking, 'sensitive': sensitive, 'notices': notices,
+            'fingerprint': _fingerprint(version_id, sensitive)}
+
+
+def scan_complete(review: dict) -> bool:
+    """False when a tool could not be checked: then "Run without asking" is refused."""
+    return not any(item['code'] == INCOMPLETE_CODE for item in review['notices'])

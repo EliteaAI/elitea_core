@@ -22,10 +22,10 @@ def run_event(kind: str, text: str, level: str = 'info', **data) -> dict:
     }
 
 
-def finished_event(status: str, reason: str | None = None) -> dict:
-    """The last event of a run: its final status and the reason."""
+def finished_event(status: str, reason: str | None = None, level: str | None = None) -> dict:
+    """The last event of a run: its final status and the reason; `level` overrides the level of the status."""
     text = f'Run finished: {status}' + (f' ({reason})' if reason else '')
-    return run_event('finished', text, FINISH_LEVELS.get(status, 'warning'), status=status)
+    return run_event('finished', text, level or FINISH_LEVELS.get(status, 'warning'), status=status)
 
 
 def append_run_events(session, run_id: int, *events: dict, **columns) -> None:

@@ -134,7 +134,8 @@ class ScheduleDraftHandler:
             return {"error": "LLM returned no JSON draft"}, 502
 
         try:
-            draft, warnings = validate_schedule_draft(project_id, parsed, locked, roster)
+            draft, warnings = validate_schedule_draft(
+                project_id, parsed, locked, roster, owner_id=auth.current_user().get("id"))
         except Exception:  # noqa: BLE001 -- the model answer was paid for; answer a short reason, not a 500
             log.exception("generate_schedule_draft: the draft could not be checked")
             return {"error": "The draft could not be checked"}, 502
