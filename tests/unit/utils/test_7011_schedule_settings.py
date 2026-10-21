@@ -24,13 +24,15 @@ class FakeConfigurations:
         self.calls = []
         self.error = None
         self.old_register = False  # a configurations plugin from before owned types
+        self.register_errors = []  # one error per register call, in order; None lets the call pass
+        self.logged = []
 
     def timeout(self, _seconds):
         return self
 
     def _call(self, name, **kwargs):
         self.calls.append((name, kwargs))
-        if self.error:
+        if self.error and not (name == 'register' and self.register_errors):
             raise self.error
 
     def configurations_get_first_filtered_project(self, project_id, filter_fields):
@@ -53,6 +55,10 @@ class FakeConfigurations:
 
     def configurations_register(self, **kwargs):
         self._call('register', **kwargs)
+        if self.register_errors:
+            error = self.register_errors.pop(0)
+            if error:
+                raise error
         if self.old_register and 'managed_by' in kwargs:
             raise TypeError("configurations_register() got an unexpected keyword argument 'managed_by'")
 
@@ -64,7 +70,10 @@ def store(monkeypatch):
     tools = types.ModuleType('tools')
     tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=store))
     pylon_tools = types.ModuleType('pylon.core.tools')
-    pylon_tools.log = types.SimpleNamespace(exception=lambda *a, **k: None, warning=lambda *a, **k: None)
+    pylon_tools.log = types.SimpleNamespace(
+        exception=lambda *a, **k: store.logged.append(('exception', a)),
+        warning=lambda *a, **k: store.logged.append(('warning', a)),
+    )
     for name, module in (('tools', tools), ('pylon', types.ModuleType('pylon')),
                          ('pylon.core', types.ModuleType('pylon.core')), ('pylon.core.tools', pylon_tools)):
         monkeypatch.setitem(sys.modules, name, module)
@@ -151,11 +160,38 @@ def test_el7011_cr_an_older_configurations_still_gets_the_type(store):
         {**PLAIN_REGISTRATION, 'model': store.module.ScheduleProjectSettings, **OWNER},
         {**PLAIN_REGISTRATION, 'model': store.module.ScheduleProjectSettings},
     ]
+    assert [level for level, _args in store.logged] == ['warning']
+
+
+@pytest.mark.parametrize('error', [TimeoutError('rpc timeout'), RuntimeError('configurations down')])
+def test_el7011_cr_another_error_keeps_the_guard_and_is_logged(store, error):
+    """A timeout never leads to the unguarded type: one call, one logged error, nothing raised."""
+    store.register_errors = [error]
+    store.module.register_schedule_settings_type()
+    [(name, kwargs)] = store.calls
+    assert name == 'register'
+    assert kwargs['managed_by'] == 'elitea_core'
+    assert [level for level, _args in store.logged] == ['exception']
+
+
+def test_el7011_cr_a_type_error_about_another_argument_is_not_an_old_plugin(store):
+    store.register_errors = [TypeError("register() got an unexpected keyword argument 'model'")]
+    store.module.register_schedule_settings_type()
+    assert len(store.calls) == 1
+    assert [level for level, _args in store.logged] == ['exception']
+
+
+def test_el7011_cr_an_older_configurations_that_also_fails_plain_is_logged(store):
+    store.register_errors = [TypeError("unexpected keyword argument 'managed_by'"), RuntimeError('down')]
+    store.module.register_schedule_settings_type()
+    assert len(store.calls) == 2
+    assert [level for level, _args in store.logged] == ['warning', 'exception']
 
 
 def test_el7011_cr_a_register_error_does_not_stop_the_plugin(store):
     store.error = RuntimeError('configurations down')
     store.module.register_schedule_settings_type()
+    assert len(store.calls) == 1
 
 
 @pytest.mark.parametrize('body', [{}, {'allow_run_without_asking': 1}, {'allow_run_without_asking': True, 'x': 1}])
