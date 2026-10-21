@@ -8,7 +8,13 @@ import sys
 import types
 
 import pytest
-from unit.utils.test_7011_run_starter_pipeline import OWNER, PKG, _module, clean_review, load_starter
+from unit.utils.test_7011_run_starter_pipeline import (
+    OWNER,
+    PKG,
+    _module,
+    clean_review,
+    load_starter,
+)
 
 PROJECT_ID, SCHEDULE_ID, RUN_ID = 34, 1, 3
 SENSITIVE = {"code": "sensitive_action", "toolkit": "Outlook", "tool": "send_email"}
@@ -121,5 +127,5 @@ def test_el7011_cr_a_blocking_finding_blocks_the_run_with_the_reason(run, rule):
     kwargs, _ = run(rule, True)
 
     assert kwargs is None and run.predicts == []
-    assert run.blocks == [(PROJECT_ID, RUN_ID, 'Node "Review" waits for a person; '
-                                                'Toolkit "Jira" has no usable credential for the owner')]
+    reason = 'Node "Review" waits for a person; Toolkit "Jira" has no usable credential for the owner'
+    assert run.blocks == [(PROJECT_ID, RUN_ID, reason)]

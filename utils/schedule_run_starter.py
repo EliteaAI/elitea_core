@@ -47,7 +47,7 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 id=schedule.id, name=schedule.name, principal=schedule.principal, created_by=schedule.created_by,
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
-                approval_rule=schedule.approval_rule),
+                approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint),
             version=SimpleNamespace(id=version.id, application_id=version.application_id),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
             trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
@@ -73,11 +73,24 @@ def _setting_allows_auto_approve(project_id: int) -> bool:
     return is_run_without_asking_allowed(project_id)
 
 
+def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
+    """"Run without asking" holds only for the confirmed tools (owner CR 2026-10-21, R3.2).
+
+    New sensitive tools since the confirmation, an incomplete scan or the setting off run as "Pause and ask me".
+    """
+    from .schedule_risk import scan_complete
+    if schedule.approval_rule != 'run_without_asking' or not scan_complete(review):
+        return False
+    if review['sensitive'] and review['fingerprint'] != schedule.approval_fingerprint:
+        return False
+    return _setting_allows_auto_approve(project_id)
+
+
 def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     """Start one claimed agent or pipeline run as its owner and return without waiting for the answer.
 
-    A closed budget blocks the run. Every other failure after the pre-run check closes the run as failed:
-    a running run blocks the schedule.
+    A closed budget or a blocking risk finding blocks the run. Every other failure after the pre-run check
+    closes the run as failed: a running run blocks the schedule.
     """
     loaded = _load(project_id, schedule_id, run_id)
     if loaded is None:
@@ -90,12 +103,18 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     if scope:
         block_schedule_run(project_id, run_id, BUDGET_CLOSED.format(scope))
         return
+    # late: the scan pulls in the toolkit expansion
+    from .schedule_risk import scan_schedule
+    review = scan_schedule(project_id, loaded.version.id, check.owner_id)
+    if review['blocking']:  # a scheduled run cannot sign in or answer a person
+        block_schedule_run(project_id, run_id, '; '.join(item['message'] for item in review['blocking']))
+        return
     source = loaded.schedule.entity_type
     if source == 'pipeline' and loaded.schedule.run_mode == 'entry_point':
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
-    auto_approve = loaded.schedule.approval_rule == 'run_without_asking' and _setting_allows_auto_approve(project_id)
+    auto_approve = _may_auto_approve(project_id, loaded.schedule, review)
     manual = getattr(loaded, 'trigger', 'cron') in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
     trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
     try:
