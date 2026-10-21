@@ -11,8 +11,8 @@ from ..models.conversation import Conversation
 from ..models.message_group import ConversationMessageGroup
 from ..models.pd.context import ContextStrategy
 from .context_window import (
-    get_model_limits, is_platform_admin, manual_context_tokens, manual_context_tokens_allowed, normalize_mode,
-    resolve_context_budget,
+    get_model_limits, is_platform_admin, legacy_context_tokens, manual_context_tokens, manual_context_tokens_allowed,
+    normalize_mode, pick_chat_llm_settings, resolve_context_budget, status_max_tokens,
 )
 
 
@@ -61,28 +61,27 @@ def get_conversation_meta(project_id: int, conversation_id: int) -> dict:
         return {}
 
 
+def merge_meta_expression(meta_updates: dict):
+    """Key-level JSONB merge, so a write never rewrites keys it did not pass from a stale read."""
+    from sqlalchemy import literal  # pylint: disable=C0415
+    from sqlalchemy.dialects.postgresql import JSONB  # pylint: disable=C0415
+    return Conversation.meta.op('||')(literal(meta_updates, type_=JSONB))
+
+
 def update_conversation_meta(project_id: int, conversation_id: int, meta_updates: dict) -> dict:
-    """Update conversation metadata directly in database."""
+    """Merge top-level keys into conversation meta in one statement; other keys are untouched."""
     with db.get_session(project_id) as session:
-        conversation = session.query(Conversation).filter(
-            Conversation.id == conversation_id
-        ).first()
-
-        if not conversation:
-            raise Exception(f"Conversation with ID {conversation_id} not found")
-
-        current_meta = conversation.meta or {}
-        updated_meta = {**current_meta, **meta_updates}
-
-        session.query(Conversation).filter(
+        updated = session.query(Conversation).filter(
             Conversation.id == conversation_id
         ).update(
-            {Conversation.meta: updated_meta},
+            {Conversation.meta: merge_meta_expression(meta_updates)},
             synchronize_session=False
         )
+        if not updated:
+            raise Exception(f"Conversation with ID {conversation_id} not found")
         session.commit()
-
-        return updated_meta
+        row = session.query(Conversation.meta).filter(Conversation.id == conversation_id).first()
+        return (row[0] if row else None) or {}
 
 
 def get_context_analytics(project_id: int, conversation_id: int) -> dict | None:
@@ -138,19 +137,17 @@ def update_context_analytics_after_message_delete(
 
 
 def _conversation_model_budget(project_id: int, conversation_id: int, mode: str) -> dict:
-    """Budget before the first response: resolve from the model a participant chats with."""
-    from ..models.participants import ParticipantMapping
+    """Budget before the first response: resolve from the chat model (the user participant's llm_settings)."""
+    from ..models.participants import Participant, ParticipantMapping
     llm_settings = {}
     try:
         with db.get_session(project_id) as session:
-            mappings = session.query(ParticipantMapping.entity_settings).filter(
+            mappings = session.query(Participant.entity_name, ParticipantMapping.entity_settings).join(
+                Participant, Participant.id == ParticipantMapping.participant_id
+            ).filter(
                 ParticipantMapping.conversation_id == conversation_id
             ).all()
-        for (entity_settings,) in mappings:
-            candidate = (entity_settings or {}).get('llm_settings') or {}
-            if candidate.get('model_name'):
-                llm_settings = candidate
-                break
+        llm_settings = pick_chat_llm_settings(mappings)
     except Exception as e:
         log.warning(f"Failed to read conversation {conversation_id} model: {e}")
     limits = get_model_limits(llm_settings.get('model_project_id') or project_id, llm_settings.get('model_name'))
@@ -173,8 +170,8 @@ def _manual_context_info(context_strategy: dict, user_id) -> dict | None:
 
 def get_context_data(
         project_id: int, conversation_id: int, user_id: int | None = None,
-) -> tuple[dict | None, dict, str, dict | None, dict | None]:
-    """Get context analytics, resolved budget, strategy name, chat usage and manual trigger info."""
+) -> tuple[dict | None, dict, str, dict | None, dict | None, int | None]:
+    """Get context analytics, resolved budget, strategy name, chat usage, manual and legacy trigger info."""
     meta = get_conversation_meta(project_id, conversation_id)
     context_analytics = meta.get('context_analytics')
     context_strategy = meta.get('context_strategy') or {}
@@ -184,7 +181,8 @@ def get_context_data(
         budget = _conversation_model_budget(project_id, conversation_id, mode)
     strategy_name = context_strategy.get('name', 'default')
     manual = _manual_context_info(context_strategy, user_id)
-    return context_analytics, budget, strategy_name, meta.get('usage_totals'), manual
+    legacy = legacy_context_tokens(context_strategy)
+    return context_analytics, budget, strategy_name, meta.get('usage_totals'), manual, legacy
 
 
 def build_context_response(
@@ -193,6 +191,7 @@ def build_context_response(
     strategy_name: str = 'default',
     usage_totals: dict | None = None,
     manual: dict | None = None,
+    legacy_max_tokens: int | None = None,
 ) -> dict:
     """Build context response for UI."""
     budget = budget or resolve_context_budget(None, None)
@@ -201,9 +200,7 @@ def build_context_response(
     messages_in_context = stored_analytics.get('messages_in_context', 0) if stored_analytics else 0
 
     manual = manual or {'manual_max_tokens_enabled': False, 'manual_max_context_tokens': None}
-    max_tokens = budget['available_window']
-    if manual['manual_max_context_tokens']:
-        max_tokens = min(manual['manual_max_context_tokens'], budget.get('usable_input') or max_tokens)
+    max_tokens = status_max_tokens(budget, manual['manual_max_context_tokens'], legacy_max_tokens)
     utilization = (current_tokens / max_tokens) if max_tokens > 0 else 0.0
 
     breakdown = (stored_analytics or {}).get('token_breakdown') or {}
@@ -251,7 +248,8 @@ def set_context_strategy(
         conversation_id: Conversation ID
         user_context_defaults: User's default context management settings
         user_summarization_defaults: User's default summarization settings
-        context_window_mode: Project default window mode; read from project settings when omitted
+        context_window_mode: Project default window mode; pass it in so the settings RPC runs before the
+            caller's transaction. Read from project settings (TTL-cached) when omitted
 
     Returns:
         dict: The context strategy configuration

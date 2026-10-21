@@ -11,7 +11,7 @@ from tools import auth, rpc_tools, VaultClient, serialize, context
 
 from .context_window import (
     BALANCED, budget_for_model_config, is_platform_admin, manual_context_tokens, manual_context_tokens_allowed,
-    normalize_mode,
+    strategy_for_predict,
 )
 from .llm_settings import normalize_runtime_max_tokens
 from .next_input_suggestion_utils import next_input_suggestion_config
@@ -219,34 +219,35 @@ def load_context_settings_from_conversation(project_id: int, conversation_id: st
             ).first()
 
             if conversation and conversation.meta:
-                strategy = conversation.meta.get('context_strategy')
-                if strategy:
-                    # Legacy chats with only max_context_tokens follow Balanced (#6898)
-                    strategy = {**strategy, 'context_window_mode': normalize_mode(strategy.get('context_window_mode'))}
-                    strategy.pop('max_context_tokens', None)
-                return strategy
+                # Pre-release chats with only the old max_context_tokens default follow Balanced (#6898)
+                return strategy_for_predict(conversation.meta.get('context_strategy'))
     except Exception as e:
         log.debug(f"Could not load context_settings from conversation {conversation_id}: {e}")
 
     return None
 
 
-def load_manual_context_tokens(project_id: int, conversation_id) -> Optional[int]:
-    """Admin-set summarization trigger from the stored strategy, only while the platform toggle is on."""
+def load_context_meta(project_id: int, conversation_id) -> dict:
+    """The stored context_strategy and context_budget of a conversation, in one read."""
     try:
         uuid.UUID(str(conversation_id))
     except (ValueError, AttributeError, TypeError):
-        return None
+        return {}
     try:
         from ..models.conversation import Conversation
         with db.get_session(project_id) as session:
             row = session.query(Conversation.meta).filter(Conversation.uuid == str(conversation_id)).first()
-        strategy = ((row[0] if row else None) or {}).get('context_strategy') or {}
+        meta = (row[0] if row else None) or {}
     except Exception as e:
-        log.debug(f"Could not load manual context tokens for conversation {conversation_id}: {e}")
-        return None
+        log.debug(f"Could not load context meta for conversation {conversation_id}: {e}")
+        return {}
+    return {'context_strategy': meta.get('context_strategy') or {}, 'context_budget': meta.get('context_budget')}
+
+
+def allowed_manual_context_tokens(strategy: Optional[dict]) -> Optional[int]:
+    """Admin-set summarization trigger, only while the platform toggle is on (no checks without a stored value)."""
     manual = manual_context_tokens(strategy)
-    if not manual or not manual_context_tokens_allowed() or not is_platform_admin(strategy.get('manual_set_by')):
+    if not manual or not manual_context_tokens_allowed() or not is_platform_admin((strategy or {}).get('manual_set_by')):
         return None
     return manual
 
@@ -276,9 +277,9 @@ def apply_context_budget(
     return budget
 
 
-def store_context_budget(project_id: int, conversation_id, budget: Optional[dict]) -> None:
-    """Keep the latest resolved budget on the conversation for the context status API."""
-    if not budget or not conversation_id:
+def store_context_budget(project_id: int, conversation_id, budget: Optional[dict], stored: Optional[dict] = None) -> None:
+    """Keep the latest resolved budget on the conversation for the context status API (skipped when unchanged)."""
+    if not budget or not conversation_id or budget == stored:
         return
     try:
         uuid.UUID(str(conversation_id))
@@ -378,10 +379,12 @@ def generate_predict_payload(
 
     if parsed.context_settings is not None:
         context_conversation_id = getattr(parsed, 'conversation_id', None) or parsed.stream_id
+        context_meta = load_context_meta(parsed.project_id, context_conversation_id)
         context_budget = apply_context_budget(
             parsed.context_settings, llm_model_configuration, getattr(parsed.llm_settings, 'max_tokens', None),
-            load_manual_context_tokens(parsed.project_id, context_conversation_id))
-        store_context_budget(parsed.project_id, context_conversation_id, context_budget)
+            allowed_manual_context_tokens(context_meta.get('context_strategy')))
+        store_context_budget(
+            parsed.project_id, context_conversation_id, context_budget, context_meta.get('context_budget'))
 
     model_max_output_tokens = llm_model_configuration.get('max_output_tokens')
     if model_max_output_tokens is not None:

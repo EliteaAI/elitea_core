@@ -10,9 +10,7 @@ from ...models.pd.context import ContextStrategyUpdate
 from ...utils.context_analytics import (
     build_context_response, get_context_data, get_conversation_meta, update_conversation_meta,
 )
-from ...utils.context_window import (
-    MANUAL_TOKENS_KEYS, is_platform_admin, manual_context_tokens_allowed, normalize_mode,
-)
+from ...utils.context_window import LEGACY_TRIGGER_KEY, MANUAL_TOKENS_KEYS, manual_change_denied, normalize_mode
 from ...utils.constants import PROMPT_LIB_MODE
 
 
@@ -59,15 +57,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
             if validated.context_window_mode is not None:
                 updated_strategy['context_window_mode'] = validated.context_window_mode
                 updated_strategy.pop('max_context_tokens', None)
+                updated_strategy.pop(LEGACY_TRIGGER_KEY, None)
             elif validated.max_context_tokens is not None:
                 log.warning('PUT context_strategy with max_context_tokens is deprecated, use context_window_mode')
                 updated_strategy['max_context_tokens'] = validated.max_context_tokens
+                updated_strategy[LEGACY_TRIGGER_KEY] = True
             updated_strategy['context_window_mode'] = normalize_mode(updated_strategy.get('context_window_mode'))
-            manual_changed = validated.manual_max_context_tokens != current_strategy.get('manual_max_context_tokens')
-            if 'manual_max_context_tokens' in validated.model_fields_set and manual_changed:
-                user_id = auth.current_user().get('id')
-                if not manual_context_tokens_allowed() or not is_platform_admin(user_id):
-                    return {"error": "Manual Max Context Tokens is not available"}, 403
+            user_id = auth.current_user().get('id')
+            if manual_change_denied(
+                    validated.model_fields_set, validated.manual_max_context_tokens, current_strategy, user_id):
+                return {"error": "Manual Max Context Tokens is not available"}, 403
+            if 'manual_max_context_tokens' in validated.model_fields_set \
+                    and validated.manual_max_context_tokens != current_strategy.get('manual_max_context_tokens'):
                 for key in MANUAL_TOKENS_KEYS:
                     updated_strategy.pop(key, None)
                 if validated.manual_max_context_tokens is not None:
@@ -83,7 +84,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 meta_updates={'context_strategy': updated_strategy}
             )
 
-            response = build_context_response(*get_context_data(project_id, conversation_id, auth.current_user().get('id')))
+            response = build_context_response(*get_context_data(project_id, conversation_id, user_id))
             response['message'] = 'Strategy updated successfully'
             response['updated_strategy'] = updated_strategy
             return response, 200

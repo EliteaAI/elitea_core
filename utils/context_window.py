@@ -22,10 +22,30 @@ ENVIRONMENT_SETTINGS_TYPE = 'environment_settings'
 MANUAL_TOKENS_FLAG = 'manual_max_context_tokens_enabled'
 MANUAL_TOKENS_KEYS = ('manual_max_context_tokens', 'manual_set_by_admin', 'manual_set_by')
 MIN_MANUAL_CONTEXT_TOKENS = 1_000
+LEGACY_TRIGGER_KEY = 'legacy_trigger'
 _RPC_TIMEOUT = 3
 _CACHE_TTL_SECONDS = 60
 _cache_lock = threading.Lock()
 _model_cache: dict = {}
+_value_cache: dict = {}
+
+
+def _cached(key, load, fallback, ttl=_CACHE_TTL_SECONDS):
+    """TTL-cached ``load()``; a failing load returns ``fallback`` and is retried on the next call."""
+    now = time.monotonic()
+    with _cache_lock:
+        cached = _value_cache.get(key)
+        if cached and now - cached[0] < ttl:
+            return cached[1]
+    try:
+        value = load()
+    except Exception as e:  # pylint: disable=W0718
+        from pylon.core.tools import log  # pylint: disable=E0611,E0401,C0415
+        log.warning('Failed to load %s: %s', key, e)
+        return fallback
+    with _cache_lock:
+        _value_cache[key] = (now, value)
+    return value
 
 
 def normalize_mode(mode) -> str:
@@ -88,17 +108,14 @@ def resolve_context_budget(
 
 
 def get_project_default_mode(project_id: int) -> str:
-    """Admin-set project default for new chats; Balanced when unset or unreadable."""
-    from pylon.core.tools import log  # pylint: disable=E0611,E0401,C0415
-    from tools import rpc_tools  # pylint: disable=E0401,C0415
-    try:
+    """Admin-set project default for new chats; Balanced when unset or unreadable (TTL-cached)."""
+    def load():
+        from tools import rpc_tools  # pylint: disable=E0401,C0415
         config = rpc_tools.RpcMixin().rpc.timeout(_RPC_TIMEOUT).configurations_get_first_filtered_project(
             project_id=project_id, filter_fields={'type': SETTINGS_TYPE, 'elitea_title': SETTINGS_TYPE},
         )
-    except Exception as e:  # pylint: disable=W0718
-        log.warning('Failed to read context window settings for project %s: %s', project_id, e)
-        return BALANCED
-    return normalize_mode(((config or {}).get('data') or {}).get('default_mode'))
+        return normalize_mode(((config or {}).get('data') or {}).get('default_mode'))
+    return _cached(('default_mode', project_id), load, BALANCED)
 
 
 def get_model_limits(project_id: Optional[int], model_name: Optional[str]) -> dict:
@@ -134,30 +151,28 @@ def budget_for_model_config(mode: Optional[str], model_config: Optional[dict], l
 
 
 def manual_context_tokens_allowed() -> bool:
-    """Platform toggle (Administration > environment_settings) for manual summarization triggers."""
-    from pylon.core.tools import log  # pylint: disable=E0611,E0401,C0415
-    from tools import rpc_tools  # pylint: disable=E0401,C0415
-    from .utils import get_public_project_id
-    try:
+    """Platform toggle (Administration > environment_settings) for manual summarization triggers (TTL-cached)."""
+    def load():
+        from tools import rpc_tools  # pylint: disable=E0401,C0415
+        from .utils import get_public_project_id  # pylint: disable=C0415
         config = rpc_tools.RpcMixin().rpc.timeout(_RPC_TIMEOUT).configurations_get_first_filtered_project(
             project_id=get_public_project_id(),
             filter_fields={'type': ENVIRONMENT_SETTINGS_TYPE, 'elitea_title': ENVIRONMENT_SETTINGS_TYPE},
         )
-    except Exception as e:  # pylint: disable=W0718
-        log.warning('Failed to read environment settings: %s', e)
-        return False
-    return ((config or {}).get('data') or {}).get(MANUAL_TOKENS_FLAG) is True
+        return ((config or {}).get('data') or {}).get(MANUAL_TOKENS_FLAG) is True
+    return _cached(('manual_tokens_flag',), load, False)
 
 
 def is_platform_admin(user_id) -> bool:
+    """Platform admin role check (TTL-cached per user)."""
     if not user_id:
         return False
-    from tools import rpc_tools  # pylint: disable=E0401,C0415
-    try:
+
+    def load():
+        from tools import rpc_tools  # pylint: disable=E0401,C0415
         roles = rpc_tools.RpcMixin().rpc.timeout(_RPC_TIMEOUT).auth_get_user_roles(user_id, 'administration') or []
-    except Exception:  # pylint: disable=W0718
-        return False
-    return bool({'admin', 'super_admin'} & set(roles))
+        return bool({'admin', 'super_admin'} & set(roles))
+    return _cached(('platform_admin', user_id), load, False)
 
 
 def manual_context_tokens(strategy: Optional[dict]) -> Optional[int]:
@@ -167,3 +182,66 @@ def manual_context_tokens(strategy: Optional[dict]) -> Optional[int]:
         return None
     value = _positive_int(strategy.get('manual_max_context_tokens'))
     return value if value and value >= MIN_MANUAL_CONTEXT_TOKENS else None
+
+
+def manual_change_denied(fields_set, new_value, current_strategy: Optional[dict], user_id,
+                         allowed=manual_context_tokens_allowed, is_admin=is_platform_admin) -> bool:
+    """A context_strategy PUT that changes the manual trigger needs the platform toggle and a platform admin.
+
+    Resending the stored value is not a change, so the role and toggle are only checked on a real change.
+    """
+    if 'manual_max_context_tokens' not in fields_set:
+        return False
+    if new_value == (current_strategy or {}).get('manual_max_context_tokens'):
+        return False
+    return not allowed() or not is_admin(user_id)
+
+
+def legacy_context_tokens(strategy: Optional[dict]) -> Optional[int]:
+    """Deprecated PUT ``max_context_tokens`` (AC22).
+
+    Honored only when that PUT marked it; pre-release chats carrying the old 64000 default follow Balanced.
+    """
+    strategy = strategy or {}
+    if strategy.get(LEGACY_TRIGGER_KEY) is not True:
+        return None
+    return _positive_int(strategy.get('max_context_tokens'))
+
+
+def strategy_for_predict(strategy: Optional[dict]) -> Optional[dict]:
+    """Stored context_strategy as predict sends it: a marked legacy trigger keeps the legacy path
+    (no window mode), anything else runs in its window mode (unknown or missing is Balanced)."""
+    if not strategy:
+        return strategy
+    strategy = dict(strategy)
+    if legacy_context_tokens(strategy):
+        strategy.pop('context_window_mode', None)
+    else:
+        strategy['context_window_mode'] = normalize_mode(strategy.get('context_window_mode'))
+        strategy.pop('max_context_tokens', None)
+    strategy.pop(LEGACY_TRIGGER_KEY, None)
+    return strategy
+
+
+def status_max_tokens(budget: dict, manual: Optional[int] = None, legacy: Optional[int] = None) -> int:
+    """Context status ``max_tokens``: a legacy or manual trigger, capped by the usable input, else the window."""
+    trigger = manual or legacy
+    if trigger:
+        return min(trigger, budget.get('usable_input') or budget['available_window'])
+    return budget['available_window']
+
+
+def pick_chat_llm_settings(participants) -> dict:
+    """llm_settings of the chat model: the user participant's, else the first participant with a model.
+
+    ``participants`` is an iterable of (entity_name, entity_settings).
+    """
+    fallback = {}
+    for entity_name, entity_settings in participants:
+        candidate = (entity_settings or {}).get('llm_settings') or {}
+        if not candidate.get('model_name'):
+            continue
+        if str(entity_name) == 'user':
+            return candidate
+        fallback = fallback or candidate
+    return fallback

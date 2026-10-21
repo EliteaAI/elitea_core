@@ -60,6 +60,10 @@ def create_conversation(session, project_id: int, user_id: int, parsed) -> tuple
             user_summarization_defaults = social_user.get('default_summarization')
     except Exception:
         pass  # Continue with defaults if fetching user settings fails
+    context_window_mode = None
+    if get_context_manager_feature_flag(project_id):
+        from .context_window import get_project_default_mode  # pylint: disable=C0415
+        context_window_mode = get_project_default_mode(project_id)
 
     if parsed.meta is None:
         parsed.meta = {}
@@ -97,12 +101,13 @@ def create_conversation(session, project_id: int, user_id: int, parsed) -> tuple
         session.flush()
 
     context_strategy = None
-    if get_context_manager_feature_flag(project_id):
+    if context_window_mode is not None:
         context_strategy = set_context_strategy(
             project_id=project_id,
             conversation_id=new_conversation.id,
             user_context_defaults=user_context_defaults,
             user_summarization_defaults=user_summarization_defaults,
+            context_window_mode=context_window_mode,
         )
     return new_conversation, context_strategy
 
