@@ -39,6 +39,8 @@ LIST_QUERY_PARAMS = [
      "description": "Only schedules of these owners, repeated or comma-separated; schedules admin only"},
     {"name": "entity_id", "in": "query", "schema": {"type": "integer"},
      "description": "Only schedules of this agent or pipeline"},
+    {"name": "version_id", "in": "query", "schema": {"type": "integer"},
+     "description": "Only schedules that run this version"},
     {"name": "search", "in": "query", "schema": {"type": "string"}, "description": "Match on schedule or entity name"},
     {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
      "description": "Rows per page"},
