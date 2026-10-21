@@ -428,3 +428,14 @@ def test_r2_4_el7011_registration_without_openapi_registry_does_not_fail(monkeyp
                                     openapi_registry=types.SimpleNamespace(register_plugin=lambda **kwargs: None))
     plugin = _install(monkeypatch, preload)
     plugin.Module._register_openapi(types.SimpleNamespace(descriptor=types.SimpleNamespace(metadata={})))
+
+
+# R2.4, R6.2, R8.3 (EL-7011 BUG-29): every error answer shows the one refusal body, `code` and `error`
+def test_r2_4_el7011_every_error_answer_example_has_code(spec):
+    for key, operation in _operations(spec).items():
+        for status, response in operation['responses'].items():
+            if int(status) < 400:
+                continue
+            example = response['content']['application/json']['example']
+            assert example['code'] and example['error'], (key, status)
+            assert re.fullmatch(r'[a-z_]+', example['code']), (key, status)

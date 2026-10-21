@@ -187,6 +187,9 @@ ERRORS = {
     502: "The model failed or its answer could not be used",
     503: "A service the operation needs is unavailable",
 }
+# The refusal body of every error answer: a stable `code`, a human `error`, and extra keys (`field`, findings)
+DEFAULT_CODES = {400: "invalid_input", 403: "forbidden", 404: "not_found", 409: "conflict", 500: "server_error",
+                 502: "model_failed", 503: "service_unavailable"}
 
 
 def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict:
@@ -197,9 +200,10 @@ def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict
     answers = {str(code): success}
     for error, value in errors.items():
         description, error_example = value if isinstance(value, tuple) else (value, None)
-        answers[str(error)] = {"description": description or ERRORS[error]}
-        if error_example:
-            answers[str(error)]["content"] = {"application/json": {"example": error_example}}
+        description = description or ERRORS[error]
+        refusal = {"code": DEFAULT_CODES[error], "error": description, **(error_example or {})}
+        answers[str(error)] = {"description": description,
+                               "content": {"application/json": {"example": refusal}}}
     return answers
 
 
