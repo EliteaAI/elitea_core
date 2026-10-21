@@ -48,14 +48,16 @@ def extract_token_breakdown(context_info: dict | None) -> dict:
     }
 
 
-def get_conversation_meta(project_id: int, conversation_id: int) -> dict:
-    """Get conversation meta from database."""
+def get_conversation_meta(project_id: int, conversation_id: int, missing=None) -> dict:
+    """Get conversation meta from database; ``missing`` (default ``{}``) when the conversation does not exist."""
     try:
         with db.get_session(project_id) as session:
             conversation = session.query(Conversation).filter(
                 Conversation.id == conversation_id
             ).first()
-            return conversation.meta or {} if conversation else {}
+            if conversation is None:
+                return {} if missing is None else missing
+            return conversation.meta or {}
     except Exception as e:
         log.warning(f"Failed to get conversation meta: {e}")
         return {}
