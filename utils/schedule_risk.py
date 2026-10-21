@@ -1,7 +1,8 @@
 """Risk review of a schedule's target version (EL-7011, US-17; owner CR 2026-10-21).
 
 `scan_schedule` sorts the findings in three groups. `blocking` stops a save and a run. `sensitive`
-needs a confirmation that names the `fingerprint`. `notices` never stop anything.
+needs a confirmation that names the `fingerprint`: a sensitive tool, or a toolkit that runs with the
+owner's personal credential. `notices` never stop anything.
 """
 import hashlib
 import json
@@ -17,6 +18,9 @@ CREDENTIAL_ERRORS = {'private_credential_not_found', 'credential_not_found', 'cr
 HUMAN_NODE_TYPES = {'hitl', 'printer'}
 BLOCKING_CODES = {'personal_signin_required', 'human_input_step', 'missing_credential'}
 SENSITIVE_CODE = 'sensitive_action'
+PERSONAL_CODE = 'personal_credential'
+SENSITIVE_CODES = {SENSITIVE_CODE, PERSONAL_CODE}
+TYPE_LABELS = {'github': 'GitHub', 'gitlab': 'GitLab', 'sharepoint': 'SharePoint', 'openapi': 'OpenAPI'}
 INCOMPLETE_CODE = 'scan_incomplete'
 
 
@@ -58,6 +62,20 @@ def _uses_personal_token(tool, expanded: dict) -> bool:
     return tool.type == 'openapi' and bool(expanded.get('oauth_discovery_endpoint'))
 
 
+def _uses_private_credential(tool) -> bool:
+    """True when a credential reference of the toolkit is the owner's personal (private) one."""
+    return any(isinstance(value, dict) and 'elitea_title' in value and value.get('private') is True
+               for value in (tool.settings or {}).values())
+
+
+def _personal_credential(tool, name) -> dict:
+    """The owner decision 2026-10-21: a personal credential is "warn and confirm", one item per toolkit."""
+    label = TYPE_LABELS.get(tool.type, tool.type.replace('_', ' ').title())
+    return _warning(PERSONAL_CODE, f'Toolkit "{name}" runs with the owner\'s personal {label} credential',
+                    toolkit=name, toolkit_type=tool.type, tool=None, risk_level='needs_approval',
+                    badge=PERSONAL_CODE, effect=f"Runs with the owner's personal {label} credential.")
+
+
 def _sensitive_warnings(tool, name) -> list:
     selected = (tool.settings or {}).get('selected_tools') or []
     if not selected:
@@ -84,10 +102,12 @@ def _toolkit_warnings(tool, project_id, owner_id) -> list:
                              toolkit=name, toolkit_type=tool.type)]
         raise
     warnings = []
-    if _uses_personal_token(tool, expanded):
+    if _uses_personal_token(tool, expanded):  # an interactive sign-in blocks; no personal item beside it
         warnings.append(_warning('personal_signin_required',
                                  f'Toolkit "{name}" needs a personal sign-in; a scheduled run cannot sign in',
                                  toolkit=name, toolkit_type=tool.type, reason='needs a personal sign-in'))
+    elif _uses_private_credential(tool):
+        warnings.append(_personal_credential(tool, name))
     return warnings + _sensitive_warnings(tool, name)
 
 
@@ -115,21 +135,22 @@ def _findings(project_id: int, version_id: int, owner_id: int) -> tuple[list, di
 
 
 def _fingerprint(version_id: int | None, sensitive: list) -> str:
-    """sha256 of the version id and the sorted (toolkit, tool) pairs of the sensitive tools."""
-    pairs = sorted([item['toolkit'], item['tool']] for item in sensitive)
+    """sha256 of the version id and the sorted (toolkit, tool) pairs; a personal credential is (toolkit, "*")."""
+    pairs = sorted([item['toolkit'], item['tool'] or '*'] for item in sensitive)
     return hashlib.sha256(json.dumps([version_id, pairs]).encode()).hexdigest()
 
 
 def scan_schedule(project_id: int, version_id: int | None, owner_id: int) -> dict:
     """The risk review of one version run by one owner: `blocking`, `sensitive`, `notices`, `fingerprint`.
 
-    A blocking finding carries `fix`, the agent or pipeline version to open. Never raises: a failure is
-    a `scan_incomplete` notice.
+    A blocking finding carries `fix`, the agent or pipeline version to open. `sensitive` holds the
+    `sensitive_action` tools and the `personal_credential` toolkits (`tool` null). Never raises: a
+    failure is a `scan_incomplete` notice.
     """
     findings, fix = _findings(project_id, version_id, owner_id)
     blocking = [{**item, 'fix': fix} for item in findings if item['code'] in BLOCKING_CODES]
-    sensitive = [item for item in findings if item['code'] == SENSITIVE_CODE]
-    notices = [item for item in findings if item['code'] not in BLOCKING_CODES and item['code'] != SENSITIVE_CODE]
+    sensitive = [item for item in findings if item['code'] in SENSITIVE_CODES]
+    notices = [item for item in findings if item['code'] not in BLOCKING_CODES | SENSITIVE_CODES]
     return {'blocking': blocking, 'sensitive': sensitive, 'notices': notices,
             'fingerprint': _fingerprint(version_id, sensitive)}
 

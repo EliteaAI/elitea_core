@@ -212,7 +212,8 @@ class ScheduleItemHandlers:
     def _check_risks(self, project_id: int):
         """Answer the risk review of a version before a save; nothing is written.
 
-        The answer has `blocking` (the save is refused), `sensitive` (the save needs `risk_ack`),
+        The answer has `blocking` (the save is refused), `sensitive` (sensitive tools and personal
+        credentials, `personal_credential` with `tool` null: the save needs `risk_ack`),
         `notices`, `run_without_asking_allowed` and the `fingerprint` that `risk_ack` must name.
         Who may call: a project member with `schedules.create`, as for a create.
         Errors: 400 invalid field, or a version that is not of the agent or pipeline; 403; 404 not visible.

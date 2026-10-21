@@ -112,9 +112,14 @@ SENSITIVE_FINDING = {
     "toolkit": "Outlook", "toolkit_type": "outlook", "tool": "send_email", "risk_level": "needs_approval",
     "badge": "sends_messages", "effect": "Sends e-mail to people inside and outside the company",
 }
+PERSONAL_FINDING = {
+    "code": "personal_credential", "message": "Toolkit \"Jira\" runs with the owner's personal Jira credential",
+    "toolkit": "Jira", "toolkit_type": "jira", "tool": None, "risk_level": "needs_approval",
+    "badge": "personal_credential", "effect": "Runs with the owner's personal Jira credential.",
+}
 FINGERPRINT = "3f1c9a0e5b7d4c2a8e6f0b1d3c5a7e9f2b4d6f8a0c2e4a6b8d0f2a4c6e8b0d2f"
 CHECK_EXAMPLE = {
-    "blocking": [], "sensitive": [SENSITIVE_FINDING],
+    "blocking": [], "sensitive": [SENSITIVE_FINDING, PERSONAL_FINDING],
     "notices": [{"code": "token_may_expire", "message": "The token of toolkit \"Jira\" may expire"}],
     "run_without_asking_allowed": True, "fingerprint": FINGERPRINT,
 }
@@ -135,7 +140,8 @@ SAVE_BAD_INPUT = (
 RISK_REVIEW_TEXT = (
     "The risk review runs first and every refusal has a stable `code`, a human `error` text, the findings "
     "(`blocking`, `sensitive`, `notices`) and the `fingerprint`. A blocking finding answers 409 "
-    "`schedule_blocked`: fix the agent or pipeline. Sensitive tools without an acknowledgement answer 409 "
+    "`schedule_blocked`: fix the agent or pipeline. Sensitive tools or a personal credential without an "
+    "acknowledgement answer 409 "
     "`risk_confirmation_required`: save again with `risk_ack: {fingerprint, confirmed_name}`. For "
     "\"Run without asking\", `confirmed_name` must equal the schedule name, else 400 `risk_name_mismatch` "
     "(`field: risk_ack`). A fingerprint that no longer matches the tools answers 409 `risk_changed`: review "
@@ -209,7 +215,9 @@ OPERATIONS = {
             "Run the risk review of a version before a save; nothing is written. `blocking` findings refuse "
             "the save (personal sign-in, human input step, missing credential); each has `fix`, the agent or "
             "pipeline version to open. `sensitive` tools need `risk_ack` on the save; each has `toolkit_type`, "
-            "`badge` and `effect`. `notices` never block. `run_without_asking_allowed` is false when the project "
+            "`badge` and `effect`. A toolkit that runs with the owner's personal (private) credential is a "
+            "`personal_credential` item in `sensitive`: `tool` is null and `badge` is `personal_credential`. "
+            "`notices` never block. `run_without_asking_allowed` is false when the project "
             "does not allow the rule or a tool could not be checked. Send the `fingerprint` back in `risk_ack`.",
             "a project member with `schedules.create`, as for a create",
             "400 an invalid field, or a version that is not of the agent or pipeline; 403 no permission; "

@@ -165,7 +165,7 @@ def _apply_confirmation(row: EntitySchedule, confirmed: dict | None, user_id: in
 
 def _audit_confirmation(project_id: int, row: EntitySchedule, user_id: int, confirmed: dict) -> None:
     """One audit trail event: the tracing plugin writes a row for this span, with the tools in its action."""
-    tools = ', '.join(sorted(f"{item['toolkit']}.{item['tool']}" for item in confirmed['sensitive']))
+    tools = ', '.join(sorted(f"{item['toolkit']}.{item['tool'] or '*'}" for item in confirmed['sensitive']))
     otel_trace.get_tracer(__name__).start_span(f'{CONFIRMED_EVENT}: {tools}', attributes={
         'telemetry.data_type': 'schedule_execution', 'user.id': user_id, 'project.id': project_id,
         'entity.type': 'schedule', 'entity.id': str(row.id), 'entity.name': row.name,
