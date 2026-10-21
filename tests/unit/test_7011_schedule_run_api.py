@@ -21,6 +21,7 @@ from test_7011_schedule_crud_api import (  # noqa: F401 -- `harness` is a fixtur
     PACKAGE,
     PERMISSION_PREFIX,
     PROJECT_ID,
+    assert_refusal,
 )
 from test_7011_schedule_crud_api import harness as _crud_harness
 
@@ -106,20 +107,20 @@ def test_7011_r2_1_a_finished_run_does_not_block(harness, started):
 
 def test_7011_r2_2_deleted_version_is_409_and_inserts_nothing(harness, started):
     schedule_id = harness.seed(version_id=None, enabled=False, disabled_reason='version_deleted')
-    assert run(harness, schedule_id) == ({'error': 'version_deleted'}, 409)
+    assert_refusal(run(harness, schedule_id), 409)
     assert (runs(harness), started) == ([], [])
 
 
 def test_7011_r3_1_admin_who_is_not_the_owner_is_403_and_inserts_nothing(harness, started):
     schedule_id = harness.seed(created_by=OTHER_ID)
     harness.request_as(ADMIN_ID, ADMIN)
-    assert run(harness, schedule_id) == ({'error': 'not_owner'}, 403)
+    assert_refusal(run(harness, schedule_id), 403, code='not_owner')
     assert (runs(harness), started) == ([], [])
 
 
 def test_7011_r3_2_regular_user_run_of_another_owners_schedule_is_404(harness, started):
     schedule_id = harness.seed(created_by=OTHER_ID)
-    assert run(harness, schedule_id) == (NOT_FOUND, 404)
+    assert_refusal(run(harness, schedule_id), 404, NOT_FOUND['error'])
     assert (runs(harness), started) == ([], [])
 
 

@@ -68,10 +68,10 @@ def export_schedules_yaml(project_id: int, ids: list[int] | None) -> str:
     with db.get_session(project_id) as session:
         found = session.execute(query.limit(MAX_ITEMS + 1)).all()
     if len(found) > MAX_ITEMS:  # the import takes at most MAX_ITEMS, so a bigger file could not come back
-        raise ScheduleError({'error': f'{TOO_MANY}; export them in parts by ids'})
+        raise ScheduleError('too_many_schedules', f'{TOO_MANY}; export them in parts by ids')
     unknown = sorted(set(ids or []) - {row.id for row, *_ in found})
     if unknown:
-        raise ScheduleError({'error': f'Unknown schedule ids: {", ".join(map(str, unknown))}'})
+        raise ScheduleError('invalid_input', f'Unknown schedule ids: {", ".join(map(str, unknown))}', field='ids')
     return from_str_to_yaml({
         'kind': FILE_KIND,
         'schema_version': SCHEMA_VERSION,
@@ -172,11 +172,11 @@ def _match(by_key: dict, by_name: dict, seen_keys: set, item, application_id: in
     """Return the stored schedule the item updates, or None; raise _Skipped or ScheduleError when it cannot."""
     if item.key is not None:
         if item.key in seen_keys:
-            raise ScheduleError({'error': REPEATED_KEY})
+            raise ScheduleError('repeated_key', REPEATED_KEY)
         seen_keys.add(item.key)
         row = by_key.get(item.key)
         if row is not None and (row.application_id, row.entity_type) != (application_id, item.entity_type):
-            raise ScheduleError({'error': OTHER_ENTITY})
+            raise ScheduleError('other_entity', OTHER_ENTITY)
         return row
     rows = by_name.get((application_id, version_id, item.name), [])
     if len(rows) > 1:
@@ -208,7 +208,7 @@ def _review_item(project_id: int, owner_id: int, version_id: int, values: dict) 
     from .schedule_risk import scan_complete, scan_schedule
     review = scan_schedule(project_id, version_id, owner_id)
     if review['blocking']:
-        raise ScheduleError({'error': '; '.join(finding['message'] for finding in review['blocking'])})
+        raise ScheduleError('schedule_blocked', '; '.join(finding['message'] for finding in review['blocking']))
     if values['approval_rule'] == 'run_without_asking' and (review['sensitive'] or not scan_complete(review)):
         values['approval_rule'] = 'pause_and_ask'
         return UNCONFIRMED_NOTE

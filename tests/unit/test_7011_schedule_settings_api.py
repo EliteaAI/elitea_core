@@ -17,7 +17,7 @@ PACKAGE = 'plugins.elitea_core'
 PROJECT_ID = 7
 LIST_PERMISSION = 'models.applications.schedules.list'
 ADMIN_PERMISSION = 'models.applications.schedules.admin'
-INVALID = {'error': 'allow_run_without_asking must be true or false', 'field': 'allow_run_without_asking'}
+INVALID = {'code': 'invalid_input', 'error': 'allow_run_without_asking must be true or false', 'field': 'allow_run_without_asking'}
 
 
 class Harness:
@@ -139,7 +139,7 @@ def test_el7011_r3_2_get_is_false_when_the_store_fails(harness):
 def test_el7011_cr_put_with_an_unknown_key_is_400_naming_it(harness, body, field):
     response, status = _call(harness, 'put', body)
     assert status == 400
-    assert response == {'error': f'{field} is not a schedule setting', 'field': field}
+    assert response == {'code': 'invalid_input', 'error': f'{field} is not a schedule setting', 'field': field}
     assert harness.saved == {}
 
 

@@ -94,7 +94,7 @@ def test_7011_r2_1_r2_2_ineligible_new_owner_is_400_with_the_reason(harness, own
     owner.ineligible[OWNER_ID] = reason
     schedule_id = harness.seed(created_by=OTHER_ID)
     assert change_owner(harness, schedule_id, {'owner_id': OWNER_ID}) == (
-        {'error': reason, 'field': 'owner_id'}, 400)
+        {'code': 'invalid_input', 'error': reason, 'field': 'owner_id'}, 400)
     assert unchanged(harness, schedule_id)
     assert harness.notices == []
 
@@ -104,7 +104,7 @@ def test_7011_r2_1_unavailable_access_check_is_503_not_400(harness, owner):
     owner.ineligible[OWNER_ID] = owner.ACCESS_CHECK_UNAVAILABLE
     schedule_id = harness.seed(created_by=OTHER_ID)
     assert change_owner(harness, schedule_id, {'owner_id': OWNER_ID}) == (
-        {'error': owner.ACCESS_CHECK_UNAVAILABLE}, 503)
+        {'code': 'access_check_unavailable', 'error': owner.ACCESS_CHECK_UNAVAILABLE}, 503)
     assert unchanged(harness, schedule_id)
 
 
