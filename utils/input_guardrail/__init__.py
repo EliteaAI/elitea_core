@@ -153,9 +153,16 @@ def _payload_slots(payload: Dict[str, Any], not_inspected: List[str], kind: str 
             ))
     # Variable values are rendered into the system prompt: the request's own values are
     # the caller's input for this turn, the version's stored defaults are the owner's
-    slots.extend(_variable_slots('current_turn', (application.get('variables') or {}).values()
-                                 if isinstance(application.get('variables'), dict) else []))
-    slots.extend(_variable_slots('instructions', version_details.get('variables') or []))
+    # Stored defaults are merged into the request's values too, so one equal to its
+    # default is the owner's and is inspected once, as instructions
+    stored = version_details.get('variables') or []
+    defaults = {(v.get('name'), v.get('value')) for v in stored if isinstance(v, dict)}
+    requested = application.get('variables') if isinstance(application.get('variables'), dict) else {}
+    slots.extend(_variable_slots('current_turn', [
+        v for v in requested.values()
+        if not (isinstance(v, dict) and (v.get('name'), v.get('value')) in defaults)
+    ]))
+    slots.extend(_variable_slots('instructions', stored))
     return [s for s in slots if s.text]
 
 

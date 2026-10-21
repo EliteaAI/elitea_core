@@ -685,6 +685,34 @@ def test_stored_variable_default_is_inspected_as_instructions(guardrail):
     assert blocked.value.segments == ['instructions']
 
 
+def test_stored_default_merged_into_the_request_is_the_owners_only(guardrail):
+    # predict merges the version's defaults into the request's values: the same value
+    # arrives in both places and must not read as the user's own input
+    _enable(guardrail, categories={'credentials': 'block'})
+    stored = {'name': 'repo_token', 'value': FAKE_GITHUB_TOKEN}
+    application = {'variables': {'repo_token': dict(stored)}, 'version_details': {'variables': [stored]}}
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError) as blocked:
+        guardrail.apply_input_guardrail(_call('hello', application=application))
+
+    assert blocked.value.segments == ['instructions']
+    assert blocked.value.message_key == 'input_guardrail.blocked.instructions'
+    assert len(guardrail.spans) == 1
+
+
+def test_request_value_overriding_a_stored_default_is_the_current_turn(guardrail):
+    _enable(guardrail, categories={'credentials': 'block'})
+    application = {
+        'variables': {'repo_token': {'name': 'repo_token', 'value': f'tok {FAKE_GITHUB_TOKEN}'}},
+        'version_details': {'variables': [{'name': 'repo_token', 'value': 'placeholder'}]},
+    }
+
+    with pytest.raises(guardrail.exceptions.InputGuardrailBlockedError) as blocked:
+        guardrail.apply_input_guardrail(_call('hello', application=application))
+
+    assert blocked.value.segments == ['current_turn']
+
+
 class _Vault:
     """unsecret as VaultClient does it: substitutes {{secret.NAME}} in nested values."""
     def __init__(self, secrets):
