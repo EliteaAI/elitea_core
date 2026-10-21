@@ -154,8 +154,10 @@ def harness(isolated_sys_modules, monkeypatch):
     sys.modules[folder_access.__name__] = folder_access
     risk = types.ModuleType(f'{PACKAGE}.utils.schedule_risk')  # the scan has its own tests (US-17)
     risk.scan_schedule_risks = lambda *args: harness.scans.append(args) or list(harness.risk_warnings)
-    risk.is_run_without_asking_allowed = lambda project_id: harness.run_without_asking_allowed
     sys.modules[risk.__name__] = risk
+    settings = types.ModuleType(f'{PACKAGE}.utils.schedule_settings')
+    settings.is_run_without_asking_allowed = lambda project_id: harness.run_without_asking_allowed
+    sys.modules[settings.__name__] = settings
     sys.modules[notifications.__name__] = notifications
 
     harness.EntitySchedule = sqlite_db.create_schedule_table(load, Base, engine)

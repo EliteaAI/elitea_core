@@ -1,4 +1,4 @@
-"""Handlers of the schedules of a project (EL-7011, US-05, US-06, US-22): list, export, import, preferences.
+"""Handlers of the schedules of a project (EL-7011, US-05, US-06, US-22): list, export, import, preferences, settings.
 
 `api/v2/schedules.py` serves them; this module registers no route.
 """
@@ -17,6 +17,8 @@ from .schedule_queries import list_schedules
 MAX_ID = 2147483647  # the schedule id column is a 32-bit integer
 MAX_EXPORT_IDS = 500
 INVALID_PREFERENCE = {"error": "get_notified must be true or false"}
+INVALID_SETTING = {"error": "allow_run_without_asking must be true or false", "field": "allow_run_without_asking"}
+SETTINGS_UNAVAILABLE = {"error": "The project settings store is unavailable; try again later"}
 
 
 class SchedulePreferenceUpdate(BaseModel):
@@ -78,7 +80,7 @@ class ScheduleProjectHandlers:
             ).model_dump(mode="json")  # one ISO offset per date; serialize() adds a second 'Z'
             for row in rows
         ]
-        from .schedule_risk import is_run_without_asking_allowed
+        from .schedule_settings import is_run_without_asking_allowed
         return {"total": total, "rows": items, "run_without_asking_allowed": bool(is_run_without_asking_allowed(project_id))}, 200
 
     @auth.decorators.check_api(schedule_check_spec("export"))
@@ -169,3 +171,35 @@ class ScheduleProjectHandlers:
                 session.get(EntitySchedulePreference, user_id).get_notified = value
                 session.commit()
         return {"get_notified": value}, 200
+
+    @auth.decorators.check_api(schedule_check_spec("list"))
+    def _get_settings(self, project_id: int):
+        """Answer whether the project allows the "Run without asking" approval rule; false when never saved.
+
+        Who may call: a project member with `schedules.list`.
+        Errors: 403. A store error answers false, as every other reader of the setting does (fail closed).
+        """
+        from .schedule_settings import is_run_without_asking_allowed
+        return {"allow_run_without_asking": is_run_without_asking_allowed(project_id)}, 200
+
+    @auth.decorators.check_api(schedule_check_spec("admin"))
+    def _save_settings(self, project_id: int):
+        """Allow or forbid "Run without asking" in the project. Saved schedules keep their rule; while it is
+        off, their runs pause and ask.
+
+        Who may call: a schedules admin (`schedules.admin`) only.
+        Errors: 400 an unknown key or a value that is not true or false, with `field`; 403; 503 the store fails.
+        """
+        from .schedule_settings import ScheduleProjectSettings, save_schedule_settings
+        try:
+            settings = ScheduleProjectSettings.model_validate(request.get_json(silent=True))
+        except ValidationError as e:
+            unknown = [error["loc"][0] for error in e.errors() if error["type"] == "extra_forbidden"]
+            if unknown:
+                return {"error": f"{unknown[0]} is not a schedule setting", "field": unknown[0]}, 400
+            return INVALID_SETTING, 400
+        try:
+            return save_schedule_settings(project_id, settings), 200
+        except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the configurations store failed
+            log.exception("Project %s: the schedule settings could not be saved", project_id)
+            return SETTINGS_UNAVAILABLE, 503
