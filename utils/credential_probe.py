@@ -5,10 +5,17 @@ fields themselves. This module decides whether the user may probe it, sends the 
 slot to the ``governed_ops`` pool (the ``indexer_governed_check_connection`` task), and lets the worker ask Main for the
 material through the same trusted release as a run (``credential_release``), under a single-use ticket.
 
-Order: the user holds ``credentials.probe``; the configuration is a credential of this project and type; its reference is
-``validated`` or ``active`` at the generation the configuration is at; a worker can run the task; the ``probe`` event is
+Order: the actor holds ``credentials.probe``; the configuration is a credential of this project and type; its reference is
+``validated`` or ``active`` (``pending`` too when the credential onboarding probes a value it has just written) at the
+generation the configuration is at; a worker can run the task; the ``probe`` event is
 committed, then the ticket (metadata only, 90 s, taken once by the release) is stored, then the task runs. Every refusal
 is a code with a fixed readable message, audited; no value of the credential passes through this module.
+
+Two users can be involved (#7119). ``user_id`` is the user whose personal reference is preferred over the shared one (the
+tester, or the custodian when an operator tests on their behalf); only that user may probe their personal reference. The
+actor (``actor_user_id``, the same user unless given) is who holds ``credentials.probe``, is named as the caller of the
+events and is the user the ticket and the stored-configuration read are for. The caller that passes a different actor has
+authorised them already (the credential onboarding's REST layer).
 """
 import json
 import uuid
@@ -76,12 +83,12 @@ def _stored_configuration(project_id, configuration_uuid, user_id) -> dict:
         user_id=user_id, unsecret=False)
 
 
-def _check_arguments(project_id, configuration_uuid, config_type, user_id) -> None:
+def _check_arguments(project_id, configuration_uuid, config_type, user_id, actor_user_id) -> None:
     try:
         canonical = str(uuid.UUID(configuration_uuid)) if isinstance(configuration_uuid, str) else None
     except ValueError:
         canonical = None
-    ints = all(isinstance(value, int) and not isinstance(value, bool) for value in (project_id, user_id))
+    ints = all(isinstance(value, int) and not isinstance(value, bool) for value in (project_id, user_id, actor_user_id))
     if (not ints or canonical is None or canonical != configuration_uuid or not isinstance(config_type, str)
             or not 0 < len(config_type) <= 128):
         raise _deny("CREDENTIAL_REFERENCE_REQUIRED")
@@ -97,8 +104,10 @@ def _may_probe(user_id, project_id) -> None:
         raise _deny("DENIED_RBAC")
 
 
-def _reference_of(project_id, configuration_uuid, config_type, user_id, known) -> tuple:
-    """The configuration's facts and its credential reference; the refusal when it cannot be probed."""
+def _reference_of(project_id, configuration_uuid, config_type, user_id, known, onboarding=False) -> tuple:
+    """The configuration's facts and its credential reference; the refusal when it cannot be probed. ``onboarding``
+    also admits a ``pending`` reference with a committed generation: the value the credential onboarding has just
+    written, probed before it is validated."""
     try:
         configuration = read_configuration_facts([(configuration_uuid, project_id)]).get(configuration_uuid)
         if not isinstance(configuration, dict):
@@ -106,7 +115,8 @@ def _reference_of(project_id, configuration_uuid, config_type, user_id, known) -
         if (configuration.get("section") != CREDENTIAL_SECTION or configuration.get("project_id") != project_id
                 or configuration.get("type") != config_type):
             raise _deny("CREDENTIAL_REFERENCE_REQUIRED")
-        found = this.for_module("secrets").module.credential_use_facts(project_id, [configuration["id"]], [])
+        found = this.for_module("secrets").module.credential_use_facts(   # the tester's own personal reference first
+            project_id, [configuration["id"]], [], None, personal_user_id=user_id)
     except AdmissionDenied:
         raise
     except Exception as exc:  # pylint: disable=W0703
@@ -116,7 +126,9 @@ def _reference_of(project_id, configuration_uuid, config_type, user_id, known) -
     if not isinstance(reference, dict):
         raise _deny("CREDENTIAL_REFERENCE_REQUIRED")
     known.update(credential_ref=reference.get("ref_id"), credential_generation=reference.get("generation"))
-    if reference.get("state") not in ("validated", "active") or reference.get("store_kind") not in STORE_KINDS:
+    states = ("pending", "validated", "active") if onboarding else ("validated", "active")
+    if (reference.get("state") not in states or reference.get("store_kind") not in STORE_KINDS
+            or (reference.get("state") == "pending" and not (reference.get("generation") or 0) >= 1)):
         raise _deny("CREDENTIAL_REFERENCE_INACTIVE")
     if reference.get("ownership_class") == "personal" and reference.get("custodian_user_id") != user_id:
         raise _deny("CREDENTIAL_CLASS_NOT_ALLOWED")
@@ -132,12 +144,12 @@ def _probe_event(module, **fields) -> dict:
         environment=module.admission_settings.environment, **fields)
 
 
-def _open_probe(module, project_id, user_id, probe_ref, reference) -> None:
+def _open_probe(module, project_id, user_id, actor_user_id, probe_ref, reference, onboarding=False) -> None:
     """Commit the ``probe`` event, then store the ticket the release takes. The event comes first: a ticket never
     exists without its record, and a lost ticket only makes the probe fail."""
     event = _probe_event(
         module, decision="allow", reason_code=ALLOWED, event_id=probe_ref, project_id=project_id,
-        caller_ref=f"user:{user_id}", user_ref=f"user:{user_id}", credential_ref=reference["ref_id"],
+        caller_ref=f"user:{actor_user_id}", user_ref=f"user:{user_id}", credential_ref=reference["ref_id"],
         credential_generation=reference["generation"])
     try:
         with db.get_session(project_id) as session:
@@ -146,10 +158,13 @@ def _open_probe(module, project_id, user_id, probe_ref, reference) -> None:
     except Exception as exc:  # pylint: disable=W0703
         log.error("governed check_connection: the probe event was not recorded (%s)", type(exc).__name__)
         raise _deny("AUDIT_UNAVAILABLE") from None
-    ticket = json.dumps({
+    ticket = {
         "project_id": project_id, "credential_ref": reference["ref_id"],
-        "credential_generation": reference["generation"], "task_name": PROBE_TASK, "user_id": user_id,
-    })
+        "credential_generation": reference["generation"], "task_name": PROBE_TASK, "user_id": actor_user_id,
+    }
+    if onboarding:   # the release may read a pending reference for this ticket (and only this ticket)
+        ticket["onboarding"] = True
+    ticket = json.dumps(ticket)
     try:
         module.get_redis_client().set(PROBE_KEY + probe_ref, ticket, ex=PROBE_TTL_S)
     except Exception as exc:  # pylint: disable=W0703
@@ -205,7 +220,7 @@ def shape_result(result) -> dict:
     return {**result, "success": True}
 
 
-def _outcome(module, project_id, user_id, reference, answer) -> None:
+def _outcome(module, project_id, user_id, actor_user_id, reference, answer) -> None:
     if answer.get("success"):
         outcome, reason = "success", SUCCEEDED
     elif answer.get("requires_authorization"):
@@ -215,31 +230,32 @@ def _outcome(module, project_id, user_id, reference, answer) -> None:
     try:
         adm._tracing().security_audit_record_autocommit(_probe_event(
             module, decision="allow", reason_code=reason, outcome=outcome, project_id=project_id,
-            caller_ref=f"user:{user_id}", user_ref=f"user:{user_id}", credential_ref=reference["ref_id"],
+            caller_ref=f"user:{actor_user_id}", user_ref=f"user:{user_id}", credential_ref=reference["ref_id"],
             credential_generation=reference["generation"]))
     except Exception as exc:  # pylint: disable=W0703
         log.error("governed check_connection: the outcome was not recorded (%s)", type(exc).__name__)
 
 
-def _probe(module, project_id, configuration_uuid, config_type, user_id, known) -> dict:
+def _probe(module, project_id, configuration_uuid, config_type, user_id, known, actor_user_id=None, onboarding=False) -> dict:  # pylint: disable=R0913
     if not module.governance_profile.enabled:
         raise _deny("DEPENDENCY_UNAVAILABLE")
-    _check_arguments(project_id, configuration_uuid, config_type, user_id)
-    known.update(project_id=project_id, caller_ref=f"user:{user_id}", user_ref=f"user:{user_id}")
+    actor_user_id = user_id if actor_user_id is None else actor_user_id
+    _check_arguments(project_id, configuration_uuid, config_type, user_id, actor_user_id)
+    known.update(project_id=project_id, caller_ref=f"user:{actor_user_id}", user_ref=f"user:{user_id}")
     try:
         audit_allowed = adm._tracing().security_audit_admission_allowed_local()
     except Exception:  # pylint: disable=W0703
         audit_allowed = False
     if not audit_allowed:
         raise _deny("AUDIT_UNAVAILABLE")
-    _may_probe(user_id, project_id)
-    _configuration, reference = _reference_of(project_id, configuration_uuid, config_type, user_id, known)
+    _may_probe(actor_user_id, project_id)
+    _configuration, reference = _reference_of(project_id, configuration_uuid, config_type, user_id, known, onboarding)
     required = {"task_envelope.v1", CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_GOVERNED_OPS_POOL_V1}
     if not module.worker_capabilities.has_capable_worker(required):
         raise _deny("WORKER_CAPABILITY_UNAVAILABLE")
     # the stored configuration without its secret fields, and a slot for them
     try:
-        settings = _stored_configuration(project_id, configuration_uuid, user_id)
+        settings = _stored_configuration(project_id, configuration_uuid, actor_user_id)
         if settings.get("configuration_generation") != reference.get("configuration_generation"):
             raise _deny("CREDENTIAL_GENERATION_MISMATCH")   # changed between the facts and the read: no probe
         paths = secret_paths_for({config_type}, configuration_secret_fields)[config_type]
@@ -258,26 +274,30 @@ def _probe(module, project_id, configuration_uuid, config_type, user_id, known) 
     settings[SLOT_KEY] = slot_of(
         {"credential_ref": reference["ref_id"], "credential_generation": reference["generation"]}, held,
         ticket=probe_ref)
-    _open_probe(module, project_id, user_id, probe_ref, reference)
+    _open_probe(module, project_id, user_id, actor_user_id, probe_ref, reference, onboarding)
     try:
         answer = shape_result(_run_probe(module, project_id, config_type, settings))
     finally:
         _close_probe(module, probe_ref)
-    _outcome(module, project_id, user_id, reference, answer)
+    _outcome(module, project_id, user_id, actor_user_id, reference, answer)
     adm._metric(CREDENTIAL_PROBE, "credential_probe_total", "decision", "allow",
                 SUCCEEDED if answer.get("success") else FAILED)
     return answer
 
 
-def governed_check_connection(module, project_id, configuration_uuid, config_type, user_id) -> dict:
-    """Test a saved credential through the governed path. Never raises.
+def governed_check_connection(  # pylint: disable=R0913
+    module, project_id, configuration_uuid, config_type, user_id, actor_user_id=None, onboarding=False,
+) -> dict:
+    """Test a saved credential through the governed path. Never raises. ``user_id``: whose personal reference is
+    preferred; ``actor_user_id`` (default ``user_id``): who holds ``credentials.probe``; ``onboarding``: a ``pending``
+    reference may be probed (see the module docstring).
 
     ``{"success": True, ...}`` | ``{"success": False, "message"}`` (the provider failed) |
     ``{"success": False, "requires_authorization": True, "auth_metadata", "message"}`` |
     ``{"success": False, "code", "message"}`` (a refusal: permission, governance, capability, store)."""
     known = {}
     try:
-        return _probe(module, project_id, configuration_uuid, config_type, user_id, known)
+        return _probe(module, project_id, configuration_uuid, config_type, user_id, known, actor_user_id, onboarding)
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703

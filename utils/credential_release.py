@@ -224,9 +224,11 @@ class _Scope:  # pylint: disable=R0903
     """What the checks established and the reply needs: which project holds the credential, which reference states
     may be released, the audit identity of the requester, and when the release stops being usable."""
 
-    def __init__(self, binding_project_id, allow_validated, expires_at, event, revocation_epoch=None, on_revoke=None):  # pylint: disable=R0913
+    def __init__(self, binding_project_id, allow_validated, expires_at, event, revocation_epoch=None, on_revoke=None,
+                 allow_pending=False):  # pylint: disable=R0913
         self.binding_project_id, self.allow_validated, self.expires_at = binding_project_id, allow_validated, expires_at
         self.event, self.revocation_epoch, self.on_revoke = event, revocation_epoch, on_revoke
+        self.allow_pending = allow_pending   # a probe of a value the credential onboarding has just written
 
 
 def _check_run(module, request: _Request, known: dict) -> _Scope:  # pylint: disable=R0914
@@ -398,7 +400,7 @@ def _check_probe(module, request: _Request, known: dict) -> _Scope:
         toolkit_instance_id=request.toolkit_instance_id, credential_ref=slot["credential_ref"],
         credential_generation=slot["credential_generation"])
     known.update(user_ref=event["user_ref"])
-    return _Scope(request.project_id, True, _horizon(), event)
+    return _Scope(request.project_id, True, _horizon(), event, allow_pending=ticket.get("onboarding") is True)
 
 
 # --- the store read and the reply ------------------------------------------------------------
@@ -410,7 +412,7 @@ def _read_and_reply(module, request: _Request, known: dict, scope: _Scope) -> di
     try:
         result = this.for_module("secrets").module.release_credential_material(
             scope.binding_project_id, slot["credential_ref"], slot["credential_generation"], release_id,
-            known["caller_ref"], scope.allow_validated)
+            known["caller_ref"], scope.allow_validated, **({"allow_pending": True} if scope.allow_pending else {}))
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: the store read failed (%s)", type(exc).__name__)
         raise adm._denied("DEPENDENCY_UNAVAILABLE") from None
