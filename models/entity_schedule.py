@@ -1,5 +1,6 @@
 """Schedule tables (EL-7011). Keep in step with the R-2.0.8 block of db_migrations.txt."""
 from datetime import datetime
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
@@ -10,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Uuid,
     desc,
     func,
     text,
@@ -40,10 +42,13 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
         Index('ix_entity_schedules_next_run_enabled', 'next_run', postgresql_where=text('enabled')),
         Index('ix_entity_schedules_created_by', 'created_by'),
         Index('ix_entity_schedules_application_version', 'application_id', 'version_id'),
+        Index('uq_entity_schedules_uuid', 'uuid', unique=True),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # The stable key of the YAML file; the SQL backfill uses gen_random_uuid()
+    uuid: Mapped[UUID] = mapped_column(Uuid, nullable=False, default=uuid4)
     entity_type: Mapped[str] = mapped_column(String(16), nullable=False)
     application_id: Mapped[int] = mapped_column(
         ForeignKey(f'{c.POSTGRES_TENANT_SCHEMA}.applications.id', ondelete='CASCADE'), nullable=False

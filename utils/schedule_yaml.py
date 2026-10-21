@@ -1,10 +1,12 @@
 """Schedules as a YAML file (EL-7011): the export writes a fixed allow-list of fields, never the stored row.
 
-The import creates every item disabled, through the create path of the schedule service."""
+The import updates the schedule an item matches, by key or else by natural key, through the update path of the
+schedule service; an unmatched item is created disabled, through the create path."""
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from tools import db
 
@@ -14,19 +16,25 @@ from .pipeline_utils import from_str_to_yaml, validate_yaml_from_str
 from .schedule_service import ScheduleError
 
 FILE_KIND = 'elitea_schedules'
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_FILE_BYTES = 1024 * 1024
 MAX_ITEMS = 500
 NOT_YAML = 'The schedule file is not valid YAML'
 TOO_LARGE = 'The schedule file is larger than 1 MB'
 TOO_MANY = f'The schedule file has more than {MAX_ITEMS} schedules'
 SAVE_FAILED = 'The schedule could not be saved'
+REPEATED_KEY = 'The key is used by an earlier schedule of this file'
+OTHER_ENTITY = 'The key belongs to a schedule of another agent or pipeline'
+UPDATE_FIELDS = (
+    'description', 'run_mode', 'prompt', 'variables', 'cron', 'timezone', 'expires_at', 'approval_rule',
+)  # never enabled or name: an update keeps them (R5.1)
 
 
 def _item(row: EntitySchedule, entity_name: str, version_name: str | None) -> dict:
     """One allow-listed file item; the keys are the file format, in file order."""
     is_entry_point = row.run_mode == 'entry_point'
     return {
+        'key': str(row.uuid),
         'name': row.name,
         'description': row.description,
         'entity_type': row.entity_type,
@@ -137,42 +145,99 @@ def _resolve(index: dict, item) -> tuple[int, int]:
     return matches[0]
 
 
+def _schedule_index(session, file) -> tuple[dict, dict]:
+    """Map the uuid, and the (application_id, version_id, name), to the stored schedules the file can match; one query."""
+    keys, names = set(), set()
+    for raw in file.schedules:
+        try:
+            keys.add(UUID(str(raw['key'])))
+        except (KeyError, ValueError):
+            pass  # no key or a bad one; the item model reports a bad key
+        if isinstance(raw.get('name'), str):
+            names.add(raw['name'])
+    by_key, by_name = {}, {}
+    for row in session.scalars(
+            select(EntitySchedule).where(or_(EntitySchedule.uuid.in_(keys), EntitySchedule.name.in_(names)))
+    ):
+        by_key[row.uuid] = row
+        by_name.setdefault((row.application_id, row.version_id, row.name), []).append(row)
+    return by_key, by_name
+
+
+def _match(by_key: dict, by_name: dict, seen_keys: set, item, application_id: int, version_id: int):
+    """Return the stored schedule the item updates, or None; raise _Skipped or ScheduleError when it cannot."""
+    if item.key is not None:
+        if item.key in seen_keys:
+            raise ScheduleError({'error': REPEATED_KEY})
+        seen_keys.add(item.key)
+        row = by_key.get(item.key)
+        if row is not None and (row.application_id, row.entity_type) != (application_id, item.entity_type):
+            raise ScheduleError({'error': OTHER_ENTITY})
+        return row
+    rows = by_name.get((application_id, version_id, item.name), [])
+    if len(rows) > 1:
+        raise _Skipped(f"Schedule '{item.name}' found more than once")
+    return rows[0] if rows else None
+
+
+def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, ids: tuple[int, int]):
+    """Update the schedule the item matches, else create a disabled one; return ('updated' or 'created', row)."""
+    # late: the export loads without these modules
+    from ..models.pd.entity_schedule import ScheduleCreate, ScheduleUpdate
+    from .schedule_service import create_schedule, update_schedule
+    by_key, by_name, _ = indexes
+    application_id, version_id = ids
+    row = _match(*indexes, item, *ids)
+    if row is not None:
+        old_key = (row.application_id, row.version_id, row.name)
+        body = ScheduleUpdate(**{field: values[field] for field in UPDATE_FIELDS}, version_id=version_id)
+        update_schedule(session, project_id, row, body, scope)
+        if row.version_id != old_key[1]:  # a later keyless item of the file finds the row under its new version
+            by_name[old_key].remove(row)
+            by_name.setdefault((row.application_id, row.version_id, row.name), []).append(row)
+        return 'updated', row
+    body = ScheduleCreate(**values, application_id=application_id, version_id=version_id, enabled=False)
+    row = create_schedule(session, project_id, body, scope, key=item.key)
+    by_key[row.uuid] = row  # a later item of the file then updates this row
+    by_name.setdefault((application_id, version_id, row.name), []).append(row)
+    return 'created', row
+
+
 def import_schedules(project_id: int, admin_id: int, file) -> dict:
-    """Create one disabled schedule per matched item, owned by the admin; return the report.
+    """Update the schedule each item matches, else create a disabled one owned by the admin; return the report.
 
     Args:
         project_id: The target project.
-        admin_id: The importing admin; owner and principal of every row.
+        admin_id: The importing admin; owner and principal of every created row.
         file: The `ScheduleFile` from `parse_schedules_file`.
 
     Returns:
-        `{created, skipped, failed}`; every entry has the item name, a created one the `schedule_id`
-        and a `note` when the approval rule changed, a skipped or failed one the `reason`.
+        `{created, updated, skipped, failed}`; every entry has the item name, a created or updated one the
+        `schedule_id` and a `note` when the approval rule changed, a skipped or failed one the `reason`.
     """
     # late: the export loads without these modules
-    from ..models.pd.entity_schedule import ScheduleCreate
     from ..models.pd.schedule_yaml import ScheduleFileItem
     from .schedule_access import ScheduleScope
     from .schedule_risk import is_run_without_asking_allowed
-    from .schedule_service import create_schedule
     scope = ScheduleScope(user_id=admin_id, is_admin=True, permissions=frozenset())
     may_run_without_asking = is_run_without_asking_allowed(project_id)
-    report = {'created': [], 'skipped': [], 'failed': []}
+    report = {'created': [], 'updated': [], 'skipped': [], 'failed': []}
     names = {raw['entity_name'] for raw in file.schedules if isinstance(raw.get('entity_name'), str)}
     with db.get_session(project_id) as session:
         index = _entity_index(session, names)
+        indexes = (*_schedule_index(session, file), set())  # by uuid, by natural key, keys seen in the file
         for raw in file.schedules:
             entry = {'name': raw.get('name')}
             try:
                 item = ScheduleFileItem.model_validate(raw)
-                application_id, version_id = _resolve(index, item)
-                values = item.model_dump(exclude={'entity_name', 'version_name'})
+                ids = _resolve(index, item)
+                values = item.model_dump(exclude={'key', 'entity_name', 'version_name'})
                 if item.approval_rule == 'run_without_asking' and not may_run_without_asking:
                     values['approval_rule'] = 'pause_and_ask'
                     entry['note'] = 'Run without asking is not allowed in this project; saved as Pause and ask me'
-                body = ScheduleCreate(**values, application_id=application_id, version_id=version_id, enabled=False)
-                entry['schedule_id'] = create_schedule(session, project_id, body, scope).id
-                report['created'].append(entry)
+                group, row = _save(session, project_id, scope, indexes, item, values, ids)
+                entry.update(name=row.name, schedule_id=row.id)  # a key match keeps the stored name
+                report[group].append(entry)
             except _Skipped as e:
                 report['skipped'].append({**entry, 'reason': str(e)})
             except ValidationError as e:

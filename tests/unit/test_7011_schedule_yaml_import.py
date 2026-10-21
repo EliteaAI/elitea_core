@@ -1,4 +1,4 @@
-"""EL-7011 US-22: import of a schedule YAML file (R2.1 to R2.6, R3.1, R3.2, R3.5) on SQLite.
+"""EL-7011 US-22: import of a schedule YAML file (R2.1 to R2.6, R3.1, R3.2, R3.5, R4, R5) on SQLite.
 
 The import module, the create service, the body models and the schedule table are real.
 The plugin package around them is stubbed.
@@ -10,6 +10,7 @@ import contextlib
 import pathlib
 import sys
 import types
+import uuid
 
 import pytest
 import yaml
@@ -78,10 +79,11 @@ def install_service_stubs(env):
     """Stub the folder rights, the run-without-asking secret and the notifications the create service calls."""
     env.folder_error = None
     env.run_without_asking = False
+    env.notices = []
     stubs = {
         'folder_access': {'entity_access_error': lambda *args, **kwargs: env.folder_error},
         'schedule_risk': {'is_run_without_asking_allowed': lambda project_id: env.run_without_asking},
-        'schedule_notifications': {'notify_schedule_event': lambda *args, **kwargs: True},
+        'schedule_notifications': {'notify_schedule_event': lambda *args, **kwargs: env.notices.append(args) or True},
     }
     for name, attributes in stubs.items():
         stub = types.ModuleType(f'{PACKAGE}.utils.{name}')
@@ -106,8 +108,8 @@ class Env:
     def import_text(self, text):
         return self.module.import_schedules(PROJECT_ID, ADMIN_ID, self.module.parse_schedules_file(text))
 
-    def import_items(self, *items):
-        return self.import_text(file_text(*items))
+    def import_items(self, *items, **header):
+        return self.import_text(file_text(*items, **header))
 
     def rows(self):
         with self.session_factory() as session:
@@ -119,6 +121,13 @@ class Env:
             session.flush()
             session.add(self.ApplicationVersion(
                 id=application_id * 10, application_id=application_id, name=version_name, agent_type=agent_type,
+            ))
+            session.commit()
+
+    def add_version(self, application_id, version_id, name):
+        with self.session_factory() as session:
+            session.add(self.ApplicationVersion(
+                id=version_id, application_id=application_id, name=name, agent_type='openai',
             ))
             session.commit()
 
@@ -170,7 +179,7 @@ def test_7011_r3_1_a_file_just_under_the_size_limit_is_accepted_and_reports_per_
 
 
 @pytest.mark.parametrize('header', [
-    {'kind': 'other'}, {'schema_version': 2}, {'kind': None}, {'schema_version': '1'}, {'schema_version': True},
+    {'kind': 'other'}, {'schema_version': 3}, {'kind': None}, {'schema_version': '1'}, {'schema_version': True},
 ])
 def test_7011_r3_2_a_wrong_header_raises_the_header_message(env, header):
     with pytest.raises(ValueError, match=env.WRONG_HEADER):
@@ -200,7 +209,9 @@ def test_7011_r2_1_import_creates_a_disabled_schedule_owned_by_the_admin(env):
         False, ADMIN_ID, ADMIN_ID, {'kind': 'delegation', 'ref': ADMIN_ID},
     )
     assert (row.name, row.description, row.cron, row.timezone) == ('Daily digest', 'Digest', '0 9 * * 1-5', 'Europe/Berlin')
-    assert report == {'created': [{'name': 'Daily digest', 'schedule_id': row.id}], 'skipped': [], 'failed': []}
+    assert report == {
+        'created': [{'name': 'Daily digest', 'schedule_id': row.id}], 'updated': [], 'skipped': [], 'failed': [],
+    }
 
 
 def test_7011_r2_2_import_resolves_the_entity_and_version_by_name(env):
@@ -295,10 +306,10 @@ def test_7011_r3_5_a_pipeline_item_without_a_valid_run_mode_fails_and_the_agent_
 def test_7011_r2_4_a_database_error_fails_the_item_with_a_generic_reason_and_the_next_item_goes_on(env, monkeypatch):
     real = env.service.create_schedule
 
-    def broken_once(session, project_id, body, scope):
+    def broken_once(session, project_id, body, scope, **kwargs):
         if body.name == 'Broken':
             raise OperationalError('INSERT secret_table', {}, Exception('connection lost'))
-        return real(session, project_id, body, scope)
+        return real(session, project_id, body, scope, **kwargs)
 
     monkeypatch.setattr(env.service, 'create_schedule', broken_once)
     report = env.import_items(item(name='Broken'), item(name='Good'))
@@ -334,8 +345,108 @@ def test_7011_r2_5_pause_and_ask_needs_no_note(env):
 
 # --- R2.6: the report
 
-def test_7011_r2_6_the_report_lists_created_skipped_and_failed_items(env):
-    report = env.import_items(item(name='Good'), item(name='Gone', entity_name='Nobody'), item(name='Bad', cron='x'))
+def test_7011_r2_6_the_report_lists_created_updated_skipped_and_failed_items(env):
+    env.import_items(item(name='Again'))
+    report = env.import_items(
+        item(name='Good'), item(name='Again'), item(name='Gone', entity_name='Nobody'), item(name='Bad', cron='x'),
+    )
     assert {key: [entry['name'] for entry in value] for key, value in report.items()} == {
-        'created': ['Good'], 'skipped': ['Gone'], 'failed': ['Bad'],
+        'created': ['Good'], 'updated': ['Again'], 'skipped': ['Gone'], 'failed': ['Bad'],
     }
+
+
+# --- R4, R5: an item that matches a stored schedule updates it
+
+KEY = str(uuid.UUID(int=1))
+
+
+def keyed(**overrides):
+    return item(key=KEY, **overrides)
+
+
+def test_7011_r4_1_a_second_import_of_the_same_file_updates_and_creates_nothing(env):
+    env.import_items(keyed(), schema_version=2)
+    with env.session_factory() as session:  # another owner took it over and turned it on
+        (stored,) = session.query(env.EntitySchedule).all()
+        stored.created_by, stored.enabled = 42, True
+        session.commit()
+    report = env.import_items(keyed(cron='0 7 * * *', description='New'), schema_version=2)
+    (row,) = env.rows()
+    assert report == {'created': [], 'updated': [{'name': 'Daily digest', 'schedule_id': row.id}], 'skipped': [], 'failed': []}
+    assert (row.id, row.cron, row.description) == (stored.id, '0 7 * * *', 'New')
+    assert (row.created_by, row.principal, row.enabled, row.updated_by) == (
+        42, {'kind': 'delegation', 'ref': ADMIN_ID}, True, ADMIN_ID,
+    )
+    assert len(env.notices) == 1  # R5.5: the owner hears of the admin change
+
+
+def test_7011_r4_1_a_key_of_a_schedule_of_another_agent_fails_and_keeps_the_schedule(env):
+    env.add_entity(3, 'Other')
+    env.import_items(keyed(), schema_version=2)
+    report = env.import_items(keyed(entity_name='Other', cron='0 7 * * *'), schema_version=2)
+    assert [entry['name'] for entry in report['failed']] == ['Daily digest']
+    assert [(row.application_id, row.cron) for row in env.rows()] == [(1, '0 9 * * 1-5')]
+
+
+def test_7011_r4_1_an_update_keeps_the_approval_downgrade_note(env):
+    env.import_items(item())
+    report = env.import_items(item(approval_rule='run_without_asking'))
+    assert 'note' in report['updated'][0]
+    assert env.rows()[0].approval_rule == 'pause_and_ask'
+
+
+def test_7011_r4_2_a_keyless_item_updates_by_natural_key(env):
+    env.import_items(item())
+    report = env.import_items(item(prompt='Changed'))
+    (row,) = env.rows()
+    assert [entry['schedule_id'] for entry in report['updated']] == [row.id]
+    assert (row.prompt, row.enabled, row.name) == ('Changed', False, 'Daily digest')
+
+
+def test_7011_r4_2_a_keyless_duplicate_in_one_file_updates_the_first_row(env):
+    report = env.import_items(item(), item(prompt='Second'))
+    assert ([len(report['created']), len(report['updated'])], [row.prompt for row in env.rows()]) == ([1, 1], ['Second'])
+
+
+def test_7011_r4_3_a_natural_key_found_twice_is_skipped(env):
+    env.import_items(keyed(), item(key=str(uuid.UUID(int=2))), schema_version=2)
+    report = env.import_items(item(prompt='Changed'))
+    assert [entry['name'] for entry in report['skipped']] == ['Daily digest']
+    assert [row.prompt for row in env.rows()] == ['Summarise', 'Summarise']
+
+
+def test_7011_r4_4_a_repeated_key_fails_the_second_item(env):
+    report = env.import_items(keyed(), keyed(name='Copy', prompt='Second'), schema_version=2)
+    assert [entry['name'] for entry in report['created']] == ['Daily digest']
+    assert [entry['name'] for entry in report['failed']] == ['Copy']
+    assert [(row.name, row.prompt) for row in env.rows()] == [('Daily digest', 'Summarise')]
+
+
+def test_7011_r4_5_a_new_key_is_stored_and_matches_next_import(env):
+    env.import_items(keyed(), schema_version=2)
+    assert str(env.rows()[0].uuid) == KEY
+    report = env.import_items(keyed(name='Renamed in the file'), schema_version=2)
+    assert len(report['updated']) == 1
+    assert [row.name for row in env.rows()] == ['Daily digest']  # R5.1: the name stays
+
+
+def test_7011_r5_6_a_version_1_file_without_keys_still_imports(env):
+    report = env.import_items(item(), schema_version=1)
+    assert [entry['name'] for entry in report['created']] == ['Daily digest']
+
+
+# P2 review: a key update that moves the version also moves the natural key for later items of the file
+def test_7011_r4_2_a_keyless_item_after_a_key_update_of_the_version_updates_that_row(env):
+    env.add_version(1, 12, 'v2')
+    env.import_items(keyed(), schema_version=2)
+    report = env.import_items(keyed(version_name='v2', cron='0 7 * * *'), item(version_name='v2'), schema_version=2)
+    (row,) = env.rows()
+    assert [len(report[group]) for group in ('created', 'updated', 'skipped', 'failed')] == [0, 2, 0, 0]
+    assert row.version_id == 12
+
+
+# P3 review: an updated entry names the stored schedule, which a key match never renames
+def test_7011_r4_1_an_updated_entry_names_the_stored_schedule(env):
+    env.import_items(keyed(), schema_version=2)
+    report = env.import_items(keyed(name='Renamed in the file'), schema_version=2)
+    assert [entry['name'] for entry in report['updated']] == ['Daily digest']
