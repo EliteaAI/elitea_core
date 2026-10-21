@@ -15,9 +15,9 @@ EXPIRES_TEXT = 'Last day the schedule runs, in its time zone; null for no stop d
 
 class ScheduleTiming(BaseModel):
     """Cron, IANA time zone and optional stop date; field order is validation order."""
-    cron: str = Field(description=CRON_TEXT)
-    timezone: str = Field(description=TIMEZONE_TEXT)
-    expires_at: date | None = Field(None, description=EXPIRES_TEXT)
+    cron: str = Field(description=CRON_TEXT, examples=['0 9 * * 1-5'])
+    timezone: str = Field(description=TIMEZONE_TEXT, examples=['Europe/Warsaw'])
+    expires_at: date | None = Field(None, description=EXPIRES_TEXT, examples=['2026-12-31'])
 
     @field_validator('cron')
     @classmethod
@@ -67,11 +67,16 @@ PROMPT_TEXT = 'Message sent at each run; `{{ name }}` takes a variable value'
 VARIABLES_TEXT = 'Values of the entity variables'
 APPROVAL_TEXT = ('A human step `pause_and_ask` waits for the owner; `run_without_asking` '
                  'goes on, when the project allows it')
+NAME_EXAMPLE = 'Daily report'
+DESCRIPTION_EXAMPLE = 'Weekday summary of the open tickets'
+PROMPT_EXAMPLE = 'Summarize the open tickets'
+VARIABLES_EXAMPLE = [{'name': 'ticket_limit', 'value': '20'}]
 
 
 class ScheduleVariable(BaseModel):
-    name: str = Field(min_length=1, description='Variable name of the agent prompt or the pipeline')
-    value: str = Field(description='Value used for every run')
+    name: str = Field(min_length=1, description='Variable name of the agent prompt or the pipeline',
+                      examples=['ticket_limit'])
+    value: str = Field(description='Value used for every run', examples=['20'])
 
 
 class ScheduleCreate(ScheduleTiming):
@@ -81,33 +86,35 @@ class ScheduleCreate(ScheduleTiming):
         'prompt': 'Summarize the open tickets', 'cron': '0 9 * * 1-5', 'timezone': 'Europe/Warsaw',
     }]})
 
-    name: str = Field(min_length=1, max_length=NAME_MAX, description=NAME_TEXT)
-    description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT)
-    entity_type: Literal['agent', 'pipeline'] = Field(description='Kind of the scheduled entity')
-    application_id: int = Field(description='Id of the agent or pipeline')
-    version_id: int = Field(description=VERSION_TEXT)
-    run_mode: RunMode | None = Field(None, description=RUN_MODE_TEXT)
-    prompt: str | None = Field(None, description=PROMPT_TEXT)
-    variables: list[ScheduleVariable] = Field([], description=VARIABLES_TEXT)
-    enabled: bool = Field(True, description='False saves the schedule paused')
-    approval_rule: ApprovalRule = Field('pause_and_ask', description=APPROVAL_TEXT)
+    name: str = Field(min_length=1, max_length=NAME_MAX, description=NAME_TEXT, examples=[NAME_EXAMPLE])
+    description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT,
+                                    examples=[DESCRIPTION_EXAMPLE])
+    entity_type: Literal['agent', 'pipeline'] = Field(description='Kind of the scheduled entity', examples=['agent'])
+    application_id: int = Field(description='Id of the agent or pipeline', examples=[12])
+    version_id: int = Field(description=VERSION_TEXT, examples=[34])
+    run_mode: RunMode | None = Field(None, description=RUN_MODE_TEXT, examples=['prompt'])
+    prompt: str | None = Field(None, description=PROMPT_TEXT, examples=[PROMPT_EXAMPLE])
+    variables: list[ScheduleVariable] = Field([], description=VARIABLES_TEXT, examples=[VARIABLES_EXAMPLE])
+    enabled: bool = Field(True, description='False saves the schedule paused', examples=[True])
+    approval_rule: ApprovalRule = Field('pause_and_ask', description=APPROVAL_TEXT, examples=['pause_and_ask'])
 
 
 class ScheduleUpdate(BaseModel):
     """No owner or entity fields: the extra `created_by` and `principal` of a body are dropped (R2.2)."""
     model_config = ConfigDict(json_schema_extra={'examples': [{'enabled': False}, {'cron': '30 8 * * *'}]})
 
-    name: str | None = Field(None, min_length=1, max_length=NAME_MAX, description=NAME_TEXT)
-    description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT)
-    version_id: int | None = Field(None, description=VERSION_TEXT)
-    run_mode: RunMode | None = Field(None, description=RUN_MODE_TEXT)
-    prompt: str | None = Field(None, description=PROMPT_TEXT)
-    variables: list[ScheduleVariable] | None = Field(None, description=VARIABLES_TEXT)
-    cron: str | None = Field(None, description=CRON_TEXT)
-    timezone: str | None = Field(None, description=TIMEZONE_TEXT)
-    expires_at: date | None = Field(None, description=EXPIRES_TEXT)
-    enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it')
-    approval_rule: ApprovalRule | None = Field(None, description=APPROVAL_TEXT)
+    name: str | None = Field(None, min_length=1, max_length=NAME_MAX, description=NAME_TEXT, examples=[NAME_EXAMPLE])
+    description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT,
+                                    examples=[DESCRIPTION_EXAMPLE])
+    version_id: int | None = Field(None, description=VERSION_TEXT, examples=[35])
+    run_mode: RunMode | None = Field(None, description=RUN_MODE_TEXT, examples=['prompt'])
+    prompt: str | None = Field(None, description=PROMPT_TEXT, examples=[PROMPT_EXAMPLE])
+    variables: list[ScheduleVariable] | None = Field(None, description=VARIABLES_TEXT, examples=[VARIABLES_EXAMPLE])
+    cron: str | None = Field(None, description=CRON_TEXT, examples=['30 8 * * *'])
+    timezone: str | None = Field(None, description=TIMEZONE_TEXT, examples=['Europe/Warsaw'])
+    expires_at: date | None = Field(None, description=EXPIRES_TEXT, examples=['2026-12-31'])
+    enabled: bool | None = Field(None, description='False pauses the schedule, true resumes it', examples=[False])
+    approval_rule: ApprovalRule | None = Field(None, description=APPROVAL_TEXT, examples=['run_without_asking'])
 
     @field_validator('cron')
     @classmethod

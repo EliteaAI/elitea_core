@@ -2,7 +2,7 @@
 from typing import ClassVar
 
 from flask import request
-from pydantic import BaseModel, StrictBool, ValidationError
+from pydantic import BaseModel, Field, StrictBool, ValidationError
 from sqlalchemy.exc import IntegrityError
 from tools import api_tools, auth, db, register_openapi
 
@@ -15,7 +15,8 @@ INVALID_BODY = {"error": "get_notified must be true or false"}
 
 
 class SchedulePreferenceUpdate(BaseModel):
-    get_notified: StrictBool
+    get_notified: StrictBool = Field(description="True sends the caller a notice when a schedule run succeeds",
+                                     examples=[False])
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
