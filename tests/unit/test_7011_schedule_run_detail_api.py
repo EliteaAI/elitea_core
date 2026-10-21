@@ -49,9 +49,12 @@ def reads(monkeypatch):
     module = types.ModuleType(f'{PACKAGE}.utils.schedule_run_detail')
     module.version_label = lambda session, version_id: {10: 'v3'}.get(version_id)
 
-    def tool_call_events(session, conversation_id):
+    def tool_call_events(session, conversation_id, with_results):
         state.conversations.append(conversation_id)
+        state.with_results.append(with_results)
         return [TOOL] if conversation_id else []
+
+    state.with_results = []
 
     module.tool_call_events = tool_call_events
     module.usage_summary = lambda session, project_id, run: state.usage
@@ -124,6 +127,24 @@ def test_cr_el7011_an_admin_reads_the_run_of_another_owner(harness, reads):
     harness.request_as(ADMIN_ID, ADMIN)
 
     assert call_run(harness, 'get', schedule_id, run_id)[1] == 200
+    assert reads.with_results == [False]  # owner decision 2026-10-21: no tool result text for an admin
+
+
+def test_cr_el7011_the_owner_reads_the_tool_results_of_the_own_run(harness, reads):
+    schedule_id = harness.seed()
+    run_id = seed_run(harness, schedule_id)
+
+    assert call_run(harness, 'get', schedule_id, run_id)[1] == 200
+    assert reads.with_results == [True]
+
+
+def test_cr_el7011_an_admin_reads_the_tool_results_of_the_own_run(harness, reads):
+    harness.request_as(ADMIN_ID, ADMIN)
+    schedule_id = harness.seed(created_by=ADMIN_ID)
+    run_id = seed_run(harness, schedule_id)
+
+    assert call_run(harness, 'get', schedule_id, run_id)[1] == 200
+    assert reads.with_results == [True]
 
 
 def test_cr_el7011_a_regular_user_gets_404_for_the_run_of_another_owner(harness, reads):

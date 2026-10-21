@@ -276,6 +276,8 @@ def test_cr_el7011_the_run_detail_documents_summary_events_and_polling(spec):
         'started', 'account', 'risk_check', 'agent_started', 'tool_call', 'paused', 'decision', 'finished'}
     assert all({'at', 'kind', 'text', 'level'} <= set(event) for event in example['events'])
     assert 'every 2 s' in operation['description'] and '`schedules.details`' in operation['description']
+    # Owner decision 2026-10-21: the text says that a caller who is not the owner gets no tool result
+    assert 'not the owner' in operation['description'] and '`summary`' in operation['description']
     assert {'403', '404'} <= set(operation['responses'])
     runs_row = _operations(spec)[('get', f'{ITEM}/runs')]['responses']['200']['content']['application/json']
     assert {'version_id', 'duration_ms'} <= set(runs_row['example']['rows'][0])
