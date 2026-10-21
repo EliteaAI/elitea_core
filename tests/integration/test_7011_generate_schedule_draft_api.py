@@ -113,7 +113,7 @@ def endpoint():
             rpc_tools=types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=_Rpc())),
             db=types.SimpleNamespace(with_project_schema_session=lambda project_id: state.__setattr__(
                 'db_sessions', state.db_sessions + 1)))
-    _module(f'{PKG}.utils.constants', PROMPT_LIB_MODE='prompt_lib')
+    _module(f'{PKG}.utils.constants', PROMPT_LIB_MODE='prompt_lib', SCHEDULES_OPENAPI_TAG='elitea_core/schedules')
     _module(f'{PKG}.utils.exceptions', PoolSaturationError=_PoolSaturationError)
     _module(f'{PKG}.utils.predict_utils', PredictPayloadError=type('PredictPayloadError', (Exception,), {}))
     _module(f'{PKG}.utils.service_prompt_utils', get_service_prompt=lambda key: state.service_prompt)
