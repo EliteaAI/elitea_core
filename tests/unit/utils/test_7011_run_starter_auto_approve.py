@@ -34,7 +34,7 @@ def run(monkeypatch):
         loaded = types.SimpleNamespace(
             schedule=types.SimpleNamespace(
                 id=SCHEDULE_ID, entity_type=entity_type, run_mode="prompt", approval_rule=rule),
-            version=types.SimpleNamespace(id=9), entity_name="Flow", prompt="Go", variables=[])
+            version=types.SimpleNamespace(id=9, name="v3"), entity_name="Flow", prompt="Go", variables=[])
         monkeypatch.setattr(starter, "_load", lambda *a: loaded)
         starter.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID)
         return predicts[-1], setting_reads
