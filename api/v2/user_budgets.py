@@ -1,3 +1,6 @@
+import datetime
+import re
+
 from flask import request
 from pylon.core.tools import log
 
@@ -238,7 +241,7 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
             int(user_id): {"spend": float(spend or 0)}
             for user_id, spend in (_safe_rpc(
                 rpc, "usage_get_users_spend", 30, {},
-                project_id=project_id, user_ids=member_ids, **spend_scope,
+                project_id=project_id, user_ids=member_ids, period=period, **spend_scope,
             ) or {}).items()
         }
     #
@@ -270,23 +273,29 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
     total = len(rows)
     page = rows[offset:offset + limit]
     #
+    # Whether this is the current billing month — limits are only meaningful then.
+    current_period = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m")
+    is_current_period = (period or current_period) == current_period
+    #
     # Comparison period: fetch prior-period spend for the page's user ids only, so the
     # frontend never needs a second full query just to build the "vs prior" column.
     if comparison_period and page:
         page_ids_for_comparison = [row["user_id"] for row in page]
-        prior_spend_scope = {"model_name": feature} if feature else {}
         prior_data = _safe_rpc(
-            rpc, "usage_get_users_spend", 30, {},
+            rpc, "usage_get_users_spend", 30, None,
             project_id=project_id, user_ids=page_ids_for_comparison,
-            period=comparison_period, **prior_spend_scope,
-        ) or {}
-        prior_by_id = {
-            int(user_id): float(entry.get("spend") or 0)
-            for user_id, entry in prior_data.items()
-        }
+            period=comparison_period, **spend_scope,
+        )
+        if prior_data is None:
+            prior_by_id = None  # RPC failed — signal unavailability to rows below
+        else:
+            prior_by_id = {
+                int(user_id): float(spend or 0)
+                for user_id, spend in prior_data.items()
+            }
     else:
         prior_by_id = {}
-
+    #
     # Limits are resolved for the page alone: this is the one call that costs per member
     page_ids = [row["user_id"] for row in page]
     limit_map = _safe_rpc(
@@ -301,18 +310,19 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
     for row in page:
         user_id = row["user_id"]
         stored_row = by_user.get(user_id) or {}
-        effective = limit_map.get(user_id, limit_map.get(str(user_id)))
+        effective = limit_map.get(user_id, limit_map.get(str(user_id))) if is_current_period else None
         spend = row["spend"]
         #
         row.update({
-            "monthly_limit": stored_row.get("monthly_limit"),
+            "monthly_limit": stored_row.get("monthly_limit") if is_current_period else None,
             "effective_limit": effective,
-            "limit_source": _limit_source(stored_row, effective, member_default),
+            "limit_source": _limit_source(stored_row, effective, member_default) if is_current_period else None,
             "currency": stored_row.get("currency") or currency,
             "enabled": stored_row.get("enabled", False),
             "remaining": None if effective is None else max(0.0, effective - spend),
             "percent_used": None if not effective else round(spend / effective * 100, 2),
-            "prev_spend": prior_by_id.get(user_id),
+            # None when the comparison RPC failed (distinguishable from 0.0 actual spend)
+            "prev_spend": None if prior_by_id is None else prior_by_id.get(user_id),
         })
     #
     warning_pct = _safe_rpc(
@@ -331,6 +341,18 @@ def _member_budget_rows(project_id: int, limit, offset, search, sort_by, sort_or
     }
 
 
+def _validate_period(value: str, param_name: str) -> None:
+    """Raise ValueError with a 400-friendly message for any malformed YYYYMM period."""
+    if not re.match(r"^\d{6}$", value):
+        raise ValueError(f"{param_name} must be in YYYYMM format")
+    month = int(value[4:6])
+    if not 1 <= month <= 12:
+        raise ValueError(f"{param_name} month must be 01–12")
+    current = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m")
+    if value > current:
+        raise ValueError(f"{param_name} must not be in the future")
+
+
 def _listing_from_request(project_id: int):
     """Read the paging parameters and build the listing."""
     try:
@@ -343,6 +365,14 @@ def _listing_from_request(project_id: int):
     if feature:
         validate_feature_period(feature, "month")
     #
+    period = request.args.get("period") or None
+    if period:
+        _validate_period(period, "period")
+    #
+    comparison_period = request.args.get("comparison_period") or None
+    if comparison_period:
+        _validate_period(comparison_period, "comparison_period")
+    #
     return _member_budget_rows(
         project_id, feature=feature,
         limit=limit,
@@ -350,8 +380,8 @@ def _listing_from_request(project_id: int):
         search=request.args.get("search") or None,
         sort_by=_safe_sort_field(request.args.get("sort_by", DEFAULT_SORT_FIELD)),
         sort_order=request.args.get("sort_order", "desc"),
-        period=request.args.get("period") or None,
-        comparison_period=request.args.get("comparison_period") or None,
+        period=period,
+        comparison_period=comparison_period,
     )
 
 
@@ -402,7 +432,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if not is_admin:
             return {"error": "Forbidden"}, 403
         #
-        return _listing_from_request(project_id), 200
+        try:
+            return _listing_from_request(project_id), 200
+        except ValueError as error:
+            return {"error": str(error)}, 400
 
 
 class AdminAPI(api_tools.APIModeHandler):
