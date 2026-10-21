@@ -179,8 +179,8 @@ def env(monkeypatch):
     queries = _register(monkeypatch, f"{PKG}.utils.schedule_queries", types.ModuleType(f"{PKG}.utils.schedule_queries"))
     queries.list_schedules = list_schedules
 
-    risk = _register(monkeypatch, f"{PKG}.utils.schedule_risk", types.ModuleType(f"{PKG}.utils.schedule_risk"))
-    risk.is_run_without_asking_allowed = lambda project_id: env.run_without_asking_allowed
+    settings = _register(monkeypatch, f"{PKG}.utils.schedule_settings", types.ModuleType(f"{PKG}.utils.schedule_settings"))
+    settings.is_run_without_asking_allowed = lambda project_id: env.run_without_asking_allowed
 
     preferences = _register(monkeypatch, f"{PKG}.models.entity_schedule", types.ModuleType(f"{PKG}.models.entity_schedule"))
     preferences.EntitySchedulePreference = object
