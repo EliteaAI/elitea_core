@@ -225,6 +225,12 @@ def test_cr_el7011_every_operation_is_described_for_humans(spec):
         assert 'Who may call:' in description and 'Errors:' in description, key
 
 
+# Owner request 2026-10-21 (US-55): Swagger shows a short summary next to each path
+def test_cr_el7011_every_operation_has_a_summary(spec):
+    for key, operation in _operations(spec).items():
+        assert 0 < len(operation.get('summary', '').strip()) <= 40, key
+
+
 # CR 2026-10-21 (US-55): every JSON success answer shows an example
 def test_cr_el7011_success_answers_show_an_example(spec):
     for key, operation in _operations(spec).items():

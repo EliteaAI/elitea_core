@@ -134,6 +134,7 @@ def _text(what: str, who: str, errors: str) -> str:
 OPERATIONS = {
     ("get", ""): {
         "name": "List schedules",
+        "summary": "List schedules",
         "description": _text(
             "Answer one page of schedules with filters, sort and paging. Each row has the owner's name "
             "and the actions the caller may take on it.",
@@ -145,6 +146,7 @@ OPERATIONS = {
     },
     ("post", ""): {
         "name": "Create a schedule",
+        "summary": "Create a schedule",
         "description": _text(
             "Create a schedule for an agent or a pipeline version. The caller becomes the owner; "
             "the body never sets the owner. The answer has save `warnings`, which never block the save.",
@@ -159,6 +161,7 @@ OPERATIONS = {
     },
     ("get", ITEM): {
         "name": "Read a schedule",
+        "summary": "Read a schedule",
         "description": _text(
             "Answer the details of one schedule, with the owner's name and the allowed actions.",
             OWNER_OR_ADMIN.format(permission="schedules.details"),
@@ -168,6 +171,7 @@ OPERATIONS = {
     },
     ("put", ITEM): {
         "name": "Edit a schedule",
+        "summary": "Edit a schedule",
         "description": _text(
             "Change the fields of a schedule; send only the fields to change. The owner never changes. "
             "This call does not pause or resume: a body with `enabled` answers 400, use the pause and "
@@ -182,6 +186,7 @@ OPERATIONS = {
     },
     ("delete", ITEM): {
         "name": "Delete a schedule",
+        "summary": "Delete a schedule",
         "description": _text(
             "Delete a schedule. The conversations of its runs stay. When an admin deletes another "
             "owner's schedule, the owner gets a notice.",
@@ -192,6 +197,7 @@ OPERATIONS = {
     },
     ("post", f"{ITEM}/pause"): {
         "name": "Pause a schedule",
+        "summary": "Pause a schedule",
         "description": _text(
             "Stop the schedule from starting new runs. A run in progress goes on. No request body. "
             "When an admin pauses another owner's schedule, the owner gets a notice.",
@@ -203,6 +209,7 @@ OPERATIONS = {
     },
     ("post", f"{ITEM}/resume"): {
         "name": "Resume a schedule",
+        "summary": "Resume a schedule",
         "description": _text(
             "Start a paused schedule again and compute its next run. No request body. The schedule "
             "needs a version, and the project must stay within its limit of active schedules.",
@@ -217,6 +224,7 @@ OPERATIONS = {
     },
     ("post", f"{ITEM}/run"): {
         "name": "Run a schedule now",
+        "summary": "Run a schedule now",
         "description": _text(
             "Start a run now (`manual`) or a test run (`test`). Only one run of a schedule is active at a time.",
             "the owner with `schedules.run`; an admin sees the schedule but cannot run it",
@@ -232,6 +240,7 @@ OPERATIONS = {
     },
     ("get", f"{ITEM}/runs"): {
         "name": "List the runs of a schedule",
+        "summary": "List the runs of a schedule",
         "description": _text(
             "Answer the run records of one schedule, newest first, with the total before paging.",
             OWNER_OR_ADMIN.format(permission="schedules.details"),
@@ -241,6 +250,7 @@ OPERATIONS = {
     },
     ("post", f"{ITEM}/owner"): {
         "name": "Change the owner",
+        "summary": "Change the owner of a schedule",
         "description": _text(
             "Give the schedule to another project member. The old and the new owner get a notice.",
             "a schedules admin (`schedules.admin`) only",
@@ -254,6 +264,7 @@ OPERATIONS = {
     },
     ("get", "export"): {
         "name": "Export schedules",
+        "summary": "Export schedules to YAML",
         "description": _text(
             "Download the schedules of the project as one YAML file, or only the schedules in `ids`.",
             "a schedules admin (`schedules.export`) only",
@@ -264,6 +275,7 @@ OPERATIONS = {
     },
     ("post", "import"): {
         "name": "Import schedules",
+        "summary": "Import schedules from YAML",
         "description": _text(
             "Read a schedule YAML file (multipart `file`). An item that matches a schedule by key, else by "
             "name, updates it. Every other item creates a paused schedule owned by the caller.",
@@ -276,6 +288,7 @@ OPERATIONS = {
     },
     ("post", "draft"): {
         "name": "Draft a schedule with AI",
+        "summary": "Draft a schedule with AI",
         "description": _text(
             "Draft the fields of a schedule form from a plain-text description and the current form values. "
             "Uses the project's default LLM. The server checks the draft and adds a warning for each field "
@@ -294,6 +307,7 @@ OPERATIONS = {
     },
     ("get", "preferences"): {
         "name": "Read my notice setting",
+        "summary": "Read my run notice setting",
         "description": _text(
             "Answer whether the caller gets a notice when a schedule run succeeds. True when never saved.",
             "a project member with `schedules.list`; each caller reads only their own value",
@@ -303,6 +317,7 @@ OPERATIONS = {
     },
     ("put", "preferences"): {
         "name": "Save my notice setting",
+        "summary": "Save my run notice setting",
         "description": _text(
             "Save the caller's own value. The user id is never taken from the request.",
             "a project member with `schedules.list`",
