@@ -104,6 +104,21 @@ def test_7011_r2_6_description_and_run_mode_nullable(entity_schedule_models):
     assert "run_mode VARCHAR(16)," in ddl
 
 
+# Owner CR 2026-10-21 (risk review): who confirmed "Run without asking", when, for which tools
+def test_el7011_cr_schedule_has_nullable_confirmation_columns(entity_schedule_models):
+    ddl = _ddl(entity_schedule_models.EntitySchedule)
+    assert "approval_confirmed_by INTEGER," in ddl
+    assert "approval_confirmed_at TIMESTAMP WITH TIME ZONE," in ddl
+    assert "approval_fingerprint TEXT," in ddl
+
+
+def test_el7011_cr_block_adds_the_confirmation_columns(sql_block):
+    for column in ("approval_confirmed_by INTEGER NULL", "approval_confirmed_at TIMESTAMPTZ NULL",
+                   "approval_fingerprint TEXT NULL"):
+        assert f"ALTER TABLE {{pid}}.entity_schedules ADD COLUMN IF NOT EXISTS {column}" in sql_block
+        assert column in next(s for s in sql_block if s.startswith("CREATE TABLE IF NOT EXISTS {pid}.entity_schedules "))
+
+
 # R2.3: no tag column in any of the three tables
 def test_7011_r2_3_no_tag_columns(entity_schedule_models):
     m = entity_schedule_models
@@ -207,8 +222,9 @@ def test_7011_r1_1_block_has_schedule_indexes(sql_block):
 
 # R1.2: every statement of the block is idempotent
 def test_7011_r1_2_every_statement_is_if_not_exists(sql_block):
-    # 3 tables, 6 indexes, 2 column statements (US-16 runs list index, CR-04 uuid, CR 2026-10-21 run log)
-    assert len(sql_block) == 11
+    # 3 tables, 6 indexes, 5 column statements (US-16 runs list index, CR-04 uuid,
+    # CR 2026-10-21 risk confirmation and run log)
+    assert len(sql_block) == 14
     for stmt in sql_block:
         assert re.match(
             r"CREATE (UNIQUE )?(TABLE|INDEX) IF NOT EXISTS "

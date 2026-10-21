@@ -60,7 +60,8 @@ class World:
         self.create_error = self.link_error = self.predict_error = None
         self.schedule = Row(
             _world=self, id=SCHEDULE_ID, name="S1", principal={}, application_id=AGENT_ID, version_id=VERSION_ID,
-            created_by=OWNER, prompt=PROMPT, variables=[], entity_type="agent", run_mode=None, approval_rule="pause_and_ask")
+            created_by=OWNER, prompt=PROMPT, variables=[], entity_type="agent", run_mode=None, approval_rule="pause_and_ask",
+            approval_fingerprint=None)
         self.run = SimpleNamespace(id=RUN_ID, conversation_id=None)
         self.rows = {
             ("EntitySchedule", SCHEDULE_ID): self.schedule,
@@ -107,8 +108,10 @@ def world(monkeypatch):
             "block_schedule_run": lambda *args: state.calls.append(("block", *args)),
             "record_run_events": lambda *args, **kwargs: None,  # the run log has its own tests
             "run_event": lambda *args, **kwargs: {}},
-        "utils.schedule_risk": {"scan_schedule_risks": lambda *args: []},
         "utils.budget_door": {"closed_budget_scope": lambda *args: None},
+        "utils.schedule_risk": {  # the risk review (owner CR 2026-10-21) has its own tests; no finding here
+            "scan_schedule": lambda *args: {"blocking": [], "sensitive": [], "notices": [], "fingerprint": "fp"},
+            "scan_complete": lambda review: True},
         "utils.exceptions": {"BudgetDoorClosedError": type("BudgetDoorClosedError", (Exception,), {})},
         "utils.pipeline_execution": {
             "TriggerType": SimpleNamespace(SCHEDULED="scheduled"),
