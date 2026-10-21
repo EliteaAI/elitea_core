@@ -1,5 +1,5 @@
 """Create, read, update and delete of one entity schedule (EL-7011, ADR-0004)."""
-from typing import ClassVar, Literal, get_args
+from typing import ClassVar, get_args
 
 from flask import request
 from pydantic import BaseModel, Field, ValidationError
@@ -10,8 +10,11 @@ from tools import api_tools, auth, db, register_openapi
 from ...models.entity_schedule import EntityScheduleRun
 from ...models.enums.all import NotificationEventTypes
 from ...models.pd.entity_schedule import ScheduleCreate, ScheduleDetails, ScheduleUpdate
+from ...models.pd.schedule_list import RunStatus
 from ...models.pd.schedule_run import ScheduleRunRequest
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.constants import SCHEDULES_OPENAPI_TAG as OPENAPI_TAG
+from ...utils.constants import SCHEDULES_PROJECT_PATH as PROJECT_PATH
 from ...utils.schedule_access import (
     ScheduleScope,
     allowed_actions,
@@ -30,9 +33,6 @@ from ...utils.schedule_service import (
 )
 from ...utils.schedule_timing import ScheduleLimitError
 
-OPENAPI_TAG = "elitea_core/schedules"
-# Pinned: register_api_class would pick any of the URLs that share a handler class (BUG-11)
-PROJECT_PATH = "<string:mode>/<int:project_id>"
 SCHEDULE_PATH = f"{PROJECT_PATH}/<int:schedule_id>"
 SCHEDULE_URL = f"/api/v2/elitea_core/schedule/{SCHEDULE_PATH}"
 RESPONSE_TEXT = {
@@ -117,9 +117,6 @@ def _on_runs_path() -> bool:
     return request.path.rstrip("/").endswith("/runs")
 
 
-RunStatus = Literal["running", "success", "failed", "skipped", "blocked", "waiting_for_approval"]
-
-
 class RunsQuery(BaseModel):
     """Query of the run records list; `limit` above the cap is lowered to it (R3.3, R3.5)."""
 
@@ -146,7 +143,8 @@ RUNS_QUERY_PARAMS = [
 ]
 OWNER_BODY = {"required": True, "content": {"application/json": {"schema": {
     "type": "object", "required": ["owner_id"],
-    "properties": {"owner_id": {"type": "integer", "description": "User id of the new owner, a project member"}},
+    "properties": {"owner_id": {"type": "integer", "description": "User id of the new owner, a project member",
+                                 "examples": [20]}},
 }, "examples": {"example1": {"value": {"owner_id": 20}}}}}}
 # The router serves these URLs with the handlers below, so register_api_class cannot list them;
 # Module._register_openapi registers them (BUG-11)

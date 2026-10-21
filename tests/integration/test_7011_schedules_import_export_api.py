@@ -123,17 +123,15 @@ def _install(env, Base, engine):
     install_service_stubs(env)
     authors = types.ModuleType(f'{PACKAGE}.utils.authors')
     queries = types.ModuleType(f'{PACKAGE}.utils.schedule_queries')
-    list_models = types.ModuleType(f'{PACKAGE}.models.pd.schedule_list')
-    for stub in (authors, queries, list_models):
+    for stub in (authors, queries):
         sys.modules[stub.__name__] = stub
-    authors.get_authors_data = list_models.ScheduleListItem = quiet
+    authors.get_authors_data = quiet
     queries.list_schedules = lambda *args: (0, [])
-    list_models.ScheduleListFilters = lambda **args: types.SimpleNamespace(limit=10, offset=0)
 
     load = load_plugin_module
     env.EntitySchedule = sqlite_db.create_schedule_table(load, Base, engine)
     for path, name in (
-        ('utils/constants.py', 'utils.constants'), ('utils/schedule_timing.py', 'utils.schedule_timing'),
+        ('models/pd/schedule_list.py', 'models.pd.schedule_list'), ('utils/constants.py', 'utils.constants'), ('utils/schedule_timing.py', 'utils.schedule_timing'),
         ('utils/schedule_access.py', 'utils.schedule_access'), ('utils/pipeline_utils.py', 'utils.pipeline_utils'),
         ('utils/export_import_utils.py', 'utils.export_import_utils'), ('models/pd/index.py', 'models.pd.index'),
         ('models/pd/entity_schedule.py', 'models.pd.entity_schedule'),
