@@ -413,6 +413,7 @@ class ScheduleItemHandlers:
 
         The events are the stored ones and the tool calls of the run conversation, in time order.
         Tokens and cost are null while the usage store has no row for the conversation.
+        A caller who is not the owner gets tool calls without their result text (no `summary`).
         Who may call: the owner with `schedules.details`, or a schedules admin.
         Errors: 403; 404 the schedule or the run is not found, or another owner's schedule.
         """
@@ -430,7 +431,9 @@ class ScheduleItemHandlers:
                 return RUN_NOT_FOUND, 404
             row = _run_row({name: getattr(run, name) for name in RUN_FIELDS})
             tokens, cost_usd = usage_summary(session, project_id, run)
-            events = [*(run.events or []), *tool_call_events(session, run.conversation_id)]
+            # Owner decision 2026-10-21: only the owner sees the tool result text of the run
+            tools = tool_call_events(session, run.conversation_id, with_results=schedule.created_by == scope.user_id)
+            events = [*(run.events or []), *tools]
             return {
                 **row,
                 "version_label": version_label(session, run.version_id),

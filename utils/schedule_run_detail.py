@@ -7,7 +7,7 @@ read here, at detail time, from the same rows the conversation view shows; the l
 from datetime import UTC, datetime, timedelta
 
 from pylon.core.tools import log
-from sqlalchemy import case, column, func, select, table
+from sqlalchemy import case, column, func, null, select, table
 
 from ..models.all import ApplicationVersion
 from ..models.conversation import Conversation
@@ -64,16 +64,20 @@ def _tool_event(row) -> dict:
     return {key: value for key, value in event.items() if value is not None or key == 'at'}
 
 
-def tool_call_events(session, conversation_id: int | None) -> list[dict]:
-    """The tool calls of the run conversation as log events, oldest first, at most `EVENT_LIMIT`."""
+def tool_call_events(session, conversation_id: int | None, with_results: bool) -> list[dict]:
+    """The tool calls of the run conversation as log events, oldest first, at most `EVENT_LIMIT`.
+
+    `with_results` False leaves out the result text (no `summary`, no result in `text`): a caller who is not
+    the owner sees toolkit, tool and duration only (owner decision 2026-10-21).
+    """
     if conversation_id is None:
         return []
+    # Only the start of a tool result is read; a large output, or any output for a non-owner, stays in the database
+    output = func.substr(MessageTraceStep.tool_output, 1, SUMMARY_LIMIT * 4) if with_results else null()
     rows = session.execute(
         select(
             MessageTraceStep.started_at, MessageTraceStep.finished_at, MessageTraceStep.tool_name,
-            MessageTraceStep.is_error, MessageTraceStep.attrs,
-            # Only the start of a tool result is shown; a large output stays in the database
-            func.substr(MessageTraceStep.tool_output, 1, SUMMARY_LIMIT * 4).label('output'),
+            MessageTraceStep.is_error, MessageTraceStep.attrs, output.label('output'),
         )
         .join(ConversationMessageGroup, ConversationMessageGroup.id == MessageTraceStep.message_group_id)
         .where(ConversationMessageGroup.conversation_id == conversation_id, MessageTraceStep.kind == 'tool_call')
