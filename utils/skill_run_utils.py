@@ -284,6 +284,7 @@ def dispatch_skill_run(
         usage_entity=run.usage_entity,
         applied_skills=run.applied_skills,
         sid_project_id=caller_project_id,
+        trigger_source='api',  # TriggerType.API: only the skill REST predict routes dispatch here (BUG-12)
     )
     if outcome is None:
         raise SkillRunError(SOCKET_NOT_IN_PROJECT_ERROR, 403)
