@@ -153,3 +153,27 @@ def test_el_7011_r2_1_active_run_blocks_a_second_run_and_keeps_the_claim(claim, 
 def test_el_7011_r4_2_legacy_lock_key_is_stable_per_project(claim):
     """R4.2: the legacy step and the migration (US-24) take the same key; it never depends on the process."""
     assert [claim.legacy_lock_key(project_id) for project_id in (1, 5)] == [(7011 << 32) + 1, (7011 << 32) + 5]
+
+
+# BUG-35 (US-15 R1.5): the list shows Running right after the insert, not null
+@pytest.mark.parametrize("trigger", ["cron", "manual", "test"])
+def test_el_7011_bug35_insert_run_sets_last_run_status_running(claim, session, trigger):
+    row = _schedule(claim, session, last_run_status="success")
+
+    run_id = claim.insert_run(session, row.id, trigger)
+
+    assert run_id is not None
+    session.expire_all()
+    assert session.get(claim.EntitySchedule, row.id).last_run_status == "running"
+
+
+# BUG-35: a blocked insert (an active run exists) leaves the schedule status as it is
+def test_el_7011_bug35_blocked_insert_keeps_last_run_status(claim, session):
+    row = _schedule(claim, session, last_run_status="waiting_for_approval")
+    session.add(claim.EntityScheduleRun(schedule_id=row.id, trigger="cron", status="waiting_for_approval"))
+    session.flush()
+
+    assert claim.insert_run(session, row.id, "manual") is None
+
+    session.expire_all()
+    assert session.get(claim.EntitySchedule, row.id).last_run_status == "waiting_for_approval"
