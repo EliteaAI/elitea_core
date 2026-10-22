@@ -95,6 +95,7 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
                     approval_expires_at=datetime.now(UTC) + timedelta(hours=APPROVAL_WAIT_HOURS))
         ).rowcount
         if paused:
+            _copy_status(session, run_id, 'waiting_for_approval')  # the list shows the wait (R1.6)
             append_run_events(session, run_id, _paused_event(sensitive, sum(
                 item.get('guardrail_type') == 'sensitive_tool' for item in interrupts) - 1))
         session.commit()
@@ -106,6 +107,12 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
             notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
         except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it (R1.3)
             log.exception('Schedule run %s: cannot send the approval notice', run_id)
+
+
+def _copy_status(session, run_id: int, status: str) -> None:
+    """Copy a run status that is not an end to its schedule, so the Schedules list follows the run (R1.6)."""
+    schedule_id = select(EntityScheduleRun.schedule_id).where(EntityScheduleRun.id == run_id).scalar_subquery()
+    session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status=status))
 
 
 def _paused_event(item: dict, more: int = 0) -> dict:
@@ -174,6 +181,7 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
                 update(EntityScheduleRun).where(EntityScheduleRun.id == run_id)
                 .values(status='running', resumed_at=func.now(), approval_expires_at=None)
             )
+            _copy_status(session, run_id, 'running')  # the list shows the run again (R1.6)
         else:  # no notice: the owner made this end (R2.2)
             _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, run.conversation_id,
                       expected_status='waiting_for_approval')
