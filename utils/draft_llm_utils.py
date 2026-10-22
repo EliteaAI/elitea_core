@@ -158,7 +158,8 @@ def resolve_model(
     return unavailable, None
 
 
-def _last_exception_line(error_text) -> str:
+def last_exception_line(error_text) -> str:
+    """The last non-empty line of an error text, cut at ERROR_LINE_MAX_LENGTH."""
     lines = [line.strip() for line in str(error_text).splitlines() if line.strip()]
     line = lines[-1] if lines else str(error_text).strip()
     if len(line) > ERROR_LINE_MAX_LENGTH:
@@ -233,7 +234,7 @@ def _failure_text(container: dict) -> Optional[str]:
         return container["message"]
 
     curated = container.get("human_readable")
-    detail = _last_exception_line(container["error"]) if container.get("error") else None
+    detail = last_exception_line(container["error"]) if container.get("error") else None
     if curated and detail and not _already_states(curated, detail):
         return f"{curated} ({detail})"
     return curated or detail
@@ -364,7 +365,7 @@ def _describe_validation_error(error: dict) -> str:
         for key, label in LENGTH_RULES:
             if key in context:
                 return f"{field} is {len(value)} characters, the {label} is {context[key]}"
-    return f"{field}: {_last_exception_line(error.get('msg') or error.get('type') or 'is invalid')}"
+    return f"{field}: {last_exception_line(error.get('msg') or error.get('type') or 'is invalid')}"
 
 
 def describe_validation_failure(errors) -> str:

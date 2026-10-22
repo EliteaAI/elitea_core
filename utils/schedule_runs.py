@@ -1,4 +1,5 @@
 """Run status and schedule disable writers of the schedule runs (EL-7011)."""
+import re
 from datetime import UTC, datetime, timedelta
 
 from pylon.core.tools import log
@@ -59,6 +60,24 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
             .values(enabled=False, disabled_reason=reason)
         )
         session.commit()
+
+
+FAILED_REASON = 'The run failed'
+REASON_MAX_LENGTH = 300
+# An absolute POSIX or Windows path, such as /data/plugins/x.py or C:\work\x.py
+_ABSOLUTE_PATH = re.compile(r'(?:\b[A-Za-z]:)?[\\/](?:[\w.-]+[\\/])+[\w.-]*')
+
+
+def run_failure_reason(error) -> str:
+    """The stored reason of a failed run: one short sentence, no stack lines or paths (BUG-37, R6.1, R6.2)."""
+    from .draft_llm_utils import last_exception_line  # pylint: disable=C0415 -- keeps the module light to load
+
+    if not error or not str(error).strip():
+        return FAILED_REASON
+    reason = f'{FAILED_REASON}: {_ABSOLUTE_PATH.sub("<path>", last_exception_line(error))}'
+    if len(reason) > REASON_MAX_LENGTH:
+        reason = reason[:REASON_MAX_LENGTH - 3] + '...'
+    return reason
 
 
 def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str | None = None,
