@@ -20,6 +20,7 @@ from ..models.pd.entity_schedule import (
 from ..models.pd.schedule_list import RunStatus
 from ..models.pd.schedule_run import ScheduleRunRequest
 from .schedule_access import (
+    SCHEDULE_PERMISSIONS,
     ScheduleScope,
     allowed_actions,
     schedule_check_spec,
@@ -114,8 +115,31 @@ def _refuse_unallowed_rule(project_id: int, body):
     return None
 
 
-def _review_save(project_id: int, version_id: int | None, owner_id: int, name: str, rule: str, ack):
+def _kept_fingerprint(row) -> str | None:
+    """The stored consent an edit or a check may keep: only a schedule that runs without asking has one (R9.1)."""
+    return row.approval_fingerprint if row.approval_rule == RUN_WITHOUT_ASKING else None
+
+
+def _check_scope_error(row, body, scope: ScheduleScope) -> dict | None:
+    """Tie a check with `schedule_id` to that schedule, so it never shows the owner's scan of another entity.
+
+    The agent or pipeline must be the schedule's. Another version needs the right to edit the schedule,
+    as an edit would; the same version only needs the visibility the 404 rule already gives.
+    """
+    for field in ("entity_type", "application_id"):
+        if getattr(body, field) != getattr(row, field):
+            return refusal(INVALID_INPUT, f"{field} must be the one of the schedule", field=field)
+    if body.version_id != row.version_id and SCHEDULE_PERMISSIONS["update"] not in scope.permissions:
+        return refusal("not_owner", "Only a user who may edit this schedule can check another version", 403)
+    return None
+
+
+def _review_save(project_id: int, version_id: int | None, owner_id: int, name: str, rule: str, ack,
+                 stored_fingerprint: str | None = None):
     """Check a save against the risk review; return the review and, for a confirmed "Run without asking", it again.
+
+    An edit without `risk_ack` that keeps "Run without asking" and the stored fingerprint keeps the stored
+    consent (R9.1): it returns the review and no new confirmation, also for a rename.
 
     Raises:
         ScheduleError: 409 `schedule_blocked`, `risk_confirmation_required` or `risk_changed`; 400
@@ -129,6 +153,8 @@ def _review_save(project_id: int, version_id: int | None, owner_id: int, name: s
     if without_asking and not scan_complete(review):
         raise ScheduleError("approval_rule_not_allowed", SCAN_INCOMPLETE, field="approval_rule", **review)
     if not review["sensitive"]:
+        return review, None
+    if ack is None and without_asking and stored_fingerprint and stored_fingerprint == review["fingerprint"]:
         return review, None
     if ack is None:
         raise ScheduleError("risk_confirmation_required", CONFIRM, 409, **review)
@@ -190,7 +216,7 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
                     check_entity(session, project_id, row.entity_type, row.application_id, body.version_id)
                 review, confirmed = _review_save(
                     project_id, body.version_id or row.version_id, row.created_by, body.name or row.name,
-                    body.approval_rule or row.approval_rule, body.risk_ack,
+                    body.approval_rule or row.approval_rule, body.risk_ack, _kept_fingerprint(row),
                 )
             row = update_schedule(session, project_id, row, body, scope, confirmed)
             return _saved(row, scope, project_id, review), 200
@@ -224,22 +250,38 @@ class ScheduleItemHandlers:
         The answer has `blocking` (the save is refused), `sensitive` (sensitive tools and personal
         credentials, `personal_credential` with `tool` null: the save needs `risk_ack`),
         `notices`, `run_without_asking_allowed` and the `fingerprint` that `risk_ack` must name.
+        With `schedule_id` (an edit) the scan runs as the schedule owner, so an admin gets the owner's
+        fingerprint, and the answer adds `confirmed`: true when the schedule keeps "Run without asking"
+        with this fingerprint stored (R9.2).
         Who may call: a project member with `schedules.create`, as for a create.
-        Errors: 400 invalid field, or a version that is not of the agent or pipeline; 403; 404 not visible.
+        Errors: 400 invalid field, a version that is not of the agent or pipeline, or an agent or pipeline
+        that is not the one of `schedule_id`; 403, also `not_owner` for another version without the right
+        to edit the schedule; 404 not visible, also a `schedule_id` the caller may not see.
         """
         from .schedule_risk import scan_complete, scan_schedule
         from .schedule_settings import is_run_without_asking_allowed
         body, error = _parse_body(ScheduleRiskCheck)
         if error:
             return error
+        owner_id, stored = auth.current_user()["id"], None
         with db.get_session(project_id) as session:
             try:
+                if body.schedule_id is not None:
+                    scope = schedule_scope(project_id)
+                    row = load_schedule_in_scope(session, body.schedule_id, scope)
+                    refused = _check_scope_error(row, body, scope)
+                    if refused:
+                        return refused
+                    owner_id, stored = row.created_by, _kept_fingerprint(row)
                 check_entity(session, project_id, body.entity_type, body.application_id, body.version_id)
             except ScheduleError as e:
                 return e.response
-        review = scan_schedule(project_id, body.version_id, auth.current_user()["id"])
+        review = scan_schedule(project_id, body.version_id, owner_id)
         allowed = bool(is_run_without_asking_allowed(project_id)) and scan_complete(review)
-        return {**review, "run_without_asking_allowed": allowed}, 200
+        answer = {**review, "run_without_asking_allowed": allowed}
+        if body.schedule_id is not None:
+            answer["confirmed"] = stored is not None and stored == review["fingerprint"]
+        return answer, 200
 
     @auth.decorators.check_api(schedule_check_spec("create"))
     def _create(self, project_id: int):

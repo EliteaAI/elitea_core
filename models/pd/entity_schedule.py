@@ -1,6 +1,6 @@
 """Bodies of a schedule (EL-7011): timing, create, update and details."""
 from datetime import UTC, date, datetime, timedelta
-from typing import Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
@@ -86,14 +86,23 @@ class RiskAck(BaseModel):
                                 examples=['Daily report'])
 
 
+# The scheduled entity and version, the same in the risk check and the create body
+EntityType = Annotated[Literal['agent', 'pipeline'], Field(description='Kind of the scheduled entity', examples=['agent'])]
+ApplicationId = Annotated[int, Field(description='Id of the agent or pipeline', examples=[12])]
+VersionId = Annotated[int, Field(description=VERSION_TEXT, examples=[34])]
+
+
 class ScheduleRiskCheck(BaseModel):
     """The body of the dry-run risk check: the version that would run."""
     model_config = ConfigDict(json_schema_extra={'examples': [
         {'entity_type': 'agent', 'application_id': 12, 'version_id': 34}]})
 
-    entity_type: Literal['agent', 'pipeline'] = Field(description='Kind of the scheduled entity', examples=['agent'])
-    application_id: int = Field(description='Id of the agent or pipeline', examples=[12])
-    version_id: int = Field(description=VERSION_TEXT, examples=[34])
+    entity_type: EntityType
+    application_id: ApplicationId
+    version_id: VersionId
+    schedule_id: int | None = Field(
+        default=None, description='Id of the schedule an edit checks: the scan runs as its owner and the answer '
+        'adds `confirmed`', examples=[7])
 
 
 class ScheduleVariable(BaseModel):
@@ -112,9 +121,9 @@ class ScheduleCreate(ScheduleTiming):
     name: str = Field(min_length=1, max_length=NAME_MAX, description=NAME_TEXT, examples=[NAME_EXAMPLE])
     description: str | None = Field(None, max_length=DESCRIPTION_MAX, description=DESCRIPTION_TEXT,
                                     examples=[DESCRIPTION_EXAMPLE])
-    entity_type: Literal['agent', 'pipeline'] = Field(description='Kind of the scheduled entity', examples=['agent'])
-    application_id: int = Field(description='Id of the agent or pipeline', examples=[12])
-    version_id: int = Field(description=VERSION_TEXT, examples=[34])
+    entity_type: EntityType
+    application_id: ApplicationId
+    version_id: VersionId
     run_mode: RunMode | None = Field(None, description=RUN_MODE_TEXT, examples=['prompt'])
     prompt: str | None = Field(None, description=PROMPT_TEXT, examples=[PROMPT_EXAMPLE])
     variables: list[ScheduleVariable] = Field([], description=VARIABLES_TEXT, examples=[VARIABLES_EXAMPLE])
