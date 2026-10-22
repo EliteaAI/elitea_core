@@ -80,7 +80,10 @@ def claim_schedule(session, schedule_id: int, seen_next_run: datetime, new_next_
 
 
 def insert_run(session, schedule_id: int, trigger: str, requested_by: int | None = None) -> int | None:
-    """Insert a running run; None when the active-run unique index already holds one."""
+    """Insert a running run and copy `running` to its schedule; None when the active-run unique index already holds one.
+
+    The copy is in the same transaction, so the list never shows the previous status for a running run (R1.5).
+    """
     run = EntityScheduleRun(schedule_id=schedule_id, trigger=trigger, status='running', requested_by=requested_by)
     try:
         # A savepoint, so the conflict rolls back the insert only and the claim stays
@@ -88,6 +91,7 @@ def insert_run(session, schedule_id: int, trigger: str, requested_by: int | None
             session.add(run)
     except IntegrityError:
         return None
+    session.execute(update(EntitySchedule).where(EntitySchedule.id == schedule_id).values(last_run_status='running'))
     return run.id
 
 
