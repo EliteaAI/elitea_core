@@ -108,7 +108,9 @@ def make_world(monkeypatch):
                 "process_multimodal_content": none, "update_attachment_thumbnails": none},
             "utils.token_limit_continuation": {"trim_continuation_overlap": same},
             "utils.pipeline_hitl_history": {"persist_pipeline_hitl_prompt": none},
-            "utils.schedule_runs": {"finish_schedule_run": world.finish, "pause_schedule_run": world.pause},
+            "utils.schedule_runs": {
+                "finish_schedule_run": world.finish, "pause_schedule_run": world.pause,
+                "run_failure_reason": lambda error: f"short({error})"},
         }
         for dotted, names in stubs.items():
             name = "plugins.elitea_core." + dotted
@@ -150,7 +152,15 @@ def test_7011_r1_1_stream_end_finishes_the_schedule_run_as_success_after_the_com
 def test_7011_r1_1_stream_end_with_an_error_finishes_the_run_as_failed_with_the_error(make_world):
     world = make_world(dict(SCHEDULE_META))
     world.end({"is_error": True, "error": "the model failed"})
-    assert ("finish", PROJECT_ID, RUN_ID, "failed", "the model failed", CONVERSATION_ID) in world.events
+    assert ("finish", PROJECT_ID, RUN_ID, "failed", "short(the model failed)", CONVERSATION_ID) in world.events
+
+
+# BUG-37 (US-13 R1.3, R6.1): the stored reason is the short one, never the raw traceback
+def test_7011_bug37_stream_end_stores_the_short_reason_not_the_traceback(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    error = 'Traceback (most recent call last):\n  File "/data/plugins/x.py", line 3\nValueError: boom'
+    world.end({"is_error": True, "error": error})
+    assert ("finish", PROJECT_ID, RUN_ID, "failed", f"short({error})", CONVERSATION_ID) in world.events
 
 
 @pytest.mark.parametrize("meta", [{}, None, {"scheduled_run": True}])
