@@ -6,6 +6,7 @@ from sqlalchemy import func, select, update
 from tools import db
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
+from .error_text import hide_locations, last_exception_line
 from .schedule_claim import append_run_events, fail_run, finished_event, run_event
 
 STALE_REASON = 'the run did not finish in time'
@@ -59,6 +60,20 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
             .values(enabled=False, disabled_reason=reason)
         )
         session.commit()
+
+
+FAILED_REASON = 'The run failed'
+REASON_MAX_LENGTH = 300
+
+
+def run_failure_reason(error) -> str:
+    """The stored reason of a failed run: one short sentence, no stack lines or paths (BUG-37, R6.1, R6.2)."""
+    if not error or not str(error).strip():
+        return FAILED_REASON
+    reason = f'{FAILED_REASON}: {hide_locations(last_exception_line(error))}'
+    if len(reason) > REASON_MAX_LENGTH:
+        reason = reason[:REASON_MAX_LENGTH - 3] + '...'
+    return reason
 
 
 def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str | None = None,

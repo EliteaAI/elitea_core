@@ -124,6 +124,7 @@ def endpoint():
     schedule_models = _load_real('models.pd.generate_schedule_draft', 'models/pd/generate_schedule_draft.py')
     _module(f'{PKG}.utils.schedule_draft_utils', schedule_roster=lambda project_id: ROSTER,
             build_schedule_draft_prompt=build, validate_schedule_draft=validate)
+    _load_real('utils.error_text', 'utils/error_text.py')  # draft_llm_utils imports it
     _load_real('utils.draft_llm_utils', 'utils/draft_llm_utils.py')
     state.module = _load_real('utils.schedule_draft_handler', 'utils/schedule_draft_handler.py')
     sys.modules.update(handler_stubs(PKG, real='schedule_draft_handler'))
