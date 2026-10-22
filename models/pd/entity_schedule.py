@@ -94,6 +94,9 @@ class ScheduleRiskCheck(BaseModel):
     entity_type: Literal['agent', 'pipeline'] = Field(description='Kind of the scheduled entity', examples=['agent'])
     application_id: int = Field(description='Id of the agent or pipeline', examples=[12])
     version_id: int = Field(description=VERSION_TEXT, examples=[34])
+    schedule_id: int | None = Field(
+        default=None, description='Id of the schedule an edit checks: the scan runs as its owner and the answer '
+        'adds `confirmed`', examples=[7])
 
 
 class ScheduleVariable(BaseModel):
