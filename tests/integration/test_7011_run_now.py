@@ -72,4 +72,4 @@ def test_7011_bug35_cr24_manual_run_shows_running_in_list_and_sets_last_run(worl
 
     schedule = world.schedule()
     assert schedule.last_run_status == "running"
-    assert schedule.last_run.replace(tzinfo=None) != last_run
+    assert schedule.last_run is not None and schedule.last_run.replace(tzinfo=None) > last_run
