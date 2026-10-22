@@ -5,10 +5,11 @@ stubs for pylon/tools imports. Run tests via:
 
     python tests/run_tests.py [pytest args...]
 """
+import importlib.util
 import pathlib
-import pytest
-
 import sys
+
+import pytest
 
 # PLUGIN_ROOT is computed relative to this file, no imports needed
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -54,3 +55,21 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.utils)
         elif "/models/" in path_str:
             item.add_marker(pytest.mark.models)
+
+
+ERROR_TEXT = "plugins.elitea_core.utils.error_text"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def error_text_module():
+    """utils/error_text.py has no plugin imports, so it is loaded once for real.
+
+    Path loaders do not resolve a sibling import, so `from .error_text import ...` in schedule_runs and
+    draft_llm_utils finds this module. Session scope reaches module-scoped loader fixtures; it holds no state.
+    """
+    spec = importlib.util.spec_from_file_location(ERROR_TEXT, PLUGIN_ROOT / "utils" / "error_text.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules.setdefault(ERROR_TEXT, module)
+    yield module
+    sys.modules.pop(ERROR_TEXT, None)

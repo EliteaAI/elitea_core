@@ -198,3 +198,57 @@ def test_el_7011_r4_3_announce_skips_a_run_whose_status_has_no_notice(runs, sess
     runs._announce(1, session, [run.id])
 
     assert (sent.notices, sent.emitted) == ([], [])
+
+
+@pytest.fixture
+def reasons(runs):
+    """schedule_runs with the real error_text helpers (a plain module, nothing to stub)."""
+    return runs
+
+
+TRACEBACK = (
+    "Traceback (most recent call last):\n"
+    '  File "/data/plugins/indexer_worker/agent_common.py", line 412, in execution_error\n'
+    "    raise RuntimeError(text)\n"
+    "RuntimeError: Pipeline node 'printer' failed\n"
+)
+
+
+# BUG-37 (US-13 R6.1): one short sentence from the last line, with no stack lines or paths
+def test_el_7011_bug37_run_failure_reason_keeps_the_last_line_only(reasons):
+    reason = reasons.run_failure_reason(TRACEBACK)
+    assert reason == "The run failed: RuntimeError: Pipeline node 'printer' failed"
+    assert "Traceback" not in reason and "agent_common.py" not in reason
+
+
+# BUG-37 (US-13 R6.1): an absolute path in the last line becomes <path>
+@pytest.mark.parametrize("path", ["/data/plugins/elitea_core/utils/x.py", "C:\\work\\elitea\\x.py"])
+def test_el_7011_bug37_run_failure_reason_hides_absolute_paths(reasons, path):
+    reason = reasons.run_failure_reason(f"OSError: cannot open {path} for reading")
+    assert reason == "The run failed: OSError: cannot open <path> for reading"
+
+
+# BUG-37 (US-13 R6.2): at most 300 characters, prefix and "..." included
+def test_el_7011_bug37_run_failure_reason_is_capped_at_300_characters(reasons):
+    reason = reasons.run_failure_reason("ValueError: " + "x" * 1000)
+    assert len(reason) == 300
+    assert reason.startswith("The run failed: ValueError: ") and reason.endswith("...")
+
+
+# BUG-37 (US-13 R6.2): no error text gives the bare sentence
+@pytest.mark.parametrize("error", [None, "", "   \n  "])
+def test_el_7011_bug37_run_failure_reason_without_error_text(reasons, error):
+    assert reasons.run_failure_reason(error) == "The run failed"
+
+
+# BUG-37 review r2: only absolute file paths are hidden; URL hosts and dates stay; a query string is dropped
+@pytest.mark.parametrize(("error", "reason"), [
+    ("HTTPError: 404 for https://host/a/b", "HTTPError: 404 for https://host/a/b"),
+    ("HTTPError: 401 for https://host/a?token=x&b=2", "HTTPError: 401 for https://host/a?<query>"),
+    ("ValueError: bad date 12/05/2026", "ValueError: bad date 12/05/2026"),
+    ("FileNotFoundError: /x.py", "FileNotFoundError: <path>"),
+    ("OSError: cannot open /data/my files/x.py", "OSError: cannot open <path> files/x.py"),
+    ("KeyError: 'and/or' in /data/plugins/x.py", "KeyError: 'and/or' in <path>"),
+])
+def test_el_7011_bug37_run_failure_reason_hides_only_paths_and_queries(reasons, error, reason):
+    assert reasons.run_failure_reason(error) == f"The run failed: {reason}"
