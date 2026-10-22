@@ -242,6 +242,19 @@ def test_7011_cr22_a_chat_row_has_schedule_run_null(world, history):
 
     assert {row["id"]: row["schedule_run"] for row in body["rows"]} == {chat: None, gone: None, bad: None}
 
+
+# CR-22 review r2: meta is user-writable, so a chat that names another conversation's run learns nothing
+def test_7011_cr22_a_chat_whose_meta_names_another_run_gets_null(world, history):
+    world.run(trigger="cron")
+    (run,) = world.conversations()
+    forged = history.add(1, schedule_run_id=1, execution_type="scheduled")
+
+    body, _ = history.list(schedule_id="1")
+
+    rows = {row["id"]: row["schedule_run"] for row in body["rows"]}
+    assert rows[forged] is None
+    assert rows[run.id]["id"] == 1
+
 PERMISSIONS = {f"models.applications.schedules.{verb}" for verb in ("list", "details", "create", "update", "delete", "run")}
 
 

@@ -29,13 +29,22 @@ class ConversationList(ConversationBase):
     id: int
 
 
+class ScheduleRunRef(BaseModel):
+    """The run record of a run history row: the schedule is read live, the status stays raw (CR-22, US-38 D6)."""
+    id: int
+    schedule_id: int
+    schedule_name: str
+    status: str
+    trigger: str
+
+
 class ConversationListExtended(ConversationList):
     participants_count: int
     message_groups_count: int
     users_count: int
     duration: float = 0.0
     execution_type: str = 'chat'  # no stored value: a plain chat (owner decision 2026-10-21, US-50 R3.1)
-    schedule_run: dict | None = None  # {id, schedule_id, schedule_name, status, trigger} of a run row (CR-22, US-16 R2.4)
+    schedule_run: ScheduleRunRef | None = None  # the run record of a run row (CR-22, US-16 R2.4)
 
     @model_validator(mode='after')
     def compute_execution_type(self):
