@@ -177,3 +177,31 @@ def test_el_7011_bug35_blocked_insert_keeps_last_run_status(claim, session):
 
     session.expire_all()
     assert session.get(claim.EntitySchedule, row.id).last_run_status == "waiting_for_approval"
+
+
+# CR-24 (US-15 R4.1): Run now sets the schedule Last run time; a test run and the cron insert do not
+OLD_LAST_RUN = datetime(2026, 10, 20, 9, 0)
+
+
+@pytest.mark.parametrize(("trigger", "moves"), [("manual", True), ("test", False), ("cron", False)])
+def test_el_7011_cr24_insert_run_sets_last_run_for_run_now_only(claim, session, trigger, moves):
+    row = _schedule(claim, session, last_run=OLD_LAST_RUN)
+
+    assert claim.insert_run(session, row.id, trigger) is not None
+
+    session.expire_all()
+    last_run = session.get(claim.EntitySchedule, row.id).last_run.replace(tzinfo=None)
+    assert (last_run > OLD_LAST_RUN) is moves
+    assert last_run >= OLD_LAST_RUN
+
+
+# CR-24 (US-15 R4.2): a refused Run now (an active run exists) keeps the Last run time
+def test_el_7011_cr24_refused_run_now_keeps_last_run(claim, session):
+    row = _schedule(claim, session, last_run=OLD_LAST_RUN)
+    session.add(claim.EntityScheduleRun(schedule_id=row.id, trigger="cron", status="running"))
+    session.flush()
+
+    assert claim.insert_run(session, row.id, "manual") is None
+
+    session.expire_all()
+    assert session.get(claim.EntitySchedule, row.id).last_run.replace(tzinfo=None) == OLD_LAST_RUN
