@@ -10,10 +10,14 @@ Run via:
 """
 import sys
 import types
+from datetime import UTC, datetime
 
 import pytest
 from unit.test_7011_schedule_crud_api import (
+    ADMIN,
+    ADMIN_ID,
     EDITOR,
+    OTHER_ID,
     OWNER_ID,
     PACKAGE,
     PERMISSION_PREFIX,
@@ -250,3 +254,71 @@ def test_el7011_cr_a_personal_credential_needs_the_ack_and_is_audited_as_toolkit
     assert status == 201 and body['warnings'] == [PERSONAL]
     [(name, _)] = named.audit
     assert name == 'schedule_run_without_asking_confirmed: GitHub.*'
+
+
+# BUG-36 (R9.1, R9.2): a kept fingerprint keeps the consent; an admin check scans as the owner
+CONFIRMED_AT = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
+
+
+def _seed_confirmed(harness, created_by=OWNER_ID, fingerprint='fp-1'):
+    return harness.seed(created_by=created_by, approval_rule='run_without_asking', approval_confirmed_by=created_by,
+                        approval_confirmed_at=CONFIRMED_AT, approval_fingerprint=fingerprint)
+
+
+def _consent(row):
+    return row.approval_confirmed_by, row.approval_fingerprint, row.approval_confirmed_at is not None
+
+
+class TestKeptConsent:
+    @pytest.mark.parametrize('change', [{'cron': '0 10 * * *'}, {'name': 'Renamed'}])
+    def test_el7011_bug36_cron_edit_of_a_confirmed_schedule_needs_no_ack(self, harness, change):
+        harness.run_without_asking_allowed = True
+        harness.risk_warnings = [SENSITIVE]
+        schedule_id = _seed_confirmed(harness)
+        body, status = harness.call('put', change, schedule_id=schedule_id)
+        assert status == 200 and body['approval_rule'] == 'run_without_asking'
+        assert _consent(harness.row(schedule_id)) == (OWNER_ID, 'fp-1', True)
+        assert harness.audit == []
+
+    def test_el7011_bug36_edit_with_a_new_fingerprint_still_needs_the_ack(self, harness):
+        harness.run_without_asking_allowed = True
+        harness.risk_warnings = [SENSITIVE]
+        harness.fingerprint = 'fp-2'
+        schedule_id = _seed_confirmed(harness)
+        body, status = harness.call('put', {'cron': '0 10 * * *'}, schedule_id=schedule_id)
+        assert (status, body['code'], body['fingerprint']) == (409, 'risk_confirmation_required', 'fp-2')
+        assert _consent(harness.row(schedule_id)) == (OWNER_ID, 'fp-1', True)
+
+
+class TestCheckAsOwner:
+    def test_el7011_bug36_admin_check_scans_as_the_owner(self, harness):
+        harness.run_without_asking_allowed = True
+        harness.risk_warnings = [SENSITIVE]
+        schedule_id = _seed_confirmed(harness, created_by=OTHER_ID)
+        harness.request_as(ADMIN_ID, ADMIN)
+        body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
+        assert status == 200 and body['confirmed'] is True
+        assert harness.scans[-1] == (PROJECT_ID, 10, OTHER_ID)
+        harness.request_as(OTHER_ID, EDITOR)
+        body, status = harness.call('put', {'risk_ack': _ack(fingerprint=body['fingerprint'])},
+                                    schedule_id=schedule_id)
+        assert status == 200
+        assert _consent(harness.row(schedule_id))[:2] == (OTHER_ID, 'fp-1')
+
+    @pytest.mark.parametrize('seed', [{'fingerprint': 'fp-0'}, {}])
+    def test_el7011_bug36_check_is_not_confirmed_when_the_consent_differs(self, harness, seed):
+        harness.risk_warnings = [SENSITIVE]
+        schedule_id = _seed_confirmed(harness, **seed) if seed else harness.seed()
+        body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
+        assert (status, body['confirmed']) == (200, False)
+
+    def test_el7011_bug36_check_with_a_hidden_schedule_id_is_404(self, harness):
+        schedule_id = harness.seed(created_by=OTHER_ID)
+        body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
+        assert (status, body['code']) == (404, 'not_found')
+        assert harness.scans == []
+
+    def test_el7011_bug36_check_without_a_schedule_id_has_no_confirmed(self, harness):
+        body, _ = harness.call('post', CHECK_BODY, suffix='/check')
+        assert 'confirmed' not in body
+
