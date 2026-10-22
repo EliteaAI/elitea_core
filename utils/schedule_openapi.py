@@ -254,16 +254,19 @@ OPERATIONS = {
             "`badge` and `effect`. A toolkit that runs with the owner's personal (private) credential is a "
             "`personal_credential` item in `sensitive`: `tool` is null and `badge` is `personal_credential`. "
             "`notices` never block. `run_without_asking_allowed` is false when the project "
-            "does not allow the rule or a tool could not be checked. Send the `fingerprint` back in `risk_ack`.",
+            "does not allow the rule or a tool could not be checked. Send the `fingerprint` back in `risk_ack`. "
+            "An edit sends `schedule_id`: the scan runs as the schedule owner, and the answer adds `confirmed`, "
+            "true when the schedule keeps \"Run without asking\" with this fingerprint stored, so the save "
+            "needs no new `risk_ack`.",
             "a project member with `schedules.create`, as for a create",
             "400 an invalid field, or a version that is not of the agent or pipeline; 403 no permission; "
-            "404 the agent or pipeline is not visible"),
+            "404 the agent or pipeline, or the `schedule_id`, is not visible"),
         "parameters": PROJECT_PARAMS,
         "request_body": ScheduleRiskCheck,
         "responses": _responses(200, "The risk review", CHECK_EXAMPLE, {
             400: ("A version that is not of the agent or pipeline", {
                 "error": "The version does not belong to this agent or pipeline", "field": "version_id"}),
-            403: None, 404: "The agent or pipeline is not visible"}),
+            403: None, 404: "The agent or pipeline, or the schedule of `schedule_id`, is not visible"}),
     },
     ("get", ITEM): {
         "name": "Read a schedule",
