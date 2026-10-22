@@ -33,7 +33,7 @@ from ..utils.attachments import (
 )
 from ..utils.token_limit_continuation import trim_continuation_overlap
 from ..utils.pipeline_hitl_history import persist_pipeline_hitl_prompt
-from ..utils.schedule_runs import finish_schedule_run, pause_schedule_run
+from ..utils.schedule_runs import finish_schedule_run, pause_schedule_run, run_failure_reason
 
 from ..utils.sio_utils import SioEvents
 
@@ -300,10 +300,15 @@ class Event:
                 if run_id:
                     metadata = payload['response_metadata']
                     is_error = metadata.get('is_error')
+                    reason = None
+                    if is_error:
+                        # BUG-37: the run keeps one short sentence; the full error stays in the server log
+                        log.warning('chat_message_stream_end: schedule run %s failed: %s', run_id, metadata.get('error'))
+                        reason = run_failure_reason(metadata.get('error'))
                     try:
                         finish_schedule_run(
-                            chat_project_id, run_id, 'failed' if is_error else 'success',
-                            metadata.get('error') if is_error else None, msg_group.conversation.id,
+                            chat_project_id, run_id, 'failed' if is_error else 'success', reason,
+                            msg_group.conversation.id,
                         )
                     except Exception:  # noqa: BLE001 -- the chat end stays; the stale sweep closes the run
                         log.exception('chat_message_stream_end: schedule run %s not finished', run_id)
