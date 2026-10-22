@@ -245,6 +245,7 @@ def _install_package(rpc_state):
     }.items():
         sys.modules[name] = mod
 
+    _load_real('utils.error_text', 'utils/error_text.py')  # draft_llm_utils imports it
     _load_real('utils.draft_llm_utils', 'utils/draft_llm_utils.py')
     _load_real('utils.generate_skill_utils', 'utils/generate_skill_utils.py')
     _load_real('utils.generate_project_context_utils', 'utils/generate_project_context_utils.py')

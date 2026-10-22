@@ -11,9 +11,9 @@ from typing import Optional
 from pylon.core.tools import log
 from tools import rpc_tools
 
+from .error_text import ERROR_LINE_MAX_LENGTH, last_exception_line  # noqa: F401 -- ERROR_LINE_MAX_LENGTH is public here
 from .utils import get_public_project_id
 
-ERROR_LINE_MAX_LENGTH = 300
 MAX_LISTED_MODEL_NAMES = 20
 PARSE_FAILURE_WINDOW = 120
 PARSE_FAILURE_TAIL = 80
@@ -157,14 +157,6 @@ def resolve_model(
         ), None
     return unavailable, None
 
-
-def last_exception_line(error_text) -> str:
-    """The last non-empty line of an error text, cut at ERROR_LINE_MAX_LENGTH."""
-    lines = [line.strip() for line in str(error_text).splitlines() if line.strip()]
-    line = lines[-1] if lines else str(error_text).strip()
-    if len(line) > ERROR_LINE_MAX_LENGTH:
-        return line[:ERROR_LINE_MAX_LENGTH] + "..."
-    return line
 
 
 def _thinking_steps(result) -> list:

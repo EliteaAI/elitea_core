@@ -1,5 +1,4 @@
 """Run status and schedule disable writers of the schedule runs (EL-7011)."""
-import re
 from datetime import UTC, datetime, timedelta
 
 from pylon.core.tools import log
@@ -7,6 +6,7 @@ from sqlalchemy import func, select, update
 from tools import db
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
+from .error_text import hide_locations, last_exception_line
 from .schedule_claim import append_run_events, fail_run, finished_event, run_event
 
 STALE_REASON = 'the run did not finish in time'
@@ -64,17 +64,13 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
 
 FAILED_REASON = 'The run failed'
 REASON_MAX_LENGTH = 300
-# An absolute POSIX or Windows path, such as /data/plugins/x.py or C:\work\x.py
-_ABSOLUTE_PATH = re.compile(r'(?:\b[A-Za-z]:)?[\\/](?:[\w.-]+[\\/])+[\w.-]*')
 
 
 def run_failure_reason(error) -> str:
     """The stored reason of a failed run: one short sentence, no stack lines or paths (BUG-37, R6.1, R6.2)."""
-    from .draft_llm_utils import last_exception_line  # pylint: disable=C0415 -- keeps the module light to load
-
     if not error or not str(error).strip():
         return FAILED_REASON
-    reason = f'{FAILED_REASON}: {_ABSOLUTE_PATH.sub("<path>", last_exception_line(error))}'
+    reason = f'{FAILED_REASON}: {hide_locations(last_exception_line(error))}'
     if len(reason) > REASON_MAX_LENGTH:
         reason = reason[:REASON_MAX_LENGTH - 3] + '...'
     return reason
