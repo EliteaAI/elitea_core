@@ -253,12 +253,19 @@ def world(monkeypatch):
             session.commit()
             return run_id
 
+    @contextmanager
+    def edit_schedule():
+        """The schedule row in a session that commits the changes made in the block."""
+        with _orm.Session(engine) as session:
+            yield session.get(schedules.EntitySchedule, ids.schedule)
+            session.commit()
+
     def run_count():
         with _orm.Session(engine) as session:
             return session.query(schedules.EntityScheduleRun).count()
 
     return types.SimpleNamespace(run=run, schedule=schedule, set_run_status=set_run_status, claim=claim_run,
-                                 run_count=run_count, predictions=predictions, predict_errors=predict_errors,
+                                 run_count=run_count, edit_schedule=edit_schedule, predictions=predictions, predict_errors=predict_errors,
                                  conversations=conversations, auth=auth, blocking=blocking,
                                  first_message=first_message, run_row=run_row, notices=notices,
                                  agent_version=agent_version)
