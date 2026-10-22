@@ -61,8 +61,8 @@ def test_7011_r2_1_a_run_after_the_active_run_closed_is_accepted(world):
     assert world.run_count() == 2
 
 
-# BUG-35 / R1.5: the list row shows Running at once; a manual run does not move the cron Last run time
-def test_7011_bug35_manual_run_shows_running_in_list_and_keeps_last_run(world):
+# BUG-35 / R1.5: the list row shows Running at once; CR-24 / R4.1: Run now also moves the Last run time
+def test_7011_bug35_cr24_manual_run_shows_running_in_list_and_sets_last_run(world):
     last_run = datetime(2026, 10, 20, 9, 0)
     world.set_run_status("success")
     with world.edit_schedule() as schedule:
@@ -72,4 +72,4 @@ def test_7011_bug35_manual_run_shows_running_in_list_and_keeps_last_run(world):
 
     schedule = world.schedule()
     assert schedule.last_run_status == "running"
-    assert schedule.last_run.replace(tzinfo=None) == last_run
+    assert schedule.last_run is not None and schedule.last_run.replace(tzinfo=None) > last_run
