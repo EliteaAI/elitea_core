@@ -5,9 +5,10 @@ from sqlalchemy import desc, asc, Integer, String, or_, func
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
+from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
-from ..models.pd.conversation import ConversationListExtended, ConversationDetails
+from ..models.pd.conversation import ConversationListExtended, ConversationDetails, ScheduleRunRef
 from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
@@ -29,6 +30,37 @@ from ..utils.model_defaults import creation_llm_settings, chat_request_default
 # and CLI tools may pass larger values, but anything above this is rejected
 # silently rather than fanning into a heavy GROUP BY.
 LIST_CONVERSATIONS_MAX_LIMIT = 100
+
+
+def _schedule_runs(session, conversations) -> dict[int, dict]:
+    """The run record of each run row, keyed by conversation id (CR-22, US-38 D6).
+
+    One query bounded by the page's run ids (at most LIST_CONVERSATIONS_MAX_LIMIT); the schedule name is read live,
+    so a rename shows at once. A row whose meta has no integer run id, whose run is gone, or whose run belongs
+    to another conversation, gets no entry.
+    """
+    run_of = {}
+    for conv in conversations:
+        run_id = (conv.meta or {}).get('schedule_run_id')
+        if isinstance(run_id, int) and not isinstance(run_id, bool):
+            run_of[conv.id] = run_id
+    if not run_of:
+        return {}
+    # Meta is user-writable: a run counts only when its own conversation_id names this conversation
+    runs = {
+        (run_id, conversation_id): ScheduleRunRef(
+            id=run_id, schedule_id=schedule_id, schedule_name=name, status=status, trigger=trigger,
+        ).model_dump()
+        for run_id, conversation_id, schedule_id, name, status, trigger in (
+            session.query(EntityScheduleRun.id, EntityScheduleRun.conversation_id, EntityScheduleRun.schedule_id,
+                          EntitySchedule.name, EntityScheduleRun.status, EntityScheduleRun.trigger)
+            .join(EntitySchedule, EntitySchedule.id == EntityScheduleRun.schedule_id)
+            .filter(EntityScheduleRun.id.in_(set(run_of.values())),
+                    EntityScheduleRun.conversation_id.in_(list(run_of)))
+            .all()
+        )
+    }
+    return {conv_id: runs[(run_id, conv_id)] for conv_id, run_id in run_of.items() if (run_id, conv_id) in runs}
 
 
 class RPC:
@@ -519,6 +551,8 @@ class RPC:
                 else calculate_conversation_durations_batch(conv_ids, session)
             )
 
+            schedule_runs = _schedule_runs(session, conversations)
+
             rows = []
             for conv in conversations:
                 conv_dict = {
@@ -527,6 +561,7 @@ class RPC:
                     "participants_count": participants_count.get(conv.id, 0),
                     "message_groups_count": mg_counts.get(conv.id, 0),
                     "users_count": users_count.get(conv.id, 0),
+                    "schedule_run": schedule_runs.get(conv.id),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 

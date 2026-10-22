@@ -215,6 +215,46 @@ def test_7011_r2_1_a_schedule_id_that_is_not_an_integer_is_400(world, history, v
 
 
 
+
+# CR-22 / US-16 R2.4, US-38 R3.1-R3.4: a run row carries its schedule name, run status and trigger, read live
+def test_7011_cr22_a_schedule_run_row_carries_schedule_name_status_and_trigger(world, history):
+    world.run(trigger="test")
+    (run,) = world.conversations()
+    world.set_run_status("success")
+    with world.edit_schedule() as schedule:
+        schedule.name = "Daily digest"  # a rename shows at once: the name is read from the schedule, not meta
+
+    body, _ = history.list(schedule_id="1")
+
+    (row,) = body["rows"]
+    assert row["id"] == run.id
+    assert row["schedule_run"] == {"id": 1, "schedule_id": 1, "schedule_name": "Daily digest",
+                                   "status": "success", "trigger": "test"}
+
+
+# CR-22 / US-16 R2.4, US-38 R3.3: a row with no run record, or whose run is gone, has schedule_run null
+def test_7011_cr22_a_chat_row_has_schedule_run_null(world, history):
+    chat = history.add(1)
+    gone = history.add(1, schedule_run_id=999, execution_type="scheduled")
+    bad = history.add(1, schedule_run_id="x")
+
+    body, _ = history.list()
+
+    assert {row["id"]: row["schedule_run"] for row in body["rows"]} == {chat: None, gone: None, bad: None}
+
+
+# CR-22 review r2: meta is user-writable, so a chat that names another conversation's run learns nothing
+def test_7011_cr22_a_chat_whose_meta_names_another_run_gets_null(world, history):
+    world.run(trigger="cron")
+    (run,) = world.conversations()
+    forged = history.add(1, schedule_run_id=1, execution_type="scheduled")
+
+    body, _ = history.list(schedule_id="1")
+
+    rows = {row["id"]: row["schedule_run"] for row in body["rows"]}
+    assert rows[forged] is None
+    assert rows[run.id]["id"] == 1
+
 PERMISSIONS = {f"models.applications.schedules.{verb}" for verb in ("list", "details", "create", "update", "delete", "run")}
 
 
