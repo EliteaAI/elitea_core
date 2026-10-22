@@ -260,9 +260,9 @@ def test_el7011_cr_a_personal_credential_needs_the_ack_and_is_audited_as_toolkit
 CONFIRMED_AT = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
 
 
-def _seed_confirmed(harness, created_by=OWNER_ID, fingerprint='fp-1'):
+def _seed_confirmed(harness, created_by=OWNER_ID, fingerprint='fp-1', **fields):
     return harness.seed(created_by=created_by, approval_rule='run_without_asking', approval_confirmed_by=created_by,
-                        approval_confirmed_at=CONFIRMED_AT, approval_fingerprint=fingerprint)
+                        approval_confirmed_at=CONFIRMED_AT, approval_fingerprint=fingerprint, **fields)
 
 
 def _consent(row):
@@ -322,3 +322,48 @@ class TestCheckAsOwner:
         body, _ = harness.call('post', CHECK_BODY, suffix='/check')
         assert 'confirmed' not in body
 
+
+class TestReviewRound2:
+    """BUG-36 review r2: the check is tied to its schedule, and only a kept rule keeps the consent."""
+
+    @pytest.mark.parametrize('field, value', [('entity_type', 'pipeline'), ('application_id', 2)])
+    def test_el7011_bug36_check_of_another_entity_is_refused(self, harness, field, value):
+        harness.risk_warnings = [SENSITIVE]
+        schedule_id = _seed_confirmed(harness)
+        body, status = harness.call('post', {**CHECK_BODY, field: value, 'schedule_id': schedule_id}, suffix='/check')
+        assert (status, body['code'], body['field']) == (400, 'invalid_input', field)
+        assert harness.scans == []
+
+    def test_el7011_bug36_check_of_another_version_needs_the_edit_right(self, harness):
+        harness.risk_warnings = [SENSITIVE]
+        schedule_id = _seed_confirmed(harness, version_id=None)
+        harness.request_as(OWNER_ID, EDITOR - {PERMISSION_PREFIX + 'update'})
+        body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
+        assert (status, body['code']) == (403, 'not_owner')
+        assert harness.scans == []
+        harness.request_as(OWNER_ID, EDITOR)
+        body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
+        assert status == 200 and harness.scans[-1] == (PROJECT_ID, 10, OWNER_ID)
+
+    def test_el7011_bug36_check_of_the_same_version_needs_no_edit_right(self, harness):
+        harness.risk_warnings = [SENSITIVE]
+        schedule_id = _seed_confirmed(harness)
+        harness.request_as(OWNER_ID, EDITOR - {PERMISSION_PREFIX + 'update'})
+        body, status = harness.call('post', {**CHECK_BODY, 'schedule_id': schedule_id}, suffix='/check')
+        assert status == 200 and body['confirmed'] is True
+
+    def test_el7011_bug36_pause_and_ask_moved_to_run_without_asking_needs_the_ack(self, harness):
+        harness.run_without_asking_allowed = True
+        harness.risk_warnings = [SENSITIVE]
+        schedule_id = harness.seed(approval_rule='pause_and_ask', approval_fingerprint='fp-1')  # a stale fingerprint
+        body, status = harness.call('put', {'approval_rule': 'run_without_asking'}, schedule_id=schedule_id)
+        assert (status, body['code']) == (409, 'risk_confirmation_required')
+        assert harness.row(schedule_id).approval_rule == 'pause_and_ask'
+
+    def test_el7011_bug36_run_without_asking_moved_to_pause_and_ask_needs_the_ack(self, harness):
+        harness.risk_warnings = [SENSITIVE]
+        schedule_id = _seed_confirmed(harness)
+        body, status = harness.call('put', {'approval_rule': 'pause_and_ask'}, schedule_id=schedule_id)
+        assert (status, body['code']) == (409, 'risk_confirmation_required')
+        _, status = harness.call('put', {'approval_rule': 'pause_and_ask', 'risk_ack': _ack()}, schedule_id=schedule_id)
+        assert status == 200 and harness.row(schedule_id).approval_rule == 'pause_and_ask'
