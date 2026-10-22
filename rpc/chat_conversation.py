@@ -22,7 +22,7 @@ from ..utils.participant_utils import add_participant_to_conversation
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import merge_meta_expression, set_context_strategy
 from ..utils.chat_usage import strip_server_owned_meta
-from ..utils.context_window import get_project_default_mode
+from ..utils.context_window import new_chat_window_mode
 from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
 from ..utils.model_defaults import creation_llm_settings, chat_request_default
 
@@ -296,7 +296,7 @@ class RPC:
         effective_instructions = instructions
         context_window_mode = None
         if apply_context_strategy and get_context_manager_feature_flag(project_id):
-            context_window_mode = get_project_default_mode(project_id)
+            context_window_mode = new_chat_window_mode(project_id, user_context_defaults)
 
         if user_personalization:
             persona = user_personalization.get('persona')

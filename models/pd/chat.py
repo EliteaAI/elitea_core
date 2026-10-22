@@ -2,7 +2,7 @@ import uuid
 from typing import Optional, List, Dict, Any, Literal
 
 from jinja2 import Environment, DebugUndefined
-from pydantic import BaseModel, Field, model_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 # from .tool import ToolUpdateModel
 from .tool import ToolChatModel
 from .utils import MergeUpdateBase
@@ -29,6 +29,7 @@ ChatHistoryMessage = ChatHistory
 
 
 class ContextStrategyModel(BaseModel):
+    # Context management can no longer be turned off (#6898); stored or sent `false` is ignored
     enabled: Optional[bool] = True
     enable_summarization: Optional[bool] = True
     enable_context_editing: Optional[bool] = False
@@ -42,6 +43,11 @@ class ContextStrategyModel(BaseModel):
     preserve_recent_messages: Optional[int] = 5
     summary_instructions: Optional[str] = 'Generate a concise summary of the following conversation messages'
     summary_llm_settings: Optional[LLMSettingsModel] = None
+
+    @field_validator('enabled', mode='before')
+    @classmethod
+    def always_enabled(cls, _value):
+        return True
 
 
 class ApplicationChatRequest(MergeUpdateBase):

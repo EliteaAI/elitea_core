@@ -110,14 +110,26 @@ def resolve_context_budget(
 
 
 def get_project_default_mode(project_id: int) -> str:
-    """Admin-set project default for new chats; Balanced when unset or unreadable (TTL-cached)."""
-    def load():
-        from tools import rpc_tools  # pylint: disable=E0401,C0415
+    """Admin-set project default for new chats; Balanced when unset or unreadable.
+
+    Read fresh on every chat creation: a cached value kept serving the old default after an admin change.
+    """
+    from tools import rpc_tools  # pylint: disable=E0401,C0415
+    try:
         config = rpc_tools.RpcMixin().rpc.timeout(_RPC_TIMEOUT).configurations_get_first_filtered_project(
             project_id=project_id, filter_fields={'type': SETTINGS_TYPE, 'elitea_title': SETTINGS_TYPE},
         )
-        return normalize_mode(((config or {}).get('data') or {}).get('default_mode'))
-    return _cached(('default_mode', project_id), load, BALANCED)
+    except Exception as e:  # pylint: disable=W0718
+        from pylon.core.tools import log  # pylint: disable=E0611,E0401,C0415
+        log.warning('Failed to load the context window default of project %s: %s', project_id, e)
+        return BALANCED
+    return normalize_mode(((config or {}).get('data') or {}).get('default_mode'))
+
+
+def new_chat_window_mode(project_id: int, user_context_defaults: Optional[dict] = None) -> str:
+    """Window mode of a new chat: the user's Memory default, else the project default, else Balanced."""
+    user_mode = (user_context_defaults or {}).get('context_window_mode')
+    return user_mode if user_mode in WINDOW_MODES else get_project_default_mode(project_id)
 
 
 def get_model_limits(project_id: Optional[int], model_name: Optional[str]) -> dict:
