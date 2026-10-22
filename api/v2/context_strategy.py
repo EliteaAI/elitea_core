@@ -46,7 +46,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
             updated_strategy = {
                 **current_strategy,
-                'enabled': validated.enabled if 'enabled' in validated.model_fields_set else current_strategy.get('enabled', True),
+                'enabled': True,
                 'preserve_recent_messages': validated.preserve_recent_messages or current_strategy.get('preserve_recent_messages') or 5,
                 'preserve_system_messages': validated.preserve_system_messages if validated.preserve_system_messages is not None else current_strategy.get('preserve_system_messages', True),
                 'enable_summarization': validated.enable_summarization if validated.enable_summarization is not None else current_strategy.get('enable_summarization', True),

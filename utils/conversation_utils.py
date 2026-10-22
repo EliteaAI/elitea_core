@@ -62,11 +62,15 @@ def create_conversation(session, project_id: int, user_id: int, parsed) -> tuple
         pass  # Continue with defaults if fetching user settings fails
     context_window_mode = None
     if get_context_manager_feature_flag(project_id):
-        from .context_window import get_project_default_mode  # pylint: disable=C0415
-        context_window_mode = get_project_default_mode(project_id)
+        from .context_window import new_chat_window_mode  # pylint: disable=C0415
+        context_window_mode = new_chat_window_mode(project_id, user_context_defaults)
 
     if parsed.meta is None:
         parsed.meta = {}
+    # A duplicated chat arrives with its source's meta; the new chat starts its own strategy, usage and budget
+    from .chat_usage import SERVER_OWNED_META_KEYS  # pylint: disable=C0415
+    for key in (*SERVER_OWNED_META_KEYS, 'context_strategy'):
+        parsed.meta.pop(key, None)
     if user_personalization:
         # Set persona directly (not default_persona) - this is what the chat system expects
         persona = user_personalization.get('persona')

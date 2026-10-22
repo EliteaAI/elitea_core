@@ -250,8 +250,8 @@ def set_context_strategy(
         conversation_id: Conversation ID
         user_context_defaults: User's default context management settings
         user_summarization_defaults: User's default summarization settings
-        context_window_mode: Project default window mode; pass it in so the settings RPC runs before the
-            caller's transaction. Read from project settings (TTL-cached) when omitted
+        context_window_mode: New chat window mode; pass it in so the settings RPC runs before the
+            caller's transaction. Resolved from the user's Memory default, else the project default, when omitted
 
     Returns:
         dict: The context strategy configuration
@@ -259,8 +259,6 @@ def set_context_strategy(
     strategy_data = {}
 
     if user_context_defaults:
-        if 'enabled' in user_context_defaults:
-            strategy_data['enabled'] = user_context_defaults['enabled']
         if 'preserve_recent_messages' in user_context_defaults:
             strategy_data['preserve_recent_messages'] = user_context_defaults['preserve_recent_messages']
         if 'enable_summarization' in user_context_defaults:
@@ -286,8 +284,8 @@ def set_context_strategy(
             strategy_data['summary_llm_settings'] = summary_llm_settings
 
     if context_window_mode is None:
-        from .context_window import get_project_default_mode
-        context_window_mode = get_project_default_mode(project_id)
+        from .context_window import new_chat_window_mode
+        context_window_mode = new_chat_window_mode(project_id, user_context_defaults)
     strategy_data['context_window_mode'] = normalize_mode(context_window_mode)
 
     try:

@@ -17,6 +17,7 @@ class ContextStrategyUpdate(BaseModel):
     enable_summarization: Optional[bool] = None
     enable_context_editing: Optional[bool] = None
     summary_instructions: Optional[str] = None
+    # Deprecated (#6898): context management is always on; accepted from old clients and ignored
     enabled: Optional[bool] = True
 
     @model_validator(mode='after')
@@ -43,6 +44,11 @@ class ContextStrategy(BaseModel):
     summary_llm_settings: Optional[dict] = None
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     last_optimized_at: Optional[str] = None
+
+    @field_validator('enabled', mode='before')
+    @classmethod
+    def always_enabled(cls, _value):
+        return True
 
 
 class ContextStatus(BaseModel):
