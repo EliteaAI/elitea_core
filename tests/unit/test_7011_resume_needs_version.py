@@ -9,7 +9,9 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from test_7011_schedule_crud_api import harness  # noqa: F401  (pytest fixture)
+import test_7011_schedule_crud_api
+
+harness = test_7011_schedule_crud_api.harness  # the pytest fixture of the US-07 file
 
 
 def test_7011_r2_4_resume_without_a_version_is_400_on_version_id(harness):  # noqa: F811
