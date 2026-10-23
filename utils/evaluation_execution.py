@@ -69,6 +69,7 @@ _NO_ENVELOPE_REASONS = {
     'timeout': 'timeout',
     'predict_exception': 'no_envelope',
     'budget_blocked': 'budget_blocked',
+    'guardrail_blocked': 'guardrail_blocked',
 }
 
 

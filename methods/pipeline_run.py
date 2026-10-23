@@ -7,6 +7,7 @@ from ..models.pd.llm import llm_settings_family_conflict
 from ..utils.pipeline_utils import validate_yaml_from_str
 from ..utils.predict_utils import generate_predict_payload, PredictPayloadError, user_input_preview
 from ..utils.application_utils import validate_and_resolve_llm_settings
+from ..utils.input_guardrail import inspect_and_unsecret
 
 
 YAML_MAX_SIZE = 512 * 1024  # 512KB
@@ -98,8 +99,8 @@ class Method:
         except PredictPayloadError as e:
             return {"error": str(e)}
 
-        vc = VaultClient(project_id)
-        payload = vc.unsecret(payload)
+        # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
+        payload = inspect_and_unsecret(payload, VaultClient(project_id), project_id, user_id)
 
         user_context = {
             "user_id": user_id,
