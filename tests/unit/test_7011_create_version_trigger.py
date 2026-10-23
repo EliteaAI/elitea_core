@@ -78,7 +78,7 @@ def create_version(isolated_sys_modules):
         module = types.ModuleType(name)
         module.__dict__.update(attrs)
         sys.modules[name] = module
-    sys.modules[f"{PKG}.utils.pipeline_trigger"] = rule_module
+    sys.modules[f"{PKG}.utils.trigger_write_rule"] = rule_module
     spec = importlib.util.spec_from_file_location(
         f"{PKG}.utils.create_utils", PLUGIN_ROOT / "utils" / "create_utils.py")
     module = importlib.util.module_from_spec(spec)
