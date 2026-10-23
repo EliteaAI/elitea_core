@@ -96,7 +96,7 @@ class ScheduleDraftHandler:
         locked = req.locked_entity.model_dump() if req.locked_entity else None
         roster = schedule_roster(project_id)
         system_prompt = build_schedule_draft_prompt(
-            template, req.current, roster, req.timezone, locked,
+            template, req.current.model_dump(exclude_unset=True), roster, req.timezone, locked,
         )
 
         try:
