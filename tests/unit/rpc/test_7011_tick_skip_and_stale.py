@@ -82,7 +82,8 @@ def world(monkeypatch):
 
 
 def _row(row_id):
-    return types.SimpleNamespace(id=row_id, entity_type="pipeline", cron="* * * * *", timezone="UTC", next_run=NOW)
+    return types.SimpleNamespace(id=row_id, entity_type="pipeline", cron="* * * * *", timezone="UTC", next_run=NOW,
+                                 expires_at=None, name="schedule", created_by=1)
 
 
 def test_7011_r2_1_active_run_at_the_claim_records_a_skipped_run(world):

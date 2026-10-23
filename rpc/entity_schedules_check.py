@@ -1,9 +1,10 @@
 """The generic schedule tick: claim every due schedule once and start its run (EL-7011)."""
 import time
+import types
 from datetime import UTC, datetime
 
 from pylon.core.tools import log, web
-from sqlalchemy import text
+from sqlalchemy import text, update
 from tools import db, rpc_tools, this
 
 from ..utils.maintenance_gate import is_maintenance_active
@@ -91,11 +92,28 @@ def _dispatch_project(project_id: int, entity_types: list[str], room: int) -> in
         # Plain values, read once: a commit expires ORM rows, and a reloaded next_run that another
         # replica already moved would let this claim match and start the schedule twice (R1.1)
         due = [
-            (row.id, row.entity_type, row.cron, row.timezone, row.next_run)
+            (row.id, row.entity_type, row.cron, row.timezone, row.next_run, row.expires_at, row.name, row.created_by)
             for row in select_due_schedules(session, entity_types, room)
         ]
-        for schedule_id, entity_type, cron, timezone, seen_next_run in due:
+        for schedule_id, entity_type, cron, timezone, seen_next_run, expires_at, name, owner_id in due:
             try:
+                if expires_at is not None and expires_at <= datetime.now(UTC):  # R3.1: past its stop date
+                    # Imported when a row expires: only this path needs the model graph
+                    from ..models.entity_schedule import EntitySchedule
+                    from ..models.enums.all import NotificationEventTypes
+                    from ..utils.schedule_notifications import notify_schedule_event
+                    disabled = session.execute(
+                        update(EntitySchedule)
+                        .where(EntitySchedule.id == schedule_id, EntitySchedule.enabled.is_(True))
+                        .values(enabled=False, disabled_reason="expired")
+                    ).rowcount == 1  # R3.4: zero rows means another replica disabled it and sent the notice
+                    session.commit()
+                    if disabled:  # R3.2: no claim, no run; the notice goes after the commit
+                        notify_schedule_event(
+                            project_id, owner_id, NotificationEventTypes.schedule_expired,
+                            types.SimpleNamespace(id=schedule_id, name=name),
+                        )
+                    continue
                 next_run = compute_next_run(cron, timezone, datetime.now(UTC))
                 if not claim_schedule(session, schedule_id, seen_next_run, next_run):
                     session.rollback()
