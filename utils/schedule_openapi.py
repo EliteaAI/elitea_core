@@ -194,8 +194,137 @@ DEFAULT_CODES = {400: "invalid_input", 403: "forbidden", 404: "not_found", 409: 
                  502: "model_failed", 503: "service_unavailable"}
 
 
+REFUSAL_NAME = "ScheduleRefusal"
+REFUSAL_REF = {"$ref": f"#/components/schemas/{REFUSAL_NAME}"}
+REFUSAL_SCHEMA = {
+    "type": "object", "required": ["code", "error"],
+    "description": "The body of every refused Schedules call. A refusal may carry more keys that name its findings.",
+    "properties": {
+        "code": {"type": "string", "description": "A stable code for the refusal", "examples": ["invalid_input"]},
+        "error": {"type": "string", "description": "A plain message for the user", "examples": ["Choose a version"]},
+        "field": {"type": "string", "description": "The one wrong input, when there is one", "examples": ["version_id"]},
+    },
+    "additionalProperties": True,
+}
+
+
+REFUSAL_NAME = "ScheduleRefusal"
+REFUSAL_REF = {"$ref": f"#/components/schemas/{REFUSAL_NAME}"}
+REFUSAL_SCHEMA = {
+    "type": "object", "required": ["code", "error"],
+    "description": "The body of every refused Schedules call. A refusal may carry more keys that name its findings.",
+    "properties": {
+        "code": {"type": "string", "description": "A stable code for the refusal", "examples": ["invalid_input"]},
+        "error": {"type": "string", "description": "A plain message for the user", "examples": ["Choose a version"]},
+        "field": {"type": "string", "description": "The one wrong input, when there is one", "examples": ["version_id"]},
+    },
+    "additionalProperties": True,
+}
+
+
+REFUSAL_NAME = "ScheduleRefusal"
+REFUSAL_REF = {"$ref": f"#/components/schemas/{REFUSAL_NAME}"}
+REFUSAL_SCHEMA = {
+    "type": "object", "required": ["code", "error"],
+    "description": "The body of every refused Schedules call. A refusal may carry more keys that name its findings.",
+    "properties": {
+        "code": {"type": "string", "description": "A stable code for the refusal", "examples": ["invalid_input"]},
+        "error": {"type": "string", "description": "A plain message for the user", "examples": ["Choose a version"]},
+        "field": {"type": "string", "description": "The one wrong input, when there is one", "examples": ["version_id"]},
+    },
+    "additionalProperties": True,
+}
+
+
+REFUSAL_NAME = "ScheduleRefusal"
+REFUSAL_REF = {"$ref": f"#/components/schemas/{REFUSAL_NAME}"}
+REFUSAL_SCHEMA = {
+    "type": "object", "required": ["code", "error"],
+    "description": "The body of every refused Schedules call. A refusal may carry more keys that name its findings.",
+    "properties": {
+        "code": {"type": "string", "description": "A stable code for the refusal", "examples": ["invalid_input"]},
+        "error": {"type": "string", "description": "A plain message for the user", "examples": ["Choose a version"]},
+        "field": {"type": "string", "description": "The one wrong input, when there is one", "examples": ["version_id"]},
+    },
+    "additionalProperties": True,
+}
+
+
+REFUSAL_NAME = "ScheduleRefusal"
+REFUSAL_REF = {"$ref": f"#/components/schemas/{REFUSAL_NAME}"}
+REFUSAL_SCHEMA = {
+    "type": "object", "required": ["code", "error"],
+    "description": "The body of every refused Schedules call. A refusal may carry more keys that name its findings.",
+    "properties": {
+        "code": {"type": "string", "description": "A stable code for the refusal", "examples": ["invalid_input"]},
+        "error": {"type": "string", "description": "A plain message for the user", "examples": ["Choose a version"]},
+        "field": {"type": "string", "description": "The one wrong input, when there is one", "examples": ["version_id"]},
+    },
+    "additionalProperties": True,
+}
+
+
+REFUSAL_NAME = "ScheduleRefusal"
+REFUSAL_REF = {"$ref": f"#/components/schemas/{REFUSAL_NAME}"}
+REFUSAL_SCHEMA = {
+    "type": "object", "required": ["code", "error"],
+    "description": "The body of every refused Schedules call. A refusal may carry more keys that name its findings.",
+    "properties": {
+        "code": {"type": "string", "description": "A stable code for the refusal", "examples": ["invalid_input"]},
+        "error": {"type": "string", "description": "A plain message for the user", "examples": ["Choose a version"]},
+        "field": {"type": "string", "description": "The one wrong input, when there is one", "examples": ["version_id"]},
+    },
+    "additionalProperties": True,
+}
+
+
+REFUSAL_NAME = "ScheduleRefusal"
+REFUSAL_REF = {"$ref": f"#/components/schemas/{REFUSAL_NAME}"}
+REFUSAL_SCHEMA = {
+    "type": "object", "required": ["code", "error"],
+    "description": "The body of every refused Schedules call. A refusal may carry more keys that name its findings.",
+    "properties": {
+        "code": {"type": "string", "description": "A stable code for the refusal", "examples": ["invalid_input"]},
+        "error": {"type": "string", "description": "A plain message for the user", "examples": ["Choose a version"]},
+        "field": {"type": "string", "description": "The one wrong input, when there is one", "examples": ["version_id"]},
+    },
+    "additionalProperties": True,
+}
+
+
+REFUSAL_NAME = "ScheduleRefusal"
+REFUSAL_REF = {"$ref": f"#/components/schemas/{REFUSAL_NAME}"}
+REFUSAL_SCHEMA = {
+    "type": "object", "required": ["code", "error"],
+    "description": "The body of every refused Schedules call. A refusal may carry more keys that name its findings.",
+    "properties": {
+        "code": {"type": "string", "description": "A stable code for the refusal", "examples": ["invalid_input"]},
+        "error": {"type": "string", "description": "A plain message for the user", "examples": ["Choose a version"]},
+        "field": {"type": "string", "description": "The one wrong input, when there is one", "examples": ["version_id"]},
+    },
+    "additionalProperties": True,
+}
+
+
+REFUSAL_NAME = "ScheduleRefusal"
+REFUSAL_REF = {"$ref": f"#/components/schemas/{REFUSAL_NAME}"}
+REFUSAL_SCHEMA = {
+    "type": "object", "required": ["code", "error"],
+    "description": "The body of every refused Schedules call. A refusal may carry more keys that name its findings.",
+    "properties": {
+        "code": {"type": "string", "description": "A stable code for the refusal", "examples": ["invalid_input"]},
+        "error": {"type": "string", "description": "A plain message for the user", "examples": ["Choose a version"]},
+        "field": {"type": "string", "description": "The one wrong input, when there is one", "examples": ["version_id"]},
+    },
+    "additionalProperties": True,
+}
+
+
 def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict:
-    """The success answer with its JSON example, then the main error answers; an error text None takes the default."""
+    """The success answer with its JSON example, then the main error answers; an error text None takes the default.
+
+    Every 4xx answer points to the shared `ScheduleRefusal` schema and keeps its own example.
+    """
     success = {"description": text}
     if example is not None:
         success["content"] = {"application/json": {"example": example}}
@@ -204,9 +333,30 @@ def _responses(code: int, text: str, example: dict | None, errors: dict) -> dict
         description, error_example = value if isinstance(value, tuple) else (value, None)
         description = description or ERRORS[error]
         refusal = {"code": DEFAULT_CODES[error], "error": description, **(error_example or {})}
-        answers[str(error)] = {"description": description,
-                               "content": {"application/json": {"example": refusal}}}
+        body = {"schema": REFUSAL_REF, "example": refusal} if 400 <= error < 500 else {"example": refusal}
+        answers[str(error)] = {"description": description, "content": {"application/json": body}}
     return answers
+
+
+def add_refusal_schema(registry) -> None:
+    """Put `ScheduleRefusal` into `components.schemas` of every spec the registry builds.
+
+    lean: the shared registry fills components only from request and response models, so the spec
+    builders are wrapped once; drop this when the registry takes extra components.
+    """
+    for name in ("get_plugin_spec", "get_combined_spec"):
+        build = getattr(registry, name)
+        if getattr(build, "adds_schedule_refusal", False):
+            continue
+
+        def wrapped(*args, _build=build, **kwargs):
+            spec = _build(*args, **kwargs)
+            if spec:
+                spec["components"]["schemas"].setdefault(REFUSAL_NAME, REFUSAL_SCHEMA)
+            return spec
+
+        wrapped.adds_schedule_refusal = True
+        setattr(registry, name, wrapped)
 
 
 def _text(what: str, who: str, errors: str) -> str:
