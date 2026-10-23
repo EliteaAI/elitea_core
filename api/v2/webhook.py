@@ -32,7 +32,9 @@ from ...models.enums.all import AgentTypes
 from ...models.pd.pipeline_trigger import TriggerType
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.pipeline_execution import TriggerType as RunTrigger  # pylint: disable=E0402
-from ...utils.exceptions import VerifySignatureError, PoolSaturationError  # pylint: disable=E0402
+from ...utils.exceptions import (  # pylint: disable=E0402
+    InputGuardrailBlockedError, PoolSaturationError, VerifySignatureError,
+)
 from ...utils.pipeline_trigger import (
     WEBHOOK_TYPE_CONFIG,
     normalize_secret_value,
@@ -237,6 +239,8 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
         except VerifySignatureError as e:
             return e.value, 400
+        except InputGuardrailBlockedError as e:
+            return e.body(), 422
         except PoolSaturationError as e:
             return {
                 "error": "temporarily_unavailable",
