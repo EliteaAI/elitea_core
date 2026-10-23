@@ -13,6 +13,7 @@ from ..models.pd.version import (
 from typing import Generator, List
 
 from ..models.all import Tag
+from .pipeline_trigger import sanitize_trigger_for_write
 from .skill_utils import copy_skill_mappings
 
 
@@ -57,6 +58,9 @@ def create_version(
     # Ensure instructions is never NULL in database (issue #5664)
     if 'instructions' not in version_dict or version_dict.get('instructions') is None:
         version_dict['instructions'] = ''
+    if version_dict.get('pipeline_settings'):
+        # No create path stores a legacy schedule trigger (EL-7011 R2.1)
+        version_dict['pipeline_settings'] = sanitize_trigger_for_write(version_dict['pipeline_settings'], None)
     notes_value = version_dict.pop('notes', None) if 'notes' in version_dict else None
     if notes_value is not None:
         merged_meta = dict(version_dict.get('meta') or {})
