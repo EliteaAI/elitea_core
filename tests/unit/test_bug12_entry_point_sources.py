@@ -100,6 +100,7 @@ def do_predict(monkeypatch, world):  # noqa: F811 -- the fixture imported above
         "utils.utils": {"verify_signature": None},
         "utils.exceptions": {"VerifySignatureError": Exception, "PoolSaturationError": Exception},
         "utils.sio_utils": {"SioEvents": types.SimpleNamespace()},
+        "utils.input_guardrail": {"inspect_and_unsecret": lambda payload, *a, **k: payload},
         "utils.vectorstore": {"get_pgvector_connection_string": lambda _pid: "connstr"},
     }
     for name in (PKG, f"{PKG}.methods", f"{PKG}.models", f"{PKG}.models.pd", f"{PKG}.utils"):
