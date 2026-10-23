@@ -51,8 +51,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
     @api_tools.endpoint_metrics
     def get(self, project_id: int, conversation_id: int, **kwargs):
         try:
-            analytics, max_tokens, strategy_name = get_context_data(project_id, conversation_id)
-            return build_context_response(analytics, max_tokens, strategy_name), 200
+            user_id = auth.current_user().get('id')
+            return build_context_response(*get_context_data(project_id, conversation_id, user_id)), 200
         except Exception as e:
             log.exception(f"Error getting context for conversation {conversation_id}")
             return {"error": str(e)}, 500

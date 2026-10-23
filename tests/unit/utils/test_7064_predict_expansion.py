@@ -111,6 +111,7 @@ def env(models_path):
         'merge_disclosable_skills': lambda own, chat: [*own, *chat],
         'expand_version_for_runtime': expand_version_for_runtime,
         'attach_subagent_prefetch': attach_subagent_prefetch,
+        'inject_stored_logins': lambda payload, project_id, user_id: None,
         'dedupe_internal_mcp_tools': lambda tools: None,
         'resolve_internal_mcp_tools': lambda tools, user_id, project_id: calls.resolve.append(user_id),
         'log': NS(warning=lambda *a, **k: None, debug=lambda *a, **k: None, info=lambda *a, **k: None),
