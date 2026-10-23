@@ -1,0 +1,165 @@
+{
+  "chat": [
+    [
+      [
+        "indexer_agent"
+      ],
+      {
+        "args": [
+          "thread",
+          5
+        ],
+        "kwargs": {
+          "_elitea_predict_run_id": "c659a225-d62a-5299-bc84-8de403fde4d3",
+          "application_id": 7,
+          "envelope": {
+            "context_ref": null,
+            "required_capabilities": [],
+            "schema_version": 1,
+            "security_profile": "legacy"
+          },
+          "instructions": "Be brief.",
+          "message_id": 5,
+          "project_id": 1,
+          "stream_id": "s-1",
+          "tools": [
+            {
+              "id": 3,
+              "name": "jira-3",
+              "selected_tools": [
+                "run"
+              ],
+              "settings": {
+                "jira_configuration": {
+                  "configuration_project_id": 1,
+                  "configuration_type": "jira",
+                  "configuration_uuid": "11111111-1111-4111-8111-111111111111",
+                  "elitea_title": "jira-main"
+                }
+              },
+              "toolkit_name": "jira-3",
+              "type": "jira"
+            }
+          ],
+          "version_id": 70
+        },
+        "meta": {
+          "platform_run_id": "c659a225-d62a-5299-bc84-8de403fde4d3",
+          "project_id": 1,
+          "task_name": "indexer_agent"
+        },
+        "pool": "agents"
+      }
+    ]
+  ],
+  "pipeline": [
+    [
+      [
+        "indexer_agent"
+      ],
+      {
+        "args": [
+          "thread",
+          7
+        ],
+        "kwargs": {
+          "_elitea_predict_run_id": "010b9cce-6aa7-5f30-8e87-d93b1bfbc4ab",
+          "envelope": {
+            "context_ref": null,
+            "required_capabilities": [],
+            "schema_version": 1,
+            "security_profile": "legacy"
+          },
+          "message_id": 7,
+          "project_id": 1,
+          "tools": [],
+          "version_id": 71,
+          "yaml": "nodes: []"
+        },
+        "meta": {
+          "entity": "pipeline",
+          "platform_run_id": "010b9cce-6aa7-5f30-8e87-d93b1bfbc4ab",
+          "project_id": 1,
+          "task_name": "indexer_agent"
+        },
+        "pool": "agents"
+      }
+    ]
+  ],
+  "predict": [
+    [
+      [
+        "indexer_predict_agent"
+      ],
+      {
+        "args": [],
+        "kwargs": {
+          "_elitea_predict_run_id": "3bea60d5-e12b-53a2-92ea-b57bbb01a193",
+          "envelope": {
+            "context_ref": null,
+            "required_capabilities": [],
+            "schema_version": 1,
+            "security_profile": "legacy"
+          },
+          "execution_generation": 1,
+          "message_id": 6,
+          "project_id": 1,
+          "tools": [
+            {
+              "id": 4,
+              "name": "github-4",
+              "selected_tools": [
+                "run"
+              ],
+              "settings": {
+                "token": "{{secret.gh}}"
+              },
+              "toolkit_name": "github-4",
+              "type": "github"
+            }
+          ],
+          "user_input": "hi",
+          "version_id": 70
+        },
+        "meta": {
+          "platform_run_id": "3bea60d5-e12b-53a2-92ea-b57bbb01a193",
+          "project_id": 1,
+          "task_name": "indexer_predict_agent"
+        },
+        "pool": "agents"
+      }
+    ]
+  ],
+  "test_tool": [
+    [
+      [
+        "indexer_test_toolkit_tool"
+      ],
+      {
+        "args": [],
+        "kwargs": {
+          "_elitea_predict_run_id": "024f1615-2284-5fbb-8a07-165bdda899dc",
+          "envelope": {
+            "context_ref": null,
+            "required_capabilities": [],
+            "schema_version": 1,
+            "security_profile": "legacy"
+          },
+          "message_id": 8,
+          "project_id": 1,
+          "tool_name": "run",
+          "toolkit_config": {
+            "settings": {
+              "k": "v"
+            }
+          }
+        },
+        "meta": {
+          "platform_run_id": "024f1615-2284-5fbb-8a07-165bdda899dc",
+          "project_id": 1
+        },
+        "pool": "indexer"
+      }
+    ]
+  ]
+}

@@ -32,8 +32,9 @@ from ...models.enums.all import AgentTypes
 from ...models.pd.pipeline_trigger import TriggerType
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.exceptions import (  # pylint: disable=E0402
-    InputGuardrailBlockedError, PoolSaturationError, VerifySignatureError,
+    AdmissionDenied, InputGuardrailBlockedError, PoolSaturationError, VerifySignatureError,
 )
+from ...utils.mandate_admission import prepare_trigger_run, refusal_http_status
 from ...utils.pipeline_trigger import (
     WEBHOOK_TYPE_CONFIG,
     normalize_secret_value,
@@ -184,15 +185,24 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
 
                 # Execute pipeline with History tracking
                 # Use trigger creator as execution context so runs appear in their History
-                user_id = get_webhook_creator_id(trigger, application)
+                # A governed platform runs it under the version's autonomous mandate: as its owner, with a
+                # single-use ticket for the request built here (the signature was checked above)
                 try:
+                    user_id, mandate_ticket = prepare_trigger_run(
+                        trigger_kind="pipeline_webhook", project_id=project_id, version=version,
+                        entry_point="webhook", trigger_ref=f"webhook:version:{version.id}",
+                        default_user_id=get_webhook_creator_id(trigger, application),
+                    )
                     result = execute_pipeline_webhook(
                         project_id=project_id,
                         version=version,
                         user_id=user_id,
                         webhook_type=webhook_type,
                         payload=payload,
+                        mandate_ticket=mandate_ticket,
                     )
+                    if "code" in result:   # a governed refusal: {code, error}, fixed readable text
+                        return result, refusal_http_status(result["code"])
                     if "error" in result:
                         return result, 400
                     return result, 200
@@ -237,6 +247,8 @@ class WebHookAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return e.errors(), 400
         except VerifySignatureError as e:
             return e.value, 400
+        except AdmissionDenied as e:
+            return {"code": e.reason_code, "error": e.message}, refusal_http_status(e.reason_code)
         except InputGuardrailBlockedError as e:
             return e.body(), 422
         except PoolSaturationError as e:

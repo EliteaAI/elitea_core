@@ -9,7 +9,12 @@ from tools import VaultClient, db, serialize
 from ..models.pd.chat import ApplicationChatRequest, ContextStrategyModel
 from ..utils.predict_utils import generate_predict_payload, load_context_settings_from_conversation, user_input_preview
 from ..models.all import ApplicationVersion
+from ..models.pd.admission import admission_request_from
 from ..utils.budget_door import schema_may_use_llm
+from ..utils.credential_slots import has_free_form_secret, mark_free_form_secret
+from ..utils.governance import is_governed
+from ..utils.mandate_admission import mandate_admission_request
+from ..utils.trigger_principal import resolve_trigger_principal
 from ..utils.utils import verify_signature
 from ..utils.exceptions import VerifySignatureError, PoolSaturationError
 from ..utils.input_guardrail import inspect_and_unsecret
@@ -74,6 +79,18 @@ class Method:
             except Exception:
                 pass
 
+            # A governed webhook run belongs to the autonomous mandate of this agent version, whose owner it acts for.
+            # The signature above is the proof the call is a real webhook; no mandate leaves it a system run, which
+            # admission refuses (#6947). Governance off: no read, nothing changes.
+            mandate_principal = None
+            if webhook_signature is not None and is_governed(self):
+                mandate_principal = resolve_trigger_principal(
+                    session, trigger_kind="agent_webhook", project_id=project_id, version_id=version_id)
+                if mandate_principal.kind == "mandate" and mandate_principal.owner_user_id is not None:
+                    user_id = mandate_principal.owner_user_id
+                else:
+                    mandate_principal = None
+
             payload_in['project_id'] = project_id
             payload_in['version_id'] = version_id
             payload_in['application_id'] = application_version.application_id
@@ -108,7 +125,9 @@ class Method:
 
         payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
         # Same as predict_sio: inspect, resolve {{secret.*}} and hand the worker its pgvector connstr pre-fork
+        free_form_secret = has_free_form_secret(self, payload)   # governed: noticed before it is resolved (#6946)
         payload = inspect_and_unsecret(payload, VaultClient(parsed.project_id), parsed.project_id, user_id)
+        mark_free_form_secret(payload, free_form_secret)
         try:
             payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
         except Exception as e:  # pylint: disable=W0703
@@ -122,11 +141,25 @@ class Method:
             'project_id': parsed.project_id,
         }
 
+        # Governed runs are admitted from the authenticated HTTP caller and the version row loaded above, never
+        # from the user_id argument or the payload; a webhook has no person behind it. None when governance is off
+        if mandate_principal is not None:
+            admission = mandate_admission_request(
+                project_id=parsed.project_id, binding_project_id=project_id, version_row=application_version,
+                principal=mandate_principal, entry_point="webhook", trigger_ref=f"webhook:version:{version_id}",
+            )
+        else:
+            admission = admission_request_from(
+                self, sid=None, project_id=parsed.project_id, binding_project_id=project_id,
+                version_row=application_version, run_kind="system" if webhook_signature is not None else "interactive",
+                entry_point="predict_api",
+            )
         task_id = self.task_node.start_task(
             "indexer_agent",
             args=[None, None],
             kwargs=payload,
             pool="agents",
+            admission=admission,
             meta={
                 "task_name": "indexer_agent",
                 "project_id": parsed.project_id,

@@ -19,6 +19,7 @@
 from copy import deepcopy
 from pylon.core.tools import web, log  # pylint: disable=E0611,E0401
 
+from ..utils import schema_registry_version
 from ..utils.validator_cache import toolkit_validator_cache
 
 from tools import context
@@ -77,6 +78,7 @@ class Method:
         self.toolkit_schemas = toolkit_schemas
         # New indexer snapshot may ship changed validator logic under an identical schema
         toolkit_validator_cache.clear()
+        schema_registry_version.bump()   # what was derived from the schemas of the last snapshot is stale
 
         log.info("Toolkit schemas definitions collected successfully")
 
@@ -84,6 +86,7 @@ class Method:
     def toolkit_configurations_collected(self, event, payload: dict):
         self.configuration_schemas = deepcopy(payload)
         toolkit_validator_cache.clear()
+        schema_registry_version.bump()
 
         # The generated MCP configuration models are also the schemas shown by
         # the New Toolkit picker. Reconcile only this owned subset so a live
