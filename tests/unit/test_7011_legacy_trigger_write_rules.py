@@ -1,13 +1,12 @@
 """EL-7011 US-23: the write rule for a pipeline version trigger.
 
-Contract under test: utils/pipeline_trigger.py (sanitize_trigger_for_write).
+Contract under test: utils/trigger_write_rule.py (sanitize_trigger_for_write).
 R2.1, R2.2: a body trigger of type schedule is stored as chat_message.
 R2.3: a stored legacy schedule trigger is kept as stored.
 R2.4: a body without a trigger is returned as is (the save keeps the stored trigger).
 """
 import pathlib
 import sys
-import types
 
 import pytest
 
@@ -23,27 +22,13 @@ WEBHOOK = {"type": "webhook", "webhook_type": "custom", "created_by": 7}
 
 
 def load_trigger_rule_module():
-    """utils/pipeline_trigger.py with its plugin imports stubbed; other 7011 tests import this loader."""
-    for name in ("plugins", "plugins.elitea_core", "plugins.elitea_core.utils"):
-        if name not in sys.modules:
-            pkg = types.ModuleType(name)
-            pkg.__path__ = []
-            sys.modules[name] = pkg
-    constants = sys.modules.setdefault(
-        "plugins.elitea_core.utils.constants", types.ModuleType("plugins.elitea_core.utils.constants"))
-    if not hasattr(constants, "PROMPT_LIB_MODE"):
-        constants.PROMPT_LIB_MODE = "prompt_lib"
-    tools = sys.modules.setdefault("tools", types.ModuleType("tools"))
-    if not hasattr(tools, "this"):
-        tools.this = types.SimpleNamespace(module_name="elitea_core")
-    if not hasattr(tools, "VaultClient"):
-        tools.VaultClient = object
-    return load_utils_module(PLUGIN_ROOT / "utils", "pipeline_trigger")
+    """utils/trigger_write_rule.py; other 7011 tests import this loader."""
+    return load_utils_module(PLUGIN_ROOT / "utils", "trigger_write_rule")
 
 
 @pytest.fixture(scope="module")
 def rule():
-    """sanitize_trigger_for_write from utils/pipeline_trigger.py, plugin imports stubbed."""
+    """sanitize_trigger_for_write from utils/trigger_write_rule.py."""
     return load_trigger_rule_module().sanitize_trigger_for_write
 
 
