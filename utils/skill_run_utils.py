@@ -9,7 +9,7 @@ from pylon.core.tools import log
 from tools import auth, db
 
 from .application_utils import validate_and_resolve_llm_settings
-from .exceptions import BudgetDoorClosedError, MaintenanceInProgressError, PoolSaturationError
+from .exceptions import BudgetDoorClosedError, InputGuardrailBlockedError, MaintenanceInProgressError, PoolSaturationError
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 from .predict_utils import get_project_context
 from .project_context_utils import prepare_project_context_delivery
@@ -310,6 +310,8 @@ def sio_error_response(error: SioValidationError) -> tuple[dict | list, int]:
     refusal = error.__context__
     if isinstance(refusal, BudgetDoorClosedError):
         return refusal.body(), 429
+    if isinstance(refusal, InputGuardrailBlockedError):
+        return refusal.body(), 422
     if isinstance(refusal, MaintenanceInProgressError):
         return {'error': 'maintenance_in_progress', 'message': sio_error_message(error)}, 503
     return {'error': sio_error_message(error)}, 400
@@ -389,6 +391,8 @@ def execute_skill_predict(
         return sio_error_response(e)
     except BudgetDoorClosedError as e:
         return e.body(), 429
+    except InputGuardrailBlockedError as e:
+        return e.body(), 422
     except PoolSaturationError as e:
         return {
             'error': 'temporarily_unavailable',
