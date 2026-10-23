@@ -34,8 +34,8 @@ def fill_placeholders(text: str, variables: list[dict]) -> str:
     return PLACEHOLDER.sub(lambda match: values.get(match.group(1), match.group(0)), text)
 
 
-def _load(project_id: int, schedule_id: int) -> SimpleNamespace | None:
-    """Plain values of the schedule, its version and its agent or pipeline, read inside one session."""
+def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | None:
+    """Plain values of the schedule, its version, its agent or pipeline and the run trigger, read in one session."""
     with db.get_session(project_id) as session:
         schedule = session.get(EntitySchedule, schedule_id)
         version = schedule and schedule.version_id and session.get(ApplicationVersion, schedule.version_id)
@@ -48,7 +48,8 @@ def _load(project_id: int, schedule_id: int) -> SimpleNamespace | None:
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id),
             version=SimpleNamespace(id=version.id, application_id=version.application_id),
-            entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []))
+            entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
+            trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
 
 
 def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> bool:
@@ -68,7 +69,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     A closed budget blocks the run. Every other failure after the pre-run check closes the run as failed:
     a running run blocks the schedule.
     """
-    loaded = _load(project_id, schedule_id)
+    loaded = _load(project_id, schedule_id, run_id)
     if loaded is None:
         fail_schedule_run(project_id, run_id, NOT_FOUND)
         return
@@ -84,13 +85,15 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
+    manual = getattr(loaded, 'trigger', 'cron') in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
+    trigger_type = TriggerType.MANUAL if manual else TriggerType.SCHEDULED
     try:
         # lean: a conversation stays when the link fails after it; the run still closes as failed
         conversation_uuid, _, response_id = create_trigger_run_conversation(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
-            trigger_type=TriggerType.SCHEDULED, trigger_message=message,
-            conversation_name=f'Scheduled run: {loaded.entity_name}',
-            extra_meta={'schedule_id': schedule_id, 'schedule_run_id': run_id, 'execution_type': 'scheduled'},
+            trigger_type=trigger_type, trigger_message=message,
+            conversation_name=f"{'Manual' if manual else 'Scheduled'} run: {loaded.entity_name}",
+            extra_meta={'schedule_id': schedule_id, 'schedule_run_id': run_id, 'execution_type': trigger_type},
             source=source,
         )
         linked = _link_conversation(project_id, run_id, conversation_uuid)
@@ -105,7 +108,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         execute_pipeline_via_predict_sio(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
-            trigger_source='scheduled', is_system_user=False,
+            # Usage analytics counts a run without trigger_source as started by a person (#6881)
+            trigger_source=None if manual else 'scheduled', is_system_user=False,
         )
     except BudgetDoorClosedError as error:  # the door closed after the check (R2.3)
         finish_trigger_run_with_error(project_id, response_id, error)
