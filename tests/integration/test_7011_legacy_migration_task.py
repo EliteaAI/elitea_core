@@ -154,7 +154,8 @@ def test_7011_r3_3_real_run_moves_and_reports(project):
     report = module.migrate_project(PROJECT, dry_run=False)
     errors = report.pop("errors")
     assert [e["version_id"] for e in errors] == [8]
-    assert {**report, "errors": []} == _expected(2, [])
+    actual = {**report, "errors": []}
+    assert actual == _expected(2, [])
     rows, settings = stored()
     assert rows == [(1, True, None), (2, False, "invalid_cron"), (3, False, "owner_lost_access"), (4, True, None),
                     (5, False, "owner_lost_access")]
