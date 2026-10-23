@@ -1,6 +1,12 @@
+from flask import request
+
 from tools import api_tools, auth, config as c, register_openapi, rpc_tools
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.tool_spend_features import validate_feature_period
+
+# Budget periods are monthly until #6006 adds the others
+PERIOD_MONTH = "month"
 
 OPENAPI_TAG = "elitea_core/usage"
 
@@ -14,7 +20,7 @@ NO_WARNING = {
 }
 
 
-def _warning_state(project_id: int, user_id: int):
+def _warning_state(project_id: int, user_id: int, feature: str = None):
     """Budget warning state for one member of one project.
 
     Deliberately narrow. The run pages ask on every open, so this returns a percentage and
@@ -22,7 +28,12 @@ def _warning_state(project_id: int, user_id: int):
     month of spend to produce the same number.
     """
     try:
-        return rpc_tools.RpcMixin().rpc.timeout(10).usage_get_budget_warning_state(
+        rpc = rpc_tools.RpcMixin().rpc.timeout(10)
+        if feature:
+            return rpc.usage_get_feature_warning_state(
+                feature=feature, project_id=project_id, user_id=user_id,
+            ) or dict(NO_WARNING)
+        return rpc.usage_get_budget_warning_state(
             project_id=project_id, user_id=user_id,
         ) or dict(NO_WARNING)
     except Exception:  # pylint: disable=W0703
@@ -49,7 +60,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             "banner the user dismissed returns once level rises.\n\n"
             "The result is cached briefly, so the percentage may lag real spend by up to a "
             "minute. That is deliberate: resolving it reads a month of activity, and this "
-            "endpoint is on the interactive path."
+            "endpoint is on the interactive path.\n\n"
+            "With feature (e.g. web_search) it reports that Tool Spend feature's limits "
+            "instead of the LLM budget."
         ),
         tags=[OPENAPI_TAG],
         parameters=[
@@ -61,9 +74,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 "description": "Project the caller is working in.",
                 "example": 1,
             },
+            {
+                "name": "feature",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Tool Spend feature; omit for the LLM budget.",
+                "example": "web_search",
+            },
         ],
         responses={
             "200": {"description": "Warning state for the caller in this project."},
+            "400": {"description": "feature is not a valid Tool Spend feature."},
         },
     )
     @auth.decorators.check_api(
@@ -79,8 +101,14 @@ class PromptLibAPI(api_tools.APIModeHandler):
         # Same permission the Usage page uses, so a caller who can be warned can also
         # follow the link the banner offers
         user_id = auth.current_user().get("id")
+        feature = request.args.get("feature") or None
+        if feature:
+            try:
+                validate_feature_period(feature, PERIOD_MONTH)
+            except ValueError as error:
+                return {"error": str(error)}, 400
         #
-        return _warning_state(project_id, user_id), 200
+        return _warning_state(project_id, user_id, feature), 200
 
 
 class API(api_tools.APIBase):
