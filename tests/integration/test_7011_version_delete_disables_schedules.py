@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fixtures import schedule_sqlite as sqlite_db
+from fixtures.cut_source import load_cut
 from fixtures.helpers import load_module_with_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -113,8 +114,7 @@ def env(monkeypatch):
         'detach_skills_for_entity_versions': lambda session, ids: None,
         'log': types.SimpleNamespace(info=lambda *a, **k: None),
     }
-    exec(compile(ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[])), 'rpc/application.py', 'exec'),  # noqa: S102 - runs the two real functions cut out of rpc/application.py
-         namespace)
+    namespace = load_cut(functions, namespace, 'rpc/application.py')  # the two real functions cut out of rpc/application.py
     env.owner = types.SimpleNamespace(
         context=types.SimpleNamespace(event_manager=types.SimpleNamespace(fire_event=lambda *a: None)),
     )
