@@ -120,7 +120,7 @@ def env(monkeypatch):
 
     api_tools = types.SimpleNamespace(
         APIModeHandler=APIModeHandler, APIBase=APIBase, endpoint_metrics=lambda func: func,
-        with_modes=lambda params: list(params),
+        with_modes=list,
     )
 
     class Session:
