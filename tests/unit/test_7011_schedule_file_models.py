@@ -80,5 +80,6 @@ def test_r2_4_el_7011_item_requires_core_keys(model, field):
 def test_r2_4_el_7011_item_optional_keys_default(model):
     body = {k: v for k, v in _item().items() if k in {"name", "entity_type", "entity_name", "cron", "timezone"}}
     item = model.ScheduleFileItem(**body)
-    assert (item.description, item.version_name, item.run_mode, item.prompt, item.expires_at) == (None,) * 5
+    defaults = (item.description, item.version_name, item.run_mode, item.prompt, item.expires_at)
+    assert defaults == (None,) * 5
     assert (item.variables, item.approval_rule) == ([], "pause_and_ask")
