@@ -63,6 +63,7 @@ def install_parent_models(plugin_package):
         __table_args__ = ({'schema': 'tenant'},)
         id = sa.Column(sa.Integer, primary_key=True)
         application_id = sa.Column(sa.Integer, sa.ForeignKey('tenant.applications.id'))
+        name = sa.Column(sa.String, default='base')
         agent_type = sa.Column(sa.String, default='openai')
 
     models = sys.modules[f'{plugin_package}.models']
