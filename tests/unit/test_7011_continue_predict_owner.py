@@ -15,6 +15,7 @@ import types
 from contextlib import contextmanager
 
 import pytest
+from fixtures.cut_source import load_cut
 from fixtures.helpers import load_module_with_stubs
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -70,7 +71,7 @@ def _helpers(meta, error=None, decision='approve', apply_error=None):
         'ScheduleDecisionInvalid': Invalid,
         'ScheduleRunNotWaiting': NotWaiting,
     }
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), 'chat_all.py', 'exec'), namespace)  # noqa: S102 - runs the real helpers cut out of rpc/chat_all.py
+    namespace = load_cut(nodes, namespace, 'chat_all.py')  # the real helpers cut out of rpc/chat_all.py
     return namespace['_check_schedule_decision'], namespace['_apply_schedule_decision'], calls
 
 
