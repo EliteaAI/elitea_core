@@ -451,3 +451,32 @@ def test_r2_4_el7011_every_error_answer_example_has_code(spec):
             example = response['content']['application/json']['example']
             assert example['code'] and example['error'], (key, status)
             assert re.fullmatch(r'[a-z_]+', example['code']), (key, status)
+
+
+# BUG-48 (US-17 R8.3): one refusal schema, and the 4xx answers of the save operations point to it
+REFUSAL_REF = {'$ref': '#/components/schemas/ScheduleRefusal'}
+REFUSAL_OPERATIONS = [('post', BASE), ('put', ITEM), ('delete', ITEM), ('post', f'{BASE}/check')]
+
+
+def test_bug_48_el7011_one_refusal_schema_has_code_and_error_required_and_field_optional(spec):
+    schema = spec['components']['schemas']['ScheduleRefusal']
+    assert sorted(schema['required']) == ['code', 'error']
+    assert {name: schema['properties'][name]['type'] for name in ('code', 'error', 'field')} == {
+        'code': 'string', 'error': 'string', 'field': 'string'}
+    assert schema.get('additionalProperties', True) is not False
+
+
+@pytest.mark.parametrize('method, path', REFUSAL_OPERATIONS)
+def test_bug_48_el7011_every_4xx_of_the_save_operations_points_to_the_refusal_schema(spec, method, path):
+    operations = _operations(spec)
+    if (method, path) not in operations:
+        pytest.skip('the operation is not in this branch')
+    refusals = {code: r for code, r in operations[(method, path)]['responses'].items() if code.startswith('4')}
+    assert {'400', '403', '404', '409'} & set(refusals), (method, path)
+    for code, response in refusals.items():
+        assert response['content']['application/json']['schema'] == REFUSAL_REF, (method, path, code)
+
+
+def test_bug_48_el7011_the_4xx_examples_stay(spec):
+    resume = _operations(spec)[('post', f'{ITEM}/resume')]['responses']['400']
+    assert resume['content']['application/json']['example']['field'] == 'version_id'
