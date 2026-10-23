@@ -26,7 +26,7 @@ from ...utils.sio_utils import get_chat_room
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.context_analytics import update_conversation_meta
 from ...utils.sio_utils import SioEvents, SioValidationError
-from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError
+from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError, InputGuardrailBlockedError
 from ...utils.model_defaults import chat_request_default
 
 
@@ -287,6 +287,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             }, 400
         except BudgetDoorClosedError as e:
             return e.body(), 429
+        except InputGuardrailBlockedError as e:
+            return e.body(), 422
         except PoolSaturationError as e:
             return {
                 "error": "temporarily_unavailable",

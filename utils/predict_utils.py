@@ -9,10 +9,16 @@ from pylon.core.tools import log
 from tools import VaultClient, db, serialize, this
 from tools import auth, rpc_tools, VaultClient, serialize, context
 
+from .context_window import (
+    BALANCED, budget_for_model_config, is_platform_admin, manual_context_tokens, manual_context_tokens_allowed,
+    strategy_for_predict,
+)
 from .llm_settings import normalize_runtime_max_tokens
+from .mcp_oauth import refresh_token
 from .next_input_suggestion_utils import next_input_suggestion_config
 from .skill_mentions import merge_disclosable_skills, merge_mention_candidates
 from .skill_utils import consume_message_skills, resolve_runtime_skills
+from .stored_oauth_tokens import inject_stored_oauth_tokens
 from .subagent_prefetch import attach_subagent_prefetch, expand_version_for_runtime
 from ..models.elitea_tools import EliteATool
 from ..models.enums.all import AgentTypes
@@ -215,11 +221,99 @@ def load_context_settings_from_conversation(project_id: int, conversation_id: st
             ).first()
 
             if conversation and conversation.meta:
-                return conversation.meta.get('context_strategy')
+                # Pre-release chats with only the old max_context_tokens default follow Balanced (#6898)
+                return strategy_for_predict(conversation.meta.get('context_strategy'))
     except Exception as e:
         log.debug(f"Could not load context_settings from conversation {conversation_id}: {e}")
 
     return None
+
+
+def load_context_meta(project_id: int, conversation_id) -> dict:
+    """The stored context_strategy and context_budget of a conversation, in one read."""
+    try:
+        uuid.UUID(str(conversation_id))
+    except (ValueError, AttributeError, TypeError):
+        return {}
+    try:
+        from ..models.conversation import Conversation
+        with db.get_session(project_id) as session:
+            row = session.query(Conversation.meta).filter(Conversation.uuid == str(conversation_id)).first()
+        meta = (row[0] if row else None) or {}
+    except Exception as e:
+        log.debug(f"Could not load context meta for conversation {conversation_id}: {e}")
+        return {}
+    return {'context_strategy': meta.get('context_strategy') or {}, 'context_budget': meta.get('context_budget')}
+
+
+def allowed_manual_context_tokens(strategy: Optional[dict]) -> Optional[int]:
+    """Admin-set summarization trigger, only while the platform toggle is on (no checks without a stored value)."""
+    manual = manual_context_tokens(strategy)
+    if not manual or not manual_context_tokens_allowed() or not is_platform_admin((strategy or {}).get('manual_set_by')):
+        return None
+    return manual
+
+
+def apply_context_budget(
+        context_settings, model_configuration: dict, llm_max_tokens=None, manual_max_context_tokens=None,
+) -> Optional[dict]:
+    """Resolve the window mode against the request's model and set the SDK summarization trigger."""
+    if context_settings is None:
+        return None
+    mode = getattr(context_settings, 'context_window_mode', None)
+    legacy_trigger = getattr(context_settings, 'max_context_tokens', None)
+    budget = budget_for_model_config(mode or BALANCED, model_configuration, normalize_runtime_max_tokens(llm_max_tokens))
+    if mode is None and legacy_trigger:
+        log.warning('context_settings.max_context_tokens without context_window_mode is deprecated')
+        context_settings.max_context_tokens = min(int(legacy_trigger), budget['usable_input'])
+    else:
+        context_settings.context_window_mode = budget['window_mode']
+        if manual_max_context_tokens:
+            context_settings.max_context_tokens = min(int(manual_max_context_tokens), budget['usable_input'])
+        else:
+            context_settings.max_context_tokens = budget['compaction_threshold']
+        context_settings.count_overhead_in_trigger = True
+    context_settings.effective_window = budget['effective_window']
+    context_settings.reserved_output = budget['reserved_output']
+    context_settings.safety_margin = budget['safety_margin']
+    return budget
+
+
+def store_context_budget(project_id: int, conversation_id, budget: Optional[dict], stored: Optional[dict] = None) -> None:
+    """Keep the latest resolved budget on the conversation for the context status API (skipped when unchanged)."""
+    if not budget or not conversation_id or budget == stored:
+        return
+    try:
+        uuid.UUID(str(conversation_id))
+    except (ValueError, AttributeError, TypeError):
+        return
+    try:
+        from sqlalchemy import literal
+        from sqlalchemy.dialects.postgresql import JSONB
+        from ..models.conversation import Conversation
+        with db.get_session(project_id) as session:
+            session.query(Conversation).filter(Conversation.uuid == str(conversation_id)).update(
+                {Conversation.meta: Conversation.meta.op('||')(
+                    literal({'context_budget': budget}, type_=JSONB))},
+                synchronize_session=False,
+            )
+            session.commit()
+    except Exception as e:
+        log.warning(f"Could not store context budget for conversation {conversation_id}: {e}")
+
+
+def inject_stored_logins(payload: dict, project_id: int, expansion_user_id: int) -> None:
+    """Stored OAuth logins (Microsoft toolkits) for runs that carry no browser token, e.g. schedules."""
+    try:
+        rpc = rpc_tools.RpcMixin().rpc.timeout(5)
+        inject_stored_oauth_tokens(
+            payload, this.module.get_redis_client(), refresh_token,
+            lambda uuid_, type_: rpc.configurations_get_stored_login(
+                project_id=project_id, user_id=expansion_user_id,
+                configuration_uuid=uuid_, expected_type=type_),
+        )
+    except Exception as e:  # pylint: disable=W0703
+        log.warning("Stored OAuth token injection skipped: %s", type(e).__name__)
 
 
 def generate_predict_payload(
@@ -298,6 +392,15 @@ def generate_predict_payload(
             continue
 
         model_parameters[param] = param_value
+
+    if parsed.context_settings is not None:
+        context_conversation_id = getattr(parsed, 'conversation_id', None) or parsed.stream_id
+        context_meta = load_context_meta(parsed.project_id, context_conversation_id)
+        context_budget = apply_context_budget(
+            parsed.context_settings, llm_model_configuration, getattr(parsed.llm_settings, 'max_tokens', None),
+            allowed_manual_context_tokens(context_meta.get('context_strategy')))
+        store_context_budget(
+            parsed.project_id, context_conversation_id, context_budget, context_meta.get('context_budget'))
 
     model_max_output_tokens = llm_model_configuration.get('max_output_tokens')
     if model_max_output_tokens is not None:
@@ -517,6 +620,11 @@ def generate_predict_payload(
     # dedupe/resolve run — otherwise those tools are skipped and never get {project_id}/PAT filled.
     payload = serialize(payload)
 
+    inspected = getattr(parsed, 'input_guardrail_inspected', None)
+    if inspected:
+        # Accepted history (#6886): without it checkpoint B re-inspects those turns
+        payload['input_guardrail_inspected'] = list(inspected)
+
     if not skip_expansion:
         try:
             application = payload.get('application')
@@ -531,6 +639,8 @@ def generate_predict_payload(
 
     if isinstance(parsed, ApplicationChatRequest):
         attach_subagent_prefetch(payload, parsed.project_id, expansion_user_id)
+
+    inject_stored_logins(payload, parsed.project_id, expansion_user_id)
 
     return payload
 

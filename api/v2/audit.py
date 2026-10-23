@@ -52,6 +52,8 @@ if _API_AVAILABLE:
                 date_to (str): ISO datetime upper bound
                 entity_name (str): partial match on entity name (e.g., pylon-main)
                 action (str): partial match on action (e.g., pylon_started)
+                action_prefix (str): actions starting with this (e.g., input:credentials.)
+                group_by (str): "action" returns counts per action instead of rows
             """
             from tools import db
             from ...models.audit_event import AuditEvent
@@ -167,6 +169,13 @@ if _API_AVAILABLE:
                         pattern = f"%{action}%"
                         query = query.filter(AuditEvent.action.ilike(pattern))
 
+                    action_prefix = request.args.get("action_prefix")
+                    if action_prefix:
+                        query = query.filter(AuditEvent.action.startswith(action_prefix, autoescape=True))
+
+                    if request.args.get("group_by") == "action":
+                        return self._group_by_action(query, AuditEvent, limit, offset), 200
+
                     # -- Count --
                     total = query.count()
 
@@ -186,6 +195,19 @@ if _API_AVAILABLE:
             except Exception as e:
                 log.error(f"Audit trail query failed: {e}")
                 return {"error": "Failed to query audit trail"}, 500
+
+        @staticmethod
+        def _group_by_action(query, audit_event, limit, offset):
+            """Counts per action for the filtered rows, most frequent first."""
+            from sqlalchemy import func
+            count = func.count(audit_event.id).label("count")
+            grouped = query.with_entities(audit_event.action, count).group_by(audit_event.action)
+            total = grouped.count()
+            rows = grouped.order_by(desc(count), asc(audit_event.action)).offset(offset).limit(limit).all()
+            return {
+                "total": total,
+                "groups": [{"action": action, "count": n} for action, n in rows],
+            }
 
         @staticmethod
         def _serialize(row):

@@ -1,14 +1,13 @@
 import re
 from typing import Optional
 
-from pydantic import BaseModel, Field, ConfigDict, constr, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, ValidationInfo, constr, field_validator, model_validator
 
 from .predict_llm import LLMSettingsRequest
 from .skill import RESERVED_NAME_WORDS, validate_skill_name
 
 NAME_MAX_LENGTH = 64
 DESCRIPTION_MAX_LENGTH = 2304
-INSTRUCTIONS_MAX_LENGTH = 5000
 
 
 _CONNECTORS = frozenset({"with", "using", "via", "by", "for", "from", "powered"})
@@ -138,8 +137,7 @@ class GenerateSkillDraftResponse(BaseModel):
     )
     instructions: str = Field(
         min_length=1,
-        max_length=INSTRUCTIONS_MAX_LENGTH,
-        description=f"Skill instructions in Markdown (truncated to {INSTRUCTIONS_MAX_LENGTH} characters)",
+        description="Skill instructions in Markdown (truncated to the platform's skill content max length)",
     )
 
     @field_validator("name", mode="before")
@@ -154,5 +152,6 @@ class GenerateSkillDraftResponse(BaseModel):
 
     @field_validator("instructions", mode="before")
     @classmethod
-    def _truncate_instructions(cls, v):
-        return v[:INSTRUCTIONS_MAX_LENGTH].rstrip() if isinstance(v, str) else v
+    def _truncate_instructions(cls, v, info: ValidationInfo):
+        max_length = (info.context or {}).get('instructions_max_length')
+        return v[:max_length].rstrip() if isinstance(v, str) and max_length else v
