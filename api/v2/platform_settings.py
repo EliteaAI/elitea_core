@@ -14,6 +14,7 @@ from ...utils.midturn_injection_utils import (
     get_midturn_injection_whitelist,
 )
 from ...utils.skill_publish_utils import get_skill_publish_blocked, get_skill_publish_whitelist
+from ...utils.skill_utils import get_max_instructions_length
 
 
 _DEFAULT_NEW_ITEM_DAYS = 14
@@ -126,6 +127,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 'skill_publishing_guardrail'
             ),
             "tool_spend": _tool_spend_availability(),
+            "skill_instructions_max_length": get_max_instructions_length(),
         }, 200
 
 
