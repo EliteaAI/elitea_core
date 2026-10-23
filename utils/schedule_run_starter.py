@@ -94,7 +94,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
     auto_approve = loaded.schedule.approval_rule == 'run_without_asking' and _secret_allows_auto_approve(project_id)
     manual = getattr(loaded, 'trigger', 'cron') in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
-    trigger_type = TriggerType.MANUAL if manual else TriggerType.SCHEDULED
+    trigger_type = TriggerType.SCHEDULE_MANUAL if manual else TriggerType.SCHEDULED
     try:
         # lean: a conversation stays when the link fails after it; the run still closes as failed
         conversation_uuid, _, response_id = create_trigger_run_conversation(
@@ -116,8 +116,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         execute_pipeline_via_predict_sio(
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
-            # Usage analytics counts a run without trigger_source as started by a person (#6881)
-            trigger_source=None if manual else 'scheduled', is_system_user=False,
+            trigger_source=trigger_type, is_system_user=False,
             auto_approve_sensitive_actions=auto_approve,
         )
     except BudgetDoorClosedError as error:  # the door closed after the check (R2.3)

@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field, constr, ConfigDict, model_validator
@@ -34,12 +34,14 @@ class ConversationListExtended(ConversationList):
     message_groups_count: int
     users_count: int
     duration: float = 0.0
-    execution_type: Literal['manual', 'scheduled'] = 'manual'
+    execution_type: str = 'manual'
 
     @model_validator(mode='after')
     def compute_execution_type(self):
+        # Late import: that module loads the DB models
+        from ...utils.pipeline_execution import TriggerType
         stored = self.meta.get('execution_type')
-        if stored in ('manual', 'scheduled'):
+        if stored in TriggerType.VALUES:
             self.execution_type = stored
         elif self.meta.get('scheduled_run') is True:
             self.execution_type = 'scheduled'
