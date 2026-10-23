@@ -26,6 +26,7 @@ PKG = 'draftpkg_6416_test'
 DEFAULT_MODEL = 'gpt-5-mini'
 PROJECT = 2
 PUBLIC_PROJECT = 1
+SKILL_INSTRUCTIONS_MAX_LENGTH = 12345
 
 TRACEBACK = (
     'Traceback (most recent call last):\n'
@@ -157,6 +158,9 @@ def _install_package(rpc_state):
     constants = types.ModuleType(f'{PKG}.utils.constants')
     constants.PROMPT_LIB_MODE = 'prompt_lib'
 
+    skill_utils = types.ModuleType(f'{PKG}.utils.skill_utils')
+    skill_utils.get_max_instructions_length = lambda: SKILL_INSTRUCTIONS_MAX_LENGTH
+
     service_prompt_utils = types.ModuleType(f'{PKG}.utils.service_prompt_utils')
     service_prompt_utils.get_service_prompt = lambda key: SERVICE_PROMPTS.get(key, DEFAULT_PROMPT)
 
@@ -236,6 +240,7 @@ def _install_package(rpc_state):
         f'{PKG}.utils.utils': utils_utils,
         f'{PKG}.utils.constants': constants,
         f'{PKG}.utils.service_prompt_utils': service_prompt_utils,
+        f'{PKG}.utils.skill_utils': skill_utils,
         f'{PKG}.utils.generate_application_utils': generate_application_utils,
         'flask': flask,
         'pylon': pylon,
@@ -621,6 +626,6 @@ def test_skill_prompt_carries_the_output_contract(endpoints):
 
     assert status == 200
     assert 'Required output contract' in handler.sent_instructions
-    assert 'max 5000 characters' in handler.sent_instructions
+    assert f'max {SKILL_INSTRUCTIONS_MAX_LENGTH} characters' in handler.sent_instructions
     # validate_skill_name raises on these, so the authoritative contract has to repeat the rule
     assert "'claude' or 'anthropic'" in handler.sent_instructions
