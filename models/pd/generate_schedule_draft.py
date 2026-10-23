@@ -101,6 +101,24 @@ class CurrentForm(BaseModel):
     approval_rule: str | None = None
 
 
+class CurrentForm(BaseModel):
+    """Current form values; a known key with the wrong type fails, other keys pass through."""
+    model_config = ConfigDict(extra='allow')
+
+    name: str | None = None
+    description: str | None = None
+    entity_type: str | None = None
+    application_id: StrictInt | None = None
+    version_id: StrictInt | None = None
+    run_mode: str | None = None
+    prompt: str | None = None
+    variables: list | dict | None = None
+    cron: str | None = None
+    timezone: str | None = None
+    expires_at: str | None = None
+    approval_rule: str | None = None
+
+
 class GenerateScheduleDraftRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={"examples": [{
         "prompt": "Run the report agent every weekday at 9", "timezone": "Europe/Warsaw",
