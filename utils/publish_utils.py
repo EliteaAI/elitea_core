@@ -1809,7 +1809,9 @@ def _resolve_or_fork_skill_twin(
     ))
     # In-process module call — NEVER the RPC bus (in-request synchronous RPC to
     # the same process deadlocks the worker; see attach_public_skill_to_agents).
-    result, errors = this.module.import_wizard([payload], public_project_id, user_id)
+    result, errors = this.module.import_wizard(
+        [payload], public_project_id, user_id, skill_instructions_already_saved=True,
+    )
     imported = (result.get('skills') or [])
     if not imported:
         skill_errors = (errors or {}).get('skills') if isinstance(errors, dict) else errors
