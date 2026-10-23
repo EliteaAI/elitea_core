@@ -46,7 +46,7 @@ def test_el_7011_bug12_r1_1_trigger_type_holds_the_shared_enum(world):  # noqa: 
     assert (trigger_type.CHAT, trigger_type.API, trigger_type.MCP, trigger_type.WEBHOOK,
             trigger_type.SCHEDULED, trigger_type.SCHEDULE_MANUAL) == (
         "chat", "api", "mcp", "webhook", "scheduled", "schedule_manual")
-    assert {"chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "manual"} == set(trigger_type.VALUES)
+    assert set(trigger_type.VALUES) == {"chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "manual"}
 
 
 @pytest.mark.parametrize("trigger", ["manual", "test"])
