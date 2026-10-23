@@ -2,7 +2,7 @@ import uuid
 from typing import Optional, List, Dict, Any, Literal
 
 from jinja2 import Environment, DebugUndefined
-from pydantic import BaseModel, Field, model_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 # from .tool import ToolUpdateModel
 from .tool import ToolChatModel
 from .utils import MergeUpdateBase
@@ -29,13 +29,25 @@ ChatHistoryMessage = ChatHistory
 
 
 class ContextStrategyModel(BaseModel):
+    # Context management can no longer be turned off (#6898); stored or sent `false` is ignored
     enabled: Optional[bool] = True
     enable_summarization: Optional[bool] = True
     enable_context_editing: Optional[bool] = False
-    max_context_tokens: Optional[int] = 64000
+    context_window_mode: Optional[str] = None
+    # Summarization trigger the SDK reads; resolved from the window mode at predict time (#6898)
+    max_context_tokens: Optional[int] = None
+    effective_window: Optional[int] = None
+    reserved_output: Optional[int] = None
+    safety_margin: Optional[int] = None
+    count_overhead_in_trigger: Optional[bool] = None
     preserve_recent_messages: Optional[int] = 5
     summary_instructions: Optional[str] = 'Generate a concise summary of the following conversation messages'
     summary_llm_settings: Optional[LLMSettingsModel] = None
+
+    @field_validator('enabled', mode='before')
+    @classmethod
+    def always_enabled(cls, _value):
+        return True
 
 
 class ApplicationChatRequest(MergeUpdateBase):
@@ -54,6 +66,8 @@ class ApplicationChatRequest(MergeUpdateBase):
     mcp_auth_decisions: Optional[List[Dict[str, Any]]] = None
     authorization_request_id: Optional[str] = None
     execution_generation: Optional[str] = None
+    # Segment hashes checkpoint A already settled (#6886); forwarded to checkpoint B
+    input_guardrail_inspected: Optional[List[str]] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
     variables: Optional[List[ApplicationVariableModel]] = None
@@ -145,6 +159,8 @@ class LLMChatRequest(MergeUpdateBase):
     mcp_auth_decisions: Optional[List[Dict[str, Any]]] = None
     authorization_request_id: Optional[str] = None
     execution_generation: Optional[str] = None
+    # Segment hashes checkpoint A already settled (#6886); forwarded to checkpoint B
+    input_guardrail_inspected: Optional[List[str]] = None
     chat_history: Optional[List[ChatHistoryMessage]] = []
     instructions: Optional[str] = None
     tools: Optional[List[dict]] = []
