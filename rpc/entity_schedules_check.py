@@ -155,7 +155,21 @@ class RPC:
 
     @web.rpc("entity_schedules_check")
     def entity_schedules_check(self, **kwargs):  # pylint: disable=W0613
-        """Called by the scheduling plugin every minute."""
+        """Called by the scheduling plugin every minute.
+
+        Governed platforms also stop the runs this process tracks that must not go on (``enforce_run_deadlines``).
+        Known gap: the map of tracked runs is in memory, so after a Main restart a running mandate run is no longer
+        stopped by Main (#6947).
+        """
+        # Stopping work is never what maintenance mode holds back, so the sweep runs before that check
+        # Imported at call time: the tick loads without the governance model graph
+        from ..utils.governance import governance_lifecycle_active
+        if governance_lifecycle_active(self):
+            try:
+                from ..utils.admission import enforce_run_deadlines
+                enforce_run_deadlines(self)
+            except Exception as exc:  # noqa: BLE001 -- a failed sweep must not stop the tick
+                log.exception("entity_schedules_check: run deadline sweep failed: exc=%r", exc)
         if is_maintenance_active():
             log.info("entity_schedules_check: maintenance mode active, skipping tick")
             return

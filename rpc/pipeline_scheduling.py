@@ -16,11 +16,14 @@ from ..models.all import Application, ApplicationVersion
 from ..models.enums.all import AgentTypes
 from ..models.pd.pipeline_trigger import TriggerType, PipelineTriggerSchedule
 from ..utils.cron_utils import is_cron_due
+from ..utils.mandate_admission import prepare_trigger_run
 from ..utils.pipeline_execution import (
     TriggerType as TriggerTypeConst,
     create_trigger_run_conversation,
     execute_pipeline_via_predict_sio,
+    finish_trigger_run_refused,
     finish_trigger_run_with_error,
+    is_trigger_refusal,
 )
 
 # Re-entrancy guard: if a previous tick is still running (took >60s) we skip
@@ -203,11 +206,20 @@ def _execute_pipeline(
     Creates a conversation with initial message for the run to track it in History,
     then executes the pipeline using the shared execution utility.
 
+    A governed platform runs it under the version's autonomous mandate: as the mandate owner, with a single-use
+    ticket for the admission request built here. Without a mandate it is refused at admission (``MANDATE_REQUIRED``);
+    the refusal is written into the run's History entry, and the cron slot is consumed as for any failed dispatch.
+
     Args:
         project_id: Project ID
         version: ApplicationVersion instance
         creator_id: User ID who created the schedule
     """
+    # Who the run acts for, and the ticket that proves a mandate run is ours: one read, governed only
+    creator_id, mandate_ticket = prepare_trigger_run(
+        trigger_kind="pipeline_schedule", project_id=project_id, version=version, entry_point="schedule",
+        trigger_ref=f"schedule:version:{version.id}", default_user_id=creator_id,
+    )
     # Get application name for conversation
     with db.get_session(project_id) as session:
         application = session.query(Application).get(version.application_id)
@@ -233,10 +245,14 @@ def _execute_pipeline(
             response_message_id=response_message_id,
             user_input="",  # Empty input for scheduled runs
             trigger_source="scheduled",
+            mandate_ticket=mandate_ticket,
         )
     except Exception as exc:
         finish_trigger_run_with_error(project_id, response_message_id, exc)
         raise
+
+    if is_trigger_refusal(result):
+        finish_trigger_run_refused(project_id, response_message_id, result)
 
     return result
 

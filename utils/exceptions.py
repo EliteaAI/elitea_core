@@ -67,6 +67,23 @@ class MaintenanceInProgressError(Exception):
         super().__init__(f"Maintenance mode active - task '{task_name}' rejected")
 
 
+class WorkerCapabilityUnavailable(Exception):
+    """Raised by task_node.start_task when a governed task has no live worker that supports it.
+
+    Governed dispatch never falls back to an incompatible worker (C-1009, #6940).
+    """
+
+    reason_code = "WORKER_CAPABILITY_UNAVAILABLE"
+
+    def __init__(self, task_name: str = "?", missing: tuple = ()):
+        self.task_name = task_name
+        self.missing = tuple(missing)
+        super().__init__(
+            f"{self.reason_code}: no live worker supports task '{task_name}' "
+            f"(required: {', '.join(self.missing) or '-'})"
+        )
+
+
 # Twinned with usage/hooks.py's BUDGET_ERROR_MESSAGE/BUDGET_ERROR_CODES — edit both together;
 # the SDK and the UI match on this body, never on the status code
 BUDGET_ERROR_MESSAGE = (
@@ -98,6 +115,21 @@ class BudgetDoorClosedError(Exception):
     def body(self):
         """The wire body the inference-plane refusal uses, byte-identical."""
         return {"error": {"message": self.message, "type": self.type, "code": self.code}}
+
+
+class AdmissionDenied(Exception):
+    """A governed run was refused before dispatch (C-1009, #6756).
+
+    ``reason_code`` is a stable upper-case code; ``message`` is fixed text per code and never
+    carries a claim, token or identifier from the request. ``audit`` holds reference fields of the
+    refused credential for the deny event only (never for the message).
+    """
+
+    def __init__(self, reason_code: str, message: str, audit: dict | None = None):
+        self.reason_code = reason_code
+        self.message = message
+        self.audit = audit or {}
+        super().__init__(f"{reason_code}: {message}")
 
 
 INPUT_GUARDRAIL_BLOCKED_TYPE = "input_guardrail_blocked"

@@ -23,6 +23,10 @@ register_expected_trajectory_module(PLUGIN_ROOT)
 register_trajectory_checks_module(PLUGIN_ROOT)
 register_masking_module(PLUGIN_ROOT)
 
+from fixtures import identity  # noqa: E402
+
+identity.snapshot_sqlalchemy()  # before any suite replaces sqlalchemy.* with stand-ins (#6756 fixtures)
+
 
 @pytest.fixture(scope="session")
 def plugin_root() -> pathlib.Path:

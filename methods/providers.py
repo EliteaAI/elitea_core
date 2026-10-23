@@ -25,6 +25,7 @@ from pylon.core.tools import web  # pylint: disable=E0611,E0401,W0611
 from tools import this  # pylint: disable=E0401
 
 from ..db.models.providers import ProviderDescriptor
+from ..utils import schema_registry_version
 
 
 class Method:  # pylint: disable=E1101,R0903,W0201
@@ -89,6 +90,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             #
             self.present_providers[project_id][descriptor.name][service_location_url] = \
                 descriptor
+            schema_registry_version.bump()
         except:  # pylint: disable=W0702
             log.exception("Provider not healthy")
             #
@@ -114,6 +116,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         if project_id in self.present_providers:
             if provider_name in self.present_providers[project_id]:
                 self.present_providers[project_id][provider_name].pop(service_location_url, None)
+        schema_registry_version.bump()
         #
         if project_id in self.unhealthy_providers:
             if provider_name in self.unhealthy_providers[project_id]:

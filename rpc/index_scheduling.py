@@ -16,7 +16,10 @@ from ..utils.application_tools import (DEFAULT_TASK_DISCONNECTED_TIMEOUT_SEC, ge
                                       should_trigger_scheduled_index, start_index_task,
                                       update_toolkit_index_meta_history_with_failed_state)
 from ..utils.utils import make_yield_to_hub, end_ambient_transaction
+from ..utils.admission import MESSAGES, index_schedule_refusal_code, record_index_schedule_refusal
 from ..utils.cron_utils import is_cron_due
+from ..utils.governance import is_governed
+from ..utils.trigger_principal import principal_of
 from ..utils.predict_utils import get_predict_base_url, get_system_user_token
 from ..utils.index_scheduling import (
     resolve_credentials,
@@ -174,6 +177,33 @@ class RPC:
                                     continue
 
                                 stats['due'] += 1
+
+                                # A governed platform does not run scheduled indexing in this release: a team
+                                # schedule ran as the system user (no mandate), a per-user one acts for a person who
+                                # has not renewed their authorization. Refused before the system token is fetched or
+                                # any task is dispatched; the refusal is the index history entry and the slot is
+                                # consumed, so it is not retried every minute. The deny is audited once the
+                                # refusal was concluded, not on a slot that stays due.
+                                if is_governed(self):
+                                    try:
+                                        code = index_schedule_refusal_code(
+                                            principal_of("index_schedule", schedule_key=user_id))
+                                        if handle_failed_index_schedule(
+                                            project_id, deepcopy(toolkit.settings), creator_id, toolkit,
+                                            index_meta_id, MESSAGES[code], expand_user_id=creator_id,
+                                        ):
+                                            record_index_schedule_refusal(
+                                                self, code, project_id=project_id, toolkit_id=toolkit.id)
+                                            stamp_schedule_last_run(
+                                                project_session, toolkit, index_meta_id, user_id, ctx,
+                                            )
+                                    except Exception as e:
+                                        log.exception(
+                                            f"{ctx} failed to record the governed refusal of a scheduled index run: "
+                                            f"{e!r}"
+                                        )
+                                    stats['failed'] += 1
+                                    continue
 
                                 # Settings resolution reaches into other projects' vaults and
                                 # configurations, so it can raise for reasons specific to this one

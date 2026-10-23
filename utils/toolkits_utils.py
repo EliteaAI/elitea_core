@@ -16,7 +16,7 @@ def get_mcp_schemas(project_id: int, user_id: int) -> dict:
     return this.module.get_tool_schemas_mcp_sse(project_id, user_id)
 
 
-def get_toolkit_schemas(project_id: int, user_id: int) -> dict:
+def get_toolkit_schemas(project_id: int, user_id: int, status: dict = None) -> dict:
     """
     Get toolkits by aggregating schemas of tools and their configurations
     from provided toolkit models and optionally extending them using provider_hub
@@ -33,6 +33,8 @@ def get_toolkit_schemas(project_id: int, user_id: int) -> dict:
        additional tool schemas from optional modules.
     :return: A dictionary with aggregated tool schemas under the key 'tools' and
        their corresponding configurations under 'tools_configuration'.
+    :param status: optional dict a caller that keeps the result passes; ``degraded`` is set to True when part of what
+       the result depends on could not be read (the personal project), so the result is not to be kept.
     :rtype: Dict
     """
     # Step 1: resolve personal project ID once — reused by both provider_hub and mcp_sse
@@ -41,6 +43,8 @@ def get_toolkit_schemas(project_id: int, user_id: int) -> dict:
         personal_project_id = context.rpc_manager.timeout(15).projects_get_personal_project_id(user_id)
     except Exception:
         log.warning("Failed to resolve personal project ID for user %s", user_id)
+        if status is not None:
+            status["degraded"] = True
 
     # Step 4: read security config once for the whole request
     security_config = get_toolkit_security_config()

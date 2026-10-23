@@ -52,6 +52,8 @@ LENIENT_MODULES = (
         'schedule_service', 'schedule_timing', 'authors', 'schedule_queries', 'draft_llm_utils',
         'exceptions', 'predict_utils', 'schedule_draft_utils', 'service_prompt_utils', 'utils',
         'evaluation_run_utils', 'run_id', 'scheduler_bindings', 'sio_utils', 'prompt_eliminate_utils',
+        'admission', 'binding_api', 'governance', 'governance_settings', 'mandate_admission',
+        'worker_capabilities',
     )),
 )
 OTHER_TAGS = {

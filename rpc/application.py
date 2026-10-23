@@ -37,8 +37,12 @@ from ..utils.application_utils import (
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
+from ..models.pd.admission import admission_request_from
+from ..utils.mandate_admission import take_trigger_admission
+from ..utils.credential_slots import has_free_form_secret, mark_free_form_secret
 from ..utils.exceptions import (
-    PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError, InputGuardrailBlockedError,
+    AdmissionDenied, PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError,
+    InputGuardrailBlockedError,
 )
 from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.create_utils import create_application, create_version
@@ -277,6 +281,7 @@ class RPC:
                     applied_skills: Optional[list] = None,
                     sid_project_id: Optional[int] = None,
                     auto_approve_sensitive_actions: bool = False,
+                    mandate_ticket: Optional[str] = None,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -305,6 +310,7 @@ class RPC:
             log.warning("Sid %s is not in project %s", sid, sid_project_id)
             return  # FIXME: need some proper error?
 
+        admission_version_row = None  # the row governed admission binds to, never ids from the payload
         if parsed.version_id:
             application_name = None
             with db.get_session(parsed.project_id) as session:
@@ -318,6 +324,7 @@ class RPC:
                         stream_id=data.get("stream_id"),
                         message_id=data.get("message_id")
                     )
+                admission_version_row = application_version
 
                 # Resolve llm_settings only when completely missing (original behavior). The
                 # family-conflict case (issue #5821) is handled by write-time rejection
@@ -452,6 +459,8 @@ class RPC:
             }
 
         # TODO probably better move to toolkits expand, check OpenAPI
+        # Governed: a {{secret.*}} outside a credential configuration is noticed before it is resolved (#6946)
+        free_form_secret = has_free_form_secret(self, payload)
         vc = VaultClient(parsed.project_id)
         # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
         try:
@@ -460,6 +469,7 @@ class RPC:
             _raise_input_guardrail_blocked(
                 self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
             )
+        mark_free_form_secret(payload, free_form_secret)
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a
@@ -489,12 +499,26 @@ class RPC:
                     "project_id": application_project_id, **usage_entity["root"],
                 }
 
+        # Governed runs are admitted from the authenticated connection and the version row loaded above,
+        # never from user_id / user_context / ids in the payload; None when governance is off (#6756)
+        # An autonomous run (scheduler tick, webhook API) brings a single-use ticket for the request its trusted caller
+        # built; anything else (no ticket, a forged, spent or foreign one) is the ordinary request, which for a
+        # system user is refused as MANDATE_REQUIRED (#6947)
+        admission = take_trigger_admission(
+            self, mandate_ticket, project_id=parsed.project_id, binding_project_id=application_project_id,
+            version_id=getattr(admission_version_row, "id", None),
+        ) or admission_request_from(
+            self, sid=sid, project_id=parsed.project_id, binding_project_id=application_project_id,
+            version_row=admission_version_row, run_kind="system" if is_system_user else "interactive",
+            entry_point="chat_sio",
+        )
         try:
             task_id = self.task_node.start_task(
                 "indexer_agent",
                 args=[parsed.stream_id, parsed.message_id],
                 kwargs=payload,
                 pool="agents",
+                admission=admission,
                 meta=add_trace_context_to_meta({
                     "task_name": "indexer_agent",
                     "project_id": parsed.project_id,
@@ -529,6 +553,17 @@ class RPC:
                     message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
                 )
             raise
+        except AdmissionDenied as denied:
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error={"code": denied.reason_code, "error": denied.message},
+                    stream_id=parsed.stream_id,
+                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
+                )
+            return {"code": denied.reason_code, "error": denied.message}
         except InputGuardrailBlockedError as blocked_error:
             _raise_input_guardrail_blocked(
                 self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
@@ -717,6 +752,8 @@ class RPC:
                 raise PredictPayloadError(str(e))
 
         # TODO probably better move to toolkits expand, check OpenAPI
+        # Governed: a {{secret.*}} outside a credential configuration is noticed before it is resolved (#6946)
+        free_form_secret = has_free_form_secret(self, payload)
         vc = VaultClient(parsed.project_id)
         # Checkpoint B before {{secret.*}} is resolved: a referenced project secret is not input (#6886)
         try:
@@ -725,6 +762,7 @@ class RPC:
             _raise_input_guardrail_blocked(
                 self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,
             )
+        mark_free_form_secret(payload, free_form_secret)
 
         # Prefetch pgvector connstr here (pre-fork, in the non-forked parent process)
         # so the indexer worker doesn't have to resolve DNS/vault itself inside a
@@ -738,12 +776,19 @@ class RPC:
                 parsed.project_id, e
             )
 
+        # Plain LLM chat has no agent version, so governed admission refuses it (#6756)
+        admission = admission_request_from(
+            self, sid=sid, project_id=parsed.project_id, binding_project_id=parsed.project_id,
+            version_row=None, run_kind="system" if is_system_user else "interactive",
+            entry_point="chat_sio_llm",
+        )
         try:
             task_id = self.task_node.start_task(
                 "indexer_predict_agent",
                 args=[parsed.stream_id, parsed.message_id],
                 kwargs=payload,
                 pool="agents",
+                admission=admission,
                 meta=add_trace_context_to_meta({
                     "task_name": "indexer_predict_agent",
                     "project_id": parsed.project_id,
@@ -778,6 +823,17 @@ class RPC:
                     message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
                 )
             raise
+        except AdmissionDenied as denied:
+            if sid:
+                raise SioValidationError(
+                    sio=self.context.sio,
+                    sid=sid,
+                    event=sio_event,
+                    error={"code": denied.reason_code, "error": denied.message},
+                    stream_id=parsed.stream_id,
+                    message_id=(start_event_content.get('question_id') if start_event_content else None) or parsed.message_id,
+                )
+            return {"code": denied.reason_code, "error": denied.message}
         except InputGuardrailBlockedError as blocked_error:
             _raise_input_guardrail_blocked(
                 self, blocked_error, sid, parsed, payload, chat_project_id, sio_event, start_event_content,

@@ -25,6 +25,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from tools import db
 
 from ..models.message_group import ConversationMessageGroup
+from ..utils.admission import complete_context
 from ..utils.application_tools import cancel_toolkit_index_meta, resolve_toolkit_index_connection
 from ..utils.parallel_hitl import (
     INTERNAL_CONTINUE_TOKEN, merge_interrupts, pending_supervisor_decisions,
@@ -64,6 +65,12 @@ class Method:
         #
         if status != "stopped":
             return
+        #
+        # Close the admission context of a governed run (#6756); no-op when governance is off
+        try:
+            complete_context(self, task_id)
+        except Exception:  # pylint: disable=W0702,W0703
+            log.exception("Execution context completion failed (task_id=%s)", task_id)
         #
         # Parallel sub-agent dispatch (#4993 Track 2) runs BEFORE the callback
         # pop: SIO agent tasks (parked parents and their children) register no

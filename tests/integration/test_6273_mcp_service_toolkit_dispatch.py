@@ -86,6 +86,7 @@ def mcp_service_module(monkeypatch):
 
     exceptions = types.ModuleType("plugins.elitea_core.utils.exceptions")
     exceptions.PoolSaturationError = type("PoolSaturationError", (Exception,), {})
+    exceptions.InputGuardrailBlockedError = type("InputGuardrailBlockedError", (Exception,), {})   # imported by utils/mcp_service.py (#6886)
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.exceptions", exceptions)
 
     internal_tools = types.ModuleType("plugins.elitea_core.utils.internal_tools")
