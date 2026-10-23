@@ -88,7 +88,7 @@ class Method:
         #     generated_name = result['result'].strip().strip('"\'')
         """
         try:
-            log.debug(f"Auto-naming conversation {conversation_id} with user input: {user_input[:100]}...")
+            log.debug(f"Auto-naming conversation {conversation_id} from {len(user_input or '')} chars of user input")
             
             # Simple approach: use first meaningful words from user input
             # Clean and truncate user input to create a conversation name
@@ -133,7 +133,7 @@ class Method:
                 # Ultimate fallback - ensure it's always at least 3 characters
                 generated_name = "New Chat"
             
-            log.debug(f"Generated conversation name: '{generated_name}'")
+            log.debug(f"Generated a conversation name ({len(generated_name or '')} chars)")
 
             # Update conversation name in database
             with db.get_session(project_id) as session:
@@ -159,7 +159,7 @@ class Method:
                         room=room,
                     )
 
-                    log.debug(f"Successfully updated conversation {conversation_id} name to: '{generated_name}'")
+                    log.debug(f"Successfully updated conversation {conversation_id} name")
                         
         except Exception as e:
             log.error(f"Failed to generate conversation name: {e}")
