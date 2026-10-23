@@ -310,6 +310,7 @@ class RPC:
     def import_wizard(
         self, import_data: dict, project_id: int, author_id: int,
         force_new_skills: bool = False,
+        skill_instructions_already_saved: bool = False,
     ):
         rpc_call = rpc_tools.RpcMixin().rpc.call
 
@@ -381,11 +382,10 @@ class RPC:
             rpc_func = ENTITY_IMPORT_MAPPER.get(entity)
             if rpc_func:
                 r = e = None
-                skill_fork_kwargs = (
-                    {'force_new': True}
-                    if entity == 'skills' and force_new_skills
-                    else {}
-                )
+                skill_fork_kwargs = {
+                    'force_new': force_new_skills,
+                    'instructions_already_saved': skill_instructions_already_saved,
+                } if entity == 'skills' else {}
                 try:
                     r, e = getattr(rpc_call, rpc_func)(
                         model_data, project_id, author_id, **skill_fork_kwargs
