@@ -12,6 +12,7 @@ import types
 from contextlib import contextmanager
 
 import pytest
+from fixtures.cut_source import load_cut
 from unit.utils.test_7011_pipeline_execution_owner import world  # noqa: F401 -- the real TriggerType
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -23,7 +24,7 @@ HELPER = "_chat_trigger_kwargs"
 def _chat_helper(trigger_type):
     nodes = [node for node in CHAT_ALL.body if getattr(node, "name", None) == HELPER]
     namespace = {"TriggerType": trigger_type}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), "chat_all.py", "exec"), namespace)  # noqa: S102 - the real helper cut out of rpc/chat_all.py
+    namespace = load_cut(nodes, namespace, "chat_all.py")  # the real helper cut out of rpc/chat_all.py
     return namespace[HELPER]
 
 
