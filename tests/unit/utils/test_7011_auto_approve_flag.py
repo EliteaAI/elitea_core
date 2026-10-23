@@ -51,6 +51,7 @@ def build(models_path):
         'merge_mention_candidates': lambda attached, chat: [*attached, *chat],
         'merge_disclosable_skills': lambda own, chat: [*own, *chat],
         'dedupe_internal_mcp_tools': lambda tools: None,
+        'inject_stored_logins': lambda *a, **k: None,
         'resolve_internal_mcp_tools': lambda *a: None,
         'log': NS(warning=lambda *a, **k: None, debug=lambda *a, **k: None, info=lambda *a, **k: None),
     }
