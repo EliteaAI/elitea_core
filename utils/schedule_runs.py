@@ -1,7 +1,8 @@
 """Run status and schedule disable writers of the schedule runs (EL-7011)."""
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, update
+from pylon.core.tools import log
+from sqlalchemy import func, select, update
 from tools import db
 
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
@@ -11,6 +12,22 @@ STALE_REASON = 'the run did not finish in time'
 PAUSE_REASON = 'the run stopped for input that no one can give'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
+APPROVAL_WAIT_HOURS = 24
+REJECT_REASON = 'rejected by the owner'
+# The HITL actions of a decision: `reject` ends a waiting run, the others let it go on (R2.1, R2.2)
+DECISION_ACTIONS = ('approve', 'edit', 'answer', 'block_with_comment', 'reject')
+
+
+class ScheduleDecisionForbidden(Exception):
+    """The caller of an approve or reject is not the schedule owner; an admin included (R2.3)."""
+
+
+class ScheduleDecisionInvalid(Exception):
+    """An action of an approve or reject is empty or unknown."""
+
+
+class ScheduleRunNotWaiting(Exception):
+    """The run of an approve or reject is not waiting for approval (R2.4)."""
 
 
 def fail_schedule_run(project_id: int, run_id: int, reason: str) -> None:
@@ -32,22 +49,94 @@ def disable_schedule(project_id: int, schedule_id: int, reason: str) -> None:
 
 
 def finish_schedule_run(project_id: int, run_id: int, status: str, reason: str | None = None,
-                        conversation_id: int | None = None) -> bool:
-    """End a running run as `success` or `failed`, copy it to its schedule and tell the owner.
+                        conversation_id: int | None = None, expected_status: str = 'running',
+                        notice: bool = True) -> bool:
+    """End a run in `expected_status` as `success` or `failed`, copy it to its schedule and tell the owner.
 
-    False, with nothing changed or sent, when the run is not running any more.
+    False, with nothing changed or sent, when the run is not in `expected_status` any more.
     """
     with db.get_session(project_id) as session:
-        ended = _end_runs(session, EntityScheduleRun.id == run_id, status, reason, conversation_id)
+        ended = _end_runs(session, EntityScheduleRun.id == run_id, status, reason, conversation_id, expected_status)
         session.commit()
-        _announce(project_id, session, ended)
+        if notice:
+            _announce(project_id, session, ended)
     return bool(ended)
 
 
-def pause_schedule_run(project_id: int, run_id: int, interrupt) -> None:
-    """Handle an interrupt of a schedule run; no branch claims it yet, so the run fails (R5.2)."""
-    # lean: `interrupt` is unused here; US-18 and US-19 read it to route their pauses
-    finish_schedule_run(project_id, run_id, 'failed', PAUSE_REASON)
+def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
+    """A sensitive-tool pause makes a running run wait for the owner (R1.2, R1.3); any other pause fails it."""
+    # A parallel pause carries its interrupts in `hitl_interrupts`
+    interrupts = [interrupt.get('hitl_interrupt') or {}, *(interrupt.get('hitl_interrupts') or [])]
+    if not any(item.get('guardrail_type') == 'sensitive_tool' for item in interrupts):
+        finish_schedule_run(project_id, run_id, 'failed', PAUSE_REASON)
+        return
+    # Late import, as in _announce
+    from .schedule_notifications import notify_schedule_event
+    with db.get_session(project_id) as session:
+        paused = session.execute(
+            update(EntityScheduleRun)
+            .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running')
+            # resumed_at is cleared, so a stale fan-out decision of an earlier pause never matches this one
+            .values(status='waiting_for_approval', resumed_at=None,
+                    approval_expires_at=datetime.now(UTC) + timedelta(hours=APPROVAL_WAIT_HOURS))
+        ).rowcount
+        session.commit()
+        if not paused:  # a run that is not running stays as it is, with no notice (R1.4)
+            return
+        try:
+            run = session.get(EntityScheduleRun, run_id)
+            schedule = session.get(EntitySchedule, run.schedule_id)
+            notify_schedule_event(project_id, schedule.created_by, 'schedule_approval_needed', schedule, run)
+        except Exception:  # noqa: BLE001 -- the pause is committed; a lost notice must not undo it (R1.3)
+            log.exception('Schedule run %s: cannot send the approval notice', run_id)
+
+
+def check_schedule_decision(project_id: int, run_id: int, caller_id: int, actions: list,
+                            fan_out: bool = False) -> str | None:
+    """Check the owner's decision on a waiting run without changing it; `reject` or `approve`.
+
+    Any `reject` in `actions` rejects. `ScheduleDecisionForbidden` for anyone but `created_by`, an admin
+    included (R2.3); then `ScheduleDecisionInvalid` for an empty or unknown action; then
+    `ScheduleRunNotWaiting` when the run is not waiting (R2.4). None when a fan-out child decides a run
+    that an earlier decision of the same pause resumed: nothing to change.
+    """
+    with db.get_session(project_id) as session:
+        run = session.get(EntityScheduleRun, run_id)
+        if run is None:
+            raise ScheduleRunNotWaiting(run_id)
+        if session.get(EntitySchedule, run.schedule_id).created_by != caller_id:
+            raise ScheduleDecisionForbidden(run_id)
+        status, resumed_at = run.status, run.resumed_at
+    if not actions or not all(action in DECISION_ACTIONS for action in actions):
+        raise ScheduleDecisionInvalid(actions)
+    if fan_out and status == 'running' and resumed_at is not None:
+        return None
+    if status != 'waiting_for_approval':
+        raise ScheduleRunNotWaiting(run_id)
+    return 'reject' if 'reject' in actions else 'approve'
+
+
+def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None:
+    """Write a checked decision: `approve` sets the run running, `reject` fails it (R2.1, R2.2).
+
+    `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
+    """
+    with db.get_session(project_id) as session:
+        if decision == 'approve':
+            resumed = session.execute(
+                update(EntityScheduleRun)
+                .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'waiting_for_approval')
+                .values(status='running', resumed_at=func.now(), approval_expires_at=None)
+            ).rowcount
+            session.commit()
+            if not resumed:
+                raise ScheduleRunNotWaiting(run_id)
+            return
+        conversation_id = session.scalar(
+            select(EntityScheduleRun.conversation_id).where(EntityScheduleRun.id == run_id))
+    if not finish_schedule_run(project_id, run_id, 'failed', REJECT_REASON, conversation_id=conversation_id,
+                               expected_status='waiting_for_approval', notice=False):
+        raise ScheduleRunNotWaiting(run_id)
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:
@@ -81,8 +170,9 @@ def fail_stale_runs(project_id: int, now: datetime, stale_minutes: int) -> int:
     return len(ended)
 
 
-def _end_runs(session, condition, status: str, reason: str | None, conversation_id: int | None = None) -> list[int]:
-    """End the running runs that match `condition` and copy the status to their schedules; the run ids."""
+def _end_runs(session, condition, status: str, reason: str | None, conversation_id: int | None = None,
+              expected_status: str = 'running') -> list[int]:
+    """End the runs in `expected_status` that match `condition` and copy the status to their schedules; the run ids."""
     values = {'status': status, 'reason': reason, 'finished_at': func.now()}
     schedule_values = {'last_run_status': status}
     if conversation_id:
@@ -90,7 +180,7 @@ def _end_runs(session, condition, status: str, reason: str | None, conversation_
         schedule_values['last_conversation_id'] = conversation_id
     ended = session.execute(
         update(EntityScheduleRun)
-        .where(EntityScheduleRun.status == 'running', condition)
+        .where(EntityScheduleRun.status == expected_status, condition)
         .values(**values)
         .returning(EntityScheduleRun.id, EntityScheduleRun.schedule_id)
     ).all()

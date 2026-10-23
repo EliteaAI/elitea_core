@@ -60,7 +60,7 @@ class World:
         self.create_error = self.link_error = self.predict_error = None
         self.schedule = Row(
             _world=self, id=SCHEDULE_ID, name="S1", principal={}, application_id=AGENT_ID, version_id=VERSION_ID,
-            created_by=OWNER, prompt=PROMPT, variables=[], entity_type="agent", run_mode=None)
+            created_by=OWNER, prompt=PROMPT, variables=[], entity_type="agent", run_mode=None, approval_rule="pause_and_ask")
         self.run = SimpleNamespace(id=RUN_ID, conversation_id=None)
         self.rows = {
             ("EntitySchedule", SCHEDULE_ID): self.schedule,
