@@ -32,6 +32,7 @@ from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_
 from ..models.pd.tool import ToolValidatedDetails
 from .category_utils import get_active_categories, resolve_category
 from .constants import DEFAULT_FALLBACK_CATEGORY
+from .pipeline_trigger import sanitize_trigger_for_write
 from .folder_access import folder_exclusion_clause
 
 
@@ -222,9 +223,11 @@ def applications_update_version(version_data, session, *, commit: bool = True) -
     notes_value = dumped.pop('notes', None) if notes_provided else None
 
     for key, value in dumped.items():
-        if key == 'pipeline_settings' and isinstance(value, dict) and 'trigger' not in value:
+        if key == 'pipeline_settings' and isinstance(value, dict):
             existing_trigger = (version.pipeline_settings or {}).get('trigger')
-            if existing_trigger:
+            if 'trigger' in value:
+                value = sanitize_trigger_for_write(value, existing_trigger)
+            elif existing_trigger:
                 value = {**value, 'trigger': existing_trigger}
         setattr(version, key, value)
 
