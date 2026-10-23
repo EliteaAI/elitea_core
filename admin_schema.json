@@ -276,6 +276,237 @@
       "requires_restart": false,
       "value_schema": { "type": "integer", "minimum": 7, "maximum": 60 }
     },
+    "input_guardrail_enabled": {
+      "type": "boolean",
+      "title": "Inspect User Input",
+      "description": "When enabled, every user message, chat history turn and agent instruction is inspected for credentials and personal data before it is stored or sent to a model. The detected value is never written to logs, audit rows or traces.",
+      "path": "input_guardrail.enabled",
+      "section": "guardrails",
+      "default": false,
+      "strict_type": true,
+      "requires_restart": false,
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "input_guardrail.enabled"
+        }
+      ]
+    },
+    "input_guardrail_credentials_action": {
+      "type": "string",
+      "title": "Credentials",
+      "description": "Action for API keys, tokens, private keys and passwords. Record: audit only. Warn: audit and show a notice. Redact: replace the value before it is stored or sent. Block: refuse the message.",
+      "path": "input_guardrail.categories.credentials",
+      "section": "guardrails",
+      "default": "block",
+      "enum": [
+        "off",
+        "record",
+        "warn",
+        "redact",
+        "block"
+      ],
+      "requires_restart": false,
+      "visible_when": {
+        "field": "input_guardrail_enabled",
+        "value": true
+      },
+      "value_schema": {
+        "type": "string",
+        "enum": [
+          "off",
+          "record",
+          "warn",
+          "redact",
+          "block"
+        ]
+      },
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "input_guardrail.categories.credentials"
+        }
+      ]
+    },
+    "input_guardrail_personal_data_action": {
+      "type": "string",
+      "title": "Personal Data",
+      "description": "Action for e-mail addresses, phone numbers, payment cards and IBANs.",
+      "path": "input_guardrail.categories.personal_data",
+      "section": "guardrails",
+      "default": "off",
+      "enum": [
+        "off",
+        "record",
+        "warn",
+        "redact",
+        "block"
+      ],
+      "requires_restart": false,
+      "visible_when": {
+        "field": "input_guardrail_enabled",
+        "value": true
+      },
+      "value_schema": {
+        "type": "string",
+        "enum": [
+          "off",
+          "record",
+          "warn",
+          "redact",
+          "block"
+        ]
+      },
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "input_guardrail.categories.personal_data"
+        }
+      ]
+    },
+    "input_guardrail_on_error": {
+      "type": "string",
+      "title": "On Inspection Error",
+      "description": "What happens when inspection fails or exceeds its time budget. fail_open: the message goes through unchanged. fail_closed: the message is refused. Both are audited.",
+      "path": "input_guardrail.on_error",
+      "section": "guardrails",
+      "default": "fail_open",
+      "enum": [
+        "fail_open",
+        "fail_closed"
+      ],
+      "requires_restart": false,
+      "visible_when": {
+        "field": "input_guardrail_enabled",
+        "value": true
+      },
+      "value_schema": {
+        "type": "string",
+        "enum": [
+          "fail_open",
+          "fail_closed"
+        ]
+      },
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "input_guardrail.on_error"
+        }
+      ]
+    },
+    "input_guardrail_timeout_ms": {
+      "type": "integer",
+      "title": "Inspection Time Budget (ms)",
+      "description": "Upper bound for one inspection. Allowed range: 10–5000.",
+      "path": "input_guardrail.timeout_ms",
+      "section": "guardrails",
+      "default": 200,
+      "minimum": 10,
+      "maximum": 5000,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "input_guardrail_enabled",
+        "value": true
+      },
+      "value_schema": {
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 5000
+      },
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "input_guardrail.timeout_ms"
+        }
+      ]
+    },
+    "input_guardrail_max_inspect_chars": {
+      "type": "integer",
+      "title": "Maximum Inspected Characters",
+      "description": "Inputs longer than this are not inspected and are handled as an inspection error.",
+      "path": "input_guardrail.max_inspect_chars",
+      "section": "guardrails",
+      "default": 200000,
+      "minimum": 1000,
+      "maximum": 5000000,
+      "requires_restart": false,
+      "visible_when": {
+        "field": "input_guardrail_enabled",
+        "value": true
+      },
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 5000000
+      },
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "input_guardrail.max_inspect_chars"
+        }
+      ]
+    },
+    "input_guardrail_allow_patterns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "format": "regex_list",
+      "title": "Allowed Patterns",
+      "description": "Regular expressions for values that are never a detection, such as a known test key format. Each entry must be a valid regular expression.",
+      "path": "input_guardrail.allow_patterns",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false,
+      "visible_when": {
+        "field": "input_guardrail_enabled",
+        "value": true
+      },
+      "value_schema": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "input_guardrail.allow_patterns"
+        }
+      ]
+    },
+    "input_guardrail_exempt_project_ids": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "title": "Exempt Projects",
+      "description": "Projects whose input is not inspected, for example automated test projects.",
+      "path": "input_guardrail.exempt_project_ids",
+      "section": "guardrails",
+      "default": [],
+      "requires_restart": false,
+      "enum_source": "projects",
+      "visible_when": {
+        "field": "input_guardrail_enabled",
+        "value": true
+      },
+      "sync_targets": [
+        {
+          "pylon": "pylon-indexer",
+          "plugin": "indexer_worker",
+          "path": "input_guardrail.exempt_project_ids"
+        }
+      ]
+    },
     "is_next_input_suggestion_enabled": {
       "type": "boolean",
       "title": "Enable Next-Input Suggestions",
@@ -462,6 +693,22 @@
         "type": "integer",
         "minimum": 1,
         "maximum": 50
+      }
+    },
+    "max_instructions_length": {
+      "type": "integer",
+      "title": "Skill Content Max Length",
+      "description": "Maximum number of characters in a skill's instructions. Lowering it never changes existing skills; it only blocks saving instructions longer than the new limit. Allowed range: 1–200000.",
+      "path": "skills.max_instructions_length",
+      "section": "runtime",
+      "default": 50000,
+      "minimum": 1,
+      "maximum": 200000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200000
       }
     },
     "pipeline_scheduling_enabled": {
