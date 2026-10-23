@@ -23,7 +23,7 @@ class Row(SimpleNamespace):
     def __getattribute__(self, name):
         world = object.__getattribute__(self, "__dict__").get("_world")
         if world is not None and not name.startswith("_") and not world.session_open:
-            raise RuntimeError(f"detached read of {name}")
+            raise AttributeError(f"detached read of {name}")
         return object.__getattribute__(self, name)
 
 
