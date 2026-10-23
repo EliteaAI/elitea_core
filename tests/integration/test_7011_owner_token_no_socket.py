@@ -56,6 +56,11 @@ def predict_utils(monkeypatch):
         pkg.__path__ = []
         monkeypatch.setitem(sys.modules, name, pkg)
     stubs = {
+        f'{PKG}.context_window': {'BALANCED': None, 'budget_for_model_config': None, 'is_platform_admin': None,
+                                  'manual_context_tokens': None, 'manual_context_tokens_allowed': None,
+                                  'strategy_for_predict': None},
+        f'{PKG}.mcp_oauth': {'refresh_token': None},
+        f'{PKG}.stored_oauth_tokens': {'inject_stored_oauth_tokens': None},
         f'{PKG}.llm_settings': {'normalize_runtime_max_tokens': None},
         f'{PKG}.next_input_suggestion_utils': {'next_input_suggestion_config': None},
         f'{PKG}.skill_mentions': {'merge_disclosable_skills': None, 'merge_mention_candidates': None},
