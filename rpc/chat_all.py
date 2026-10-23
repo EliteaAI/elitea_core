@@ -42,7 +42,10 @@ from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
 from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
     apply_participant_skill_mentions, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
     resolve_skill_attachment_llm_settings
-from ..utils.exceptions import PoolSaturationError
+from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
+from ..utils.input_guardrail import (
+    INSPECTED_PAYLOAD_KEY, accepted_history_hashes, check_chat_input, check_resume_input, participant_entity, redacted_input,
+)
 from ..utils.parallel_hitl import (
     EXECUTION_GENERATION_KEY, begin_execution_generation,
     claim_supervisor_decision_phase, decisions_for_child,
@@ -1241,6 +1244,43 @@ class RPC:
                 )
                 return {"error": "This message has already been submitted"}
 
+            # Checkpoint A (#6886): before the turn is stored, broadcast or used to
+            # name the conversation. A blocked turn is stored redacted with the refusal
+            # as its answer (plan D5), so the card survives a reload; REST callers get
+            # the error raised (422) and nothing is stored
+            try:
+                parsed.user_input, input_guardrail_verdict = check_chat_input(
+                    parsed.user_input, parsed.project_id, current_user['id'],
+                    entity=participant_entity(
+                        session.get(Participant, parsed.participant_id) if parsed.participant_id else None
+                    ),
+                )
+            except InputGuardrailBlockedError as blocked:
+                if not sid:
+                    raise
+                stored_ids = self._store_blocked_turn(
+                    session, conversation, author_participant, parsed, blocked, room, sid,
+                ) or {}
+                self.context.sio.emit(
+                    event=SioEvents.chat_predict.value,
+                    data={
+                        'type': 'input_guardrail_blocked',
+                        'stream_id': parsed.conversation_uuid,
+                        'message_id': parsed.question_id,
+                        'question_id': parsed.question_id,
+                        # The sender's placeholders carry client-made ids; without the stored
+                        # ones an edit or regenerate of the card cannot find the rows (#6886)
+                        **stored_ids,
+                        'content': blocked.message,
+                        'response_metadata': {
+                            'human_readable': blocked.message,
+                            'input_guardrail': blocked.verdict(),
+                        },
+                    },
+                    to=sid,
+                )
+                return {"error": blocked.type, **blocked.body()}
+
             self.check_and_generate_conversation_name(
                 parsed.project_id, parsed.user_input, room, conversation
             )
@@ -1317,6 +1357,8 @@ class RPC:
             if parsed.interaction_uuid:
                 # todo: add [30] min check last message for interaction_uuid
                 msg_group_meta['interaction_uuid'] = parsed.interaction_uuid
+            if input_guardrail_verdict:
+                msg_group_meta['input_guardrail'] = input_guardrail_verdict
             
             # Initialize context metadata for new message group
             if context_management_enabled:
@@ -1460,6 +1502,21 @@ class RPC:
                 room=room,
                 skip_sid=sid
             )
+            if sid and input_guardrail_verdict:
+                # The sender's optimistic copy still holds what they typed; replace it
+                # with the stored (redacted) text and show the notice (#6886)
+                self.context.sio.emit(
+                    event=SioEvents.chat_predict.value,
+                    data={
+                        'type': 'input_guardrail_notice',
+                        'stream_id': parsed.conversation_uuid,
+                        'message_id': parsed.question_id,
+                        'question_id': parsed.question_id,
+                        'content': parsed.user_input if input_guardrail_verdict.get('action') == 'redact' else None,
+                        'response_metadata': {'input_guardrail': input_guardrail_verdict},
+                    },
+                    to=sid,
+                )
 
             if parsed.user_ids:
                 mentioned_participants = session.query(Participant).filter(
@@ -1529,7 +1586,8 @@ class RPC:
                         include_context=not is_pipeline,
                         routing_projection=payload.get('_routing_projection'),
                     )
-                    log.debug('chat payload["chat_history"]=%s', payload["chat_history"])
+                    payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
+                    log.debug('chat payload["chat_history"] has %d messages', len(payload["chat_history"]))
 
                     context_meta = {
                         'context': {
@@ -1591,6 +1649,88 @@ class RPC:
                             "response_message_group_id": response_msg.id,
                         }
                     return result
+
+    @web.method()
+    def _store_blocked_turn(self, session, conversation, author_participant, parsed, blocked, room, sid):
+        """Store a turn checkpoint A refused: the input redacted, the refusal as its answer.
+
+        Plan D5: a reload shows the same card, and the stored copy never holds the value.
+        Never raises; on failure the refusal still reaches the sender, unstored.
+
+        Returns the stored ids the sender's placeholders need (``response_message_id``,
+        ``question_item_uuid``), or None when nothing was stored.
+        """
+        verdict = blocked.verdict()
+        stored_ids = {}
+        try:
+            stored_input = redacted_input(parsed.user_input)
+            msg_group = ConversationMessageGroup(
+                uuid=parsed.question_id,
+                conversation=conversation,
+                author_participant=author_participant,
+                sent_to_id=parsed.participant_id,
+                meta={'input_guardrail': verdict},
+            )
+            question_item = TextMessageItem(
+                message_group=msg_group,
+                item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
+                content=stored_input,
+                order_index=0,
+            )
+            session.add(msg_group)
+            session.add(question_item)
+            session.flush()
+            stored_ids['question_item_uuid'] = str(question_item.uuid)
+            if msg_group.sent_to_id:
+                response_msg = ConversationMessageGroup(
+                    conversation=conversation,
+                    author_participant_id=msg_group.sent_to_id,
+                    is_streaming=False,
+                    reply_to_id=msg_group.id,
+                    created_at=datetime.now(tz=timezone.utc) + timedelta(seconds=1),
+                    meta={'is_error': True, 'error': blocked.message, 'input_guardrail': verdict},
+                )
+                session.add(response_msg)
+                session.flush()
+                stored_ids['response_message_id'] = str(response_msg.uuid)
+                session.add(TextMessageItem(
+                    message_group=response_msg,
+                    item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
+                    content=blocked.message,
+                    order_index=0,
+                ))
+            session.commit()
+            session.refresh(msg_group)
+            self.context.sio.emit(
+                event=SioEvents.chat_predict.value,
+                data={'type': 'chat_user_message', **serialize(MessageGroupDetail.model_validate(msg_group))},
+                room=room,
+                skip_sid=sid,
+            )
+            if isinstance(stored_input, str):
+                # The sender's optimistic copy holds what they typed; match the stored copy
+                self.context.sio.emit(
+                    event=SioEvents.chat_predict.value,
+                    data={
+                        'type': 'input_guardrail_notice',
+                        'stream_id': parsed.conversation_uuid,
+                        'message_id': parsed.question_id,
+                        'question_id': parsed.question_id,
+                        'content': stored_input,
+                        'response_metadata': {'input_guardrail': verdict},
+                    },
+                    to=sid,
+                )
+        except Exception:  # pylint: disable=W0703
+            log.exception('[INPUT_GUARDRAIL] Failed to store the blocked turn')
+            session.rollback()
+            return None
+        # The first turn still names the conversation, or its "naming" spinner never clears
+        text = stored_input if isinstance(stored_input, str) else ' '.join(
+            b.get('text') or '' for b in stored_input or [] if isinstance(b, dict) and b.get('type') == 'text'
+        )
+        self.check_and_generate_conversation_name(parsed.project_id, text or 'New Chat', room, conversation)
+        return stored_ids
 
     @web.method()
     def _wait_parallel_hitl_ack(self, message_id, decision_id, phase, timeout=0.75):
@@ -1901,14 +2041,14 @@ class RPC:
             "Continue predict: message_id=%s conversation_uuid=%s sid=%s "
             "hitl_resume=%s mcp_auth_resume=%s authorization_request_id=%s "
             "hitl_decisions=%d mcp_auth_decisions=%d "
-            "token_limit_continuation=%s user_input=%s",
+            "token_limit_continuation=%s user_input_chars=%d",
             data.get("message_id"), data.get("conversation_uuid"), sid,
             bool(data.get("hitl_resume")), bool(data.get("mcp_auth_resume")),
             data.get("authorization_request_id"),
             len(data.get("hitl_decisions") or []),
             len(data.get("mcp_auth_decisions") or []),
             bool(data.get("token_limit_continuation")),
-            data.get("user_input"),
+            len(data.get("user_input") or ""),
         )
         try:
             parsed = SioContinuePredictModel.model_validate(data)
@@ -1944,6 +2084,41 @@ class RPC:
         if self.is_chat_run_stopped(parsed.message_id):
             log.info("[PARALLEL] continue refused — run stopped (message_id=%s)", parsed.message_id)
             return {"stopped": True}
+
+        # Checkpoint A (#6886) for a resume: the replacement input and HITL edit or
+        # answer text, before a decision message is stored or any resume dispatches
+        resume_question_id = None
+        try:
+            with db.get_session(parsed.project_id) as session:
+                resumed_group = session.query(ConversationMessageGroup).filter(
+                    ConversationMessageGroup.uuid == parsed.message_id
+                ).first()
+                resume_entity = participant_entity(resumed_group.author_participant if resumed_group else None)
+                # Explicit FK: ``reply_to`` has no remote_side and loads the reply, not the question
+                resumed_question = session.get(
+                    ConversationMessageGroup, resumed_group.reply_to_id
+                ) if resumed_group and resumed_group.reply_to_id else None
+                resume_question_id = str(resumed_question.uuid) if resumed_question else None
+            check_resume_input(parsed, parsed.project_id, current_user['id'], entity=resume_entity)
+        except InputGuardrailBlockedError as blocked:
+            if not sid:
+                raise
+            self.context.sio.emit(
+                event=SioEvents.chat_predict.value,
+                data={
+                    'type': 'input_guardrail_blocked',
+                    'stream_id': str(parsed.conversation_uuid),
+                    'message_id': parsed.message_id,
+                    **({'question_id': resume_question_id} if resume_question_id else {}),
+                    'content': blocked.message,
+                    'response_metadata': {
+                        'human_readable': blocked.message,
+                        'input_guardrail': blocked.verdict(),
+                    },
+                },
+                to=sid,
+            )
+            return {"error": blocked.type, **blocked.body()}
 
         # Parallel sub-agent HITL (#4993 Track 2): if this resume targets a
         # parked-fan-out child thread, replay that child directly (with
@@ -2266,6 +2441,13 @@ class RPC:
                 )
                 flag_modified(response_msg, 'meta')
 
+            # A block verdict stored by an earlier refused run must not outlive this resume:
+            # the meta writer keeps keys a run does not report, so the card would return on reload
+            stored_guardrail = (response_msg.meta or {}).get('input_guardrail')
+            if isinstance(stored_guardrail, dict) and stored_guardrail.get('action') == 'block':
+                response_msg.meta = {k: v for k, v in response_msg.meta.items() if k != 'input_guardrail'}
+                flag_modified(response_msg, 'meta')
+
             # Set streaming back to true
             response_msg.is_streaming = True
             session.commit()
@@ -2396,6 +2578,7 @@ class RPC:
                     include_context=not continues_pipeline,
                     routing_projection=payload.get('_routing_projection'),
                 )
+                payload[INSPECTED_PAYLOAD_KEY] = accepted_history_hashes(chat_history_groups)
                 if is_token_limit_continuation_request:
                     prepare_token_limit_payload(payload, truncated_content)
                 payload['message_id'] = str(response_msg.uuid)
