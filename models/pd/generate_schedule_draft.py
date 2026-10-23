@@ -105,18 +105,18 @@ class CurrentForm(BaseModel):
     """Current form values; a known key with the wrong type fails, other keys pass through."""
     model_config = ConfigDict(extra='allow')
 
-    name: str | None = None
-    description: str | None = None
-    entity_type: str | None = None
-    application_id: StrictInt | None = None
-    version_id: StrictInt | None = None
-    run_mode: str | None = None
-    prompt: str | None = None
-    variables: list | dict | None = None
-    cron: str | None = None
-    timezone: str | None = None
-    expires_at: str | None = None
-    approval_rule: str | None = None
+    name: str | None = Field(None, description='Schedule name', examples=['Daily report'])
+    description: str | None = Field(None, description='Schedule description', examples=['Sends the daily report'])
+    entity_type: str | None = Field(None, description='Entity type: agent or pipeline', examples=['agent'])
+    application_id: StrictInt | None = Field(None, description='Id of the agent or pipeline', examples=[12])
+    version_id: StrictInt | None = Field(None, description='Id of the entity version', examples=[34])
+    run_mode: str | None = Field(None, description='How the entity runs', examples=['conversation'])
+    prompt: str | None = Field(None, description='Prompt sent on each run', examples=['Summarize yesterday'])
+    variables: list | dict | None = Field(None, description='Variable values for the run', examples=[[{'name': 'topic', 'value': 'sales'}]])
+    cron: str | None = Field(None, description='Cron expression of the schedule', examples=['0 9 * * 1-5'])
+    timezone: str | None = Field(None, description='Time zone of the schedule', examples=['Europe/Warsaw'])
+    expires_at: str | None = Field(None, description='Last day of the schedule, as a date', examples=['2026-12-31'])
+    approval_rule: str | None = Field(None, description='Approval rule for risky steps', examples=['ask'])
 
 
 class GenerateScheduleDraftRequest(BaseModel):
