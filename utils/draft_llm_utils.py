@@ -11,7 +11,7 @@ from typing import Optional
 from pylon.core.tools import log
 from tools import rpc_tools
 
-from .error_text import ERROR_LINE_MAX_LENGTH, last_exception_line  # noqa: F401 -- ERROR_LINE_MAX_LENGTH is public here
+from .error_text import last_exception_line
 from .utils import get_public_project_id
 
 MAX_LISTED_MODEL_NAMES = 20
