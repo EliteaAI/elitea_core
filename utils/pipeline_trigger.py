@@ -461,31 +461,6 @@ def get_trigger_from_pipeline_settings(pipeline_settings: dict) -> dict:
     return trigger
 
 
-def sanitize_trigger_for_write(settings: dict, stored_trigger: dict | None) -> dict:
-    """
-    Return the pipeline_settings to store, so no write adds a legacy schedule trigger.
-
-    A stored schedule trigger is kept until the migration moves it; otherwise a body
-    schedule trigger is stored as chat_message. Settings without a trigger are returned
-    as is, so the save path keeps the stored trigger.
-
-    Args:
-        settings: The pipeline_settings dict carried by the write
-        stored_trigger: The trigger already stored on the version, None on create
-
-    Returns:
-        A new pipeline_settings dict
-    """
-    if "trigger" not in settings:
-        return dict(settings)
-    # Plain strings: this leaf module does not import the trigger models
-    if (stored_trigger or {}).get("type") == "schedule":
-        return {**settings, "trigger": stored_trigger}
-    if (settings["trigger"] or {}).get("type") == "schedule":
-        return {**settings, "trigger": {"type": "chat_message"}}
-    return dict(settings)
-
-
 def build_trigger_for_storage(update_data, user_id: int) -> dict:
     """
     Build trigger configuration dict for storage in pipeline_settings.
