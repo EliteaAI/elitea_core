@@ -32,7 +32,7 @@ from ..utils.like_utils import add_likes, add_trending_likes, add_my_liked, get_
 from ..models.pd.tool import ToolValidatedDetails
 from .category_utils import get_active_categories, resolve_category
 from .constants import DEFAULT_FALLBACK_CATEGORY
-from .pipeline_trigger import sanitize_trigger_for_write
+from .trigger_write_rule import sanitize_trigger_for_write
 from .folder_access import folder_exclusion_clause
 
 
