@@ -41,7 +41,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         Args:
             project_id: Project ID
-            toolkit_type: MCP toolkit type (e.g., 'mcp_github_copilot')
+            toolkit_type: MCP toolkit type (must start with 'mcp_', e.g. 'mcp_github_copilot')
 
         Request Body:
             settings: dict - Toolkit settings (credentials, etc.)
@@ -54,6 +54,10 @@ class PromptLibAPI(api_tools.APIModeHandler):
             }
         """
         _ = kwargs
+
+        # Reject before credential expansion or any connection check runs
+        if not toolkit_type.startswith('mcp_'):
+            return {"success": False, "error": "toolkit_type must be an MCP type (mcp_*)"}, 400
 
         current_user = auth.current_user()
         user_id = current_user.get('id') if current_user else None
