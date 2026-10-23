@@ -160,7 +160,7 @@ def world(monkeypatch):
         monkeypatch.setitem(sys.modules, f"{PKG}.{dotted}", _module(f"{PKG}.{dotted}", **attrs))
 
     schedules = load("models/entity_schedule.py", fresh=True)
-    load("utils/schedule_claim.py", fresh=True)
+    claim = load("utils/schedule_claim.py", fresh=True)
     load("utils/schedule_runs.py", fresh=True)
     prerun = load("utils/schedule_prerun.py", fresh=True)
     load("utils/pipeline_execution.py", fresh=True)
@@ -205,8 +205,9 @@ def world(monkeypatch):
         session.commit()
         ids = types.SimpleNamespace(schedule=schedule.id, run=1)
 
-    def run(**changes):
+    def run(trigger="cron", **changes):
         with _orm.Session(engine) as session:
+            session.get(schedules.EntityScheduleRun, ids.run).trigger = trigger
             for field, value in changes.items():
                 setattr(session.get(schedules.EntitySchedule, ids.schedule), field, value)
             session.commit()
@@ -230,7 +231,28 @@ def world(monkeypatch):
         with _orm.Session(engine) as session:
             return session.get(chat.ApplicationVersion, VERSION_ID).variables
 
-    return types.SimpleNamespace(run=run, predictions=predictions, predict_errors=predict_errors,
+    def schedule():
+        with _orm.Session(engine) as session:
+            return session.get(schedules.EntitySchedule, ids.schedule)
+
+    def set_run_status(status):
+        with _orm.Session(engine) as session:
+            session.get(schedules.EntityScheduleRun, ids.run).status = status
+            session.commit()
+
+    def claim_run(trigger):
+        """The run claim of the run endpoint: the new run id, None when an active run holds the schedule."""
+        with _orm.Session(engine) as session:
+            run_id = claim.insert_run(session, ids.schedule, trigger, OWNER)
+            session.commit()
+            return run_id
+
+    def run_count():
+        with _orm.Session(engine) as session:
+            return session.query(schedules.EntityScheduleRun).count()
+
+    return types.SimpleNamespace(run=run, schedule=schedule, set_run_status=set_run_status, claim=claim_run,
+                                 run_count=run_count, predictions=predictions, predict_errors=predict_errors,
                                  conversations=conversations, auth=auth,
                                  first_message=first_message, run_row=run_row, notices=notices,
                                  agent_version=agent_version)
