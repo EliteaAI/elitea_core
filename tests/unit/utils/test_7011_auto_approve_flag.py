@@ -15,6 +15,7 @@ from typing import Optional, Union
 from unittest.mock import Mock
 
 import pytest
+from fixtures.cut_source import load_cut
 from fixtures.helpers import load_module_with_stubs
 
 
@@ -53,7 +54,7 @@ def build(models_path):
         'resolve_internal_mcp_tools': lambda *a: None,
         'log': NS(warning=lambda *a, **k: None, debug=lambda *a, **k: None, info=lambda *a, **k: None),
     }
-    exec(compile(ast.Module([function], []), str(path), 'exec'), namespace)  # noqa: S102 - runs the real function cut out of utils/predict_utils.py
+    namespace = load_cut([function], namespace, 'utils/predict_utils.py')  # the real function cut out of utils/predict_utils.py
     return lambda **kwargs: namespace['generate_predict_payload'](
         Chat(project_id=7, user_input='go', chat_history=[], thread_id='t',
              llm_settings=llm.LLMSettingsModel(model_name='m', max_tokens=500), tools=[]),
