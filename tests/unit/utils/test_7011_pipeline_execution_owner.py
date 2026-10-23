@@ -90,7 +90,7 @@ def world(monkeypatch):
     def get_or_create_one(session, entity_name, entity_meta):
         return types.SimpleNamespace(id=entity_meta.id, entity_name=entity_name), True
 
-    entity = lambda **fields: types.SimpleNamespace(**fields)
+    entity = types.SimpleNamespace
     leaves = {
         "models.all": {"Application": object, "ApplicationVersion": object},
         "models.conversation": {"Conversation": Record},
