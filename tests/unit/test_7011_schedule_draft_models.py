@@ -21,7 +21,7 @@ def models():
 def test_el_7011_r1_4_request_accepts_prompt_and_defaults_the_rest(models):
     request = models.GenerateScheduleDraftRequest(prompt='  Every weekday at 9  ')
     assert request.prompt == 'Every weekday at 9'
-    assert request.current == {}
+    assert request.current.model_dump(exclude_unset=True) == {}
     assert request.locked_entity is None
     assert request.timezone is None
 

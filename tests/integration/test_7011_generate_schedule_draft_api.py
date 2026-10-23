@@ -184,6 +184,10 @@ def test_el_7011_r1_3_the_draft_opens_no_write_session(endpoint):
     ({}, 'prompt'), ({'prompt': '   '}, 'prompt'),
     ({'prompt': 'x', 'locked_entity': {'entity_type': 'tool'}}, 'locked_entity'),
     ({'prompt': 'x', 'current': 'not a dict'}, 'current'),
+    ({'prompt': 'x', 'current': 'not an object'}, 'current'),
+    ({'prompt': 'x', 'current': {'application_id': 'abc'}}, 'current'),
+    ({'prompt': 'x', 'current': {'application_id': '4'}}, 'current'),
+    ({'prompt': 'x', 'current': {'name': 5}}, 'current'),
 ])
 def test_el_7011_r1_4_a_bad_body_is_400_with_code_field_and_no_model_call(endpoint, body, field):
     payload, status, model = _post(endpoint, body)
