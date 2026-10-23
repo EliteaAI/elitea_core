@@ -1004,7 +1004,7 @@ def _clone_source_version_for_publish(
             run_settings=src.run_settings,
         )
 
-    result = create_skill_version(project_id, skill_id, version_data)
+    result = create_skill_version(project_id, skill_id, version_data, instructions_already_saved=True)
     return result['id']
 
 
