@@ -22,7 +22,7 @@ WEBHOOK = {"type": "webhook", "webhook_type": "custom", "created_by": 7}
 
 
 def _function(name):
-    path = UTILS / ("pipeline_trigger.py" if name == "sanitize_trigger_for_write" else "application_utils.py")
+    path = UTILS / ("trigger_write_rule.py" if name == "sanitize_trigger_for_write" else "application_utils.py")
     return next(n for n in ast.parse(path.read_text()).body
                 if isinstance(n, ast.FunctionDef) and n.name == name)
 
