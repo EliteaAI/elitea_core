@@ -13,7 +13,7 @@ from ..models.pd.version import (
 from typing import Generator, List
 
 from ..models.all import Tag
-from .pipeline_trigger import sanitize_trigger_for_write
+from .trigger_write_rule import sanitize_trigger_for_write
 from .skill_utils import copy_skill_mappings
 
 
