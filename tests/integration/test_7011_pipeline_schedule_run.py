@@ -11,7 +11,6 @@ import pytest
 from integration.test_7011_agent_schedule_run import (  # noqa: F401 -- `world` is a fixture
     AGENT_ID,
     OWNER,
-    PROMPT,
     VERSION_ID,
     VERSION_VARIABLES,
     world,
