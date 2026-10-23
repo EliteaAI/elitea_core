@@ -102,7 +102,7 @@ def _install(env, Base, engine):
         env, Base,
         api_tools=types.SimpleNamespace(
             APIModeHandler=object, APIBase=object, endpoint_metrics=lambda func: func,
-            with_modes=lambda params: list(params),
+            with_modes=list,
         ),
         register_openapi=lambda **meta: (lambda func: func),
         auth=types.SimpleNamespace(
