@@ -11,7 +11,7 @@ from ...utils.conversation_utils import (
 )
 from ...utils.constants import PROMPT_LIB_MODE
 from ...utils.sio_utils import SioValidationError
-from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError
+from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError, InputGuardrailBlockedError
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -97,6 +97,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"detail": "SioValidationError", "error": f"Wrong input data: {e.error}"}, 400
         except BudgetDoorClosedError as e:
             return e.body(), 429
+        except InputGuardrailBlockedError as e:
+            return e.body(), 422
         except PoolSaturationError as e:
             return {
                 "error": "temporarily_unavailable",
