@@ -206,7 +206,8 @@ def post(monkeypatch):
         'plugins.elitea_core.utils.constants': types.SimpleNamespace(PROMPT_LIB_MODE='prompt_lib'),
         'plugins.elitea_core.utils.sio_utils': types.SimpleNamespace(SioValidationError=Forbidden),
         'plugins.elitea_core.utils.exceptions': types.SimpleNamespace(
-            PoolSaturationError=NotWaiting, BudgetDoorClosedError=NotWaiting),
+            PoolSaturationError=NotWaiting, BudgetDoorClosedError=NotWaiting,
+            InputGuardrailBlockedError=NotWaiting),
     }
     for name in ('pylon', 'pylon.core', 'plugins', 'plugins.elitea_core', 'plugins.elitea_core.api',
                  'plugins.elitea_core.api.v2'):
