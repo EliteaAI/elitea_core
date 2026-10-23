@@ -15,7 +15,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))  # the shared harness liv
 from test_7011_schedule_crud_api import (  # noqa: F401 -- `harness` is a fixture
     ADMIN,
     ADMIN_ID,
-    EDITOR,
     NOT_FOUND,
     OTHER_ID,
     OWNER_ID,
