@@ -25,7 +25,7 @@ Split of responsibility (mirrors :mod:`llm_judge`):
 Outcome dict shape::
 
     {'status': 'ok'|'unsupported'|'timeout'|'predict_exception'|'predict_error'|'empty'
-               |'guardrail_paused'|'parked'|'budget_blocked',
+               |'guardrail_paused'|'parked'|'budget_blocked'|'guardrail_blocked',
      'output': <assistant text> | None,   # set only when status == 'ok'
      'error':  <str> | None,              # set when status != 'ok'
      'execution': {...},                  # trajectory + counters, see :mod:`evaluation_execution`
@@ -33,6 +33,9 @@ Outcome dict shape::
 
 ``status='budget_blocked'`` (with ``budget_scope``: ``project`` | ``member``) is a call refused by
 the project/member budget gate at dispatch. The run stops on it (``stop_reason=gate_closed``).
+
+``status='guardrail_blocked'`` is a case whose input the input guardrail refused at dispatch
+(#6886): no model ran. Only that case fails; the run goes on.
 """
 import copy
 import time
@@ -245,6 +248,10 @@ def run_agent(
             outcome['budget_scope'] = getattr(exc, 'scope', None)
             outcome['execution']['metrics']['budget_scope'] = outcome['budget_scope']
             return outcome
+        if getattr(exc, 'type', None) == 'input_guardrail_blocked':
+            # InputGuardrailBlockedError: the message names categories only, never the value
+            return _outcome('guardrail_blocked', None, str(getattr(exc, 'message', '') or exc),
+                            latency_ms=latency_ms)
         return _outcome('predict_exception', None, str(exc), latency_ms=latency_ms)
     latency_ms = int((time.monotonic() - started) * 1000)
 
