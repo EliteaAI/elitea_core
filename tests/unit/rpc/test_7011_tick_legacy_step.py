@@ -99,6 +99,7 @@ def world(monkeypatch):
     quiet = lambda *a, **k: None
     stubs = {
         "utils.maintenance_gate": {"is_maintenance_active": lambda: False},
+        "utils.governance": {"governance_lifecycle_active": lambda _module: False},  # no governed deadline sweep
         "utils.utils": {"make_yield_to_hub": lambda _runtime: quiet, "end_ambient_transaction": quiet},
         "utils.schedule_claim": {
             "select_due_schedules": world.select_due, "claim_schedule": None, "insert_cron_run": None,
@@ -194,11 +195,15 @@ def real_legacy(world, monkeypatch):
             "PipelineTriggerSchedule": types.SimpleNamespace(parse_obj=lambda t: types.SimpleNamespace(**t)),
         },
         "utils.cron_utils": {"is_cron_due": lambda cron, last_run, zone: True},
+        # an ungoverned platform: the schedule creator runs it and there is no mandate ticket
+        "utils.mandate_admission": {"prepare_trigger_run": lambda **kw: (kw["default_user_id"], None)},
         "utils.pipeline_execution": {
             "TriggerType": types.SimpleNamespace(SCHEDULED="scheduled"),
             "create_trigger_run_conversation": lambda **_: ("uuid", 1, "message"),
             "execute_pipeline_via_predict_sio": lambda **kw: world.executed.append(kw["version"].id),
             "finish_trigger_run_with_error": None,
+            "finish_trigger_run_refused": None,
+            "is_trigger_refusal": lambda _result: False,
         },
     }
     for dotted, names in leaves.items():

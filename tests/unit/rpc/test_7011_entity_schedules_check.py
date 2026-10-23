@@ -91,6 +91,7 @@ def load_tick(monkeypatch, stubs, *, db, project_list, schedules, log):
     stubs = {
         "utils.maintenance_gate": {"is_maintenance_active": lambda: False},
         "utils.utils": {"make_yield_to_hub": lambda _runtime: _quiet, "end_ambient_transaction": _quiet},
+        "utils.governance": {"governance_lifecycle_active": lambda _module: False},  # no governed deadline sweep
         **stubs,
     }
     for dotted, names in stubs.items():
@@ -258,3 +259,43 @@ def test_7011_r1_1_claims_use_the_next_run_read_by_the_due_query(world):
     world.rows, world.moved_by_another_replica = {1: rows}, [rows[1]]  # moved after the due query
     world.tick()
     assert [claim[1] for claim in world.claims] == [NOW, NOW]
+
+
+def _governed(monkeypatch, world, governed, sweep):
+    """The governed deadline sweep (#6947) is called by the tick; `governed` says whether the platform is governed."""
+    monkeypatch.setattr(sys.modules["plugins.elitea_core.utils.governance"], "governance_lifecycle_active",
+                        lambda _module: governed)
+    admission = types.ModuleType("plugins.elitea_core.utils.admission")
+    admission.enforce_run_deadlines = sweep
+    monkeypatch.setitem(sys.modules, admission.__name__, admission)
+
+
+def test_6947_the_tick_sweeps_once_when_governed_and_not_at_all_when_not(world, monkeypatch):
+    swept = []
+    for governed, expected in ((False, 0), (True, 1)):
+        _governed(monkeypatch, world, governed, swept.append)
+        swept.clear()
+        world.tick()
+        assert len(swept) == expected
+
+
+def test_6947_the_sweep_runs_in_maintenance_mode_too_and_the_tick_itself_does_not(world, monkeypatch):
+    swept = []
+    _governed(monkeypatch, world, True, swept.append)
+    world.maintenance, world.rows = True, {1: [_row(1)]}
+    world.tick()
+    assert len(swept) == 1 and not world.listed and not world.started
+    _governed(monkeypatch, world, False, swept.append)
+    swept.clear()
+    world.tick()
+    assert swept == []
+
+
+def test_6947_a_sweep_that_fails_never_stops_the_tick(world, monkeypatch):
+    def broken(_module):
+        raise RuntimeError("db down")
+
+    _governed(monkeypatch, world, True, broken)
+    world.rows = {1: [_row(1)]}
+    world.tick()
+    assert world.listed and world.started
