@@ -27,7 +27,7 @@ def world(monkeypatch):
 
     def run(trigger):
         loaded = types.SimpleNamespace(
-            schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type="agent", run_mode="prompt"),
+            schedule=types.SimpleNamespace(id=SCHEDULE_ID, entity_type="agent", run_mode="prompt", approval_rule="pause_and_ask"),
             version=types.SimpleNamespace(id=9), entity_name="Nightly", prompt="Go", variables=[], trigger=trigger)
         monkeypatch.setattr(starter, "_load", lambda *a: loaded)
         starter.run_owner_schedule(34, SCHEDULE_ID, RUN_ID)

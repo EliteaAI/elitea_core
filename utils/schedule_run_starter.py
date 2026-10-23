@@ -46,7 +46,8 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
             schedule=SimpleNamespace(
                 id=schedule.id, name=schedule.name, principal=schedule.principal, created_by=schedule.created_by,
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
-                application_id=schedule.application_id, version_id=schedule.version_id),
+                application_id=schedule.application_id, version_id=schedule.version_id,
+                approval_rule=schedule.approval_rule),
             version=SimpleNamespace(id=version.id, application_id=version.application_id),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
             trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
@@ -61,6 +62,12 @@ def _link_conversation(project_id: int, run_id: int, conversation_uuid: str) -> 
         run.conversation_id = session.query(Conversation).filter_by(uuid=conversation_uuid).one().id
         session.commit()
         return True
+
+
+def _secret_allows_auto_approve(project_id: int) -> bool:
+    """The project secret check (R3.2); the late import keeps the secret store off every other run."""
+    from .schedule_risk import is_run_without_asking_allowed
+    return is_run_without_asking_allowed(project_id)
 
 
 def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
@@ -85,6 +92,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
         user_input, message = '', ENTRY_POINT_MESSAGE  # the pipeline starts at its YAML entry_point (R2.2)
     else:
         user_input = message = fill_placeholders(loaded.prompt, loaded.variables)
+    auto_approve = loaded.schedule.approval_rule == 'run_without_asking' and _secret_allows_auto_approve(project_id)
     manual = getattr(loaded, 'trigger', 'cron') in ('manual', 'test')  # Run now and Test run (US-15 R1.3)
     trigger_type = TriggerType.MANUAL if manual else TriggerType.SCHEDULED
     try:
@@ -110,6 +118,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
             # Usage analytics counts a run without trigger_source as started by a person (#6881)
             trigger_source=None if manual else 'scheduled', is_system_user=False,
+            auto_approve_sensitive_actions=auto_approve,
         )
     except BudgetDoorClosedError as error:  # the door closed after the check (R2.3)
         finish_trigger_run_with_error(project_id, response_id, error)
