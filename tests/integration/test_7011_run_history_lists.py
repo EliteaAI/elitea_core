@@ -165,7 +165,7 @@ def test_7011_r1_2_cron_manual_and_legacy_rows_carry_their_execution_type(world,
     body, status = history.list(schedule_id="1")
 
     assert status == 200
-    assert _types(body) == {cron.id: "scheduled", manual.id: "manual", legacy: "scheduled",
+    assert _types(body) == {cron.id: "scheduled", manual.id: "schedule_manual", legacy: "scheduled",
                             flag_off: "manual", no_flag: "manual"}
 
 

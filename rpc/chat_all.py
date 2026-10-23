@@ -81,6 +81,7 @@ from ..utils.pipeline_hitl_history import (
     create_pipeline_hitl_resume_segments,
     get_direct_pipeline_hitl_interrupt,
 )
+from ..utils.pipeline_execution import TriggerType
 
 
 TIMEOUT_CANCEL_TEXT = "No response, cancelled by timeout"
@@ -93,6 +94,11 @@ CHAT_PREDICT_MAPPER = {
     ParticipantTypes.skill: 'applications_predict_sio',
     # ParticipantTypes.pipeline: 'applications_predict_sio',
 }
+
+
+def _chat_trigger_kwargs(rpc_func: str) -> dict:
+    """The chat trigger source of an agent, pipeline or skill run; the other predict RPCs take no such argument."""
+    return {'trigger_source': TriggerType.CHAT} if rpc_func == 'applications_predict_sio' else {}
 
 
 # The answer of each refused schedule decision (EL-7011)
@@ -1625,6 +1631,7 @@ class RPC:
                             routing_projection=payload.pop('_routing_projection', None),
                             **pop_chat_skills(payload),
                             **skill_rpc_kwargs,
+                            **_chat_trigger_kwargs(rpc_func),
                         )
                     except (PoolSaturationError, SioValidationError):
                         # Mark the response placeholder as not streaming to avoid stuck chat entry
@@ -2600,6 +2607,7 @@ class RPC:
                     routing_projection=payload.pop('_routing_projection', None),
                     **pop_chat_skills(payload),
                     **skill_rpc_kwargs,
+                    **_chat_trigger_kwargs(rpc_func),
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout

@@ -22,8 +22,9 @@ def world(monkeypatch):
         predict=lambda **kw: calls.predict.append(kw),
         prerun=lambda *a: types.SimpleNamespace(ok=True, owner_id=OWNER),
     )
-    # the stubbed TriggerType of the shared harness has no MANUAL member
-    monkeypatch.setattr(starter, "TriggerType", types.SimpleNamespace(SCHEDULED="scheduled", MANUAL="manual"))
+    # the stubbed TriggerType of the shared harness has no SCHEDULE_MANUAL member
+    monkeypatch.setattr(starter, "TriggerType", types.SimpleNamespace(SCHEDULED="scheduled",
+                                                                      SCHEDULE_MANUAL="schedule_manual"))
 
     def run(trigger):
         loaded = types.SimpleNamespace(
@@ -41,16 +42,16 @@ def world(monkeypatch):
 def test_7011_r1_3_manual_run_conversation_has_execution_type_manual(world, trigger):
     calls = world(trigger)
 
-    assert calls.conversation[0]["trigger_type"] == "manual"
+    assert calls.conversation[0]["trigger_type"] == "schedule_manual"
     assert calls.conversation[0]["extra_meta"] == {
-        "schedule_id": SCHEDULE_ID, "schedule_run_id": RUN_ID, "execution_type": "manual"}
+        "schedule_id": SCHEDULE_ID, "schedule_run_id": RUN_ID, "execution_type": "schedule_manual"}
 
 
 # TC-US15-01 / R1.2
 def test_7011_r1_2_manual_run_starts_as_the_owner_with_the_manual_source(world):
     calls = world("manual")
 
-    assert calls.predict[0]["trigger_source"] is None  # a person started it (#6881)
+    assert calls.predict[0]["trigger_source"] == "schedule_manual"  # BUG-12: Run now is told apart
     assert calls.predict[0]["is_system_user"] is False
     assert calls.predict[0]["user_id"] == OWNER
 
