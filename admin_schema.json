@@ -64,6 +64,29 @@
         }
       ]
     },
+    "sensitive_tool_info": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "badge": {
+              "type": "string",
+              "enum": ["sends_messages", "deletes_data", "changes_data", "runs_code", "needs_approval"]
+            },
+            "effect": { "type": "string" }
+          }
+        }
+      },
+      "title": "Sensitive Tool Effects",
+      "description": "Optional badge and effect text per sensitive tool, shown when a schedule is saved. Map of toolkit type to tool name to {badge, effect}. A tool without an entry shows the badge \"needs_approval\" and the effect \"This tool can change data outside ELITEA.\"",
+      "path": "toolkit_security.sensitive_tool_info",
+      "section": "guardrails",
+      "default": {},
+      "requires_restart": false,
+      "enum_source_keys": "toolkit_names"
+    },
     "sensitive_action_company_name": {
       "type": "string",
       "title": "Company Name for Policy Message",
@@ -706,6 +729,79 @@
       "format": "cron",
       "default": "* * * * *",
       "visible_when": { "field": "pipeline_scheduling_enabled", "value": true }
+    },
+    "schedules_min_interval_minutes": {
+      "type": "integer",
+      "title": "Schedules Minimum Interval (minutes)",
+      "description": "Smallest allowed gap in minutes between two runs of one schedule. A schedule that fires more often is rejected when it is saved. Allowed range: 1–1440.",
+      "path": "scheduler.schedules.min_interval_minutes",
+      "section": "runtime",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 1440,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1440
+      }
+    },
+    "schedules_max_enabled_per_project": {
+      "type": "integer",
+      "title": "Schedules Max Enabled Per Project",
+      "description": "Maximum number of enabled schedules in one project. Disabled schedules do not count. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.max_enabled_per_project",
+      "section": "runtime",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "agent_scheduling_enabled": {
+      "type": "boolean",
+      "title": "Agent Scheduling Enabled",
+      "description": "When disabled, agent schedules are skipped and their next_run is unchanged. Pipeline schedules still run. Enable to include agent schedules in the tick.",
+      "path": "scheduler.schedules.agent_scheduling_enabled",
+      "section": "runtime",
+      "strict_type": true,
+      "default": true
+    },
+    "schedules_dispatch_cap": {
+      "type": "integer",
+      "title": "Schedules Dispatch Cap",
+      "description": "Maximum number of due schedules dispatched per tick, across all projects. Rows left over keep their next_run and go in the next tick. Allowed range: 1–10000.",
+      "path": "scheduler.schedules.dispatch_cap",
+      "section": "runtime",
+      "default": 100,
+      "minimum": 1,
+      "maximum": 10000,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10000
+      }
+    },
+    "schedules_stale_run_minutes": {
+      "type": "integer",
+      "title": "Schedules Stale Run Minutes",
+      "description": "Minutes a scheduled run may stay in running state before the tick fails it with the reason 'the run did not finish in time'. Allowed range: 1–10080.",
+      "path": "scheduler.schedules.stale_run_minutes",
+      "section": "runtime",
+      "default": 120,
+      "minimum": 1,
+      "maximum": 10080,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10080
+      }
     },
     "index_scheduling_enabled": {
       "type": "boolean",

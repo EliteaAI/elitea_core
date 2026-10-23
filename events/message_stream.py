@@ -33,9 +33,14 @@ from ..utils.attachments import (
 )
 from ..utils.token_limit_continuation import trim_continuation_overlap
 from ..utils.pipeline_hitl_history import persist_pipeline_hitl_prompt
+from ..utils.schedule_runs import finish_schedule_run, pause_schedule_run, run_failure_reason
 
 from ..utils.sio_utils import SioEvents
 
+
+def _schedule_run_id(conversation):
+    """The schedule run a conversation belongs to (EL-7011); None for every other chat."""
+    return (conversation.meta or {}).get('schedule_run_id') if conversation else None
 
 
 class Event:
@@ -98,7 +103,8 @@ class Event:
         # log.debug(f'chat_message_stream_end {event=}')
         # log.debug(f'chat_message_stream_end {payload=}')
 
-        with db.get_session(payload['response_metadata']['chat_project_id']) as session:
+        chat_project_id = payload['response_metadata']['chat_project_id']
+        with db.get_session(chat_project_id) as session:
             msg_group: ConversationMessageGroup = session.query(ConversationMessageGroup).filter(
                 ConversationMessageGroup.uuid == payload['message_id']
             ).with_for_update(of=ConversationMessageGroup).first()
@@ -289,6 +295,23 @@ class Event:
                         data=user_payload,
                         room=room,
                     )
+
+                run_id = _schedule_run_id(msg_group.conversation)
+                if run_id:
+                    metadata = payload['response_metadata']
+                    is_error = metadata.get('is_error')
+                    reason = None
+                    if is_error:
+                        # BUG-37: the run keeps one short sentence; the full error stays in the server log
+                        log.warning('chat_message_stream_end: schedule run %s failed: %s', run_id, metadata.get('error'))
+                        reason = run_failure_reason(metadata.get('error'))
+                    try:
+                        finish_schedule_run(
+                            chat_project_id, run_id, 'failed' if is_error else 'success', reason,
+                            msg_group.conversation.id,
+                        )
+                    except Exception:  # noqa: BLE001 -- the chat end stays; the stale sweep closes the run
+                        log.exception('chat_message_stream_end: schedule run %s not finished', run_id)
 
     @web.event('chat_message_stream_partial_save')
     def chat_message_stream_partial_save(self, context, event, payload):
@@ -570,5 +593,12 @@ class Event:
 
                 session.add(msg_group)
                 session.commit()
+                # Only a pause that ends the run closes it; a child or MCP-auth pause keeps streaming
+                run_id = None if msg_group.is_streaming else _schedule_run_id(msg_group.conversation)
+                if run_id:
+                    try:
+                        pause_schedule_run(chat_project_id, run_id, response_metadata)
+                    except Exception:  # noqa: BLE001 -- the pause stays; the stale sweep closes the run
+                        log.exception('chat_message_stream_pause: schedule run %s not closed', run_id)
                 log.debug(f'chat_message_stream_pause: Set is_streaming={msg_group.is_streaming} for message {message_id}'
                           f'{" (HITL interrupt persisted)" if hitl_interrupt or hitl_interrupts else ""}')

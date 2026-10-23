@@ -20,6 +20,8 @@ from .utils.governance import init_governance
 from .utils.governance_settings import has_live_contexts, record_boot_preflight
 from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
+from .utils.schedule_access import register_schedule_permissions
+from .utils.schedule_settings import register_schedule_settings_type
 from .utils.worker_capabilities import (
     CAPABILITIES_EVENT,
     CAPABILITIES_REQUEST_EVENT,
@@ -303,6 +305,13 @@ class Module(module.ModuleModel):
                     "description": "Manage project context content and AI-assisted project context draft generation.",
                 },
                 {
+                    "name": "elitea_core/schedules",
+                    "description": "Run agents and pipelines on a cron schedule: create, edit, pause, resume, "
+                                   "run now, change owner, list runs, export and import schedules, draft one "
+                                   "with AI, set your notices, and allow \"Run without asking\" in the "
+                                   "project. All under /schedules/{mode}/{project_id}.",
+                },
+                {
                     "name": "elitea_core/skills",
                     "description": "Create, update, version, list, and generate skills from natural-language requirements.",
                 },
@@ -317,6 +326,16 @@ class Module(module.ModuleModel):
             ],
             api_module=api_v2,
         )
+        if not hasattr(openapi_registry, "register_endpoint"):  # the preload stub registers nothing
+            return
+        # One handler class serves every Schedules URL, so the folder scan cannot list them (BUG-11)
+        from .utils.constants import SCHEDULES_OPENAPI_TAG  # pylint: disable=C0415
+        from .utils.schedule_openapi import OPENAPI_ENDPOINTS, add_refusal_schema  # pylint: disable=C0415
+        add_refusal_schema(openapi_registry)
+        for endpoint in OPENAPI_ENDPOINTS:
+            openapi_registry.register_endpoint(
+                plugin_name="elitea_core", tags=[SCHEDULES_OPENAPI_TAG], available_to_users=True, mcp_tool=False,
+                **endpoint)
 
     def _init_publish_validation_secret(self):
         """Initialize HMAC signing key for publish validation tokens."""
@@ -532,6 +551,10 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_eval_case_usage_columns", self.migrate_eval_case_usage_columns,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_legacy_pipeline_schedules", self.migrate_legacy_pipeline_schedules,
                 group="R-2.0.8",
             )
             this.for_module("admin").module.register_admin_task(
@@ -775,6 +798,9 @@ class Module(module.ModuleModel):
             }
         })
 
+        # Register schedule permissions for schedules permission family (EL-7011)
+        register_schedule_permissions()
+        register_schedule_settings_type()
         # Autonomous mandates (#6947, C-1009), in the governance.* family of the operator UI. Registered whatever
         # the governance flag says, so roles can be assigned before it is switched on; nothing evaluates them yet
         # (the operator tasks are the only writers).
@@ -1031,6 +1057,7 @@ class Module(module.ModuleModel):
         from .models.message_items import base, text, canvas, context
         from .models.all import ConversationShareToken, ConversationShareTokenIndex  # noqa: F401 — ensure tables are created
         from .models import chat_template  # noqa: F401 — register ChatTemplate with db.Base.metadata
+        from .models import entity_schedule  # noqa: F401 — register the schedule tables with db.Base.metadata
 
         self.thread = Thread(
             target=self.listen_in_memory_event
@@ -1272,6 +1299,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "set_index_schedule_expiration", self.set_index_schedule_expiration
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_legacy_pipeline_schedules", self.migrate_legacy_pipeline_schedules
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_agent_identity_tables", self.create_agent_identity_tables

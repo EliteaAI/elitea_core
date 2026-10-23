@@ -29,11 +29,33 @@ class ConversationList(ConversationBase):
     id: int
 
 
+class ScheduleRunRef(BaseModel):
+    """The run record of a run history row: the schedule is read live, the status stays raw (CR-22, US-38 D6)."""
+    id: int
+    schedule_id: int
+    schedule_name: str
+    status: str
+    trigger: str
+
+
 class ConversationListExtended(ConversationList):
     participants_count: int
     message_groups_count: int
     users_count: int
     duration: float = 0.0
+    execution_type: str = 'chat'  # no stored value: a plain chat (owner decision 2026-10-21, US-50 R3.1)
+    schedule_run: ScheduleRunRef | None = None  # the run record of a run row (CR-22, US-16 R2.4)
+
+    @model_validator(mode='after')
+    def compute_execution_type(self):
+        # Late import: that module loads the DB models
+        from ...utils.pipeline_execution import TriggerType
+        stored = self.meta.get('execution_type')
+        if stored in TriggerType.VALUES:
+            self.execution_type = stored
+        elif self.meta.get('scheduled_run') is True:
+            self.execution_type = 'scheduled'
+        return self
 
     @model_validator(mode='after')
     def strip_support_user_prefix(self):

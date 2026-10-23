@@ -15,6 +15,7 @@ from ..utils.exceptions import InputGuardrailBlockedError, PoolSaturationError
 from .internal_tools import MCP_CURRENT_PROJECT_SUFFIXES, MCP_PROJECT_SCOPED_SUFFIXES
 from .mcp_session import SseSession
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
+from .pipeline_execution import TriggerType
 
 
 class McpProjectScopeError(Exception):
@@ -332,7 +333,8 @@ class McpService:
                     payload_in={"user_input": request.params.arguments["task"], "chat_history": []},
                     raw=None,
                     webhook_signature=None,
-                    return_chat_history=True
+                    return_chat_history=True,
+                    trigger_source=TriggerType.MCP,
                 )
                 #
                 if "error" not in result or result["error"] is None:

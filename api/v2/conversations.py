@@ -48,6 +48,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
              "description": "Filter by participant entity name (e.g. 'application', 'llm')."},
             {"name": "entity_meta_project_id", "in": "query", "required": False, "schema": {"type": "integer"},
              "description": "Owner project of a 'skill' participant; separates own skills from Catalog skills."},
+            {"name": "schedule_id", "in": "query", "required": False, "schema": {"type": "integer"},
+             "description": "Only conversations started by this schedule (meta.schedule_id). Not an integer: 400."},
         ],
         available_to_users=True,
     )
@@ -67,6 +69,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
 
         entity_meta_id = request.args.get('entity_meta_id', type=int) or request.args.get('participant_id', type=int)
 
+        schedule_id = request.args.get('schedule_id')
+        if schedule_id is not None:
+            if not (schedule_id.isascii() and schedule_id.isdecimal()):
+                return {'error': 'schedule_id must be an integer', 'field': 'schedule_id'}, 400
+            schedule_id = int(schedule_id)
+
         result = rpc.timeout(10).chat_list_conversations_rpc(
             project_id=project_id,
             user_id=user_id,
@@ -81,6 +89,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
             participant_id=entity_meta_id,
             entity_name=request.args.get('entity_name'),
             entity_project_id=request.args.get('entity_meta_project_id', type=int),
+            schedule_id=schedule_id,
         )
 
         return result, 200
