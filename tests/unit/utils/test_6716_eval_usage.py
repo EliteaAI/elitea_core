@@ -102,6 +102,7 @@ def test_remainder_without_any_model_cannot_be_priced(usage):
     ({'task_id': 't1'}, 'timeout', 'timeout'),
     (None, 'predict_exception', 'no_envelope'),
     (None, 'budget_blocked', 'budget_blocked'),
+    (None, 'guardrail_blocked', 'guardrail_blocked'),
 ])
 def test_missing_usage_is_not_recorded_never_zero(usage, result, status, reason):
     u = usage.envelope_usage(result, status=status)
@@ -288,6 +289,22 @@ def test_gate_refusal_is_budget_blocked_with_its_scope(runner):
     assert (out['status'], out['budget_scope']) == ('budget_blocked', 'member')
     assert out['execution']['metrics']['budget_scope'] == 'member'
     assert (out['usage']['usage_state'], out['usage']['usage_state_reason']) == ('not_recorded', 'budget_blocked')
+
+
+class _InputGuardrailBlockedError(Exception):
+    type = 'input_guardrail_blocked'
+    message = 'Your message appears to contain credentials. It was not sent to the model.'
+
+
+def test_input_guardrail_refusal_is_guardrail_blocked(runner):
+    """#6886: a case whose input the guardrail blocks is not a predict failure."""
+    def predict(**kw):
+        raise _InputGuardrailBlockedError()
+
+    out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=predict)
+    assert out['status'] == 'guardrail_blocked'
+    assert out['error'] == _InputGuardrailBlockedError.message
+    assert (out['usage']['usage_state'], out['usage']['usage_state_reason']) == ('not_recorded', 'guardrail_blocked')
 
 
 def test_other_exceptions_stay_predict_exception(runner):

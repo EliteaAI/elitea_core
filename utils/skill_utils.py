@@ -35,6 +35,7 @@ from ..models.pd.skill_run_settings import dump_run_settings
 
 DEFAULT_MAX_SKILLS_PER_AGENT = 50
 DEFAULT_MAX_INVOKED_SKILLS_PER_TURN = 5
+DEFAULT_MAX_INSTRUCTIONS_LENGTH = 50000
 
 
 def _skill_limit(key: str, default: int) -> int:
@@ -52,6 +53,10 @@ def get_max_skills_per_agent() -> int:
 
 def get_max_invoked_skills_per_turn() -> int:
     return _skill_limit('max_invoked_skills_per_turn', DEFAULT_MAX_INVOKED_SKILLS_PER_TURN)
+
+
+def get_max_instructions_length() -> int:
+    return _skill_limit('max_instructions_length', DEFAULT_MAX_INSTRUCTIONS_LENGTH)
 
 
 _SKILL_SORT_WHITELIST = frozenset({'created_at', 'name', 'id'})
@@ -133,6 +138,24 @@ class SkillLimitExceededError(SkillError):
         self.entity_version_id = entity_version_id
         self.current_count = current_count
         self.max_allowed = max_allowed
+
+
+class SkillInstructionsTooLongError(SkillError):
+    http_status = 400
+
+    def __init__(self, length: int, max_allowed: int):
+        super().__init__(
+            f"Skill instructions are {length} characters long. "
+            f"Maximum allowed is {max_allowed} characters."
+        )
+        self.length = length
+        self.max_allowed = max_allowed
+
+
+def validate_instructions_length(instructions: str) -> None:
+    max_allowed = get_max_instructions_length()
+    if len(instructions) > max_allowed:
+        raise SkillInstructionsTooLongError(len(instructions), max_allowed)
 
 
 class SkillAlreadyAttachedError(SkillError):
@@ -716,7 +739,7 @@ def attach_public_skill_to_agents(
             # self-healing: the resolve-or-fork lookup above reuses that orphan on the
             # next attach of the same (skill, version), so no cleanup is required.
             result, _errors = this.module.import_wizard(
-                [payload], project_id, author_id,
+                [payload], project_id, author_id, skill_instructions_already_saved=True,
             )
             imported = (result.get('skills') or [])
             if not imported:
@@ -879,8 +902,13 @@ def create_skill(
     skill_data: SkillCreateModel,
     session,
     project_id: int,
+    instructions_already_saved: bool = False,
 ) -> Skill:
     """Create a new skill with its initial version."""
+    if not instructions_already_saved:
+        for version_data in skill_data.versions:
+            validate_instructions_length(version_data.instructions)
+
     # Create skill
     skill = Skill(
         name=skill_data.name,
@@ -1053,8 +1081,12 @@ def create_skill_version(
     skill_id: int,
     version_data: SkillVersionCreateModel,
     session=None,
+    instructions_already_saved: bool = False,
 ) -> dict:
     """Create a new version for an existing skill."""
+    if not instructions_already_saved:
+        validate_instructions_length(version_data.instructions)
+
     with _skill_session(session, project_id) as s:
         # Verify skill exists
         skill = s.query(Skill).filter(Skill.id == skill_id).first()
@@ -1237,6 +1269,7 @@ def import_skill(
     author_id: int,
     *,
     force_new: bool = False,
+    instructions_already_saved: bool = False,
     session=None,
 ) -> SkillImportResultModel:
     """Create a skill in ``project_id``, reusing an existing fork of the same source
@@ -1283,7 +1316,7 @@ def import_skill(
             'versions': payloads[:1],
             'meta': None,
         })
-        skill = create_skill(skill_model, s, project_id)
+        skill = create_skill(skill_model, s, project_id, instructions_already_saved=instructions_already_saved)
         version_map = {v.name: v.id for v in skill.versions}
         for vp in payloads[1:]:
             detail = create_skill_version(
@@ -1291,6 +1324,7 @@ def import_skill(
                 skill_id=skill.id,
                 version_data=SkillVersionCreateModel.model_validate(vp),
                 session=s,
+                instructions_already_saved=instructions_already_saved,
             )
             version_map[vp['name']] = detail['id']
         return SkillImportResultModel(id=skill.id, versions=version_map, reused=False)
@@ -1889,7 +1923,8 @@ def _update_version_fields(session, version: SkillVersion, update_data: SkillVer
     """Apply field updates from ``update_data`` onto ``version`` in place."""
     if update_data.name is not None:
         version.name = update_data.name
-    if update_data.instructions is not None:
+    if update_data.instructions is not None and update_data.instructions != version.instructions:
+        validate_instructions_length(update_data.instructions)
         version.instructions = update_data.instructions
     if update_data.meta is not None:
         version.meta = {**(version.meta or {}), **update_data.meta}
