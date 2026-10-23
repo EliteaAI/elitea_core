@@ -135,12 +135,13 @@ def test_an_over_long_name_is_truncated_without_a_trailing_hyphen(pd_module):
 
 
 def test_the_other_fields_still_truncate(pd_module):
+    instructions_max_length = 7000
     draft = pd_module.GenerateSkillDraftResponse.model_validate({
         'name': 'claude-reviewer',
         'description': 'd' * (pd_module.DESCRIPTION_MAX_LENGTH + 500),
-        'instructions': 'i' * (pd_module.INSTRUCTIONS_MAX_LENGTH + 500),
-    })
+        'instructions': 'i' * (instructions_max_length + 500),
+    }, context={'instructions_max_length': instructions_max_length})
 
     assert draft.name == 'reviewer'
     assert len(draft.description) == pd_module.DESCRIPTION_MAX_LENGTH
-    assert len(draft.instructions) == pd_module.INSTRUCTIONS_MAX_LENGTH
+    assert len(draft.instructions) == instructions_max_length

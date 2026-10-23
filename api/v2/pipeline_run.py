@@ -6,6 +6,7 @@ from pylon.core.tools import log
 from tools import api_tools, auth, config as c, register_openapi
 
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.exceptions import InputGuardrailBlockedError
 from ...utils.predict_utils import PredictPayloadError
 
 
@@ -91,6 +92,8 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return e.errors(), 400
         except PredictPayloadError as e:
             return {"error": str(e)}, 400
+        except InputGuardrailBlockedError as e:
+            return e.body(), 422
         except BaseException as exc:
             log.exception("Pipeline run error: %s", exc)
             return {"error": "Cannot execute pipeline"}, 500
