@@ -102,6 +102,13 @@ def do_predict(monkeypatch, world):  # noqa: F811 -- the fixture imported above
         "utils.sio_utils": {"SioEvents": types.SimpleNamespace()},
         "utils.input_guardrail": {"inspect_and_unsecret": lambda payload, *a, **k: payload},
         "utils.vectorstore": {"get_pgvector_connection_string": lambda _pid: "connstr"},
+        # the governance seams of the predict method; an ungoverned platform reads none of them
+        "models.pd.admission": {"admission_request_from": lambda *a, **k: None},
+        "utils.credential_slots": {"has_free_form_secret": lambda *a, **k: False,
+                                   "mark_free_form_secret": lambda *a, **k: None},
+        "utils.governance": {"is_governed": lambda *a, **k: False},
+        "utils.mandate_admission": {"mandate_admission_request": None},
+        "utils.trigger_principal": {"resolve_trigger_principal": lambda *a, **k: None},
     }
     for name in (PKG, f"{PKG}.methods", f"{PKG}.models", f"{PKG}.models.pd", f"{PKG}.utils"):
         module(name)
