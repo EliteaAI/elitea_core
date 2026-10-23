@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from fixtures.cut_source import load_cut
 
 UTILS = Path(__file__).resolve().parents[2] / "utils"
 STORED_SCHEDULE = {"type": "schedule", "cron": "0 9 * * *", "timezone": "UTC", "created_by": 7}
@@ -35,8 +36,7 @@ def _save(stored_settings, body_settings):
         "loads": lambda _: {}, "IntegrityError": ValueError, "log": MagicMock(),
     }
     names = ("sanitize_trigger_for_write", "applications_update_version")
-    module = ast.Module(body=[_function(n) for n in names], type_ignores=[])
-    exec(compile(module, str(UTILS), "exec"), namespace)  # noqa: S102 - runs the real functions cut out of the source file
+    namespace = load_cut([_function(n) for n in names], namespace, "utils/application_utils.py")  # the real functions cut out of the source files
     version = SimpleNamespace(id=1, name="v1", status="draft", agent_type="pipeline",
                               llm_settings={}, pipeline_settings=stored_settings, meta={})
     session = MagicMock()
