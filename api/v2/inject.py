@@ -13,6 +13,8 @@ from ...models.enums.all import ParticipantTypes
 from ...utils.midturn_injection_utils import is_midturn_injection_blocked_for_project
 from ...utils.sio_utils import get_chat_room, SioEvents
 from ...utils.constants import PROMPT_LIB_MODE
+from ...utils.exceptions import InputGuardrailBlockedError
+from ...utils.input_guardrail import check_chat_input
 
 import uuid as _uuid
 
@@ -52,7 +54,18 @@ class PromptLibAPI(api_tools.APIModeHandler):
                          f"max {MAX_INJECTION_CHARS}). Send it as a new message instead."
             }, 400
 
+        # Checkpoint A: injected text reaches the running turn without passing start_task
+        try:
+            user_input, input_guardrail_verdict = check_chat_input(
+                user_input, project_id, auth.current_user().get('id'),
+            )
+        except InputGuardrailBlockedError as e:
+            return e.body(), 422
+
         injection_id = raw.get("injection_id") or str(_uuid.uuid4())
+        item_meta = {'injection_id': injection_id}
+        if input_guardrail_verdict:
+            item_meta['input_guardrail'] = input_guardrail_verdict
 
         with db.get_session(project_id) as session:
             conversation = session.query(Conversation).filter(
@@ -93,7 +106,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
                 content=user_input,
                 order_index=next_index,
-                meta={'injection_id': injection_id},
+                meta=item_meta,
             )
             session.add(msg)
             session.commit()

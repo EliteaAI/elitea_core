@@ -36,7 +36,7 @@ def test_digest_ignores_key_order(pu):
 def test_twin_is_stamped_with_the_run_settings_digest(pu, monkeypatch):
     captured = []
 
-    def import_wizard(entities, project_id, user_id):
+    def import_wizard(entities, project_id, user_id, **kwargs):
         captured.append(entities[0])
         return {'skills': [{'id': 77}]}, {}
 
