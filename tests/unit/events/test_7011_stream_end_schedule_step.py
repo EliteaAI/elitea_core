@@ -92,6 +92,7 @@ def make_world(monkeypatch):
             "models.message_items.text": {"TextMessageItem": Model},
             "models.message_items.base": {"MessageItem": Model},
             "models.pd.message": {"MessageGroupDetail": types.SimpleNamespace(model_validate=same)},
+            "utils.chat_usage": {"accumulate_chat_usage": none},
             "utils.sio_utils": {"get_chat_room": same, "SioEvents": types.SimpleNamespace(chat_message_sync="sync")},
             "utils.message_stream": {
                 "update_message_group_meta": same, "safe_decode_bytes_in_dict": same, "parse_content_chunks": same},
