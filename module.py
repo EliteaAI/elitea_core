@@ -363,6 +363,7 @@ class Module(module.ModuleModel):
 
     def ready(self):
         self._register_managed_schedules()
+        self._register_input_guardrail_redactor()
         self._bootstrap_platform_schedules()
 
         # ORM create_all() creates missing tenant tables but never expands an
@@ -640,6 +641,7 @@ class Module(module.ModuleModel):
                 closed_budget_scope, dispatch_may_use_llm, dispatch_owner, dispatch_uses_own_model,
             )
             from .utils.exceptions import BudgetDoorClosedError, MaintenanceInProgressError
+            from .utils.input_guardrail import apply_input_guardrail
             if is_maintenance_active():
                 task_name = args[0] if args else kwargs.get("task_name") or "?"
                 log.info(
@@ -661,6 +663,9 @@ class Module(module.ModuleModel):
                     closed_scope, project_id,
                 )
                 raise BudgetDoorClosedError(scope=closed_scope, project_id=project_id)
+            # Input guardrail: raises InputGuardrailBlockedError on block, rewrites the
+            # payload on redact; inert while input_guardrail.enabled is false
+            apply_input_guardrail(kwargs)
             stamp_predict_run_id(kwargs)
             return _original_start_task(*args, **kwargs)
 
@@ -680,6 +685,7 @@ class Module(module.ModuleModel):
             from .utils.maintenance_gate import is_maintenance_active
             from .utils.budget_door import closed_budget_scope, dispatch_owner
             from .utils.exceptions import BudgetDoorClosedError, MaintenanceInProgressError
+            from .utils.input_guardrail import apply_input_guardrail
             if is_maintenance_active():
                 raise MaintenanceInProgressError(task_name=EVAL_RUN_TASK_NAME)
             project_id, owner_id = dispatch_owner(kwargs)
@@ -690,6 +696,7 @@ class Module(module.ModuleModel):
                     closed_scope, project_id,
                 )
                 raise BudgetDoorClosedError(scope=closed_scope, project_id=project_id)
+            apply_input_guardrail(kwargs)
             stamp_predict_run_id(kwargs)
             return _original_eval_start_task(*args, **kwargs)
 
@@ -919,6 +926,19 @@ class Module(module.ModuleModel):
             {"stream_id": p.stream_id, "message_id": p.message_id, "suggestions": p.suggestions},
             to=p.sid,
         )
+
+    def _register_input_guardrail_redactor(self):
+        """Tracing span payloads carry the redacted text, not the detected value (#6886).
+
+        The redactor reads the live policy, so it is inert while the guardrail is off. It
+        returns None for a value it could not fully inspect: tracing masks the whole value.
+        """
+        try:
+            from tools import this  # pylint: disable=E0401,C0415
+            from .utils.input_guardrail import redact_value
+            this.for_module("tracing").module.register_value_redactor(redact_value)
+        except Exception as e:  # pylint: disable=W0703
+            log.debug(f"Input guardrail: tracing redactor not registered: {e}")
 
     def deinit(self):
         log.info('De-initializing')

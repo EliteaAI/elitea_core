@@ -159,3 +159,25 @@ def test_caller_with_both_permissions_discovers_tools(harness):
     assert harness.discover_calls == [
         {"url": TARGET_URL, "credentials": {"token": "resolved-secret"}}
     ]
+
+
+@pytest.mark.parametrize("toolkit_type", ["github", "openapi", "mcp", "McpFoo", "xmcp_test"])
+def test_non_mcp_type_is_rejected_before_expansion_and_discovery(harness, toolkit_type):
+    # Non-MCP types must never reach credential expansion or the indexer connection check
+    harness.user_permissions = {TOOL_DETAILS, UNSECRET}
+
+    response, status = harness.handler.post(project_id=1, toolkit_type=toolkit_type)
+
+    assert status == 400
+    assert response == {"success": False, "error": "toolkit_type must be an MCP type (mcp_*)"}
+    assert harness.expand_calls == []
+    assert harness.discover_calls == []
+
+
+def test_non_mcp_type_without_permissions_is_still_denied(harness):
+    # Permission check runs first, so the type error does not leak to unauthorized callers
+    harness.user_permissions = {TOOL_DETAILS}
+
+    _, status = harness.handler.post(project_id=1, toolkit_type="github")
+
+    assert status == 403
