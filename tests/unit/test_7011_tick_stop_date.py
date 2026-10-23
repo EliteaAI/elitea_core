@@ -9,14 +9,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
-import sqlalchemy.orm
+from sqlalchemy.orm import declarative_base
 from unit.rpc.test_7011_entity_schedules_check import load_tick, tick_caller
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 PAST, FUTURE = datetime.now(UTC) - timedelta(days=1), datetime.now(UTC) + timedelta(days=1)  # the tick reads the clock
 
 
-class FakeEntitySchedule(sa.orm.declarative_base()):
+class FakeEntitySchedule(declarative_base()):
     __tablename__ = "entity_schedules"
     id = sa.Column(sa.Integer, primary_key=True)
     enabled = sa.Column(sa.Boolean)
