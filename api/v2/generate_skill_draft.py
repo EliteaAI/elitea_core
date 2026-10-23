@@ -45,6 +45,7 @@ from ...utils.generate_skill_utils import (
     build_edit_skill_system_prompt,
 )
 from ...utils.service_prompt_utils import get_service_prompt
+from ...utils.skill_utils import get_max_instructions_length
 from ...utils.utils import extract_json_from_text
 
 _SERVICE_PROMPT_KEY_CREATE = "skill_generator"
@@ -191,7 +192,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
             return {"error": "LLM returned unparseable output", "parse_error": str(e)}, 422
 
         try:
-            draft = GenerateSkillDraftResponse.model_validate(parsed)
+            draft = GenerateSkillDraftResponse.model_validate(
+                parsed, context={'instructions_max_length': get_max_instructions_length()},
+            )
         except ValidationError as e:
             log.warning("generate_skill_draft: validation failed: %s", e.errors())
             return {"error": "Generated draft failed validation", "details": e.errors(), "raw": parsed}, 422
