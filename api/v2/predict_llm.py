@@ -29,7 +29,7 @@ from ...models.pd.predict_llm import LLMPredictRequest  # pylint: disable=E0402
 from ...utils.constants import PROMPT_LIB_MODE  # pylint: disable=E0402
 from ...utils.predict_utils import PredictPayloadError, get_project_context
 from ...utils.project_context_utils import prepare_project_context_delivery
-from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError
+from ...utils.exceptions import PoolSaturationError, BudgetDoorClosedError, InputGuardrailBlockedError
 
 
 class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
@@ -124,6 +124,8 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
             return {"error": str(e)}, 400
         except BudgetDoorClosedError as e:
             return e.body(), 429
+        except InputGuardrailBlockedError as e:
+            return e.body(), 422
         except PermissionError as e:
             return {"error": str(e)}, 403
         except PoolSaturationError as e:

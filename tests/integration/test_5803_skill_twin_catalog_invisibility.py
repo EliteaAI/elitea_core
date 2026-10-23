@@ -234,7 +234,7 @@ def _skill_info(instructions='x' * 120):
 def test_forked_twin_payload_has_no_status_and_namespaced_lineage(pu, monkeypatch):
     captured = {}
 
-    def import_wizard(entities, project_id, user_id):
+    def import_wizard(entities, project_id, user_id, **kwargs):
         captured['entities'] = entities
         captured['project_id'] = project_id
         return {'skills': [{'id': 77}]}, {}
@@ -273,7 +273,7 @@ def test_forked_twin_payload_has_no_status_and_namespaced_lineage(pu, monkeypatc
 def test_twin_import_uuid_tracks_content(pu, monkeypatch):
     seen = []
 
-    def import_wizard(entities, project_id, user_id):
+    def import_wizard(entities, project_id, user_id, **kwargs):
         seen.append(entities[0]['import_uuid'])
         return {'skills': [{'id': 77}]}, {}
 
