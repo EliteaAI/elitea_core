@@ -83,7 +83,7 @@ from ..utils.pipeline_hitl_history import (
     create_pipeline_hitl_resume_segments,
     get_direct_pipeline_hitl_interrupt,
 )
-from ..utils.pipeline_execution import TriggerType
+from ..utils.pipeline_execution import TriggerType, with_execution_type
 
 
 TIMEOUT_CANCEL_TEXT = "No response, cancelled by timeout"
@@ -1288,6 +1288,7 @@ class RPC:
                 )
                 return {"error": "This message has already been submitted"}
 
+            conversation.meta = with_execution_type(conversation.meta, TriggerType.CHAT)
             # Checkpoint A (#6886): before the turn is stored, broadcast or used to
             # name the conversation. A blocked turn is stored redacted with the refusal
             # as its answer (plan D5), so the card survives a reload; REST callers get

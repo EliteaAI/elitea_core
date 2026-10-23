@@ -20,6 +20,8 @@ from .utils.governance import init_governance
 from .utils.governance_settings import has_live_contexts, record_boot_preflight
 from .utils.mandate_admission import TicketStore
 from .utils.run_id import stamp_predict_run_id
+from .utils.schedule_access import register_schedule_permissions
+from .utils.schedule_settings import register_schedule_settings_type
 from .utils.worker_capabilities import (
     CAPABILITIES_EVENT,
     CAPABILITIES_REQUEST_EVENT,
@@ -306,7 +308,8 @@ class Module(module.ModuleModel):
                     "name": "elitea_core/schedules",
                     "description": "Run agents and pipelines on a cron schedule: create, edit, pause, resume, "
                                    "run now, change owner, list runs, export and import schedules, draft one "
-                                   "with AI, and set your notices. All under /schedules/{mode}/{project_id}.",
+                                   "with AI, set your notices, and allow \"Run without asking\" in the "
+                                   "project. All under /schedules/{mode}/{project_id}.",
                 },
                 {
                     "name": "elitea_core/skills",
@@ -552,6 +555,10 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.register_admin_task(
                 "migrate_eval_case_usage_columns", self.migrate_eval_case_usage_columns,
+                group="R-2.0.8",
+            )
+            this.for_module("admin").module.register_admin_task(
+                "migrate_legacy_pipeline_schedules", self.migrate_legacy_pipeline_schedules,
                 group="R-2.0.8",
             )
             this.for_module("admin").module.register_admin_task(
@@ -849,6 +856,9 @@ class Module(module.ModuleModel):
             }
         })
 
+        # Register schedule permissions for schedules permission family (EL-7011)
+        register_schedule_permissions()
+        register_schedule_settings_type()
         # Autonomous mandates (#6947, C-1009), in the governance.* family of the operator UI. Registered whatever
         # the governance flag says, so roles can be assigned before it is switched on; nothing evaluates them yet
         # (the operator tasks are the only writers).
@@ -1355,6 +1365,9 @@ class Module(module.ModuleModel):
             )
             this.for_module("admin").module.unregister_admin_task(
                 "prune_orphaned_index_schedules", self.prune_orphaned_index_schedules
+            )
+            this.for_module("admin").module.unregister_admin_task(
+                "migrate_legacy_pipeline_schedules", self.migrate_legacy_pipeline_schedules
             )
             this.for_module("admin").module.unregister_admin_task(
                 "create_agent_identity_tables", self.create_agent_identity_tables

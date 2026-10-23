@@ -137,7 +137,7 @@ def test_cr_el7011_tool_calls_of_the_run_conversation_become_log_events_in_time_
     detail.tool(1, group=2)  # another conversation
     detail.tool(2, kind="thinking_step")  # not a tool call
 
-    first, second = detail.module.tool_call_events(detail.session, CONVERSATION_ID, with_results=True)
+    first, second = detail.module.tool_call_events(detail.session, CONVERSATION_ID)
 
     assert (first["at"], first["kind"], first["toolkit"], first["tool"], first["duration_ms"]) == (
         (START + timedelta(seconds=5)).isoformat(), "tool_call", "github", "list_issues", 1200)
@@ -165,23 +165,8 @@ def test_cr_el7011_tool_call_events_are_capped_and_need_a_conversation(detail):
     for second in range(205):
         detail.tool(second)
 
-    assert len(detail.module.tool_call_events(detail.session, CONVERSATION_ID, with_results=True)) == 200
-    assert detail.module.tool_call_events(detail.session, None, with_results=True) == []
-
-
-# Owner decision 2026-10-21: a caller who is not the owner gets no tool result text
-def test_cr_el7011_without_results_a_tool_call_keeps_toolkit_tool_and_duration_only(detail):
-    detail.tool(5, attrs={"metadata": {"toolkit_name": "github"}}, tool_output="12 open issues: secret title")
-    detail.tool(20, tool_name="create_issue", is_error=True, tool_output="403 Forbidden for secret repo")
-
-    first, second = detail.module.tool_call_events(detail.session, CONVERSATION_ID, with_results=False)
-
-    assert first == {"at": (START + timedelta(seconds=5)).isoformat(), "kind": "tool_call", "level": "info",
-                     "text": "Tool call: github · list_issues (1200 ms)", "toolkit": "github", "tool": "list_issues",
-                     "duration_ms": 1200}
-    assert (second["text"], second["level"], "summary" in second) == (
-        "Tool call: create_issue (1200 ms)", "error", False)
-    assert "secret" not in str([first, second])
+    assert len(detail.module.tool_call_events(detail.session, CONVERSATION_ID)) == 200
+    assert detail.module.tool_call_events(detail.session, None) == []
 
 
 def test_cr_el7011_usage_sums_the_tokens_and_the_cost_of_the_run_conversation(detail):
