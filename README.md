@@ -1,6 +1,8 @@
 # elitea_core
 ELITEA plugin with core platform functionality
 
+Credential governance (profiles, identity boundaries, acceptance contract): [docs/credential-governance/](docs/credential-governance/README.md)
+
 
 ## Running Tests
 
