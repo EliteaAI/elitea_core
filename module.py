@@ -327,7 +327,8 @@ class Module(module.ModuleModel):
             return
         # One handler class serves every Schedules URL, so the folder scan cannot list them (BUG-11)
         from .utils.constants import SCHEDULES_OPENAPI_TAG  # pylint: disable=C0415
-        from .utils.schedule_openapi import OPENAPI_ENDPOINTS  # pylint: disable=C0415
+        from .utils.schedule_openapi import OPENAPI_ENDPOINTS, add_refusal_schema  # pylint: disable=C0415
+        add_refusal_schema(openapi_registry)
         for endpoint in OPENAPI_ENDPOINTS:
             openapi_registry.register_endpoint(
                 plugin_name="elitea_core", tags=[SCHEDULES_OPENAPI_TAG], available_to_users=True, mcp_tool=False,
