@@ -13,6 +13,7 @@ from ..utils.budget_door import schema_may_use_llm
 from ..utils.utils import verify_signature
 from ..utils.exceptions import VerifySignatureError, PoolSaturationError
 from ..utils.pipeline_execution import TriggerType
+from ..utils.input_guardrail import inspect_and_unsecret
 from ..utils.sio_utils import SioEvents
 from ..utils.vectorstore import get_pgvector_connection_string
 
@@ -108,8 +109,8 @@ class Method:
                 parsed.context_settings = ContextStrategyModel(**context_strategy)
 
         payload: dict = generate_predict_payload(parsed, user_id=user_id, eligible_for_autoapproval=True, return_chat_history=return_chat_history)
-        # Same as predict_sio: resolve {{secret.*}} and hand the worker its pgvector connstr pre-fork
-        payload = VaultClient(parsed.project_id).unsecret(payload)
+        # Same as predict_sio: inspect, resolve {{secret.*}} and hand the worker its pgvector connstr pre-fork
+        payload = inspect_and_unsecret(payload, VaultClient(parsed.project_id), parsed.project_id, user_id)
         payload['trigger_source'] = trigger_source  # usage analytics groups runs by it (BUG-12)
         try:
             payload['pgvector_connstr'] = get_pgvector_connection_string(parsed.project_id)
