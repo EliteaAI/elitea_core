@@ -178,8 +178,9 @@ def extract_conversation_cases(
 def tool_calls_by_group(session, group_ids: List[int]) -> Dict[int, List[str]]:
     """``{group_id: [tool_name, ...]}`` for the groups' ``tool_call`` trace steps, in the order the
     chat renders them (``started_at`` nulls last, then ``id``). One query; names only, so the
-    ``tool_output`` blobs are never read. Includes sub-agent calls, as the run's ``tool_sequence``
-    does.
+    ``tool_output`` blobs are never read. The agent's own calls only: a sub-agent's internal calls
+    are left out, as ``trajectory.tool_match`` leaves them out of the run (#7015 P3), so a promoted
+    reference scores 100 on a replay of the same conversation.
     """
     if not group_ids:
         return {}
@@ -187,14 +188,15 @@ def tool_calls_by_group(session, group_ids: List[int]) -> Dict[int, List[str]]:
     from ..models.message_trace_step import MessageTraceStep
 
     rows = (
-        session.query(MessageTraceStep.message_group_id, MessageTraceStep.tool_name)
+        session.query(MessageTraceStep.message_group_id, MessageTraceStep.tool_name,
+                      MessageTraceStep.parent_agent_name)
         .filter(MessageTraceStep.message_group_id.in_(list(group_ids)),
                 MessageTraceStep.kind == 'tool_call')
         .order_by(asc(MessageTraceStep.started_at).nullslast(), asc(MessageTraceStep.id))
         .all()
     )
     calls: Dict[int, List[str]] = {}
-    for group_id, tool_name in rows:
-        if tool_name:
+    for group_id, tool_name, parent_agent_name in rows:
+        if tool_name and not parent_agent_name:
             calls.setdefault(group_id, []).append(tool_name)
     return calls

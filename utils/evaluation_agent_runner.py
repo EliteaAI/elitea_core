@@ -5,14 +5,14 @@ Closes the §14.2 measurement gap: an offline-batch case stores only an ``input`
 **pinned** ``ApplicationVersion`` over each case's input to produce that output, so the AI/code
 engines score a real agent response instead of an empty string.
 
-Per the H4 scope decision (recommend: single-turn agents only, pipelines deferred):
-  * **Supported** — every conversational ``agent_type`` runnable through the tool-full single-turn
-    ``predict_sio`` path the chat surface already uses (``openai``/``react``/``elitea``/… — the same
-    primitive the judge rides, but with the *real* version_details, so the agent's own tools and
-    instructions drive the response).
-  * **Deferred** — ``pipeline`` (multi-node, possible HITL pauses) does not fit a single input→output
-    turn (§8.1). An unsupported agent yields a clear per-case *unsupported* outcome, never a crash,
-    and the run's machine bindings become error rows (E4 fail-closed, handled by the orchestrator).
+Every ``agent_type`` runs through the tool-full single-turn ``predict_sio`` path the chat surface
+already uses (``openai``/``react``/``elitea``/``pipeline``/… — the same primitive the judge rides,
+but with the *real* version_details, so the agent's own tools and instructions drive the response).
+Pipelines were deferred in H4 and are supported since #7015: the indexer records their node spans
+in the envelope, and a HITL node pause fails the case like an agent's (``fail_case``).
+:data:`UNSUPPORTED_AGENT_TYPES` stays for a future type that cannot run as one turn: such an agent
+yields a clear per-case *unsupported* outcome, never a crash, and the run's machine bindings become
+error rows (E4 fail-closed, handled by the orchestrator).
 
 Split of responsibility (mirrors :mod:`llm_judge`):
   * pure builders (:func:`build_agent_predict_data`, :func:`merge_case_variables`,
@@ -43,8 +43,8 @@ from typing import Callable, List, Optional
 from uuid import uuid4
 
 # agent_type values that DO NOT fit the single-turn input->output contract (§8.1). Kept as a literal
-# set so the pure core needs no ORM/enum import; mirrors models.enums.all.AgentTypes.pipeline.
-UNSUPPORTED_AGENT_TYPES = frozenset({'pipeline'})
+# set so the pure core needs no ORM/enum import. Empty since pipelines became supported (#7015).
+UNSUPPORTED_AGENT_TYPES = frozenset()
 
 DEFAULT_AGENT_TIMEOUT = 120  # agents run tools + may chain steps, so more headroom than the judge
 _ASSISTANT_ROLES = ('assistant', 'ai')
@@ -56,8 +56,8 @@ _SDK_NO_OUTPUT_SENTINEL = 'Assistant run has been completed, but output is None.
 
 def agent_type_supported(version_details: dict) -> bool:
     """True when the version's ``agent_type`` can run as a single input→output turn (§8.1). Unknown
-    /missing agent_type is treated as supported (defaults to the conversational path); only the
-    explicitly multi-node types (``pipeline``) are deferred for P1."""
+    /missing agent_type is treated as supported (defaults to the conversational path); only a type
+    listed in :data:`UNSUPPORTED_AGENT_TYPES` is refused."""
     agent_type = (version_details or {}).get('agent_type')
     return agent_type not in UNSUPPORTED_AGENT_TYPES
 
@@ -190,6 +190,7 @@ def run_agent(
     step_limit: Optional[int] = None,
     case_index: Optional[int] = None,
     store_tool_outputs: bool = True,
+    dispatch_io=None,
 ) -> dict:
     """Run the pinned agent over one case's input and return a structured outcome (never raises).
 
@@ -201,9 +202,16 @@ def run_agent(
     ``predict_sio`` has neither a sid nor a live request to recover the acting user from, and
     without it every case fails with 'User token not found'.
 
-    A run that paused for human review (``guardrail_paused``) or parked on a sub-agent fan-out
-    (``parked``) fails the case even when text preceded the pause: nobody can answer the prompt in
-    a batch run, so that text is not the agent's answer (design §4.5).
+    A run that paused for human review (``guardrail_paused``) fails the case even when text
+    preceded the pause: nobody can answer the prompt in a batch run, so that text is not the
+    agent's answer (design §4.5).
+
+    A run that parks on a dispatched sub-agent fan-out is waited for inside the same time limit
+    (#7015, :mod:`evaluation_dispatch`): the reconcile's answer is the case's output, and the
+    evidence covers the parent, every child and the reconcile. A fan-out that does not finish in
+    time is stopped and ends as ``timeout`` with the partial evidence. ``dispatch_io`` is the
+    platform I/O for that wait; it defaults to this module's task node and Redis when ``predict``
+    is not injected, and without it a parked run stays ``parked``.
 
     ``case_index`` with ``platform_run_id`` makes the stream id, which the ledger keeps as the
     row's ``conversation_id``, name this case, so settlement can find its ledger rows.
@@ -214,23 +222,26 @@ def run_agent(
     from .evaluation_execution import extract_execution, is_parked, pause_details
     from .evaluation_usage import ROLE_AGENT, case_stream_key, envelope_usage, not_applicable_usage
 
-    def _outcome(status, output, error, result=None, latency_ms=None):
+    def _outcome(status, output, error, result=None, latency_ms=None, evidence_status=None):
+        # evidence_status reads an envelope a no-envelope status (a dispatch timeout) would drop
+        evidence_status = evidence_status or status
         return {'status': status, 'output': output, 'error': error,
-                'execution': extract_execution(result, status=status, latency_ms=latency_ms,
+                'execution': extract_execution(result, status=evidence_status, latency_ms=latency_ms,
                                                error=error or _predict_error_text(result),
                                                store_tool_outputs=store_tool_outputs),
                 'usage': (not_applicable_usage('unsupported') if status == 'unsupported'
-                          else envelope_usage(result, status=status))}
+                          else envelope_usage(result, status=evidence_status))}
 
     if not agent_type_supported(version_details):
         agent_type = (version_details or {}).get('agent_type')
         return _outcome('unsupported', None,
-                        f"agent_type '{agent_type}' is not supported for live batch execution "
-                        '(P1 scope: single-turn agents only, pipelines deferred)')
+                        f"agent_type '{agent_type}' is not supported for live batch execution")
 
     if predict is None:
         from tools import this
         predict = this.module.predict_sio
+        if dispatch_io is None:
+            dispatch_io = _platform_dispatch_io(this.module)
 
     data = build_agent_predict_data(project_id, version_details, case.get('input'),
                                     case.get('variables'), step_limit=step_limit,
@@ -264,6 +275,21 @@ def run_agent(
             pass
         return _outcome('timeout', None, f'agent timed out after {timeout}s', latency_ms=latency_ms)
 
+    dispatch = None
+    if is_parked(result) and dispatch_io is not None:
+        from .evaluation_dispatch import RECONCILED, await_dispatch
+        # What is left of the case's limit, on the clock the wait runs on
+        remaining = timeout - (time.monotonic() - started)
+        dispatch = await_dispatch(result, deadline=dispatch_io.clock() + remaining, io=dispatch_io)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if dispatch['state'] != RECONCILED:
+            outcome = _outcome('timeout', None,
+                               f"agent's sub-agent fan-out did not finish within {timeout}s "
+                               f"({dispatch['state']})",
+                               dispatch['result'], latency_ms, evidence_status='parked')
+            return _with_dispatch(outcome, dispatch)
+        result = dispatch['result']
+
     if is_parked(result):
         return _outcome('parked', None,
                         'agent parked on a sub-agent fan-out, which a batch run cannot resume',
@@ -271,15 +297,49 @@ def run_agent(
     pause = pause_details(result)
     if pause is not None:
         what = pause.get('tool_name') or pause.get('node_name') or pause.get('guardrail_type') or 'a guardrail'
-        return _outcome('guardrail_paused', None,
-                        f'agent paused for human review at {what}; batch runs fail the case', result,
-                        latency_ms)
+        return _with_dispatch(_outcome('guardrail_paused', None,
+                                       f'agent paused for human review at {what}; batch runs fail the case',
+                                       result, latency_ms), dispatch)
 
     output = extract_agent_output(result)
     if output is not None:
-        return _outcome('ok', output, None, result, latency_ms)
+        return _with_dispatch(_outcome('ok', output, None, result, latency_ms), dispatch)
 
     err = _predict_error_text(result)
     if err:
-        return _outcome('predict_error', None, err, result, latency_ms)
-    return _outcome('empty', None, 'agent produced no assistant output', result, latency_ms)
+        return _with_dispatch(_outcome('predict_error', None, err, result, latency_ms), dispatch)
+    return _with_dispatch(_outcome('empty', None, 'agent produced no assistant output', result, latency_ms),
+                          dispatch)
+
+
+def _with_dispatch(outcome: dict, dispatch: Optional[dict]) -> dict:
+    """Record how a dispatched fan-out went in the case's metrics (no-op for a plain run)."""
+    if dispatch is not None:
+        outcome['dispatch_state'] = dispatch['state']
+        outcome['execution'].setdefault('metrics', {}).update(
+            dispatch_state=dispatch['state'], dispatch_waves=dispatch['waves'],
+            dispatch_children=dispatch['children'])
+    return outcome
+
+
+def _platform_dispatch_io(module):
+    """The :class:`evaluation_dispatch.DispatchIO` of a live pylon_main."""
+    from .evaluation_dispatch import DispatchIO
+
+    def _join(task_id, timeout):
+        result = module.task_node.join_task(task_id, timeout=max(int(timeout), 1))
+        return ... if result is ... else {'result': result}
+
+    def _task_result(task_id):
+        result = module.task_node.get_task_result(task_id)
+        return None if result is ... else {'result': result}
+
+    return DispatchIO(
+        pointer=module.parallel_dispatch_reconcile_pointer,
+        epoch_children=module.parallel_dispatch_epoch_children,
+        join=_join,
+        task_result=_task_result,
+        # stop_task also stops the children of a reconcile that parked again
+        stop_task=module.stop_task,
+        stop_epoch=module.parallel_dispatch_stop_epoch,
+    )

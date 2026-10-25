@@ -197,6 +197,13 @@ def test_metrics_from_recorded_run(execution):
         'llm_calls': 3, 'tool_calls': 1, 'distinct_tools': 1, 'tool_errors': 0,
         'retries': 0, 'redundant_calls': 0, 'step_limit_hit': False,
         'guardrail_events': 0, 'latency_ms': 47_000, 'final_answer_ms': metrics['final_answer_ms'],
+        # The recorded run calls a sub-agent, so its steps are split by agent (#7015 P3).
+        'agents': [
+            {'agent': None, 'llm_calls': 2, 'tool_calls': 1, 'input_tokens': 7322, 'output_tokens': 125,
+             'cost': None, 'source': 'trajectory'},
+            {'agent': 'Child Writer', 'llm_calls': 1, 'tool_calls': 0, 'input_tokens': 53,
+             'output_tokens': 4376, 'cost': None, 'source': 'trajectory'},
+        ],
     }
     # The run diff reads this stored value instead of the trajectory (performance §3.4).
     trajectory = execution.extract_execution(_envelope(), status='ok', latency_ms=47_000)['trajectory']
@@ -276,8 +283,9 @@ def test_run_agent_exception_is_not_recorded(runner):
     assert out['execution']['trajectory_state_reason'] == 'no_envelope'
 
 
-def test_run_agent_unsupported_is_not_applicable(runner):
-    out = runner.run_agent(1, {'agent_type': 'pipeline'}, {'input': 'q'}, predict=lambda **kw: None)
+def test_run_agent_unsupported_is_not_applicable(runner, monkeypatch):
+    monkeypatch.setattr(runner, 'UNSUPPORTED_AGENT_TYPES', frozenset({'future'}))
+    out = runner.run_agent(1, {'agent_type': 'future'}, {'input': 'q'}, predict=lambda **kw: None)
     assert out['execution']['trajectory_state'] == 'not_applicable'
 
 

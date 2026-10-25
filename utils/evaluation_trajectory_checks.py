@@ -125,7 +125,9 @@ if _traj is None or _exp is None:
 else:
     mode = _exp.get('match') or 'superset'
     expected = [t for t in (_exp.get('tools') or []) if isinstance(t, dict) and t.get('name')]
-    actual = _tool_steps(_traj)
+    # The agent under test's own calls (#7015 P3): a sub-agent's internal tools are its business,
+    # and the reference names the sub-agent call itself.
+    actual = [s for s in _tool_steps(_traj) if not s.get('parent_agent')]
     if not expected and mode in ('superset', 'in_order'):
         result = 'na'  # nothing is required, so there is nothing to match
     elif mode == 'exact':
@@ -289,7 +291,8 @@ CHECKS = {
             "order, extras allowed), any_order (F1 of expected vs actual calls), subset (share of "
             "actual calls that were expected), superset (share of expected calls made; the default). "
             "Expected `args` are compared per `args_match` (subset by default, or exact); an "
-            "argument masked as a secret when stored matches on presence only. Skipped when the "
+            "argument masked as a secret when stored matches on presence only. Only the agent's "
+            "own calls count: a sub-agent's internal tool calls are not matched. Skipped when the "
             "case has no expected trajectory."),
         'body': _TOOL_MATCH, 'return_contract': 'number',
         'scale_type': 'continuous', 'scale_min': 0.0, 'scale_max': 1.0,

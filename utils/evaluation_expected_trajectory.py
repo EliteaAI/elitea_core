@@ -14,7 +14,8 @@ Shape (normalized; keys whose value is unset are omitted)::
       "allow_repeat": ["get_job_status"]
     }
 
-``match`` compares the expected ``tools`` with the case's recorded ``tool_sequence``:
+``match`` compares the expected ``tools`` with the agent's own recorded tool calls. A sub-agent's
+internal calls are left out (#7015 P3); the call *to* the sub-agent is one of the agent's calls:
 
 * ``exact`` — the same calls in the same order, nothing else;
 * ``in_order`` — the expected calls appear in that order; other calls may sit between them;
