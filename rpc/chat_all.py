@@ -744,7 +744,8 @@ def _resolve_application_llm_settings(
     return llm_settings
 
 
-def generate_payload(session, msg_group: ConversationMessageGroup, predict_payload: SioPredictModel) -> dict:
+def generate_payload(session, msg_group: ConversationMessageGroup, predict_payload: SioPredictModel,
+                     strict_skill_mentions: bool = False) -> dict:
     participant_chat_settings: ParticipantMapping = session.query(
         ParticipantMapping.entity_settings
     ).where(
@@ -965,7 +966,9 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
 
     try:
-        apply_participant_skill_mentions(session, msg_group, result, predict_payload.project_id)
+        apply_participant_skill_mentions(
+            session, msg_group, result, predict_payload.project_id, strict_mentions=strict_skill_mentions,
+        )
     except UnknownSkillMentionError as e:
         raise PayloadGenerationError(str(e)) from e
 
@@ -1490,7 +1493,9 @@ class RPC:
                 # here we need to generate payload
                 if rpc_func := CHAT_PREDICT_MAPPER.get(msg_group.sent_to.entity_name):
                     try:
-                        payload: dict = generate_payload(session, msg_group=msg_group, predict_payload=parsed)
+                        payload: dict = generate_payload(
+                            session, msg_group=msg_group, predict_payload=parsed, strict_skill_mentions=True,
+                        )
                     except PayloadGenerationError as e:
                         # raise SioValidationError(
                         #     sio=self.context.sio,

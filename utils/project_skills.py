@@ -5,14 +5,13 @@ load_skill, and `~name` loads at most the per-turn cap of bodies here.
 """
 import difflib
 import re
-from queue import Empty
 from typing import Optional
 
 from pylon.core.tools import log
 from sqlalchemy import func
-from tools import db, rpc_tools
+from tools import context, db, rpc_tools
 
-from .folder_access import folder_ids_exclusion_clause, get_restricted_folder_ids
+from .folder_access import folder_ids_exclusion_clause
 from .skill_utils import get_max_invoked_skills_per_turn
 from .support_utils import get_support_config
 from ..models.enums.all import ParticipantTypes
@@ -21,6 +20,7 @@ from ..models.skill import Skill, SkillVersion
 
 PROJECT_SKILLS_CONFIG_TYPE = 'project_skills'
 SKILL_ORIGIN_PROJECT = 'project'
+SOCIAL_PLUGIN = 'social'
 BASE_VERSION_NAME = 'base'
 DID_YOU_MEAN_CUTOFF = 0.6
 MENTION_TOKEN_PATTERN = re.compile(r'(?<![0-9A-Za-z~-])~([a-z0-9][a-z0-9-]{0,62})(?![0-9A-Za-z-])', re.IGNORECASE)
@@ -57,25 +57,37 @@ def only_the_sender_reads(conversation, sender_id) -> bool:
     return bool(conversation.is_private) and conversation_user_ids(conversation) <= {str(sender_id)}
 
 
+def social_installed() -> bool:
+    """Folders exist only with the social plugin; when that cannot be told, assume they do."""
+    try:
+        return SOCIAL_PLUGIN in context.module_manager.modules
+    except Exception:  # pylint: disable=W0718
+        return True
+
+
+def user_restricted_folder_ids(project_id: int, user_id) -> list:
+    """Unlike folder_access.get_restricted_folder_ids, an RPC timeout (queue.Empty) propagates instead of reading as "no folders"."""
+    return rpc_tools.RpcMixin().rpc.timeout(3).social_get_restricted_folder_ids(
+        project_id=project_id, entity_type='skill', user_id=user_id,
+    ) or []
+
+
 def restricted_folder_ids_for_everyone(project_id: int) -> list:
     rpc = rpc_tools.RpcMixin().rpc
-    try:
-        supported = rpc.timeout(3).social_folder_permissions_supported(project_id)
-    except Empty:
-        log.debug('social_folder_permissions_supported unavailable, no folder filtering applied')
-        return []
-    if not supported:
+    if not rpc.timeout(3).social_folder_permissions_supported(project_id):
         return []
     member_ids = rpc.timeout(5).admin_get_users_ids_in_project(project_id=project_id) or []
     restricted = set()
     for member_id in {int(member_id) for member_id in member_ids}:
-        restricted.update(get_restricted_folder_ids(project_id, 'skill', member_id))
+        restricted.update(user_restricted_folder_ids(project_id, member_id))
     return sorted(restricted)
 
 
 def restricted_folder_ids_for_chat(project_id: int, sender_id, conversation) -> list:
+    if not social_installed():
+        return []
     if only_the_sender_reads(conversation, sender_id):
-        return get_restricted_folder_ids(project_id, 'skill', sender_id)
+        return user_restricted_folder_ids(project_id, sender_id)
     return restricted_folder_ids_for_everyone(project_id)
 
 
@@ -169,16 +181,22 @@ def load_skill_bodies(project_id: int, version_ids: list) -> dict:
     return {version_id: instructions for version_id, instructions in rows}
 
 
-def resolve_mentioned_project_skills(user_input, known_names: set, catalog: list, project_id: int) -> list:
-    """Catalog entries named by `~token` in the message, with their bodies, at most the per-turn cap."""
+def resolve_mentioned_project_skills(user_input, known_names: set, catalog: list, project_id: int,
+                                     strict: bool = False) -> list:
+    """Catalog entries named by `~token` in the message, with their bodies, at most the per-turn cap.
+
+    Only a fresh send is strict: a regenerated or continued message was accepted
+    against an older catalog, so its unknown tokens stay literal instead of failing.
+    """
     known = {name.lower() for name in known_names if name}
     tokens = [token for token in mention_tokens(user_input) if token not in known]
     if not tokens:
         return []
     by_name = {entry['name'].lower(): entry for entry in catalog}
-    error = did_you_mean_error([token for token in tokens if token not in by_name], known | set(by_name))
-    if error is not None:
-        raise error
+    if strict:
+        error = did_you_mean_error([token for token in tokens if token not in by_name], known | set(by_name))
+        if error is not None:
+            raise error
     mentioned = [by_name[token] for token in tokens if token in by_name][:get_max_invoked_skills_per_turn()]
     bodies = load_skill_bodies(project_id, [entry['skill_version_id'] for entry in mentioned])
     return [{**entry, 'instructions': bodies.get(entry['skill_version_id']) or ''} for entry in mentioned]

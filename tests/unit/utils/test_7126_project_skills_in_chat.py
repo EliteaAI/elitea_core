@@ -4,6 +4,7 @@ import importlib.util
 import pathlib
 import sys
 import types
+from queue import Empty
 
 import pytest
 
@@ -102,21 +103,28 @@ class TestSetting:
 class TestAccessRule:
     @pytest.fixture
     def calls(self, project_skills, monkeypatch):
-        calls = {'restricted': [], 'members': 0, 'supported': True, 'rows': []}
+        calls = {'restricted': [], 'members': 0, 'supported': True, 'rows': [], 'timeouts': set()}
 
-        def restricted(project_id, entity_types, user_id=None):
+        def restricted(project_id, entity_type, user_id):
             calls['restricted'].append(user_id)
+            if user_id in calls['timeouts']:
+                raise Empty()
             return {5: [50], 6: [60], 7: []}.get(user_id, [])
+
+        def supported(project_id):
+            if 'supported' in calls['timeouts']:
+                raise Empty()
+            return calls['supported']
 
         def members(project_id):
             calls['members'] += 1
             return [5, 6, 7, 7]
 
         rpc = types.SimpleNamespace(
-            social_folder_permissions_supported=lambda project_id: calls['supported'],
+            social_folder_permissions_supported=supported,
             admin_get_users_ids_in_project=members,
+            social_get_restricted_folder_ids=restricted,
         )
-        monkeypatch.setattr(project_skills, 'get_restricted_folder_ids', restricted)
         monkeypatch.setattr(project_skills.rpc_tools, 'RpcMixin', lambda: types.SimpleNamespace(
             rpc=types.SimpleNamespace(timeout=lambda seconds: rpc),
         ))
@@ -152,16 +160,35 @@ class TestAccessRule:
         assert calls['members'] == 1
         assert len(calls['restricted']) == 3
 
+    @pytest.mark.parametrize('timeout, user_ids', [
+        (6, (5, 6)),
+        (5, (5,)),
+        ('supported', (5, 6)),
+    ], ids=['one member of a shared chat', 'the sender of a private chat', 'the permissions probe'])
+    def test_a_social_timeout_offers_nothing_instead_of_dropping_restrictions(self, project_skills, calls, timeout, user_ids):
+        calls['timeouts'].add(timeout)
+
+        assert project_skills.project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, user_ids)) == []
+        assert calls['rows'] == []
+
+    def test_without_the_social_plugin_there_are_no_folders_to_look_up(self, project_skills, calls, monkeypatch):
+        monkeypatch.setattr(project_skills.context, 'module_manager', types.SimpleNamespace(modules={}))
+
+        project_skills.project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(False, (5, 6)))
+
+        assert calls['restricted'] == [] and calls['members'] == 0
+        assert calls['rows'] == [[]]
+
     def test_the_support_project_never_offers_project_skills(self, project_skills, calls, monkeypatch):
         monkeypatch.setattr(project_skills, 'get_support_config', lambda: {'project_id': CHAT_PROJECT_ID})
         assert project_skills.project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation()) == []
         assert calls['rows'] == []
 
     def test_a_failed_lookup_offers_nothing_instead_of_everything(self, project_skills, calls, monkeypatch):
-        def failing(project_id, entity_types, user_id=None):
+        def failing(project_id, user_id):
             raise RuntimeError('social down')
 
-        monkeypatch.setattr(project_skills, 'get_restricted_folder_ids', failing)
+        monkeypatch.setattr(project_skills, 'user_restricted_folder_ids', failing)
         assert project_skills.project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation()) == []
         assert calls['rows'] == []
 
@@ -242,13 +269,23 @@ class TestMentions:
     def test_a_close_unknown_name_is_answered_with_a_suggestion(self, project_skills, bodies):
         catalog = [_entry(1, 'release-notes')]
         with pytest.raises(project_skills.UnknownSkillMentionError) as error:
-            project_skills.resolve_mentioned_project_skills('~relese-notes please', {'reviewer'}, catalog, CHAT_PROJECT_ID)
+            project_skills.resolve_mentioned_project_skills('~relese-notes please', {'reviewer'}, catalog, CHAT_PROJECT_ID,
+                                                            strict=True)
         assert str(error.value) == 'No skill named "~relese-notes". Did you mean ~release-notes?'
         assert bodies == []
 
     def test_a_suggestion_may_point_at_a_chat_skill(self, project_skills, bodies):
         with pytest.raises(project_skills.UnknownSkillMentionError, match='Did you mean ~reviewer'):
-            project_skills.resolve_mentioned_project_skills('~reviewr', {'Reviewer'}, [], CHAT_PROJECT_ID)
+            project_skills.resolve_mentioned_project_skills('~reviewr', {'Reviewer'}, [], CHAT_PROJECT_ID, strict=True)
+
+    def test_a_regenerated_message_keeps_a_close_unknown_name_literal(self, project_skills, bodies):
+        catalog = [_entry(1, 'release-notes'), _entry(2, 'sql-review')]
+
+        mentioned = project_skills.resolve_mentioned_project_skills(
+            '~relese-notes and ~sql-review', {'reviewer'}, catalog, CHAT_PROJECT_ID,
+        )
+
+        assert [m['name'] for m in mentioned] == ['sql-review']
 
     def test_a_token_unlike_any_skill_stays_literal(self, project_skills, bodies):
         catalog = [_entry(1, 'release-notes')]
@@ -286,12 +323,14 @@ class TestChatTurn:
         monkeypatch.setattr(project_skills, 'load_skill_bodies', lambda project_id, ids: {vid: f'Body {vid}.' for vid in ids})
         return state
 
-    def _apply(self, env, entity_name, user_input='hello', version_details=None, rows=None, msg_group=None):
+    def _apply(self, env, entity_name, user_input='hello', version_details=None, rows=None, msg_group=None, strict=True):
         session = ParticipantRowsSession(rows if rows is not None else [participant_row(56, CHAT_PROJECT_ID, 101)])
         result = {'user_input': user_input}
         if version_details is not None:
             result['version_details'] = version_details
-        env.mod.apply_participant_skill_mentions(session, msg_group or _msg_group(entity_name), result, CHAT_PROJECT_ID)
+        env.mod.apply_participant_skill_mentions(
+            session, msg_group or _msg_group(entity_name), result, CHAT_PROJECT_ID, strict_mentions=strict,
+        )
         return result
 
     def test_a_model_chat_gets_the_catalog_beside_the_participants(self, env, catalog):
@@ -337,6 +376,12 @@ class TestChatTurn:
     def test_an_unknown_tilde_name_raises_for_the_chat_to_answer(self, env, catalog, project_skills):
         with pytest.raises(project_skills.UnknownSkillMentionError, match='Did you mean ~release-notes'):
             self._apply(env, 'dummy', user_input='~release-note')
+
+    def test_regenerate_and_continue_keep_an_unknown_tilde_name_literal(self, env, catalog):
+        result = self._apply(env, 'dummy', user_input='~release-note please', strict=False)
+
+        assert result['user_input'] == '~release-note please'
+        assert all(skill.get('instructions') is None for skill in result[env.mod.PROJECT_SKILLS_KEY])
 
     @pytest.mark.parametrize('entity_name, version_details', [
         ('skill', {'agent_type': 'openai'}),
@@ -422,6 +467,20 @@ class TestPlumbing:
         assert calls and all(
             any(kw.arg == 'project_skills' and kw.value.id == 'project_skills' for kw in call.keywords) for call in calls
         )
+
+    def test_only_a_fresh_send_resolves_mentions_strictly(self):
+        def strict_calls(path):
+            tree = ast.parse((PLUGIN_ROOT / path).read_text())
+            return [
+                any(kw.arg == 'strict_skill_mentions' and getattr(kw.value, 'value', None) is True for kw in node.keywords)
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == 'generate_payload'
+            ]
+
+        assert sorted(strict_calls('rpc/chat_all.py')) == [False, True]
+        assert strict_calls('api/v2/regenerate.py') == [False]
+        function = _function('rpc/chat_all.py', 'generate_payload')
+        assert 'strict_mentions=strict_skill_mentions' in ast.unparse(function)
 
     def test_generate_payload_turns_an_unknown_mention_into_a_payload_error(self):
         function = _function('rpc/chat_all.py', 'generate_payload')

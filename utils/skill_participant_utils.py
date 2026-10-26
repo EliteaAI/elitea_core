@@ -309,7 +309,8 @@ def own_skill_names(result: dict) -> set:
     return {skill.get('name') for skill in (result.get('version_details') or {}).get('skills') or []}
 
 
-def project_skill_candidates(msg_group, result: dict, participant_candidates: list, chat_project_id: int) -> list:
+def project_skill_candidates(msg_group, result: dict, participant_candidates: list, chat_project_id: int,
+                             strict_mentions: bool = False) -> list:
     """Every project skill this chat may use, bodies attached only to the ones the message names with `~`."""
     if msg_group.sent_to.entity_name == ParticipantTypes.skill or not is_project_skills_in_chat_enabled(chat_project_id):
         return []
@@ -318,17 +319,20 @@ def project_skill_candidates(msg_group, result: dict, participant_candidates: li
     if not catalog or not has_skill_mention(result.get('user_input')):
         return catalog
     known_names = own_skill_names(result) | {candidate.get('name') for candidate in participant_candidates}
-    mentioned = resolve_mentioned_project_skills(result.get('user_input'), known_names, catalog, chat_project_id)
+    mentioned = resolve_mentioned_project_skills(
+        result.get('user_input'), known_names, catalog, chat_project_id, strict=strict_mentions,
+    )
     return with_mentioned_bodies(catalog, mentioned)
 
 
-def apply_participant_skill_mentions(session, msg_group, result: dict, chat_project_id: int) -> None:
+def apply_participant_skill_mentions(session, msg_group, result: dict, chat_project_id: int,
+                                     strict_mentions: bool = False) -> None:
     participant = msg_group.sent_to
     is_dummy = participant.entity_name == ParticipantTypes.dummy
     if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, result.get('version_details'))):
         return
     candidates = participant_skill_mention_candidates(session, msg_group, chat_project_id)
-    project_skills = project_skill_candidates(msg_group, result, candidates, chat_project_id)
+    project_skills = project_skill_candidates(msg_group, result, candidates, chat_project_id, strict_mentions)
     if not candidates and not project_skills:
         return
     if candidates:

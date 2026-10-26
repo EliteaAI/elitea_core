@@ -155,6 +155,7 @@ def env(isolated_sys_modules):
     tools = types.ModuleType('tools')
     tools.db = types.SimpleNamespace(with_project_schema_session=with_project_schema_session)
     tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=FakeRpc()))
+    tools.context = types.SimpleNamespace(module_manager=types.SimpleNamespace(modules={'social': object()}))
     tools.auth = types.SimpleNamespace(sio_users={}, current_user=lambda auth_data: {}, is_sio_user_in_project=None)
     sys.modules['tools'] = tools
 
