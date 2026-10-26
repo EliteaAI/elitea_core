@@ -91,6 +91,7 @@ def rpc(monkeypatch):
     models = {
         'all': {'Application': application, 'ApplicationVersion': mock.MagicMock()},
         'conversation': {'Conversation': conversation},
+        'participants': {'Participant': mock.MagicMock(), 'ParticipantMapping': mock.MagicMock()},
         'skill': {'Skill': skill, 'SkillVersion': version},
         'utils': {'get_public_project_id': lambda: PUBLIC_PROJECT_ID},
     }
