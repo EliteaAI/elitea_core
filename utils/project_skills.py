@@ -92,13 +92,15 @@ def restricted_folder_ids_for_chat(project_id: int, sender_id, conversation) -> 
 
 
 def load_project_skill_rows(project_id: int, restricted_folder_ids: list) -> list:
+    clause = folder_ids_exclusion_clause('skill', Skill.id, restricted_folder_ids)
+    if restricted_folder_ids and clause is None:
+        raise RuntimeError('No folder filter for restricted skill folders; the social model lookup failed')
     with db.with_project_schema_session(project_id) as session:
         query = session.query(
             Skill.id, Skill.name, Skill.description, Skill.meta,
             SkillVersion.id, SkillVersion.name, SkillVersion.meta,
             (func.length(func.btrim(SkillVersion.instructions)) > 0).label('has_body'),
         ).join(SkillVersion, SkillVersion.skill_id == Skill.id)
-        clause = folder_ids_exclusion_clause('skill', Skill.id, restricted_folder_ids)
         if clause is not None:
             query = query.filter(clause)
         return query.order_by(Skill.id, SkillVersion.id).all()

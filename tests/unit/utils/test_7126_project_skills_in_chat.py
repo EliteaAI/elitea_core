@@ -1,5 +1,6 @@
 """#7126 - every project skill reaches a chat turn as a body-less catalog entry; `~name` loads at most the cap."""
 import ast
+import contextlib
 import importlib.util
 import pathlib
 import sys
@@ -191,6 +192,66 @@ class TestAccessRule:
         monkeypatch.setattr(project_skills, 'user_restricted_folder_ids', failing)
         assert project_skills.project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation()) == []
         assert calls['rows'] == []
+
+
+class _Expression:
+    def __gt__(self, other):
+        return self
+
+    def label(self, name):
+        return self
+
+
+class _RowsQuery:
+    def __init__(self, rows, filters):
+        self.rows, self.filters = rows, filters
+
+    def join(self, *args):
+        return self
+
+    def filter(self, clause):
+        self.filters.append(clause)
+        return _RowsQuery([], self.filters)
+
+    def order_by(self, *columns):
+        return self
+
+    def all(self):
+        return list(self.rows)
+
+
+class TestFolderFilter:
+    @pytest.fixture
+    def catalog_with(self, project_skills, monkeypatch):
+        filters = []
+
+        @contextlib.contextmanager
+        def session(project_id):
+            yield types.SimpleNamespace(query=lambda *columns: _RowsQuery([_row(1, 'restricted-skill', 10)], filters))
+
+        monkeypatch.setattr(project_skills, 'db', types.SimpleNamespace(with_project_schema_session=session))
+        monkeypatch.setattr(project_skills, 'func', types.SimpleNamespace(length=lambda value: _Expression(), btrim=lambda value: value))
+        monkeypatch.setattr(project_skills, 'user_restricted_folder_ids', lambda project_id, user_id: [50])
+
+        def build(clause):
+            monkeypatch.setattr(project_skills, 'folder_ids_exclusion_clause', lambda *args: clause)
+            return project_skills.project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, (5,))), filters
+
+        return build
+
+    def test_restricted_folders_without_a_folder_filter_offer_nothing(self, catalog_with):
+        catalog, filters = catalog_with(None)
+
+        assert catalog == []
+        assert filters == []
+
+    def test_restricted_folders_with_a_folder_filter_apply_it(self, catalog_with):
+        clause = object()
+
+        catalog, filters = catalog_with(clause)
+
+        assert filters == [clause]
+        assert catalog == []
 
 
 class TestCatalogEntries:
