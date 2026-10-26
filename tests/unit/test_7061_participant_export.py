@@ -1,4 +1,4 @@
-"""Conversation export is participant-level (#7061).
+"""Conversation export is participant-level (#7061), public chats are open to the project (#7165).
 
 Every current participant may export (JSON, ZIP, size summary); outsiders are still denied
 like on other participant-level endpoints.
@@ -60,3 +60,13 @@ def test_outsider_on_private_conversation_sees_not_found(access):
 
 def test_outsider_on_public_conversation_is_forbidden(access):
     assert access.decide_access(False, False, False, lambda: False, False) == access.NOT_PARTICIPANT
+
+
+def test_public_conversation_export_skips_participant_check():
+    # #7165: anyone who can open a chat can export it, and public chats open for the whole project
+    call, = _access_calls()
+    guard, = [
+        node for node in ast.walk(ast.parse(EXPORT_API.read_text()))
+        if isinstance(node, ast.If) and node.lineno < call.lineno <= node.end_lineno
+    ]
+    assert ast.unparse(guard.test) == 'conversation.is_private'
