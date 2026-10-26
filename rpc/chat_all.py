@@ -39,6 +39,7 @@ from ..utils.attachments import NotSupportableProcessorExtension, read_file_cont
 from ..utils.sio_utils import SioEvents, SioValidationError
 from ..utils.conversation_access import check_post_access
 from ..utils.skill_utils import validate_agent_skills, SkillVersionDeletedError
+from ..utils.project_skills import UnknownSkillMentionError
 from ..utils.skill_participant_utils import SkillParticipantError, build_skill_participant_payload, \
     apply_participant_skill_mentions, pop_chat_skills, pop_skill_dispatch, record_skill_run, \
     resolve_skill_attachment_llm_settings
@@ -963,7 +964,10 @@ def generate_payload(session, msg_group: ConversationMessageGroup, predict_paylo
     # Add steps limit parameter if any
     result['steps_limit'] = msg_group.conversation.meta.get('steps_limit', None)
 
-    apply_participant_skill_mentions(session, msg_group, result, predict_payload.project_id)
+    try:
+        apply_participant_skill_mentions(session, msg_group, result, predict_payload.project_id)
+    except UnknownSkillMentionError as e:
+        raise PayloadGenerationError(str(e)) from e
 
     return result
 

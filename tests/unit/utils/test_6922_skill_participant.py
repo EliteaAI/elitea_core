@@ -149,6 +149,9 @@ def env(isolated_sys_modules):
         def configurations_get_auto_routing_settings(self, project_id):
             return {'enabled': True}
 
+        def configurations_get_first_filtered_project(self, project_id, filter_fields=None):
+            return None
+
     tools = types.ModuleType('tools')
     tools.db = types.SimpleNamespace(with_project_schema_session=with_project_schema_session)
     tools.rpc_tools = types.SimpleNamespace(RpcMixin=lambda: types.SimpleNamespace(rpc=FakeRpc()))
@@ -157,6 +160,7 @@ def env(isolated_sys_modules):
 
     sqlalchemy = _package('sqlalchemy')
     sqlalchemy.desc = lambda column: column
+    sqlalchemy.func = types.SimpleNamespace()
     sqlalchemy_orm = types.ModuleType('sqlalchemy.orm')
     sqlalchemy_orm.selectinload = lambda *a: None
     sqlalchemy.orm = sqlalchemy_orm
@@ -165,9 +169,15 @@ def env(isolated_sys_modules):
     _stub('utils.application_utils', validate_and_resolve_llm_settings=resolve_fake_llm_settings)
     _stub('utils.predict_utils', get_project_context=lambda project_id: {'enabled': False, 'content': ''})
     _stub('utils.utils', get_public_project_id=lambda: PUBLIC_PROJECT_ID)
-    _stub('utils.skill_utils', consume_message_skills=lambda content, candidates: (content, list(candidates)))
-    _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None),
-          SkillVersion=types.SimpleNamespace(id=IdColumn(), skill_id=Column()))
+    _stub('utils.skill_utils', consume_message_skills=lambda content, candidates: (content, list(candidates)),
+          get_max_invoked_skills_per_turn=lambda: 5)
+    _stub('utils.folder_access', get_restricted_folder_ids=lambda *args, **kwargs: [],
+          folder_ids_exclusion_clause=lambda *args, **kwargs: None)
+    _stub('utils.support_utils', get_support_config=lambda: {'enabled': False, 'project_id': None})
+    _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None, name=Column(),
+                                                      description=Column(), meta=Column()),
+          SkillVersion=types.SimpleNamespace(id=IdColumn(), skill_id=Column(), name=Column(), meta=Column(),
+                                             instructions=Column()))
     _stub('models.message_group', ConversationMessageGroup=types.SimpleNamespace(
         author_participant_id=Column(), conversation_id=Column(), created_at=Column(),
     ))
@@ -179,7 +189,8 @@ def env(isolated_sys_modules):
     for name in ('skill_predict', 'llm', 'skill_run_settings', 'participant'):
         _load(f'models/pd/{name}.py', f'{PACKAGE}.models.pd.{name}')
     for name in ('exceptions', 'mcp_versioning', 'sio_utils', 'project_context_utils', 'usage_attribution',
-                 'skill_run_settings', 'skill_run_utils', 'skill_mentions', 'skill_llm_override'):
+                 'skill_run_settings', 'skill_run_utils', 'skill_mentions', 'skill_llm_override',
+                 'project_skills'):
         _load(f'utils/{name}.py', f'{PACKAGE}.utils.{name}')
     module = _load('utils/skill_participant_utils.py', f'{PACKAGE}.utils.skill_participant_utils')
 

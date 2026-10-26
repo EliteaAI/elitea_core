@@ -126,7 +126,7 @@ class TestChatSkillsReachTheResponder:
 
     def test_the_internal_keys_leave_the_payload_for_the_rpc_kwargs(self, env):
         payload = {'user_input': 'hi', env.mod.CHAT_SKILLS_KEY: ['chat'], env.mod.INVOKED_SKILLS_KEY: ['invoked']}
-        assert env.mod.pop_chat_skills(payload) == {'chat_skills': ['chat'], 'invoked_skills': ['invoked']}
+        assert env.mod.pop_chat_skills(payload) == {'chat_skills': ['chat'], 'project_skills': None, 'invoked_skills': ['invoked']}
         assert payload == {'user_input': 'hi'}
 
 

@@ -10,8 +10,10 @@ from tools import db
 from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTarget, build_skill_run, \
     build_skill_run_target, load_skill_run_target, \
     resolve_skill_llm_settings, select_skill_version
+from .project_skills import is_project_skills_in_chat_enabled, project_skill_catalog, \
+    resolve_mentioned_project_skills, with_mentioned_bodies
 from .skill_llm_override import select_llm_override
-from .skill_mentions import resolves_mentions_in_predict
+from .skill_mentions import merge_mention_candidates, resolves_mentions_in_predict
 from .skill_utils import consume_message_skills
 from .utils import get_public_project_id
 from ..models.enums.all import ParticipantTypes
@@ -23,6 +25,7 @@ from ..models.skill import Skill
 
 SKILL_DISPATCH_KEY = '_skill_dispatch'
 CHAT_SKILLS_KEY = '_chat_skills'
+PROJECT_SKILLS_KEY = '_project_skills'
 INVOKED_SKILLS_KEY = '_invoked_skills'
 FOREIGN_SKILL_ERROR = 'A skill participant must come from this project or the public catalog'
 SKILL_NOT_FOUND_ERROR = 'Skill not found'
@@ -302,21 +305,45 @@ def owner_skill_candidates(owner_id: int, published_only: bool, pins: dict) -> d
     return candidates
 
 
+def own_skill_names(result: dict) -> set:
+    return {skill.get('name') for skill in (result.get('version_details') or {}).get('skills') or []}
+
+
+def project_skill_candidates(msg_group, result: dict, participant_candidates: list, chat_project_id: int) -> list:
+    """Every project skill this chat may use, bodies attached only to the ones the message names with `~`."""
+    if msg_group.sent_to.entity_name == ParticipantTypes.skill or not is_project_skills_in_chat_enabled(chat_project_id):
+        return []
+    sender_id = (msg_group.author_participant.entity_meta or {}).get('id')
+    catalog = project_skill_catalog(chat_project_id, sender_id, msg_group.conversation)
+    if not catalog or not has_skill_mention(result.get('user_input')):
+        return catalog
+    known_names = own_skill_names(result) | {candidate.get('name') for candidate in participant_candidates}
+    mentioned = resolve_mentioned_project_skills(result.get('user_input'), known_names, catalog, chat_project_id)
+    return with_mentioned_bodies(catalog, mentioned)
+
+
 def apply_participant_skill_mentions(session, msg_group, result: dict, chat_project_id: int) -> None:
     participant = msg_group.sent_to
     is_dummy = participant.entity_name == ParticipantTypes.dummy
     if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, result.get('version_details'))):
         return
     candidates = participant_skill_mention_candidates(session, msg_group, chat_project_id)
-    if not candidates:
+    project_skills = project_skill_candidates(msg_group, result, candidates, chat_project_id)
+    if not candidates and not project_skills:
         return
-    result[CHAT_SKILLS_KEY] = candidates
+    if candidates:
+        result[CHAT_SKILLS_KEY] = candidates
+    if project_skills:
+        result[PROJECT_SKILLS_KEY] = project_skills
     if is_dummy and has_skill_mention(result.get('user_input')):
-        result['user_input'], result[INVOKED_SKILLS_KEY] = consume_message_skills(result['user_input'], candidates)
+        result['user_input'], result[INVOKED_SKILLS_KEY] = consume_message_skills(
+            result['user_input'], merge_mention_candidates([], candidates, project_skills),
+        )
 
 
 def pop_chat_skills(payload: dict) -> dict:
     return {
         'chat_skills': payload.pop(CHAT_SKILLS_KEY, None),
+        'project_skills': payload.pop(PROJECT_SKILLS_KEY, None),
         'invoked_skills': payload.pop(INVOKED_SKILLS_KEY, None),
     }
