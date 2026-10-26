@@ -315,6 +315,9 @@ def _resolve_participants(participants) -> list[dict]:
                         toolkit_id=entity_meta.get('id'),
                     ) or {}
                     p['meta']['name'] = details.get('name') or details.get('toolkit_name')
+                case ParticipantTypes.skill.value:
+                    from .skill_participant_utils import load_skill_participant_details  # pylint: disable=C0415
+                    p['meta']['name'] = load_skill_participant_details(entity_meta).get('name')
         except Exception as e:  # pylint: disable=W0703
             log.warning("Chat export: failed to resolve participant %s name: %s", p['id'], e)
     return result
