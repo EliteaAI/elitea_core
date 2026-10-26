@@ -266,7 +266,7 @@ def test_a_child_of_an_unknown_context_with_internal_tools_is_refused(ns, env):
     {"Authorization": "Bearer pat-value"}, {"authorization": "Bearer {personal_token}"}, {"Cookie": "session=x"},
     json.dumps({"Authorization": "Bearer pat-value", "X-Trace": "1"}),
 ])
-def test_under_enforce_an_internal_toolkits_own_auth_headers_are_removed(ns, env, headers):
+def test_under_enforce_an_internal_toolkits_own_auth_headers_are_removed_quietly_on_the_plain_path(ns, env, headers):
     seed(env)
     tool = internal_tool(headers=headers, kind="mcp_elitea", personal_token="pat-value")
     call = call_kwargs(tools=[tool])
@@ -729,6 +729,8 @@ def test_under_enforce_a_disguised_internal_toolkit_loses_the_pasted_token(ns, e
     ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
     assert call["kwargs"]["tools"][0]["settings"]["headers"] == {}
     assert obo(ns).TOKEN_KWARG in call["kwargs"]
+    stripped = [e for e in env.denied if e["reason_code"] == "INTERNAL_MCP_OWN_AUTH"]
+    assert len(stripped) == 1 and stripped[0]["event_type"] == "decision" and not stripped[0].get("would_deny")
 
 
 def test_under_enforce_any_mcp_toolkit_on_the_platforms_origin_loses_its_own_auth_whatever_the_path(ns, env):

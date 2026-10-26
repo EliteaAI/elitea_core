@@ -997,10 +997,18 @@ def admit_dispatch(  # pylint: disable=R0911
         # switched on): the worker would not check it, so the run is not started
         return _refuse_dispatch(module, "STALE_CONTEXT", call_kwargs, run_id)
     try:
-        # an internal Elitea MCP toolkit reaches the platform with the run token only (#7214)
+        # an internal Elitea MCP toolkit reaches the platform with the run token only (#7214): a toolkit that brought
+        # credentials of its own on a disguised internal path or another platform route has them removed, and recorded
+        brought_own = internal_obo.INTERNAL_MCP_OWN_AUTH in internal_obo.inspect_internal_mcp(payload)
         internal_obo.police_internal_mcp(payload)
     except internal_obo.ForeignInternalMcp as foreign:
         return _refuse_dispatch(module, foreign.code, call_kwargs, run_id)
+    if brought_own:
+        project_id = meta.get("project_id") or payload.get("project_id")
+        _record_deny(module, internal_obo.INTERNAL_MCP_OWN_AUTH, event_type="decision",
+                     project_id=project_id if isinstance(project_id, int) else None,
+                     run_id=run_id if isinstance(run_id, str) else None)
+        _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "deny", internal_obo.INTERNAL_MCP_OWN_AUTH)
     if free_form_secret:
         # a {{secret.*}} outside a credential configuration would have been resolved into the payload, where no slot
         # governs it: only credentials registered for governed use reach a governed run
