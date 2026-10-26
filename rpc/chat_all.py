@@ -59,6 +59,7 @@ from ..utils.toolkit_authorization import (
     authorization_identity, pending_authorization_requests,
     retire_all_authorization_requests, retire_authorization_requests,
 )
+from ..utils.authoring import is_authoring_conversation
 from ..utils.authors import get_authors_data
 from ..utils.internal_tools import (
     inject_internal_imagegen_tool, ImageGenConfigurationError,
@@ -89,6 +90,14 @@ CHAT_PREDICT_MAPPER = {
     ParticipantTypes.skill: 'applications_predict_sio',
     # ParticipantTypes.pipeline: 'applications_predict_sio',
 }
+
+
+def authoring_kwargs(conversation, participant, chat_project_id, rpc_func) -> dict:
+    """The ``authoring`` flag of ``applications_predict_sio`` for a turn of the editor's test chat (#7213), read from the
+    conversation row this process loaded, never from the client's turn; nothing for any other turn or participant."""
+    if rpc_func != CHAT_PREDICT_MAPPER[ParticipantTypes.application]:
+        return {}
+    return {"authoring": True} if is_authoring_conversation(conversation, participant, chat_project_id) else {}
 
 
 def _get_agent_type(
@@ -1573,6 +1582,7 @@ class RPC:
                             routing_projection=payload.pop('_routing_projection', None),
                             **pop_chat_skills(payload),
                             **skill_rpc_kwargs,
+                            **authoring_kwargs(conversation, msg_group.sent_to, parsed.project_id, rpc_func),
                         )
                     except (PoolSaturationError, SioValidationError):
                         # Mark the response placeholder as not streaming to avoid stuck chat entry
@@ -2531,6 +2541,7 @@ class RPC:
                     routing_projection=payload.pop('_routing_projection', None),
                     **pop_chat_skills(payload),
                     **skill_rpc_kwargs,
+                    **authoring_kwargs(conversation, response_msg.author_participant, parsed.project_id, rpc_func),
                 )
                 self.finalize_timed_out_response(
                     session, response_msg, result, await_task_timeout

@@ -142,7 +142,7 @@ A mandate lets one agent version run from a schedule or a webhook as its owner's
 | Field | Rule |
 |---|---|
 | `owner_user_ref` | `issuer`, `tid`, `oid` of the owner; the owner must stay active and linked to the same identity |
-| `agent_binding_ref` | The active binding of the version; a run is refused (`DENIED_BINDING`) if the version's active binding is another one |
+| `agent_binding_ref` | The active binding of the version; a run is refused (`DENIED_BINDING`) if the version's active binding is another one. NULL for a development run (`profile = development`): the editor's test chat of an unbound version, held to its `definition_digest` and the author's own credentials instead |
 | `allowed_operations` | `run:schedule`, `run:webhook` |
 | `max_runtime_s` | 60 to 86400. Main stops a run that overruns it (`RUNTIME_LIMIT_EXCEEDED`). |
 | `valid_until` | At most 180 days ahead. Expiry is by the clock (`MANDATE_EXPIRED`). |

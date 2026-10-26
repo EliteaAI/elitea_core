@@ -37,7 +37,7 @@ from ..utils.application_utils import (
     ApplicationVersionNonFoundError,
     ApplicationToolExpandedError
 )
-from ..models.pd.admission import admission_request_from
+from ..models.pd.admission import ENTRY_EDITOR_CHAT, admission_request_from
 from ..utils.mandate_admission import take_trigger_admission
 from ..utils.credential_slots import has_free_form_secret, mark_free_form_secret
 from ..utils.exceptions import (
@@ -268,6 +268,7 @@ class RPC:
                     applied_skills: Optional[list] = None,
                     sid_project_id: Optional[int] = None,
                     mandate_ticket: Optional[str] = None,
+                    authoring: bool = False,
                     ) -> dict:
         if start_event_content is None:
             start_event_content = {}
@@ -485,7 +486,9 @@ class RPC:
         ) or admission_request_from(
             self, sid=sid, project_id=parsed.project_id, binding_project_id=application_project_id,
             version_row=admission_version_row, run_kind="system" if is_system_user else "interactive",
-            entry_point="chat_sio",
+            # the editor's test chat (#7213): said by chat_all from the conversation row it loaded, only over a live
+            # socket of the author; the RPC argument is not reachable from a client payload
+            entry_point=ENTRY_EDITOR_CHAT if authoring and sid else "chat_sio",
         )
         try:
             task_id = self.task_node.start_task(

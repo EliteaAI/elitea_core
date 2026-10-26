@@ -13,6 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from ...utils.governance import is_auditing, is_governed
 
 CALLER_TYPES = ("user", "token")
+# The agent or pipeline editor's test chat (#7213): the one entry point admission may run as a ``development`` run (the
+# author's own identity and credentials, no binding). Set by ``chat_all.predict_sio`` from the conversation row it
+# loaded, never from anything the client sent with the turn.
+ENTRY_EDITOR_CHAT = "editor_chat"
 
 
 class AdmissionRequest(BaseModel):
@@ -23,7 +27,7 @@ class AdmissionRequest(BaseModel):
     application_id: Optional[int] = None
     version_id: Optional[int] = None
     run_kind: Literal["interactive", "system", "mandate"]
-    entry_point: Literal["chat_sio", "chat_sio_llm", "predict_api", "schedule", "webhook"]
+    entry_point: Literal["chat_sio", "editor_chat", "chat_sio_llm", "predict_api", "schedule", "webhook"]
     caller_type: Literal["user", "token", "public", "trigger"]
     caller_id: Optional[int] = None
     caller_reference: Optional[SecretStr] = Field(default=None, exclude=True, repr=False)

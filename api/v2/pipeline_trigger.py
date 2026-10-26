@@ -32,6 +32,7 @@ from ...utils.pipeline_trigger import (
     validate_gitlab_signing_token_format,
 )
 from ...utils.folder_access import require_folder_access, APPLICATION_ENTITY_TYPES
+from ...utils.trigger_governance import governance_notice_for
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -261,6 +262,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
                         auth_method=trigger_config.get("gitlab_auth_method"),
                     )
 
+                # Under governance an unattended trigger runs only a bound version with a mandate: the saved
+                # trigger is kept, and the author is told what it still needs (#7213)
+                governance_notice = governance_notice_for(
+                    self.module, session, project_id, version.application_id, version_id, trigger_config.get("type"))
+
                 # Return the updated trigger
                 response = PipelineTriggerResponse(
                     type=trigger_config.get("type"),
@@ -271,6 +277,7 @@ class PromptLibAPI(api_tools.APIModeHandler):
                     webhook_type=webhook_type,
                     webhook_url=webhook_url,
                     gitlab_auth_method=trigger_config.get("gitlab_auth_method"),
+                    governance_notice=governance_notice,
                     **secret_info,
                 )
 

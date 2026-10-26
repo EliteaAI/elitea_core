@@ -591,9 +591,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     def create_agent_identity_tables(self, *args, **kwargs):
         """Admin task: create the agent identity tables in each project schema (R-2.0.8, #6756, C-1009).
 
-        Creates ``agent_identity_binding`` and ``execution_security_context`` where they are missing.
-        New projects get them from ``create_all`` and a startup guard covers the rest, so this is the
-        operator's way to report (dry run) and re-run. Idempotent; schemas that have both are left alone.
+        Creates ``agent_identity_binding`` and ``execution_security_context`` where they are missing, and drops the
+        NOT NULL of ``execution_security_context.agent_binding_ref`` where it is still there (a development run has no
+        binding, #7213; ``relaxed`` in the result). New projects get them from ``create_all`` and a startup guard
+        covers the rest, so this is the operator's way to report (dry run) and re-run. Idempotent; schemas that have
+        both tables and the relaxed column are left alone.
 
         Param format (required):
             "project_id=<all|N>[;dry_run]"
@@ -604,7 +606,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "project_id=3"            - project 3 only
         """
         from ..utils.agent_identity_schema import (  # pylint: disable=C0415
-            apply_identity_tables, project_ids_missing_identity_tables,
+            apply_identity_tables, apply_nullable_binding_ref, project_ids_missing_identity_tables,
+            project_ids_with_not_null_binding_ref,
         )
 
         param = kwargs.get("param", "") or ""
@@ -640,16 +643,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     )
                 ]
             missing = set(project_ids_missing_identity_tables())
+            strict = set(project_ids_with_not_null_binding_ref())
         except Exception:  # pylint: disable=W0703
             log.exception("create_agent_identity_tables: failed to list projects")
             return {"migrated": 0, "error": "failed to list projects"}
 
         migrated, failed = apply_identity_tables([pid for pid in project_ids if pid in missing], dry_run=dry_run)
+        relaxed, not_relaxed = apply_nullable_binding_ref([pid for pid in project_ids if pid in strict], dry_run=dry_run)
         log.info(
-            "%screate_agent_identity_tables: migrated=%s failed=%s",
-            "[DRY RUN] " if dry_run else "", len(migrated), len(failed),
+            "%screate_agent_identity_tables: migrated=%s failed=%s relaxed=%s",
+            "[DRY RUN] " if dry_run else "", len(migrated), len(failed), len(relaxed),
         )
-        return {"migrated": len(migrated), "failed": len(failed), "failed_projects": failed, "dry_run": dry_run}
+        return {"migrated": len(migrated), "failed": len(failed) + len(not_relaxed),
+                "failed_projects": failed + not_relaxed, "relaxed": len(relaxed), "dry_run": dry_run}
 
     @web.method()
     def manage_agent_identity_binding(self, *args, **kwargs):
@@ -716,8 +722,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         """Admin task: create the tables of the credential governance switch in the public schema (R-2.0.8, #7120, C-1009).
 
         Creates ``credential_governance_settings`` and ``credential_governance_settings_history`` where they are
-        missing. They are not created at startup, so until this runs the switch reads as "no stored row" (governance
-        off) and the Admin UI cannot save. Idempotent.
+        missing, and adds to an existing table the columns that came after it (``allow_development_runs``, #7213).
+        They are not created at startup, so until this runs the switch reads as "no stored row" (governance off) and
+        the Admin UI cannot save; a table without the column reads with the flag's default and cannot be saved either.
+        Idempotent.
 
         Param format (optional):
             "dry_run"  - report which tables would be created (``would_create``) and create nothing

@@ -19,7 +19,9 @@ Checks, in order, the first failure wins (a run; a probe has its ticket instead 
   6/7. the live admission still stands: user and binding epochs, digest,    the codes of ``validate_context``
      mandate, and the credential decision of this use rechecked (WP-1B); a
      refusal here revokes the context, as ``validate_context`` does. Read-only
-     otherwise: it does not move the context's state
+     otherwise: it does not move the context's state. A development run
+     (#7213) has no binding: its decisions are rechecked against the author's
+     own grants, and its release events carry ``development:<digest>``
   8. the store read, by the secrets plugin, which re-reads the reference    CREDENTIAL_REFERENCE_INACTIVE / STORE_*
   9. the release event is committed before the reply leaves                 AUDIT_UNAVAILABLE
 
@@ -44,7 +46,7 @@ from tools import auth, db, this
 
 from ..models.agent_identity import AgentIdentityBinding, ExecutionSecurityContext
 from . import admission as adm   # the live checks of validate_context, the audit and counter helpers
-from .credential_decision import MAX_GOVERNED_CREDENTIALS_PER_RUN, recheck_failure
+from .credential_decision import MAX_GOVERNED_CREDENTIALS_PER_RUN, PROFILE_DEVELOPMENT, recheck_development, recheck_failure
 from .credential_slots import MAX_SLOT_FIELDS
 from .exceptions import AdmissionDenied
 from .governance import governance_lifecycle_active
@@ -369,19 +371,21 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
             raise _unaudited("STALE_CONTEXT")   # no admitted run behind it
         binding_project_id = row.binding_project_id or row.project_id
         binding = session.execute(select(*binding_columns).where(AgentIdentityBinding.id == row.agent_binding_ref)
-                                  ).one_or_none() if binding_project_id == first.project_id else None
-    if binding_project_id != first.project_id:   # the agent lives in another project: a second read
+                                  ).one_or_none() if (binding_project_id == first.project_id
+                                                      and row.agent_binding_ref is not None) else None
+    if binding_project_id != first.project_id and row.agent_binding_ref is not None:   # the agent lives in another project
         binding = adm._read_binding(binding_project_id, row.agent_binding_ref)
     subject = row.subject if isinstance(row.subject, dict) else {}
     is_mandate = subject.get("kind") == "mandate"
+    label = adm.context_binding_label(row)   # the binding, or development:<digest> (#7213)
     for request in requests:
         request.known.update(
-            application_id=row.application_id, attempt=row.attempt, agent_binding_ref=str(row.agent_binding_ref),
+            application_id=row.application_id, attempt=row.attempt, agent_binding_ref=label,
             run_id=row.run_id, traceparent=row.trace_ref, policy_revision=row.policy_revision,
             environment=row.environment,
             mandate_ref=str(subject.get("ref"))[len("mandate:"):] if is_mandate else None)
     #   3a. a live, running context of this worker's run
-    if row.schema_version != adm.SCHEMA_VERSION or row.profile != "governed":
+    if row.schema_version != adm.SCHEMA_VERSION or row.profile not in adm.PROFILES:
         raise adm._denied("STALE_CONTEXT")
     if first.task_name not in adm.ADMITTED_TASKS or first.caller.get("run_id") != row.run_id:
         raise adm._denied("STALE_CONTEXT")
@@ -411,7 +415,7 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
     events = [dict(
         tenant=row.tenant, project_id=row.project_id, application_id=row.application_id,
         caller_ref=request.known["caller_ref"], user_ref=user_ref, mandate_ref=request.known["mandate_ref"],
-        agent_binding_ref=str(row.agent_binding_ref), run_id=row.run_id, attempt=row.attempt,
+        agent_binding_ref=label, run_id=row.run_id, attempt=row.attempt,
         toolkit_instance_id=request.toolkit_instance_id, credential_ref=request.slot["credential_ref"],
         credential_generation=request.slot["credential_generation"], revocation_epoch=entry.get("reference_epoch"),
         traceparent=row.trace_ref, policy_revision=row.policy_revision, environment=row.environment)
@@ -456,19 +460,24 @@ def _live_check(request: _Request, row, binding, entries, is_mandate, requests) 
         raise refuse("MANDATE_INACTIVE")
     if not epochs.get("active") or epochs.get("user") != stamped.get("user"):
         raise refuse("EPOCH_MISMATCH")
-    if binding is None or binding.state != "active":
-        raise refuse("DENIED_BINDING")
-    if binding.revocation_epoch != stamped.get("binding"):
-        raise refuse("EPOCH_MISMATCH")
-    if binding.definition_digest != row.definition_digest:
-        raise refuse("BINDING_DIGEST_MISMATCH")
+    development = row.profile == PROFILE_DEVELOPMENT   # no binding to hold a development run to (#7213)
+    if not development:
+        if binding is None or binding.state != "active":
+            raise refuse("DENIED_BINDING")
+        if binding.revocation_epoch != stamped.get("binding"):
+            raise refuse("EPOCH_MISMATCH")
+        if binding.definition_digest != row.definition_digest:
+            raise refuse("BINDING_DIGEST_MISMATCH")
     if is_mandate:
         code = adm._mandate_revoke_code(row, stamped)
         if code is not None:
             raise refuse(code)
     try:
-        code, failed = recheck_failure(
-            binding_project_id, entries, (row.subject or {}).get("ref"), str(row.agent_binding_ref), adm._now())
+        subject_ref = (row.subject or {}).get("ref")
+        if development:
+            code, failed = recheck_development(binding_project_id, entries, subject_ref, adm._now())
+        else:
+            code, failed = recheck_failure(binding_project_id, entries, subject_ref, str(row.agent_binding_ref), adm._now())
     except Exception as exc:  # pylint: disable=W0703
         log.error("credential release: credential facts unreadable (%s)", type(exc).__name__)
         raise adm._denied("DEPENDENCY_UNAVAILABLE") from None

@@ -75,11 +75,12 @@ def test_get_without_the_tables_reads_off_and_says_how_to_create_them(ns, env):
     module = genv.api_module(ns)
     result, status = get(ns, module)
     assert status == 200
-    assert set(result) == {"effective", "stored", "locks", "ceiling", "preflight", "table_present", "read", "descriptions"}
+    assert set(result) == {"effective", "stored", "locks", "ceiling", "preflight", "table_present", "columns_present", "read",
+                           "descriptions"}
     assert result["table_present"] is False and result["read"] == "missing_table" and result["stored"] is None
     assert result["effective"] == {"mode": "off", "policy_revision": None, "admit_legacy_pat": False,
-                                   "allow_runtime_domain_binding": False, "environment": None, "capped": False,
-                                   "unavailable": False}
+                                   "allow_runtime_domain_binding": False, "allow_development_runs": False,
+                                   "environment": None, "capped": False, "unavailable": False}
     table = next(item for item in result["preflight"]["checks"] if item["id"] == "settings_table")
     assert (table["status"], table["code"], table["blocking"]) == ("fail", "MISSING_TABLE", True)
     assert table["message"].startswith("Settings storage is not set up. Run the task create_governance_settings_tables")
@@ -92,7 +93,8 @@ def test_get_shape_with_a_stored_row(ns, env, module):
     assert status == 200 and result["table_present"] is True and result["read"] == "ok"
     assert result["effective"]["mode"] == "audit_only" and result["effective"]["policy_revision"] == "CHG-1"
     stored = result["stored"]
-    assert set(stored) == {"mode", "policy_revision", "admit_legacy_pat", "allow_runtime_domain_binding", "environment",
+    assert set(stored) == {"mode", "policy_revision", "admit_legacy_pat", "allow_runtime_domain_binding",
+                           "allow_development_runs", "environment",
                            "revision", "updated_by", "updated_at"}
     assert (stored["mode"], stored["revision"], stored["updated_by"]) == ("audit_only", 1, 1)
     assert result["ceiling"] == {"max_mode": "enforce", "source": "default"} and result["locks"] == {}
@@ -479,7 +481,8 @@ def test_history_lists_the_changes_newest_first_with_who_and_when(ns, env, modul
         2, "enforce", "CHG-2", "two")
     assert newest["changed_by"] == {"id": 2, "email": "ops@example.test"}
     assert oldest["changed_by"] == {"id": 1, "email": "root@example.test"} and oldest["revision"] == 1
-    assert newest["flags"] == {"admit_legacy_pat": False, "allow_runtime_domain_binding": False}
+    assert newest["flags"] == {"admit_legacy_pat": False, "allow_runtime_domain_binding": False,
+                               "allow_development_runs": None}
     assert newest["changed_at"] is not None
 
 
@@ -616,3 +619,56 @@ def test_every_refusal_is_a_fixed_message_with_a_code_and_no_input(ns):
     assert {gs.STATUS[c] for c in ("REVISION_CONFLICT", "FIELD_LOCKED", "MODE_ABOVE_CEILING", "PREFLIGHT_FAILED",
                                    "MIGRATION_REQUIRED")} == {409}
     assert {gs.STATUS[c] for c in ("DEPENDENCY_UNAVAILABLE", "AUDIT_UNAVAILABLE")} == {503}
+
+
+# --- allow_development_runs (#7213): stored when chosen, the default of the mode otherwise, added to an older table ----------
+
+def test_put_stores_the_development_choice_when_made_and_null_when_not(ns, env, module):
+    result, status = put(ns, module, body(mode="enforce", policy_revision="CHG-7"))
+    assert status == 200 and result["stored"]["allow_development_runs"] is None
+    assert result["effective"]["allow_development_runs"] is False       # not chosen under enforce: off
+    assert module.governance_state.effective.allow_development_runs is False
+    result, status = put(ns, module, body(mode="enforce", policy_revision="CHG-7", allow_development_runs=True,
+                                          expected_revision=1, change_note="let developers test"))
+    assert status == 200 and result["stored"]["allow_development_runs"] is True
+    assert result["effective"]["allow_development_runs"] is True
+    assert module.governance_state.effective.allow_development_runs is True
+    result, status = put(ns, module, body(expected_revision=2, change_note="back to measuring"))   # audit only, not chosen
+    assert status == 200 and result["stored"]["allow_development_runs"] is None
+    assert result["effective"]["allow_development_runs"] is True        # not chosen under audit only: on
+    history_, _ = history(ns, module)
+    assert [row["flags"]["allow_development_runs"] for row in history_["rows"]] == [None, True, None]
+    assert put(ns, module, body(allow_development_runs="yes", expected_revision=3))[0]["code"] == "INVALID_REQUEST"
+
+
+def drop_development_columns(ns, env):
+    """The tables as they were before #7213 (SQLite 3.35+ drops a column)."""
+    with env.get_session(None) as session:
+        for table in ("credential_governance_settings", "credential_governance_settings_history"):
+            session.execute(ns.sa.text(f"ALTER TABLE public.{table} DROP COLUMN allow_development_runs"))
+        session.commit()
+    ns.governance_settings._COLUMNS_SEEN.clear()  # pylint: disable=W0212
+
+
+def test_a_table_from_before_the_column_reads_with_the_default_and_the_task_adds_the_column(ns, env, module):
+    assert put(ns, module, body())[1] == 200
+    drop_development_columns(ns, env)
+    read, stored = ns.governance_settings.read_settings()
+    assert read == "ok" and stored.mode == "audit_only" and stored.allow_development_runs is None
+    result, status = get(ns, module)
+    assert status == 200 and result["columns_present"] is False and result["effective"]["allow_development_runs"] is True
+    result, status = put(ns, module, body(expected_revision=1, change_note="again"))
+    assert (status, result["code"]) == (409, "MIGRATION_REQUIRED")
+    assert ns.governance_settings.create_tables(dry_run=True) == {
+        "created": [], "would_create": [], "added_columns": [],
+        "would_add_columns": ["credential_governance_settings.allow_development_runs",
+                              "credential_governance_settings_history.allow_development_runs"], "dry_run": True}
+    assert ns.governance_settings.create_tables()["added_columns"] == [
+        "credential_governance_settings.allow_development_runs",
+        "credential_governance_settings_history.allow_development_runs"]
+    assert ns.governance_settings.create_tables() == {"created": [], "would_create": [], "added_columns": [],
+                                                      "would_add_columns": [], "dry_run": False}   # idempotent
+    result, status = put(ns, module, body(expected_revision=1, change_note="again", allow_development_runs=False))
+    assert status == 200 and result["columns_present"] is True and result["stored"]["allow_development_runs"] is False
+    history_, _ = history(ns, module)
+    assert [row["flags"]["allow_development_runs"] for row in history_["rows"]] == [False, None]
