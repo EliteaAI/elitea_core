@@ -4,9 +4,12 @@ Main is the issuer and the internal Elitea MCP is the resource. When a run is ad
 token for it: ``sub`` the verified subject (or the mandate), ``uid`` the user the platform acts as, ``act`` the agent
 binding (``development:<digest>`` for a development run), ``aud`` ``elitea:internal``, ``scope`` the binding's platform
 operations intersected with the user's RBAC (computed once), ``ctx``/``prj``/``run``/``tsk`` the security context it
-belongs to, ``exp`` the context's expiry and a ``jti``. It is HMAC-SHA256 signed with a key derived from
-``SECRETS_MASTER_KEY``; there is no revocation store: the token is only accepted while its context passes
-``validate_context`` (state, expiry and every epoch the context was admitted under).
+belongs to, ``tgt`` the projects its internal MCP toolkits address, ``exp`` the context's expiry and a ``jti``. It is
+HMAC-SHA256 signed with a key derived from ``SECRETS_MASTER_KEY``; there is no revocation store: the token is only
+accepted while its context passes ``validate_context`` (state, expiry and every epoch the context was admitted under).
+It is a bearer: whoever holds it acts as the run (the caller checked by ``validate_context`` is built from its own
+claims), which is why it never leaves the run's worker, goes only to the platform's own origins and lives no longer
+than the context. A token is minted only for a run that can reach the internal MCP (``needs_run_token``).
 
 The token travels to the worker as one task kwarg (``TOKEN_KWARG``), which the worker takes out of the payload before
 anything else reads it; the SDK sends it as the bearer of the internal MCP requests of that run and of no other origin.
@@ -14,20 +17,23 @@ It is never written to a toolkit's settings, a log line, an audit event or the t
 
 On the MCP side the auth plugin hands a bearer with ``TOKEN_PREFIX`` to ``verify_request`` (registered at init): the
 signature, the audience, the expiry, the route (an internal MCP endpoint, or the in-process API call such an endpoint
-makes), then the context. The request then runs as the user ``uid`` (``flask.g.auth``) with the claims kept in
-``flask.g.internal_obo``: the endpoint's own RBAC decorator still decides, and ``check_operation`` refuses an operation
-outside ``scope``. Every write is recorded as a ``platform_operation`` audit event before it is made.
+makes), the project it addresses (``tgt``), then the context (a positive verdict is reused for a few seconds). The
+request then runs as the user ``uid`` (``flask.g.auth``) with the claims kept in ``flask.g.internal_obo``: the endpoint's
+own RBAC decorator still decides, and ``check_operation`` refuses an operation outside ``scope``, and any write the
+explicit map (``ENDPOINT_OPERATIONS``) does not know. Every write is recorded as a ``platform_operation`` audit event
+before it is made.
 """
 import base64
 import hashlib
 import hmac
 import json
 import re
+import threading
 import time
 import uuid
 from datetime import timezone
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from pylon.core.tools import log
 from sqlalchemy import select
@@ -42,23 +48,80 @@ ISSUER = "elitea:main"
 AUDIENCE = "elitea:internal"
 KEY_CONTEXT = b"elitea-internal-obo-v1"
 MAX_TOKEN_CHARS = 4096
-CLAIM_KEYS = frozenset({"v", "iss", "aud", "sub", "uid", "act", "scope", "ctx", "prj", "run", "tsk", "iat", "exp",
-                        "jti"})
+CLAIM_KEYS = frozenset({"v", "iss", "aud", "sub", "uid", "act", "scope", "ctx", "prj", "tgt", "run", "tsk", "iat",
+                        "exp", "jti"})
+MAX_TARGETS = 16
+MAX_CLOCK_SKEW_S = 60   # a token issued later than this in the future is refused
+VERDICT_TTL_S = 5.0     # a positive context verdict is reused this long (never longer than the auth epoch TTL)
+MAX_VERDICTS = 4096
 # What the in-process API call of an internal MCP endpoint carries: the claims its endpoint already verified (an object
 # in the WSGI environ, which no HTTP header can set), so the call is not validated a second time
 VERIFIED_ENVIRON_KEY = "elitea.internal_obo.claims"
 DEVELOPMENT_LABEL = "development:"   # what a development run (#7213) has where a governed run has its binding id
 INTERNAL_FALLBACK_URL = "http://pylon_main:8080"   # the in-cluster origin internal toolkits use (internal_tools)
-# The routes of the internal MCP (routes/mcp_sse.py); the run token is refused on every other route
+# The routes of the internal MCP (routes/mcp_sse.py, blueprint ``elitea_core``); the run token is refused elsewhere
 MCP_ROUTE_ENDPOINTS = frozenset({
-    "client_streamable_http", "client_tag_filtered_streamable_http", "client_parametrized_streamable_http",
+    "elitea_core.client_streamable_http", "elitea_core.client_tag_filtered_streamable_http",
+    "elitea_core.client_parametrized_streamable_http",
 })
 
-# Platform operations an agent binding may allow (``allowed_platform_operations``). ``read``: any GET; ``build``: any
-# other call; ``credentials``: a write to the credential plugins; ``run``: starting an agent or a toolkit tool.
+# Platform operations an agent binding may allow (``allowed_platform_operations``). ``read``: any GET; ``build``:
+# creating, changing or deleting platform entities; ``credentials``: anything that creates, changes or returns a
+# secret; ``run``: starting an agent, a skill, a toolkit tool or a model call.
 OPERATIONS = ("read", "build", "credentials", "run")
-DEFAULT_BINDING_OPERATIONS = ("read",)   # a binding approved before #7214 (no list) may only read
-CREDENTIAL_PLUGINS = frozenset({"secrets", "configurations"})
+# No list, or an explicitly empty one: read only (§21). Refusing reads too is not offered: it is the binding without
+# the internal toolkit, which needs no token at all.
+DEFAULT_BINDING_OPERATIONS = ("read",)
+# Every write the internal MCP exposes as an API tool (``mcp_tool=True``), by method and path template under /api/v2/,
+# and its operation. A write that is not here is refused (``INTERNAL_OPERATION_UNKNOWN``): a new MCP-exposed write
+# needs its line before an agent can call it. Reads (GET) are ``read``.
+ENDPOINT_OPERATIONS = {
+    # credentials: create, change or return a secret
+    ("POST", "artifacts/s3_credentials/{mode}/{project_id}"): "credentials",
+    ("PUT", "artifacts/s3_credentials/{mode}/{project_id}/{access_key_id}"): "credentials",
+    ("POST", "configurations/configurations/{project_id}"): "credentials",
+    ("PUT", "configurations/configuration/{project_id}/{config_id}"): "credentials",
+    ("POST", "configurations/models/{project_id}"): "credentials",
+    ("POST", "secrets/secrets/{mode}/{project_id}"): "credentials",
+    ("PUT", "secrets/secret/{mode}/{project_id}/{secret}"): "credentials",
+    # run: start an agent, a skill or a model call
+    ("POST", "elitea_core/messages/{mode}/{project_id}/{conversation_uuid}"): "run",
+    ("POST", "elitea_core/continue_predict/{mode}/{project_id}/{conversation_uuid}"): "run",
+    ("POST", "elitea_core/skill_predict/{mode}/{project_id}/{skill_id}"): "run",
+    ("POST", "elitea_core/public_skill_predict/{mode}/{project_id}/{public_skill_id}"): "run",
+    ("POST", "elitea_core/generate_project_context_draft/{mode}/{project_id}"): "run",
+    ("POST", "elitea_core/generate_skill_draft/{mode}/{project_id}"): "run",
+    # build: platform entities
+    ("POST", "elitea_core/applications/{mode}/{project_id}"): "build",
+    ("POST", "elitea_core/versions/{mode}/{project_id}/{application_id}"): "build",
+    ("PUT", "elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}"): "build",
+    ("POST", "elitea_core/version_instruction_patch/{mode}/{project_id}/{application_id}/{version_id}"): "build",
+    ("PATCH", "elitea_core/application_relation/{mode}/{project_id}/{application_id}/{version_id}"): "build",
+    ("POST", "elitea_core/tools/{mode}/{project_id}"): "build",
+    ("PUT", "elitea_core/tool/{mode}/{project_id}/{tool_id}"): "build",
+    ("PATCH", "elitea_core/tool/{mode}/{project_id}/{tool_id}"): "build",
+    ("POST", "elitea_core/skills/{mode}/{project_id}"): "build",
+    ("PUT", "elitea_core/skill/{mode}/{project_id}/{skill_id}"): "build",
+    ("PATCH", "elitea_core/skill/{mode}/{project_id}/{skill_id}"): "build",
+    ("PUT", "elitea_core/project_context/{mode}/{project_id}/project-context"): "build",
+    ("DELETE", "elitea_core/project_context/{mode}/{project_id}/project-context"): "build",
+    ("POST", "elitea_core/folder/{mode}/{project_id}/{folder_id}"): "build",
+    ("PUT", "elitea_core/folder/{mode}/{project_id}/{folder_id}"): "build",
+    ("POST", "elitea_core/conversations/{mode}/{project_id}"): "build",
+    ("PUT", "elitea_core/conversation/{mode}/{project_id}/{conversation_id}"): "build",
+    ("POST", "elitea_core/participants/{mode}/{project_id}/{conversation_id}"): "build",
+    ("DELETE", "elitea_core/participant/{mode}/{project_id}/{conversation_id}/{participant_id}"): "build",
+    ("PATCH", "elitea_core/entity_settings/{mode}/{project_id}/{conversation_id}/{participant_id}"): "build",
+    ("POST", "artifacts/artifacts/{mode}/{project_id}/{bucket}"): "build",
+    ("DELETE", "artifacts/artifacts/{mode}/{project_id}/{bucket}"): "build",
+    ("POST", "artifacts/buckets/{mode}/{project_id}"): "build",
+    ("PUT", "artifacts/buckets/{mode}/{project_id}"): "build",
+    ("PATCH", "artifacts/buckets/{mode}/{project_id}"): "build",
+    ("POST", "social/folders/{mode}/{project_id}"): "build",
+    ("PUT", "social/folder/{mode}/{project_id}/{folder_id}"): "build",
+    ("PUT", "social/move_to_folder/{mode}/{project_id}"): "build",
+    ("PUT", "notifications/notification/{mode}/{project_id}/{notification_id}"): "build",
+}
 # The RBAC half of the scope: an operation is in scope only when the user holds one of these in the agent's project.
 # A coarse pre-filter: the endpoint's own decorator still decides every call. ``read`` needs no extra permission.
 OPERATION_PERMISSIONS = {
@@ -79,6 +142,10 @@ INTERNAL_TOKEN_INVALID = "INTERNAL_TOKEN_INVALID"
 INTERNAL_TOKEN_EXPIRED = "INTERNAL_TOKEN_EXPIRED"
 CONTEXT_NOT_LIVE = "CONTEXT_NOT_LIVE"
 INTERNAL_SCOPE_DENIED = "INTERNAL_SCOPE_DENIED"
+INTERNAL_OPERATION_UNKNOWN = "INTERNAL_OPERATION_UNKNOWN"
+INTERNAL_TARGET_DENIED = "INTERNAL_TARGET_DENIED"
+INTERNAL_MCP_ORIGIN_NOT_ALLOWED = "INTERNAL_MCP_ORIGIN_NOT_ALLOWED"
+DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
 AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"
 LEGACY_PAT_INTERNAL_MCP = "LEGACY_PAT_INTERNAL_MCP"
 PLATFORM_OPERATION = "PLATFORM_OPERATION"
@@ -89,6 +156,12 @@ MESSAGES = {
     INTERNAL_SCOPE_DENIED: "This agent is not allowed to do that on your behalf: its approved operations do not "
                            "include it. Do it yourself in Elitea, or ask an operator to extend the agent's binding.",
     AUDIT_UNAVAILABLE: "The security audit trail is unavailable; the change was not made. Try again later.",
+    INTERNAL_OPERATION_UNKNOWN: "This Elitea tool is not available to agents acting on your behalf; the call was "
+                                "refused. Do it yourself in Elitea.",
+    INTERNAL_TARGET_DENIED: "This run's Elitea tools may not act in that project; the call was refused.",
+    INTERNAL_MCP_ORIGIN_NOT_ALLOWED: "An Elitea MCP toolkit of this agent points to an address the platform does not "
+                                     "serve its tools from; the run was not started. Use the built-in Elitea tools.",
+    DEPENDENCY_UNAVAILABLE: "The Elitea tools of this run cannot be checked right now; try again in a moment.",
 }
 _B64 = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -133,8 +206,8 @@ def _mac(key: bytes, body: str) -> str:
 # --- minting ----------------------------------------------------------------------------------
 
 def binding_operations(project_id, actor) -> tuple:
-    """The platform operations the binding behind ``actor`` allows: one read of its row. A development run has no
-    binding (the author's own RBAC decides alone), a binding without a list allows ``read`` only."""
+    """The platform operations the binding behind ``actor`` allows: one SELECT of its column (a development run reads
+    nothing: it has no binding, the author's own RBAC decides alone). No list or an empty one allows ``read`` only."""
     if isinstance(actor, str) and actor.startswith(DEVELOPMENT_LABEL):
         return OPERATIONS
     try:
@@ -145,7 +218,7 @@ def binding_operations(project_id, actor) -> tuple:
         stored = session.execute(
             select(AgentIdentityBinding.allowed_platform_operations).where(AgentIdentityBinding.id == binding_id)
         ).scalar_one_or_none()
-    if stored is None:
+    if not stored:
         return DEFAULT_BINDING_OPERATIONS
     return tuple(op for op in OPERATIONS if op in stored)
 
@@ -179,7 +252,7 @@ def internal_origins() -> list:
     return found
 
 
-def mint(*, sub, uid, act, scope, ctx, prj, run, tsk, exp, now=None) -> tuple:
+def mint(*, sub, uid, act, scope, ctx, prj, tgt, run, tsk, exp, now=None) -> tuple:
     """``(token, claims)``; ``TokenUnavailable`` without a key."""
     key = signing_key()
     if key is None:
@@ -187,7 +260,8 @@ def mint(*, sub, uid, act, scope, ctx, prj, run, tsk, exp, now=None) -> tuple:
     issued = int(now if now is not None else time.time())
     claims = {
         "v": 1, "iss": ISSUER, "aud": AUDIENCE, "sub": str(sub), "uid": int(uid), "act": str(act),
-        "scope": list(scope), "ctx": str(ctx), "prj": int(prj), "run": str(run), "tsk": str(tsk),
+        "scope": list(scope), "ctx": str(ctx), "prj": int(prj), "tgt": sorted({int(p) for p in tgt})[:MAX_TARGETS],
+        "run": str(run), "tsk": str(tsk),
         "iat": issued, "exp": int(exp), "jti": uuid.uuid4().hex,
     }
     body = _b64(json.dumps(claims, sort_keys=True, separators=(",", ":")).encode("utf-8"))
@@ -202,7 +276,7 @@ def delivery(token, claims) -> dict:
     return {"token": token, "origins": internal_origins(), "identity": identity}
 
 
-def mint_for_admission(view, task_name) -> dict:
+def mint_for_admission(view, task_name, payload) -> dict:
     """The delivery of a run Main just admitted (``ExecutionSecurityContextView``): reads only the binding's
     operations and the user's (cached) permissions."""
     if signing_key() is None:   # before any read: a deployment without the key pays nothing for it
@@ -212,11 +286,12 @@ def mint_for_admission(view, task_name) -> dict:
     scope = scope_for(view.binding_project_id, view.agent_binding_ref, view.subject_user_id)
     token, claims = mint(
         sub=view.subject_ref, uid=view.subject_user_id, act=view.agent_binding_ref, scope=scope, ctx=view.context_ref,
-        prj=view.project_id, run=view.run_id, tsk=task_name, exp=view.expires_at.timestamp())
+        prj=view.project_id, tgt=target_projects(payload, view.project_id, view.subject_user_id), run=view.run_id,
+        tsk=task_name, exp=view.expires_at.timestamp())
     return delivery(token, claims)
 
 
-def mint_for_context(project_id, context_ref, task_name) -> dict:
+def mint_for_context(project_id, context_ref, task_name, payload) -> dict:
     """The delivery of a dispatch that runs under a context admitted earlier (a child, a reconcile run): one read of
     the context row, then as at admission. The token expires with the context."""
     if signing_key() is None:
@@ -243,19 +318,34 @@ def mint_for_context(project_id, context_ref, task_name) -> dict:
     exp = (expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=timezone.utc)).timestamp()
     token, claims = mint(
         sub=subject_ref, uid=user_id, act=actor, scope=scope_for(binding_project_id, actor, user_id),
-        ctx=str(context_id), prj=project_id, run=row.run_id, tsk=task_name, exp=exp)
+        ctx=str(context_id), prj=project_id, tgt=target_projects(payload, project_id, user_id), run=row.run_id,
+        tsk=task_name, exp=exp)
     return delivery(token, claims)
 
 
 # --- verification -----------------------------------------------------------------------------
 
-def _refusal(code, status=401) -> dict:
-    return {"ok": False, "status": status, "code": code, "message": MESSAGES[code]}
+STATUS_OF = {INTERNAL_TOKEN_INVALID: 401, INTERNAL_TOKEN_EXPIRED: 401, INTERNAL_TARGET_DENIED: 403,
+             CONTEXT_NOT_LIVE: 403, DEPENDENCY_UNAVAILABLE: 503}
+_VERDICTS = {}            # (ctx, jti) -> monotonic deadline of a positive context verdict
+_VERDICTS_LOCK = threading.Lock()
+_COUNTER = {}
 
 
-def parse(token, key, now=None) -> dict:
+def _refusal(code, status=None) -> dict:
+    return {"ok": False, "status": status or STATUS_OF.get(code, 401), "code": code, "message": MESSAGES[code]}
+
+
+def _count(result, code):
+    """``internal_token_verification_total{result, reason_code}``: a counter and the log line the platform reads."""
+    key = (result, code)
+    _COUNTER[key] = _COUNTER.get(key, 0) + 1
+    log.info("security_metric name=internal_token_verification_total result=%s reason_code=%s", result, code)
+
+
+def parse(token, key, now=None, max_lifetime_s=None) -> dict:
     """The claims of a token Main signed with ``key``, or ``ValueError(code)``: structure, signature, issuer,
-    audience and expiry. The context is not checked here."""
+    audience, issue time, lifetime and expiry. The context is not checked here."""
     if not isinstance(token, str) or len(token) > MAX_TOKEN_CHARS or not token.startswith(TOKEN_PREFIX):
         raise ValueError(INTERNAL_TOKEN_INVALID)
     body, sep, mac = token[len(TOKEN_PREFIX):].partition(".")
@@ -275,10 +365,19 @@ def parse(token, key, now=None) -> dict:
             raise ValueError(INTERNAL_TOKEN_INVALID)
     if claims["uid"] <= 0 or not isinstance(claims["scope"], list) or not all(op in OPERATIONS for op in claims["scope"]):
         raise ValueError(INTERNAL_TOKEN_INVALID)
+    tgt = claims["tgt"]
+    if not isinstance(tgt, list) or len(tgt) > MAX_TARGETS \
+            or not all(isinstance(p, int) and not isinstance(p, bool) for p in tgt):
+        raise ValueError(INTERNAL_TOKEN_INVALID)
     for name in ("sub", "act", "ctx", "run", "tsk", "jti"):
         if not isinstance(claims[name], str) or not claims[name]:
             raise ValueError(INTERNAL_TOKEN_INVALID)
-    if int(now if now is not None else time.time()) >= claims["exp"]:
+    moment = int(now if now is not None else time.time())
+    if claims["iat"] > moment + MAX_CLOCK_SKEW_S or claims["exp"] <= claims["iat"]:
+        raise ValueError(INTERNAL_TOKEN_INVALID)
+    if max_lifetime_s is not None and claims["exp"] - claims["iat"] > max_lifetime_s:
+        raise ValueError(INTERNAL_TOKEN_INVALID)
+    if moment >= claims["exp"]:
         raise ValueError(INTERNAL_TOKEN_EXPIRED)
     return claims
 
@@ -288,30 +387,104 @@ def _route_accepts(environ, endpoint, claims) -> Optional[str]:
     if environ.get(INTERNAL_MCP_ENVIRON_KEY) is True:
         verified = environ.get(VERIFIED_ENVIRON_KEY)
         return "inner" if isinstance(verified, dict) and verified.get("jti") == claims["jti"] else None
-    if isinstance(endpoint, str) and endpoint.rsplit(".", 1)[-1] in MCP_ROUTE_ENDPOINTS:
+    if endpoint in MCP_ROUTE_ENDPOINTS:
         return "mcp"
     return None
 
 
-def verify_request(token, environ, endpoint=None, module=None, now=None) -> dict:
-    """The auth plugin's verifier of ``TOKEN_PREFIX`` bearers: ``{"ok": True, "user_id"}`` (and ``flask.g.internal_obo``
-    set to the claims), or ``{"ok": False, "status", "code", "message"}``. Never raises, never logs the token."""
+def _addressed_projects(route, view_args, args) -> list:
+    """The projects a request acts in: the route's ``project_id`` and, on the MCP route, ``scope_project_id``."""
+    found = []
+    for value in ((view_args or {}).get("project_id"), (args or {}).get("scope_project_id") if route == "mcp" else None):
+        if value is None:
+            continue
+        try:
+            found.append(int(value))
+        except (TypeError, ValueError):
+            found.append(None)   # an unreadable project is not one of the token's
+    return found
+
+
+def _request_parts():
     try:
-        claims = parse(token, signing_key(), now=now)
-    except ValueError as exc:
-        return _refusal(str(exc))
-    if endpoint is None:
         import flask  # pylint: disable=C0415
-        endpoint = flask.request.endpoint if flask.has_request_context() else None
+        if flask.has_request_context():
+            return flask.request.endpoint, flask.request.view_args, flask.request.args
+    except Exception:  # pylint: disable=W0703
+        pass
+    return None, None, None
+
+
+def _verdict_ttl() -> float:
+    return max(0.0, min(VERDICT_TTL_S, float(getattr(auth, "epoch_ttl", VERDICT_TTL_S) or 0)))
+
+
+def _cached_verdict(claims) -> bool:
+    key = (claims["ctx"], claims["jti"])
+    with _VERDICTS_LOCK:
+        deadline = _VERDICTS.get(key)
+        if deadline is not None and deadline > time.monotonic():
+            return True
+        _VERDICTS.pop(key, None)
+    return False
+
+
+def _remember_verdict(claims):
+    ttl = _verdict_ttl()
+    if ttl <= 0:
+        return
+    with _VERDICTS_LOCK:
+        if len(_VERDICTS) >= MAX_VERDICTS:
+            now = time.monotonic()
+            for key in [key for key, deadline in _VERDICTS.items() if deadline <= now] or list(_VERDICTS)[:MAX_VERDICTS // 4]:
+                _VERDICTS.pop(key, None)
+        _VERDICTS[(claims["ctx"], claims["jti"])] = time.monotonic() + ttl
+
+
+def _refuse_verified(module, claims, code):
+    """A refusal of a token whose signature holds: counted and audited (the claims are Main's own)."""
+    _count("deny", code)
+    try:
+        _audit(claims, "token", "-", "-", "deny", code, module=module)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("internal_obo: a token refusal was not recorded (%s)", type(exc).__name__)
+    return _refusal(code)
+
+
+def verify_request(token, environ, endpoint=None, module=None, now=None, view_args=None, args=None) -> dict:
+    """The auth plugin's verifier of ``TOKEN_PREFIX`` bearers: ``{"ok": True, "user_id"}`` (and ``flask.g.internal_obo``
+    set to the claims), or ``{"ok": False, "status", "code", "message"}``. Never raises, never logs the token.
+
+    In order: signature and claims (a bad MAC is only counted: its claims are not Main's), the route, the projects the
+    request addresses against ``tgt``, then the context: ``validate_context`` without moving its state, a positive verdict
+    reused for ``VERDICT_TTL_S`` (bounded by the auth epoch TTL). A context that cannot be checked is 503, not a
+    refusal of the run."""
+    module = module or this.module
+    if endpoint is None and view_args is None and args is None:
+        endpoint, view_args, args = _request_parts()
+    settings = getattr(module, "admission_settings", None)
+    ttl = getattr(settings, "context_ttl_s", None)
+    try:
+        claims = parse(token, signing_key(), now=now, max_lifetime_s=None if ttl is None else int(ttl) + MAX_CLOCK_SKEW_S)
+    except ValueError as exc:
+        _count("deny", str(exc))
+        return _refusal(str(exc))
     route = _route_accepts(environ, endpoint, claims)
     if route is None:
-        return _refusal(INTERNAL_TOKEN_INVALID, 403)
-    if route == "mcp":
+        return _refuse_verified(module, claims, INTERNAL_TOKEN_INVALID) | {"status": 403}
+    if any(project not in claims["tgt"] for project in _addressed_projects(route, view_args, args)):
+        return _refuse_verified(module, claims, INTERNAL_TARGET_DENIED)
+    if route == "mcp" and not _cached_verdict(claims):
         from .admission import validate_context  # pylint: disable=C0415
         caller = {"kind": "indexer_worker", "task_name": claims["tsk"], "run_id": claims["run"]}
-        verdict = validate_context(module or this.module, claims["prj"], claims["ctx"], caller)
+        verdict = validate_context(module, claims["prj"], claims["ctx"], caller, touch=False)
         if not isinstance(verdict, dict) or not verdict.get("ok"):
-            return _refusal(CONTEXT_NOT_LIVE, 403)
+            code = DEPENDENCY_UNAVAILABLE if isinstance(verdict, dict) \
+                and verdict.get("reason_code") == DEPENDENCY_UNAVAILABLE else CONTEXT_NOT_LIVE
+            _count("deny", code)   # validate_context recorded the decision itself
+            return _refusal(code)
+        _remember_verdict(claims)
+    _count("allow", "VERIFIED")
     _set_claims(claims)
     return {"ok": True, "user_id": claims["uid"]}
 
@@ -339,14 +512,19 @@ def current_claims() -> Optional[dict]:
 
 # --- authorization and audit on the MCP side ---------------------------------------------------
 
-def operation_of(method, path) -> str:
-    """The platform operation of an API call: a read, a write to a credential plugin, or any other write."""
-    if str(method or "").upper() in READ_METHODS:
+def endpoint_key(path) -> str:
+    """A path template as the map keys it: without the ``/api/v2/`` prefix and surrounding slashes."""
+    text = str(path or "").strip("/")
+    return text[len("api/v2/"):] if text.startswith("api/v2/") else text
+
+
+def operation_of(method, path) -> Optional[str]:
+    """The platform operation of an API tool, from its method and path template: ``read`` for a GET, the explicit map
+    for a write, None for a write the map does not know (refused)."""
+    verb = str(method or "").upper()
+    if verb in READ_METHODS:
         return "read"
-    segments = [segment for segment in str(path or "").split("/") if segment]
-    if len(segments) >= 3 and segments[0] == "api" and segments[2] in CREDENTIAL_PLUGINS:
-        return "credentials"
-    return "build"
+    return ENDPOINT_OPERATIONS.get((verb, endpoint_key(path)))
 
 
 class OperationRefused(Exception):
@@ -356,16 +534,16 @@ class OperationRefused(Exception):
         self.message = MESSAGES[code]
 
 
-def _audit(claims, operation, target, tool_name, decision, code):
+def _audit(claims, operation, target, tool_name, decision, code, module=None):
     subject = claims["sub"]
     event = {
         "event_type": "platform_operation", "decision": decision, "reason_code": code,
         "project_id": claims["prj"], "caller_ref": f"user:{claims['uid']}", "user_ref": subject,
         "mandate_ref": subject[len("mandate:"):] if subject.startswith("mandate:") else None,
         "agent_binding_ref": claims["act"], "runtime_identity_ref": f"context:{claims['ctx']}",
-        "run_id": claims["run"], "operation_id": f"{operation}:{tool_name}"[:256], "target_ref": target[:256],
+        "run_id": claims["run"], "operation_id": f"{operation}:{tool_name}"[:256], "target_ref": str(target)[:256],
     }
-    module = this.module
+    module = module or this.module
     profile = getattr(module, "governance_profile", None)
     settings = getattr(module, "admission_settings", None)
     event["policy_revision"] = getattr(profile, "policy_revision", None)
@@ -375,18 +553,20 @@ def _audit(claims, operation, target, tool_name, decision, code):
 
 
 def check_operation(operation, target, tool_name) -> None:
-    """Refuse (``OperationRefused``) an operation outside the run token's scope, and record a write before it is made.
-    A request without a run token is not touched. A refusal is recorded too; a write whose record cannot be written is
-    refused (``AUDIT_UNAVAILABLE``). Reads in scope are not recorded."""
+    """Refuse (``OperationRefused``) an operation outside the run token's scope, or a write the map does not know
+    (``operation`` None), and record a write before it is made. A request without a run token is not touched. A refusal
+    is recorded too; a write whose record cannot be written is refused (``AUDIT_UNAVAILABLE``). Reads in scope are not
+    recorded."""
     claims = current_claims()
     if claims is None:
         return
-    if operation not in claims["scope"]:
+    if operation is None or operation not in claims["scope"]:
+        code = INTERNAL_OPERATION_UNKNOWN if operation is None else INTERNAL_SCOPE_DENIED
         try:
-            _audit(claims, operation, target, tool_name, "deny", INTERNAL_SCOPE_DENIED)
+            _audit(claims, operation or "unknown", target, tool_name, "deny", code)
         except Exception as exc:  # pylint: disable=W0703
             log.error("internal_obo: a scope refusal was not recorded (%s)", type(exc).__name__)
-        raise OperationRefused(INTERNAL_SCOPE_DENIED)
+        raise OperationRefused(code)
     if operation == "read":
         return
     try:
@@ -403,7 +583,17 @@ def refusal_text(exc: OperationRefused) -> str:
 
 # --- what a payload carries ------------------------------------------------------------------
 
-_INTERNAL_URL = re.compile(r"/app/(?:\{project_id\}|\d+)/mcp/")
+# The internal endpoint shape, on the URL's path (the SDK's matcher is the same): /app/<project>/mcp, then / or nothing
+_INTERNAL_PATH = re.compile(r"^/app/(?P<project>\d+|\{project_id\})/mcp(?:/|$)")
+_AUTH_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"})
+
+
+class ForeignInternalMcp(Exception):
+    """An internal-shaped MCP toolkit on an origin the platform does not serve its tools from."""
+
+    def __init__(self):
+        super().__init__(INTERNAL_MCP_ORIGIN_NOT_ALLOWED)
+        self.code = INTERNAL_MCP_ORIGIN_NOT_ALLOWED
 
 
 def _tool_lists(payload):
@@ -420,12 +610,104 @@ def _tool_lists(payload):
                 yield value.get("tools")
 
 
-def has_internal_mcp(payload) -> bool:
-    """Does the payload carry an internal Elitea MCP toolkit (its URL has the internal endpoint shape)? Dict reads."""
+def _mcp_tools(payload):
+    """``(tool, settings, url parts)`` of every MCP toolkit whose URL has the internal endpoint shape."""
     for tools in _tool_lists(payload):
         for tool in tools if isinstance(tools, list) else ():
-            settings = tool.get("settings") if isinstance(tool, dict) else None
+            if not isinstance(tool, dict) or not str(tool.get("type", "")).startswith("mcp"):
+                continue
+            settings = tool.get("settings")
             url = settings.get("url") if isinstance(settings, dict) else None
-            if isinstance(url, str) and _INTERNAL_URL.search(url) and str(tool.get("type", "")).startswith("mcp"):
+            if not isinstance(url, str):
+                continue
+            parts = urlsplit(url)
+            if _INTERNAL_PATH.match(parts.path):
+                yield tool, settings, parts
+
+
+def has_internal_mcp(payload) -> bool:
+    """Does the payload carry an internal Elitea MCP toolkit (its URL has the internal endpoint shape)? Dict reads."""
+    return next(_mcp_tools(payload), None) is not None
+
+
+def may_fetch_subagents(payload) -> bool:
+    """Can the runtime fetch a sub-agent's details itself (the prefetch did not cover it)? Then its internal toolkits,
+    injected by Main into that response, are not visible here, and the run still gets a token. Dict reads."""
+    application = payload.get("application") if isinstance(payload, dict) else None
+    prefetched = (application or {}).get("subagent_version_details") if isinstance(application, dict) else None
+    prefetched = prefetched if isinstance(prefetched, dict) else {}
+    for tools in _tool_lists(payload):
+        for tool in tools if isinstance(tools, list) else ():
+            if not isinstance(tool, dict) or tool.get("type") != "application":
+                continue
+            settings = tool.get("settings") if isinstance(tool.get("settings"), dict) else {}
+            if f"{settings.get('application_id')}:{settings.get('application_version_id')}" not in prefetched:
                 return True
     return False
+
+
+def needs_run_token(payload) -> bool:
+    """A run token is minted only for a run that can reach the internal MCP: an internal toolkit in the payload, or a
+    sub-agent the runtime may fetch itself (its details carry Main-injected internal toolkits)."""
+    return has_internal_mcp(payload) or may_fetch_subagents(payload)
+
+
+def _private_project(user_id) -> Optional[int]:
+    """The user's private project (where Main injects most internal toolkits), for a sub-agent fetched at run time."""
+    try:
+        from tools import rpc_tools  # pylint: disable=C0415
+        project = rpc_tools.RpcMixin().rpc.timeout(5).admin_get_user_private_project(user_id)
+        return int(project.id) if project else None
+    except Exception as exc:  # pylint: disable=W0703
+        log.warning("internal_obo: the private project could not be read (%s)", type(exc).__name__)
+        return None
+
+
+def target_projects(payload, project_id, user_id) -> list:
+    """``tgt``: the projects the run's internal toolkits address (each URL's project and ``scope_project_id``; the
+    tool's own project for a template URL). A run that may fetch sub-agents also gets its own project and the user's
+    private project, where Main injects those sub-agents' toolkits."""
+    found = set()
+    for tool, settings, parts in _mcp_tools(payload):
+        project = _INTERNAL_PATH.match(parts.path).group("project")
+        if project.isdigit():
+            found.add(int(project))
+        else:
+            owner = settings.get("project_id") or tool.get("project_id") or project_id
+            if isinstance(owner, int) or (isinstance(owner, str) and owner.isdigit()):
+                found.add(int(owner))
+        for value in parse_qs(parts.query).get("scope_project_id", []):
+            if value.isdigit():
+                found.add(int(value))
+    if may_fetch_subagents(payload):
+        found.add(int(project_id))
+        private = _private_project(user_id)
+        if private is not None:
+            found.add(private)
+    return sorted(found)
+
+
+def police_internal_mcp(payload) -> int:
+    """Under enforce, before dispatch: an internal-shaped MCP toolkit may reach the platform only with the run token.
+    Its own ``Authorization``/``Cookie`` headers and personal token are removed (the run token replaces them); one on an
+    origin the platform does not serve its tools from raises ``ForeignInternalMcp``. The number of toolkits changed."""
+    allowed = set(internal_origins())
+    changed = 0
+    for tool, settings, parts in list(_mcp_tools(payload)):
+        if f"{parts.scheme}://{parts.netloc}".lower() not in allowed:
+            raise ForeignInternalMcp()
+        headers = settings.get("headers")
+        if isinstance(headers, str):
+            try:
+                headers = json.loads(headers) if headers.strip() else {}
+            except ValueError:
+                headers = {}
+        cleaned = {key: value for key, value in (headers or {}).items()
+                   if not (isinstance(key, str) and key.lower() in _AUTH_HEADERS)} if isinstance(headers, dict) else {}
+        if cleaned != settings.get("headers") or "personal_token" in settings:
+            new_settings = dict(settings)
+            new_settings["headers"] = cleaned
+            new_settings.pop("personal_token", None)
+            tool["settings"] = new_settings
+            changed += 1
+    return changed

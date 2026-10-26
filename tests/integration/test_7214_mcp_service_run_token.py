@@ -6,6 +6,7 @@ the verified claims so it is not validated twice. Calls without a run token are 
 is the real one, its audit and context reads are stubbed.
 """
 
+import ast
 import importlib.util
 import pathlib
 import sys
@@ -114,6 +115,8 @@ def service(mcp_service_module, monkeypatch):
 
     def check_operation(operation, target, tool_name):
         checks.append((operation, target, tool_name))
+        if operation is None:
+            raise Refused("INTERNAL_OPERATION_UNKNOWN")
         if operation not in flask.g.internal_obo["scope"]:
             raise Refused("INTERNAL_SCOPE_DENIED")
 
@@ -122,12 +125,15 @@ def service(mcp_service_module, monkeypatch):
     obo.OperationRefused = Refused
     obo.check_operation = check_operation
     obo.refusal_text = lambda exc: f"{exc.code}: {exc.message}"
-    source = (PLUGIN_ROOT / "utils" / "internal_obo.py").read_text()
-    namespace = {}
-    exec(compile(source[source.index("def operation_of"):source.index("class OperationRefused")], "internal_obo.py",
-                 "exec"), {"READ_METHODS": frozenset({"GET", "HEAD", "OPTIONS"}),
-                           "CREDENTIAL_PLUGINS": frozenset({"secrets", "configurations"})}, namespace)
-    obo.operation_of = namespace["operation_of"]   # the real classifier, lifted from the module (no Pylon imports)
+    # the real classifier and its map, lifted from the module (no Pylon imports)
+    tree = ast.parse((PLUGIN_ROOT / "utils" / "internal_obo.py").read_text())
+    wanted = [node for node in tree.body if (
+        isinstance(node, ast.Assign) and any(getattr(t, "id", None) in ("ENDPOINT_OPERATIONS", "READ_METHODS")
+                                             for t in node.targets))
+        or (isinstance(node, ast.FunctionDef) and node.name in ("endpoint_key", "operation_of"))]
+    namespace = {"Optional": __import__("typing").Optional}
+    exec(compile(ast.Module(wanted, []), "internal_obo.py", "exec"), namespace)  # pylint: disable=W0122
+    obo.operation_of = namespace["operation_of"]
     monkeypatch.setitem(sys.modules, obo.__name__, obo)
     executor = mcp_service_module.McpApiToolExecutor
 
@@ -141,6 +147,7 @@ def service(mcp_service_module, monkeypatch):
 
 def tool(method, path):
     return {"method": method, "path": path, "label": f"{method.lower()}_tool", "parameters": [
+        {"name": "mode", "in": "path", "schema": {"type": "string", "default": "prompt_lib"}},
         {"name": "project_id", "in": "path", "schema": {"type": "integer"}}]}
 
 
@@ -155,12 +162,27 @@ def test_a_write_out_of_scope_is_refused_before_the_api_is_called(service):
 
 def test_a_write_in_scope_runs_and_its_api_call_carries_the_verified_claims(service):
     service.flask.g.internal_obo = dict(CLAIMS)
-    result = service.executor.execute(tool("POST", "/api/v2/elitea_core/applications/prompt_lib/{project_id}"),
+    result = service.executor.execute(tool("POST", "/api/v2/elitea_core/applications/{mode}/{project_id}"),
                                       {"project_id": 1, "name": "a"})
     assert result == {"result": {}}
     [environ] = service.sent
     assert environ["elitea.internal_obo.claims"] == CLAIMS and environ["elitea.internal_mcp_request"] is True
     assert service.checks == [("build", "POST /api/v2/elitea_core/applications/prompt_lib/1", "post_tool")]
+
+
+def test_a_write_the_map_does_not_know_is_refused_before_the_api_is_called(service):
+    service.flask.g.internal_obo = dict(CLAIMS, scope=["read", "build", "credentials", "run"])
+    result = service.executor.execute(tool("POST", "/api/v2/projects/project/{project_id}"), {"project_id": 1})
+    assert result == {"error": "INTERNAL_OPERATION_UNKNOWN: readable text"} and service.sent == []
+    assert service.checks[0][0] is None
+
+
+def test_an_s3_credential_is_a_credentials_operation_not_build(service):
+    service.flask.g.internal_obo = dict(CLAIMS)
+    result = service.executor.execute(tool("POST", "/api/v2/artifacts/s3_credentials/{mode}/{project_id}"),
+                                      {"project_id": 1})
+    assert result["error"].startswith("INTERNAL_SCOPE_DENIED") and service.sent == []
+    assert service.checks[0][0] == "credentials"
 
 
 def test_without_a_run_token_nothing_is_checked_or_marked(service):

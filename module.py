@@ -710,8 +710,8 @@ class Module(module.ModuleModel):
         except Exception as exc:  # pylint: disable=W0703
             log.error("internal OBO: the run token verifier could not be registered (%s)", type(exc).__name__)
         if internal_obo.signing_key() is None:
-            log.warning("internal OBO: SECRETS_MASTER_KEY is not set; governed runs get no run token and the governance "
-                        "preflight refuses to switch on")
+            log.warning("internal OBO: SECRETS_MASTER_KEY is not set; governed runs with built-in Elitea tools are "
+                        "refused (INTERNAL_TOKEN_UNAVAILABLE)")
 
         def _run():
             try:
@@ -1198,6 +1198,11 @@ class Module(module.ModuleModel):
 
         # MCP SSE deinitialization
         self.mcp_sse_deinit()
+        try:   # the run token verifier goes with the module (#7214)
+            from .utils.internal_obo import TOKEN_PREFIX  # pylint: disable=C0415
+            auth.unregister_bearer_verifier(TOKEN_PREFIX)
+        except Exception as exc:  # pylint: disable=W0703
+            log.warning("internal OBO: the run token verifier was not unregistered (%s)", type(exc).__name__)
 
         # Provider Hub deinitialization
         self.provider_hub_deinit()

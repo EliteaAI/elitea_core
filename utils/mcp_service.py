@@ -92,8 +92,8 @@ class McpApiToolExecutor:
             url_path = McpApiToolExecutor._build_url_path(path, path_params)
             if _run_token_claims() is not None:
                 from .internal_obo import operation_of  # pylint: disable=C0415
-                refused = _refused_by_run_token(
-                    operation_of(method, url_path), f"{method} {url_path}", api_tool.get("label", ""))
+                refused = _refused_by_run_token(   # classified by the tool's own path template, not the call's values
+                    operation_of(method, path), f"{method} {url_path}", api_tool.get("label", ""))
                 if refused:
                     return {"error": refused}
 

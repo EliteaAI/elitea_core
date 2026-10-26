@@ -109,7 +109,7 @@ def parse_binding_param(param):
 
 def parse_platform_operations(raw, action):
     """``(sorted list, None)`` or ``(None, readable error)`` for a ``platform_operations`` value (#7214): a comma list,
-    or a list, of ``read``/``build``/``credentials``/``run``, on a create or a rebind only. Empty means none."""
+    or a list, of ``read``/``build``/``credentials``/``run``, on a create or a rebind only. Empty means read only (as no list, §21)."""
     if action not in OPERATIONS_ACTIONS:
         return None, "platform_operations belongs to action=create or action=rebind only"
     items = raw.split(",") if isinstance(raw, str) else raw

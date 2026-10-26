@@ -115,6 +115,8 @@ MESSAGES = {
     # the run token of the internal Elitea MCP (#7214)
     "INTERNAL_TOKEN_UNAVAILABLE": "The built-in Elitea tools of this agent cannot get the run's own identity right now; "
                                   "the run was not started. Try again later.",
+    "INTERNAL_MCP_ORIGIN_NOT_ALLOWED": "An Elitea MCP toolkit of this agent points to an address the platform does not "
+                                       "serve its tools from; the run was not started. Use the built-in Elitea tools.",
     **dict.fromkeys(
         ("STORE_DENIED", "STORE_SEALED", "STORE_UNAVAILABLE", "STORE_TLS_INVALID", "STORE_NOT_FOUND",
          "STORE_VERSION_CONFLICT"),
@@ -993,6 +995,11 @@ def admit_dispatch(  # pylint: disable=R0911
         # no governed envelope to carry the context (e.g. a parent started before governance was
         # switched on): the worker would not check it, so the run is not started
         return _refuse_dispatch(module, "STALE_CONTEXT", call_kwargs, run_id)
+    try:
+        # an internal Elitea MCP toolkit reaches the platform with the run token only (#7214)
+        internal_obo.police_internal_mcp(payload)
+    except internal_obo.ForeignInternalMcp as foreign:
+        return _refuse_dispatch(module, foreign.code, call_kwargs, run_id)
     if free_form_secret:
         # a {{secret.*}} outside a credential configuration would have been resolved into the payload, where no slot
         # governs it: only credentials registered for governed use reach a governed run
@@ -1005,7 +1012,7 @@ def admit_dispatch(  # pylint: disable=R0911
         meta.setdefault("context_ref", envelope["context_ref"])
         inherited_project = meta.get("project_id") or payload.get("project_id")
         if not _deliver_run_token(payload, lambda: internal_obo.mint_for_context(
-                inherited_project, envelope["context_ref"], task_name)):
+                inherited_project, envelope["context_ref"], task_name, payload)):
             _refuse_dispatch(module, "INTERNAL_TOKEN_UNAVAILABLE", call_kwargs, run_id)
         return None
     if unavailable:
@@ -1029,7 +1036,7 @@ def admit_dispatch(  # pylint: disable=R0911
                 caller_ref=_caller_ref(admission), run_id=run_id if isinstance(run_id, str) else None,
                 traceparent=admission.trace_ref, **denied.audit)
             raise
-    if not _deliver_run_token(payload, lambda: internal_obo.mint_for_admission(view, task_name)):
+    if not _deliver_run_token(payload, lambda: internal_obo.mint_for_admission(view, task_name, payload)):
         track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
         _record_deny(
             module, "INTERNAL_TOKEN_UNAVAILABLE", project_id=admission.project_id,
@@ -1046,9 +1053,13 @@ def admit_dispatch(  # pylint: disable=R0911
 
 
 def _deliver_run_token(payload, minted) -> bool:
-    """Put the run token (#7214) on the payload: one signature, and the reads of the scope. False when none could be
-    minted for a payload that carries an internal Elitea MCP toolkit: that run is refused, its toolkit never falls back
-    to a personal or system token. A payload without one goes on without a token."""
+    """Put the run token (#7214) on the payload of a run that can reach the internal MCP (``needs_run_token``: an
+    internal toolkit, or a sub-agent the runtime may fetch itself): one signature, the binding's operations, the user's
+    cached permissions. Any other run mints and reads nothing. False when a token is needed and none could be minted:
+    that run is refused; its toolkits never fall back to a personal or system token. A sub-agent that the runtime would
+    fetch only gets a token when the minting works; without one its internal toolkits are refused at the MCP."""
+    if not internal_obo.needs_run_token(payload):
+        return True
     try:
         payload[internal_obo.TOKEN_KWARG] = minted()
         return True
@@ -1056,7 +1067,7 @@ def _deliver_run_token(payload, minted) -> bool:
         if internal_obo.has_internal_mcp(payload):
             log.error("admission: no run token could be minted (%s); the run is refused", type(exc).__name__)
             return False
-        log.debug("admission: no run token (%s); the run has no internal Elitea MCP toolkit", type(exc).__name__)
+        log.warning("admission: no run token (%s); fetched sub-agents get no internal tools", type(exc).__name__)
         return True
 
 
@@ -1403,7 +1414,7 @@ def _mandate_revoke_code(row, stamped) -> Optional[str]:
     return None
 
 
-def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,R0914,R0915
+def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: disable=R0912,R0914,R0915
     """Is this run still the one that was admitted? No database connection is held while anything else is asked: the
     context (and, in the same project, its binding) is read in a short session, the identity service and the facts are
     asked with none open, and the state is written in a short session of its own, as a conditional update (a context
@@ -1506,10 +1517,11 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
         if code is not None:
             raise revoke(code)
     #
-    with db.get_session(project_id) as session:
-        if _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
-            raise _denied("STALE_CONTEXT")
-        session.commit()
+    if touch or row.state != "running":   # the internal MCP asks per request: no write once the run is running (#7214)
+        with db.get_session(project_id) as session:
+            if _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
+                raise _denied("STALE_CONTEXT")
+            session.commit()
     return {
         "context_ref": str(context_id), "run_id": row.run_id, "attempt": row.attempt,
         "project_id": row.project_id, "application_id": row.application_id, "version_id": row.version_id,
@@ -1518,14 +1530,14 @@ def _validate(project_id, context_ref, caller, known):  # pylint: disable=R0912,
     }
 
 
-def validate_context(module, project_id, context_ref, caller) -> dict:
+def validate_context(module, project_id, context_ref, caller, touch=True) -> dict:
     """Worker-bus handler: is this run still the one that was admitted? Never raises, returns no secrets.
 
     ``{"ok": True, "context": {...}}`` or ``{"ok": False, "reason_code", "message"}``.
     """
     known = {}
     try:
-        context = _validate(project_id, context_ref, caller, known)
+        context = _validate(project_id, context_ref, caller, known, touch=touch)
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703
