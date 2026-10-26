@@ -312,8 +312,9 @@ Run admin task migrate_eval_case_usage_columns with param: project_id=all
 # .guardrail_events) added to the platform dimension registry centry.eval_platform_dimension.
 # Nothing seeds them at boot, so the platform catalog stays without them until this runs.
 # Projects get a copy only when someone attaches one from the catalog. Run after create_tables.
-# No params. Insert-only and idempotent: existing entries (and admin edits to them) are kept;
-# a same-named non-built-in entry is reported under "conflicts" and left alone.
+# No params. Idempotent: admin weight/target edits to existing entries are kept (since #7015 the
+# task also refreshes their descriptions, see below); a same-named non-built-in entry is reported
+# under "conflicts" and left alone.
 Run admin task seed_eval_trajectory_dimensions
 
 # Performance P-2: two built-in latency dimensions (performance.latency,
@@ -403,3 +404,12 @@ Run admin task create_mandate_tables with param: project_id=all
 # the task once per environment, then choose the mode under Admin UI -> Governance -> Overview. Idempotent.
 Run admin task create_governance_settings_tables with param: dry_run
 Run admin task create_governance_settings_tables
+
+# Issue #7015: trajectory.tool_match gained an opt-in `calls: own` option, and its description
+# now documents it. Re-run the task once after deploying this build: it refreshes the description
+# of every built-in entry whose text differs from the plugin's (reported under "updated") and
+# resyncs those entries into the projects that attached them (failures under "resync_failures").
+# Weights and targets are not touched. Optional for scoring: the check's script is resolved from
+# the plugin at run time, so `calls: own` works without it; only the shown description lags.
+# No params. Idempotent.
+Run admin task seed_eval_trajectory_dimensions
