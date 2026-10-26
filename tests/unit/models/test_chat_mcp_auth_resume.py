@@ -95,7 +95,7 @@ _module(
     'utils.skill_mentions',
     merge_mention_candidates=lambda attached, chat, project=None: [*attached, *chat, *(project or [])],
     merge_disclosable_skills=lambda own, chat: [*own, *chat],
-    without_bodies=lambda skills: [{k: v for k, v in s.items() if k != 'instructions'} for s in skills or []],
+    strip_skill_bodies=lambda skills: [{k: v for k, v in s.items() if k != 'instructions'} for s in skills or []],
 )
 _module('utils.application_tools', expand_toolkit_settings=lambda tools, *_args: tools)
 _module(

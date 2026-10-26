@@ -10,8 +10,8 @@ from tools import db
 from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTarget, build_skill_run, \
     build_skill_run_target, load_skill_run_target, \
     resolve_skill_llm_settings, select_skill_version
-from .project_skills import is_project_skills_in_chat_enabled, project_skill_catalog, \
-    resolve_mentioned_project_skills, with_mentioned_bodies
+from .project_skills import build_project_skill_catalog, is_project_skills_in_chat_enabled, \
+    resolve_mentioned_project_skills
 from .skill_llm_override import select_llm_override
 from .skill_mentions import merge_mention_candidates, resolves_mentions_in_predict
 from .skill_utils import consume_message_skills
@@ -305,24 +305,21 @@ def owner_skill_candidates(owner_id: int, published_only: bool, pins: dict) -> d
     return candidates
 
 
-def own_skill_names(result: dict) -> set:
-    return {skill.get('name') for skill in (result.get('version_details') or {}).get('skills') or []}
-
-
-def project_skill_candidates(msg_group, result: dict, participant_candidates: list, chat_project_id: int,
+def collect_project_skill_candidates(msg_group, result: dict, participant_candidates: list, chat_project_id: int,
                              strict_mentions: bool = False) -> list:
-    """Every project skill this chat may use, bodies attached only to the ones the message names with `~`."""
     if msg_group.sent_to.entity_name == ParticipantTypes.skill or not is_project_skills_in_chat_enabled(chat_project_id):
         return []
     sender_id = (msg_group.author_participant.entity_meta or {}).get('id')
-    catalog = project_skill_catalog(chat_project_id, sender_id, msg_group.conversation)
+    catalog = build_project_skill_catalog(chat_project_id, sender_id, msg_group.conversation)
     if not catalog or not has_skill_mention(result.get('user_input')):
         return catalog
-    known_names = own_skill_names(result) | {candidate.get('name') for candidate in participant_candidates}
+    own_names = {skill.get('name') for skill in (result.get('version_details') or {}).get('skills') or []}
+    known_names = own_names | {candidate.get('name') for candidate in participant_candidates}
     mentioned = resolve_mentioned_project_skills(
         result.get('user_input'), known_names, catalog, chat_project_id, strict=strict_mentions,
     )
-    return with_mentioned_bodies(catalog, mentioned)
+    loaded = {(skill['skill_project_id'], skill['skill_id']): skill for skill in mentioned}
+    return [loaded.get((entry['skill_project_id'], entry['skill_id']), entry) for entry in catalog]
 
 
 def apply_participant_skill_mentions(session, msg_group, result: dict, chat_project_id: int,
@@ -332,7 +329,7 @@ def apply_participant_skill_mentions(session, msg_group, result: dict, chat_proj
     if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, result.get('version_details'))):
         return
     candidates = participant_skill_mention_candidates(session, msg_group, chat_project_id)
-    project_skills = project_skill_candidates(msg_group, result, candidates, chat_project_id, strict_mentions)
+    project_skills = collect_project_skill_candidates(msg_group, result, candidates, chat_project_id, strict_mentions)
     if not candidates and not project_skills:
         return
     if candidates:

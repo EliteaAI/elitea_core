@@ -23,7 +23,7 @@ def merge_disclosable_skills(own_skills: list, chat_skills: list) -> list:
     return merged
 
 
-def without_bodies(skills: list) -> list:
+def strip_skill_bodies(skills: list) -> list:
     return [{key: value for key, value in skill.items() if key != 'instructions'} for skill in skills or []]
 
 

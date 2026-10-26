@@ -42,13 +42,12 @@ def folder_exclusion_clause(
     Must be applied to the listing query *before* count/offset/limit, otherwise the
     total and the page size are computed over rows the user cannot see.
     """
-    return folder_ids_exclusion_clause(
+    return build_folder_ids_exclusion_clause(
         entity_types, id_column, get_restricted_folder_ids(project_id, entity_types, user_id),
     )
 
 
-def folder_ids_exclusion_clause(entity_types: Union[str, List[str]], id_column, restricted: list):
-    """The predicate of `folder_exclusion_clause` for an already-resolved set of restricted folder ids."""
+def build_folder_ids_exclusion_clause(entity_types: Union[str, List[str]], id_column, restricted: list):
     if not restricted:
         return None
     #

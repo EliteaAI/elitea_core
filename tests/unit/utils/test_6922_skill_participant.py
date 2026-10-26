@@ -173,7 +173,7 @@ def env(isolated_sys_modules):
     _stub('utils.skill_utils', consume_message_skills=lambda content, candidates: (content, list(candidates)),
           get_max_invoked_skills_per_turn=lambda: 5)
     _stub('utils.folder_access', get_restricted_folder_ids=lambda *args, **kwargs: [],
-          folder_ids_exclusion_clause=lambda *args, **kwargs: None)
+          build_folder_ids_exclusion_clause=lambda *args, **kwargs: None)
     _stub('utils.support_utils', get_support_config=lambda: {'enabled': False, 'project_id': None})
     _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None, name=Column(),
                                                       description=Column(), meta=Column()),
