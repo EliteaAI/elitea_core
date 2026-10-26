@@ -1,6 +1,5 @@
 import difflib
 import re
-from typing import Optional
 
 from pylon.core.tools import log
 from sqlalchemy import func
@@ -36,83 +35,63 @@ def is_project_skills_in_chat_enabled(project_id: int) -> bool:
     return ((record or {}).get('data') or {}).get('enabled') is True
 
 
-def is_read_only_by_sender(conversation, sender_id) -> bool:
+def build_project_skill_catalog(project_id: int, sender_id, conversation) -> list:
+    if get_support_config().get('project_id') == project_id:
+        return []
     reader_ids = {
         str((participant.entity_meta or {}).get('id'))
         for participant in conversation.participants
         if participant.entity_name == ParticipantTypes.user.value
     }
-    return bool(conversation.is_private) and reader_ids <= {str(sender_id)}
-
-
-def is_social_installed() -> bool:
     try:
-        return SOCIAL_PLUGIN in context.module_manager.modules
+        rpc = rpc_tools.RpcMixin().rpc
+        if SOCIAL_PLUGIN not in context.module_manager.modules:
+            folder_owner_ids = set()
+        elif conversation.is_private and reader_ids <= {str(sender_id)}:
+            folder_owner_ids = {sender_id}
+        elif rpc.timeout(3).social_folder_permissions_supported(project_id):
+            folder_owner_ids = {int(member_id) for member_id in rpc.timeout(5).admin_get_users_ids_in_project(project_id=project_id) or []}
+        else:
+            folder_owner_ids = set()
+        restricted_folder_ids = sorted({
+            folder_id
+            for owner_id in folder_owner_ids
+            for folder_id in rpc.timeout(3).social_get_restricted_folder_ids(
+                project_id=project_id, entity_type='skill', user_id=owner_id,
+            ) or []
+        })
+        folder_filter = build_folder_ids_exclusion_clause('skill', Skill.id, restricted_folder_ids)
+        if restricted_folder_ids and folder_filter is None:
+            raise RuntimeError('No folder filter for restricted skill folders; the social model lookup failed')
+        with db.with_project_schema_session(project_id) as session:
+            query = session.query(
+                Skill.id, Skill.name, Skill.description, Skill.meta,
+                SkillVersion.id, SkillVersion.name, SkillVersion.meta,
+                (func.length(func.btrim(SkillVersion.instructions)) > 0).label('has_body'),
+            ).join(SkillVersion, SkillVersion.skill_id == Skill.id)
+            if folder_filter is not None:
+                query = query.filter(folder_filter)
+            rows = query.order_by(Skill.id, SkillVersion.id).all()
     except Exception:  # pylint: disable=W0718
-        return True
-
-
-def fetch_restricted_folder_ids_strictly(project_id: int, user_id) -> list:
-    return rpc_tools.RpcMixin().rpc.timeout(3).social_get_restricted_folder_ids(
-        project_id=project_id, entity_type='skill', user_id=user_id,
-    ) or []
-
-
-def collect_member_restricted_folder_ids(project_id: int) -> list:
-    rpc = rpc_tools.RpcMixin().rpc
-    if not rpc.timeout(3).social_folder_permissions_supported(project_id):
+        log.exception('[Skills] Project skill catalog of project %s unavailable this turn', project_id)
         return []
-    member_ids = rpc.timeout(5).admin_get_users_ids_in_project(project_id=project_id) or []
-    restricted = set()
-    for member_id in {int(member_id) for member_id in member_ids}:
-        restricted.update(fetch_restricted_folder_ids_strictly(project_id, member_id))
-    return sorted(restricted)
 
-
-def resolve_chat_restricted_folder_ids(project_id: int, sender_id, conversation) -> list:
-    if not is_social_installed():
-        return []
-    if is_read_only_by_sender(conversation, sender_id):
-        return fetch_restricted_folder_ids_strictly(project_id, sender_id)
-    return collect_member_restricted_folder_ids(project_id)
-
-
-def load_project_skill_rows(project_id: int, restricted_folder_ids: list) -> list:
-    clause = build_folder_ids_exclusion_clause('skill', Skill.id, restricted_folder_ids)
-    if restricted_folder_ids and clause is None:
-        raise RuntimeError('No folder filter for restricted skill folders; the social model lookup failed')
-    with db.with_project_schema_session(project_id) as session:
-        query = session.query(
-            Skill.id, Skill.name, Skill.description, Skill.meta,
-            SkillVersion.id, SkillVersion.name, SkillVersion.meta,
-            (func.length(func.btrim(SkillVersion.instructions)) > 0).label('has_body'),
-        ).join(SkillVersion, SkillVersion.skill_id == Skill.id)
-        if clause is not None:
-            query = query.filter(clause)
-        return query.order_by(Skill.id, SkillVersion.id).all()
-
-
-def select_default_version(versions: dict, skill_meta: Optional[dict]) -> Optional[dict]:
-    default_version_id = (skill_meta or {}).get('default_version_id')
-    if default_version_id in versions:
-        return versions[default_version_id]
-    return next((version for version in versions.values() if version['name'] == BASE_VERSION_NAME), None)
-
-
-def build_catalog_entries(rows: list, project_id: int) -> list:
     skills = {}
     for skill_id, name, description, skill_meta, version_id, version_name, version_meta, has_body in rows:
         skill = skills.setdefault(skill_id, {'name': name, 'description': description, 'meta': skill_meta, 'versions': {}})
         skill['versions'][version_id] = {'id': version_id, 'name': version_name, 'meta': version_meta, 'has_body': has_body}
-    entries, taken_names = [], set()
+    catalog, taken_names = [], set()
     for skill_id in sorted(skills):
         skill = skills[skill_id]
-        version = select_default_version(skill['versions'], skill['meta'])
+        versions = skill['versions']
+        version = versions.get((skill['meta'] or {}).get('default_version_id')) or next(
+            (candidate for candidate in versions.values() if candidate['name'] == BASE_VERSION_NAME), None,
+        )
         name_key = (skill['name'] or '').strip().lower()
         if version is None or not version['has_body'] or not name_key or name_key in taken_names:
             continue
         taken_names.add(name_key)
-        entries.append({
+        catalog.append({
             'skill_id': skill_id,
             'skill_version_id': version['id'],
             'skill_project_id': project_id,
@@ -122,65 +101,37 @@ def build_catalog_entries(rows: list, project_id: int) -> list:
             'icon_meta': (version['meta'] or {}).get('icon_meta'),
             'origin': SKILL_ORIGIN_PROJECT,
         })
-    return entries
-
-
-def build_project_skill_catalog(project_id: int, sender_id, conversation) -> list:
-    if get_support_config().get('project_id') == project_id:
-        return []
-    try:
-        restricted = resolve_chat_restricted_folder_ids(project_id, sender_id, conversation)
-        return build_catalog_entries(load_project_skill_rows(project_id, restricted), project_id)
-    except Exception:  # pylint: disable=W0718
-        log.exception('[Skills] Project skill catalog of project %s unavailable this turn', project_id)
-        return []
-
-
-def extract_mention_tokens(user_input) -> list:
-    texts = []
-    if isinstance(user_input, str):
-        texts.append(user_input)
-    elif isinstance(user_input, list):
-        texts.extend(
-            block.get('text') or '' for block in user_input
-            if isinstance(block, dict) and block.get('type') == 'text'
-        )
-    return list(dict.fromkeys(match.group(1).lower() for text in texts for match in MENTION_TOKEN_PATTERN.finditer(text)))
-
-
-def build_did_you_mean_error(unknown_tokens: list, known_names: set) -> Optional[UnknownSkillMentionError]:
-    suggestions = []
-    for token in unknown_tokens:
-        close = difflib.get_close_matches(token, sorted(known_names), n=1, cutoff=DID_YOU_MEAN_CUTOFF)
-        if close:
-            suggestions.append(f'No skill named "~{token}". Did you mean ~{close[0]}?')
-    if not suggestions:
-        return None
-    return UnknownSkillMentionError(' '.join(suggestions))
-
-
-def load_skill_bodies(project_id: int, version_ids: list) -> dict:
-    if not version_ids:
-        return {}
-    with db.with_project_schema_session(project_id) as session:
-        rows = session.query(SkillVersion.id, SkillVersion.instructions).filter(
-            SkillVersion.id.in_(version_ids)
-        ).all()
-    return {version_id: instructions for version_id, instructions in rows}
+    return catalog
 
 
 def resolve_mentioned_project_skills(user_input, known_names: set, catalog: list, project_id: int,
                                      strict: bool = False) -> list:
+    if isinstance(user_input, str):
+        texts = [user_input]
+    elif isinstance(user_input, list):
+        texts = [block.get('text') or '' for block in user_input if isinstance(block, dict) and block.get('type') == 'text']
+    else:
+        texts = []
     known = {name.lower() for name in known_names if name}
-    tokens = [token for token in extract_mention_tokens(user_input) if token not in known]
+    mention_tokens = dict.fromkeys(match.group(1).lower() for text in texts for match in MENTION_TOKEN_PATTERN.finditer(text))
+    tokens = [token for token in mention_tokens if token not in known]
     if not tokens:
         return []
     by_name = {entry['name'].lower(): entry for entry in catalog}
     if strict:
-        error = build_did_you_mean_error([token for token in tokens if token not in by_name], known | set(by_name))
-        if error is not None:
-            raise error
+        suggestable_names = sorted(known | set(by_name))
+        suggestions = []
+        for token in tokens:
+            close = [] if token in by_name else difflib.get_close_matches(token, suggestable_names, n=1, cutoff=DID_YOU_MEAN_CUTOFF)
+            if close:
+                suggestions.append(f'No skill named "~{token}". Did you mean ~{close[0]}?')
+        if suggestions:
+            raise UnknownSkillMentionError(' '.join(suggestions))
     mentioned = [by_name[token] for token in tokens if token in by_name][:get_max_invoked_skills_per_turn()]
-    bodies = load_skill_bodies(project_id, [entry['skill_version_id'] for entry in mentioned])
+    if not mentioned:
+        return []
+    with db.with_project_schema_session(project_id) as session:
+        bodies = dict(session.query(SkillVersion.id, SkillVersion.instructions).filter(
+            SkillVersion.id.in_([entry['skill_version_id'] for entry in mentioned])
+        ).all())
     return [{**entry, 'instructions': bodies.get(entry['skill_version_id']) or ''} for entry in mentioned]
-

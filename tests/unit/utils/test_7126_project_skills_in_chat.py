@@ -101,99 +101,6 @@ class TestSetting:
         assert project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID) is False
 
 
-class TestAccessRule:
-    @pytest.fixture
-    def calls(self, project_skills, monkeypatch):
-        calls = {'restricted': [], 'members': 0, 'supported': True, 'rows': [], 'timeouts': set()}
-
-        def restricted(project_id, entity_type, user_id):
-            calls['restricted'].append(user_id)
-            if user_id in calls['timeouts']:
-                raise Empty()
-            return {5: [50], 6: [60], 7: []}.get(user_id, [])
-
-        def supported(project_id):
-            if 'supported' in calls['timeouts']:
-                raise Empty()
-            return calls['supported']
-
-        def members(project_id):
-            calls['members'] += 1
-            return [5, 6, 7, 7]
-
-        rpc = types.SimpleNamespace(
-            social_folder_permissions_supported=supported,
-            admin_get_users_ids_in_project=members,
-            social_get_restricted_folder_ids=restricted,
-        )
-        monkeypatch.setattr(project_skills.rpc_tools, 'RpcMixin', lambda: types.SimpleNamespace(
-            rpc=types.SimpleNamespace(timeout=lambda seconds: rpc),
-        ))
-        monkeypatch.setattr(project_skills, 'load_project_skill_rows', lambda project_id, restricted: calls['rows'].append(restricted) or [])
-        return calls
-
-    def test_a_private_chat_with_only_the_sender_filters_by_the_sender(self, project_skills, calls):
-        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, (5,)))
-        assert calls['restricted'] == [5]
-        assert calls['rows'] == [[50]]
-
-    def test_a_private_chat_with_another_reader_filters_for_everyone(self, project_skills, calls):
-        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, (5, 6)))
-        assert sorted(calls['restricted']) == [5, 6, 7]
-        assert calls['rows'] == [[50, 60]]
-
-    def test_a_public_chat_filters_for_everyone_even_with_one_member(self, project_skills, calls):
-        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(False, (5,)))
-        assert sorted(calls['restricted']) == [5, 6, 7]
-
-    def test_a_sender_stored_as_a_string_id_still_counts_as_the_only_reader(self, project_skills, calls):
-        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, ('5',)))
-        assert calls['restricted'] == [5]
-
-    def test_without_folder_permissions_nobody_is_looked_up(self, project_skills, calls):
-        calls['supported'] = False
-        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(False, (5,)))
-        assert calls['restricted'] == []
-        assert calls['rows'] == [[]]
-
-    def test_members_are_enumerated_once_per_catalog_build(self, project_skills, calls):
-        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(False, (5,)))
-        assert calls['members'] == 1
-        assert len(calls['restricted']) == 3
-
-    @pytest.mark.parametrize('timeout, user_ids', [
-        (6, (5, 6)),
-        (5, (5,)),
-        ('supported', (5, 6)),
-    ], ids=['one member of a shared chat', 'the sender of a private chat', 'the permissions probe'])
-    def test_a_social_timeout_offers_nothing_instead_of_dropping_restrictions(self, project_skills, calls, timeout, user_ids):
-        calls['timeouts'].add(timeout)
-
-        assert project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, user_ids)) == []
-        assert calls['rows'] == []
-
-    def test_without_the_social_plugin_there_are_no_folders_to_look_up(self, project_skills, calls, monkeypatch):
-        monkeypatch.setattr(project_skills.context, 'module_manager', types.SimpleNamespace(modules={}))
-
-        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(False, (5, 6)))
-
-        assert calls['restricted'] == [] and calls['members'] == 0
-        assert calls['rows'] == [[]]
-
-    def test_the_support_project_never_offers_project_skills(self, project_skills, calls, monkeypatch):
-        monkeypatch.setattr(project_skills, 'get_support_config', lambda: {'project_id': CHAT_PROJECT_ID})
-        assert project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation()) == []
-        assert calls['rows'] == []
-
-    def test_a_failed_lookup_offers_nothing_instead_of_everything(self, project_skills, calls, monkeypatch):
-        def failing(project_id, user_id):
-            raise RuntimeError('social down')
-
-        monkeypatch.setattr(project_skills, 'fetch_restricted_folder_ids_strictly', failing)
-        assert project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation()) == []
-        assert calls['rows'] == []
-
-
 class _Expression:
     def __gt__(self, other):
         return self
@@ -202,91 +109,196 @@ class _Expression:
         return self
 
 
-class _RowsQuery:
-    def __init__(self, rows, filters):
-        self.rows, self.filters = rows, filters
+class _Query:
+    def __init__(self, platform, columns):
+        self.platform, self.columns = platform, columns
 
     def join(self, *args):
         return self
 
-    def filter(self, clause):
-        self.filters.append(clause)
-        return _RowsQuery([], self.filters)
+    def filter(self, condition):
+        if len(self.columns) == 2:
+            self.platform.body_requests.append(sorted(condition))
+        else:
+            self.platform.filters.append(condition)
+        self.condition = condition
+        return self
 
     def order_by(self, *columns):
         return self
 
     def all(self):
-        return list(self.rows)
+        if len(self.columns) == 2:
+            return [(version_id, f'Body {version_id}.') for version_id in sorted(self.condition)]
+        return list(self.platform.rows)
+
+
+@pytest.fixture
+def platform(project_skills, monkeypatch):
+    state = types.SimpleNamespace(
+        restricted_calls=[], member_calls=0, supported=True, timeouts=set(), errors=set(),
+        restricted_folders={5: [50], 6: [60], 7: []}, members=[5, 6, 7, 7],
+        rows=[], filters=[], clause_inputs=[], body_requests=[], filter_unavailable=False,
+    )
+
+    def restricted(project_id, entity_type, user_id):
+        state.restricted_calls.append(user_id)
+        if user_id in state.timeouts:
+            raise Empty()
+        if user_id in state.errors:
+            raise RuntimeError('social down')
+        return state.restricted_folders.get(user_id, [])
+
+    def supported(project_id):
+        if 'supported' in state.timeouts:
+            raise Empty()
+        return state.supported
+
+    def members(project_id):
+        state.member_calls += 1
+        return state.members
+
+    def clause(entity_types, id_column, restricted_ids):
+        state.clause_inputs.append(list(restricted_ids))
+        if not restricted_ids or state.filter_unavailable:
+            return None
+        return ('exclude', tuple(restricted_ids))
+
+    @contextlib.contextmanager
+    def session(project_id):
+        yield types.SimpleNamespace(query=lambda *columns: _Query(state, columns))
+
+    rpc = types.SimpleNamespace(
+        social_folder_permissions_supported=supported,
+        admin_get_users_ids_in_project=members,
+        social_get_restricted_folder_ids=restricted,
+    )
+    monkeypatch.setattr(project_skills.rpc_tools, 'RpcMixin', lambda: types.SimpleNamespace(
+        rpc=types.SimpleNamespace(timeout=lambda seconds: rpc),
+    ))
+    monkeypatch.setattr(project_skills, 'build_folder_ids_exclusion_clause', clause)
+    monkeypatch.setattr(project_skills, 'db', types.SimpleNamespace(with_project_schema_session=session))
+    monkeypatch.setattr(project_skills, 'func', types.SimpleNamespace(length=lambda value: _Expression(), btrim=lambda value: value))
+    return state
+
+
+def _private_catalog(project_skills, platform, rows):
+    platform.rows = rows
+    return project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, (5,)))
+
+
+class TestAccessRule:
+    def test_a_private_chat_with_only_the_sender_filters_by_the_sender(self, project_skills, platform):
+        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, (5,)))
+        assert platform.restricted_calls == [5]
+        assert platform.clause_inputs == [[50]]
+
+    def test_a_private_chat_with_another_reader_filters_for_everyone(self, project_skills, platform):
+        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, (5, 6)))
+        assert sorted(platform.restricted_calls) == [5, 6, 7]
+        assert platform.clause_inputs == [[50, 60]]
+
+    def test_a_public_chat_filters_for_everyone_even_with_one_member(self, project_skills, platform):
+        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(False, (5,)))
+        assert sorted(platform.restricted_calls) == [5, 6, 7]
+
+    def test_a_sender_stored_as_a_string_id_still_counts_as_the_only_reader(self, project_skills, platform):
+        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, ('5',)))
+        assert platform.restricted_calls == [5]
+
+    def test_without_folder_permissions_nobody_is_looked_up(self, project_skills, platform):
+        platform.supported = False
+        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(False, (5,)))
+        assert platform.restricted_calls == []
+        assert platform.clause_inputs == [[]]
+
+    def test_members_are_enumerated_once_per_catalog_build(self, project_skills, platform):
+        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(False, (5,)))
+        assert platform.member_calls == 1
+        assert len(platform.restricted_calls) == 3
+
+    @pytest.mark.parametrize('timeout, user_ids', [
+        (6, (5, 6)),
+        (5, (5,)),
+        ('supported', (5, 6)),
+    ], ids=['one member of a shared chat', 'the sender of a private chat', 'the permissions probe'])
+    def test_a_social_timeout_offers_nothing_instead_of_dropping_restrictions(self, project_skills, platform, timeout, user_ids):
+        platform.timeouts.add(timeout)
+        platform.rows = [_row(1, 'restricted-skill', 10)]
+
+        assert project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, user_ids)) == []
+        assert platform.clause_inputs == []
+
+    def test_without_the_social_plugin_there_are_no_folders_to_look_up(self, project_skills, platform, monkeypatch):
+        monkeypatch.setattr(project_skills.context, 'module_manager', types.SimpleNamespace(modules={}))
+
+        project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(False, (5, 6)))
+
+        assert platform.restricted_calls == [] and platform.member_calls == 0
+        assert platform.clause_inputs == [[]]
+
+    def test_the_support_project_never_offers_project_skills(self, project_skills, platform, monkeypatch):
+        monkeypatch.setattr(project_skills, 'get_support_config', lambda: {'project_id': CHAT_PROJECT_ID})
+        platform.rows = [_row(1, 'one', 10)]
+        assert project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation()) == []
+        assert platform.clause_inputs == []
+
+    def test_a_failed_lookup_offers_nothing_instead_of_everything(self, project_skills, platform):
+        platform.errors.add(5)
+        platform.rows = [_row(1, 'restricted-skill', 10)]
+        assert project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation()) == []
+        assert platform.clause_inputs == []
 
 
 class TestFolderFilter:
-    @pytest.fixture
-    def catalog_with(self, project_skills, monkeypatch):
-        filters = []
+    def test_restricted_folders_without_a_folder_filter_offer_nothing(self, project_skills, platform):
+        platform.filter_unavailable = True
 
-        @contextlib.contextmanager
-        def session(project_id):
-            yield types.SimpleNamespace(query=lambda *columns: _RowsQuery([_row(1, 'restricted-skill', 10)], filters))
+        assert _private_catalog(project_skills, platform, [_row(1, 'restricted-skill', 10)]) == []
+        assert platform.filters == []
 
-        monkeypatch.setattr(project_skills, 'db', types.SimpleNamespace(with_project_schema_session=session))
-        monkeypatch.setattr(project_skills, 'func', types.SimpleNamespace(length=lambda value: _Expression(), btrim=lambda value: value))
-        monkeypatch.setattr(project_skills, 'fetch_restricted_folder_ids_strictly', lambda project_id, user_id: [50])
+    def test_restricted_folders_with_a_folder_filter_apply_it(self, project_skills, platform):
+        _private_catalog(project_skills, platform, [_row(1, 'one', 10)])
 
-        def build(clause):
-            monkeypatch.setattr(project_skills, 'build_folder_ids_exclusion_clause', lambda *args: clause)
-            return project_skills.build_project_skill_catalog(CHAT_PROJECT_ID, 5, _conversation(True, (5,))), filters
-
-        return build
-
-    def test_restricted_folders_without_a_folder_filter_offer_nothing(self, catalog_with):
-        catalog, filters = catalog_with(None)
-
-        assert catalog == []
-        assert filters == []
-
-    def test_restricted_folders_with_a_folder_filter_apply_it(self, catalog_with):
-        clause = object()
-
-        catalog, filters = catalog_with(clause)
-
-        assert filters == [clause]
-        assert catalog == []
+        assert platform.filters == [('exclude', (50,))]
 
 
 class TestCatalogEntries:
-    def test_the_default_version_comes_from_meta_then_base(self, project_skills):
+    def test_the_default_version_comes_from_meta_then_base(self, project_skills, platform):
         rows = [
             _row(1, 'one', 10, 'base', skill_meta={'default_version_id': 11}),
             _row(1, 'one', 11, 'v2', skill_meta={'default_version_id': 11}),
             _row(2, 'two', 20, 'base'), _row(2, 'two', 21, 'v2'),
             _row(3, 'three', 30, 'v2'),
         ]
-        entries = project_skills.build_catalog_entries(rows, CHAT_PROJECT_ID)
+        entries = _private_catalog(project_skills, platform, rows)
         assert [(e['name'], e['skill_version_id'], e['version_name']) for e in entries] == [('one', 11, 'v2'), ('two', 20, 'base')]
 
-    def test_a_stale_default_pointer_falls_back_to_base(self, project_skills):
+    def test_a_stale_default_pointer_falls_back_to_base(self, project_skills, platform):
         rows = [_row(1, 'one', 10, 'base', skill_meta={'default_version_id': 999})]
-        assert project_skills.build_catalog_entries(rows, CHAT_PROJECT_ID)[0]['skill_version_id'] == 10
+        assert _private_catalog(project_skills, platform, rows)[0]['skill_version_id'] == 10
 
-    def test_a_default_without_a_body_is_left_out(self, project_skills):
+    def test_a_default_without_a_body_is_left_out(self, project_skills, platform):
         rows = [_row(1, 'one', 10, has_body=False), _row(1, 'one', 11, 'v2')]
-        assert project_skills.build_catalog_entries(rows, CHAT_PROJECT_ID) == []
+        assert _private_catalog(project_skills, platform, rows) == []
 
-    def test_duplicate_names_keep_the_lowest_id(self, project_skills):
+    def test_duplicate_names_keep_the_lowest_id(self, project_skills, platform):
         rows = [_row(9, 'Dup', 90), _row(4, 'dup', 40), _row(5, ' dup ', 50)]
-        entries = project_skills.build_catalog_entries(rows, CHAT_PROJECT_ID)
-        assert [e['skill_id'] for e in entries] == [4]
+        assert [e['skill_id'] for e in _private_catalog(project_skills, platform, rows)] == [4]
 
-    def test_entries_carry_identity_and_description_but_no_body(self, project_skills):
+    def test_entries_carry_identity_and_description_but_no_body(self, project_skills, platform):
         rows = [_row(1, 'one', 10, description='Use for one.', icon={'url': 'x.png'})]
-        assert project_skills.build_catalog_entries(rows, CHAT_PROJECT_ID) == [{
+        assert _private_catalog(project_skills, platform, rows) == [{
             'skill_id': 1, 'skill_version_id': 10, 'skill_project_id': CHAT_PROJECT_ID, 'name': 'one',
             'description': 'Use for one.', 'version_name': 'base', 'icon_meta': {'url': 'x.png'}, 'origin': 'project',
         }]
 
 
 class TestMentions:
+    TOKEN_CATALOG = [_entry(i, name) for i, name in enumerate(
+        ['release-notes', 'a', 'b', '5min', 'writer', 'bar', 'strike', 'bad'], start=1,
+    )]
+
     @pytest.mark.parametrize('text, expected', [
         ('use ~release-notes now', ['release-notes']),
         ('~A ~b ~a', ['a', 'b']),
@@ -295,51 +307,41 @@ class TestMentions:
         ([{'type': 'image_url'}, {'type': 'text', 'text': 'ask ~Writer'}], ['writer']),
         (None, []),
     ])
-    def test_tokens_follow_the_skill_name_grammar(self, project_skills, text, expected):
-        assert project_skills.extract_mention_tokens(text) == expected
+    def test_tokens_follow_the_skill_name_grammar(self, project_skills, platform, text, expected):
+        mentioned = project_skills.resolve_mentioned_project_skills(text, set(), self.TOKEN_CATALOG, CHAT_PROJECT_ID)
+        assert [m['name'] for m in mentioned] == expected
 
-    @pytest.fixture
-    def bodies(self, project_skills, monkeypatch):
-        requested = []
-
-        def loader(project_id, version_ids):
-            requested.append((project_id, list(version_ids)))
-            return {vid: f'Body {vid}.' for vid in version_ids}
-
-        monkeypatch.setattr(project_skills, 'load_skill_bodies', loader)
-        return requested
-
-    def test_a_mentioned_project_skill_gets_its_body(self, project_skills, bodies):
+    def test_a_mentioned_project_skill_gets_its_body(self, project_skills, platform):
         catalog = [_entry(1, 'release-notes'), _entry(2, 'sql-review')]
         mentioned = project_skills.resolve_mentioned_project_skills('do ~SQL-Review', set(), catalog, CHAT_PROJECT_ID)
         assert mentioned == [{**catalog[1], 'instructions': 'Body 102.'}]
-        assert bodies == [(CHAT_PROJECT_ID, [102])]
+        assert platform.body_requests == [[102]]
 
-    def test_known_names_are_never_looked_up_in_the_project(self, project_skills, bodies):
+    def test_known_names_are_never_looked_up_in_the_project(self, project_skills, platform):
         catalog = [_entry(1, 'reviewer')]
         assert project_skills.resolve_mentioned_project_skills('~Reviewer', {'Reviewer'}, catalog, CHAT_PROJECT_ID) == []
-        assert bodies == []
+        assert platform.body_requests == []
 
-    def test_at_most_the_per_turn_cap_is_loaded(self, project_skills, bodies):
+    def test_at_most_the_per_turn_cap_is_loaded(self, project_skills, platform):
         catalog = [_entry(i, f's{i}') for i in range(1, 8)]
         text = ' '.join(f'~s{i}' for i in range(1, 8))
         mentioned = project_skills.resolve_mentioned_project_skills(text, set(), catalog, CHAT_PROJECT_ID)
         assert [m['name'] for m in mentioned] == ['s1', 's2', 's3', 's4', 's5']
-        assert bodies == [(CHAT_PROJECT_ID, [101, 102, 103, 104, 105])]
+        assert platform.body_requests == [[101, 102, 103, 104, 105]]
 
-    def test_a_close_unknown_name_is_answered_with_a_suggestion(self, project_skills, bodies):
+    def test_a_close_unknown_name_is_answered_with_a_suggestion(self, project_skills, platform):
         catalog = [_entry(1, 'release-notes')]
         with pytest.raises(project_skills.UnknownSkillMentionError) as error:
             project_skills.resolve_mentioned_project_skills('~relese-notes please', {'reviewer'}, catalog, CHAT_PROJECT_ID,
                                                             strict=True)
         assert str(error.value) == 'No skill named "~relese-notes". Did you mean ~release-notes?'
-        assert bodies == []
+        assert platform.body_requests == []
 
-    def test_a_suggestion_may_point_at_a_chat_skill(self, project_skills, bodies):
+    def test_a_suggestion_may_point_at_a_chat_skill(self, project_skills, platform):
         with pytest.raises(project_skills.UnknownSkillMentionError, match='Did you mean ~reviewer'):
             project_skills.resolve_mentioned_project_skills('~reviewr', {'Reviewer'}, [], CHAT_PROJECT_ID, strict=True)
 
-    def test_a_regenerated_message_keeps_a_close_unknown_name_literal(self, project_skills, bodies):
+    def test_a_regenerated_message_keeps_a_close_unknown_name_literal(self, project_skills, platform):
         catalog = [_entry(1, 'release-notes'), _entry(2, 'sql-review')]
 
         mentioned = project_skills.resolve_mentioned_project_skills(
@@ -348,9 +350,11 @@ class TestMentions:
 
         assert [m['name'] for m in mentioned] == ['sql-review']
 
-    def test_a_token_unlike_any_skill_stays_literal(self, project_skills, bodies):
+    def test_a_token_unlike_any_skill_stays_literal(self, project_skills, platform):
         catalog = [_entry(1, 'release-notes')]
-        assert project_skills.resolve_mentioned_project_skills('about ~5 minutes', set(), catalog, CHAT_PROJECT_ID) == []
+        assert project_skills.resolve_mentioned_project_skills('about ~5 minutes', set(), catalog, CHAT_PROJECT_ID,
+                                                               strict=True) == []
+
 
 def _recipient(entity_name):
     return types.SimpleNamespace(id=55, entity_name=entity_name)
@@ -366,7 +370,7 @@ def _msg_group(entity_name, conversation=None):
 
 class TestChatTurn:
     @pytest.fixture
-    def catalog(self, env, project_skills, monkeypatch):
+    def catalog(self, env, project_skills, platform, monkeypatch):
         state = {'enabled': True, 'catalog': [_entry(1, 'release-notes'), _entry(2, 'sql-review')], 'asked': []}
         monkeypatch.setattr(env.mod, 'is_project_skills_in_chat_enabled', lambda project_id: state['enabled'])
 
@@ -375,7 +379,6 @@ class TestChatTurn:
             return list(state['catalog'])
 
         monkeypatch.setattr(env.mod, 'build_project_skill_catalog', catalog_for)
-        monkeypatch.setattr(project_skills, 'load_skill_bodies', lambda project_id, ids: {vid: f'Body {vid}.' for vid in ids})
         return state
 
     def _apply(self, env, entity_name, user_input='hello', version_details=None, rows=None, msg_group=None, strict=True):
