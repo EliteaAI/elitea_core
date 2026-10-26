@@ -28,6 +28,15 @@ from ...utils.mcp_oauth import exchange_token, get_oauth_configurations, pick_oa
 from ....configurations.utils import expand_configuration
 
 
+def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, token_endpoint: str):
+    """Client ID and secret of an admin-managed app; the secret only ever goes to the app's own token endpoint."""
+    from ....configurations.oauth_apps import resolve_app_client  # pylint: disable=C0415
+    app = resolve_app_client(oauth_app_id, project_id)
+    if (token_endpoint or '').rstrip('/') != app['token_endpoint'].rstrip('/'):
+        raise PermissionError("token_endpoint does not belong to the selected OAuth app")
+    return app['client_id'], app['client_secret']
+
+
 def _may_send_stored_secret(project_id: int, token_endpoint: str, credential_sources: list) -> bool:
     """token_endpoint is caller-supplied: only send a stored secret to the endpoint the toolkit
     declares, or for callers who can edit toolkits anyway."""
@@ -89,6 +98,16 @@ class ProjectAPI(api_tools.APIModeHandler):
 
         vault_client = VaultClient(project_id)
         credential_sources = []
+
+        # Default app mode: the browser knows only the app reference, never its secret
+        if data.oauth_app_id and not data.used_dcr:
+            try:
+                client_id, client_secret = _resolve_oauth_app_client(
+                    data.oauth_app_id, project_id, data.token_endpoint)
+            except LookupError as e:  # OAuthAppUnavailable
+                return {"error": "app_unavailable", "error_description": str(e)}, 400
+            except PermissionError as e:
+                return {"error": "access_denied", "error_description": str(e)}, 403
 
         # If toolkit_id is provided, fetch credentials from database
         if data.toolkit_id:
@@ -170,7 +189,7 @@ class ProjectAPI(api_tools.APIModeHandler):
                 return {"error": "Database error", "details": str(e)}, 500
 
         # Unsecret vault references sent in the request (e.g., {{secret.my_secret}})
-        if client_secret and data.client_secret and client_secret == data.client_secret:
+        if client_secret and data.client_secret and client_secret == data.client_secret and not data.oauth_app_id:
             resolved_secret = vault_client.unsecret(client_secret)
             if resolved_secret != client_secret and not _may_send_stored_secret(
                     project_id, data.token_endpoint, credential_sources):
