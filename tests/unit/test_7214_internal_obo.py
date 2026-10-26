@@ -448,3 +448,24 @@ def test_the_context_ttl_bounds_the_token(ns, env):
     claims = claims_of(call["kwargs"][obo(ns).TOKEN_KWARG]["token"])
     ttl = env.module().admission_settings.context_ttl_s
     assert claims["exp"] - claims["iat"] <= ttl + 1
+
+
+# --- development runs (#7213): runs once both are on the same tree --------------------------------------------------
+
+def test_a_development_run_gets_the_token_with_the_author_and_its_digest(ns, env):
+    if not hasattr(ns.pd_admission, "ENTRY_EDITOR_CHAT"):
+        pytest.skip("development runs (#7213) are not on this tree")
+    digest = "adv1:" + "7" * 64
+    env.add_version(1, 70, 7)
+    env.digests[70] = digest
+    env.facts_version = 5
+    env.permissions[42] = {"credentials.use", BUILD_PERMISSION, "models.applications.application.update"}
+    call = call_kwargs(internal_mcp=True)
+    context_ref = ns.adm.admit_dispatch(env.module(allow_development_runs=True), "indexer_agent", call,
+                                        env.request(entry_point="editor_chat"))
+    claims = claims_of(call["kwargs"][obo(ns).TOKEN_KWARG]["token"])
+    assert (claims["sub"], claims["uid"], claims["act"], claims["ctx"]) == (
+        "idp:tid-1:oid-42", 42, f"development:{digest}", context_ref)
+    assert claims["scope"] == ["read", "build"]   # the author's RBAC alone: no credentials, no predict permission
+    env.in_request = True
+    assert verify(ns, env, call["kwargs"][obo(ns).TOKEN_KWARG]["token"]) == {"ok": True, "user_id": 42}
