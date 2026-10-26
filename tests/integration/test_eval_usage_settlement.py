@@ -24,8 +24,12 @@ PRID = '6f1c2a90-3b4d-4e5f-8a7b-0123456789ab'
 
 
 class _Criterion:
-    def __init__(self, name, value):
-        self.name, self.value = name, value
+    def __init__(self, name, value, op='eq'):
+        self.name, self.value, self.op = name, value, op
+
+    def holds(self, item):
+        actual = getattr(item, self.name)
+        return actual in self.value if self.op == 'in' else actual == self.value
 
 
 class _Column:
@@ -34,6 +38,9 @@ class _Column:
 
     def __eq__(self, other):
         return _Criterion(self.name, other)
+
+    def in_(self, values):
+        return _Criterion(self.name, tuple(values), 'in')
 
     def __hash__(self):
         return hash(self.name)
@@ -52,6 +59,8 @@ class EvalCaseUsage:
 
 class EvalCaseExecution:
     run_id = _Column('run_id')
+    case_index = _Column('case_index')
+    trajectory = _Column('trajectory')
 
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
@@ -62,14 +71,20 @@ class _Query:
         self._items = items
 
     def filter(self, *criteria):
-        return _Query([i for i in self._items
-                       if all(getattr(i, c.name) == c.value for c in criteria)])
+        return _Query([i for i in self._items if all(c.holds(i) for c in criteria)])
+
+    def options(self, *options):
+        _OPTIONS.extend(options)
+        return self
 
     def first(self):
         return self._items[0] if self._items else None
 
     def all(self):
         return list(self._items)
+
+
+_OPTIONS = []
 
 
 class _Store:
@@ -94,8 +109,11 @@ class _Session:
 
 
 @pytest.fixture
-def harness():
+def harness(monkeypatch):
     holder = {}
+    # The fake columns are not ORM attributes: record what is deferred instead.
+    import sqlalchemy.orm
+    monkeypatch.setattr(sqlalchemy.orm, 'defer', lambda column: ('defer', column.name))
     pkg = types.ModuleType(PKG)
     pkg.__path__ = []
     utils_pkg = types.ModuleType(f'{PKG}.utils')
@@ -241,6 +259,22 @@ def test_dispatched_sub_agents_take_their_ledger_figures(harness):
     assert (child['input_tokens'], child['output_tokens'], child['cost']) == (11299, 191, 0.012254)
     assert (child['llm_calls'], child['tool_calls']) == (3, 2)  # the trajectory's counts stay
     assert execution.metrics['llm_calls'] == 5
+
+
+def test_only_the_split_cases_are_loaded_and_without_their_trajectory(harness):
+    orch, holder = harness
+    rows = [_row(0, 'agent'), _row(1, 'agent')]
+    split = EvalCaseExecution(run_id=9, case_index=0, metrics={'agents': _agents()})
+    plain = EvalCaseExecution(run_id=9, case_index=1, metrics={'llm_calls': 1})
+    _setup(holder, rows, executions=[split, plain])
+    _OPTIONS.clear()
+
+    _settle(orch, rows, lambda: [_entity_row(0, EVAL, 1, 1, 1), _entity_row(0, ORDER, 2, 2, 2),
+                                 _entity_row(1, EVAL, 3, 3, 3)])
+
+    assert split.metrics['agents'][1]['source'] == 'ledger'
+    assert plain.metrics == {'llm_calls': 1}
+    assert _OPTIONS == [('defer', 'trajectory')]
 
 
 def test_in_process_sub_agents_keep_the_trajectory_split(harness):

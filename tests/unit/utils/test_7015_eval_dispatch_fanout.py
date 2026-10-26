@@ -179,13 +179,14 @@ def test_runaway_waves_are_capped(dispatch):
     fake = FakeIO(dispatch, pointers={('T', 'e1'): _pointer('R1', {})}, joins=[_parked()] * 5)
     out = dispatch.await_dispatch(_parked(), deadline=60, io=fake.io, max_waves=3)
     assert out['state'] == dispatch.TOO_MANY_WAVES and out['waves'] == 3
+    assert fake.stopped_epochs == [('T', 'e1')]  # the wave past the cap does not run on
 
 
 def test_no_pointer_by_the_deadline_stops_the_epoch_and_keeps_finished_children(dispatch):
     fake = FakeIO(dispatch, pointers={}, joins=[], live={('T', 'e1'): {'cB': 'B1', 'cR': 'R'}},
                   results={'B1': _child('Billing', 3)})  # R is still running: no result yet
     out = dispatch.await_dispatch(_parked(), deadline=5, io=fake.io)
-    assert out['state'] == dispatch.NOT_RECONCILED
+    assert out['state'] == dispatch.TIMED_OUT
     assert fake.now == 5.0
     assert fake.stopped_epochs == [('T', 'e1')]
     texts = [s['text'] for s in out['result']['result']['thinking_steps']]
@@ -199,6 +200,50 @@ def test_a_reconcile_that_runs_past_the_deadline_is_stopped(dispatch):
     assert out['state'] == dispatch.TIMED_OUT
     assert fake.stopped == ['R1']
     assert len(out['result']['result']['thinking_steps']) == 3  # the children's work is kept
+
+
+def test_a_reconcile_whose_join_raises_is_a_reconcile_failure_with_the_evidence(dispatch):
+    # join_task raises for a failed or cancelled reconcile task: await_dispatch must not
+    fake = FakeIO(dispatch, pointers={('T', 'e1'): _pointer()}, joins=[],
+                  results={'B1': _child('Billing', 3), 'R': _child('Refunds', 4)})
+
+    def broken(task_id, timeout):
+        raise RuntimeError('reconcile task cancelled')
+
+    fake.io.join = broken
+    out = dispatch.await_dispatch(_parked(), deadline=30, io=fake.io)
+    assert out['state'] == dispatch.RECONCILE_FAILED
+    assert fake.stopped == ['R1']
+    assert len(out['result']['result']['thinking_steps']) == 3
+
+
+def test_a_join_that_returns_nothing_is_a_reconcile_failure(dispatch):
+    fake = FakeIO(dispatch, pointers={('T', 'e1'): _pointer()}, joins=[None],
+                  results={'B1': _child('Billing', 3), 'R': _child('Refunds', 4)})
+    assert dispatch.await_dispatch(_parked(), deadline=30, io=fake.io)['state'] == dispatch.RECONCILE_FAILED
+    assert fake.stopped == ['R1']
+
+
+def test_a_cancelled_run_stops_the_epoch_without_waiting_out_the_limit(dispatch):
+    fake = FakeIO(dispatch, pointers={}, joins=[], live={('T', 'e1'): {'cB': 'B1'}},
+                  results={'B1': _child('Billing', 3)})
+    polls = []
+    out = dispatch.await_dispatch(_parked(), deadline=600, io=fake.io,
+                                  should_cancel=lambda: polls.append(1) or len(polls) >= 3)
+    assert out['state'] == dispatch.CANCELLED
+    assert fake.now == 2.0 and fake.stopped_epochs == [('T', 'e1')]
+    assert [s['text'] for s in out['result']['result']['thinking_steps']] == ['fan out', 'Billing done']
+
+
+def test_a_failing_cancel_check_is_not_a_cancel(dispatch):
+    fake = FakeIO(dispatch, pointers={('T', 'e1'): _pointer()}, joins=[_final()], appear_after=3,
+                  results={'B1': _child('Billing', 3), 'R': _child('Refunds', 4)})
+
+    def broken():
+        raise RuntimeError('db down')
+
+    out = dispatch.await_dispatch(_parked(), deadline=60, io=fake.io, should_cancel=broken)
+    assert out['state'] == dispatch.RECONCILED
 
 
 def test_a_parked_result_without_an_epoch_is_not_waited_for(dispatch):
@@ -222,6 +267,38 @@ def test_a_pointer_read_error_is_retried(dispatch):
 
     fake.io.pointer = flaky
     assert dispatch.await_dispatch(_parked(), deadline=30, io=fake.io)['state'] == dispatch.RECONCILED
+
+
+# --- pipeline_trace ------------------------------------------------------------------------
+
+def _span(node, status='ok'):
+    return {'node': node, 'status': status}
+
+
+def test_merged_traces_join_each_waves_spans(dispatch):
+    parked = _parked()
+    parked['result']['pipeline_trace'] = {'spans': [_span('Start'), _span('Fan', 'running')],
+                                          'truncated': False}
+    final = _final()
+    final['result']['pipeline_trace'] = {'spans': [_span('Fan'), _span('Answer')], 'truncated': True}
+    merged = dispatch.merge_envelopes([parked, _child('Billing', 3), final])['result']
+    # the parked wave's open span is the reconcile's first one, finished: listed once
+    assert merged['pipeline_trace'] == {'spans': [_span('Start'), _span('Fan'), _span('Answer')],
+                                        'truncated': True}
+
+
+def test_a_running_span_of_another_node_is_kept(dispatch):
+    parked = _parked()
+    parked['result']['pipeline_trace'] = {'spans': [_span('Fan', 'running')]}
+    final = _final()
+    final['result']['pipeline_trace'] = {'spans': [_span('Answer')]}
+    merged = dispatch.merge_envelopes([parked, final])['result']
+    assert merged['pipeline_trace'] == {'spans': [_span('Fan', 'running'), _span('Answer')],
+                                        'truncated': False}
+
+
+def test_envelopes_without_a_trace_merge_without_one(dispatch):
+    assert 'pipeline_trace' not in dispatch.merge_envelopes([_parked(), _final()])['result']
 
 
 # --- run_agent ------------------------------------------------------------------------------
@@ -249,12 +326,50 @@ def test_run_agent_dispatch_timeout_keeps_partial_evidence(runner, dispatch):
     out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'refund both'},
                            predict=lambda **kw: _parked(), dispatch_io=fake.io, timeout=0)
     assert out['status'] == 'timeout' and out['output'] is None
-    assert 'dispatch_not_reconciled' in out['error']
+    assert 'did not finish within 0s' in out['error']
     assert out['execution']['trajectory_state'] == 'recorded'
-    assert out['execution']['metrics']['dispatch_state'] == 'dispatch_not_reconciled'
+    assert out['execution']['metrics']['dispatch_state'] == 'timeout'
     assert out['usage']['usage_state'] == 'recorded'
     assert fake.stopped_epochs == [('T', 'e1')]
     assert fake.polls == 1  # out of time on the first poll: no extra waiting
+
+
+def test_run_agent_turns_a_failing_reconcile_join_into_a_predict_error(runner, dispatch):
+    fake = FakeIO(dispatch, pointers={('T', 'e1'): _pointer()}, joins=[],
+                  results={'B1': _child('Billing', 3), 'R': _child('Refunds', 4)})
+    fake.io.join = lambda task_id, timeout: (_ for _ in ()).throw(RuntimeError('task failed'))
+    out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'refund both'},
+                           predict=lambda **kw: _parked(), dispatch_io=fake.io, timeout=60)
+    assert out['status'] == 'predict_error' and 'dispatch_reconcile_failed' in out['error']
+    assert out['execution']['metrics']['dispatch_state'] == 'dispatch_reconcile_failed'
+    assert out['execution']['trajectory_state'] == 'recorded'
+
+
+def test_run_agent_passes_the_runs_cancel_to_the_wait(runner, dispatch):
+    fake = FakeIO(dispatch, pointers={}, joins=[], live={('T', 'e1'): {}})
+    out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=lambda **kw: _parked(),
+                           dispatch_io=fake.io, timeout=600, should_cancel=lambda: True)
+    assert out['status'] == 'cancelled' and 'dispatch_cancelled' in out['error']
+    assert fake.stopped_epochs == [('T', 'e1')]
+
+
+def test_run_agent_maps_a_capped_fan_out_to_parked(runner, dispatch):
+    fake = FakeIO(dispatch, pointers={('T', 'e1'): _pointer('R1', {})}, joins=[_parked()] * 20)
+    out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=lambda **kw: _parked(),
+                           dispatch_io=fake.io, timeout=600)
+    assert out['status'] == 'parked' and 'dispatch_too_many_waves' in out['error']
+    assert out['execution']['trajectory_state'] == 'recorded'
+
+
+def test_run_agent_survives_a_raising_wait(runner, dispatch, monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError('bug')
+
+    monkeypatch.setattr(dispatch, 'await_dispatch', boom)
+    out = runner.run_agent(1, {'agent_type': 'openai'}, {'input': 'q'}, predict=lambda **kw: _parked(),
+                           dispatch_io=FakeIO(dispatch, pointers={}, joins=[]).io, timeout=60)
+    assert out['status'] == 'parked' and 'bug' in out['error']
+    assert out['execution']['metrics']['dispatch_state'] == 'dispatch_error'
 
 
 def test_run_agent_without_dispatch_io_still_reports_parked(runner):

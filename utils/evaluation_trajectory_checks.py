@@ -124,10 +124,11 @@ if _traj is None or _exp is None:
     result = 'na'
 else:
     mode = _exp.get('match') or 'superset'
+    # ``own`` (#7015 P3): the agent under test's calls only, a sub-agent's internal tools left
+    # out. Absent means ``all``, so a reference written before the option scores as it did.
+    calls = 'own' if _exp.get('calls') == 'own' else 'all'
     expected = [t for t in (_exp.get('tools') or []) if isinstance(t, dict) and t.get('name')]
-    # The agent under test's own calls (#7015 P3): a sub-agent's internal tools are its business,
-    # and the reference names the sub-agent call itself.
-    actual = [s for s in _tool_steps(_traj) if not s.get('parent_agent')]
+    actual = [s for s in _tool_steps(_traj) if calls == 'all' or not s.get('parent_agent')]
     if not expected and mode in ('superset', 'in_order'):
         result = 'na'  # nothing is required, so there is nothing to match
     elif mode == 'exact':
@@ -145,7 +146,7 @@ else:
             total = len(expected) + len(actual)
             result = 1.0 if total == 0 else round(2 * matched / total, 4)
     if result != 'na':
-        print(f"match={mode} expected={[e.get('name') for e in expected]} "
+        print(f"match={mode} calls={calls} expected={[e.get('name') for e in expected]} "
               f"actual={[a.get('tool_name') for a in actual]} score={result}")
 '''
 
@@ -291,9 +292,10 @@ CHECKS = {
             "order, extras allowed), any_order (F1 of expected vs actual calls), subset (share of "
             "actual calls that were expected), superset (share of expected calls made; the default). "
             "Expected `args` are compared per `args_match` (subset by default, or exact); an "
-            "argument masked as a secret when stored matches on presence only. Only the agent's "
-            "own calls count: a sub-agent's internal tool calls are not matched. Skipped when the "
-            "case has no expected trajectory."),
+            "argument masked as a secret when stored matches on presence only. `calls` picks the "
+            "calls compared: all (the default; sub-agents' internal calls included) or own (the "
+            "agent's own calls; a call to a sub-agent counts, its internal calls do not). Skipped "
+            "when the case has no expected trajectory."),
         'body': _TOOL_MATCH, 'return_contract': 'number',
         'scale_type': 'continuous', 'scale_min': 0.0, 'scale_max': 1.0,
         'polarity': 'higher_better', 'default_weight': 1.0,

@@ -792,6 +792,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 _decode(child): _decode(child_task)
                 for child, child_task in (client.hgetall(_k_tasks(parent_thread_id, epoch)) or {}).items()
             }
+            # Written for every fan-out, chat included: the parent cannot tell whether an eval run
+            # is waiting. Nothing deletes it (the reader may come after the epoch cleanup), so it
+            # lives the full TTL. It is one small JSON value per epoch.
             client.set(
                 _k_reconcile_task(parent_thread_id, epoch),
                 json.dumps({'task_id': task_id, 'epoch': epoch, 'children': children}),

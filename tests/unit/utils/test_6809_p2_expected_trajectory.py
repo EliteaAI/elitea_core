@@ -103,10 +103,26 @@ def test_max_tool_calls_zero_is_kept(et):
 
 # --- promote pre-fill builder ----------------------------------------------------------------
 
-def test_from_tool_calls_is_names_only_superset(et):
+def test_from_tool_calls_is_names_only_superset_of_own_calls(et):
     assert et.from_tool_calls(['a', 'b', 'a']) == {
-        'match': 'superset', 'tools': [{'name': 'a'}, {'name': 'b'}, {'name': 'a'}],
+        'match': 'superset', 'calls': 'own', 'tools': [{'name': 'a'}, {'name': 'b'}, {'name': 'a'}],
         'forbidden': [], 'allow_repeat': []}
+
+
+# --- calls (#7015 P3) --------------------------------------------------------------------------
+
+def test_calls_is_omitted_when_absent(et):
+    assert 'calls' not in et.normalize_expected_trajectory({'tools': [{'name': 'a'}]})
+
+
+@pytest.mark.parametrize('calls', ['own', 'all'])
+def test_calls_is_kept(et, calls):
+    assert et.normalize_expected_trajectory({'calls': calls})['calls'] == calls
+
+
+def test_an_unknown_calls_is_rejected(et):
+    with pytest.raises(ValueError, match='calls must be one of'):
+        et.normalize_expected_trajectory({'calls': 'children'})
 
 
 def test_from_tool_calls_without_calls_is_none(et):

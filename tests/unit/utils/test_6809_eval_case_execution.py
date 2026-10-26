@@ -365,6 +365,15 @@ def test_trajectory_rollup_averages_only_recorded_cases(execution):
                                         'not_recorded': 1}
 
 
+def test_trajectory_rollup_counts_nodes_only_for_pipelines(execution):
+    # #7015: a pipeline's cases record node_count; an agent run's rollup keeps its old shape.
+    agent = execution.trajectory_rollup([_exec_row('recorded', llm_calls=2)])
+    assert 'node_count' not in agent['totals'] and 'node_count' not in agent['averages']
+    pipeline = execution.trajectory_rollup([_exec_row('recorded', node_count=3),
+                                            _exec_row('recorded', node_count=5)])
+    assert (pipeline['totals']['node_count'], pipeline['averages']['node_count']) == (8, 4)
+
+
 def test_trajectory_rollup_with_nothing_recorded_has_no_averages(execution):
     rollup = execution.trajectory_rollup([_exec_row('not_recorded', reason='no_envelope')])
 

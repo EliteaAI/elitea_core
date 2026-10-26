@@ -8,14 +8,22 @@ Shape (normalized; keys whose value is unset are omitted)::
 
     {
       "match": "superset",                 # exact | in_order | any_order | subset | superset
+      "calls": "own",                      # own | all; absent means all (references before #7015)
       "tools": [{"name": "jira_search", "args": {"project": "EL"}, "args_match": "subset"}],
       "forbidden": ["github_delete_branch"],
       "max_tool_calls": 6,
       "allow_repeat": ["get_job_status"]
     }
 
-``match`` compares the expected ``tools`` with the agent's own recorded tool calls. A sub-agent's
-internal calls are left out (#7015 P3); the call *to* the sub-agent is one of the agent's calls:
+``calls`` picks which recorded calls ``match`` compares the expected ``tools`` with (#7015 P3):
+
+* ``own`` — the agent's own calls. A sub-agent's internal calls are left out; the call *to* the
+  sub-agent is one of the agent's calls. Promote-to-reference writes it.
+* ``all`` — every call, the sub-agents' internal ones included. The default, so a reference
+  written before ``calls`` existed scores exactly as it did. An agent without sub-agents scores
+  the same either way.
+
+``match`` modes:
 
 * ``exact`` — the same calls in the same order, nothing else;
 * ``in_order`` — the expected calls appear in that order; other calls may sit between them;
@@ -32,11 +40,14 @@ import json
 from typing import List, Optional, Tuple
 
 MATCH_MODES = ('exact', 'in_order', 'any_order', 'subset', 'superset')
+CALLS_SCOPES = ('own', 'all')
 ARGS_MATCH_MODES = ('subset', 'exact')
 DEFAULT_MATCH = 'superset'
 DEFAULT_ARGS_MATCH = 'subset'
+# Absent ``calls`` keeps the pre-#7015 behavior; new references opt in to ``own``.
+DEFAULT_CALLS = 'all'
 
-_KEYS = {'match', 'tools', 'forbidden', 'max_tool_calls', 'allow_repeat'}
+_KEYS = {'match', 'calls', 'tools', 'forbidden', 'max_tool_calls', 'allow_repeat'}
 _TOOL_KEYS = {'name', 'args', 'args_match'}
 
 MAX_TOOLS = 200
@@ -115,6 +126,10 @@ def normalize_expected_trajectory(value) -> Optional[dict]:
     if match not in MATCH_MODES:
         raise ValueError(f'expected_trajectory.match must be one of {list(MATCH_MODES)}')
 
+    calls = value.get('calls')
+    if calls is not None and calls not in CALLS_SCOPES:
+        raise ValueError(f'expected_trajectory.calls must be one of {list(CALLS_SCOPES)}')
+
     tools = value.get('tools')
     if tools is None:
         tools = []
@@ -129,6 +144,8 @@ def normalize_expected_trajectory(value) -> Optional[dict]:
         'forbidden': _names(value.get('forbidden'), 'forbidden'),
         'allow_repeat': _names(value.get('allow_repeat'), 'allow_repeat'),
     }
+    if calls is not None:
+        normalized['calls'] = calls
     max_tool_calls = value.get('max_tool_calls')
     if max_tool_calls is not None:
         if isinstance(max_tool_calls, bool) or not isinstance(max_tool_calls, int) or max_tool_calls < 0:
@@ -154,7 +171,8 @@ def from_tool_calls(tool_names: List[str]) -> Optional[dict]:
     names = [n.strip() for n in tool_names if isinstance(n, str) and n.strip()][:MAX_TOOLS]
     if not names:
         return None
-    return {'match': DEFAULT_MATCH, 'tools': [{'name': n} for n in names],
+    # ``own``: the names are the agent's own calls (``tool_calls_by_group``)
+    return {'match': DEFAULT_MATCH, 'calls': 'own', 'tools': [{'name': n} for n in names],
             'forbidden': [], 'allow_repeat': []}
 
 

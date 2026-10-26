@@ -38,6 +38,7 @@ the project/member budget gate at dispatch. The run stops on it (``stop_reason=g
 (#6886): no model ran. Only that case fails; the run goes on.
 """
 import copy
+import math
 import time
 from typing import Callable, List, Optional
 from uuid import uuid4
@@ -191,6 +192,7 @@ def run_agent(
     case_index: Optional[int] = None,
     store_tool_outputs: bool = True,
     dispatch_io=None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """Run the pinned agent over one case's input and return a structured outcome (never raises).
 
@@ -209,9 +211,11 @@ def run_agent(
     A run that parks on a dispatched sub-agent fan-out is waited for inside the same time limit
     (#7015, :mod:`evaluation_dispatch`): the reconcile's answer is the case's output, and the
     evidence covers the parent, every child and the reconcile. A fan-out that does not finish in
-    time is stopped and ends as ``timeout`` with the partial evidence. ``dispatch_io`` is the
-    platform I/O for that wait; it defaults to this module's task node and Redis when ``predict``
-    is not injected, and without it a parked run stays ``parked``.
+    time is stopped and ends as ``timeout`` with the partial evidence; one stopped by the run's
+    cancel (``should_cancel``) ends as ``cancelled``, a failed reconcile as ``predict_error``, and
+    a fan-out that cannot be followed (no epoch, too many waves) as ``parked``. ``dispatch_io`` is
+    the platform I/O for that wait; it defaults to this module's task node and Redis when
+    ``predict`` is not injected, and without it a parked run stays ``parked``.
 
     ``case_index`` with ``platform_run_id`` makes the stream id, which the ledger keeps as the
     row's ``conversation_id``, name this case, so settlement can find its ledger rows.
@@ -280,13 +284,17 @@ def run_agent(
         from .evaluation_dispatch import RECONCILED, await_dispatch
         # What is left of the case's limit, on the clock the wait runs on
         remaining = timeout - (time.monotonic() - started)
-        dispatch = await_dispatch(result, deadline=dispatch_io.clock() + remaining, io=dispatch_io)
+        try:
+            dispatch = await_dispatch(result, deadline=dispatch_io.clock() + remaining, io=dispatch_io,
+                                      should_cancel=should_cancel)
+        except Exception as exc:  # noqa: BLE001 - await_dispatch never raises; a backstop all the same
+            dispatch = {'state': 'dispatch_error', 'result': result, 'waves': 0, 'children': 0,
+                        'error': str(exc)}
         latency_ms = int((time.monotonic() - started) * 1000)
         if dispatch['state'] != RECONCILED:
-            outcome = _outcome('timeout', None,
-                               f"agent's sub-agent fan-out did not finish within {timeout}s "
-                               f"({dispatch['state']})",
-                               dispatch['result'], latency_ms, evidence_status='parked')
+            status, error = _dispatch_failure(dispatch, timeout)
+            outcome = _outcome(status, None, error, dispatch['result'], latency_ms,
+                               evidence_status='parked')
             return _with_dispatch(outcome, dispatch)
         result = dispatch['result']
 
@@ -312,6 +320,21 @@ def run_agent(
                           dispatch)
 
 
+def _dispatch_failure(dispatch: dict, timeout) -> tuple:
+    """``(status, error)`` of a case whose fan-out did not reconcile. Only the time limit is a
+    ``timeout``: that one is an outcome of the agent and scored on performance (§3.2)."""
+    from .evaluation_dispatch import CANCELLED, RECONCILE_FAILED, TIMED_OUT
+    state = dispatch['state']
+    if state == TIMED_OUT:
+        return 'timeout', f"agent's sub-agent fan-out did not finish within {timeout}s ({state})"
+    if state == CANCELLED:
+        return 'cancelled', f'run cancelled while the sub-agent fan-out was running ({state})'
+    if state == RECONCILE_FAILED:
+        return 'predict_error', f"agent's sub-agent fan-out failed to reconcile ({state})"
+    detail = f": {dispatch['error']}" if dispatch.get('error') else ''
+    return 'parked', f"agent's sub-agent fan-out could not be followed ({state}{detail})"
+
+
 def _with_dispatch(outcome: dict, dispatch: Optional[dict]) -> dict:
     """Record how a dispatched fan-out went in the case's metrics (no-op for a plain run)."""
     if dispatch is not None:
@@ -327,7 +350,7 @@ def _platform_dispatch_io(module):
     from .evaluation_dispatch import DispatchIO
 
     def _join(task_id, timeout):
-        result = module.task_node.join_task(task_id, timeout=max(int(timeout), 1))
+        result = module.task_node.join_task(task_id, timeout=max(math.ceil(timeout), 1))
         return ... if result is ... else {'result': result}
 
     def _task_result(task_id):

@@ -1100,14 +1100,18 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         (utils/evaluation_trajectory_checks.py) and are resolved at run time, so the registry rows
         carry only the definition and meta.builtin_check.
 
-        Insert-only and idempotent: an entry already present under its name is left as is, so an
-        admin's weight/target edits survive a re-run. A same-named entry that is *not* the
-        built-in check is reported as a conflict and left alone. No dry run needed.
+        Idempotent. A missing entry is inserted. An entry already present has only its
+        description refreshed to the plugin's wording, since that text documents the script the
+        plugin ships (#7015), and the refreshed entries are resynced into the projects holding a
+        copy; an admin's weight/target edits survive a re-run. A same-named entry that is *not*
+        the built-in check is reported as a conflict and left alone. No dry run needed.
         """
         from ..models.eval_platform_dimension import EvalPlatformDimension  # pylint: disable=C0415
         from ..utils.evaluation_trajectory_checks import builtin_key, registry_seed  # pylint: disable=C0415
+        from ..utils import eval_platform_dimension_utils as platform_dimensions  # pylint: disable=C0415
 
-        inserted, present, conflicts = [], [], []
+        inserted, present, updated, conflicts = [], [], [], []
+        updated_uuids = []
         try:
             with db.with_project_schema_session(None) as session:
                 existing = {row.name: row for row in session.query(EvalPlatformDimension).all()}
@@ -1117,7 +1121,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         session.add(EvalPlatformDimension(**values))
                         inserted.append(values['name'])
                     elif builtin_key(row.meta) == values['meta']['builtin_check']:
-                        present.append(values['name'])
+                        if row.description != values['description']:
+                            row.description = values['description']
+                            updated.append(values['name'])
+                            updated_uuids.append(str(row.uuid))
+                        else:
+                            present.append(values['name'])
                     else:
                         conflicts.append(values['name'])
                 session.commit()
@@ -1125,7 +1134,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.exception("seed_eval_trajectory_dimensions: failed")
             return {"ok": False, "error": str(exc)}
         #
-        result = {"ok": True, "inserted": inserted, "present": present, "conflicts": conflicts}
+        # Projects copy a registry row when they attach it and are only refreshed by a resync.
+        resync_failures = []
+        for dimension_uuid in updated_uuids:
+            try:
+                resync_failures.extend(platform_dimensions.resync_dimension(dimension_uuid)['failures'])
+            except Exception as exc:  # pylint: disable=W0703
+                log.exception("seed_eval_trajectory_dimensions: resync of %s failed", dimension_uuid)
+                resync_failures.append({"dimension_uuid": dimension_uuid, "error": str(exc)})
+        #
+        result = {"ok": True, "inserted": inserted, "updated": updated, "present": present,
+                  "conflicts": conflicts, "resync_failures": resync_failures}
         log.info("seed_eval_trajectory_dimensions: %s", result)
         return result
 

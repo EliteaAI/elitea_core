@@ -3,8 +3,9 @@
 * ``agent_breakdown`` splits a case's steps by the agent that made them, into ``metrics.agents``.
 * ``ledger_agents`` / ``settle_agents`` replace the split's tokens with the ledger's per-entity
   figures when the sub-agents were dispatched (their calls carry their own application).
-* ``trajectory.tool_match`` scores the agent's own calls only, so a reference that names the
-  sub-agents is not marked down for what they did inside. ``forbidden_tools`` still sees every call.
+* ``trajectory.tool_match`` with ``calls: own`` scores the agent's own calls only, so a reference
+  that names the sub-agents is not marked down for what they did inside. Without ``calls`` (or
+  ``all``) it sees every call, as before. ``forbidden_tools`` always sees every call.
 
 The figures are those of local run #219 (dispatched) and #217 (in-process).
 
@@ -12,6 +13,8 @@ Run via:
     python tests/run_tests.py unit/utils/test_7015_eval_per_child_attribution.py -v
 """
 
+import contextlib
+import io
 import pathlib
 import sys
 
@@ -133,8 +136,9 @@ LEDGER_219 = [
 def test_ledger_rows_key_by_the_sub_agent_application(usage):
     ledger = usage.ledger_agents(LEDGER_219, PRID)
     assert set(ledger) == {0}
-    assert set(ledger[0]) == {None, ORDER, DECISION}
-    assert (ledger[0][ORDER]['input_tokens'], ledger[0][ORDER]['llm_calls']) == (11299, 3)
+    assert set(ledger[0]) == {None, 53, 54}
+    assert (ledger[0][53]['input_tokens'], ledger[0][53]['llm_calls'], ledger[0][53]['name']) == \
+        (11299, 3, ORDER)
     assert ledger[0][None]['input_tokens'] == 3358  # the judge's rows are not the agent's
 
 
@@ -165,7 +169,56 @@ def test_a_ledger_agent_missing_from_the_trajectory_is_appended(usage):
     agents = [{'agent': None, 'llm_calls': 2, 'tool_calls': 2, 'source': 'trajectory'}]
     settled = usage.settle_agents(agents, usage.ledger_agents(LEDGER_219, PRID)[0])
     assert [a['agent'] for a in settled] == [None, ORDER, DECISION]
-    assert (settled[1]['llm_calls'], settled[1]['input_tokens']) == (None, 11299)
+    assert (settled[1]['llm_calls'], settled[1]['input_tokens'], settled[1]['application_id']) == \
+        (None, 11299, 53)
+
+
+# A sub-agent whose display name has a space: its steps say 'RD Order Reader', the ledger says
+# 'RDOrderReader' (the SDK's clean_string), and the application id is the same.
+SPACED = 'RD Order Reader'
+
+
+def _spaced_trajectory(**extra):
+    return {'steps': [_llm((100, 10)), _llm((40, 4), SPACED), _tool('read_file', SPACED), _tool(SPACED),
+                      _llm((90, 9))], **extra}
+
+
+def test_a_sub_agent_named_differently_by_steps_and_ledger_settles_by_its_id(usage, execution):
+    trajectory = _spaced_trajectory(dispatched_agents=[
+        {'name': 'RDOrderReader', 'display_name': SPACED, 'application_id': 53}])
+    agents = execution.agent_breakdown(trajectory)
+    assert agents[1]['application_id'] == 53
+    rows = [_row(0, ('application', 53, 'RDOrderReader'), 41, 4, 2_000, 1), _row(0, EVAL, 190, 19, 9_000, 2)]
+    settled = usage.settle_agents(agents, usage.ledger_agents(rows, PRID)[0])
+    assert [a['agent'] for a in settled] == [None, SPACED]  # one row each, nothing appended
+    assert (settled[1]['input_tokens'], settled[1]['source']) == (41, 'ledger')
+
+
+def test_an_entry_without_an_id_falls_back_to_the_cleaned_name(usage, execution):
+    agents = execution.agent_breakdown(_spaced_trajectory())  # stored before the id was recorded
+    assert 'application_id' not in agents[1]
+    rows = [_row(0, ('application', 53, 'RDOrderReader'), 41, 4, 2_000, 1), _row(0, EVAL, 190, 19, 9_000, 2)]
+    settled = usage.settle_agents(agents, usage.ledger_agents(rows, PRID)[0])
+    assert [a['agent'] for a in settled] == [None, SPACED] and settled[1]['input_tokens'] == 41
+
+
+def test_a_bucket_with_an_unread_call_keeps_the_trajectory_figures(usage):
+    rows = [{**_row(0, ORDER_APP, 0, 0, 0, 1), 'unparsed_calls': 1}, _row(0, EVAL, 10, 1, 5, 1)]
+    agents = [{'agent': None, 'source': 'trajectory'},
+              {'agent': ORDER, 'application_id': 53, 'input_tokens': 77, 'source': 'trajectory'}]
+    settled = usage.settle_agents(agents, usage.ledger_agents(rows, PRID)[0])
+    assert (settled[1]['input_tokens'], settled[1]['source']) == (77, 'trajectory')
+    assert settled[0]['source'] == 'ledger'
+
+
+def test_merged_dispatch_records_each_sub_agents_id(utils_path):
+    dispatch = load_utils_module(utils_path, 'evaluation_dispatch')
+    spec = {'name': 'RDOrderReader', 'display_name': SPACED, 'application_id': 53, 'tool_call_id': 'c1'}
+    parked = {'result': {'parallel_parked': True, 'parallel_dispatch': [spec, dict(spec, tool_call_id='c2')],
+                         'thinking_steps': []}}
+    merged = dispatch.merge_envelopes([parked, {'result': {'thinking_steps': []}}])['result']
+    assert merged['dispatched_agents'] == [
+        {'name': 'RDOrderReader', 'display_name': SPACED, 'application_id': 53}]
 
 
 def test_settle_agents_without_a_ledger_is_unchanged(usage):
@@ -174,7 +227,7 @@ def test_settle_agents_without_a_ledger_is_unchanged(usage):
     assert usage.settle_agents(None, {None: {}}) is None
 
 
-# --- tool_match scores the agent's own calls --------------------------------------------------
+# --- tool_match, calls: own --------------------------------------------------
 
 def _local_executor(prelude: str):
     ns = {}
@@ -192,24 +245,55 @@ def _ref(*tools, match='any_order', **extra):
             **extra}
 
 
-def test_tool_match_ignores_the_sub_agents_internal_calls(cv):
-    # Before P3 this scored 0.5714 (57): 2 matched of 2 expected + 5 actual.
-    assert run(cv, 'trajectory.tool_match', _fanout(), _ref(ORDER, DECISION)) == 1.0
+def _own(*tools, match='any_order'):
+    return _ref(*tools, match=match, calls='own')
+
+
+def test_calls_own_ignores_the_sub_agents_internal_calls(cv):
+    # Under calls=all (the default) this is 0.5714 (57): 2 matched of 2 expected + 5 actual.
+    assert run(cv, 'trajectory.tool_match', _fanout(), _own(ORDER, DECISION)) == 1.0
 
 
 @pytest.mark.parametrize('match', ['exact', 'in_order', 'subset', 'superset'])
-def test_every_match_mode_sees_only_the_agents_calls(cv, match):
-    assert run(cv, 'trajectory.tool_match', _fanout(), _ref(DECISION, ORDER, match=match)) == 1.0
+def test_every_match_mode_under_calls_own_sees_only_the_agents_calls(cv, match):
+    assert run(cv, 'trajectory.tool_match', _fanout(), _own(DECISION, ORDER, match=match)) == 1.0
 
 
 def test_a_missing_sub_agent_call_is_still_marked_down(cv):
     trajectory = {'steps': [_llm(), _llm(agent=ORDER), _tool('read_file', ORDER), _tool(ORDER), _llm()]}
-    assert run(cv, 'trajectory.tool_match', trajectory, _ref(ORDER, DECISION, match='superset')) == 0.5
+    assert run(cv, 'trajectory.tool_match', trajectory, _own(ORDER, DECISION, match='superset')) == 0.5
 
 
-def test_a_reference_naming_a_childs_tool_does_not_match_it(cv):
+def test_under_calls_own_a_reference_naming_a_childs_tool_does_not_match_it(cv):
     # The reference describes the agent under test; read_file was the child's call, not its own.
-    assert run(cv, 'trajectory.tool_match', _fanout(), _ref('read_file', match='superset')) == 0.0
+    assert run(cv, 'trajectory.tool_match', _fanout(), _own('read_file', match='superset')) == 0.0
+
+
+# --- calls absent / all: a reference written before the option scores as it did ---------------
+
+def test_a_reference_without_calls_still_sees_every_call(cv):
+    # Run #219's figure, before P3: the any_order F1 counts the children's 3 internal calls.
+    assert run(cv, 'trajectory.tool_match', _fanout(), _ref(ORDER, DECISION)) == 0.5714
+
+
+def test_a_reference_without_calls_still_matches_a_childs_tool(cv):
+    assert run(cv, 'trajectory.tool_match', _fanout(), _ref('read_file', match='superset')) == 1.0
+
+
+def test_calls_all_is_the_same_as_absent(cv):
+    for ref in (_ref(ORDER, DECISION), _ref('read_file', match='superset')):
+        assert run(cv, 'trajectory.tool_match', _fanout(), {**ref, 'calls': 'all'}) == \
+            run(cv, 'trajectory.tool_match', _fanout(), ref)
+
+
+def test_the_verdict_says_which_calls_were_compared(cv):
+    ns = {}
+    script = cv.build_validation_prelude(checks.script_for('trajectory.tool_match'), output='o',
+                                         trajectory=_fanout(), expected_trajectory=_own(ORDER))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec('\n'.join(script.splitlines()[:-1]), ns)  # noqa: S102 - trusted, shipped test scripts
+    assert 'calls=own' in out.getvalue()
 
 
 def test_forbidden_tools_still_sees_every_agent(cv):
@@ -217,11 +301,13 @@ def test_forbidden_tools_still_sees_every_agent(cv):
     assert run(cv, 'trajectory.forbidden_tools', _fanout(), expected) is False
 
 
-def test_tool_match_on_a_plain_agent_is_unchanged(cv):
+@pytest.mark.parametrize('calls', [None, 'all', 'own'])
+def test_tool_match_on_a_plain_agent_is_the_same_under_either_calls(cv, calls):
     trajectory = {'steps': [_llm(), _tool('jira_search'), _tool('jira_get'), _llm()]}
-    assert run(cv, 'trajectory.tool_match', trajectory, _ref('jira_search', 'jira_get', match='exact')) == 1.0
+    ref = _ref('jira_search', 'jira_get', match='exact', **({'calls': calls} if calls else {}))
+    assert run(cv, 'trajectory.tool_match', trajectory, ref) == 1.0
 
 
-def test_the_description_says_so():
-    assert "sub-agent's internal tool calls are not matched" in \
-        checks.CHECKS['trajectory.tool_match']['description']
+def test_the_description_documents_calls():
+    description = checks.CHECKS['trajectory.tool_match']['description']
+    assert '`calls`' in description and 'all (the default' in description

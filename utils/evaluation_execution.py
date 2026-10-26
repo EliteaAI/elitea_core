@@ -341,6 +341,8 @@ def build_trajectory(predict_result, *, store_tool_outputs: bool = True) -> Opti
     }
     if trace is not None:
         trajectory['node_sequence'] = [s['node'] for s in steps if s['kind'] == 'node']
+    if inner.get('dispatched_agents'):
+        trajectory['dispatched_agents'] = inner['dispatched_agents']
     return _fit(trajectory)
 
 
@@ -431,10 +433,20 @@ def agent_breakdown(trajectory: Optional[dict]) -> Optional[List[dict]]:
 
     ``None`` when no step ran in a sub-agent, so a plain agent's metrics are unchanged. Tokens are
     ``None`` for an agent with an LLM step whose provider sent no usage: a partial sum would read as
-    a measurement. Settlement replaces them with the ledger's figures where it has them."""
+    a measurement. Settlement replaces them with the ledger's figures where it has them.
+
+    A dispatched sub-agent also gets its ``application_id`` (from the trajectory's
+    ``dispatched_agents``): its steps name it by display name, the ledger by its application, and
+    the id is what ties the two."""
     steps = [s for s in (trajectory or {}).get('steps') or [] if isinstance(s, dict)]
     if not any(s.get('parent_agent') for s in steps):
         return None
+    ids = {}
+    for spec in (trajectory or {}).get('dispatched_agents') or []:
+        if isinstance(spec, dict):
+            for name in (spec.get('name'), spec.get('display_name')):
+                if name:
+                    ids.setdefault(name, spec.get('application_id'))
     agents: dict = {None: None}
     for step in steps:
         kind = step.get('kind')
@@ -446,6 +458,8 @@ def agent_breakdown(trajectory: Optional[dict]) -> Optional[List[dict]]:
             entry = agents[name] = {'agent': name, 'llm_calls': 0, 'tool_calls': 0,
                                     'input_tokens': 0, 'output_tokens': 0, 'cost': None,
                                     'source': AGENT_SOURCE_TRAJECTORY}
+            if ids.get(name) is not None:
+                entry['application_id'] = ids[name]
         if kind == 'tool':
             entry['tool_calls'] += 1
             continue
@@ -595,13 +609,15 @@ def trajectory_rollup(rows: List[dict]) -> Optional[dict]:
 
     metrics = [r.get('metrics') or {} for r in recorded]
     n = len(recorded)
-    totals = {key: sum(m.get(key) or 0 for m in metrics) for key in ROLLUP_COUNTERS}
+    # Pipelines only (#7015): a run of agents keeps its rollup shape.
+    counters = ROLLUP_COUNTERS + (('node_count',) if any('node_count' in m for m in metrics) else ())
+    totals = {key: sum(m.get(key) or 0 for m in metrics) for key in counters}
     latencies = [m['latency_ms'] for m in metrics if isinstance(m.get('latency_ms'), (int, float))]
     return {
         'cases': len(rows),
         'recorded_cases': n,
         'totals': totals,
-        'averages': {key: (totals[key] / n if n else None) for key in ROLLUP_COUNTERS},
+        'averages': {key: (totals[key] / n if n else None) for key in counters},
         'step_limit_hits': sum(1 for m in metrics if m.get('step_limit_hit')),
         'timed_out_cases': sum(1 for r in rows if r.get('status') == 'timeout'),
         'average_latency_ms': sum(latencies) / len(latencies) if latencies else None,

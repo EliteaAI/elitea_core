@@ -179,8 +179,9 @@ def tool_calls_by_group(session, group_ids: List[int]) -> Dict[int, List[str]]:
     """``{group_id: [tool_name, ...]}`` for the groups' ``tool_call`` trace steps, in the order the
     chat renders them (``started_at`` nulls last, then ``id``). One query; names only, so the
     ``tool_output`` blobs are never read. The agent's own calls only: a sub-agent's internal calls
-    are left out, as ``trajectory.tool_match`` leaves them out of the run (#7015 P3), so a promoted
-    reference scores 100 on a replay of the same conversation.
+    are left out (#7015 P3). The promoted reference says ``calls: own``, under which
+    ``trajectory.tool_match`` leaves them out of the run too, so it scores 100 on a replay of the
+    same conversation.
     """
     if not group_ids:
         return {}
