@@ -17,6 +17,25 @@ from .mcp_session import SseSession
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 
 
+# Path parameters an API declares as ``<path:...>`` (an artifact's ``filename`` in a folder): several segments, each
+# of them checked as one
+MULTI_SEGMENT_PATH_PARAMS = frozenset({"filename"})
+
+
+def _path_segment(name, value) -> str:
+    """One path parameter as path segment(s) of the in-process request. ``PATH_INFO`` is the decoded path (PEP 3333),
+    so the value is not percent-encoded (the route would see ``%2F`` literally); what could leave its place is refused
+    instead: a slash (but between the segments of a ``<path:...>`` parameter), a backslash, an empty or dot segment, a
+    control character (CR/LF included), ``?`` or ``#``."""
+    text = str(value)
+    segments = text.split("/") if name in MULTI_SEGMENT_PATH_PARAMS else [text]
+    for segment in segments:
+        if (not segment or segment in (".", "..") or any(ch in segment for ch in "/\\?#")
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in segment)):
+            raise ValueError(f"path parameter {name} must be a plain path segment")
+    return text
+
+
 class _RunTokenRefusal(Exception):
     """A tool call the run token's scope does not allow (#7214); its text is the readable refusal."""
 
@@ -50,13 +69,15 @@ def _run_token_claims():
     return claims if isinstance(claims, dict) else None
 
 
-def _refused_by_run_token(operation, target, tool_name):
-    """A call under a run token (#7214): the readable refusal when its scope does not allow ``operation`` (or a write
-    cannot be recorded), else None after recording a write. A call without a run token: None, nothing read."""
+def _refused_by_run_token(operation, target, tool_name, arguments=None):
+    """A call under a run token (#7214): the readable refusal when its arguments name a project outside the token's
+    targets, or its scope does not allow ``operation`` (or a write cannot be recorded), else None after recording a
+    write. A call without a run token: None, nothing read."""
     if _run_token_claims() is None:
         return None
     from . import internal_obo  # pylint: disable=C0415
     try:
+        internal_obo.check_targets(arguments or {}, target, tool_name)
         internal_obo.check_operation(operation, target, tool_name)
     except internal_obo.OperationRefused as exc:
         return internal_obo.refusal_text(exc)
@@ -93,7 +114,8 @@ class McpApiToolExecutor:
             if _run_token_claims() is not None:
                 from .internal_obo import operation_of  # pylint: disable=C0415
                 refused = _refused_by_run_token(   # classified by the tool's own path template, not the call's values
-                    operation_of(method, path), f"{method} {url_path}", api_tool.get("label", ""))
+                    operation_of(method, path), f"{method} {url_path}", api_tool.get("label", ""),
+                    {**query_params, **body_params})
                 if refused:
                     return {"error": refused}
 
@@ -190,7 +212,7 @@ class McpApiToolExecutor:
 
         url_path = path_template
         for param_name, param_value in path_params.items():
-            url_path = url_path.replace(f"{{{param_name}}}", str(param_value))
+            url_path = url_path.replace(f"{{{param_name}}}", _path_segment(param_name, param_value))
 
         return url_path
 

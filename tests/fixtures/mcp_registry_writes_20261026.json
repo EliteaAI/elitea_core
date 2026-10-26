@@ -1,0 +1,248 @@
+{
+ "generated": "2026-10-26 from the local stack: tools/list of every internal MCP tag (run token), names matched to /shared/openapi/?all=true paths with the registry's naming rule",
+ "tools_per_tag": {
+  "artifacts": [
+   "get_artifacts_artifact",
+   "get_artifacts_artifacts",
+   "post_artifacts_artifacts",
+   "delete_artifacts_artifacts",
+   "get_artifacts_buckets",
+   "post_artifacts_buckets",
+   "put_artifacts_buckets",
+   "patch_artifacts_buckets",
+   "get_artifacts_s3_credentials",
+   "post_artifacts_s3_credentials",
+   "put_artifacts_s3_credentials"
+  ],
+  "auth": [
+   "get_auth_user"
+  ],
+  "configurations": [
+   "get_configurations_available",
+   "get_configurations_configuration",
+   "put_configurations_configuration",
+   "get_configurations_configurations",
+   "post_configurations_configurations",
+   "get_configurations_models",
+   "post_configurations_models",
+   "get_configurations_types"
+  ],
+  "elitea_core/analytics": [
+   "get_elitea_core_analytics",
+   "get_elitea_core_project_user_activity"
+  ],
+  "elitea_core/applications": [
+   "get_elitea_core_application",
+   "patch_elitea_core_application_relation",
+   "get_elitea_core_applications",
+   "post_elitea_core_applications",
+   "get_elitea_core_version",
+   "put_elitea_core_version",
+   "post_elitea_core_version_instruction_patch",
+   "post_elitea_core_versions"
+  ],
+  "elitea_core/chat": [
+   "post_elitea_core_continue_predict",
+   "get_elitea_core_conversation",
+   "put_elitea_core_conversation",
+   "get_elitea_core_conversations",
+   "post_elitea_core_conversations",
+   "patch_elitea_core_entity_settings",
+   "get_elitea_core_folder",
+   "post_elitea_core_folder",
+   "put_elitea_core_folder",
+   "post_elitea_core_messages",
+   "get_elitea_core_participant",
+   "delete_elitea_core_participant",
+   "post_elitea_core_participants"
+  ],
+  "elitea_core/discovery": [
+   "get_elitea_core_search_options",
+   "get_elitea_core_tags"
+  ],
+  "elitea_core/project_context": [
+   "post_elitea_core_generate_project_context_draft",
+   "get_project_context_project-context",
+   "put_project_context_project-context",
+   "delete_project_context_project-context"
+  ],
+  "elitea_core/skills": [
+   "get_elitea_core_application_skills",
+   "post_elitea_core_generate_skill_draft",
+   "post_elitea_core_public_skill_predict",
+   "get_elitea_core_skill",
+   "put_elitea_core_skill",
+   "patch_elitea_core_skill",
+   "post_elitea_core_skill_predict",
+   "get_elitea_core_skills",
+   "post_elitea_core_skills"
+  ],
+  "elitea_core/toolkits": [
+   "put_elitea_core_tool",
+   "patch_elitea_core_tool",
+   "get_elitea_core_toolkit_available_tools",
+   "get_elitea_core_toolkits",
+   "get_elitea_core_tools",
+   "post_elitea_core_tools"
+  ],
+  "notifications": [
+   "get_notifications_notification",
+   "put_notifications_notification",
+   "get_notifications_notifications"
+  ],
+  "projects": [
+   "get_projects_project"
+  ],
+  "secrets": [
+   "put_secrets_secret",
+   "get_secrets_secrets",
+   "post_secrets_secrets"
+  ],
+  "social": [
+   "put_social_folder",
+   "get_social_folder_items",
+   "get_social_folders",
+   "post_social_folders",
+   "put_social_move_to_folder"
+  ],
+  "usage/analytics": [
+   "get_usage_analytics",
+   "get_usage_analytics_activity",
+   "get_usage_analytics_agent_detail",
+   "get_usage_analytics_agents",
+   "get_usage_analytics_costs",
+   "get_usage_analytics_tool_detail",
+   "get_usage_analytics_tools",
+   "get_usage_analytics_user_detail",
+   "get_usage_analytics_users"
+  ]
+ },
+ "write_tools": {
+  "delete_artifacts_artifacts": [
+   "DELETE artifacts/artifacts/{mode}/{project_id}/{bucket}"
+  ],
+  "delete_elitea_core_participant": [
+   "DELETE elitea_core/participant/{mode}/{project_id}/{conversation_id}/{participant_id}"
+  ],
+  "delete_project_context_project-context": [
+   "DELETE elitea_core/project_context/{mode}/{project_id}/project-context"
+  ],
+  "patch_artifacts_buckets": [
+   "PATCH artifacts/buckets/{mode}/{project_id}"
+  ],
+  "patch_elitea_core_application_relation": [
+   "PATCH elitea_core/application_relation/{mode}/{project_id}/{application_id}/{version_id}"
+  ],
+  "patch_elitea_core_entity_settings": [
+   "PATCH elitea_core/entity_settings/{mode}/{project_id}/{conversation_id}/{participant_id}"
+  ],
+  "patch_elitea_core_skill": [
+   "PATCH elitea_core/skill/{mode}/{project_id}/{skill_id}"
+  ],
+  "patch_elitea_core_tool": [
+   "PATCH elitea_core/tool/{mode}/{project_id}/{tool_id}"
+  ],
+  "post_artifacts_artifacts": [
+   "POST artifacts/artifacts/{mode}/{project_id}/{bucket}"
+  ],
+  "post_artifacts_buckets": [
+   "POST artifacts/buckets/{mode}/{project_id}"
+  ],
+  "post_artifacts_s3_credentials": [
+   "POST artifacts/s3_credentials/{mode}/{project_id}"
+  ],
+  "post_configurations_configurations": [
+   "POST configurations/configurations/{project_id}"
+  ],
+  "post_configurations_models": [
+   "POST configurations/models/{project_id}"
+  ],
+  "post_elitea_core_applications": [
+   "POST elitea_core/applications/{mode}/{project_id}"
+  ],
+  "post_elitea_core_continue_predict": [
+   "POST elitea_core/continue_predict/{mode}/{project_id}/{conversation_uuid}"
+  ],
+  "post_elitea_core_conversations": [
+   "POST elitea_core/conversations/{mode}/{project_id}"
+  ],
+  "post_elitea_core_folder": [
+   "POST elitea_core/folder/{mode}/{project_id}"
+  ],
+  "post_elitea_core_generate_project_context_draft": [
+   "POST elitea_core/generate_project_context_draft/{mode}/{project_id}"
+  ],
+  "post_elitea_core_generate_skill_draft": [
+   "POST elitea_core/generate_skill_draft/{mode}/{project_id}"
+  ],
+  "post_elitea_core_messages": [
+   "POST elitea_core/messages/{mode}/{project_id}/{conversation_uuid}"
+  ],
+  "post_elitea_core_participants": [
+   "POST elitea_core/participants/{mode}/{project_id}/{conversation_id}"
+  ],
+  "post_elitea_core_public_skill_predict": [
+   "POST elitea_core/public_skill_predict/{mode}/{project_id}/{public_skill_id}"
+  ],
+  "post_elitea_core_skill_predict": [
+   "POST elitea_core/skill_predict/{mode}/{project_id}/{skill_id}"
+  ],
+  "post_elitea_core_skills": [
+   "POST elitea_core/skills/{mode}/{project_id}"
+  ],
+  "post_elitea_core_tools": [
+   "POST elitea_core/tools/{mode}/{project_id}"
+  ],
+  "post_elitea_core_version_instruction_patch": [
+   "POST elitea_core/version_instruction_patch/{mode}/{project_id}/{application_id}/{version_id}"
+  ],
+  "post_elitea_core_versions": [
+   "POST elitea_core/versions/{mode}/{project_id}/{application_id}"
+  ],
+  "post_secrets_secrets": [
+   "POST secrets/secrets/{mode}/{project_id}"
+  ],
+  "post_social_folders": [
+   "POST social/folders/{mode}/{project_id}"
+  ],
+  "put_artifacts_buckets": [
+   "PUT artifacts/buckets/{mode}/{project_id}"
+  ],
+  "put_artifacts_s3_credentials": [
+   "PUT artifacts/s3_credentials/{mode}/{project_id}/{access_key_id}"
+  ],
+  "put_configurations_configuration": [
+   "PUT configurations/configuration/{project_id}/{config_id}"
+  ],
+  "put_elitea_core_conversation": [
+   "PUT elitea_core/conversation/{mode}/{project_id}/{conversation_id}"
+  ],
+  "put_elitea_core_folder": [
+   "PUT elitea_core/folder/{mode}/{project_id}/{folder_id}"
+  ],
+  "put_elitea_core_skill": [
+   "PUT elitea_core/skill/{mode}/{project_id}/{skill_id}"
+  ],
+  "put_elitea_core_tool": [
+   "PUT elitea_core/tool/{mode}/{project_id}/{tool_id}"
+  ],
+  "put_elitea_core_version": [
+   "PUT elitea_core/version/{mode}/{project_id}/{application_id}/{version_id}"
+  ],
+  "put_notifications_notification": [
+   "PUT notifications/notification/{mode}/{project_id}/{notification_id}"
+  ],
+  "put_project_context_project-context": [
+   "PUT elitea_core/project_context/{mode}/{project_id}/project-context"
+  ],
+  "put_secrets_secret": [
+   "PUT secrets/secret/{mode}/{project_id}/{secret}"
+  ],
+  "put_social_folder": [
+   "PUT social/folder/{mode}/{project_id}/{folder_id}"
+  ],
+  "put_social_move_to_folder": [
+   "PUT social/move_to_folder/{mode}/{project_id}"
+  ]
+ }
+}

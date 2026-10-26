@@ -6,7 +6,7 @@ from collections import OrderedDict
 from json import dumps
 from pathlib import Path
 from queue import Empty
-from threading import Thread, Event, Lock
+from threading import Thread, Event, Lock, Timer
 
 from pylon.core.tools import module, log
 
@@ -727,6 +727,22 @@ class Module(module.ModuleModel):
                 log.exception("binding operations schema: auto-migration failed")
 
         Thread(target=_run, daemon=True).start()
+
+        def _check_map():
+            # every MCP-exposed write must be in the operation map, or agents with a run token are refused it
+            try:
+                from tools import openapi_registry  # pylint: disable=C0415
+                missing = internal_obo.unmapped_writes(openapi_registry.get_mcp_api_tools())
+                log.info("security_metric name=internal_obo_unmapped_writes value=%s", len(missing))
+                if missing:
+                    log.error("internal OBO: MCP-exposed writes missing from the operation map (refused for runs): %s",
+                              ", ".join(missing))
+            except Exception:  # pylint: disable=W0703
+                log.exception("internal OBO: the operation map could not be checked")
+
+        timer = Timer(60.0, _check_map)   # after every plugin registered its OpenAPI endpoints
+        timer.daemon = True
+        timer.start()
 
     def _ensure_share_token_schema(self):
         """Startup safety net: create share-token tables in any project schema (and

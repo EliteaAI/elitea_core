@@ -855,10 +855,12 @@ def _shadow_admit(  # pylint: disable=R0912
     if admission is None or admission.run_kind != "interactive":
         return
     run_id = payload.get(PREDICT_RUN_ID_KWARGS_KEY)   # bound before anything that can raise
-    failure, snapshot, legacy_internal_mcp = None, None, False
+    failure, snapshot, legacy_internal_mcp, mcp_findings = None, None, False, []
     try:
-        # its internal Elitea MCP toolkits authenticate with a personal token: enforce gives them the run token (#7214)
+        # its internal Elitea MCP toolkits authenticate with a personal token: enforce gives them the run token (#7214),
+        # strips what a toolkit brings of its own and refuses one on another origin
         legacy_internal_mcp = internal_obo.has_internal_mcp(payload)
+        mcp_findings = internal_obo.inspect_internal_mcp(payload)
         meta = call_kwargs.get("meta")
         if admission.trace_ref is None and isinstance(meta, dict) and isinstance(meta.get("traceparent"), str):
             admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
@@ -869,13 +871,12 @@ def _shadow_admit(  # pylint: disable=R0912
 
     def evaluate():
         _shadow_evaluate(module, admission, run_id, snapshot, free_form_secret, unavailable, failure)
-        if legacy_internal_mcp:
+        for code in ([internal_obo.LEGACY_PAT_INTERNAL_MCP] if legacy_internal_mcp else []) + mcp_findings:
             _record_deny(
-                module, internal_obo.LEGACY_PAT_INTERNAL_MCP, would_deny=True, project_id=admission.project_id,
+                module, code, would_deny=True, project_id=admission.project_id,
                 application_id=admission.application_id, caller_ref=_caller_ref(admission),
                 run_id=run_id if isinstance(run_id, str) else None, traceparent=admission.trace_ref)
-            _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_deny",
-                    internal_obo.LEGACY_PAT_INTERNAL_MCP)
+            _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_deny", code)
 
     if deferred is None:
         evaluate()

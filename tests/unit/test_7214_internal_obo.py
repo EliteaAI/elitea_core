@@ -356,11 +356,12 @@ def test_an_expired_token_says_so_and_is_audited(ns, env):
 
 
 def test_a_bad_signature_is_counted_not_audited(ns, env):
+    obo(ns)._UNVERIFIED_LOG.update(at=0.0, suppressed=0)   # pylint: disable=W0212
     token, _ = mint(ns)
     assert verify(ns, env, token[:-2] + "AA")["code"] == "INTERNAL_TOKEN_INVALID"
     assert env.denied == []   # its claims are not Main's: nothing of them is written
-    assert "security_metric name=internal_token_verification_total result=deny reason_code=INTERNAL_TOKEN_INVALID" \
-        in env.log.lines
+    assert "security_metric name=internal_token_verification_total result=deny reason_code=INTERNAL_TOKEN_INVALID " \
+           "suppressed=0" in env.log.lines
 
 
 def test_no_key_refuses_every_token(ns, env):
@@ -510,7 +511,7 @@ EXPOSED_WRITES = [
     ("PATCH", "elitea_core/skill/{mode}/{project_id}/{skill_id}", "build"),
     ("PUT", "elitea_core/project_context/{mode}/{project_id}/project-context", "build"),
     ("DELETE", "elitea_core/project_context/{mode}/{project_id}/project-context", "build"),
-    ("POST", "elitea_core/folder/{mode}/{project_id}/{folder_id}", "build"),
+    ("POST", "elitea_core/folder/{mode}/{project_id}", "build"),
     ("PUT", "elitea_core/folder/{mode}/{project_id}/{folder_id}", "build"),
     ("POST", "elitea_core/conversations/{mode}/{project_id}", "build"),
     ("PUT", "elitea_core/conversation/{mode}/{project_id}/{conversation_id}", "build"),
@@ -695,3 +696,173 @@ def test_a_development_run_gets_the_token_with_the_author_and_its_digest(ns, env
     assert claims["scope"] == ["read", "build"]   # the author's RBAC alone: no credentials, no predict permission
     env.in_request = True
     assert verify(ns, env, token_of(ns, call)) == {"ok": True, "user_id": 42}
+
+
+# --- round 2: the path as the client sends it (C9-SEC-26) ---------------------------------------------------------
+
+DISGUISED = [
+    "http://pylon_main:8080/x/../app/2/mcp/elitea_core/applications",
+    "http://pylon_main:8080/./app/2/mcp/elitea_core/applications",
+    "http://pylon_main:8080/app/2/%6Dcp/elitea_core/applications",
+    "http://pylon_main:8080//app//2/mcp/elitea_core/applications",
+    "http://pylon_main:8080/app/2/%256Dcp",
+]
+
+
+@pytest.mark.parametrize("url", DISGUISED)
+def test_a_disguised_internal_path_is_recognised(ns, url):
+    assert obo(ns).has_internal_mcp({"tools": [{"type": "mcp", "settings": {"url": url}}]})
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("/x/../app/2/mcp", "/app/2/mcp"), ("/./app/2/mcp/", "/app/2/mcp/"), ("/app/2/%6Dcp", "/app/2/mcp"),
+    ("//app///2/mcp", "/app/2/mcp"), ("/app/2/mcp/../../../etc", "/etc"), ("", "/"), ("\\app\\2\\mcp", "/app/2/mcp"),
+])
+def test_the_client_path_resolves_what_the_client_resolves(ns, path, expected):
+    assert obo(ns).client_path(path) == expected
+
+
+@pytest.mark.parametrize("url", DISGUISED)
+def test_under_enforce_a_disguised_internal_toolkit_loses_the_pasted_token(ns, env, url):
+    seed(env)
+    call = call_kwargs(tools=[internal_tool(url=url, headers={"Authorization": "Bearer pat-value"})])
+    ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
+    assert call["kwargs"]["tools"][0]["settings"]["headers"] == {}
+    assert obo(ns).TOKEN_KWARG in call["kwargs"]
+
+
+def test_under_enforce_any_mcp_toolkit_on_the_platforms_origin_loses_its_own_auth_whatever_the_path(ns, env):
+    seed(env)
+    other_route = {"type": "mcp", "id": 3, "settings": {
+        "url": "http://pylon_main:8080/api/v2/elitea_core/applications/prompt_lib/2",
+        "headers": {"Authorization": "Bearer pat-value", "Cookie": "session=x", "Proxy-Authorization": "Basic x",
+                    "X-Trace": "1"}}}
+    external = {"type": "mcp", "id": 4, "settings": {"url": "https://mcp.example.com/mcp",
+                                                     "headers": {"Authorization": "Bearer external-token"}}}
+    call = call_kwargs(tools=[other_route, external])
+    ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
+    assert call["kwargs"]["tools"][0]["settings"]["headers"] == {"X-Trace": "1"}
+    assert call["kwargs"]["tools"][1]["settings"]["headers"] == {"Authorization": "Bearer external-token"}
+
+
+def test_under_enforce_a_disguised_internal_path_on_another_origin_refuses_the_run(ns, env):
+    seed(env)
+    call = call_kwargs(tools=[internal_tool(url="http://10.0.0.7:8080/x/../app/2/mcp/secrets",
+                                            headers={"Authorization": "Bearer pat-value"})])
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
+    assert err.value.reason_code == "INTERNAL_MCP_ORIGIN_NOT_ALLOWED"
+
+
+def test_audit_only_records_what_enforce_would_strip_or_refuse(ns, env):
+    seed(env)
+    tools = [internal_tool(url="http://pylon_main:8080/x/../app/2/mcp/secrets", headers={"Authorization": "Bearer p"}),
+             internal_tool(url="http://10.0.0.7:8080/app/2/mcp/secrets")]
+    call = call_kwargs(tools=tools)
+    before = copy.deepcopy(call)
+    ns.adm.admit_dispatch(env.module(governed=False, audit=True), "indexer_agent", call, env.request())
+    codes = sorted(e["reason_code"] for e in env.denied if e.get("would_deny"))
+    assert codes == ["INTERNAL_MCP_ORIGIN_NOT_ALLOWED", "INTERNAL_MCP_OWN_AUTH", "LEGACY_PAT_INTERNAL_MCP"]
+    assert call["kwargs"]["tools"] == before["kwargs"]["tools"]   # audit only changes nothing
+
+
+def test_audit_only_does_not_flag_the_plain_injected_toolkit_twice(ns, env):
+    seed(env)
+    call = call_kwargs(tools=[internal_tool(headers={"Authorization": "Bearer injected-pat"})])
+    ns.adm.admit_dispatch(env.module(governed=False, audit=True), "indexer_agent", call, env.request())
+    assert sorted(e["reason_code"] for e in env.denied if e.get("would_deny")) == ["LEGACY_PAT_INTERNAL_MCP"]
+
+
+# --- round 2: projects named in the arguments (C9-SEC-22 residual) ------------------------------------------------
+
+PARTICIPANT = {"entity_name": "application", "entity_meta": {"id": 7, "project_id": 9}, "entity_settings": {}}
+
+
+@pytest.mark.parametrize("arguments,ok", [
+    ({"project_id": 1, "participants": [dict(PARTICIPANT, entity_meta={"id": 7, "project_id": 5})]}, True),
+    ({"project_id": 1, "participants": [PARTICIPANT]}, False),                       # an agent of project 9
+    ({"participants": json.dumps([PARTICIPANT])}, False),                            # the same as a JSON string
+    ({"participants": [{"entity_meta": {"project_id": "9"}}]}, False),
+    ({"participants": [{"entity_meta": {"project_id": "nine"}}]}, False),            # unreadable: refused
+    ({"model_project_id": 9, "llm_settings": {"model_project_id": 1}}, True),        # other keys are not projects
+])
+def test_a_participant_of_a_project_outside_the_targets_is_refused(ns, env, arguments, ok):
+    under_token(ns, env, ["read", "build", "run"])
+    target = "POST /api/v2/elitea_core/participants/prompt_lib/1/12"
+    if ok:
+        obo(ns).check_targets(arguments, target, "post_elitea_core_participants")
+        assert env.denied == []
+        return
+    with pytest.raises(obo(ns).OperationRefused) as err:
+        obo(ns).check_targets(arguments, target, "post_elitea_core_participants")
+    assert err.value.code == "INTERNAL_TARGET_DENIED"
+    [event] = env.denied
+    assert (event["decision"], event["reason_code"], event["operation_id"]) == (
+        "deny", "INTERNAL_TARGET_DENIED", "target:post_elitea_core_participants")
+
+
+def test_arguments_too_deep_or_too_large_are_refused_not_half_checked(ns, env):
+    under_token(ns, env, ["read", "build"])
+    deep = {}
+    node = deep
+    for _ in range(20):
+        node["a"] = {}
+        node = node["a"]
+    with pytest.raises(obo(ns).OperationRefused):
+        obo(ns).check_targets(deep, "POST x", "t")
+    with pytest.raises(obo(ns).OperationRefused):
+        obo(ns).check_targets({"items": list(range(5000))}, "POST x", "t")
+
+
+def test_targets_are_not_read_without_a_run_token(ns, env):
+    env.in_request = True
+    obo(ns).check_targets({"participants": [PARTICIPANT]}, "POST x", "t")
+    assert env.denied == []
+
+
+# --- round 2: the map against the live registry and at startup ------------------------------------------------------
+
+REGISTRY = json.loads((PLUGIN_ROOT / "tests" / "fixtures" / "mcp_registry_writes_20261026.json").read_text())
+
+
+def test_every_write_the_live_registry_exposes_is_in_the_map(ns):
+    """``mcp_registry_writes_20261026.json`` is the live registry of the local stack (tools/list of every MCP tag with a
+    run token, each name matched to its OpenAPI path). A write tool there without its line in the map would be refused
+    at run time; this fails instead. Regenerate the snapshot when an MCP-exposed write is added."""
+    exposed = {name for names in REGISTRY["tools_per_tag"].values() for name in names if not name.startswith("get_")}
+    assert exposed == set(REGISTRY["write_tools"])
+    unmapped = []
+    for name in sorted(exposed):
+        candidates = [entry.split(" ", 1) for entry in REGISTRY["write_tools"][name]]
+        if not any(obo(ns).operation_of(method, path) for method, path in candidates):
+            unmapped.append(name)
+    assert unmapped == []
+    stale = set(obo(ns).ENDPOINT_OPERATIONS) - {
+        tuple(entry.split(" ", 1)) for entries in REGISTRY["write_tools"].values() for entry in entries}
+    assert stale == set()
+
+
+def test_the_startup_check_names_unmapped_writes(ns):
+    tools = [{"method": "post", "path": "/api/v2/elitea_core/applications/{mode}/{project_id}"},
+             {"method": "get", "path": "/api/v2/x/{project_id}"},
+             {"method": "post", "path": "/api/v2/elitea_core/new_thing/{mode}/{project_id}"}]
+    assert obo(ns).unmapped_writes(tools) == ["POST elitea_core/new_thing/{mode}/{project_id}"]
+
+
+# --- round 2: log volume ------------------------------------------------------------------------------------------
+
+def test_forged_tokens_are_counted_but_logged_at_most_once_per_window(ns, env):
+    obo(ns)._UNVERIFIED_LOG.update(at=0.0, suppressed=0)   # pylint: disable=W0212
+    token, _ = mint(ns)
+    for _ in range(50):
+        verify(ns, env, token[:-2] + "AA")
+    lines = [line for line in env.log.lines if "internal_token_verification_total" in line]
+    assert len(lines) == 1
+    assert obo(ns)._COUNTER[("deny", "INTERNAL_TOKEN_INVALID")] >= 50   # pylint: disable=W0212
+
+
+def test_a_verified_request_writes_no_log_line(ns, env):
+    _, _, call = admitted(ns, env, operations=["read", "build"])
+    env.log.lines.clear()
+    assert verify(ns, env, token_of(ns, call))["ok"]
+    assert not [line for line in env.log.lines if "internal_token_verification_total" in line]

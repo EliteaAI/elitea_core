@@ -17,7 +17,7 @@ import pytest
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLAIMS = {"jti": "j1", "sub": "idp:t:o", "uid": 42, "act": "binding-1", "ctx": "ctx-1", "prj": 1, "run": "r1",
-          "scope": ["read", "build"]}
+          "scope": ["read", "build"], "tgt": [1, 5]}
 
 
 @pytest.fixture()
@@ -128,12 +128,19 @@ def service(mcp_service_module, monkeypatch):
     # the real classifier and its map, lifted from the module (no Pylon imports)
     tree = ast.parse((PLUGIN_ROOT / "utils" / "internal_obo.py").read_text())
     wanted = [node for node in tree.body if (
-        isinstance(node, ast.Assign) and any(getattr(t, "id", None) in ("ENDPOINT_OPERATIONS", "READ_METHODS")
-                                             for t in node.targets))
-        or (isinstance(node, ast.FunctionDef) and node.name in ("endpoint_key", "operation_of"))]
-    namespace = {"Optional": __import__("typing").Optional}
+        isinstance(node, ast.Assign) and any(getattr(t, "id", None) in (
+            "ENDPOINT_OPERATIONS", "READ_METHODS", "MAX_BODY_DEPTH", "MAX_BODY_NODES", "MAX_NESTED_JSON_CHARS")
+            for t in node.targets))
+        or (isinstance(node, ast.FunctionDef) and node.name in ("endpoint_key", "operation_of", "projects_named_in"))]
+    namespace = {"Optional": __import__("typing").Optional, "json": __import__("json")}
     exec(compile(ast.Module(wanted, []), "internal_obo.py", "exec"), namespace)  # pylint: disable=W0122
     obo.operation_of = namespace["operation_of"]
+
+    def check_targets(arguments, target, tool_name):
+        if any(p not in flask.g.internal_obo["tgt"] for p in namespace["projects_named_in"](arguments)):
+            raise Refused("INTERNAL_TARGET_DENIED")
+
+    obo.check_targets = check_targets
     monkeypatch.setitem(sys.modules, obo.__name__, obo)
     executor = mcp_service_module.McpApiToolExecutor
 
@@ -183,6 +190,40 @@ def test_an_s3_credential_is_a_credentials_operation_not_build(service):
                                       {"project_id": 1})
     assert result["error"].startswith("INTERNAL_SCOPE_DENIED") and service.sent == []
     assert service.checks[0][0] == "credentials"
+
+
+def test_a_participant_from_a_project_outside_the_targets_is_refused_before_the_api_is_called(service):
+    service.flask.g.internal_obo = dict(CLAIMS, scope=["read", "build", "run"])
+    participants = tool("POST", "/api/v2/elitea_core/participants/{mode}/{project_id}/{conversation_id}")
+    participants["parameters"].append({"name": "conversation_id", "in": "path", "schema": {"type": "integer"}})
+    result = service.executor.execute(participants, {
+        "project_id": 1, "conversation_id": 12,
+        "participants": [{"entity_name": "application", "entity_meta": {"id": 7, "project_id": 9}}]})
+    assert result == {"error": "INTERNAL_TARGET_DENIED: readable text"} and service.sent == []
+    ok = service.executor.execute(participants, {
+        "project_id": 1, "conversation_id": 12,
+        "participants": [{"entity_name": "application", "entity_meta": {"id": 7, "project_id": 5}}]})
+    assert ok == {"result": {}} and len(service.sent) == 1
+
+
+@pytest.mark.parametrize("value", ["../secrets", "a/b", "..", ".", "x\\y", "x?y", "x#y", "x\ny", "x\r\ny", ""])
+def test_a_path_parameter_cannot_leave_its_segment(service, value):
+    tool_ = tool("PUT", "/api/v2/elitea_core/tool/{mode}/{project_id}/{tool_id}")
+    tool_["parameters"].append({"name": "tool_id", "in": "path", "schema": {"type": "string"}})
+    result = service.executor.execute(tool_, {"project_id": 1, "tool_id": value})
+    assert "single path segment" in result["error"] or "plain path segment" in result["error"]
+    assert service.sent == []
+
+
+def test_a_filename_may_hold_folders_but_no_dot_segment(service):
+    artifact = tool("GET", "/api/v2/artifacts/artifact/{mode}/{project_id}/{bucket}/{filename}")
+    artifact["parameters"] += [{"name": "bucket", "in": "path", "schema": {"type": "string"}},
+                               {"name": "filename", "in": "path", "schema": {"type": "string"}}]
+    assert service.executor.execute(artifact, {"project_id": 1, "bucket": "b", "filename": "dir/report.md"}) == {
+        "result": {}}
+    assert service.sent[0]["PATH_INFO"] == "/api/v2/artifacts/artifact/prompt_lib/1/b/dir/report.md"
+    refused = service.executor.execute(artifact, {"project_id": 1, "bucket": "b", "filename": "dir/../../x"})
+    assert "plain path segment" in refused["error"] and len(service.sent) == 1
 
 
 def test_without_a_run_token_nothing_is_checked_or_marked(service):

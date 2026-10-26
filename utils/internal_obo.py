@@ -27,13 +27,14 @@ import base64
 import hashlib
 import hmac
 import json
+import posixpath
 import re
 import threading
 import time
 import uuid
 from datetime import timezone
 from typing import Optional
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from pylon.core.tools import log
 from sqlalchemy import select
@@ -54,6 +55,10 @@ MAX_TARGETS = 16
 MAX_CLOCK_SKEW_S = 60   # a token issued later than this in the future is refused
 VERDICT_TTL_S = 5.0     # a positive context verdict is reused this long (never longer than the auth epoch TTL)
 MAX_VERDICTS = 4096
+MAX_BODY_DEPTH = 8        # the walk of a tool call's arguments for project ids: deeper or larger is refused
+MAX_BODY_NODES = 2000
+MAX_NESTED_JSON_CHARS = 65536
+UNVERIFIED_LOG_EVERY_S = 10.0   # a refused token that is not Main's is logged at most this often (the counter counts all)
 # What the in-process API call of an internal MCP endpoint carries: the claims its endpoint already verified (an object
 # in the WSGI environ, which no HTTP header can set), so the call is not validated a second time
 VERIFIED_ENVIRON_KEY = "elitea.internal_obo.claims"
@@ -105,7 +110,7 @@ ENDPOINT_OPERATIONS = {
     ("PATCH", "elitea_core/skill/{mode}/{project_id}/{skill_id}"): "build",
     ("PUT", "elitea_core/project_context/{mode}/{project_id}/project-context"): "build",
     ("DELETE", "elitea_core/project_context/{mode}/{project_id}/project-context"): "build",
-    ("POST", "elitea_core/folder/{mode}/{project_id}/{folder_id}"): "build",
+    ("POST", "elitea_core/folder/{mode}/{project_id}"): "build",
     ("PUT", "elitea_core/folder/{mode}/{project_id}/{folder_id}"): "build",
     ("POST", "elitea_core/conversations/{mode}/{project_id}"): "build",
     ("PUT", "elitea_core/conversation/{mode}/{project_id}/{conversation_id}"): "build",
@@ -145,6 +150,7 @@ INTERNAL_SCOPE_DENIED = "INTERNAL_SCOPE_DENIED"
 INTERNAL_OPERATION_UNKNOWN = "INTERNAL_OPERATION_UNKNOWN"
 INTERNAL_TARGET_DENIED = "INTERNAL_TARGET_DENIED"
 INTERNAL_MCP_ORIGIN_NOT_ALLOWED = "INTERNAL_MCP_ORIGIN_NOT_ALLOWED"
+INTERNAL_MCP_OWN_AUTH = "INTERNAL_MCP_OWN_AUTH"   # audit only: what enforce would strip from a toolkit
 DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
 AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"
 LEGACY_PAT_INTERNAL_MCP = "LEGACY_PAT_INTERNAL_MCP"
@@ -330,17 +336,32 @@ STATUS_OF = {INTERNAL_TOKEN_INVALID: 401, INTERNAL_TOKEN_EXPIRED: 401, INTERNAL_
 _VERDICTS = {}            # (ctx, jti) -> monotonic deadline of a positive context verdict
 _VERDICTS_LOCK = threading.Lock()
 _COUNTER = {}
+_UNVERIFIED_LOG = {"at": 0.0, "suppressed": 0}
 
 
 def _refusal(code, status=None) -> dict:
     return {"ok": False, "status": status or STATUS_OF.get(code, 401), "code": code, "message": MESSAGES[code]}
 
 
-def _count(result, code):
-    """``internal_token_verification_total{result, reason_code}``: a counter and the log line the platform reads."""
+def _count(result, code, line=False):
+    """``internal_token_verification_total{result, reason_code}``. The counter counts every verification; a log line
+    is written only when asked (``line``: a refusal of Main's own token, as rare as its audit row). Tokens that are not
+    Main's are logged at most every ``UNVERIFIED_LOG_EVERY_S``, so a stream of forged bearers cannot drive log volume."""
     key = (result, code)
     _COUNTER[key] = _COUNTER.get(key, 0) + 1
-    log.info("security_metric name=internal_token_verification_total result=%s reason_code=%s", result, code)
+    if line:
+        log.info("security_metric name=internal_token_verification_total result=%s reason_code=%s", result, code)
+
+
+def _count_unverified(code):
+    _count("deny", code)
+    now = time.monotonic()
+    if now - _UNVERIFIED_LOG["at"] < UNVERIFIED_LOG_EVERY_S:
+        _UNVERIFIED_LOG["suppressed"] += 1
+        return
+    suppressed, _UNVERIFIED_LOG["at"], _UNVERIFIED_LOG["suppressed"] = _UNVERIFIED_LOG["suppressed"], now, 0
+    log.info("security_metric name=internal_token_verification_total result=deny reason_code=%s suppressed=%s",
+             code, suppressed)
 
 
 class TokenRejected(ValueError):
@@ -452,7 +473,7 @@ def _remember_verdict(claims):
 
 def _refuse_verified(module, claims, code):
     """A refusal of a token whose signature holds: counted and audited (the claims are Main's own)."""
-    _count("deny", code)
+    _count("deny", code, line=True)
     try:
         _audit(claims, "token", "-", "-", "deny", code, module=module)
     except Exception as exc:  # pylint: disable=W0703
@@ -478,7 +499,7 @@ def verify_request(token, environ, endpoint=None, module=None, now=None, view_ar
     except TokenRejected as exc:
         return _refuse_verified(module, exc.claims, str(exc))
     except ValueError as exc:
-        _count("deny", str(exc))   # not Main's claims (or not readable ones): counted, not audited
+        _count_unverified(str(exc))   # not Main's claims (or not readable ones): counted, not audited
         return _refusal(str(exc))
     route = _route_accepts(environ, endpoint, claims)
     if route is None:
@@ -492,7 +513,7 @@ def verify_request(token, environ, endpoint=None, module=None, now=None, view_ar
         if not isinstance(verdict, dict) or not verdict.get("ok"):
             code = DEPENDENCY_UNAVAILABLE if isinstance(verdict, dict) \
                 and verdict.get("reason_code") == DEPENDENCY_UNAVAILABLE else CONTEXT_NOT_LIVE
-            _count("deny", code)   # validate_context recorded the decision itself
+            _count("deny", code, line=True)   # validate_context recorded the decision itself
             return _refusal(code)
         _remember_verdict(claims)
     _count("allow", "VERIFIED")
@@ -587,6 +608,67 @@ def check_operation(operation, target, tool_name) -> None:
         raise OperationRefused(AUDIT_UNAVAILABLE) from None
 
 
+def projects_named_in(values) -> list:
+    """Every value of a ``project_id`` key in a tool call's arguments, at any depth (nested JSON given as a string is
+    read too, as the call decodes it). ``ValueError`` when the arguments are deeper or larger than the walk allows, or
+    a project id is not a number: the call is then refused rather than half-checked."""
+    found, nodes = [], [0]
+
+    def walk(value, depth):
+        nodes[0] += 1
+        if depth > MAX_BODY_DEPTH or nodes[0] > MAX_BODY_NODES:
+            raise ValueError("arguments too deep or too large")
+        if isinstance(value, str) and value[:1] in ("{", "[") and len(value) <= MAX_NESTED_JSON_CHARS:
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "project_id" and item is not None and not isinstance(item, (dict, list)):
+                    if isinstance(item, bool) or not str(item).strip().isdigit():
+                        raise ValueError("project_id is not a number")
+                    found.append(int(str(item).strip()))
+                else:
+                    walk(item, depth + 1)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, depth + 1)
+
+    walk(values, 0)
+    return found
+
+
+def check_targets(values, target, tool_name) -> None:
+    """Refuse (``INTERNAL_TARGET_DENIED``) a call under a run token whose arguments name a project outside the
+    token's ``tgt`` (e.g. a participant's ``entity_meta.project_id``); recorded. No run token: nothing is read."""
+    claims = current_claims()
+    if claims is None:
+        return
+    try:
+        outside = [project for project in projects_named_in(values) if project not in claims["tgt"]]
+    except ValueError:
+        outside = [None]
+    if not outside:
+        return
+    try:
+        _audit(claims, "target", target, tool_name, "deny", INTERNAL_TARGET_DENIED)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("internal_obo: a target refusal was not recorded (%s)", type(exc).__name__)
+    raise OperationRefused(INTERNAL_TARGET_DENIED)
+
+
+def unmapped_writes(api_tools) -> list:
+    """The MCP-exposed writes (``openapi_registry.get_mcp_api_tools()``) the operation map does not know: each is
+    refused at run time. Checked at startup so a map that lags the registry shows up in the log, not in a chat."""
+    missing = []
+    for tool in api_tools or []:
+        method = str(tool.get("method", "")).upper()
+        if method and method not in READ_METHODS and operation_of(method, tool.get("path")) is None:
+            missing.append(f"{method} {endpoint_key(tool.get('path'))}")
+    return sorted(set(missing))
+
+
 def refusal_text(exc: OperationRefused) -> str:
     """What the model and the chat see for a refused tool call: the code, then the fixed readable text."""
     return f"{exc.code}: {exc.message}"
@@ -594,7 +676,8 @@ def refusal_text(exc: OperationRefused) -> str:
 
 # --- what a payload carries ------------------------------------------------------------------
 
-# The internal endpoint shape, on the URL's path (the SDK's matcher is the same): /app/<project>/mcp, then / or nothing
+# The internal endpoint shape, on the URL's path as the client sends it (``client_path``; the SDK matches the same):
+# /app/<project>/mcp, then / or nothing
 _INTERNAL_PATH = re.compile(r"^/app/(?P<project>\d+|\{project_id\})/mcp(?:/|$)")
 _AUTH_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"})
 
@@ -621,8 +704,24 @@ def _tool_lists(payload):
                 yield value.get("tools")
 
 
-def _mcp_tools(payload):
-    """``(tool, settings, url parts)`` of every MCP toolkit whose URL has the internal endpoint shape."""
+def client_path(path) -> str:
+    """A URL path as an HTTP client and the server end up seeing it: percent-decoded (repeatedly, at most 3 times),
+    backslashes as slashes, repeated slashes collapsed, ``.`` and ``..`` resolved. Matching the internal shape on this,
+    not on the text of the setting, is what keeps ``/x/../app/2/mcp`` or ``/app/2/%6Dcp`` from passing unrecognised."""
+    text = str(path or "")
+    for _ in range(3):
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    text = re.sub(r"/{2,}", "/", "/" + text.replace("\\", "/").lstrip("/"))
+    resolved = posixpath.normpath(text)
+    resolved = "/" + resolved.lstrip("/")
+    return resolved + "/" if text.endswith("/") and resolved != "/" else resolved
+
+
+def _all_mcp_tools(payload):
+    """``(tool, settings, url parts, internal shape match or None)`` of every MCP toolkit with a URL."""
     for tools in _tool_lists(payload):
         for tool in tools if isinstance(tools, list) else ():
             if not isinstance(tool, dict) or not str(tool.get("type", "")).startswith("mcp"):
@@ -632,8 +731,14 @@ def _mcp_tools(payload):
             if not isinstance(url, str):
                 continue
             parts = urlsplit(url)
-            if _INTERNAL_PATH.match(parts.path):
-                yield tool, settings, parts
+            yield tool, settings, parts, _INTERNAL_PATH.match(client_path(parts.path))
+
+
+def _mcp_tools(payload):
+    """``(tool, settings, url parts)`` of every MCP toolkit whose URL has the internal endpoint shape."""
+    for tool, settings, parts, match in _all_mcp_tools(payload):
+        if match:
+            yield tool, settings, parts
 
 
 def has_internal_mcp(payload) -> bool:
@@ -680,7 +785,7 @@ def target_projects(payload, project_id, user_id) -> list:
     private project, where Main injects those sub-agents' toolkits."""
     found = set()
     for tool, settings, parts in _mcp_tools(payload):
-        project = _INTERNAL_PATH.match(parts.path).group("project")
+        project = _INTERNAL_PATH.match(client_path(parts.path)).group("project")
         if project.isdigit():
             found.add(int(project))
         else:
@@ -698,15 +803,51 @@ def target_projects(payload, project_id, user_id) -> list:
     return sorted(found)
 
 
+def _origin_of(parts) -> str:
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+def _auth_header_keys(headers) -> list:
+    if isinstance(headers, str):
+        try:
+            headers = json.loads(headers) if headers.strip() else {}
+        except ValueError:
+            return ["unreadable"]
+    if not isinstance(headers, dict):
+        return []
+    return [key for key in headers if isinstance(key, str) and key.lower() in _AUTH_HEADERS]
+
+
+def inspect_internal_mcp(payload) -> list:
+    """Audit only: what ``police_internal_mcp`` would do under enforce, as would-deny codes, without changing anything.
+    ``INTERNAL_MCP_ORIGIN_NOT_ALLOWED`` for an internal-shaped toolkit on another origin; ``INTERNAL_MCP_OWN_AUTH`` for
+    a toolkit on the platform's own origin that brings its own credentials on a path that is not the plain internal
+    shape (a disguised path, or another route of the platform). The plain injected toolkits are not reported here: their
+    personal token is what ``LEGACY_PAT_INTERNAL_MCP`` already reports."""
+    allowed, codes = set(internal_origins()), []
+    for _tool, settings, parts, match in _all_mcp_tools(payload):
+        on_platform = _origin_of(parts) in allowed
+        if match and not on_platform:
+            codes.append(INTERNAL_MCP_ORIGIN_NOT_ALLOWED)
+        elif on_platform and (_auth_header_keys(settings.get("headers")) or "personal_token" in settings) \
+                and not _INTERNAL_PATH.match(parts.path):
+            codes.append(INTERNAL_MCP_OWN_AUTH)
+    return sorted(set(codes))
+
+
 def police_internal_mcp(payload) -> int:
-    """Under enforce, before dispatch: an internal-shaped MCP toolkit may reach the platform only with the run token.
-    Its own ``Authorization``/``Cookie`` headers and personal token are removed (the run token replaces them); one on an
-    origin the platform does not serve its tools from raises ``ForeignInternalMcp``. The number of toolkits changed."""
+    """Under enforce, before dispatch: an MCP toolkit may reach the platform only with the run token. Any MCP toolkit on
+    the platform's own origins, whatever its path, loses its own ``Authorization``/``Cookie``/``Proxy-Authorization``
+    headers and personal token (the run token replaces them on the internal routes); an internal-shaped one (after
+    ``client_path``) on another origin raises ``ForeignInternalMcp``. The number of toolkits changed."""
     allowed = set(internal_origins())
     changed = 0
-    for tool, settings, parts in list(_mcp_tools(payload)):
-        if f"{parts.scheme}://{parts.netloc}".lower() not in allowed:
+    for tool, settings, parts, match in list(_all_mcp_tools(payload)):
+        on_platform = _origin_of(parts) in allowed
+        if match and not on_platform:
             raise ForeignInternalMcp()
+        if not on_platform:
+            continue
         headers = settings.get("headers")
         if isinstance(headers, str):
             try:

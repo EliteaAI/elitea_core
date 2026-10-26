@@ -67,7 +67,8 @@ class AgentIdentityBinding(db_tools.AbstractBaseMixin, db.Base):
     state_changed_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # What the agent may do on the platform on the user's behalf through the internal Elitea MCP (#7214): a subset of
     # ``utils.internal_obo.OPERATIONS``; NULL or [] = ``read`` only. Part of what is approved: set at create or rebind.
-    # Deferred, so a schema that predates the column is still read until the startup safety net adds it.
+    # Deferred: loading a binding never selects it. The run token's scope reads it explicitly, so in a schema that predates
+    # it (until the startup safety net adds it) a governed run with internal Elitea tools is refused (fail closed).
     allowed_platform_operations: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True, deferred=True)
 
 
