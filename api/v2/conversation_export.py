@@ -76,21 +76,24 @@ class PromptLibAPI(api_tools.APIModeHandler):
             ).filter(Conversation.id == conversation_id).first()
             if conversation is None:
                 return NOT_FOUND
-            denied = check_conversation_access(project_id, conversation, current_user['id'])
-            if denied:
-                return denied
+            # Whoever can open the chat can export it: public chats are open to the whole project (#7165)
+            if conversation.is_private:
+                denied = check_conversation_access(project_id, conversation, current_user['id'])
+                if denied:
+                    return denied
             conversation_dict, participants, groups = load_conversation_export_data(
                 session, project_id, conversation
             )
 
         attachments = _unique_attachments(groups)
-        sizes = collect_attachment_sizes(project_id, attachments)
+        sizes, sizes_complete = collect_attachment_sizes(project_id, attachments)
 
         if summary_only:
+            # Deleted files count as 0; null only when storage could not be listed
             return {
                 'messages_count': len(groups),
                 'attachments_count': len(attachments),
-                'total_size': sum(sizes.values()) if sizes else None,
+                'total_size': sum(sizes.values()) if sizes_complete else None,
             }, 200
 
         for group in groups:
