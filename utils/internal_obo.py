@@ -343,6 +343,15 @@ def _count(result, code):
     log.info("security_metric name=internal_token_verification_total result=%s reason_code=%s", result, code)
 
 
+class TokenRejected(ValueError):
+    """A token whose signature and claim shapes hold but which is refused (issue time, lifetime, expiry): its claims
+    are Main's own, so the refusal can be audited with them."""
+
+    def __init__(self, code, claims):
+        super().__init__(code)
+        self.claims = claims
+
+
 def parse(token, key, now=None, max_lifetime_s=None) -> dict:
     """The claims of a token Main signed with ``key``, or ``ValueError(code)``: structure, signature, issuer,
     audience, issue time, lifetime and expiry. The context is not checked here."""
@@ -374,11 +383,11 @@ def parse(token, key, now=None, max_lifetime_s=None) -> dict:
             raise ValueError(INTERNAL_TOKEN_INVALID)
     moment = int(now if now is not None else time.time())
     if claims["iat"] > moment + MAX_CLOCK_SKEW_S or claims["exp"] <= claims["iat"]:
-        raise ValueError(INTERNAL_TOKEN_INVALID)
+        raise TokenRejected(INTERNAL_TOKEN_INVALID, claims)
     if max_lifetime_s is not None and claims["exp"] - claims["iat"] > max_lifetime_s:
-        raise ValueError(INTERNAL_TOKEN_INVALID)
+        raise TokenRejected(INTERNAL_TOKEN_INVALID, claims)
     if moment >= claims["exp"]:
-        raise ValueError(INTERNAL_TOKEN_EXPIRED)
+        raise TokenRejected(INTERNAL_TOKEN_EXPIRED, claims)
     return claims
 
 
@@ -466,8 +475,10 @@ def verify_request(token, environ, endpoint=None, module=None, now=None, view_ar
     ttl = getattr(settings, "context_ttl_s", None)
     try:
         claims = parse(token, signing_key(), now=now, max_lifetime_s=None if ttl is None else int(ttl) + MAX_CLOCK_SKEW_S)
+    except TokenRejected as exc:
+        return _refuse_verified(module, exc.claims, str(exc))
     except ValueError as exc:
-        _count("deny", str(exc))
+        _count("deny", str(exc))   # not Main's claims (or not readable ones): counted, not audited
         return _refusal(str(exc))
     route = _route_accepts(environ, endpoint, claims)
     if route is None:

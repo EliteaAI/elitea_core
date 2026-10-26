@@ -341,6 +341,7 @@ def test_a_token_issued_in_the_future_or_living_longer_than_a_context_is_invalid
     ttl = env.module().admission_settings.context_ttl_s
     long_lived = _signed(ns, {**claims, "iat": now, "exp": now + ttl + 3600})
     assert verify(ns, env, long_lived)["code"] == "INTERNAL_TOKEN_INVALID"
+    assert [e["reason_code"] for e in env.denied] == ["INTERNAL_TOKEN_INVALID", "INTERNAL_TOKEN_INVALID"]
 
 
 def test_an_expired_token_says_so_and_is_audited(ns, env):
@@ -349,7 +350,9 @@ def test_an_expired_token_says_so_and_is_audited(ns, env):
     assert (reply["ok"], reply["code"], reply["status"]) == (False, "INTERNAL_TOKEN_EXPIRED", 401)
     assert "security_metric name=internal_token_verification_total result=deny reason_code=INTERNAL_TOKEN_EXPIRED" \
         in env.log.lines
-    assert claims
+    [event] = env.denied
+    assert (event["event_type"], event["decision"], event["reason_code"], event["runtime_identity_ref"]) == (
+        "platform_operation", "deny", "INTERNAL_TOKEN_EXPIRED", f"context:{claims['ctx']}")
 
 
 def test_a_bad_signature_is_counted_not_audited(ns, env):
