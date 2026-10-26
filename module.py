@@ -1194,15 +1194,15 @@ class Module(module.ModuleModel):
 
     def deinit(self):
         log.info('De-initializing')
-        self.thread._stop()
-
-        # MCP SSE deinitialization
-        self.mcp_sse_deinit()
-        try:   # the run token verifier goes with the module (#7214)
+        try:   # the run token verifier goes with the module, first: what follows can raise (#7214)
             from .utils.internal_obo import TOKEN_PREFIX  # pylint: disable=C0415
             auth.unregister_bearer_verifier(TOKEN_PREFIX)
         except Exception as exc:  # pylint: disable=W0703
             log.warning("internal OBO: the run token verifier was not unregistered (%s)", type(exc).__name__)
+        self.thread._stop()
+
+        # MCP SSE deinitialization
+        self.mcp_sse_deinit()
 
         # Provider Hub deinitialization
         self.provider_hub_deinit()
