@@ -16,6 +16,9 @@ class CreateBindingRequest(BaseModel):
     application_id: StrictInt = Field(gt=0)
     version_id: StrictInt = Field(gt=0)
     identity_mode: IdentityMode
+    # What the agent may do on the platform through the internal MCP (#7214); omitted: read only
+    platform_operations: Optional[list[Literal["read", "build", "credentials", "run"]]] = Field(
+        default=None, max_length=4)
 
 
 class BindingActionRequest(BaseModel):

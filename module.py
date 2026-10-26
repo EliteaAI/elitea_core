@@ -565,6 +565,7 @@ class Module(module.ModuleModel):
         self._ensure_share_token_schema()
         self._ensure_agent_identity_schema()
         self._start_governance()
+        self._start_internal_obo()
 
         self.handle_pylon_modules_initialized()
 
@@ -697,6 +698,35 @@ class Module(module.ModuleModel):
                     log.exception("Failed to unregister %s", name)
                 self._governed_handlers[key] = False
             self.governed_handlers_registered = False
+
+    def _start_internal_obo(self):
+        """The run token of governed runs (#7214): the auth plugin hands its bearers to ``verify_request``, and the
+        binding column it scopes by is added to the project schemas that predate it (off-thread, catalog-guarded).
+        Without the auth plugin's hook no run token is accepted (the internal MCP refuses it), which fails closed."""
+        from .utils import internal_obo  # pylint: disable=C0415
+        try:
+            auth.register_bearer_verifier(
+                internal_obo.TOKEN_PREFIX, lambda token, environ: internal_obo.verify_request(token, environ, module=self))
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("internal OBO: the run token verifier could not be registered (%s)", type(exc).__name__)
+        if internal_obo.signing_key() is None:
+            log.warning("internal OBO: SECRETS_MASTER_KEY is not set; governed runs get no run token and the governance "
+                        "preflight refuses to switch on")
+
+        def _run():
+            try:
+                from .utils.binding_operations_schema import (  # pylint: disable=C0415
+                    apply_operations_column, project_ids_missing_operations_column,
+                )
+                pending = project_ids_missing_operations_column()
+                if pending:
+                    migrated, failed = apply_operations_column(pending)
+                    log.info("binding operations schema: column added (migrated=%s failed=%s)",
+                             len(migrated), len(failed))
+            except Exception:  # pylint: disable=W0703
+                log.exception("binding operations schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
 
     def _ensure_share_token_schema(self):
         """Startup safety net: create share-token tables in any project schema (and

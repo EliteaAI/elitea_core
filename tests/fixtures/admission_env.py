@@ -56,9 +56,10 @@ def find_tracing_event_model(plugin_root: Path):
         if tracing_wt.is_dir():
             candidates += sorted(tracing_wt.glob("*/models/security_audit_event.py"))
         candidates = [candidate for candidate in candidates if candidate.is_file()]
-        for candidate in candidates:
-            if "would_deny" in candidate.read_text():
-                return candidate
+        for marker in ("platform_operation", "would_deny"):   # the newest schema first (#7214, then #7120)
+            for candidate in candidates:
+                if marker in candidate.read_text():
+                    return candidate
         if candidates:
             return candidates[0]
     return None
@@ -538,6 +539,8 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.credential_slots = load("utils", "credential_slots")
     ns.mandate_state = load("utils", "mandate_state")
     ns.trigger_principal = load("utils", "trigger_principal")
+    load("utils", "mcp_versioning")
+    ns.internal_obo = load("utils", "internal_obo")   # the run token admission mints (#7214)
     ns.adm = load("utils", "admission")
     ns.credential_release = load("utils", "credential_release")
     ns.credential_probe = load("utils", "credential_probe")

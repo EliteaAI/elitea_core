@@ -1,11 +1,12 @@
 """Report the current user's PAT state for an internal Elitea MCP toolkit (VALID/EXPIRED/MISSING),
 so the toolkit UI can gate actions before the toolkit silently fails to connect. Scoped to the
-caller's own tokens; the token value is never returned."""
+caller's own tokens; the token value is never returned. GOVERNED (#7214): under enforce a run's
+internal MCP toolkits act with the run's own identity, so no personal token is asked for."""
 
 from tools import api_tools, auth, config as c
 
 from ...utils.constants import PROMPT_LIB_MODE
-from ...utils.internal_tools import is_internal_mcp_toolkit, resolve_user_token_state
+from ...utils.internal_tools import is_internal_mcp_toolkit, resolve_user_token_state, run_token_applies
 
 
 class PromptLibAPI(api_tools.APIModeHandler):
@@ -22,6 +23,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         # Empty settings: a prebuilt internal toolkit resolves its URL from the type.
         if not is_internal_mcp_toolkit({'type': toolkit_type, 'settings': {}}):
             return {"internal": False, "state": "VALID"}, 200
+
+        if run_token_applies():
+            return {"internal": True, "state": "GOVERNED"}, 200
 
         current_user = auth.current_user()
         user_id = current_user.get('id') if current_user else None

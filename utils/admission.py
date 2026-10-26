@@ -46,6 +46,7 @@ from .definition_digest import DigestError, digest_for_version, toolkit_rows
 from .exceptions import AdmissionDenied
 from .governance import MODE_AUDIT_ONLY, governance_lifecycle_active, is_auditing, is_governed, is_unavailable
 from .governance_settings import Check
+from . import internal_obo
 from .mandate_state import expire_if_due, suspend_owner_mandates
 from .run_id import PREDICT_RUN_ID_KWARGS_KEY
 from .trigger_principal import OPERATION_OF
@@ -111,6 +112,9 @@ MESSAGES = {
     "RATE_LIMITED": "This run asked for its credentials too often and was stopped.",
     "UNSUPPORTED_AUTH_MODE": "This toolkit cannot use a governed credential yet; the run was not started.",
     "WORKER_CAPABILITY_UNAVAILABLE": "No worker can apply governed credentials right now; the run was not started.",
+    # the run token of the internal Elitea MCP (#7214)
+    "INTERNAL_TOKEN_UNAVAILABLE": "The built-in Elitea tools of this agent cannot get the run's own identity right now; "
+                                  "the run was not started. Try again later.",
     **dict.fromkeys(
         ("STORE_DENIED", "STORE_SEALED", "STORE_UNAVAILABLE", "STORE_TLS_INVALID", "STORE_NOT_FOUND",
          "STORE_VERSION_CONFLICT"),
@@ -524,6 +528,7 @@ def _store_admission(  # pylint: disable=R0913,R0914
         _metric(CREDENTIAL_DECISION, "credential_decision_total", "decision", "allow", CREDENTIAL_USE_ALLOWED)
     return ExecutionSecurityContextView(
         context_ref=str(context_id), run_id=run_id, attempt=attempt, project_id=request.project_id,
+        subject_ref=subject["ref"], subject_user_id=caller.get("user_id"), binding_project_id=request.binding_project_id,
         application_id=request.application_id, version_id=request.version_id,
         agent_binding_ref=str(binding.id), policy_revision=policy_revision, expires_at=expires_at,
         allowed_bindings=[binding_ref(d) for d in decisions],
@@ -848,8 +853,10 @@ def _shadow_admit(  # pylint: disable=R0912
     if admission is None or admission.run_kind != "interactive":
         return
     run_id = payload.get(PREDICT_RUN_ID_KWARGS_KEY)   # bound before anything that can raise
-    failure, snapshot = None, None
+    failure, snapshot, legacy_internal_mcp = None, None, False
     try:
+        # its internal Elitea MCP toolkits authenticate with a personal token: enforce gives them the run token (#7214)
+        legacy_internal_mcp = internal_obo.has_internal_mcp(payload)
         meta = call_kwargs.get("meta")
         if admission.trace_ref is None and isinstance(meta, dict) and isinstance(meta.get("traceparent"), str):
             admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
@@ -860,6 +867,13 @@ def _shadow_admit(  # pylint: disable=R0912
 
     def evaluate():
         _shadow_evaluate(module, admission, run_id, snapshot, free_form_secret, unavailable, failure)
+        if legacy_internal_mcp:
+            _record_deny(
+                module, internal_obo.LEGACY_PAT_INTERNAL_MCP, would_deny=True, project_id=admission.project_id,
+                application_id=admission.application_id, caller_ref=_caller_ref(admission),
+                run_id=run_id if isinstance(run_id, str) else None, traceparent=admission.trace_ref)
+            _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "would_deny",
+                    internal_obo.LEGACY_PAT_INTERNAL_MCP)
 
     if deferred is None:
         evaluate()
@@ -973,6 +987,7 @@ def admit_dispatch(  # pylint: disable=R0911
     envelope = payload.get("envelope")
     meta.pop("context_deadline", None)   # Main-side only (below); never taken from the caller
     free_form_secret = payload.pop(FREE_FORM_SECRET_MARK, False)   # set by the predict entry points (credential_slots)
+    payload.pop(internal_obo.TOKEN_KWARG, None)   # only minted below, never taken from what the caller built
     #
     if not isinstance(envelope, dict) or envelope.get("security_profile") != PROFILE_GOVERNED:
         # no governed envelope to carry the context (e.g. a parent started before governance was
@@ -988,6 +1003,10 @@ def admit_dispatch(  # pylint: disable=R0911
         # only: its credentials are sealed against those decisions, any other credential is refused
         _seal_inherited(module, payload, envelope["context_ref"], call_kwargs, run_id)
         meta.setdefault("context_ref", envelope["context_ref"])
+        inherited_project = meta.get("project_id") or payload.get("project_id")
+        if not _deliver_run_token(payload, lambda: internal_obo.mint_for_context(
+                inherited_project, envelope["context_ref"], task_name)):
+            _refuse_dispatch(module, "INTERNAL_TOKEN_UNAVAILABLE", call_kwargs, run_id)
         return None
     if unavailable:
         # enforce is on but a required service is not: a new admission is refused readably and audited (the platform
@@ -1010,12 +1029,35 @@ def admit_dispatch(  # pylint: disable=R0911
                 caller_ref=_caller_ref(admission), run_id=run_id if isinstance(run_id, str) else None,
                 traceparent=admission.trace_ref, **denied.audit)
             raise
+    if not _deliver_run_token(payload, lambda: internal_obo.mint_for_admission(view, task_name)):
+        track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
+        _record_deny(
+            module, "INTERNAL_TOKEN_UNAVAILABLE", project_id=admission.project_id,
+            application_id=admission.application_id, caller_ref=_caller_ref(admission),
+            run_id=run_id if isinstance(run_id, str) else None, traceparent=admission.trace_ref)
+        _metric(ADMISSION_DECISION, "admission_decision_total", "decision", "deny", "INTERNAL_TOKEN_UNAVAILABLE")
+        raise _denied("INTERNAL_TOKEN_UNAVAILABLE")
     envelope["context_ref"] = view.context_ref
     meta["context_ref"] = view.context_ref
     if admission.run_kind == "mandate":
         # the wrapper takes it out again; Main stops the run at this moment (not the context ttl)
         meta["context_deadline"] = RunDeadline(view.run_deadline, view.run_deadline_code)
     return view.context_ref
+
+
+def _deliver_run_token(payload, minted) -> bool:
+    """Put the run token (#7214) on the payload: one signature, and the reads of the scope. False when none could be
+    minted for a payload that carries an internal Elitea MCP toolkit: that run is refused, its toolkit never falls back
+    to a personal or system token. A payload without one goes on without a token."""
+    try:
+        payload[internal_obo.TOKEN_KWARG] = minted()
+        return True
+    except Exception as exc:  # pylint: disable=W0703
+        if internal_obo.has_internal_mcp(payload):
+            log.error("admission: no run token could be minted (%s); the run is refused", type(exc).__name__)
+            return False
+        log.debug("admission: no run token (%s); the run has no internal Elitea MCP toolkit", type(exc).__name__)
+        return True
 
 
 _PARENTS = contextvars.ContextVar("c1009_parent_entries", default=None)

@@ -413,3 +413,9 @@ Run admin task create_governance_settings_tables
 # the plugin at run time, so `calls: own` works without it; only the shown description lags.
 # No params. Idempotent.
 Run admin task seed_eval_trajectory_dimensions
+
+# Issue #7214 (C-1009): internal Elitea MCP as a governed resource. agent_identity_binding gains the nullable column
+# allowed_platform_operations (JSONB) in every project schema. No task: the startup safety net adds it (one catalog
+# query, ADD COLUMN IF NOT EXISTS per schema that lacks it); until then the column is not read and every binding allows
+# the internal MCP to read only. Set the list with manage_agent_identity_binding (action=create or rebind,
+# platform_operations=read,build,credentials,run) or the binding REST API (platform_operations on create).
