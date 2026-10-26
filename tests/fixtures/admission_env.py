@@ -394,6 +394,7 @@ class Env:  # pylint: disable=R0902,R0904
         effective = effective or gs.Effective(
             mode=mode, policy_revision=revision, admit_legacy_pat=settings.get("admit_legacy_pat", False),
             allow_runtime_domain_binding=settings.get("allow_runtime_domain_binding", False),
+            allow_development_runs=settings.get("allow_development_runs", False),
             environment=settings.get("environment"), capped=False, unavailable=unavailable, read="ok")
         return types.SimpleNamespace(
             governance_effective=effective,
@@ -546,6 +547,8 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
     ns.binding_api = load("utils", "binding_api")
     ns.pd_binding_api = load("models/pd", "binding_api")
     ns.mandate_admission = load("utils", "mandate_admission")
+    ns.authoring = load("utils", "authoring")
+    ns.trigger_governance = load("utils", "trigger_governance")
     ns.real_now = ns.adm._now  # pylint: disable=W0212
 
     class CountingSession(sa_orm.Session):
@@ -689,9 +692,11 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
             return {item: dict(env.configurations[(project_id, item)]) for item in uuids if (project_id, item) in env.configurations}
 
         def credential_use_facts(project_id, config_ids, grant_keys, ref_ids=None, personal_subject_ref=None,
-                                 personal_user_id=None, grants_for=None):
+                                 personal_user_id=None, grants_for=None, subject_grants=None):
             env.secrets_calls.append((project_id, list(config_ids), list(grant_keys), None if ref_ids is None else list(ref_ids)))
             env.__dict__.setdefault("grants_for_calls", []).append(None if grants_for is None else [tuple(k) for k in grants_for])
+            env.__dict__.setdefault("subject_grant_calls", []).append(
+                None if subject_grants is None else [tuple(k) for k in subject_grants])
             env.__dict__.setdefault("caller_calls", []).append((personal_subject_ref, personal_user_id))   # who it was read for
             if env.secrets_raises:
                 raise env.secrets_raises
@@ -724,7 +729,26 @@ def install(plugin_root: Path, tmp_path: Path) -> types.SimpleNamespace:  # pyli
                     # as secrets facts v2: the kind follows the subject unless a test sets it (None = absent)
                     grants[key].setdefault("subject_kind", "mandate" if key.split("|")[-1].startswith("mandate:")
                                            else "user_delegation")
-            return {"references": references, "grants": grants}
+            result = {"references": references, "grants": grants}
+            if subject_grants is not None:   # facts v5 (#7213): the active grants of a subject on a credential, any binding
+                if env.facts_version < 5:
+                    raise TypeError("credential_use_facts() got an unexpected keyword argument 'subject_grants'")
+                held = {}
+                for credential, subject in subject_grants:
+                    if isinstance(credential, int):
+                        found = references.get(credential)
+                        if found is None:
+                            continue
+                        credential = found["ref_id"]
+                    for (grant_project, key), grant in env.grants.items():
+                        binding, toolkit, ref_id, _target, grant_subject = key.split("|")
+                        if (grant_project, ref_id, grant_subject) == (project_id, str(credential), subject) \
+                                and grant["state"] == "active":
+                            held.setdefault(f"{credential}|{subject}", []).append({
+                                **grant, "subject_kind": grant.get("subject_kind", "user_delegation"),
+                                "agent_binding_ref": binding, "toolkit_instance_id": toolkit})
+                result["subject_grants"] = held
+            return result
 
         def configuration_secret_fields(types):
             env.secret_field_calls.append(list(types))

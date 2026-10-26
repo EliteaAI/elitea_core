@@ -62,9 +62,9 @@ its own transaction, so a failing audit write cannot let a run through.
 | 1 | The security audit trail can take a decision | `AUDIT_UNAVAILABLE` |
 | 2 | A run with no person behind it (system) needs a mandate | `MANDATE_REQUIRED` |
 | 3 | The caller is a verified person (or an admitted token) | `IDENTITY_*` |
-| 4 | The agent version has exactly one active binding of an admitted mode, and the definition digest still matches | `DENIED_BINDING`, `BINDING_DIGEST_MISMATCH` |
+| 4 | The agent version has exactly one active binding of an admitted mode, and the definition digest still matches. A **development run** (entry point `editor_chat`, a signed-in person, *Allow development runs* on) reads the definition and its digest instead, and requires the author's right to edit the application; the decision is taken from the request kind before any binding is read | `DENIED_BINDING`, `BINDING_DIGEST_MISMATCH`, `DENIED_RBAC` |
 | 5 | The subject is a verified delegation. A mandate run replaces steps 2 to 5 (below). | `MANDATE_REQUIRED`, `IDENTITY_EVIDENCE_MISSING` |
-| 5b | Every credential the run uses passes the [credential decision](credential-profiles.md#the-credential-decision) | `CREDENTIAL_*`, `DENIED_GRANT`, `DENIED_RBAC` |
+| 5b | Every credential the run uses passes the [credential decision](credential-profiles.md#the-credential-decision). A development run replaces the grant to the binding with the author's own right: a personal credential of the author, or an active grant of the author's subject on the credential, on any binding and toolkit | `CREDENTIAL_*`, `DENIED_GRANT`, `DENIED_RBAC`, `DENIED_DEVELOPMENT_CREDENTIAL` |
 | 6 | The `ExecutionSecurityContext` row and the allow events are written in one transaction | `DEPENDENCY_UNAVAILABLE` |
 
 A **mandate run** reads the mandate from the table (the request only names it) and requires: the mandate

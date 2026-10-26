@@ -1,7 +1,7 @@
 """The platform-wide credential governance switch and its history (#7120, C-1009).
 
-One row per scope holds the mode (``off``, ``audit_only``, ``enforce``), the policy revision and the two admission
-flags. Slice 1 has the platform scope only: the CHECK on ``scope_kind``/``scope_id`` is the seam for per-project
+One row per scope holds the mode (``off``, ``audit_only``, ``enforce``), the policy revision and the admission flags
+(``allow_development_runs``, #7213, is NULL until an operator chooses: the default then follows the mode). Slice 1 has the platform scope only: the CHECK on ``scope_kind``/``scope_id`` is the seam for per-project
 overrides later (drop the CHECK, add ``project`` rows, no column change).
 
 These models are NOT on ``db.Base``: ``shared`` runs ``create_all`` on it at boot and this change must not create tables
@@ -49,6 +49,7 @@ class CredentialGovernanceSettings(Base):
     admit_legacy_pat: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     allow_runtime_domain_binding: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False,
                                                                server_default='false')
+    allow_development_runs: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     environment: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
     updated_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -70,6 +71,7 @@ class CredentialGovernanceSettingsHistory(Base):
     policy_revision: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     admit_legacy_pat: Mapped[bool] = mapped_column(Boolean, nullable=False)
     allow_runtime_domain_binding: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    allow_development_runs: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     environment: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     change_note: Mapped[str] = mapped_column(String(256), nullable=False)
     changed_by: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -77,3 +79,5 @@ class CredentialGovernanceSettingsHistory(Base):
 
 
 TABLES = (CredentialGovernanceSettings, CredentialGovernanceSettingsHistory)
+# Columns added after the tables first shipped: the admin task adds them to an existing table (#7213)
+ADDED_COLUMNS = (("allow_development_runs", "BOOLEAN NULL"),)

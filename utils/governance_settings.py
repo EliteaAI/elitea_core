@@ -1,6 +1,6 @@
 """The platform-wide credential governance switch (#7120, C-1009).
 
-The mode (``off``, ``audit_only``, ``enforce``), the policy revision and the two admission flags are stored in the
+The mode (``off``, ``audit_only``, ``enforce``), the policy revision and the admission flags are stored in the
 database and changed from the Admin UI. The deployment keeps exactly three keys, read from ``os.environ`` directly (never
 from the plugin config, whose ``pylon.db`` copy can shadow the file): ``ELITEA_CREDENTIAL_GOVERNANCE_MAX_MODE`` (the only
 ceiling), ``ELITEA_CREDENTIAL_GOVERNANCE_ENABLED`` (its deprecated alias) and ``ELITEA_CREDENTIAL_GOVERNANCE_ENVIRONMENT``
@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from tools import auth, config as c, db, this
 
 from ..models.governance_settings import (
-    HISTORY_TABLE, METADATA, SCOPE_PLATFORM, SETTINGS_TABLE, CredentialGovernanceSettings as Settings,
+    ADDED_COLUMNS, HISTORY_TABLE, METADATA, SCOPE_PLATFORM, SETTINGS_TABLE, CredentialGovernanceSettings as Settings,
     CredentialGovernanceSettingsHistory as History,
 )
 from .governance import (
@@ -38,8 +38,9 @@ ENV_MAX_MODE = "ELITEA_CREDENTIAL_GOVERNANCE_MAX_MODE"
 ENV_ENABLED = "ELITEA_CREDENTIAL_GOVERNANCE_ENABLED"
 ENV_ENVIRONMENT = "ELITEA_CREDENTIAL_GOVERNANCE_ENVIRONMENT"
 IGNORED_ENV = tuple(f"ELITEA_CREDENTIAL_GOVERNANCE_{name}" for name in (
-    "POLICY_REVISION", "MODE", "ADMIT_LEGACY_PAT", "ALLOW_RUNTIME_DOMAIN_BINDING"))
-IGNORED_CONFIG_KEYS = ("enabled", "policy_revision", "environment", "admit_legacy_pat", "allow_runtime_domain_binding")
+    "POLICY_REVISION", "MODE", "ADMIT_LEGACY_PAT", "ALLOW_RUNTIME_DOMAIN_BINDING", "ALLOW_DEVELOPMENT_RUNS"))
+IGNORED_CONFIG_KEYS = ("enabled", "policy_revision", "environment", "admit_legacy_pat", "allow_runtime_domain_binding",
+                       "allow_development_runs")
 
 SOURCE_MAX_MODE, SOURCE_ENABLED, SOURCE_DEFAULT = "MAX_MODE", "ENABLED (deprecated)", "default"
 TTL_S = 10.0            # staleness bound of the snapshot when no event arrives
@@ -129,6 +130,14 @@ DESCRIPTIONS = {
             "tooltip": "When on, agents may use a binding whose identity is resolved by the identity provider at run "
                        "time. Leave it off unless your identity team has set up runtime agent identities.",
         },
+        "allow_development_runs": {
+            "label": "Allow development runs",
+            "tooltip": "When on, the agent and pipeline editor's test chat may run a version that has no identity "
+                       "binding yet. Such a run acts as the signed-in author only and may use only the author's own "
+                       "credentials: personal ones, and project credentials already granted to that person. Nothing "
+                       "it produces can be shared, published or scheduled. Default: on under audit only, off under "
+                       "enforce; choose explicitly when you enforce.",
+        },
         "change_note": {
             "label": "Change note",
             "placeholder": "Why are you changing this? (recorded in the history)",
@@ -144,6 +153,8 @@ DESCRIPTIONS = {
     },
     "preflight": {
         "ready": "Ready: everything audit-only and enforce depend on is in place.",
+        "column_missing": "Settings storage needs an update. Run the task create_governance_settings_tables under "
+                          "System → Tasks.",
         "not_ready": "Not ready: governance can stay off, but cannot be turned on until the failed checks below are "
                      "fixed.",
         "ready_with_warnings": "Ready, with warnings: governance can be turned on; the items below limit some "
@@ -267,6 +278,7 @@ class Stored:
     revision: int
     updated_by: Optional[int]
     updated_at: Optional[datetime]
+    allow_development_runs: Optional[bool] = None   # None: not chosen, the default of the mode applies (#7213)
 
 
 @dataclass(frozen=True)
@@ -279,6 +291,7 @@ class Effective:
     capped: bool          # the stored mode is above the ceiling
     unavailable: bool     # the mode is on and a required service is not
     read: str             # ok | missing_table | error
+    allow_development_runs: bool = False   # the editor's test chat may run an unbound version as the author (#7213)
     profile: GovernanceProfile = field(init=False, compare=False)
 
     def __post_init__(self):
@@ -288,23 +301,32 @@ class Effective:
             enabled=enforce, policy_revision=revision, profile=PROFILE_GOVERNED if enforce else PROFILE_LEGACY))
 
 
+def development_runs_default(mode: str) -> bool:
+    """The ``allow_development_runs`` an operator has not chosen: on under audit only (the editor's test chat is then
+    rehearsed as a development run, not recorded as a would-deny), off under enforce and off (#7213)."""
+    return mode == MODE_AUDIT_ONLY
+
+
 def resolve(stored: Optional[Stored], *, ceiling: str, env_environment: Optional[str], preflight, read: str) -> Effective:
     """What is in effect. Pure.
 
     The mode is the stored one (``off`` without a row or a table), capped to the ceiling. A settings row that cannot be
     read on a cold start counts as ``enforce`` (so governed admissions are refused) unless the ceiling is ``off``. The
-    policy revision and both flags are the stored ones, or the defaults. The environment is the deployment's label when
-    it sets one. A failing blocking check makes an on mode ``unavailable``."""
+    policy revision and the flags are the stored ones, or the defaults (``allow_development_runs`` not chosen: the
+    default of the mode in effect). The environment is the deployment's label when it sets one. A failing blocking check
+    makes an on mode ``unavailable``."""
     row = stored if read == READ_OK else None
     wanted = row.mode if row is not None else (MODE_ENFORCE if read == READ_ERROR else MODE_OFF)
     mode = wanted if MODE_RANK[wanted] <= MODE_RANK[ceiling] else ceiling
     failing = [check for check in preflight
                if check.status == "fail" and check.blocking and check.id not in SNAPSHOT_IGNORED_CHECKS]
+    chosen = row.allow_development_runs if row is not None else None
     return Effective(
         mode=mode,
         policy_revision=row.policy_revision if row is not None else None,
         admit_legacy_pat=bool(row.admit_legacy_pat) if row is not None else False,
         allow_runtime_domain_binding=bool(row.allow_runtime_domain_binding) if row is not None else False,
+        allow_development_runs=bool(chosen) if chosen is not None else development_runs_default(mode),
         environment=env_environment or (row.environment if row is not None else None),
         capped=row is not None and mode != wanted,
         unavailable=mode != MODE_OFF and (read == READ_ERROR or bool(failing)),
@@ -324,22 +346,40 @@ def _table_present(session, name=SETTINGS_TABLE) -> bool:
 
 _ROW = (Settings.mode, Settings.policy_revision, Settings.admit_legacy_pat, Settings.allow_runtime_domain_binding,
         Settings.environment, Settings.revision, Settings.updated_by, Settings.updated_at)
+_ADDED = (Settings.allow_development_runs,)   # read only once the table has the column (#7213)
 _PLATFORM = (Settings.scope_kind == SCOPE_PLATFORM, Settings.scope_id == 0)
+_COLUMNS_SEEN = set()   # tables seen with every added column: a column never goes away, so it is looked for once
+
+
+def added_columns_present(session, table=SETTINGS_TABLE) -> bool:
+    """Does this table have the columns added after the tables first shipped (``ADDED_COLUMNS``)? One catalog read
+    per table and process until it does."""
+    if table in _COLUMNS_SEEN:
+        return True
+    names = {column["name"] for column in inspect(session.connection()).get_columns(table, schema=c.POSTGRES_SCHEMA)}
+    if all(name in names for name, _ in ADDED_COLUMNS):
+        _COLUMNS_SEEN.add(table)
+        return True
+    return False
 
 
 def _stored_of(row) -> Stored:
     return Stored(mode=row.mode, policy_revision=row.policy_revision, admit_legacy_pat=bool(row.admit_legacy_pat),
-                  allow_runtime_domain_binding=bool(row.allow_runtime_domain_binding), environment=row.environment,
+                  allow_runtime_domain_binding=bool(row.allow_runtime_domain_binding),
+                  allow_development_runs=getattr(row, "allow_development_runs", None), environment=row.environment,
                   revision=row.revision, updated_by=row.updated_by, updated_at=row.updated_at)
 
 
 def read_settings():
-    """``(read, stored)``: ``ok`` with the row (or None), ``missing_table``, or ``error`` (logged by type only)."""
+    """``(read, stored)``: ``ok`` with the row (or None), ``missing_table``, or ``error`` (logged by type only). A table
+    that predates a column is read without it (the flag then takes its default): a deploy before the task is not an
+    error."""
     try:
         with db.get_session(None) as session:
             if not _table_present(session):
                 return READ_MISSING_TABLE, None
-            row = session.execute(select(*_ROW).where(*_PLATFORM)).one_or_none()
+            columns = _ROW + _ADDED if added_columns_present(session) else _ROW
+            row = session.execute(select(*columns).where(*_PLATFORM)).one_or_none()
             return READ_OK, _stored_of(row) if row is not None else None
     except Exception as exc:  # pylint: disable=W0703
         log.error("governance settings: the stored switch could not be read (%s)", type(exc).__name__)
@@ -551,7 +591,8 @@ def _stored_json(stored: Optional[Stored]):
     if stored is None:
         return None
     return {"mode": stored.mode, "policy_revision": stored.policy_revision, "admit_legacy_pat": stored.admit_legacy_pat,
-            "allow_runtime_domain_binding": stored.allow_runtime_domain_binding, "environment": stored.environment,
+            "allow_runtime_domain_binding": stored.allow_runtime_domain_binding,
+            "allow_development_runs": stored.allow_development_runs, "environment": stored.environment,
             "revision": stored.revision, "updated_by": stored.updated_by, "updated_at": _iso(stored.updated_at)}
 
 
@@ -567,9 +608,10 @@ def _preflight_json(checks) -> dict:
     }
 
 
-def settings_payload(module, read, stored, checks) -> dict:
+def settings_payload(module, read, stored, checks, columns_present=True) -> dict:
     """The body of the GET (and of a successful PUT): what is in effect, what is stored, what the deployment fixes,
-    the preflight, and the texts the page shows."""
+    the preflight, and the texts the page shows. ``columns_present`` false: the table predates a column and cannot be
+    saved until the task runs (the page says so, as for a missing table)."""
     state = module.governance_state
     effective = resolve(stored, ceiling=state.ceiling.max_mode, env_environment=state.env_environment,
                         preflight=checks, read=read)
@@ -580,6 +622,7 @@ def settings_payload(module, read, stored, checks) -> dict:
             "mode": effective.mode, "policy_revision": effective.policy_revision,
             "admit_legacy_pat": effective.admit_legacy_pat,
             "allow_runtime_domain_binding": effective.allow_runtime_domain_binding,
+            "allow_development_runs": effective.allow_development_runs,
             "environment": effective.environment, "capped": effective.capped, "unavailable": effective.unavailable,
         },
         "stored": _stored_json(stored),
@@ -587,6 +630,7 @@ def settings_payload(module, read, stored, checks) -> dict:
         "ceiling": {"max_mode": state.ceiling.max_mode, "source": state.ceiling.source},
         "preflight": _preflight_json(checks),
         "table_present": read != READ_MISSING_TABLE,
+        "columns_present": columns_present,
         "read": read,
         "descriptions": DESCRIPTIONS,
     }
@@ -600,7 +644,20 @@ def current_state(module) -> dict:
     mode = resolve(stored, ceiling=state.ceiling.max_mode, env_environment=state.env_environment, preflight=[],
                    read=read).mode
     return settings_payload(module, read, stored, governance_preflight(
-        module, table_read=read, mode=None if mode == MODE_OFF else mode))
+        module, table_read=read, mode=None if mode == MODE_OFF else mode), columns_present=_columns_present())
+
+
+def _columns_present() -> bool:
+    """Do the settings tables have every column this build writes? Unknown (unreadable) counts as yes: saving then
+    fails readably on its own."""
+    if SETTINGS_TABLE in _COLUMNS_SEEN:
+        return True
+    try:
+        with db.get_session(None) as session:
+            return not _table_present(session) or added_columns_present(session)
+    except Exception as exc:  # pylint: disable=W0703
+        log.error("governance settings: the settings columns could not be read (%s)", type(exc).__name__)
+        return True
 
 
 # --- the change ------------------------------------------------------------------------------
@@ -618,6 +675,8 @@ class SettingsUpdate(BaseModel):
     policy_revision: Optional[str] = Field(default=None, max_length=MAX_POLICY_REVISION)
     admit_legacy_pat: StrictBool
     allow_runtime_domain_binding: StrictBool
+    # Absent or null: not chosen, the default of the mode applies (on under audit only, off under enforce; #7213)
+    allow_development_runs: Optional[StrictBool] = None
     environment: Optional[str] = Field(default=None, max_length=MAX_ENVIRONMENT)
     change_note: str = Field(min_length=1, max_length=MAX_CHANGE_NOTE)
     expected_revision: StrictInt = Field(ge=0)   # the revision that was read; 0 when there was no row
@@ -693,12 +752,15 @@ def apply_update(module, body, actor_id: int) -> dict:  # pylint: disable=R0912,
     old_mode = current.mode if current is not None else MODE_OFF
     values = dict(mode=update_.mode, policy_revision=update_.policy_revision,
                   admit_legacy_pat=update_.admit_legacy_pat,
-                  allow_runtime_domain_binding=update_.allow_runtime_domain_binding, environment=update_.environment)
+                  allow_runtime_domain_binding=update_.allow_runtime_domain_binding,
+                  allow_development_runs=update_.allow_development_runs, environment=update_.environment)
     events = _audit_events(update_, actor_id, state.env_environment or update_.environment, update_.mode != old_mode)
     tracing = this.for_module("tracing").module
     now = _now()
     with db.get_session(None) as session:
         try:
+            if not added_columns_present(session):   # a table from before the column: the task adds it
+                raise SettingsError("MIGRATION_REQUIRED")
             row = session.execute(select(Settings.id, Settings.revision).where(*_PLATFORM)).one_or_none()
             if row is None:
                 if update_.expected_revision != 0:
@@ -755,10 +817,13 @@ def history_page(limit=HISTORY_DEFAULT_LIMIT, offset=0) -> dict:
                 return {"total": 0, "rows": [], "table_present": False}
             total = session.execute(select(func.count()).select_from(History).where(
                 History.scope_kind == SCOPE_PLATFORM, History.scope_id == 0)).scalar_one()
-            rows = session.execute(
-                select(History.revision, History.mode, History.policy_revision, History.admit_legacy_pat,
+            columns = [History.revision, History.mode, History.policy_revision, History.admit_legacy_pat,
                        History.allow_runtime_domain_binding, History.environment, History.change_note,
-                       History.changed_by, History.changed_at)
+                       History.changed_by, History.changed_at]
+            if added_columns_present(session, HISTORY_TABLE):
+                columns.append(History.allow_development_runs)
+            rows = session.execute(
+                select(*columns)
                 .where(History.scope_kind == SCOPE_PLATFORM, History.scope_id == 0)
                 .order_by(History.revision.desc()).limit(limit).offset(offset)).all()
     except Exception as exc:  # pylint: disable=W0703
@@ -774,7 +839,8 @@ def history_page(limit=HISTORY_DEFAULT_LIMIT, offset=0) -> dict:
     return {"total": total, "table_present": True, "rows": [{
         "revision": row.revision, "mode": row.mode, "policy_revision": row.policy_revision,
         "flags": {"admit_legacy_pat": bool(row.admit_legacy_pat),
-                  "allow_runtime_domain_binding": bool(row.allow_runtime_domain_binding)},
+                  "allow_runtime_domain_binding": bool(row.allow_runtime_domain_binding),
+                  "allow_development_runs": getattr(row, "allow_development_runs", None)},
         "environment": row.environment, "change_note": row.change_note,
         "changed_by": None if row.changed_by is None else {"id": row.changed_by, "email": emails.get(row.changed_by)},
         "changed_at": _iso(row.changed_at),
@@ -797,15 +863,30 @@ def is_super_admin(user_id) -> bool:
 # --- the admin task --------------------------------------------------------------------------
 
 def create_tables(dry_run=False) -> dict:
-    """Create the two settings tables where missing (the only DDL of the switch). Idempotent."""
+    """Create the two settings tables where missing, and add the columns that came after them to a table that
+    predates them (``ADDED_COLUMNS``; the only DDL of the switch). Idempotent."""
     with db.get_session(None) as session:
         connection = session.connection()
         missing = [name for name in (SETTINGS_TABLE, HISTORY_TABLE)
                    if not inspect(connection).has_table(name, schema=c.POSTGRES_SCHEMA)]
         if missing and not dry_run:
             METADATA.create_all(connection, checkfirst=True)
+        added = []
+        for table in (SETTINGS_TABLE, HISTORY_TABLE):
+            if table in missing:
+                continue   # created above with every column, or would be
+            present = {column["name"] for column in inspect(connection).get_columns(table, schema=c.POSTGRES_SCHEMA)}
+            for name, definition in ADDED_COLUMNS:
+                if name in present:
+                    continue
+                added.append(f"{table}.{name}")
+                if not dry_run:   # the catalog said it is missing; the names come from this module, not from input
+                    session.execute(text(f'ALTER TABLE "{c.POSTGRES_SCHEMA}".{table} ADD COLUMN {name} {definition}'))
+        if not dry_run and (missing or added):
             session.commit()
-    return {"created": [] if dry_run else missing, "would_create": missing if dry_run else [], "dry_run": dry_run}
+            _COLUMNS_SEEN.clear()   # read the columns again: they are there now
+    return {"created": [] if dry_run else missing, "would_create": missing if dry_run else [],
+            "added_columns": [] if dry_run else added, "would_add_columns": added if dry_run else [], "dry_run": dry_run}
 
 
 # --- governed runs that outlive a restart ---------------------------------------------------------

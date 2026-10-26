@@ -48,6 +48,7 @@ Admin UI or with `PUT`:
 | `policy_revision` | Free label of the approved rules (change ticket, date), at most 128 characters. Required for `audit_only` and `enforce`. It is stamped on every admission and approval. |
 | `admit_legacy_pat` | Runs started with a personal API token may pass the identity check. They still cannot act for a person. Default off. |
 | `allow_runtime_domain_binding` | Bindings of mode `runtime_domain_binding` may be activated and used. Default off. |
+| `allow_development_runs` | The agent and pipeline editor's test chat may run a version without a binding as a *development run*: the signed-in author only, the author's own credentials only (personal, or project credentials granted to that person on any agent). Null (not chosen) means the default of the mode: on under `audit_only`, off under `enforce`. |
 | `environment` | Label; refused with `FIELD_LOCKED` when the deployment sets it |
 | `change_note`, `expected_revision` | Required. The write is a compare-and-set on the revision (`REVISION_CONFLICT`). |
 
@@ -91,7 +92,9 @@ dependency text.
 | Group | Code | Meaning |
 |---|---|---|
 | Identity | `IDENTITY_EVIDENCE_MISSING`, `IDENTITY_SUBJECT_UNLINKED`, `IDENTITY_KIND_NOT_ADMITTED`, `IDENTITY_REVOKED`, `IDENTITY_EXPIRED`, `IDENTITY_SIGNATURE_INVALID`, `IDENTITY_AUDIENCE_MISMATCH`, `IDENTITY_TENANT_MISMATCH` | No verified person behind the run |
-| Binding | `DENIED_BINDING` | The agent version has no usable active binding |
+| Binding | `DENIED_BINDING` | The agent version has no usable active binding (from the editor: development runs are off) |
+| Development | `DENIED_DEVELOPMENT_CREDENTIAL` | A development run asked for a project credential the author holds no active grant on |
+| | `DENIED_DEVELOPMENT_CHILD` | A sub-agent of a development run asked for a credential the draft was not admitted for |
 | | `BINDING_DIGEST_MISMATCH` | The agent changed after its binding was approved |
 | Mandate | `MANDATE_REQUIRED` | No approved mandate or verified person covers this run |
 | | `AUTHORIZATION_REQUIRED` | A per-user schedule acts on a person's behalf without that person |
