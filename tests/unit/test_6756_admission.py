@@ -729,7 +729,9 @@ def test_predict_sio_builds_the_request_from_the_loaded_row_and_translates_a_den
     text = source_of("rpc/application.py")
     chat, llm = text[text.index("def predict_sio("):text.index("def predict_sio_llm(")], text[text.index("def predict_sio_llm("):]
     assert "admission_version_row = application_version" in chat
-    assert 'entry_point="chat_sio"' in chat and "version_row=admission_version_row" in chat
+    # the editor's test chat is the one other entry point, said by chat_all over the author's live socket (#7213)
+    assert 'entry_point=ENTRY_EDITOR_CHAT if authoring and sid else "chat_sio"' in chat
+    assert "version_row=admission_version_row" in chat
     assert "binding_project_id=application_project_id" in chat
     assert 'run_kind="system" if is_system_user else "interactive"' in chat
     assert "admission=admission," in chat

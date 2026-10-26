@@ -641,8 +641,8 @@ class Module(module.ModuleModel):
         effective = self.governance_state.effective
         return AdmissionSettings(
             allow_runtime_domain_binding=effective.allow_runtime_domain_binding,
-            admit_legacy_pat=effective.admit_legacy_pat, context_ttl_s=self.governance_state.context_ttl_s,
-            environment=effective.environment,
+            admit_legacy_pat=effective.admit_legacy_pat, allow_development_runs=effective.allow_development_runs,
+            context_ttl_s=self.governance_state.context_ttl_s, environment=effective.environment,
         )
 
     def _start_governance(self):
@@ -718,25 +718,33 @@ class Module(module.ModuleModel):
 
     def _ensure_agent_identity_schema(self):
         """Startup safety net: create the agent identity and mandate tables in any project schema that predates
-        them (#6756, #6947). Runs off-thread; guarded by a catalog check so steady-state boots issue no DDL.
+        them (#6756, #6947), and let ``execution_security_context.agent_binding_ref`` be NULL where it still cannot
+        (development runs, #7213). Runs off-thread; guarded by catalog checks so steady-state boots issue no DDL.
         New projects are already covered by create_all."""
         def _run():
             try:
                 from .utils.agent_identity_schema import (
                     IDENTITY_TABLES, MANDATE_TABLES,
-                    project_ids_missing_tables,
-                    apply_tables,
+                    project_ids_missing_tables, project_ids_with_not_null_binding_ref,
+                    apply_tables, apply_nullable_binding_ref,
                 )
                 tables = IDENTITY_TABLES + MANDATE_TABLES
                 pending = project_ids_missing_tables(tables)
-                if not pending:
-                    return
-                log.info("agent identity schema: auto-migrating %s project(s)", len(pending))
-                migrated, failed = apply_tables(pending, tables)
-                log.info(
-                    "agent identity schema: auto-migration done (migrated=%s failed=%s)",
-                    len(migrated), len(failed),
-                )
+                if pending:
+                    log.info("agent identity schema: auto-migrating %s project(s)", len(pending))
+                    migrated, failed = apply_tables(pending, tables)
+                    log.info(
+                        "agent identity schema: auto-migration done (migrated=%s failed=%s)",
+                        len(migrated), len(failed),
+                    )
+                strict = project_ids_with_not_null_binding_ref()
+                if strict:
+                    log.info("agent identity schema: relaxing the binding reference in %s project(s)", len(strict))
+                    migrated, failed = apply_nullable_binding_ref(strict)
+                    log.info(
+                        "agent identity schema: binding reference relaxed (migrated=%s failed=%s)",
+                        len(migrated), len(failed),
+                    )
             except Exception:  # pylint: disable=W0703
                 log.exception("agent identity schema: auto-migration failed")
 

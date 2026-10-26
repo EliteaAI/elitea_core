@@ -405,6 +405,16 @@ Run admin task create_mandate_tables with param: project_id=all
 Run admin task create_governance_settings_tables with param: dry_run
 Run admin task create_governance_settings_tables
 
+# Issue #7213 (C-1009): development runs under Enforce. (a) credential_governance_settings and its history table gain the
+# nullable column allow_development_runs: re-run create_governance_settings_tables (idempotent; it adds the column to an
+# existing table; until then the switch reads with the default of the mode and the Admin UI cannot save). (b) a development
+# run's execution_security_context row has no binding: agent_binding_ref must accept NULL in every project schema. The
+# startup safety net relaxes it; create_agent_identity_tables reports/does the same ("relaxed" in the result).
+Run admin task create_governance_settings_tables with param: dry_run
+Run admin task create_governance_settings_tables
+Run admin task create_agent_identity_tables with param: project_id=all;dry_run
+Run admin task create_agent_identity_tables with param: project_id=all
+
 # Issue #7015: trajectory.tool_match gained an opt-in `calls: own` option, and its description
 # now documents it. Re-run the task once after deploying this build: it refreshes the description
 # of every built-in entry whose text differs from the plugin's (reported under "updated") and

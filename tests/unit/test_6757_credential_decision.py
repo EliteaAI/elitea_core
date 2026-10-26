@@ -779,7 +779,7 @@ def test_the_decision_runs_after_binding_and_subject_and_before_the_context_row(
     body = text[text.index("def _admit("):text.index("def admit_execution")]
     order = [body.index(marker) for marker in (
         "_verify_identity(request, settings)", "_find_binding(request, settings)", "_subject_of(principal)",
-        "_decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows)",
+        "_decide_credentials(module, request, subject, binding, payload, expires_at, shadow=shadow, rows=rows,",
         "_store_admission(")]
     assert order == sorted(order)
     store = text[text.index("def _store_admission("):text.index("# --- autonomous mandates")]
