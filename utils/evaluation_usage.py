@@ -15,6 +15,7 @@ tokens, as the provider reported them. Pricing subtracts the cache reads and wri
 ``usage.sources.base.billable_input_tokens`` does for inclusive readings, so each is billed at its
 own rate once.
 """
+import re
 from collections import Counter
 from decimal import Decimal
 from typing import Callable, Iterable, List, Optional
@@ -491,6 +492,90 @@ def settle_usage_rows(rows: List[dict], breakdown: Iterable[dict], platform_run_
                           'ledger_calls': sum(b['llm_calls'] for b in ledger.values()),
                           'unparsed_rows': len(unparsed),
                           'unmatched_ledger_rows': len(set(ledger) - matched - unparsed)}
+
+
+#: The ledger's entity type for a sub-agent's own calls: its application (#7015 P3).
+ENTITY_APPLICATION = 'application'
+
+
+def ledger_agents(breakdown: Iterable[dict], platform_run_id: str) -> dict:
+    """``{case_index: {key: bucket}}`` from a ``by_entity`` breakdown: each agent-role case's
+    ledger rows, split by who made the call. A dispatched sub-agent's rows are labelled with its
+    application, so they key by its id; the bucket keeps the ledger's ``name`` for it. Everything
+    else is the agent under test (``None``). Only cases with at least one sub-agent row are kept:
+    when every row carries the evaluation's label (sub-agents run in-process), the ledger cannot
+    tell the agents apart."""
+    cases: dict = {}
+    for entry in breakdown or []:
+        key = parse_case_stream(entry.get('conversation_id'), platform_run_id)
+        if key is None or key[1] != ROLE_AGENT or not _count(entry.get('llm_calls')):
+            continue
+        child = entry.get('entity_id') if entry.get('entity_type') == ENTITY_APPLICATION else None
+        bucket = cases.setdefault(key[0], {}).setdefault(child, {
+            'llm_calls': 0, 'cost_nano_usd': 0, 'unpriced_calls': 0, 'unparsed_calls': 0,
+            'name': None, **_empty_bucket()})
+        _add(bucket, entry)
+        for field in ('llm_calls', 'cost_nano_usd', 'unpriced_calls', 'unparsed_calls'):
+            bucket[field] += _count(entry.get(field))
+        if child is not None:
+            bucket['name'] = bucket['name'] or entry.get('entity_name')
+    return {index: agents for index, agents in cases.items()
+            if any(key is not None for key in agents)}
+
+
+_UNCLEAN = re.compile(r'[^a-zA-Z0-9_.-]')
+
+
+def _clean_name(name) -> Optional[str]:
+    """The SDK's ``clean_string``: how a tool name, and so the ledger's ``entity_name``, is
+    derived from the application's display name."""
+    return _UNCLEAN.sub('', name).replace('.', '_') if isinstance(name, str) else None
+
+
+def settle_agents(agents: Optional[List[dict]], ledger: Optional[dict]) -> Optional[List[dict]]:
+    """A case's ``metrics.agents`` with the ledger's tokens and cost where it has a figure for the
+    agent (``source: ledger``). The call counts stay the trajectory's: a step and a proxy call are
+    not the same unit. A sub-agent the ledger has calls for but the trajectory never showed (its
+    steps were cut) is appended, so the split still adds up to the case's settled total.
+
+    A sub-agent is matched by its ``application_id``; an entry without one (a trajectory stored
+    before the id was recorded) by its name, cleaned the way the ledger's is. A bucket with a call
+    the proxy could not read (``unparsed_calls``) is not settled: its 0 tokens are a missing
+    reading, so the entry keeps the trajectory's figures."""
+    if not agents or not ledger:
+        return agents
+    by_name = {_clean_name(bucket.get('name')): key for key, bucket in ledger.items()
+               if key is not None and bucket.get('name')}
+    out, seen = [], set()
+    for entry in agents:
+        name = entry.get('agent')
+        if name is None:
+            key = None
+        elif entry.get('application_id') is not None and entry['application_id'] in ledger:
+            key = entry['application_id']
+        else:
+            key = by_name.get(_clean_name(name))
+        bucket = ledger.get(key) if key not in seen else None
+        seen.add(key)
+        if bucket is None or bucket['unparsed_calls']:
+            out.append(entry)
+            continue
+        out.append({**entry, **_ledger_figures(bucket)})
+    for key, bucket in ledger.items():
+        if key not in seen and not bucket['unparsed_calls']:
+            out.append({'agent': bucket.get('name'), 'application_id': key, 'llm_calls': None,
+                        'tool_calls': None, **_ledger_figures(bucket)})
+    return out
+
+
+def _ledger_figures(bucket: dict) -> dict:
+    return {
+        'input_tokens': bucket['input_tokens'],
+        'output_tokens': bucket['output_tokens'],
+        'cost': None if bucket['unpriced_calls'] else float(Decimal(bucket['cost_nano_usd']) / _NANO),
+        'ledger_calls': bucket['llm_calls'],
+        'source': 'ledger',
+    }
 
 
 def ledger_calls(breakdown: Iterable[dict]) -> int:

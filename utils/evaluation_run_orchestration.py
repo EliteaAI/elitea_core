@@ -396,6 +396,8 @@ def trajectory_evidence(case: dict) -> Optional[dict]:
     return {
         'steps': trajectory.get('steps') or [],
         'tool_sequence': trajectory.get('tool_sequence') or [],
+        # A pipeline's nodes in run order (#7015); empty for an agent.
+        'node_sequence': trajectory.get('node_sequence') or [],
         'truncated': bool(trajectory.get('truncated')),
         'pause': trajectory.get('pause'),
         'metrics': execution.get('metrics') or {},
@@ -1296,7 +1298,8 @@ def run_time_limit(snapshot: dict) -> Optional[int]:
 
 
 def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout: Optional[int] = None,
-                       platform_run_id: Optional[str] = None, usage_entity: Optional[dict] = None):
+                       platform_run_id: Optional[str] = None, usage_entity: Optional[dict] = None,
+                       should_cancel: Optional[Callable[[], bool]] = None):
     """Bind live agent execution (H4) into the ``agent_runner`` contract for an offline-batch run.
 
     Loads the run's frozen ``application_version_id`` expanded ``version_details`` **once**, checks
@@ -1342,15 +1345,14 @@ def _make_agent_runner(project_id: int, snapshot: dict, *, user_id: int, timeout
         if not supported:
             agent_type = version_details.get('agent_type')
             return {'status': 'unsupported', 'output': None,
-                    'error': f"agent_type '{agent_type}' is not supported for live batch execution "
-                             '(P1 scope: single-turn agents only, pipelines deferred)',
+                    'error': f"agent_type '{agent_type}' is not supported for live batch execution",
                     'structure': structure,
                     'execution': not_applicable_execution('unsupported')}
         outcome = run_agent(project_id, version_details, case,
                             user_id=user_id, timeout=timeout or case_time_limit(snapshot, case),
                             platform_run_id=platform_run_id, usage_entity=usage_entity,
                             step_limit=step_limit, case_index=case_index,
-                            store_tool_outputs=store_tool_outputs)
+                            store_tool_outputs=store_tool_outputs, should_cancel=should_cancel)
         return {**outcome, 'structure': structure}
 
     _run.accepts_case_index = True
@@ -1618,7 +1620,9 @@ def execute_run(
         if snapshot.get('trigger_type') == TRIGGER_OFFLINE_BATCH:
             agent_runner = _make_agent_runner(project_id, snapshot, user_id=owner_id,
                                               platform_run_id=platform_run_id,
-                                              usage_entity=usage_entity)
+                                              usage_entity=usage_entity,
+                                              # stops a case waiting on a sub-agent fan-out (#7015)
+                                              should_cancel=_cancel_requested)
 
         outcome = orchestrate_run(snapshot, ai_scorer=ai_scorer, code_scorer=code_scorer,
                                   agent_runner=agent_runner,
@@ -1729,11 +1733,14 @@ def settle_run_usage(project_id: int, run_id: int, platform_run_id: str, usage_r
 
     Reads ``usage_eval_run_breakdown`` once it has stopped growing, takes the ledger's figures
     for each case and role it has calls for, and rewrites the rollups, the budget verdict and
-    ``meta.settlement``. Never raises: a ledger that cannot be read leaves the runtime figures
-    and marks the settlement ``unavailable``. Returns the settlement summary."""
+    ``meta.settlement``. The breakdown is read per entity, so a case whose sub-agents were
+    dispatched gets each agent's ledger tokens and cost in ``metrics.agents`` (#7015 P3). Never
+    raises: a ledger that cannot be read leaves the runtime figures and marks the settlement
+    ``unavailable``. Returns the settlement summary."""
     from datetime import datetime, timedelta, timezone
-    from .evaluation_usage import SETTLEMENT_UNAVAILABLE, TOKEN_FIELDS, settle_usage_rows
-    from ..models.evaluation import EvalRun, EvalCaseUsage
+    from .evaluation_usage import (SETTLEMENT_UNAVAILABLE, TOKEN_FIELDS, ledger_agents, settle_agents,
+                                   settle_usage_rows)
+    from ..models.evaluation import EvalRun, EvalCaseExecution, EvalCaseUsage
     from tools import db  # pylint: disable=E0401
     from pylon.core.tools import log  # local: this module loads without pylon present
 
@@ -1746,12 +1753,14 @@ def settle_run_usage(project_id: int, run_id: int, platform_run_id: str, usage_r
             def fetch():
                 return pylon_context.rpc_manager.timeout(10).usage_eval_run_breakdown(
                     project_id=project_id, platform_run_id=platform_run_id,
-                    date_from=date_from, date_to=datetime.now(timezone.utc) + margin)
+                    date_from=date_from, date_to=datetime.now(timezone.utc) + margin, by_entity=True)
         breakdown = poll_ledger_breakdown(fetch, sleep=sleep)
         rows, settlement = settle_usage_rows(usage_rows, breakdown, platform_run_id)
+        agents_ledger = ledger_agents(breakdown, platform_run_id)
     except Exception:  # noqa: BLE001 - G6: the runtime figures stand
         log.exception('Eval run %s: usage settlement could not read the ledger', run_id)
         rows, settlement = usage_rows, {'state': SETTLEMENT_UNAVAILABLE, 'reason': 'ledger_unreadable'}
+        agents_ledger = {}
 
     fields = (*TOKEN_FIELDS, 'cost', 'cost_source', 'usage_state', 'usage_state_reason',
               'token_source', 'model_name', 'settled')
@@ -1764,6 +1773,20 @@ def settle_run_usage(project_id: int, run_id: int, platform_run_id: str, usage_r
                     if row is not None:
                         for field in fields:
                             setattr(record, field, row.get(field))
+            if agents_ledger:
+                from sqlalchemy.orm import defer
+                # Only the cases with a sub-agent split, and without their trajectories: a run's
+                # trajectories can add up to megabytes, and only metrics is rewritten.
+                executions = (s.query(EvalCaseExecution)
+                              .filter(EvalCaseExecution.run_id == run_id,
+                                      EvalCaseExecution.case_index.in_(list(agents_ledger)))
+                              .options(defer(EvalCaseExecution.trajectory)))
+                for record in executions.all():
+                    metrics = record.metrics or {}
+                    ledger = agents_ledger.get(record.case_index)
+                    if ledger and metrics.get('agents'):
+                        # A new dict: JSONB is not mutation-tracked, so an in-place edit is not saved.
+                        record.metrics = {**metrics, 'agents': settle_agents(metrics['agents'], ledger)}
             run = s.query(EvalRun).filter(EvalRun.id == run_id).first()
             if run is not None:
                 run.meta = {**(run.meta or {}), **usage_meta(rows, budget), 'settlement': settlement}

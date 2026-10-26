@@ -163,3 +163,29 @@ def test_an_on_demand_run_pages_its_usage_by_case_index(results, session):
 def test_a_missing_run_raises(results, session):
     with pytest.raises(_NotFound):
         results.get_case_executions(1, 99, session=session)
+
+
+def test_an_older_fan_out_case_gets_its_agent_split_on_the_drill_down(results, session):
+    # Executions written before #7015 P3 have no metrics.agents; the drill-down derives it.
+    steps = [{'kind': 'llm', 'tokens': {'in': 10, 'out': 2}},
+             {'kind': 'llm', 'parent_agent': 'Child', 'tokens': {'in': 5, 'out': 1}},
+             {'kind': 'tool', 'tool_name': 'Child'}]
+    session.add(EvalCaseExecution(run_id=1, dataset_case_id=500, case_index=30, status='ok',
+                                  trajectory_state='recorded', trajectory={'steps': steps}, metrics={'llm_calls': 2}))
+    session.commit()
+    row, = results.get_case_executions(1, 1, session=session, dataset_case_id=500)['executions']
+    assert row['metrics']['llm_calls'] == 2
+    assert [(a['agent'], a['llm_calls'], a['tool_calls'], a['input_tokens']) for a in row['metrics']['agents']] == \
+        [(None, 1, 1, 10), ('Child', 1, 0, 5)]
+    # A list read has no trajectory to derive it from, and a stored split is served as it is.
+    listed = results.get_case_executions(1, 1, session=session, case_index=30, include_trajectory=False)
+    assert 'agents' not in listed['executions'][0]['metrics']
+
+
+def test_a_stored_agent_split_is_not_recomputed(results, session):
+    stored = [{'agent': None, 'source': 'ledger'}]
+    session.add(EvalCaseExecution(run_id=1, dataset_case_id=501, case_index=31, status='ok', trajectory_state='recorded',
+                                  trajectory={'steps': [{'kind': 'llm', 'parent_agent': 'C'}]}, metrics={'agents': stored}))
+    session.commit()
+    row, = results.get_case_executions(1, 1, session=session, dataset_case_id=501)['executions']
+    assert row['metrics']['agents'] == stored

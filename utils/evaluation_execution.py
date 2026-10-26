@@ -10,6 +10,9 @@ result builder since #6809 G1):
   * ``tool_calls_dict`` — one ``ToolCallPayload`` per tool run (``tool_name``, ``tool_inputs``,
     ``tool_output``, ``finish_reason``, ``error``, timestamps, ``metadata``). A sub-agent call is a
     tool entry too. The ``tool_calls`` *list* is not used: its filter is provider-dependent.
+  * ``pipeline_trace`` — a pipeline run only (#7015): one span per top-level node that ran, with
+    its type, timing, status and the edge it took. Each becomes a ``kind: 'node'`` step, and the
+    LLM and tool steps inside a node carry its name in ``node``. Pipeline state is never in it.
 
 This module turns that envelope into the normalized, bounded shape stored in
 ``eval_case_execution`` (design §3.1, §3.3). It is pure — no I/O, no ORM — so the shape is
@@ -158,6 +161,7 @@ def _llm_step(step: dict) -> dict:
         'text': _masked(step['text']) if isinstance(step.get('text'), str) and step['text'] else None,
         'parent_agent': step.get('parent_agent_name'),
         'parent_call_id': step.get('parent_agent_call_id'),
+        'node': step.get('langgraph_node') or None,
         'started_at': step.get('timestamp_start'),
         'duration_ms': _duration_ms(step.get('timestamp_start'), step.get('timestamp_finish')),
     }
@@ -227,6 +231,7 @@ def _tool_step(entry: dict, store_tool_outputs: bool = True) -> dict:
         'call_id': None if parent_agent else call_id,
         'parent_agent': parent_agent,
         'parent_call_id': call_id if parent_agent else None,
+        'node': metadata.get('langgraph_node') or None,
         'started_at': entry.get('timestamp_start'),
         'duration_ms': _duration_ms(entry.get('timestamp_start'), entry.get('timestamp_finish')),
         '_identity': _identity(entry.get('tool_inputs')),
@@ -234,6 +239,26 @@ def _tool_step(entry: dict, store_tool_outputs: bool = True) -> dict:
     if not store_tool_outputs:
         step['output_omitted'] = True
     return step
+
+
+def _node_step(span: dict) -> dict:
+    """One pipeline node span (indexer ``pipeline_trace``). ``edge`` is how the node chose what
+    runs next (``transitional``/``conditional``/``decision``, with ``next`` when known), ``hitl`` a
+    human-in-the-loop interrupt or resume on it."""
+    edge = span.get('edge') if isinstance(span.get('edge'), dict) else None
+    hitl = span.get('hitl') if isinstance(span.get('hitl'), dict) else None
+    return {
+        'kind': 'node',
+        'node': span.get('node'),
+        'node_type': span.get('node_type'),
+        'graph_step': span.get('step'),
+        'status': span.get('status'),
+        'edge': {'type': edge.get('type'), 'next': edge.get('next')} if edge else None,
+        'hitl': {'action': hitl.get('action'), 'next': hitl.get('next')} if hitl else None,
+        'error': _masked(span.get('error')),
+        'started_at': span.get('timestamp_start'),
+        'duration_ms': _duration_ms(span.get('timestamp_start'), span.get('timestamp_finish')),
+    }
 
 
 def _fit(trajectory: dict) -> dict:
@@ -277,13 +302,18 @@ def build_trajectory(predict_result, *, store_tool_outputs: bool = True) -> Opti
     Tool steps carry a private ``_identity`` for :func:`trajectory_metrics`;
     :func:`extract_execution` drops it before the trajectory is stored.
 
-    Steps are ordered by ``started_at``; LLM steps come before tool steps on a tie, and insertion
-    order breaks the rest. A step with no timestamp keeps its insertion position at the end."""
+    Steps are ordered by ``started_at``; on a tie a node comes before the LLM steps it ran and
+    those before tool steps, and insertion order breaks the rest. A step with no timestamp keeps
+    its insertion position at the end."""
     inner = _inner(predict_result)
     if inner is None or not any(key in inner for key in _ENVELOPE_KEYS):
         return None
 
     raw: List[dict] = []
+    trace = inner.get('pipeline_trace') if isinstance(inner.get('pipeline_trace'), dict) else None
+    for span in (trace or {}).get('spans') or []:
+        if isinstance(span, dict) and span.get('node'):
+            raw.append(_node_step(span))
     for step in inner.get('thinking_steps') or []:
         if isinstance(step, dict):
             raw.append(_llm_step(step))
@@ -300,13 +330,20 @@ def build_trajectory(predict_result, *, store_tool_outputs: bool = True) -> Opti
     steps = [step for _, step in sorted(enumerate(raw), key=_order)]
     for index, step in enumerate(steps):
         step['i'] = index
-    return _fit({
+    trajectory = {
         'steps': steps,
         'tool_sequence': [s['tool_name'] for s in steps if s['kind'] == 'tool'],
-        'truncated': False,
-        'source': 'predict_result',
+        # The indexer stops recording spans past its cap: the node view is partial.
+        'truncated': bool((trace or {}).get('truncated')),
+        # A dispatched fan-out merges the parent, its children and the reconcile (#7015)
+        'source': inner.get('trajectory_source') or 'predict_result',
         'tool_outputs_stored': store_tool_outputs,
-    })
+    }
+    if trace is not None:
+        trajectory['node_sequence'] = [s['node'] for s in steps if s['kind'] == 'node']
+    if inner.get('dispatched_agents'):
+        trajectory['dispatched_agents'] = inner['dispatched_agents']
+    return _fit(trajectory)
 
 
 def is_parked(predict_result) -> bool:
@@ -374,11 +411,66 @@ def _canonical(value) -> str:
 
 def final_answer_ms(trajectory: Optional[dict]) -> Optional[float]:
     """``duration_ms`` of the last top-level LLM step: the same step ``performance.final_answer_time``
-    scores, so the run diff and the dimension never disagree on which step is the answer."""
+    scores, so the run diff and the dimension never disagree on which step is the answer.
+
+    In a pipeline this is the last LLM node's call, even when a printer or state-modifier node
+    runs after it: those make no model call, so the time to the answer is the LLM's."""
     steps = (trajectory or {}).get('steps') or []
     answers = [s for s in steps if isinstance(s, dict) and s.get('kind') == 'llm' and not s.get('parent_agent')]
     duration = answers[-1].get('duration_ms') if answers else None
     return duration if isinstance(duration, (int, float)) else None
+
+
+#: Where an ``agents`` entry's figures come from: the recorded steps, or the usage ledger.
+AGENT_SOURCE_TRAJECTORY = 'trajectory'
+AGENT_SOURCE_LEDGER = 'ledger'
+
+
+def agent_breakdown(trajectory: Optional[dict]) -> Optional[List[dict]]:
+    """Per-agent split of one case (#7015 P3): the agent under test first (``agent`` None), then
+    each sub-agent in the order it first ran, with its LLM and tool calls and the tokens its LLM
+    steps report. A step is a sub-agent's when it carries ``parent_agent``.
+
+    ``None`` when no step ran in a sub-agent, so a plain agent's metrics are unchanged. Tokens are
+    ``None`` for an agent with an LLM step whose provider sent no usage: a partial sum would read as
+    a measurement. Settlement replaces them with the ledger's figures where it has them.
+
+    A dispatched sub-agent also gets its ``application_id`` (from the trajectory's
+    ``dispatched_agents``): its steps name it by display name, the ledger by its application, and
+    the id is what ties the two."""
+    steps = [s for s in (trajectory or {}).get('steps') or [] if isinstance(s, dict)]
+    if not any(s.get('parent_agent') for s in steps):
+        return None
+    ids = {}
+    for spec in (trajectory or {}).get('dispatched_agents') or []:
+        if isinstance(spec, dict):
+            for name in (spec.get('name'), spec.get('display_name')):
+                if name:
+                    ids.setdefault(name, spec.get('application_id'))
+    agents: dict = {None: None}
+    for step in steps:
+        kind = step.get('kind')
+        if kind not in ('llm', 'tool'):
+            continue
+        name = step.get('parent_agent') or None
+        entry = agents.get(name)
+        if entry is None:
+            entry = agents[name] = {'agent': name, 'llm_calls': 0, 'tool_calls': 0,
+                                    'input_tokens': 0, 'output_tokens': 0, 'cost': None,
+                                    'source': AGENT_SOURCE_TRAJECTORY}
+            if ids.get(name) is not None:
+                entry['application_id'] = ids[name]
+        if kind == 'tool':
+            entry['tool_calls'] += 1
+            continue
+        entry['llm_calls'] += 1
+        tokens = step.get('tokens')
+        if not isinstance(tokens, dict) or entry['input_tokens'] is None:
+            entry['input_tokens'] = entry['output_tokens'] = None
+            continue
+        entry['input_tokens'] += tokens.get('in') or 0
+        entry['output_tokens'] += tokens.get('out') or 0
+    return [entry for entry in agents.values() if entry is not None]
 
 
 def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] = None,
@@ -392,6 +484,10 @@ def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] 
       message, or the recursion limit raised (§4.5).
     * ``guardrail_events`` — blocked and auth-paused tool calls, plus the HITL pause that ended the
       run, if any.
+    * ``node_count`` / ``node_path`` — pipelines only (#7015): how many nodes ran and their names in
+      order. Absent for agents, so their stored metrics are unchanged.
+    * ``agents`` — the per-agent split (:func:`agent_breakdown`, #7015 P3), only when a sub-agent
+      ran. The other counters still cover every agent's steps.
     """
     steps = (trajectory or {}).get('steps') or []
     tools = [s for s in steps if s.get('kind') == 'tool']
@@ -408,6 +504,11 @@ def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] 
         previous = step
     lowered = f"{error or ''}\n{final_text or ''}".lower()
     paused = 1 if (trajectory or {}).get('pause') else 0
+    agents = agent_breakdown(trajectory)
+    nodes = {}
+    if 'node_sequence' in (trajectory or {}):
+        path = [s.get('node') for s in steps if s.get('kind') == 'node']
+        nodes = {'node_count': len(path), 'node_path': path}
     return {
         'llm_calls': sum(1 for s in steps if s.get('kind') == 'llm'),
         'tool_calls': len(tools),
@@ -421,6 +522,8 @@ def trajectory_metrics(trajectory: Optional[dict], *, latency_ms: Optional[int] 
         'latency_ms': latency_ms,
         # Stored so the run diff reads one number instead of loading every trajectory (§3.4).
         'final_answer_ms': final_answer_ms(trajectory),
+        **nodes,
+        **({'agents': agents} if agents else {}),
     }
 
 
@@ -506,13 +609,15 @@ def trajectory_rollup(rows: List[dict]) -> Optional[dict]:
 
     metrics = [r.get('metrics') or {} for r in recorded]
     n = len(recorded)
-    totals = {key: sum(m.get(key) or 0 for m in metrics) for key in ROLLUP_COUNTERS}
+    # Pipelines only (#7015): a run of agents keeps its rollup shape.
+    counters = ROLLUP_COUNTERS + (('node_count',) if any('node_count' in m for m in metrics) else ())
+    totals = {key: sum(m.get(key) or 0 for m in metrics) for key in counters}
     latencies = [m['latency_ms'] for m in metrics if isinstance(m.get('latency_ms'), (int, float))]
     return {
         'cases': len(rows),
         'recorded_cases': n,
         'totals': totals,
-        'averages': {key: (totals[key] / n if n else None) for key in ROLLUP_COUNTERS},
+        'averages': {key: (totals[key] / n if n else None) for key in counters},
         'step_limit_hits': sum(1 for m in metrics if m.get('step_limit_hit')),
         'timed_out_cases': sum(1 for r in rows if r.get('status') == 'timeout'),
         'average_latency_ms': sum(latencies) / len(latencies) if latencies else None,

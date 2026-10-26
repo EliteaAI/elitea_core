@@ -1,7 +1,7 @@
 """Unit tests for evaluation_agent_runner.py — live agent execution (EVAL-H4, §14.2/§17.1/§8.1).
 
 Pure builders + extraction + the injected-``predict`` dispatch. These lock the P1 agent_type scope
-(pipelines deferred), the §17.1 variable overlay, the assistant-output extraction, and the
+(pipelines supported since #7015), the §17.1 variable overlay, the assistant-output extraction, and the
 fail-closed outcome mapping (timeout / predict error / empty → a value, never a raise).
 
 ``run_agent``'s default ``predict`` is ``this.module.predict_sio``; every test injects a stub so the
@@ -25,7 +25,7 @@ def runner(utils_path):
     return load_utils_module(utils_path, 'evaluation_agent_runner')
 
 
-# --- agent_type_supported: P1 scope (pipelines deferred) ---------------------
+# --- agent_type_supported (pipelines supported since #7015) -------------------
 
 def test_openai_supported(runner):
     assert runner.agent_type_supported({'agent_type': 'openai'}) is True
@@ -35,8 +35,13 @@ def test_react_supported(runner):
     assert runner.agent_type_supported({'agent_type': 'react'}) is True
 
 
-def test_pipeline_unsupported(runner):
-    assert runner.agent_type_supported({'agent_type': 'pipeline'}) is False
+def test_pipeline_supported(runner):
+    assert runner.agent_type_supported({'agent_type': 'pipeline'}) is True
+
+
+def test_a_type_in_the_gate_is_unsupported(runner, monkeypatch):
+    monkeypatch.setattr(runner, 'UNSUPPORTED_AGENT_TYPES', frozenset({'future'}))
+    assert runner.agent_type_supported({'agent_type': 'future'}) is False
 
 
 def test_missing_agent_type_defaults_supported(runner):
@@ -161,9 +166,10 @@ def test_extract_none_on_empty_history(runner):
 
 # --- run_agent: dispatch + fail-closed mapping (E4) ---------------------------
 
-def test_run_agent_unsupported_short_circuits(runner):
+def test_run_agent_unsupported_short_circuits(runner, monkeypatch):
+    monkeypatch.setattr(runner, 'UNSUPPORTED_AGENT_TYPES', frozenset({'future'}))
     calls = []
-    out = runner.run_agent(1, {'agent_type': 'pipeline'}, {'input': 'q'},
+    out = runner.run_agent(1, {'agent_type': 'future'}, {'input': 'q'},
                            predict=lambda **kw: calls.append(kw))
     assert out['status'] == 'unsupported'
     assert out['output'] is None

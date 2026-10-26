@@ -165,6 +165,15 @@ def _k_dispatch_claim(parent_thread_id, epoch):
     return f"parallel_dispatch_claim:{parent_thread_id}:{epoch}"
 
 
+def _k_reconcile_task(parent_thread_id, epoch):
+    """Which task reconciled one epoch, and its children: a batch eval run waits on it (#7015)."""
+    return f"parallel_reconcile_task:{parent_thread_id}:{epoch}"
+
+
+def _decode(value):
+    return value.decode() if isinstance(value, bytes) else value
+
+
 def _k_child_resume_claim(child_thread_id, interrupt_ids):
     fingerprint = json.dumps(sorted(str(item) for item in interrupt_ids), separators=(',', ':'))
     return f"parallel_child_resume_claim:{child_thread_id}:{fingerprint}"
@@ -747,6 +756,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 )
                 return
             self._parallel_track_reconcile(task_id, project_id, payload)
+            self._parallel_record_reconcile(parent_thread_id, epoch, task_id)
             chat_project_id = stash.get('chat_project_id')
             parent_message_id = stash.get('parent_message_id')
             if chat_project_id and parent_message_id:
@@ -768,6 +778,98 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return
 
         self._parallel_epoch_cleanup(parent_thread_id, epoch, parent_task_id)
+
+    @web.method()
+    def _parallel_record_reconcile(self, parent_thread_id, epoch, task_id):
+        """Point the epoch at its reconcile task and its children, before the epoch keys go.
+
+        A batch eval run has only the parked result (thread id + epoch) and blocks until the
+        fan-out has an answer: it polls this key, joins the reconcile task and reads each
+        child's result for the case's trajectory (#7015)."""
+        try:
+            client = self.get_redis_client()  # pylint: disable=E1101
+            children = {
+                _decode(child): _decode(child_task)
+                for child, child_task in (client.hgetall(_k_tasks(parent_thread_id, epoch)) or {}).items()
+            }
+            # Written for every fan-out, chat included: the parent cannot tell whether an eval run
+            # is waiting. Nothing deletes it (the reader may come after the epoch cleanup), so it
+            # lives the full TTL. It is one small JSON value per epoch.
+            client.set(
+                _k_reconcile_task(parent_thread_id, epoch),
+                json.dumps({'task_id': task_id, 'epoch': epoch, 'children': children}),
+                ex=_RECONCILE_PAYLOAD_TTL,
+            )
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] record reconcile failed (parent=%s epoch=%s)", parent_thread_id, epoch)
+
+    @web.method()
+    def parallel_dispatch_reconcile_pointer(self, parent_thread_id, epoch):
+        """``{task_id, epoch, children}`` once the epoch has been reconciled, else None."""
+        try:
+            raw = self.get_redis_client().get(_k_reconcile_task(parent_thread_id, epoch))  # pylint: disable=E1101
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] reconcile pointer read failed (parent=%s epoch=%s)", parent_thread_id, epoch)
+            return None
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:  # pylint: disable=W0703
+            return None
+
+    @web.method()
+    def parallel_dispatch_epoch_children(self, parent_thread_id, epoch):
+        """child_thread_id -> task_id of an epoch still in flight ({} once it reconciled)."""
+        try:
+            tasks = self.get_redis_client().hgetall(_k_tasks(parent_thread_id, epoch)) or {}  # pylint: disable=E1101
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] epoch children read failed (parent=%s epoch=%s)", parent_thread_id, epoch)
+            return {}
+        return {_decode(child): _decode(task_id) for child, task_id in tasks.items()}
+
+    @web.method()
+    def parallel_dispatch_stop_epoch(self, parent_thread_id, epoch):
+        """Stop one epoch's live children when only its thread id and epoch are known.
+
+        A batch eval run that gives up on a fan-out has the parked result, not the parent's
+        task id, so it cannot use :meth:`parallel_dispatch_stop_children` (#7015). Returns the
+        number of children stopped."""
+        if not (parent_thread_id and epoch):
+            return 0
+        return self._parallel_stop_epoch(parent_thread_id, epoch)
+
+    @web.method()
+    def _parallel_stop_epoch(self, parent_thread_id, epoch, parent_task_id=None):
+        """Cancel one epoch: flag it, stop its children, drop their stashes and the epoch keys."""
+        # Flag cancelled BEFORE stopping, so a child's terminal `stopped`
+        # event (fired by the stop_task kill) cannot win the race into the
+        # reconcile gate. The cancel flag is a separate key with its own TTL,
+        # so it outlives the epoch keys we delete below.
+        self._parallel_mark_epoch_cancelled(parent_thread_id, epoch)
+
+        try:
+            tasks = self.get_redis_client().hgetall(_k_tasks(parent_thread_id, epoch)) or {}  # pylint: disable=E1101
+        except Exception:  # pylint: disable=W0703
+            log.exception("[PARALLEL] stop children: tasks lookup failed (epoch=%s)", epoch)
+            tasks = {}
+
+        stopped = 0
+        for child_thread_id, child_task_id in tasks.items():
+            child_thread_id, child_task_id = _decode(child_thread_id), _decode(child_task_id)
+            if child_task_id:
+                try:
+                    self.task_node.stop_task(child_task_id)  # pylint: disable=E1101
+                    stopped += 1
+                except Exception:  # pylint: disable=W0703
+                    log.exception("[PARALLEL] failed to stop child task %s", child_task_id)
+            # Drop the child's HITL launch stash so a stopped child cannot be
+            # resumed from a stale paused card.
+            self._parallel_child_unstash(child_thread_id)
+
+        # Drop the epoch coordination keys (the cancel flag persists).
+        self._parallel_epoch_cleanup(parent_thread_id, epoch, parent_task_id)
+        return stopped
 
     # -- Stop fan-out (chat stop button) --------------------------------------
 
@@ -806,31 +908,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 continue
             epoch_count += 1
 
-            # Flag cancelled BEFORE stopping, so a child's terminal `stopped`
-            # event (fired by the stop_task kill) cannot win the race into the
-            # reconcile gate. The cancel flag is a separate key with its own TTL,
-            # so it outlives the epoch keys we delete below.
-            self._parallel_mark_epoch_cancelled(parent_thread_id, epoch)
-
-            try:
-                tasks = client.hgetall(_k_tasks(parent_thread_id, epoch)) or {}
-            except Exception:  # pylint: disable=W0703
-                log.exception("[PARALLEL] stop children: tasks lookup failed (epoch=%s)", epoch)
-                tasks = {}
-
-            for child_thread_id, child_task_id in tasks.items():
-                if child_task_id:
-                    try:
-                        self.task_node.stop_task(child_task_id)  # pylint: disable=E1101
-                        stopped += 1
-                    except Exception:  # pylint: disable=W0703
-                        log.exception("[PARALLEL] failed to stop child task %s", child_task_id)
-                # Drop the child's HITL launch stash so a stopped child cannot be
-                # resumed from a stale paused card.
-                self._parallel_child_unstash(child_thread_id)
-
-            # Drop the epoch coordination keys (the cancel flag persists).
-            self._parallel_epoch_cleanup(parent_thread_id, epoch, parent_task_id)
+            stopped += self._parallel_stop_epoch(parent_thread_id, epoch, parent_task_id)
 
         log.info(
             "[PARALLEL] stop fan-out: parent_task_id=%s stopped %d child task(s) across %d epoch(s)",

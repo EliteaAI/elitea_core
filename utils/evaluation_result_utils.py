@@ -122,6 +122,13 @@ MAX_TRAJECTORY_PAGE = 10
 
 
 def _execution_row(row, include_trajectory: bool) -> dict:
+    metrics = row.metrics or {}
+    if include_trajectory and 'agents' not in metrics:
+        # Executions written before the per-agent split (#7015 P3) get it from their trajectory.
+        from .evaluation_execution import agent_breakdown
+        agents = agent_breakdown(row.trajectory)
+        if agents:
+            metrics = {**metrics, 'agents': agents}
     return {
         'id': row.id,
         'run_id': row.run_id,
@@ -132,7 +139,7 @@ def _execution_row(row, include_trajectory: bool) -> dict:
         'trajectory_state_reason': row.trajectory_state_reason,
         # Not touched when deferred: reading it would lazy-load the column row by row.
         'trajectory': row.trajectory if include_trajectory else None,
-        'metrics': row.metrics or {},
+        'metrics': metrics,
         'created_at': row.created_at.isoformat() if row.created_at else None,
     }
 

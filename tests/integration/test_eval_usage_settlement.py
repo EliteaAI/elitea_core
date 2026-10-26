@@ -24,8 +24,12 @@ PRID = '6f1c2a90-3b4d-4e5f-8a7b-0123456789ab'
 
 
 class _Criterion:
-    def __init__(self, name, value):
-        self.name, self.value = name, value
+    def __init__(self, name, value, op='eq'):
+        self.name, self.value, self.op = name, value, op
+
+    def holds(self, item):
+        actual = getattr(item, self.name)
+        return actual in self.value if self.op == 'in' else actual == self.value
 
 
 class _Column:
@@ -34,6 +38,9 @@ class _Column:
 
     def __eq__(self, other):
         return _Criterion(self.name, other)
+
+    def in_(self, values):
+        return _Criterion(self.name, tuple(values), 'in')
 
     def __hash__(self):
         return hash(self.name)
@@ -50,13 +57,25 @@ class EvalCaseUsage:
         self.__dict__.update(kwargs)
 
 
+class EvalCaseExecution:
+    run_id = _Column('run_id')
+    case_index = _Column('case_index')
+    trajectory = _Column('trajectory')
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
 class _Query:
     def __init__(self, items):
         self._items = items
 
     def filter(self, *criteria):
-        return _Query([i for i in self._items
-                       if all(getattr(i, c.name) == c.value for c in criteria)])
+        return _Query([i for i in self._items if all(c.holds(i) for c in criteria)])
+
+    def options(self, *options):
+        _OPTIONS.extend(options)
+        return self
 
     def first(self):
         return self._items[0] if self._items else None
@@ -65,9 +84,13 @@ class _Query:
         return list(self._items)
 
 
+_OPTIONS = []
+
+
 class _Store:
-    def __init__(self, run, usage_rows, fail_commit=False):
+    def __init__(self, run, usage_rows, fail_commit=False, executions=()):
         self.run, self.usage_rows, self.fail_commit, self.commits = run, usage_rows, fail_commit, 0
+        self.executions = list(executions)
 
 
 class _Session:
@@ -75,7 +98,9 @@ class _Session:
         self._store = store
 
     def query(self, target):
-        return _Query([self._store.run] if target is EvalRun else self._store.usage_rows)
+        if target is EvalRun:
+            return _Query([self._store.run])
+        return _Query(self._store.executions if target is EvalCaseExecution else self._store.usage_rows)
 
     def commit(self):
         if self._store.fail_commit:
@@ -84,8 +109,11 @@ class _Session:
 
 
 @pytest.fixture
-def harness():
+def harness(monkeypatch):
     holder = {}
+    # The fake columns are not ORM attributes: record what is deferred instead.
+    import sqlalchemy.orm
+    monkeypatch.setattr(sqlalchemy.orm, 'defer', lambda column: ('defer', column.name))
     pkg = types.ModuleType(PKG)
     pkg.__path__ = []
     utils_pkg = types.ModuleType(f'{PKG}.utils')
@@ -93,7 +121,7 @@ def harness():
     models_pkg = types.ModuleType(f'{PKG}.models')
     models_pkg.__path__ = []
     models = types.ModuleType(f'{PKG}.models.evaluation')
-    models.EvalRun, models.EvalCaseUsage = EvalRun, EvalCaseUsage
+    models.EvalRun, models.EvalCaseUsage, models.EvalCaseExecution = EvalRun, EvalCaseUsage, EvalCaseExecution
 
     @contextmanager
     def _get_session(project_id):  # noqa: ARG001
@@ -194,3 +222,87 @@ def test_a_failed_write_does_not_raise(harness):
     _setup(holder, rows, fail_commit=True)
 
     assert _settle(orch, rows, lambda: LEDGER) == {'state': 'unavailable', 'reason': 'write_failed'}
+
+
+# --- #7015 P3: each agent's ledger figures land in metrics.agents ---------------------------
+
+def _entity_row(case, entity, inp, out, nano, calls=1):
+    return {'conversation_id': f'eval_agent_{PRID}_{case}_a1b2c3d4e5f6', 'llm_calls': calls,
+            'input_tokens': inp, 'output_tokens': out, 'cache_read_tokens': 0, 'cache_creation_tokens': 0,
+            'reasoning_tokens': 0, 'cost_nano_usd': nano, 'unpriced_calls': 0, 'model_name': 'haiku',
+            'entity_type': entity[0], 'entity_id': entity[1], 'entity_name': entity[2]}
+
+
+EVAL = ('evaluation', 219, None)
+ORDER = ('application', 53, 'RD-OrderReader')
+
+
+def _agents():
+    return [{'agent': None, 'llm_calls': 2, 'tool_calls': 2, 'input_tokens': 10, 'output_tokens': 1,
+             'cost': None, 'source': 'trajectory'},
+            {'agent': 'RD-OrderReader', 'llm_calls': 3, 'tool_calls': 2, 'input_tokens': 20,
+             'output_tokens': 2, 'cost': None, 'source': 'trajectory'}]
+
+
+def test_dispatched_sub_agents_take_their_ledger_figures(harness):
+    orch, holder = harness
+    rows = [_row(0, 'agent')]
+    execution = EvalCaseExecution(run_id=9, case_index=0, metrics={'llm_calls': 5, 'agents': _agents()})
+    _setup(holder, rows, executions=[execution])
+    ledger = [_entity_row(0, EVAL, 3358, 179, 4_253_000, 2),
+              _entity_row(0, ORDER, 11299, 191, 12_254_000, 3)]
+
+    _settle(orch, rows, lambda: ledger)
+
+    parent, child = execution.metrics['agents']
+    assert (parent['input_tokens'], parent['source'], parent['ledger_calls']) == (3358, 'ledger', 2)
+    assert (child['input_tokens'], child['output_tokens'], child['cost']) == (11299, 191, 0.012254)
+    assert (child['llm_calls'], child['tool_calls']) == (3, 2)  # the trajectory's counts stay
+    assert execution.metrics['llm_calls'] == 5
+
+
+def test_only_the_split_cases_are_loaded_and_without_their_trajectory(harness):
+    orch, holder = harness
+    rows = [_row(0, 'agent'), _row(1, 'agent')]
+    split = EvalCaseExecution(run_id=9, case_index=0, metrics={'agents': _agents()})
+    plain = EvalCaseExecution(run_id=9, case_index=1, metrics={'llm_calls': 1})
+    _setup(holder, rows, executions=[split, plain])
+    _OPTIONS.clear()
+
+    _settle(orch, rows, lambda: [_entity_row(0, EVAL, 1, 1, 1), _entity_row(0, ORDER, 2, 2, 2),
+                                 _entity_row(1, EVAL, 3, 3, 3)])
+
+    assert split.metrics['agents'][1]['source'] == 'ledger'
+    assert plain.metrics == {'llm_calls': 1}
+    assert _OPTIONS == [('defer', 'trajectory')]
+
+
+def test_in_process_sub_agents_keep_the_trajectory_split(harness):
+    orch, holder = harness
+    rows = [_row(0, 'agent')]
+    execution = EvalCaseExecution(run_id=9, case_index=0, metrics={'agents': _agents()})
+    _setup(holder, rows, executions=[execution])
+
+    _settle(orch, rows, lambda: [_entity_row(0, EVAL, 400, 40, 9, 5)])  # every row is the eval's
+
+    assert [a['source'] for a in execution.metrics['agents']] == ['trajectory', 'trajectory']
+
+
+def test_the_breakdown_is_asked_for_per_entity(harness, monkeypatch):
+    orch, holder = harness
+    rows = [_row(0, 'agent')]
+    _setup(holder, rows)
+    asked = {}
+
+    class _Rpc:
+        def timeout(self, _seconds):
+            return self
+
+        def usage_eval_run_breakdown(self, **kwargs):
+            asked.update(kwargs)
+            return []
+
+    monkeypatch.setitem(sys.modules, 'tools', types.SimpleNamespace(
+        db=sys.modules['tools'].db, context=types.SimpleNamespace(rpc_manager=_Rpc())))
+    orch.settle_run_usage(1, 9, PRID, rows, None, started_at=datetime(2026, 10, 6), sleep=lambda s: None)
+    assert asked['by_entity'] is True
