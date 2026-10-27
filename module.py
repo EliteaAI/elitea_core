@@ -6,7 +6,7 @@ from collections import OrderedDict
 from json import dumps
 from pathlib import Path
 from queue import Empty
-from threading import Thread, Event, Lock
+from threading import Thread, Event, Lock, Timer
 
 from pylon.core.tools import module, log
 
@@ -569,6 +569,7 @@ class Module(module.ModuleModel):
         self._ensure_share_token_schema()
         self._ensure_agent_identity_schema()
         self._start_governance()
+        self._start_internal_obo()
 
         self.handle_pylon_modules_initialized()
 
@@ -701,6 +702,51 @@ class Module(module.ModuleModel):
                     log.exception("Failed to unregister %s", name)
                 self._governed_handlers[key] = False
             self.governed_handlers_registered = False
+
+    def _start_internal_obo(self):
+        """The run token of governed runs (#7214): the auth plugin hands its bearers to ``verify_request``, and the
+        binding column it scopes by is added to the project schemas that predate it (off-thread, catalog-guarded).
+        Without the auth plugin's hook no run token is accepted (the internal MCP refuses it), which fails closed."""
+        from .utils import internal_obo  # pylint: disable=C0415
+        try:
+            auth.register_bearer_verifier(
+                internal_obo.TOKEN_PREFIX, lambda token, environ: internal_obo.verify_request(token, environ, module=self))
+        except Exception as exc:  # pylint: disable=W0703
+            log.error("internal OBO: the run token verifier could not be registered (%s)", type(exc).__name__)
+        if internal_obo.signing_key() is None:
+            log.warning("internal OBO: SECRETS_MASTER_KEY is not set; governed runs with built-in Elitea tools are "
+                        "refused (INTERNAL_TOKEN_UNAVAILABLE)")
+
+        def _run():
+            try:
+                from .utils.binding_operations_schema import (  # pylint: disable=C0415
+                    apply_operations_column, project_ids_missing_operations_column,
+                )
+                pending = project_ids_missing_operations_column()
+                if pending:
+                    migrated, failed = apply_operations_column(pending)
+                    log.info("binding operations schema: column added (migrated=%s failed=%s)",
+                             len(migrated), len(failed))
+            except Exception:  # pylint: disable=W0703
+                log.exception("binding operations schema: auto-migration failed")
+
+        Thread(target=_run, daemon=True).start()
+
+        def _check_map():
+            # every MCP-exposed write must be in the operation map, or agents with a run token are refused it
+            try:
+                from tools import openapi_registry  # pylint: disable=C0415
+                missing = internal_obo.unmapped_writes(openapi_registry.get_mcp_api_tools())
+                log.info("security_metric name=internal_obo_unmapped_writes value=%s", len(missing))
+                if missing:
+                    log.error("internal OBO: MCP-exposed writes missing from the operation map (refused for runs): %s",
+                              ", ".join(missing))
+            except Exception:  # pylint: disable=W0703
+                log.exception("internal OBO: the operation map could not be checked")
+
+        timer = Timer(60.0, _check_map)   # after every plugin registered its OpenAPI endpoints
+        timer.daemon = True
+        timer.start()
 
     def _ensure_share_token_schema(self):
         """Startup safety net: create share-token tables in any project schema (and
@@ -1176,6 +1222,11 @@ class Module(module.ModuleModel):
 
     def deinit(self):
         log.info('De-initializing')
+        try:   # the run token verifier goes with the module, first: what follows can raise (#7214)
+            from .utils.internal_obo import TOKEN_PREFIX  # pylint: disable=C0415
+            auth.unregister_bearer_verifier(TOKEN_PREFIX)
+        except Exception as exc:  # pylint: disable=W0703
+            log.warning("internal OBO: the run token verifier was not unregistered (%s)", type(exc).__name__)
         self.thread._stop()
 
         # MCP SSE deinitialization

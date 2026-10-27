@@ -57,6 +57,11 @@ class ExecutionSecurityContextView(BaseModel):
     # A mandate run only: when Main stops it, and the code that says which bound applied (#6947)
     run_deadline: Optional[datetime] = None
     run_deadline_code: Optional[str] = None
+    # Who the run acts for (#7214): the subject reference (``idp:<tid>:<oid>`` or ``mandate:<id>``), the user the
+    # platform acts as, and the agent's project; what the run token is minted from. References only
+    subject_ref: Optional[str] = None
+    subject_user_id: Optional[int] = None
+    binding_project_id: Optional[int] = None
 
 
 def _holder(sid):

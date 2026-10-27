@@ -17,6 +17,29 @@ from .mcp_session import SseSession
 from .mcp_versioning import INTERNAL_MCP_ENVIRON_KEY
 
 
+# Path parameters an API declares as ``<path:...>`` (an artifact's ``filename`` in a folder): several segments, each
+# of them checked as one
+MULTI_SEGMENT_PATH_PARAMS = frozenset({"filename"})
+
+
+def _path_segment(name, value) -> str:
+    """One path parameter as path segment(s) of the in-process request. ``PATH_INFO`` is the decoded path (PEP 3333),
+    so the value is not percent-encoded (the route would see ``%2F`` literally); what could leave its place is refused
+    instead: a slash (but between the segments of a ``<path:...>`` parameter), a backslash, an empty or dot segment, a
+    control character (CR/LF included), ``?`` or ``#``."""
+    text = str(value)
+    segments = text.split("/") if name in MULTI_SEGMENT_PATH_PARAMS else [text]
+    for segment in segments:
+        if (not segment or segment in (".", "..") or any(ch in segment for ch in "/\\?#")
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in segment)):
+            raise ValueError(f"path parameter {name} must be a plain path segment")
+    return text
+
+
+class _RunTokenRefusal(Exception):
+    """A tool call the run token's scope does not allow (#7214); its text is the readable refusal."""
+
+
 class McpProjectScopeError(Exception):
     """Raised when a tool argument names a project the session is not confined to."""
 
@@ -32,6 +55,33 @@ def _same_path_value(supplied, scoped) -> bool:
         return float(supplied) == float(scoped)
     except (TypeError, ValueError):
         return str(supplied).strip() == str(scoped).strip()
+
+
+def _run_token_claims():
+    """The verified run token claims of this request (#7214), or None. No import of the governance code otherwise."""
+    try:
+        from flask import g as flask_g, has_request_context  # pylint: disable=C0415
+        if not has_request_context():
+            return None
+        claims = getattr(flask_g, "internal_obo", None)
+    except Exception:  # pylint: disable=W0703
+        return None
+    return claims if isinstance(claims, dict) else None
+
+
+def _refused_by_run_token(operation, target, tool_name, arguments=None):
+    """A call under a run token (#7214): the readable refusal when its arguments name a project outside the token's
+    targets, or its scope does not allow ``operation`` (or a write cannot be recorded), else None after recording a
+    write. A call without a run token: None, nothing read."""
+    if _run_token_claims() is None:
+        return None
+    from . import internal_obo  # pylint: disable=C0415
+    try:
+        internal_obo.check_targets(arguments or {}, target, tool_name)
+        internal_obo.check_operation(operation, target, tool_name)
+    except internal_obo.OperationRefused as exc:
+        return internal_obo.refusal_text(exc)
+    return None
 
 
 class McpApiToolExecutor:
@@ -61,6 +111,13 @@ class McpApiToolExecutor:
                 arguments, parameters, default_path_params, scoped_path_params
             )
             url_path = McpApiToolExecutor._build_url_path(path, path_params)
+            if _run_token_claims() is not None:
+                from .internal_obo import operation_of  # pylint: disable=C0415
+                refused = _refused_by_run_token(   # classified by the tool's own path template, not the call's values
+                    operation_of(method, path), f"{method} {url_path}", api_tool.get("label", ""),
+                    {**query_params, **body_params})
+                if refused:
+                    return {"error": refused}
 
             log.debug(f"Calling API tool: {method} {url_path} query={query_params} body={body_params}")
 
@@ -155,7 +212,7 @@ class McpApiToolExecutor:
 
         url_path = path_template
         for param_name, param_value in path_params.items():
-            url_path = url_path.replace(f"{{{param_name}}}", str(param_value))
+            url_path = url_path.replace(f"{{{param_name}}}", _path_segment(param_name, param_value))
 
         return url_path
 
@@ -190,6 +247,11 @@ class McpApiToolExecutor:
         }
 
         McpApiToolExecutor._add_auth_headers(environ, flask_g, flask_request)
+        claims = _run_token_claims()
+        if claims is not None:
+            # the run token this endpoint verified: the API call below is the same request, not validated again (#7214)
+            from .internal_obo import VERIFIED_ENVIRON_KEY  # pylint: disable=C0415
+            environ[VERIFIED_ENVIRON_KEY] = claims
         McpApiToolExecutor._add_request_body(environ, method, body_params)
 
         return environ
@@ -324,6 +386,9 @@ class McpService:
         try:
             if version_id := self.__get_ver_id_by_agent_name(request.params.name):
                 log.debug("Starting agent call (version = %s)", version_id)
+                refused = _refused_by_run_token("run", f"application_version {version_id}", request.params.name)
+                if refused:
+                    raise _RunTokenRefusal(refused)
                 #
                 result: dict = this.module.do_predict(
                     project_id=self.session.project_id,
@@ -345,6 +410,9 @@ class McpService:
                 tk_name = _build_agent_identifier(toolkit.get('name', ''))
                 tool_name = re.sub(rf"^{re.escape(tk_name)}_+", "", request.params.name)
                 tool_params = request.params.arguments
+                refused = _refused_by_run_token("run", f"toolkit {toolkit['id']} {tool_name}", request.params.name)
+                if refused:
+                    raise _RunTokenRefusal(refused)
                 #
                 result = this.module.do_runtool(
                     project_id=self.session.project_id,
@@ -367,6 +435,8 @@ class McpService:
                     response_content = json.dumps(result["result"])
             else:
                 result = {"error": f"Version matching failure for {request.params.name}"}
+        except _RunTokenRefusal as e:
+            result = {"error": str(e)}
         except InputGuardrailBlockedError as e:
             result = e.body()
         except PoolSaturationError as e:
