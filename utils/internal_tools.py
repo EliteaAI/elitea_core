@@ -572,6 +572,20 @@ def run_token_applies() -> bool:
         return False
 
 
+def run_identity_applies(sid=None) -> bool:
+    """Enforce (#7229): an interactive run of a signed-in person (a session, the holder admission reads) has the run token
+    as its only platform identity: no personal or system token is looked up, created or put on its payload.
+    ``admit_dispatch`` strips any that is left; this only spares the lookup."""
+    from . import internal_obo  # pylint: disable=C0415
+    if not run_token_applies() or internal_obo.signing_key() is None:   # no key: no run token, the token stays
+        return False
+    from ..models.pd.admission import _holder  # pylint: disable=C0415
+    try:
+        return getattr(_holder(sid), "type", None) == "user"
+    except Exception:  # pylint: disable=W0703
+        return False
+
+
 def _get_user_token(user_id: int) -> str | None:
     """Get the first non-expired access token for the user, or None if missing/expired."""
     state, token = resolve_user_token_state(user_id)

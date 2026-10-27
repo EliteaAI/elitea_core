@@ -195,7 +195,8 @@ def test_the_token_costs_one_select_and_one_permission_lookup_on_the_real_dispat
     assert not [statement for statement in plain if "allowed_platform_operations" in statement]
 
 
-def test_a_run_without_an_internal_toolkit_gets_no_token_and_mints_nothing(ns, env):
+def test_a_run_without_an_internal_toolkit_gets_only_a_client_token_with_no_scope_and_no_targets(ns, env):
+    """#7229: the run token is the run's own platform identity; without an internal toolkit it reaches no MCP route."""
     seed(env, ["read", "build"])
     signed = []
     real = obo(ns).mint
@@ -205,7 +206,8 @@ def test_a_run_without_an_internal_toolkit_gets_no_token_and_mints_nothing(ns, e
         assert ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
     finally:
         obo(ns).mint = real
-    assert obo(ns).TOKEN_KWARG not in call["kwargs"] and signed == []
+    assert [(kw["scope"], kw["tgt"]) for kw in signed] == [([], [])]
+    assert claims_of(token_of(ns, call))["scope"] == []
 
 
 def test_a_sub_agent_the_runtime_may_fetch_itself_still_gets_a_token_with_the_private_project(ns, env, monkeypatch):
@@ -220,7 +222,7 @@ def test_a_sub_agent_the_runtime_may_fetch_itself_still_gets_a_token_with_the_pr
     covered = call_kwargs(run_id="run-2", tools=[child],
                           application={"subagent_version_details": {"3:30": {"tools": []}}})
     ns.adm.admit_dispatch(env.module(), "indexer_agent", covered, env.request())
-    assert obo(ns).TOKEN_KWARG not in covered["kwargs"]
+    assert claims_of(token_of(ns, covered))["tgt"] == []   # its client token only (#7229): no private project read
 
 
 def test_without_a_key_a_run_with_internal_tools_is_refused_and_its_context_ended(ns, env):
@@ -239,7 +241,8 @@ def test_a_token_the_caller_put_on_the_payload_is_dropped(ns, env):
     seed(env)
     call = call_kwargs(**{"internal_run_token": {"token": "eio1.forged.x", "origins": ["https://evil.example"]}})
     ns.adm.admit_dispatch(env.module(), "indexer_agent", call, env.request())
-    assert "internal_run_token" not in call["kwargs"]
+    delivered = call["kwargs"]["internal_run_token"]   # Main's own (#7229), never the caller's
+    assert delivered["token"] != "eio1.forged.x" and "https://evil.example" not in delivered["origins"]
 
 
 def test_a_child_dispatch_gets_a_token_of_its_parents_context(ns, env):

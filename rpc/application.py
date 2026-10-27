@@ -63,6 +63,7 @@ from ..utils.internal_tools import (
     InternalMcpPatError,
     resolve_internal_mcp_tools,
     redact_internal_mcp_secrets,
+    run_identity_applies,
 )
 from ..utils.toolkit_meta import drop_index_schedules
 from ..utils.tracing_utils import add_trace_context_to_meta
@@ -1626,7 +1627,8 @@ class RPC:
         toolkit_id = (data.get('toolkit_config') or {}).get('toolkit_id')
 
         try:
-            require_internal_mcp_pat(data.get('toolkit_config', {}), user_id)
+            if not (run_identity_applies(sid) and not platform_read):   # an admitted run uses the run token (#7229)
+                require_internal_mcp_pat(data.get('toolkit_config', {}), user_id)
         except InternalMcpPatError as pat_err:
             log.info(f"[MCP] Blocking internal MCP tool test for user {user_id}: {pat_err.error_code}")
             raise SioValidationError(
@@ -1673,7 +1675,8 @@ class RPC:
 
         # Get project-specific auth_token from secrets (not exposed to user)
         try:
-            data['project_auth_token'], data['auth_session'] = get_predict_token_and_session(project_id, data['user_id'], sid)
+            data['project_auth_token'], data['auth_session'] = get_predict_token_and_session(
+                project_id, data['user_id'], sid, run_identity=not platform_read)
             data['session_cookie_name'] = get_session_cookie_name() if data['auth_session'] else None
             data['deployment_url'] = get_predict_base_url(project_id)
             data['public_url'] = get_public_base_url()

@@ -102,6 +102,7 @@ _module(
     'utils.internal_tools',
     resolve_internal_mcp_tools=lambda *_args: None,
     dedupe_internal_mcp_tools=lambda *_args: None,
+    run_identity_applies=lambda *_args: False,
     MCP_CURRENT_PROJECT_SUFFIXES={'elitea_core/project_context', 'elitea_core/skills'},
 )
 _package('plugins', PLUGIN_ROOT.parent)

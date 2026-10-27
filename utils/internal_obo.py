@@ -16,8 +16,9 @@ anything else reads it; the SDK sends it as the bearer of the internal MCP reque
 It is never written to a toolkit's settings, a log line, an audit event or the task meta.
 
 On the MCP side the auth plugin hands a bearer with ``TOKEN_PREFIX`` to ``verify_request`` (registered at init): the
-signature, the audience, the expiry, the route (an internal MCP endpoint, or the in-process API call such an endpoint
-makes), the project it addresses (``tgt``), then the context (a positive verdict is reused for a few seconds). The
+signature, the audience, the expiry, the route (an internal MCP endpoint, the in-process API call such an endpoint
+makes, or a route of the run's own platform client, ``RUN_ROUTES``, #7229), the project it addresses (``tgt``; the run's
+own project on a client route), then the context (a positive verdict is reused for a few seconds). The
 request then runs as the user ``uid`` (``flask.g.auth``) with the claims kept in ``flask.g.internal_obo``: the endpoint's
 own RBAC decorator still decides, and ``check_operation`` refuses an operation outside ``scope``, and any write the
 explicit map (``ENDPOINT_OPERATIONS``) does not know. Every write is recorded as a ``platform_operation`` audit event
@@ -69,6 +70,33 @@ MCP_ROUTE_ENDPOINTS = frozenset({
     "elitea_core.client_streamable_http", "elitea_core.client_tag_filtered_streamable_http",
     "elitea_core.client_parametrized_streamable_http",
 })
+# The routes of the run's own platform client (#7229): what the SDK and the worker call during a run, on the run token
+# as its only bearer, by Flask endpoint and method. The request runs as the run's user in the run's project only, and
+# each endpoint's own RBAC still decides. Any other route (tokens, governance, admin, secrets, configurations, listings,
+# a public agent, another project) refuses the run token with one answer for all.
+LLM_ENDPOINT = "runtime_interface_litellm.litellm_route_http__url"
+S3_ENDPOINTS = frozenset({"artifacts.s3_bucket_operations", "artifacts.s3_object_operations"})
+RUN_ROUTES = {
+    "api.v2.elitea_core.application": frozenset({"GET"}),        # a sub-agent's name and description
+    "api.v2.elitea_core.version": frozenset({"PATCH"}),          # a sub-agent's details, sealed (``seal_fetched_version``)
+    "api.v2.elitea_core.tools_list": frozenset({"GET"}),         # the user's platform MCP servers
+    "api.v2.elitea_core.tools_call": frozenset({"POST"}),
+    "api.v2.elitea_core.tool_spend_check": frozenset({"POST"}),
+    "api.v2.elitea_core.tool_spend_record": frozenset({"POST"}),
+    "api.v2.configurations.models": frozenset({"GET"}),
+    "api.v2.artifacts.buckets": frozenset({"GET", "POST"}),
+    "api.v2.artifacts.artifacts": frozenset({"GET", "POST"}),
+    "api.v2.artifacts.artifact": frozenset({"GET", "DELETE"}),
+    "artifacts.s3_bucket_operations": frozenset({"GET", "HEAD"}),
+    "artifacts.s3_object_operations": frozenset({"GET", "HEAD", "PUT", "DELETE"}),
+    LLM_ENDPOINT: frozenset({"POST"}),
+}
+# The model calls of the LLM proxy (its LLM endpoints, never the LiteLLM admin ones), as the route's ``url``
+LLM_PATHS = frozenset({
+    "v1/chat/completions", "v1/responses", "v1/messages", "v1/messages/count_tokens", "v1/embeddings",
+    "v1/images/generations", "v1/images/edits", "v1/auto-routing/resolve",
+})
+ADMINISTRATION_MODE = "administration"
 
 # Platform operations an agent binding may allow (``allowed_platform_operations``). ``read``: any GET; ``build``:
 # creating, changing or deleting platform entities; ``credentials``: anything that creates, changes or returns a
@@ -282,24 +310,25 @@ def delivery(token, claims) -> dict:
     return {"token": token, "origins": internal_origins(), "identity": identity}
 
 
-def mint_for_admission(view, task_name, payload) -> dict:
+def mint_for_admission(view, task_name, payload, internal=True) -> dict:
     """The delivery of a run Main just admitted (``ExecutionSecurityContextView``): reads only the binding's
-    operations and the user's (cached) permissions."""
+    operations and the user's (cached) permissions. ``internal`` False (#7229): the token only serves the run's own
+    platform client (``RUN_ROUTES``): no scope and no target project, so nothing is read and no MCP route accepts it."""
     if signing_key() is None:   # before any read: a deployment without the key pays nothing for it
         raise TokenUnavailable("no signing key")
     if view.subject_ref is None or view.subject_user_id is None:
         raise TokenUnavailable("no subject")
-    scope = scope_for(view.binding_project_id, view.agent_binding_ref, view.subject_user_id)
+    scope = scope_for(view.binding_project_id, view.agent_binding_ref, view.subject_user_id) if internal else []
     token, claims = mint(
         sub=view.subject_ref, uid=view.subject_user_id, act=view.agent_binding_ref, scope=scope, ctx=view.context_ref,
-        prj=view.project_id, tgt=target_projects(payload, view.project_id, view.subject_user_id), run=view.run_id,
-        tsk=task_name, exp=view.expires_at.timestamp())
+        prj=view.project_id, tgt=target_projects(payload, view.project_id, view.subject_user_id) if internal else [],
+        run=view.run_id, tsk=task_name, exp=view.expires_at.timestamp())
     return delivery(token, claims)
 
 
-def mint_for_context(project_id, context_ref, task_name, payload) -> dict:
+def mint_for_context(project_id, context_ref, task_name, payload, internal=True) -> dict:
     """The delivery of a dispatch that runs under a context admitted earlier (a child, a reconcile run): one read of
-    the context row, then as at admission. The token expires with the context."""
+    the context row, then as at admission (``internal`` as there). The token expires with the context."""
     if signing_key() is None:
         raise TokenUnavailable("no signing key")
     try:
@@ -323,9 +352,9 @@ def mint_for_context(project_id, context_ref, task_name, payload) -> dict:
     expires_at = row.expires_at
     exp = (expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=timezone.utc)).timestamp()
     token, claims = mint(
-        sub=subject_ref, uid=user_id, act=actor, scope=scope_for(binding_project_id, actor, user_id),
-        ctx=str(context_id), prj=project_id, tgt=target_projects(payload, project_id, user_id), run=row.run_id,
-        tsk=task_name, exp=exp)
+        sub=subject_ref, uid=user_id, act=actor, scope=scope_for(binding_project_id, actor, user_id) if internal else [],
+        ctx=str(context_id), prj=project_id, tgt=target_projects(payload, project_id, user_id) if internal else [],
+        run=row.run_id, tsk=task_name, exp=exp)
     return delivery(token, claims)
 
 
@@ -412,14 +441,35 @@ def parse(token, key, now=None, max_lifetime_s=None) -> dict:
     return claims
 
 
-def _route_accepts(environ, endpoint, claims) -> Optional[str]:
-    """``"mcp"`` on an internal MCP route, ``"inner"`` on the in-process API call of a verified one, else None."""
+def _route_accepts(environ, endpoint, claims, view_args=None) -> Optional[str]:
+    """``"mcp"`` on an internal MCP route, ``"inner"`` on the in-process API call of a verified one, ``"run"`` on a
+    route of the run's own platform client (``RUN_ROUTES``), else None."""
     if environ.get(INTERNAL_MCP_ENVIRON_KEY) is True:
         verified = environ.get(VERIFIED_ENVIRON_KEY)
         return "inner" if isinstance(verified, dict) and verified.get("jti") == claims["jti"] else None
     if endpoint in MCP_ROUTE_ENDPOINTS:
         return "mcp"
+    view_args = view_args or {}
+    if environ.get("REQUEST_METHOD") in RUN_ROUTES.get(endpoint, ()) and view_args.get("mode") != ADMINISTRATION_MODE \
+            and (endpoint != LLM_ENDPOINT or view_args.get("url") in LLM_PATHS):
+        return "run"
     return None
+
+
+def _run_route_project(environ, endpoint, view_args, args) -> Optional[int]:
+    """The project a request of the run's own client acts in, as the route itself reads it: the path's
+    ``project_id``, the S3 API's ``?project_id``, the LLM proxy's ``X-Project-Id`` (else ``OpenAI-Organization``).
+    None when it names none or an unreadable one (refused: the proxy would pick the user's own project)."""
+    if endpoint == LLM_ENDPOINT:
+        value = environ.get("HTTP_X_PROJECT_ID") or environ.get("HTTP_OPENAI_ORGANIZATION")
+    elif endpoint in S3_ENDPOINTS:
+        value = (args or {}).get("project_id")
+    else:
+        value = (view_args or {}).get("project_id")
+    try:
+        return None if isinstance(value, bool) else int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def _addressed_projects(route, view_args, args) -> list:
@@ -501,12 +551,16 @@ def verify_request(token, environ, endpoint=None, module=None, now=None, view_ar
     except ValueError as exc:
         _count_unverified(str(exc))   # not Main's claims (or not readable ones): counted, not audited
         return _refusal(str(exc))
-    route = _route_accepts(environ, endpoint, claims)
+    route = _route_accepts(environ, endpoint, claims, view_args)
     if route is None:
         return _refuse_verified(module, claims, INTERNAL_TOKEN_INVALID) | {"status": 403}
-    if any(project not in claims["tgt"] for project in _addressed_projects(route, view_args, args)):
+    if route == "run":
+        # the run's own client acts in the run's project only (#7229); ``tgt`` is for the internal MCP
+        if _run_route_project(environ, endpoint, view_args, args) != claims["prj"]:
+            return _refuse_verified(module, claims, INTERNAL_TARGET_DENIED)
+    elif any(project not in claims["tgt"] for project in _addressed_projects(route, view_args, args)):
         return _refuse_verified(module, claims, INTERNAL_TARGET_DENIED)
-    if route == "mcp" and not _cached_verdict(claims):
+    if route in ("mcp", "run") and not _cached_verdict(claims):
         from .admission import validate_context  # pylint: disable=C0415
         caller = {"kind": "indexer_worker", "task_name": claims["tsk"], "run_id": claims["run"]}
         verdict = validate_context(module, claims["prj"], claims["ctx"], caller, touch=False)

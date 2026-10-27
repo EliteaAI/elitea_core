@@ -1050,3 +1050,20 @@ def test_a_mandate_run_whose_sub_agents_carry_no_credential_of_their_own_is_admi
     shared = credential.payload["application"]["version_details"]["tools"][0]   # the mandate's own toolkit
     admit(ns, env, agent, run_id="run-2", payload=with_sub_agent(credential.payload, shared))
     assert len(contexts(env, ns)) == 2
+
+
+def test_a_mandate_dispatch_keeps_its_system_token_and_gets_no_client_token(ns, env, agent):
+    """#7229: only an interactive run of a signed-in person has the run token as its only identity; a scheduled or
+    webhook run keeps the token its payload builder gave it, as before."""
+    ns.tools.config.SECRETS_MASTER_KEY = "test-master-key-not-a-secret"
+    try:
+        call = {"args": [], "pool": "agents", "meta": {"project_id": 1}, "kwargs": {
+            "project_id": 1, "_elitea_predict_run_id": RUN, "llm": {"kwargs": {"api_key": "system-token-value"}},
+            "application": {"version_details": {"tools": []}},
+            "envelope": {"schema_version": 1, "security_profile": "governed",
+                         "required_capabilities": ["task_envelope.v1"], "context_ref": None}}}
+        assert ns.adm.admit_dispatch(env.module(), "indexer_agent", call, request(ns, agent.mandate))
+        assert call["kwargs"]["llm"]["kwargs"]["api_key"] == "system-token-value"
+        assert "internal_run_token" not in call["kwargs"]
+    finally:
+        vars(ns.tools.config).pop("SECRETS_MASTER_KEY", None)
