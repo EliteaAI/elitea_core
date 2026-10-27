@@ -1636,7 +1636,7 @@ class RPC:
             log.warning("Continuing with original toolkit configuration")
 
         try:
-            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id, admitted_run=False)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
 
@@ -1937,7 +1937,7 @@ class RPC:
             log.warning("Continuing with original toolkit configuration")
 
         try:
-            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id)
+            resolve_internal_mcp_tools([data['toolkit_config']], user_id, project_id, admitted_run=False)
         except Exception as e:
             log.warning(f"Failed to resolve internal MCP toolkit for test: {e}")
 

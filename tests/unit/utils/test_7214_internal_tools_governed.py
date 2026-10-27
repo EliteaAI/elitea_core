@@ -117,6 +117,17 @@ def test_enforce_resolves_a_manual_internal_toolkit_without_a_personal_token(loa
     assert loaded.auth.calls == []
 
 
+def test_enforce_keeps_the_personal_token_for_a_toolkit_test_that_is_not_an_admitted_run(loaded):
+    # The toolkit Test run and the MCP connection test are dispatched without admission, so no run token
+    # exists for them; they keep the user's own token (PAT or the platform's system token) under enforce.
+    governed(loaded)
+    tool = {"type": "mcp_elitea", "settings": {"url": "http://pylon_main:8080/app/{project_id}/mcp/secrets",
+                                               "headers": {"Authorization": "Bearer {personal_token}"}}}
+    loaded.it.resolve_internal_mcp_tools([tool], 42, 3, admitted_run=False)
+    assert tool["settings"]["personal_token"] == "pat-9"
+    assert tool["settings"]["headers"]["Authorization"] == "Bearer pat-9"
+
+
 def test_off_resolves_a_manual_internal_toolkit_with_the_personal_token(loaded):
     tool = {"type": "mcp_elitea", "settings": {"url": "http://pylon_main:8080/app/{project_id}/mcp/secrets",
                                                "headers": {"Authorization": "Bearer {personal_token}"}}}

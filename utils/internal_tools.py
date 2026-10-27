@@ -860,9 +860,13 @@ def _match_internal_mcp(toolkit_config: dict) -> tuple[bool, str | None]:
     return True, prebuilt_url
 
 
-def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_id: int) -> None:
-    # under enforce no personal token is filled in: the run token is (#7214)
-    token = None if run_token_applies() else _TOKEN_UNSET
+def resolve_internal_mcp_tools(tools: list[dict], user_id: int, runtime_project_id: int,
+                               admitted_run: bool = True) -> None:
+    """``admitted_run``: the payload is for an admitted run, which under enforce authenticates its internal
+    toolkits with the run token minted at admission, so no personal token is filled in (#7214). The toolkit
+    test and the MCP connection test are dispatched without admission and get no run token; they pass
+    ``admitted_run=False`` and keep the user's own token, as the discovery path does (follow-up: #7229)."""
+    token = None if admitted_run and run_token_applies() else _TOKEN_UNSET
     for tool in tools or []:
         try:
             matched, prebuilt_url = _match_internal_mcp(tool)
