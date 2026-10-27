@@ -136,7 +136,7 @@ DESCRIPTIONS = {
                        "may run what has no identity binding yet. Such a run acts as the signed-in author only and may "
                        "use only the author's own credentials: personal ones, and project credentials already granted "
                        "to that person. Nothing it produces can be shared, published or scheduled. Switching to "
-                       "enforce switches it on; you can switch it off afterwards.",
+                       "enforce switches it on unless you switch it off in the same change.",
         },
         "change_note": {
             "label": "Change note",
@@ -303,18 +303,20 @@ class Effective:
 
 def development_runs_default(mode: str) -> bool:
     """The ``allow_development_runs`` an operator has not chosen: on under audit only (the editor's test chat is then
-    rehearsed as a development run, not recorded as a would-deny) and under enforce (an author keeps developing as
-    before, #7227 D14), off under off (#7213)."""
-    return mode in (MODE_AUDIT_ONLY, MODE_ENFORCE)
+    rehearsed as a development run, not recorded as a would-deny), off under enforce and off (#7213). A deployment
+    already in enforce keeps what it has; only a switch into enforce turns development runs on (#7227 D14)."""
+    return mode == MODE_AUDIT_ONLY
 
 
-def development_runs_on_change(update_mode: str, old_mode: str, chosen: Optional[bool],
-                               stored: Optional[bool]) -> Optional[bool]:
-    """What the write stores for ``allow_development_runs`` (#7227 D14). Switching to enforce switches development runs
-    on in the same write, unless the operator changed the choice in this very edit (a value other than the stored one):
-    an author meets enforce with the editor, toolkit tests and indexing working. Any later write keeps what the operator
-    chose, so switching them off afterwards sticks."""
-    if update_mode == MODE_ENFORCE and old_mode != MODE_ENFORCE and (chosen is None or chosen == stored):
+DEVELOPMENT_RUNS_WITH_ENFORCE_NOTE = " (development runs enabled with enforce)"
+
+
+def development_runs_on_change(update_mode: str, old_mode: str, chosen: Optional[bool]) -> Optional[bool]:
+    """What the write stores for ``allow_development_runs`` (#7227 D14). The operator's explicit value always wins: it
+    is stored as sent. Only a write that switches into enforce and says nothing about it (an API caller) switches
+    development runs on, so an author meets enforce with the editor, toolkit tests and indexing working; the Admin UI
+    sends the switch it shows (on when the mode is changed to enforce, unless the operator turns it off)."""
+    if chosen is None and update_mode == MODE_ENFORCE and old_mode != MODE_ENFORCE:
         return True
     return chosen
 
@@ -687,7 +689,8 @@ class SettingsUpdate(BaseModel):
     policy_revision: Optional[str] = Field(default=None, max_length=MAX_POLICY_REVISION)
     admit_legacy_pat: StrictBool
     allow_runtime_domain_binding: StrictBool
-    # Absent or null: not chosen, the default of the mode applies (on under audit only and enforce; #7213, #7227 D14)
+    # Absent or null: not chosen, the default of the mode applies (on under audit only, off otherwise; #7213); a switch into
+    # enforce that says nothing about it switches development runs on (#7227 D14)
     allow_development_runs: Optional[StrictBool] = None
     environment: Optional[str] = Field(default=None, max_length=MAX_ENVIRONMENT)
     change_note: str = Field(min_length=1, max_length=MAX_CHANGE_NOTE)
@@ -762,9 +765,12 @@ def apply_update(module, body, actor_id: int) -> dict:  # pylint: disable=R0912,
         if failed:
             raise SettingsError("PREFLIGHT_FAILED", failed_checks=failed)
     old_mode = current.mode if current is not None else MODE_OFF
-    development = development_runs_on_change(
-        update_.mode, old_mode, update_.allow_development_runs,
-        current.allow_development_runs if current is not None else None)
+    development = development_runs_on_change(update_.mode, old_mode, update_.allow_development_runs)
+    automatic = development is True and update_.allow_development_runs is None   # switched on with enforce
+    change_note = update_.change_note
+    if automatic:   # the history says so: nobody chose it in this write
+        change_note = (change_note[:MAX_CHANGE_NOTE - len(DEVELOPMENT_RUNS_WITH_ENFORCE_NOTE)]
+                       + DEVELOPMENT_RUNS_WITH_ENFORCE_NOTE)
     values = dict(mode=update_.mode, policy_revision=update_.policy_revision,
                   admit_legacy_pat=update_.admit_legacy_pat,
                   allow_runtime_domain_binding=update_.allow_runtime_domain_binding,
@@ -793,7 +799,7 @@ def apply_update(module, body, actor_id: int) -> dict:  # pylint: disable=R0912,
                 if changed != 1:
                     raise SettingsError("REVISION_CONFLICT")
             session.execute(insert(History).values(
-                **values, scope_kind=SCOPE_PLATFORM, scope_id=0, revision=revision, change_note=update_.change_note,
+                **values, scope_kind=SCOPE_PLATFORM, scope_id=0, revision=revision, change_note=change_note,
                 changed_by=actor_id, changed_at=now))
             try:
                 for event in events:

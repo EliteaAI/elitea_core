@@ -713,3 +713,68 @@ def test_the_configuration_facts_are_read_once_per_dispatch_with_what_later_step
         assert cd.read_configuration_facts([("a", 1)], reader)["a"]["section"] == "credentials"
     assert sorted(calls) == [(1, ["a", "b"]), (2, ["c"])]   # one read per project, none after
     assert set(cd.read_configuration_facts([("a", 1)], reader)) == {"a"} and len(calls) == 3   # outside: as before
+
+
+# --- C9-SEC-32: the toolkit runner never runs under a context it was not admitted for -------------------------------------
+
+def agent_run(env, ns):
+    """A live governed agent run of the caller, with a credential granted on its binding: ``(call, context_ref, cred)``."""
+    cred = Credential(env, env.seed_agent())
+    call, ref = dispatch(env, ns, payload_of(cred), module_=env.module(), entry_point="chat_sio")
+    ns.adm.validate_context(env.module(), 1, ref, CALLER)   # running
+    return call, ref, cred
+
+
+@pytest.mark.parametrize("governed", [True, False])
+def test_a_toolkit_run_naming_the_context_of_another_run_is_refused_before_anything_is_read(ns, env, monkeypatch,
+                                                                                             governed):
+    _call, ref, cred = agent_run(env, ns)
+    minted = []
+    monkeypatch.setattr(ns.adm.internal_obo, "mint_for_context", lambda *args: minted.append(args) or {"token": "t"})
+    forged = toolkit_call(cred, context_ref=ref)   # the caller's data carried the agent run's envelope
+    before = len(env.sessions)
+    for admission in (toolkit_request(env), None):   # with the caller's own admission, and with none
+        with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+            ns.adm.admit_dispatch(module(env, governed=governed), TOOLKIT_TASK, copy.deepcopy(forged), admission)
+        assert err.value.reason_code == "DENIED_ENTRY_POINT"
+    assert minted == [] and len(env.sessions) == before   # nothing read, sealed against or minted for it
+    assert cred.secret in dumped(forged)   # (the forged call itself was never sealed against the agent's decision)
+
+
+def test_an_agent_dispatch_with_a_toolkit_entry_point_and_an_inherited_context_is_refused(ns, env):
+    _call, ref, cred = agent_run(env, ns)
+    child = call_kwargs(payload_of(cred), context_ref=ref)
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        ns.adm.admit_dispatch(module(env), "indexer_agent", child, toolkit_request(env))
+    assert err.value.reason_code == "DENIED_ENTRY_POINT"
+    assert child["kwargs"]["envelope"]["context_ref"] == ref and "context_ref" not in child["meta"]
+
+
+def test_the_worker_validation_and_the_release_tie_the_task_to_the_entry_point_of_the_context(ns, env):
+    ns.need_transport()
+    call, ref, cred = agent_run(env, ns)
+    toolkit_caller = dict(TOOLKIT_CALLER)
+    assert ns.adm.validate_context(env.module(), 1, ref, toolkit_caller)["ok"] is False   # an agent run's context
+    slot = call["kwargs"]["application"]["version_details"]["tools"][0]["settings"]["credentials"]["credential_slot"]
+    assert release(env, ns, ref, cred.tool_id, slot, caller=toolkit_caller)["ok"] is False
+    tool_cred = Credential(env, uuid.uuid4(), tool_id=7, config_id=9)
+    toolkit_ref = admit_toolkit(env, ns, toolkit_call(tool_cred), toolkit_id=7)
+    assert ns.adm.validate_context(env.module(), 1, toolkit_ref, CALLER)["ok"] is False   # an agent task on a toolkit run
+    assert ns.adm.validate_context(env.module(), 1, toolkit_ref, toolkit_caller)["ok"] is True
+
+
+def test_the_caller_data_loses_every_platform_field_at_the_entry(ns):
+    data = {"tool_name": "t", "envelope": {"context_ref": "x"}, "context_ref": "x", "_elitea_predict_run_id": "r",
+            ns.adm.UNADMITTED_KWARG: True, ns.adm.internal_obo.TOKEN_KWARG: "eio1.x",
+            ns.adm.FREE_FORM_SECRET_MARK: False}
+    removed = ns.adm.strip_platform_fields(data)
+    assert data == {"tool_name": "t"} and len(removed) == 6
+    marked = {"tool_name": "t", ns.adm.FREE_FORM_SECRET_MARK: True, "envelope": {}}
+    ns.adm.strip_platform_fields(marked, keep=(ns.adm.FREE_FORM_SECRET_MARK,))
+    assert marked == {"tool_name": "t", ns.adm.FREE_FORM_SECRET_MARK: True}   # Main's own mark stays
+    text = (PLUGIN_ROOT / "rpc" / "application.py").read_text()
+    test = function(text, "test_toolkit_tool_sio", "def test_mcp_connection_sio(")
+    # every caller-data entry of a toolkit run passes here first (socket, REST, chat participant, index_data, which
+    # hands the same data to start_index_task); do_runtool strips its own payload (test_7227_toolkit_entries)
+    assert test.index("strip_platform_fields(data)") < test.index("admission_request_from(") \
+        < test.index("start_index_task(")

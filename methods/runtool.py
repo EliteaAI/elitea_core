@@ -3,6 +3,7 @@ from pylon.core.tools import log, web
 from sqlalchemy.orm import joinedload
 
 from ..models.pd.admission import ENTRY_TOOLKIT_TEST, admission_request_from
+from ..utils.admission import strip_platform_fields
 from ..utils.credential_slots import has_free_form_secret, mark_free_form_secret
 from ..utils.predict_utils import generate_test_tool_payload
 from ..utils.exceptions import AdmissionDenied, PoolSaturationError
@@ -23,6 +24,7 @@ class Method:
         predict_timeout=float(60*60),  # 1 hour
     ):
         payload = generate_test_tool_payload(project_id, user_id=user_id, toolkit_id=toolkit_id, tool_name=tool_name, tool_params=tool_params)
+        strip_platform_fields(payload)   # only the admission made here decides the run (C9-SEC-32)
         # Governed (#7229): a development run of the authenticated HTTP caller (never the user_id argument); a webhook has
         # no person behind it. None when governance is off
         admission = admission_request_from(

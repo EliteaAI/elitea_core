@@ -39,7 +39,7 @@ from ..utils.application_utils import (
 )
 from ..models.pd.admission import ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_TOOLKIT_TEST, admission_request_from
 from ..utils.mandate_admission import take_trigger_admission
-from ..utils.admission import CREDENTIAL_FREE
+from ..utils.admission import CREDENTIAL_FREE, strip_platform_fields
 from ..utils.credential_slots import has_free_form_secret, has_secret_template, mark_free_form_secret
 from ..utils.governance import is_governed
 from ..utils.exceptions import (
@@ -1554,6 +1554,11 @@ class RPC:
         """
         if start_event_content is None:
             start_event_content = {}
+        # the caller's data never carries what only Main sets on a dispatch (an envelope, its context, a run id, the
+        # run token, the markers): a toolkit run runs only under the admission made for it (C9-SEC-32)
+        removed = strip_platform_fields(data)
+        if removed:
+            log.warning("test_toolkit_tool_sio: platform fields removed from the caller's data: %s", removed)
 
         # Generate unique IDs for tracking
         data['message_id'] = data.get('message_id', str(uuid4()))

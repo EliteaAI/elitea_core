@@ -68,12 +68,33 @@ ADMITTED_TASKS = frozenset({"indexer_agent", "indexer_predict_agent", TOOLKIT_TA
 # or indexing it on demand. A toolkit run has no other profile: it is never a governed (bound) run
 TOOLKIT_ENTRY_POINTS = frozenset({ENTRY_TOOLKIT_TEST, ENTRY_INDEX_ON_DEMAND})
 DEVELOPMENT_ENTRY_POINTS = frozenset({ENTRY_EDITOR_CHAT, *TOOLKIT_ENTRY_POINTS})
+
+
+def task_fits_entry(task_name, entry_point) -> bool:
+    """The toolkit runner runs only toolkit runs, and a toolkit run only on the toolkit runner (C9-SEC-32): at dispatch,
+    at the worker's validation and at every release."""
+    return (task_name == TOOLKIT_TASK) == (entry_point in TOOLKIT_ENTRY_POINTS)
 # Passed as ``admission`` by the platform's own read of chat attachments (a built-in toolkit with no credential): such a
 # dispatch is not admitted, and its payload must be shown to carry no credential (sealed with no decisions)
 CREDENTIAL_FREE = type("CredentialFreeDispatch", (), {"__repr__": lambda self: "CREDENTIAL_FREE"})()
 # What tells the worker that such a dispatch was not admitted on purpose (it refuses a governed run with no context
 # otherwise): set here only, never taken from a caller. Twin of indexer_worker methods/indexer_test_toolkit.py
 UNADMITTED_KWARG = "c1009_unadmitted_read"
+# What only Main puts on a dispatch, and the worker trusts: never taken from a caller's data (C9-SEC-32)
+PLATFORM_KWARGS = ("envelope", "context_ref", PREDICT_RUN_ID_KWARGS_KEY, UNADMITTED_KWARG, internal_obo.TOKEN_KWARG,
+                   FREE_FORM_SECRET_MARK)
+
+
+def strip_platform_fields(data, keep=()) -> list:
+    """Remove from a caller's data, in place, every key only Main may set on a dispatch (the task envelope and its
+    context, the run id, the unadmitted-read marker, the run token, the free-form secret mark), but ``keep`` (what Main
+    itself set on the data meanwhile). The names removed, for the log; the values are never read."""
+    if not isinstance(data, dict):
+        return []
+    removed = [key for key in PLATFORM_KWARGS if key in data and key not in keep]
+    for key in removed:
+        del data[key]
+    return removed
 SCHEMA_VERSION = 1
 MAX_TRACKED_CONTEXTS = 10_000
 CREDENTIAL_FACTS_MIN_VERSION = 3   # the secrets plugin's credential_use_facts shape this module reads
@@ -1394,6 +1415,14 @@ def admit_dispatch(  # pylint: disable=R0911
     payload.pop(internal_obo.TOKEN_KWARG, None)   # only minted below, never taken from what the caller built
     payload.pop(UNADMITTED_KWARG, None)   # only set below, for the platform's own read
     view_payload = _dispatched_view(task_name, payload)   # a toolkit run: its toolkit as the run's toolkit list (#7229)
+    # the toolkit runner never runs under a context it was not admitted for (C9-SEC-32): it never inherits one, the
+    # platform's unadmitted read is for it only, and an admission request must name an entry point of its own kind.
+    # Checked before the inherited branch, whatever the mode
+    if task_name == TOOLKIT_TASK and isinstance(envelope, dict) and envelope.get("context_ref"):
+        return _refuse_dispatch(module, "DENIED_ENTRY_POINT", call_kwargs, run_id)
+    if (admission is CREDENTIAL_FREE and task_name != TOOLKIT_TASK) or (
+            isinstance(admission, AdmissionRequest) and not task_fits_entry(task_name, admission.entry_point)):
+        return _refuse_dispatch(module, "DENIED_ENTRY_POINT", call_kwargs, run_id)
     #
     if not isinstance(envelope, dict) or envelope.get("security_profile") != PROFILE_GOVERNED:
         # no governed envelope to carry the context (e.g. a parent started before governance was
@@ -1419,9 +1448,7 @@ def admit_dispatch(  # pylint: disable=R0911
         return _refuse_dispatch(module, "CREDENTIAL_REFERENCE_REQUIRED", call_kwargs, run_id)
     if admission is CREDENTIAL_FREE:
         # the platform's own read of chat attachments (a built-in toolkit, no toolkit row): not admitted, and nothing
-        # was decided for it, so any credential configuration in it is refused. Only the toolkit runner reads it
-        if task_name != TOOLKIT_TASK:
-            return _refuse_dispatch(module, "DENIED_ENTRY_POINT", call_kwargs, run_id)
+        # was decided for it, so any credential configuration in it is refused (only the toolkit runner reads it)
         try:
             _seal_dispatch(view_payload, lambda: [])
         except AdmissionDenied as denied:
@@ -1448,10 +1475,6 @@ def admit_dispatch(  # pylint: disable=R0911
         return _refuse_dispatch(module, "DEPENDENCY_UNAVAILABLE", call_kwargs, run_id)
     if admission is None:
         return _refuse_dispatch(module, "IDENTITY_EVIDENCE_MISSING", call_kwargs, run_id)
-    if (task_name == TOOLKIT_TASK) != (admission.entry_point in TOOLKIT_ENTRY_POINTS):
-        # a toolkit run is admitted only for the toolkit runner, and the toolkit runner only as a toolkit run: an agent
-        # dispatch never takes the toolkit branch (no binding, no author check), whatever entry point it names
-        return _refuse_dispatch(module, "DENIED_ENTRY_POINT", call_kwargs, run_id)
     #
     if admission.trace_ref is None and isinstance(meta.get("traceparent"), str):
         admission = admission.model_copy(update={"trace_ref": meta["traceparent"]})
@@ -1975,7 +1998,7 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
                    columns.run_id, columns.attempt, columns.project_id, columns.application_id, columns.version_id,
                    columns.agent_binding_ref, columns.binding_project_id, columns.subject, columns.caller,
                    columns.definition_digest, columns.policy_revision, columns.environment, columns.revocation_epochs,
-                   columns.allowed_bindings, columns.parent_context_ref, columns.call_lineage)
+                   columns.allowed_bindings, columns.parent_context_ref, columns.call_lineage, columns.entry_point)
             .where(columns.id == context_id)
         ).one_or_none()
         binding = None
@@ -1997,7 +2020,7 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
     if row.schema_version != SCHEMA_VERSION or row.profile not in PROFILES:
         raise _denied("UNKNOWN_SCHEMA_VERSION")
     if (caller.get("kind") != "indexer_worker" or caller.get("task_name") not in ADMITTED_TASKS
-            or caller.get("run_id") != row.run_id):
+            or caller.get("run_id") != row.run_id or not task_fits_entry(caller.get("task_name"), row.entry_point)):
         raise _denied("STALE_CONTEXT")
     if row.state not in LIVE_STATES:
         reason = row.revoked_reason if row.state == "revoked" else None

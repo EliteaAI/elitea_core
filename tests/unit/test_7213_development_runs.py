@@ -481,7 +481,7 @@ def test_a_child_of_a_governed_run_keeps_the_governed_refusal(ns, env):
 
 # --- the setting: default by mode, explicit under enforce ------------------------------------------------------------------
 
-def test_the_setting_defaults_on_under_audit_only_and_enforce_until_chosen(ns):
+def test_the_setting_defaults_on_under_audit_only_and_off_under_enforce_until_chosen(ns):
     gs = ns.governance_settings
 
     def stored(mode, chosen=None):
@@ -492,12 +492,12 @@ def test_the_setting_defaults_on_under_audit_only_and_enforce_until_chosen(ns):
     def effective(mode, chosen=None, ceiling="enforce"):
         return gs.resolve(stored(mode, chosen), ceiling=ceiling, env_environment=None, preflight=[], read="ok")
 
-    # on under audit only and under enforce (#7227 D14), off under off
-    assert gs.development_runs_default("audit_only") and gs.development_runs_default("enforce")
+    # on under audit only, off under enforce and off: an enforce deployment keeps what it has (#7227 D14)
+    assert gs.development_runs_default("audit_only") and not gs.development_runs_default("enforce")
     assert not gs.development_runs_default("off")
     assert effective("audit_only").allow_development_runs is True
-    assert effective("enforce").allow_development_runs is True
-    assert effective("enforce", chosen=False).allow_development_runs is False
+    assert effective("enforce").allow_development_runs is False
+    assert effective("enforce", chosen=True).allow_development_runs is True
     assert effective("off").allow_development_runs is False
     assert effective("enforce", chosen=True).allow_development_runs is True
     assert effective("audit_only", chosen=False).allow_development_runs is False

@@ -520,8 +520,7 @@ def test_the_module_answers_from_the_snapshot(ns, env):
     holder.governance_state.refresh()
     assert holder.governance_profile.enabled is True and holder.governance_profile.policy_revision == "CHG-5"
     assert holder.admission_settings == ns.adm.AdmissionSettings(
-        allow_runtime_domain_binding=False, admit_legacy_pat=True, context_ttl_s=3600, environment="prod-eu",
-        allow_development_runs=True)   # not chosen under enforce: on (#7227 D14)
+        allow_runtime_domain_binding=False, admit_legacy_pat=True, context_ttl_s=3600, environment="prod-eu")
     reader.answer = ("ok", stored(ns, "audit_only", "CHG-6"))
     holder.governance_state.refresh()
     assert holder.governance_profile.enabled is False and holder.governance_profile.policy_revision == "CHG-6"

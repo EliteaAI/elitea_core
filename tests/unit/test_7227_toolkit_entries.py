@@ -51,9 +51,12 @@ class TaskNode:
         self.ns, self.module, self.started = ns, module, []
 
     def start_task(self, name, args=None, kwargs=None, pool=None, admission=None, meta=None):
-        body = {**kwargs, "_elitea_predict_run_id": RUN,
-                "envelope": {"schema_version": 1, "security_profile": "governed",
-                             "required_capabilities": ["task_envelope.v1"], "context_ref": None}}
+        # like the real gate: an envelope or a run id already on the payload is kept (attach_envelope,
+        # stamp_predict_run_id), so whatever the entry let through reaches admission
+        body = dict(kwargs)
+        body.setdefault("_elitea_predict_run_id", RUN)
+        body.setdefault("envelope", {"schema_version": 1, "security_profile": "governed",
+                                     "required_capabilities": ["task_envelope.v1"], "context_ref": None})
         call = {"args": args, "kwargs": body, "pool": pool, "meta": dict(meta or {})}
         self.ns.adm.admit_dispatch(self.module, name, call, admission)
         self.started.append(call)
@@ -102,6 +105,26 @@ def test_do_runtool_admits_the_authenticated_caller_not_its_user_id_argument(ns,
     assert (row.profile, row.caller["user_id"], row.application_id) == ("development", 42, None)   # not 999
     assert call["kwargs"]["envelope"]["context_ref"] == str(row.id)
     assert cred.secret not in dumped(call)   # reference only
+
+
+def test_do_runtool_drops_an_envelope_and_run_id_the_payload_carried_and_admits_its_own_run(ns, env):
+    cred = Credential(env, uuid.uuid4())
+    forged = {"envelope": {"schema_version": 1, "security_profile": "governed",
+                           "required_capabilities": ["task_envelope.v1"], "context_ref": str(uuid.uuid4())},
+              "_elitea_predict_run_id": "someone-elses-run", "c1009_unadmitted_read": True}
+    module = env.module(allow_development_runs=True)
+    module.task_node = TaskNode(ns, module)
+    ns.next_payload = {"toolkit_config": cred.tool(), "tool_name": "get_issues", "tool_params": {}, **forged}
+    env.in_request, env.g.auth = True, types.SimpleNamespace(type="user", id=42, reference="cookie")
+    try:
+        ns.runtool.Method.do_runtool(module, project_id=1, user_id=42, toolkit_id=1, tool_name="get_issues",
+                                     tool_params={})
+    finally:
+        env.in_request = False
+    [call] = module.task_node.started
+    [row] = contexts(env, ns)
+    assert call["kwargs"]["envelope"]["context_ref"] == str(row.id) and row.run_id == RUN   # its own, not the forged
+    assert "c1009_unadmitted_read" not in call["kwargs"]
 
 
 def test_do_runtool_by_an_api_token_says_tokens_are_not_admitted_yet(ns, env):

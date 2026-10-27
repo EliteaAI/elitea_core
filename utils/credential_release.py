@@ -365,7 +365,7 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
                    columns.binding_project_id, columns.project_id, columns.tenant, columns.subject,
                    columns.allowed_bindings, columns.trace_ref, columns.revocation_epochs, columns.caller,
                    columns.definition_digest, columns.policy_revision, columns.environment, columns.parent_context_ref,
-                   columns.call_lineage)
+                   columns.call_lineage, columns.entry_point)
             .where(columns.id == context_id)
         ).one_or_none()
         if row is None:
@@ -388,7 +388,8 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
     #   3a. a live, running context of this worker's run
     if row.schema_version != adm.SCHEMA_VERSION or row.profile not in adm.PROFILES:
         raise adm._denied("STALE_CONTEXT")
-    if first.task_name not in adm.ADMITTED_TASKS or first.caller.get("run_id") != row.run_id:
+    if (first.task_name not in adm.ADMITTED_TASKS or first.caller.get("run_id") != row.run_id
+            or not adm.task_fits_entry(first.task_name, row.entry_point)):   # C9-SEC-32
         raise adm._denied("STALE_CONTEXT")
     if row.state != "running":
         reason = row.revoked_reason if row.state == "revoked" else None
