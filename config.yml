@@ -75,4 +75,4 @@ cost_budgets:
 # POLICY_REVISION, MODE, ADMIT_LEGACY_PAT and ALLOW_RUNTIME_DOMAIN_BINDING variables) is ignored with a warning.
 # Deliberately NOT declared in admin_schema.json, so the admin config editor cannot change it.
 enterprise_credential_governance:
-  context_ttl_s: 3600                   # how long an admitted run may start or restart (60..86400)
+  context_ttl_s: 3600                   # how long an admitted run may stay idle before it can no longer start, restart or call the platform (60..86400); a run in use slides it, up to MAX_RUN_LIFETIME_S

@@ -2202,19 +2202,19 @@ def _validate(project_id, context_ref, caller, known, touch=True, ttl=None):  # 
         if code is not None:
             raise revoke(code)
     #
-    # the run is in use: its deadline (and its root's) slides by the idle window, at most once per half window (#7229)
+    # the run is in use: the deadline of all its live contexts slides by the idle window, at most once per half window
+    # (#7229): the run's sub-agents and its parked root stay as live as the run itself
     now = _now()
-    due = [] if is_mandate or not ttl else [
-        (target.id, target.created_at) for target in ((row_ref(context_id, row), root) if root is not None
-                                                      else (row_ref(context_id, row),))
-        if (target.subject or {}).get("kind") != "mandate"
-        and _aware(target.expires_at) < now + timedelta(seconds=int(ttl) / 2)]
+    members = (row, root) if root is not None else (row,)
+    due = not is_mandate and bool(ttl) and any(
+        _aware(member.expires_at) < now + timedelta(seconds=int(ttl) / 2) for member in members)
     if touch or row.state != "running" or due:   # the internal MCP asks per request: no write once running (#7214)
         with db.get_session(project_id) as session:
             if (touch or row.state != "running") \
                     and _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
                 raise _denied("STALE_CONTEXT")
-            _slide(session, due, int(ttl or 0), now)
+            if due:
+                _slide(session, row.run_id, min(_aware(member.created_at) for member in members), int(ttl), now)
             session.commit()
     return {
         "context_ref": str(context_id), "run_id": row.run_id, "attempt": row.attempt,
@@ -2228,10 +2228,6 @@ _NO_ROOT = type("NoRoot", (), {"__repr__": lambda self: "NO_ROOT"})()   # a line
 _SLIDE_COLUMNS = (ExecutionSecurityContext.id, ExecutionSecurityContext.state, ExecutionSecurityContext.created_at,
                   ExecutionSecurityContext.expires_at, ExecutionSecurityContext.subject)
 RowRef = namedtuple("RowRef", "id state created_at expires_at subject")
-
-
-def row_ref(context_id, row) -> RowRef:
-    return RowRef(context_id, row.state, row.created_at, row.expires_at, row.subject)
 
 
 def _root_row(project_id, row):
@@ -2257,49 +2253,38 @@ def root_context_live(project_id, row) -> bool:
     return root is None or (root is not _NO_ROOT and root.state in LIVE_STATES)
 
 
-def _slide(session, targets, ttl, now, allow_expired=False) -> int:
-    """Move the deadline of each ``(context id, created_at)`` to ``now + ttl``, never past ``created_at`` +
-    ``MAX_RUN_LIFETIME_S`` and never backwards, as one conditional UPDATE each: only a live context (an ended one is never
-    revived) and, unless ``allow_expired`` (the signed-in person's resume decision), only one still in its window. The
-    number of rows moved."""
-    moved = 0
-    for context_id, created_at in targets if ttl > 0 else ():
-        deadline = min(now + timedelta(seconds=ttl), _aware(created_at) + timedelta(seconds=MAX_RUN_LIFETIME_S))
-        conditions = [ExecutionSecurityContext.id == context_id, ExecutionSecurityContext.state.in_(LIVE_STATES),
-                      ExecutionSecurityContext.expires_at < deadline]
-        if not allow_expired:
-            conditions.append(ExecutionSecurityContext.expires_at > now)
-        moved += session.execute(
-            update(ExecutionSecurityContext).where(*conditions).values(expires_at=deadline)).rowcount or 0
-    return moved
+def _slide(session, run_id, created_at, ttl, now, allow_expired=False) -> int:
+    """Move the deadline of every live context of the run (its own, its root's, its sub-agents': one admission, one
+    ``created_at``) to ``now + ttl``, never past ``created_at`` + ``MAX_RUN_LIFETIME_S`` and never backwards, in one
+    conditional UPDATE: an ended context is never revived and, unless ``allow_expired`` (the signed-in person's resume
+    decision), neither is one past its window. The number of rows moved."""
+    if ttl <= 0 or not run_id:
+        return 0
+    deadline = min(now + timedelta(seconds=ttl), _aware(created_at) + timedelta(seconds=MAX_RUN_LIFETIME_S))
+    conditions = [ExecutionSecurityContext.run_id == run_id, ExecutionSecurityContext.state.in_(LIVE_STATES),
+                  ExecutionSecurityContext.expires_at < deadline]
+    if not allow_expired:
+        conditions.append(ExecutionSecurityContext.expires_at > now)
+    return session.execute(
+        update(ExecutionSecurityContext).where(*conditions).values(expires_at=deadline)).rowcount or 0
 
 
 def slide_for_resume(module, project_id, context_ref) -> int:
     """The signed-in person's decision on a paused fan-out child (``_continue_child_resume``, after its requester check)
-    is use of the run: the child's context and its root slide, even past their idle deadline, while they are live and
-    within the cap. A mandate's never does (its deadline is the mandate's). The number of rows moved (#7229)."""
+    is use of the run: every live context of the run (the child's, its root's, its sub-agents') slides, even past its
+    idle deadline, within the cap. A mandate's never does (its deadline is the mandate's). The number moved (#7229)."""
     ttl = int(getattr(getattr(module, "admission_settings", None), "context_ttl_s", 0) or 0)
     try:
         context_id = uuid.UUID(str(context_ref))
     except ValueError:
         return 0
     with db.get_session(project_id) as session:
-        row = session.execute(select(*_SLIDE_COLUMNS, ExecutionSecurityContext.parent_context_ref,
-                                     ExecutionSecurityContext.call_lineage)
+        row = session.execute(select(ExecutionSecurityContext.run_id, ExecutionSecurityContext.created_at,
+                                     ExecutionSecurityContext.subject)
                               .where(ExecutionSecurityContext.id == context_id)).one_or_none()
         if row is None or (row.subject or {}).get("kind") == "mandate":
             return 0
-        targets = [(row.id, row.created_at)]
-        lineage = row.call_lineage if isinstance(row.call_lineage, list) else []
-        if row.parent_context_ref is not None and lineage:
-            try:
-                root = session.execute(select(*_SLIDE_COLUMNS).where(
-                    ExecutionSecurityContext.id == uuid.UUID(str(lineage[0])))).one_or_none()
-            except ValueError:
-                root = None
-            if root is not None and (root.subject or {}).get("kind") != "mandate":
-                targets.append((root.id, root.created_at))
-        moved = _slide(session, targets, ttl, _now(), allow_expired=True)
+        moved = _slide(session, row.run_id, row.created_at, ttl, _now(), allow_expired=True)
         session.commit()
     return moved
 

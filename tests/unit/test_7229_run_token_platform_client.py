@@ -662,6 +662,7 @@ def draft_fan_out(env, ns):
     details = copy.deepcopy(call["kwargs"]["application"]["subagent_version_details"]["8:80"]["version_details"])
     child = call_kwargs({"application": {"id": 8, "version_id": 80, "version_details": details}}, context_ref=ref)
     ns.adm.admit_dispatch(env.module(allow_development_runs=True), "indexer_agent", child, None)
+    draft_fan_out.root_call = call
     return ref, child["kwargs"]["envelope"]["context_ref"], details
 
 
@@ -672,9 +673,10 @@ def test_a_fan_out_child_resumed_after_a_long_pause_runs_on_with_its_root(ns, en
     paused = ns.adm._aware(context_row(env, ns, child_ref).expires_at)  # pylint: disable=W0212
     clock["now"] = paused + timedelta(seconds=2 * TTL)   # the person decides two hours later
     assert verdict(ns, env, child_ref)["reason_code"] == "STALE_CONTEXT"
-    assert ns.adm.slide_for_resume(env.module(), 1, child_ref) == 2   # the child and its root, in one go
-    for ref in (child_ref, root_ref):
-        assert ns.adm._aware(context_row(env, ns, ref).expires_at) > clock["now"]  # pylint: disable=W0212
+    # the whole run slides in one statement: the child, its root and the sub-agents admitted with it
+    assert ns.adm.slide_for_resume(env.module(), 1, child_ref) == len(env.query(1, ns.models.ExecutionSecurityContext))
+    for row in env.query(1, ns.models.ExecutionSecurityContext):
+        assert ns.adm._aware(row.expires_at) > clock["now"]  # pylint: disable=W0212
     # the replay of the stashed child is admitted under the child's own context again, and the worker validates it
     resumed = call_kwargs({"application": {"id": 8, "version_id": 80, "version_details": copy.deepcopy(details)}},
                           context_ref=child_ref)
@@ -682,6 +684,10 @@ def test_a_fan_out_child_resumed_after_a_long_pause_runs_on_with_its_root(ns, en
     assert resumed["kwargs"]["envelope"]["context_ref"] == child_ref
     assert verdict(ns, env, child_ref, touch=True)["ok"] is True
     assert child_ref in [str(row.id) for row in ns.adm.descendant_contexts(1, RUN, root_ref)]
+    # the parked parent's reconcile still finds the decisions of the sub-agents that finished before the pause
+    reconcile = copy.deepcopy(draft_fan_out.root_call)
+    assert ns.adm.admit_dispatch(env.module(allow_development_runs=True), "indexer_agent", reconcile, None) is None
+    assert reconcile["kwargs"]["envelope"]["context_ref"] == root_ref
     # and the release of the child's slot honours the slid deadline
     _private, public = ns.keypair()
     slot = resumed["kwargs"]["application"]["version_details"]["tools"][0]["settings"]["credentials"]["credential_slot"]
