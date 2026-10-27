@@ -89,10 +89,12 @@ class PromptLibAPI(api_tools.APIModeHandler):
         sizes, sizes_complete = collect_attachment_sizes(project_id, attachments)
 
         if summary_only:
-            # Deleted files count as 0; null only when storage could not be listed
+            # Storage-verified counts are null when storage could not be fully checked
             return {
                 'messages_count': len(groups),
                 'attachments_count': len(attachments),
+                'available_count': len(sizes) if sizes_complete else None,
+                'missing_count': len(attachments) - len(sizes) if sizes_complete else None,
                 'total_size': sum(sizes.values()) if sizes_complete else None,
             }, 200
 
