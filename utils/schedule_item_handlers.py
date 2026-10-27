@@ -40,6 +40,7 @@ from .schedule_service import (
     update_schedule,
 )
 from .schedule_timing import ScheduleLimitError
+from .trigger_governance import governance_notice_for
 
 MAX_RUNS_LIMIT = 100
 RUN_FIELDS = (
@@ -167,16 +168,17 @@ def _review_save(project_id: int, version_id: int | None, owner_id: int, name: s
     return review, review
 
 
-def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = None) -> dict:
+def _saved(row, scope: ScheduleScope, project_id: int, review: dict | None = None, notice: str | None = None) -> dict:
     """Details of a saved row, with every finding of the risk review as the save `warnings` (R2.4).
 
-    `review` is the scan the save already ran; a pause or a resume scans here.
+    `review` is the scan the save already ran; a pause or a resume scans here. `notice` is the governance
+    notice of a create or an edit: the schedule is saved, but its version has no active binding.
     """
     if review is None:
         from .schedule_risk import scan_schedule
         review = scan_schedule(project_id, row.version_id, row.created_by)
     warnings = review["blocking"] + review["sensitive"] + review["notices"]
-    return {**_read_answer(row, scope, project_id), "warnings": warnings}
+    return {**_read_answer(row, scope, project_id), "warnings": warnings, "governance_notice": notice}
 
 
 def _read_answer(row, scope: ScheduleScope, project_id: int) -> dict:
@@ -199,10 +201,12 @@ def _validation_response(error: ValidationError) -> tuple[dict, int]:
     return refusal(INVALID_INPUT, first["msg"].removeprefix("Value error, "), field=field)
 
 
-def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | ScheduleEdit, reviewed: bool = False):
+def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | ScheduleEdit, reviewed: bool = False,
+                  module=None):
     """Save an edit, a pause or a resume through the service and answer the details.
 
-    `reviewed` runs the risk review of an edit first; a pause or a resume skips it. The service checks
+    `reviewed` runs the risk review of an edit first and adds the governance notice; a pause or a resume
+    skips both. The service checks
     a resume (a version is needed, the project cap), computes the next run, and marks the audit span
     and tells the owner when an admin changes another owner's schedule.
     """
@@ -219,7 +223,9 @@ def _apply_update(project_id: int, schedule_id: int, body: ScheduleUpdate | Sche
                     body.approval_rule or row.approval_rule, body.risk_ack, _kept_fingerprint(row),
                 )
             row = update_schedule(session, project_id, row, body, scope, confirmed)
-            return _saved(row, scope, project_id, review), 200
+            notice = governance_notice_for(
+                module, session, project_id, row.application_id, row.version_id, "schedule") if reviewed else None
+            return _saved(row, scope, project_id, review, notice), 200
         except ScheduleError as e:
             return e.response
         except ScheduleLimitError as e:
@@ -313,7 +319,9 @@ class ScheduleItemHandlers:
                 return e.response
             except ScheduleLimitError as e:
                 return refusal(LIMIT_REACHED, str(e), 409)
-            return _saved(row, scope, project_id, review), 201
+            notice = governance_notice_for(
+                self.module, session, project_id, row.application_id, row.version_id, "schedule")
+            return _saved(row, scope, project_id, review, notice), 201
 
     @auth.decorators.check_api(schedule_check_spec("details"))
     def _read(self, project_id: int, schedule_id: int):
@@ -348,7 +356,7 @@ class ScheduleItemHandlers:
         refused = _refuse_unallowed_rule(project_id, body)
         if refused:
             return refused
-        return _apply_update(project_id, schedule_id, body, reviewed=True)
+        return _apply_update(project_id, schedule_id, body, reviewed=True, module=self.module)
 
     @auth.decorators.check_api(schedule_check_spec("delete"))
     def _delete(self, project_id: int, schedule_id: int):
@@ -508,7 +516,7 @@ class ScheduleItemHandlers:
                 row = load_schedule_in_scope(session, schedule_id, scope)
             except ScheduleError as e:
                 return e.response
-            reason = validate_new_owner(project_id, owner_id)
+            reason = validate_new_owner(project_id, owner_id, row.entity_type, row.application_id)
             if reason == ACCESS_CHECK_UNAVAILABLE:
                 return refusal("access_check_unavailable", reason, 503)
             if reason:

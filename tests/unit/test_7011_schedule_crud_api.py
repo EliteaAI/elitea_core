@@ -51,6 +51,8 @@ class Harness:
         self.notice_error = None
         self.access_error = None
         self.risk_warnings = []
+        self.governance_notice = None
+        self.governance_calls = []
         self.fingerprint = 'fp-1'
         self.run_without_asking_allowed = False
         self.scans = []
@@ -181,6 +183,14 @@ def harness(isolated_sys_modules, monkeypatch):
     settings = types.ModuleType(f'{PACKAGE}.utils.schedule_settings')
     settings.is_run_without_asking_allowed = lambda project_id: harness.run_without_asking_allowed
     sys.modules[settings.__name__] = settings
+    governance = types.ModuleType(f'{PACKAGE}.utils.trigger_governance')
+
+    def governance_notice_for(module, session, project_id, application_id, version_id, trigger_type):
+        harness.governance_calls.append((project_id, application_id, version_id, trigger_type))
+        return harness.governance_notice
+
+    governance.governance_notice_for = governance_notice_for
+    sys.modules[governance.__name__] = governance
     sys.modules[notifications.__name__] = notifications
 
     harness.EntitySchedule = sqlite_db.create_schedule_table(load, Base, engine)
@@ -294,6 +304,46 @@ def test_7011_r2_5_resume_without_a_version_is_400_and_stays_disabled(harness):
         'Choose a version before you resume this schedule', field='version_id',
     )
     assert harness.row(schedule_id).enabled is False
+
+
+UNBOUND = 'Credential governance is on and this version has no active identity binding'
+
+
+def test_create_answers_the_governance_notice_of_an_unbound_version(harness):
+    harness.governance_notice = UNBOUND
+    body, status = harness.call('post', agent_body())
+    assert status == 201
+    assert body['governance_notice'] == UNBOUND
+    assert harness.governance_calls == [(PROJECT_ID, 1, 10, 'schedule')]
+
+
+def test_create_answers_no_governance_notice_when_the_version_is_bound_or_governance_is_off(harness):
+    body, status = harness.call('post', agent_body())
+    assert status == 201
+    assert body['governance_notice'] is None
+
+
+def test_edit_answers_the_governance_notice_of_an_unbound_version(harness):
+    schedule_id = harness.seed()
+    harness.governance_notice = UNBOUND
+    body, status = harness.call('put', {'name': 'Renamed'}, schedule_id)
+    assert status == 200
+    assert body['governance_notice'] == UNBOUND
+    assert harness.governance_calls[-1][3] == 'schedule'
+
+
+def test_edit_answers_no_governance_notice_when_the_version_is_bound_or_governance_is_off(harness):
+    body, status = harness.call('put', {'name': 'Renamed'}, harness.seed())
+    assert status == 200
+    assert body['governance_notice'] is None
+
+
+def test_pause_does_not_ask_for_a_governance_notice(harness):
+    harness.governance_notice = UNBOUND
+    body, status = harness.call('post', None, harness.seed(), suffix='/pause')
+    assert status == 200
+    assert body['governance_notice'] is None
+    assert harness.governance_calls == []
 
 
 # --- Owner CR 2026-10-21: PUT edits fields only; pause and resume are their own actions
