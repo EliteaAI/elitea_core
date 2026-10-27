@@ -132,6 +132,28 @@ class TestPlatformSettings:
         assert (field['section'], field['type'], field['default'], field['requires_restart']) == ('skills', 'boolean', False, False)
 
 
+class TestPlatformSettingsForTheProjectCard:
+    @pytest.mark.parametrize('config, expected', [
+        ({}, {'available': False, 'project_default': False}),
+        ({'skills': {'project_skills_in_chat': {'available': True, 'project_default': True}}},
+         {'available': True, 'project_default': True}),
+        ({'skills': {'project_skills_in_chat': {'available': 'true', 'project_default': 1}}},
+         {'available': False, 'project_default': False}),
+        ({'skills': None}, {'available': False, 'project_default': False}),
+    ], ids=['unset', 'both on', 'non-boolean values', 'no skills section'])
+    def test_only_literal_true_reads_as_on(self, project_skills, monkeypatch, config, expected):
+        monkeypatch.setattr(project_skills, 'this', types.SimpleNamespace(descriptor=types.SimpleNamespace(config=config)))
+
+        assert project_skills.read_platform_project_skills_settings() == expected
+
+    def test_the_endpoint_returns_the_platform_settings_to_anyone_who_may_list_skills(self):
+        tree = ast.parse((PLUGIN_ROOT / 'api/v2/project_skills_settings.py').read_text())
+        get = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'get')
+
+        assert "'models.applications.skills.list'" in ast.unparse(get.decorator_list[0])
+        assert ast.unparse(get.body[-1]) == 'return (read_platform_project_skills_settings(), 200)'
+
+
 class _Expression:
     def __gt__(self, other):
         return self
