@@ -2,8 +2,9 @@
 
 One entry per row of `ROUTES` in `api/v2/schedules.py`, with the same (method, URL tail) key; a test
 checks that both tables match. `Module._register_openapi` registers every entry under the
-`elitea_core/schedules` tag and keeps it out of the MCP tools.
+`elitea_core/schedules` tag; only the operations of `MCP_TOOL_NAMES` are MCP tools.
 """
+import inspect
 from typing import get_args
 
 from ..models.pd.entity_schedule import ScheduleCreate, ScheduleEdit, ScheduleRiskCheck
@@ -539,7 +540,28 @@ OPERATIONS = {
             403: None, 503: "The settings store is unavailable"}),
     },
 }
+# The chat model reads these names; the default name (method plus the last two path segments) is the same
+# for several actions on one path.
+MCP_TOOL_NAMES = {
+    ("get", ""): "list_schedules",
+    ("get", ITEM): "get_schedule",
+    ("post", ""): "create_schedule",
+    ("put", ITEM): "update_schedule",
+    ("delete", ITEM): "delete_schedule",
+    ("post", f"{ITEM}/run"): "run_schedule_now",
+}
 OPENAPI_ENDPOINTS = [
-    {"method": method, "path": f"{BASE_URL}/{tail}".rstrip("/"), **operation}
+    {"method": method, "path": f"{BASE_URL}/{tail}".rstrip("/"), **operation,
+     **({"operation_name": MCP_TOOL_NAMES[method, tail]} if (method, tail) in MCP_TOOL_NAMES else {})}
     for (method, tail), operation in OPERATIONS.items()
 ]
+
+
+def register_schedule_endpoints(registry, tag: str) -> None:
+    """Register every schedule operation; the ones of `MCP_TOOL_NAMES` also as MCP tools."""
+    names_tools = "operation_name" in inspect.signature(registry.register_endpoint).parameters
+    for endpoint in OPENAPI_ENDPOINTS:
+        fields = {key: value for key, value in endpoint.items() if names_tools or key != "operation_name"}
+        registry.register_endpoint(
+            plugin_name="elitea_core", tags=[tag], available_to_users=True,
+            mcp_tool="operation_name" in endpoint, **fields)
