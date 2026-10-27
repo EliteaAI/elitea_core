@@ -111,6 +111,28 @@ def _chat_trigger_kwargs(rpc_func: str) -> dict:
     return {'trigger_source': TriggerType.CHAT} if rpc_func == 'applications_predict_sio' else {}
 
 
+def _get_agent_type(
+    session, app_participant, app_version_id, *, owner_project_id=None, chat_project_id=None,
+) -> str | None:
+    agent_type = app_participant.meta.get('agent_type')
+    if not agent_type and app_version_id:
+        try:
+            if owner_project_id is not None and owner_project_id != chat_project_id:
+                with db.get_session(owner_project_id) as owner_session:
+                    version_row = owner_session.query(ApplicationVersion.agent_type).filter(
+                        ApplicationVersion.id == app_version_id
+                    ).first()
+            else:
+                version_row = session.query(ApplicationVersion.agent_type).filter(
+                    ApplicationVersion.id == app_version_id
+                ).first()
+            if version_row:
+                agent_type = version_row[0]
+        except Exception:
+            log.debug(f"Could not fetch agent_type for version {app_version_id}")
+    return agent_type
+
+
 # The answer of each refused schedule decision (EL-7011)
 _SCHEDULE_REFUSALS = {
     ScheduleDecisionForbidden: {"error": "Only the schedule owner can approve or reject this run", "status": 403},
@@ -157,28 +179,6 @@ def _apply_schedule_decision(project_id, pending) -> dict | None:
     except ScheduleRunNotWaiting:
         return _SCHEDULE_REFUSALS[ScheduleRunNotWaiting]
     return None
-
-
-def _get_agent_type(
-    session, app_participant, app_version_id, *, owner_project_id=None, chat_project_id=None,
-) -> str | None:
-    agent_type = app_participant.meta.get('agent_type')
-    if not agent_type and app_version_id:
-        try:
-            if owner_project_id is not None and owner_project_id != chat_project_id:
-                with db.get_session(owner_project_id) as owner_session:
-                    version_row = owner_session.query(ApplicationVersion.agent_type).filter(
-                        ApplicationVersion.id == app_version_id
-                    ).first()
-            else:
-                version_row = session.query(ApplicationVersion.agent_type).filter(
-                    ApplicationVersion.id == app_version_id
-                ).first()
-            if version_row:
-                agent_type = version_row[0]
-        except Exception:
-            log.debug(f"Could not fetch agent_type for version {app_version_id}")
-    return agent_type
 
 
 def generate_toolkit_payload(
