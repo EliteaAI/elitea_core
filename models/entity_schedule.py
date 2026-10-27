@@ -135,6 +135,9 @@ class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
     version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     principal_label: Mapped[str | None] = mapped_column(String(256), nullable=True)
     risk_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The chat message of a delivered run; NULL on a run_history run, where conversation_id is the run chat
+    conversation_uuid: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    message_group_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class EntitySchedulePreference(db_tools.AbstractBaseMixin, db.Base):
