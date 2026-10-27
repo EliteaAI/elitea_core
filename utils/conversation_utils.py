@@ -203,6 +203,7 @@ def _duration_expression(span):
 def calculate_conversation_durations_batch(
     conversation_ids: list[int],
     session: Session,
+    author_participant_ids=None,
 ) -> dict[int, float]:
     """Return {conversation_id: duration_seconds} in a single GROUP BY query.
 
@@ -212,6 +213,12 @@ def calculate_conversation_durations_batch(
         return {}
 
     span = _thinking_span_subquery(session, conversation_ids)
+    filters = [
+        ConversationMessageGroup.conversation_id.in_(conversation_ids),
+        ConversationMessageGroup.reply_to_id.isnot(None),
+    ]
+    if author_participant_ids is not None:
+        filters.append(ConversationMessageGroup.author_participant_id.in_(author_participant_ids))
     rows = (
         session.query(
             ConversationMessageGroup.conversation_id,
@@ -219,10 +226,7 @@ def calculate_conversation_durations_batch(
         )
         .select_from(ConversationMessageGroup)
         .outerjoin(span, span.c.mg_id == ConversationMessageGroup.id)
-        .filter(
-            ConversationMessageGroup.conversation_id.in_(conversation_ids),
-            ConversationMessageGroup.reply_to_id.isnot(None),
-        )
+        .filter(*filters)
         .group_by(ConversationMessageGroup.conversation_id)
         .all()
     )

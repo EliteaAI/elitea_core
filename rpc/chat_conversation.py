@@ -1,7 +1,7 @@
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, or_, func
+from sqlalchemy import desc, asc, Integer, and_, or_, func
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
@@ -19,6 +19,7 @@ from ..utils.conversation_utils import (
     reresolve_persona_instructions
 )
 from ..utils.participant_utils import add_participant_to_conversation
+from ..utils.skill_run_history import chat_skill_runs, openable_skill_chat_ids, skill_run_started_at
 from ..utils.chat_feature_flags import get_context_manager_feature_flag
 from ..utils.context_analytics import merge_meta_expression, set_context_strategy
 from ..utils.chat_usage import strip_server_owned_meta
@@ -434,9 +435,10 @@ class RPC:
             if query:
                 base_query = base_query.where(Conversation.name.ilike(f'%{query}%'))
 
+            run_filters = []
             if source:
                 sources = list(set(i.strip().lower() for i in source.split(',')))
-                base_query = base_query.where(Conversation.source.in_(sources))
+                run_filters.append(Conversation.source.in_(sources))
 
             if not include_hidden:
                 base_query = base_query.filter(
@@ -446,6 +448,7 @@ class RPC:
                     )
                 )
 
+            is_skill_history = participant_id is not None and entity_name == ParticipantTypes.skill.value
             if participant_id is not None:
                 filters = [
                     Conversation.meta.has_key('single_participant'),
@@ -455,13 +458,23 @@ class RPC:
                     filters.append(
                         Conversation.meta['single_participant']['entity_name'].astext == entity_name,
                     )
-                if entity_name == ParticipantTypes.skill.value and entity_project_id is not None:
+                if is_skill_history and entity_project_id is not None:
                     filters.append(
                         Conversation.meta['single_participant']['entity_meta']['project_id'].astext.cast(Integer)
                         == entity_project_id,
                     )
-                base_query = base_query.filter(*filters)
+                run_filters.extend(filters)
 
+            if is_skill_history:
+                base_query = base_query.filter(or_(
+                    and_(*run_filters),
+                    Conversation.id.in_(openable_skill_chat_ids(session, participant_id, entity_project_id, user_id)),
+                ))
+            elif run_filters:
+                base_query = base_query.filter(*run_filters)
+
+            if is_skill_history and sorting_by is Conversation.created_at:
+                sorting_by = skill_run_started_at(session, participant_id, entity_project_id)
             base_query = base_query.order_by(sorting(sorting_by))
 
             # Cap page size: keeps the IN(...) lists in the aggregation queries
@@ -514,6 +527,13 @@ class RPC:
                 else calculate_conversation_durations_batch(conv_ids, session)
             )
 
+            chat_runs = chat_skill_runs(
+                session,
+                [c.id for c in conversations if 'single_participant' not in (c.meta or {})],
+                participant_id,
+                entity_project_id,
+            ) if is_skill_history else {}
+
             rows = []
             for conv in conversations:
                 conv_dict = {
@@ -522,6 +542,7 @@ class RPC:
                     "participants_count": participants_count.get(conv.id, 0),
                     "message_groups_count": mg_counts.get(conv.id, 0),
                     "users_count": users_count.get(conv.id, 0),
+                    **chat_runs.get(conv.id, {}),
                 }
                 rows.append(serialize(ConversationListExtended.model_validate(conv_dict).model_dump()))
 

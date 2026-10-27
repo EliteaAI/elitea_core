@@ -34,6 +34,8 @@ class ConversationListExtended(ConversationList):
     message_groups_count: int
     users_count: int
     duration: float = 0.0
+    skill_version_id: Optional[int] = None
+    run_started_at: Optional[datetime] = None
 
     @model_validator(mode='after')
     def strip_support_user_prefix(self):
