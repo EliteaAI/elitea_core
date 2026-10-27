@@ -142,6 +142,7 @@ class SkillLimitExceededError(SkillError):
 
 class SkillInvocationLimitError(SkillError):
     http_status = 400
+    code = 'SKILL_INVOCATION_LIMIT'
 
     def __init__(self, count: int, max_allowed: int):
         super().__init__(
@@ -150,6 +151,9 @@ class SkillInvocationLimitError(SkillError):
         )
         self.count = count
         self.max_allowed = max_allowed
+
+    def refusal(self) -> dict:
+        return {'code': self.code, 'error': str(self)}
 
 
 class SkillInstructionsTooLongError(SkillError):

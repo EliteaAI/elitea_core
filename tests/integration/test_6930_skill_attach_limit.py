@@ -172,6 +172,17 @@ class TestInvocationCaps:
         with pytest.raises(skill_utils_module.SkillInvocationLimitError):
             skill_utils_module.validate_message_skill_limit(message, _skills(50))
 
+    def test_the_rejection_reads_as_a_coded_refusal(self, skill_utils_module, admin_config):  # noqa: F811
+        message = ' '.join(f'~skill-{i}' for i in range(1, 7))
+
+        with pytest.raises(skill_utils_module.SkillInvocationLimitError) as exc:
+            skill_utils_module.validate_message_skill_limit(message, _skills(50))
+
+        assert exc.value.refusal() == {
+            'code': 'SKILL_INVOCATION_LIMIT',
+            'error': 'This message references 6 skills with ~skill-name. Maximum allowed is 5 per message.',
+        }
+
     def test_the_early_chat_check_accepts_a_message_at_the_cap(self, skill_utils_module, admin_config):  # noqa: F811
         message = ' '.join(f'~skill-{i}' for i in range(1, 6))
 

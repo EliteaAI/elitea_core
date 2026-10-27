@@ -188,7 +188,7 @@ class TestMentionCandidates:
             _row(57, PUBLIC_PROJECT_ID, 200),
         ])
         msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55)
-        candidates = env.mod.participant_skill_mention_candidates(session, msg_group, CHAT_PROJECT_ID)
+        candidates = env.mod.participant_skill_mention_candidates(session, msg_group.conversation_id, msg_group.sent_to_id, CHAT_PROJECT_ID)
         assert [(c['skill_version_id'], c['instructions']) for c in candidates] == [
             (101, 'Own v2.'), (200, 'Catalog published.'),
         ]
@@ -200,7 +200,7 @@ class TestMentionCandidates:
             _row(58, CHAT_PROJECT_ID, 999),
         ])
         msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55)
-        assert env.mod.participant_skill_mention_candidates(session, msg_group, CHAT_PROJECT_ID) == []
+        assert env.mod.participant_skill_mention_candidates(session, msg_group.conversation_id, msg_group.sent_to_id, CHAT_PROJECT_ID) == []
 
     @pytest.mark.parametrize('user_input, expected', [
         ('use ~Reviewer', True),

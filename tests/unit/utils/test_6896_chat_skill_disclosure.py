@@ -143,6 +143,68 @@ class TestAgentMessageSkillLimit:
         assert checked == []
 
 
+class TestTurnSkillLimitBeforeTheTurnIsStored:
+    @pytest.fixture
+    def checked(self, env, monkeypatch):
+        calls = []
+        monkeypatch.setattr(env.mod, 'validate_message_skill_limit',
+                            lambda content, candidates: calls.append((content, candidates)))
+        return calls
+
+    def _validate(self, env, entity_name, user_input='~agent-skill-1', version_details=None):
+        session = ParticipantRowsSession([participant_row(56, CHAT_PROJECT_ID, 101), participant_row(57, PUBLIC_PROJECT_ID, 200)])
+        env.mod.validate_turn_skill_limit(
+            session, 3, _recipient(entity_name), user_input, CHAT_PROJECT_ID, lambda: version_details,
+        )
+
+    def test_an_agent_turn_is_checked_against_the_same_candidates_as_the_predict(self, env, checked):
+        own = _agent_skills(2)
+        self._validate(env, 'application', version_details={'agent_type': 'openai', 'skills': own})
+        [(content, candidates)] = checked
+        assert content == '~agent-skill-1'
+        assert candidates[:2] == own
+        assert _pins(candidates[2:]) == [(CHAT_PROJECT_ID, 10, 101), (PUBLIC_PROJECT_ID, 10, 200)]
+
+    @pytest.mark.parametrize('entity_name', ['dummy', 'skill'])
+    def test_a_model_or_skill_turn_is_checked_against_the_chat_skills(self, env, checked, entity_name):
+        self._validate(env, entity_name)
+        [(_content, candidates)] = checked
+        assert _pins(candidates) == [(CHAT_PROJECT_ID, 10, 101), (PUBLIC_PROJECT_ID, 10, 200)]
+
+    @pytest.mark.parametrize('entity_name,user_input,version_details', [
+        ('application', 'no mention here', {'agent_type': 'openai', 'skills': _agent_skills(6)}),
+        ('application', '~agent-skill-1', {'agent_type': 'pipeline', 'skills': _agent_skills(6)}),
+        ('application', '~agent-skill-1', None),
+    ])
+    def test_turns_the_predict_never_resolves_are_not_checked(
+        self, env, checked, entity_name, user_input, version_details,
+    ):
+        self._validate(env, entity_name, user_input=user_input, version_details=version_details)
+        assert checked == []
+
+    def test_no_target_participant_is_not_checked(self, env, checked):
+        env.mod.validate_turn_skill_limit(ParticipantRowsSession([]), 3, None, '~a', CHAT_PROJECT_ID, lambda: None)
+        assert checked == []
+
+    @pytest.mark.parametrize('user_input', ['plain question', '', None])
+    def test_a_turn_without_a_mention_never_reads_the_agent_version(self, env, checked, user_input):
+        reads = []
+        env.mod.validate_turn_skill_limit(
+            ParticipantRowsSession([]), 3, _recipient('application'), user_input, CHAT_PROJECT_ID,
+            lambda: reads.append('version') or {'agent_type': 'openai', 'skills': []},
+        )
+        assert reads == [] and checked == []
+
+    def test_a_turn_with_a_mention_reads_the_agent_version_once(self, env, checked):
+        reads = []
+        self_session = ParticipantRowsSession([])
+        env.mod.validate_turn_skill_limit(
+            self_session, 3, _recipient('application'), '~agent-skill-1', CHAT_PROJECT_ID,
+            lambda: reads.append('version') or {'agent_type': 'openai', 'skills': _agent_skills(1)},
+        )
+        assert reads == ['version'] and len(checked) == 1
+
+
 class TestChatSkillsReachTheResponder:
     @pytest.mark.parametrize('entity_name', ['application', 'skill'])
     def test_agents_and_skills_get_the_chat_skills_without_a_tilde(self, env, entity_name):
@@ -202,7 +264,7 @@ class TestParticipantLookup:
         ])
         msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55)
 
-        candidates = env.mod.participant_skill_mention_candidates(session, msg_group, CHAT_PROJECT_ID)
+        candidates = env.mod.participant_skill_mention_candidates(session, msg_group.conversation_id, msg_group.sent_to_id, CHAT_PROJECT_ID)
 
         assert sorted(opened) == sorted([CHAT_PROJECT_ID, PUBLIC_PROJECT_ID])
         assert [c['skill_version_id'] for c in candidates] == [101, 110, 200]
@@ -210,7 +272,7 @@ class TestParticipantLookup:
     def test_participants_are_read_in_a_stable_order(self, env):
         session = CountingRowsSession([participant_row(56, CHAT_PROJECT_ID, 101)])
         msg_group = types.SimpleNamespace(conversation_id=3, sent_to_id=55)
-        env.mod.participant_skill_mention_candidates(session, msg_group, CHAT_PROJECT_ID)
+        env.mod.participant_skill_mention_candidates(session, msg_group.conversation_id, msg_group.sent_to_id, CHAT_PROJECT_ID)
         assert session.ordered_by
 
 
@@ -338,3 +400,72 @@ def test_a_rejected_chat_payload_stops_the_reply_placeholder_streaming():
             and stmt.targets[0].attr == 'is_streaming' and getattr(stmt.value, 'value', None) is False
         ]
         assert resets, f'handler at line {handler.lineno} leaves the reply streaming'
+
+
+def _predict_sio_source():
+    tree = ast.parse((PLUGIN_ROOT / 'rpc/chat_all.py').read_text())
+    return next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'predict_sio')
+
+
+def _calls(node, name):
+    return [
+        c for c in ast.walk(node)
+        if isinstance(c, ast.Call) and (getattr(c.func, 'id', None) == name or getattr(c.func, 'attr', None) == name)
+    ]
+
+
+def test_an_over_limit_turn_is_rejected_before_it_is_stored_broadcast_or_named():
+    predict = _predict_sio_source()
+    [check] = _calls(predict, 'validate_turn_skill_limit')
+    stored = min(c.lineno for c in _calls(predict, 'ConversationMessageGroup'))
+    named = min(c.lineno for c in _calls(predict, 'check_and_generate_conversation_name'))
+    committed = min(c.lineno for c in _calls(predict, 'commit'))
+
+    assert check.lineno < min(stored, named, committed)
+    assert isinstance(check.args[-1], ast.Lambda), 'the agent version must be read only for a turn with a ~mention'
+
+
+def test_the_over_limit_rejection_sends_the_refusal_and_writes_nothing():
+    predict = _predict_sio_source()
+    guard = next(
+        n for n in ast.walk(predict)
+        if isinstance(n, ast.Try) and any(_calls(stmt, 'validate_turn_skill_limit') for stmt in n.body)
+    )
+    [handler] = [h for h in guard.handlers if getattr(h.type, 'id', None) == 'SkillInvocationLimitError']
+    body = ast.Module(handler.body, [])
+
+    [raised] = _calls(body, 'SioValidationError')
+    error = next(k.value for k in raised.keywords if k.arg == 'error')
+    assert _calls(error, 'refusal')
+    assert not _calls(body, 'commit') and not _calls(body, 'emit') and not _calls(body, 'add')
+
+
+def test_the_chat_payload_error_handlers_send_the_coded_content():
+    tree = ast.parse((PLUGIN_ROOT / 'rpc/chat_all.py').read_text())
+    handlers = [
+        handler
+        for node in ast.walk(tree) if isinstance(node, ast.Try)
+        and any(_calls(stmt, 'generate_payload') for stmt in node.body)
+        for handler in node.handlers if getattr(handler.type, 'id', None) == 'PayloadGenerationError'
+    ]
+    sent = [
+        value for handler in handlers for call in ast.walk(ast.Module(handler.body, []))
+        if isinstance(call, ast.Dict) for key, value in zip(call.keys, call.values)
+        if getattr(key, 'value', None) == 'content'
+    ] + [
+        k.value for handler in handlers for call in _calls(ast.Module(handler.body, []), 'SioValidationError')
+        for k in call.keywords if k.arg == 'error'
+    ]
+
+    assert len(sent) == len(handlers) == 2
+    assert all(isinstance(v, ast.Attribute) and v.attr == 'content' for v in sent)
+
+
+def test_a_participant_limit_error_keeps_its_code():
+    tree = ast.parse((PLUGIN_ROOT / 'rpc/chat_all.py').read_text())
+    guard = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Try) and any(_calls(stmt, 'apply_participant_skill_mentions') for stmt in n.body)
+    )
+    [raised] = _calls(ast.Module(guard.handlers[0].body, []), 'PayloadGenerationError')
+    assert any(k.arg == 'code' for k in raised.keywords)
