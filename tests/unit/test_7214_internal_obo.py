@@ -130,7 +130,7 @@ def test_admission_mints_one_token_with_the_claims_of_the_run(ns, env):
     assert claims["aud"] == "elitea:internal" and claims["iss"] == "elitea:main"
     assert claims["scope"] == ["read", "build"]
     assert claims["tgt"] == [1, 5]   # the URL's project and its scope_project_id
-    assert claims["exp"] == int(ns.adm._aware(row.expires_at).timestamp())   # the context's own expiry
+    assert abs(claims["exp"] - claims["iat"] - ns.adm.MAX_RUN_LIFETIME_S) <= 1   # the run cap (#7229); the row decides
     assert delivered["origins"] == ["http://localhost", "http://pylon_main:8080"]
     assert obo(ns).TOKEN_KWARG not in call["meta"] and "eio1." not in json.dumps(call["kwargs"]["envelope"])
 
@@ -341,8 +341,7 @@ def test_a_token_issued_in_the_future_or_living_longer_than_a_context_is_invalid
     _, claims = mint(ns)
     future = _signed(ns, {**claims, "iat": now + 120, "exp": now + 600})
     assert verify(ns, env, future)["code"] == "INTERNAL_TOKEN_INVALID"
-    ttl = env.module().admission_settings.context_ttl_s
-    long_lived = _signed(ns, {**claims, "iat": now, "exp": now + ttl + 3600})
+    long_lived = _signed(ns, {**claims, "iat": now, "exp": now + ns.adm.MAX_RUN_LIFETIME_S + 3600})   # past the run cap
     assert verify(ns, env, long_lived)["code"] == "INTERNAL_TOKEN_INVALID"
     assert [e["reason_code"] for e in env.denied] == ["INTERNAL_TOKEN_INVALID", "INTERNAL_TOKEN_INVALID"]
 
@@ -674,10 +673,11 @@ def test_the_column_is_deferred_so_an_old_schema_is_still_read(ns):
     assert column.deferred is True
 
 
-def test_the_context_ttl_bounds_the_token(ns, env):
+def test_the_run_cap_bounds_the_token_and_the_context_decides_liveness(ns, env):
+    """#7229: the token lives to the run cap; the context's sliding idle deadline decides whether its run is live."""
     _, _, call = admitted(ns, env, operations=["read"])
     claims = claims_of(token_of(ns, call))
-    assert claims["exp"] - claims["iat"] <= env.module().admission_settings.context_ttl_s + 1
+    assert claims["exp"] - claims["iat"] <= ns.adm.MAX_RUN_LIFETIME_S + 1
 
 
 # --- development runs (#7213): runs once both are on the same tree --------------------------------------------------

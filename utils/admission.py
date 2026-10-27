@@ -99,6 +99,10 @@ SCHEMA_VERSION = 1
 MAX_TRACKED_CONTEXTS = 10_000
 CREDENTIAL_FACTS_MIN_VERSION = 3   # the secrets plugin's credential_use_facts shape this module reads
 LIVE_STATES = ("admitted", "running")
+# A run's absolute lifetime (#7229): its context's deadline slides while the run is in use (each verdict of the worker,
+# a run route, the internal MCP, a resume decision) by the idle window (``context_ttl_s``), never past ``created_at`` +
+# this. The run token lives to this cap; the context row decides whether the run is still live.
+MAX_RUN_LIFETIME_S = 86400
 # Codes that explain why a context was revoked; the worker is told the same reason, not a generic one
 REVOKE_CODES = frozenset({
     "EPOCH_MISMATCH", "BINDING_DIGEST_MISMATCH", "DENIED_BINDING",
@@ -536,14 +540,23 @@ def _chat_toolkit_ids(payload) -> list:
             if isinstance(tool.get("settings"), dict) and configurations_in(tool["settings"])]
 
 
+def _readable_ids(toolkit_ids) -> list:
+    """The ids that can name a stored toolkit: positive integers of the column's range; anything else names nothing."""
+    readable = (int(item) for item in toolkit_ids if (isinstance(item, int) and not isinstance(item, bool))
+                or (isinstance(item, str) and item.isascii() and item.isdecimal() and len(item) <= 10))
+    return sorted({item for item in readable if 0 < item < 2 ** 31})
+
+
+# A chat is not a draft: the grant refusal of a chat toolkit's credential says so (#7229 D15)
+CHAT_GRANT_MESSAGE = "This credential needs a grant before you can use it in a chat."
+
+
 def _read_chat_toolkits(request: AdmissionRequest, toolkit_ids):
     """Step 4 of a plain LLM chat with configured toolkits (#7229 D15): the stored toolkits it runs, as for a toolkit
     Test run (``_read_toolkit``), in one read in the chat's project. They are the authority on which credential each
     selects; one that is not saved there declares nothing. The digest is of the stored toolkits."""
     from ..models.elitea_tools import EliteATool  # pylint: disable=C0415
-    readable = (int(item) for item in toolkit_ids if (isinstance(item, int) and not isinstance(item, bool))
-                or (isinstance(item, str) and item.isascii() and item.isdecimal() and len(item) <= 10))
-    ids = sorted({item for item in readable if 0 < item < 2 ** 31})   # an integer column: anything else names nothing
+    ids = _readable_ids(toolkit_ids)
     with db.get_session(request.binding_project_id) as session:
         tools = session.query(EliteATool).filter(EliteATool.id.in_(ids)).all() if ids else []
         try:
@@ -1193,6 +1206,8 @@ def _admit(  # pylint: disable=R0914
     except AdmissionDenied as denied:
         if not _is_plain_llm_chat(request):
             raise
+        if denied.reason_code == DEVELOPMENT_GRANT_REQUIRED:
+            denied = AdmissionDenied(denied.reason_code, CHAT_GRANT_MESSAGE, denied.audit)
         raise _named_refusal(denied, payload, None, _payload_toolkits(payload)) from None   # names the toolkit (D15)
     # 5c. the sub-agents it runs in its own process, each on its own decision (#7227)
     context_id = uuid.uuid4()
@@ -1533,7 +1548,8 @@ def admit_dispatch(  # pylint: disable=R0911
         except AdmissionDenied as denied:
             track_context(module, None, admission.project_id, view.context_ref)   # nothing is dispatched: end the context
             if denied.reason_code == "CREDENTIAL_REFERENCE_REQUIRED" and _is_plain_llm_chat(admission) \
-                    and not module.admission_settings.allow_development_runs:
+                    and not module.admission_settings.allow_development_runs \
+                    and _readable_ids(_chat_toolkit_ids(view_payload)):   # a saved chat toolkit: switching on would help
                 denied = _denied("DEVELOPMENT_RUNS_DISABLED")   # a chat toolkit's credential needs them (#7229 D15)
             _record_deny(
                 module, denied.reason_code, project_id=admission.project_id, application_id=admission.application_id,
@@ -2078,7 +2094,7 @@ def _mandate_revoke_code(row, stamped) -> Optional[str]:
     return None
 
 
-def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: disable=R0912,R0914,R0915
+def _validate(project_id, context_ref, caller, known, touch=True, ttl=None):  # pylint: disable=R0912,R0913,R0914,R0915
     """Is this run still the one that was admitted? No database connection is held while anything else is asked: the
     context (and, in the same project, its binding) is read in a short session, the identity service and the facts are
     asked with none open, and the state is written in a short session of its own, as a conditional update (a context
@@ -2102,7 +2118,8 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
                    columns.run_id, columns.attempt, columns.project_id, columns.application_id, columns.version_id,
                    columns.agent_binding_ref, columns.binding_project_id, columns.subject, columns.caller,
                    columns.definition_digest, columns.policy_revision, columns.environment, columns.revocation_epochs,
-                   columns.allowed_bindings, columns.parent_context_ref, columns.call_lineage, columns.entry_point)
+                   columns.allowed_bindings, columns.parent_context_ref, columns.call_lineage, columns.entry_point,
+                   columns.created_at)
             .where(columns.id == context_id)
         ).one_or_none()
         binding = None
@@ -2131,7 +2148,8 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
         raise _denied(reason if reason in REVOKE_CODES else "STALE_CONTEXT")
     if _now() >= _aware(row.expires_at):
         raise _denied("STALE_CONTEXT")
-    if not root_context_live(project_id, row):   # a fan-out sub-agent of a run that ended (#7227)
+    root = _root_row(project_id, row)
+    if root is _NO_ROOT or (root is not None and root.state not in LIVE_STATES):   # a sub-agent of a run that ended (#7227)
         raise _denied("STALE_CONTEXT")
     #
     def revoke(code):
@@ -2184,10 +2202,19 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
         if code is not None:
             raise revoke(code)
     #
-    if touch or row.state != "running":   # the internal MCP asks per request: no write once the run is running (#7214)
+    # the run is in use: its deadline (and its root's) slides by the idle window, at most once per half window (#7229)
+    now = _now()
+    due = [] if is_mandate or not ttl else [
+        (target.id, target.created_at) for target in ((row_ref(context_id, row), root) if root is not None
+                                                      else (row_ref(context_id, row),))
+        if (target.subject or {}).get("kind") != "mandate"
+        and _aware(target.expires_at) < now + timedelta(seconds=int(ttl) / 2)]
+    if touch or row.state != "running" or due:   # the internal MCP asks per request: no write once running (#7214)
         with db.get_session(project_id) as session:
-            if _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
+            if (touch or row.state != "running") \
+                    and _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
                 raise _denied("STALE_CONTEXT")
+            _slide(session, due, int(ttl or 0), now)
             session.commit()
     return {
         "context_ref": str(context_id), "run_id": row.run_id, "attempt": row.attempt,
@@ -2197,21 +2224,84 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
     }
 
 
-def root_context_live(project_id, row) -> bool:
-    """A sub-agent admitted with its run (#7227) holds its admission only while the run's own context (the first of its
-    lineage) is live: a run that ended or was revoked ends its sub-agents with it. A run's own context: True, nothing
-    read; otherwise one read."""
+_NO_ROOT = type("NoRoot", (), {"__repr__": lambda self: "NO_ROOT"})()   # a lineage whose root cannot be read
+_SLIDE_COLUMNS = (ExecutionSecurityContext.id, ExecutionSecurityContext.state, ExecutionSecurityContext.created_at,
+                  ExecutionSecurityContext.expires_at, ExecutionSecurityContext.subject)
+RowRef = namedtuple("RowRef", "id state created_at expires_at subject")
+
+
+def row_ref(context_id, row) -> RowRef:
+    return RowRef(context_id, row.state, row.created_at, row.expires_at, row.subject)
+
+
+def _root_row(project_id, row):
+    """The root (the first of the lineage) of a sub-agent's context: ``None`` for a run's own context (nothing read),
+    ``_NO_ROOT`` when it cannot be read, else its ``RowRef`` (one read)."""
     if getattr(row, "parent_context_ref", None) is None:
-        return True
+        return None
     lineage = row.call_lineage if isinstance(row.call_lineage, list) else []
     try:
         root_id = uuid.UUID(str(lineage[0]))
     except (IndexError, ValueError):
-        return False
+        return _NO_ROOT
     with db.get_session(project_id) as session:
-        state = session.execute(
-            select(ExecutionSecurityContext.state).where(ExecutionSecurityContext.id == root_id)).scalar_one_or_none()
-    return state in LIVE_STATES
+        root = session.execute(select(*_SLIDE_COLUMNS).where(ExecutionSecurityContext.id == root_id)).one_or_none()
+    return _NO_ROOT if root is None else RowRef(*root)
+
+
+def root_context_live(project_id, row) -> bool:
+    """A sub-agent admitted with its run (#7227) holds its admission only while the run's own context (the first of its
+    lineage) is live: a run that ended or was revoked ends its sub-agents with it. A run's own context: True, nothing
+    read; otherwise one read."""
+    root = _root_row(project_id, row)
+    return root is None or (root is not _NO_ROOT and root.state in LIVE_STATES)
+
+
+def _slide(session, targets, ttl, now, allow_expired=False) -> int:
+    """Move the deadline of each ``(context id, created_at)`` to ``now + ttl``, never past ``created_at`` +
+    ``MAX_RUN_LIFETIME_S`` and never backwards, as one conditional UPDATE each: only a live context (an ended one is never
+    revived) and, unless ``allow_expired`` (the signed-in person's resume decision), only one still in its window. The
+    number of rows moved."""
+    moved = 0
+    for context_id, created_at in targets if ttl > 0 else ():
+        deadline = min(now + timedelta(seconds=ttl), _aware(created_at) + timedelta(seconds=MAX_RUN_LIFETIME_S))
+        conditions = [ExecutionSecurityContext.id == context_id, ExecutionSecurityContext.state.in_(LIVE_STATES),
+                      ExecutionSecurityContext.expires_at < deadline]
+        if not allow_expired:
+            conditions.append(ExecutionSecurityContext.expires_at > now)
+        moved += session.execute(
+            update(ExecutionSecurityContext).where(*conditions).values(expires_at=deadline)).rowcount or 0
+    return moved
+
+
+def slide_for_resume(module, project_id, context_ref) -> int:
+    """The signed-in person's decision on a paused fan-out child (``_continue_child_resume``, after its requester check)
+    is use of the run: the child's context and its root slide, even past their idle deadline, while they are live and
+    within the cap. A mandate's never does (its deadline is the mandate's). The number of rows moved (#7229)."""
+    ttl = int(getattr(getattr(module, "admission_settings", None), "context_ttl_s", 0) or 0)
+    try:
+        context_id = uuid.UUID(str(context_ref))
+    except ValueError:
+        return 0
+    with db.get_session(project_id) as session:
+        row = session.execute(select(*_SLIDE_COLUMNS, ExecutionSecurityContext.parent_context_ref,
+                                     ExecutionSecurityContext.call_lineage)
+                              .where(ExecutionSecurityContext.id == context_id)).one_or_none()
+        if row is None or (row.subject or {}).get("kind") == "mandate":
+            return 0
+        targets = [(row.id, row.created_at)]
+        lineage = row.call_lineage if isinstance(row.call_lineage, list) else []
+        if row.parent_context_ref is not None and lineage:
+            try:
+                root = session.execute(select(*_SLIDE_COLUMNS).where(
+                    ExecutionSecurityContext.id == uuid.UUID(str(lineage[0])))).one_or_none()
+            except ValueError:
+                root = None
+            if root is not None and (root.subject or {}).get("kind") != "mandate":
+                targets.append((root.id, root.created_at))
+        moved = _slide(session, targets, ttl, _now(), allow_expired=True)
+        session.commit()
+    return moved
 
 
 def context_binding_label(row) -> str:
@@ -2239,7 +2329,8 @@ def validate_context(module, project_id, context_ref, caller, touch=True) -> dic
     """
     known = {}
     try:
-        context = _validate(project_id, context_ref, caller, known, touch=touch)
+        context = _validate(project_id, context_ref, caller, known, touch=touch,
+                            ttl=getattr(getattr(module, "admission_settings", None), "context_ttl_s", None))
     except AdmissionDenied as denied:
         code = denied.reason_code
     except Exception as exc:  # pylint: disable=W0703

@@ -502,6 +502,7 @@ def test_a_chat_toolkit_with_a_granted_project_credential_runs_and_an_ungranted_
     tool = {**ungranted.tool(), "toolkit_name": "my jira"}
     refusal = chat_refusal(env, ns, {"tools": [tool]})
     assert refusal.reason_code == "DENIED_DEVELOPMENT_CREDENTIAL" and "toolkit “my jira”" in refusal.message
+    assert "in a chat" in refusal.message and "draft" not in refusal.message
 
 
 def test_with_development_runs_off_a_chat_toolkit_credential_is_refused_as_switched_off(ns, env):
@@ -545,3 +546,161 @@ def test_a_chat_toolkit_with_only_a_platform_internal_configuration_takes_no_dev
     [row] = env.query(1, ns.models.ExecutionSecurityContext)
     assert ref == str(row.id) and row.allowed_bindings == [] and env.permission_calls == []
     assert len(env.configuration_calls) == 1   # the facts the seal reads anyway, once
+
+
+# --- the run's lifetime: a sliding idle deadline under a cap (#7229, review item 1) ----------------------------------
+
+from datetime import timedelta  # noqa: E402  pylint: disable=C0413
+
+from fixtures.governed_credentials import run_to_running  # noqa: E402  pylint: disable=C0413
+
+TTL = 3600
+
+
+@pytest.fixture
+def clock(ns, monkeypatch):
+    """Admission's clock, moved by the test (the run token's own clock is the real one)."""
+    real = ns.adm._now   # pylint: disable=W0212
+    state = {"now": real()}
+    monkeypatch.setattr(ns.adm, "_now", lambda: state["now"])
+    return state
+
+
+def context_row(env, ns, ref):
+    return next(row for row in env.query(1, ns.models.ExecutionSecurityContext) if str(row.id) == ref)
+
+
+def updates_during(env, action):
+    seen = []
+    engine = env.engine(1)
+    listener = lambda conn, cursor, statement, params, context, many: seen.append(statement)   # noqa: E731
+    env.ns.sa.event.listen(engine, "before_cursor_execute", listener)
+    try:
+        action()
+    finally:
+        env.ns.sa.event.remove(engine, "before_cursor_execute", listener)
+    return [s for s in seen if s.lstrip().upper().startswith("UPDATE") and "expires_at" in s]
+
+
+def verdict(ns, env, ref, touch=False):
+    return ns.adm.validate_context(env.module(), 1, ref, CALLER, touch=touch)
+
+
+def test_an_idle_run_expires_after_its_window_and_its_token_with_it(ns, env, clock):
+    call, ref = admitted_run(ns, env)
+    run_to_running(env, ns, ref)
+    clock["now"] = ns.adm._aware(context_row(env, ns, ref).expires_at) + timedelta(seconds=1)  # pylint: disable=W0212
+    assert verdict(ns, env, ref)["reason_code"] == "STALE_CONTEXT"
+    reply = verify(ns, env, token_of(call), *RUN_REQUESTS[0][:3])
+    assert (reply["code"], reply["status"]) == ("CONTEXT_NOT_LIVE", 403)
+
+
+def test_a_run_in_use_slides_past_its_first_deadline_with_one_write_per_half_window(ns, env, clock):
+    _call, ref = admitted_run(ns, env)
+    run_to_running(env, ns, ref)
+    start = clock["now"]
+    first = ns.adm._aware(context_row(env, ns, ref).expires_at)  # pylint: disable=W0212
+    writes = []
+    for step in range(1, 7):   # a verdict every third of the window, for two windows
+        clock["now"] = start + timedelta(seconds=step * TTL // 3)
+        writes.append(len(updates_during(env, lambda: verdict(ns, env, ref))))
+        assert ns.adm._aware(context_row(env, ns, ref).expires_at) > clock["now"]  # pylint: disable=W0212
+    assert clock["now"] > first and writes == [0, 1, 0, 1, 0, 1]
+    assert verdict(ns, env, ref)["ok"] is True
+
+
+def test_an_ended_run_is_never_revived(ns, env, clock):
+    call, ref = admitted_run(ns, env)
+    run_to_running(env, ns, ref)
+    for state in ("completed", "revoked"):
+        with env.get_session(1) as session:
+            ns.adm._set_state(session, uuid.UUID(ref), state, "EPOCH_MISMATCH")  # pylint: disable=W0212
+            session.commit()
+        before = context_row(env, ns, ref).expires_at
+        assert verdict(ns, env, ref)["ok"] is False
+        assert ns.adm.slide_for_resume(env.module(), 1, ref) == 0
+        clock["now"] = ns.adm._aware(before) + timedelta(seconds=10)  # pylint: disable=W0212
+        assert ns.adm.reopen_contexts(env.module(), 1, [ref]) == 0
+        assert context_row(env, ns, ref).expires_at == before
+        assert verify(ns, env, token_of(call), *RUN_REQUESTS[0][:3])["ok"] is False
+
+
+def test_the_run_cap_holds_however_long_the_run_is_in_use(ns, env, clock):
+    call, ref = admitted_run(ns, env)
+    run_to_running(env, ns, ref)
+    cap = ns.adm._aware(context_row(env, ns, ref).created_at) + timedelta(seconds=ns.adm.MAX_RUN_LIFETIME_S)  # pylint: disable=W0212
+    while True:
+        clock["now"] += timedelta(seconds=TTL // 2 + 1)
+        if not verdict(ns, env, ref)["ok"]:
+            break
+        assert ns.adm._aware(context_row(env, ns, ref).expires_at) <= cap  # pylint: disable=W0212
+    assert clock["now"] >= cap - timedelta(seconds=TTL // 2 + 1) and verdict(ns, env, ref)["reason_code"] == "STALE_CONTEXT"
+    claims = claims_of(token_of(call))
+    reply = obo(ns).verify_request(token_of(call), {"REQUEST_METHOD": "PATCH"}, endpoint=RUN_REQUESTS[0][0],
+                                   module=env.module(), now=claims["exp"] + 1, view_args=RUN_REQUESTS[0][2], args={})
+    assert reply["code"] == "INTERNAL_TOKEN_EXPIRED"
+    assert claims["exp"] <= cap.timestamp() + 5
+
+
+def test_a_mandate_context_never_slides(ns, env, clock):
+    _call, ref = admitted_run(ns, env)
+    with env.get_session(1) as session:   # the row as a mandate run has it
+        session.execute(env.ns.sa.update(ns.models.ExecutionSecurityContext)
+                        .where(ns.models.ExecutionSecurityContext.id == uuid.UUID(ref))
+                        .values(subject={"kind": "mandate", "ref": "mandate:" + str(uuid.uuid4())}))
+        session.commit()
+    before = context_row(env, ns, ref).expires_at
+    clock["now"] = ns.adm._aware(before) - timedelta(seconds=60)  # pylint: disable=W0212
+    assert ns.adm.slide_for_resume(env.module(), 1, ref) == 0
+    assert not updates_during(env, lambda: verdict(ns, env, ref))   # whatever the verdict, no deadline write
+    assert context_row(env, ns, ref).expires_at == before
+
+
+def draft_fan_out(env, ns):
+    payload, _child, _grandchild = draft_tree(env)
+    call, ref = dev_dispatch(env, ns, payload)
+    details = copy.deepcopy(call["kwargs"]["application"]["subagent_version_details"]["8:80"]["version_details"])
+    child = call_kwargs({"application": {"id": 8, "version_id": 80, "version_details": details}}, context_ref=ref)
+    ns.adm.admit_dispatch(env.module(allow_development_runs=True), "indexer_agent", child, None)
+    return ref, child["kwargs"]["envelope"]["context_ref"], details
+
+
+def test_a_fan_out_child_resumed_after_a_long_pause_runs_on_with_its_root(ns, env, clock):
+    root_ref, child_ref, details = draft_fan_out(env, ns)
+    assert child_ref != root_ref
+    run_to_running(env, ns, root_ref)
+    paused = ns.adm._aware(context_row(env, ns, child_ref).expires_at)  # pylint: disable=W0212
+    clock["now"] = paused + timedelta(seconds=2 * TTL)   # the person decides two hours later
+    assert verdict(ns, env, child_ref)["reason_code"] == "STALE_CONTEXT"
+    assert ns.adm.slide_for_resume(env.module(), 1, child_ref) == 2   # the child and its root, in one go
+    for ref in (child_ref, root_ref):
+        assert ns.adm._aware(context_row(env, ns, ref).expires_at) > clock["now"]  # pylint: disable=W0212
+    # the replay of the stashed child is admitted under the child's own context again, and the worker validates it
+    resumed = call_kwargs({"application": {"id": 8, "version_id": 80, "version_details": copy.deepcopy(details)}},
+                          context_ref=child_ref)
+    ns.adm.admit_dispatch(env.module(allow_development_runs=True), "indexer_agent", resumed, None)
+    assert resumed["kwargs"]["envelope"]["context_ref"] == child_ref
+    assert verdict(ns, env, child_ref, touch=True)["ok"] is True
+    assert child_ref in [str(row.id) for row in ns.adm.descendant_contexts(1, RUN, root_ref)]
+    # and the release of the child's slot honours the slid deadline
+    _private, public = ns.keypair()
+    slot = resumed["kwargs"]["application"]["version_details"]["tools"][0]["settings"]["credentials"]["credential_slot"]
+    released = ns.credential_release.release_credential(
+        env.module(), project_id=1, context_ref=child_ref, probe_ref=None, caller=dict(CALLER), toolkit_instance_id="2",
+        field="credentials", slot=dict(slot), recipient_key=public)
+    assert released.get("ok") is True, released.get("reason_code")
+
+
+def test_the_child_resume_extends_the_run_only_behind_its_requester_check():
+    text = (PLUGIN_ROOT / "rpc" / "chat_all.py").read_text()
+    resume = text[text.index("def _continue_child_resume("):]
+    resume = resume[:resume.index("\n    def ", 10)]
+    assert resume.index("Child interrupt ownership validation failed") < resume.index("slide_for_resume(") \
+        < resume.index("start_task(")
+
+
+
+def test_with_development_runs_off_only_a_saved_chat_toolkit_is_refused_as_switched_off(ns, env):
+    cred = Credential(env, uuid.uuid4())
+    unsaved = {**cred.tool(), "id": None}   # switching development runs on would not help it
+    assert chat_refusal(env, ns, {"tools": [unsaved]}, allow=False).reason_code == "CREDENTIAL_REFERENCE_REQUIRED"

@@ -290,6 +290,14 @@ def internal_origins() -> list:
     return found
 
 
+MANDATE_PREFIX = "mandate:"   # the subject ref of a run under a mandate
+
+
+def _max_run_lifetime_s() -> int:
+    from .admission import MAX_RUN_LIFETIME_S  # pylint: disable=C0415
+    return MAX_RUN_LIFETIME_S
+
+
 def mint(*, sub, uid, act, scope, ctx, prj, tgt, run, tsk, exp, now=None) -> tuple:
     """``(token, claims)``; ``TokenUnavailable`` without a key."""
     key = signing_key()
@@ -323,10 +331,13 @@ def mint_for_admission(view, task_name, payload, internal=True) -> dict:
     if view.subject_ref is None or view.subject_user_id is None:
         raise TokenUnavailable("no subject")
     scope = scope_for(view.binding_project_id, view.agent_binding_ref, view.subject_user_id) if internal else []
+    # a person's run lives to the cap (the row decides liveness, #7229); a mandate's to its own deadline
+    exp = view.expires_at.timestamp() if str(view.subject_ref).startswith(MANDATE_PREFIX) \
+        else time.time() + _max_run_lifetime_s()
     token, claims = mint(
         sub=view.subject_ref, uid=view.subject_user_id, act=view.agent_binding_ref, scope=scope, ctx=view.context_ref,
         prj=view.project_id, tgt=target_projects(payload, view.project_id, view.subject_user_id) if internal else [],
-        run=view.run_id, tsk=task_name, exp=view.expires_at.timestamp())
+        run=view.run_id, tsk=task_name, exp=exp)
     return delivery(token, claims)
 
 
@@ -343,7 +354,7 @@ def mint_for_context(project_id, context_ref, task_name, payload, internal=True)
     with db.get_session(project_id) as session:
         row = session.execute(
             select(columns.subject, columns.caller, columns.agent_binding_ref, columns.definition_digest,
-                   columns.binding_project_id, columns.run_id, columns.expires_at)
+                   columns.binding_project_id, columns.run_id, columns.expires_at, columns.created_at)
             .where(columns.id == context_id)
         ).one_or_none()
     user_id = (row.caller or {}).get("user_id") if row is not None else None
@@ -353,8 +364,10 @@ def mint_for_context(project_id, context_ref, task_name, payload, internal=True)
     actor = (DEVELOPMENT_LABEL + str(row.definition_digest)) if row.agent_binding_ref is None \
         else str(row.agent_binding_ref)
     binding_project_id = row.binding_project_id or project_id
-    expires_at = row.expires_at
-    exp = (expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=timezone.utc)).timestamp()
+    mandate = (row.subject or {}).get("kind") == "mandate"
+    moment = row.expires_at if mandate else row.created_at   # a person's run lives to the cap (#7229)
+    exp = (moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)).timestamp() \
+        + (0 if mandate else _max_run_lifetime_s())
     token, claims = mint(
         sub=subject_ref, uid=user_id, act=actor, scope=scope_for(binding_project_id, actor, user_id) if internal else [],
         ctx=str(context_id), prj=project_id, tgt=target_projects(payload, project_id, user_id) if internal else [],
@@ -548,10 +561,8 @@ def verify_request(token, environ, endpoint=None, module=None, now=None, view_ar
     module = module or this.module
     if endpoint is None and view_args is None and args is None:
         endpoint, view_args, args = _request_parts()
-    settings = getattr(module, "admission_settings", None)
-    ttl = getattr(settings, "context_ttl_s", None)
-    try:
-        claims = parse(token, signing_key(), now=now, max_lifetime_s=None if ttl is None else int(ttl) + MAX_CLOCK_SKEW_S)
+    try:   # no token outlives the run cap; whether its run is still live is the context row's (#7229)
+        claims = parse(token, signing_key(), now=now, max_lifetime_s=_max_run_lifetime_s() + MAX_CLOCK_SKEW_S)
     except TokenRejected as exc:
         return _refuse_verified(module, exc.claims, str(exc))
     except ValueError as exc:
