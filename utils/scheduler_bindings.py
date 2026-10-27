@@ -1,6 +1,7 @@
 """Platform schedules whose cadence is owned by the elitea_core admin config."""
 
 from croniter import croniter
+from sqlalchemy import text
 
 from pylon.core.tools import log
 
@@ -28,6 +29,33 @@ SCHEDULER_CONFIG_RPC_FUNCS = {
     'index_scheduling': 'applications_check_index_scheduling',
     'pipeline_scheduling': 'pipelines_check_scheduling',
 }
+
+
+# Handlers that earlier builds stored on a managed row, per row name. A stack that ran such a build keeps
+# that row beside the one the boot call matches by handler, so the tick would run from two rows.
+LEGACY_RPC_FUNCS = {
+    'pipeline_scheduling': 'entity_schedules_check',
+}
+
+_REBIND_LEGACY_ROW = text(
+    "UPDATE schedule SET rpc_func = :new WHERE name = :name "
+    "AND project_id IS NULL AND rpc_func = :old "
+    "AND NOT EXISTS (SELECT 1 FROM schedule WHERE name = :name "
+    "AND project_id IS NULL AND rpc_func = :new)"
+)
+_PARK_LEGACY_ROW = text(
+    "UPDATE schedule SET active = false WHERE name = :name "
+    "AND project_id IS NULL AND rpc_func = :old AND active"
+)
+
+
+def rebind_legacy_rows(session):
+    """Point each stray-handler platform row at the managed handler, or switch it off when one exists."""
+    for name, old in LEGACY_RPC_FUNCS.items():
+        params = {'name': name, 'old': old, 'new': SCHEDULER_CONFIG_RPC_FUNCS[name]}
+        session.execute(_REBIND_LEGACY_ROW, params)
+        session.execute(_PARK_LEGACY_ROW, params)
+    session.commit()
 
 
 def advertised_bindings(active):
