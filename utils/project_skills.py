@@ -136,7 +136,8 @@ def resolve_mentioned_project_skills(user_input, known_names: set, catalog: list
     mentioned = [by_name[token] for token in tokens if token in by_name]
     max_allowed = get_max_invoked_skills_per_turn()
     if len(mentioned) > max_allowed:
-        raise SkillInvocationLimitError(len(mentioned), max_allowed)
+        message_mention_count = len([token for token in mention_tokens if token in known or token in by_name])
+        raise SkillInvocationLimitError(message_mention_count, max_allowed)
     if not mentioned:
         return []
     with db.with_project_schema_session(project_id) as session:

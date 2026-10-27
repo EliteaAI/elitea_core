@@ -361,6 +361,15 @@ class TestMentions:
         assert (error.value.count, error.value.max_allowed) == (6, 5)
         assert platform.body_requests == []
 
+    def test_the_over_limit_refusal_counts_every_skill_the_message_names(self, project_skills, platform):
+        catalog = [_entry(i, f's{i}') for i in range(1, 8)]
+        text = '~own-a ~own-b ' + ' '.join(f'~s{i}' for i in range(1, 7)) + ' ~nothing-like-it'
+
+        with pytest.raises(project_skills.SkillInvocationLimitError) as error:
+            project_skills.resolve_mentioned_project_skills(text, {'own-a', 'Own-B'}, catalog, CHAT_PROJECT_ID)
+
+        assert (error.value.count, error.value.max_allowed) == (8, 5)
+
     def test_mentions_up_to_the_limit_all_load(self, project_skills, platform):
         catalog = [_entry(i, f's{i}') for i in range(1, 8)]
         text = ' '.join(f'~s{i}' for i in range(1, 6))
