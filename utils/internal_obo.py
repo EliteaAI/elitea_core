@@ -90,7 +90,11 @@ RUN_ROUTES = {
     "artifacts.s3_bucket_operations": frozenset({"GET", "HEAD"}),
     "artifacts.s3_object_operations": frozenset({"GET", "HEAD", "PUT", "DELETE"}),
     LLM_ENDPOINT: frozenset({"POST"}),
+    "api.v2.secrets.secret": frozenset({"GET"}),                 # one platform-internal secret only (RUN_ROUTE_VALUES)
 }
+# Routes of RUN_ROUTES held to fixed values of a path argument: the checkpointer's connection string the worker falls back
+# to reading when Main's prefetch did not reach it (a fan-out child); no other secret is returned to a run token
+RUN_ROUTE_VALUES = {"api.v2.secrets.secret": ("secret", frozenset({"pgvector_project_connstr"}))}
 # The model calls of the LLM proxy (its LLM endpoints, never the LiteLLM admin ones), as the route's ``url``
 LLM_PATHS = frozenset({
     "v1/chat/completions", "v1/responses", "v1/messages", "v1/messages/count_tokens", "v1/embeddings",
@@ -450,8 +454,10 @@ def _route_accepts(environ, endpoint, claims, view_args=None) -> Optional[str]:
     if endpoint in MCP_ROUTE_ENDPOINTS:
         return "mcp"
     view_args = view_args or {}
+    fixed = RUN_ROUTE_VALUES.get(endpoint)
     if environ.get("REQUEST_METHOD") in RUN_ROUTES.get(endpoint, ()) and view_args.get("mode") != ADMINISTRATION_MODE \
-            and (endpoint != LLM_ENDPOINT or view_args.get("url") in LLM_PATHS):
+            and (endpoint != LLM_ENDPOINT or view_args.get("url") in LLM_PATHS) \
+            and (fixed is None or view_args.get(fixed[0]) in fixed[1]):
         return "run"
     return None
 

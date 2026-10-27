@@ -126,6 +126,7 @@ RUN_REQUESTS = [   # (endpoint, method, view_args, args, headers): what the run'
      {"OpenAI-Organization": "1"}),
     ("runtime_interface_litellm.litellm_route_http__url", "POST", {"url": "v1/images/generations"}, {},
      {"X-Project-Id": "1"}),
+    ("api.v2.secrets.secret", "GET", {"project_id": 1, "secret": "pgvector_project_connstr"}, {}, {}),
 ]
 
 
@@ -163,6 +164,8 @@ def test_a_model_call_must_name_the_runs_project_as_the_proxy_reads_it(ns, env, 
     ("api.v2.elitea_core.governance_settings", "PUT", {"mode": "administration"}),   # governance settings
     ("api.v2.admin.users", "GET", {"mode": "administration"}),                 # admin endpoints
     ("api.v2.secrets.secret", "GET", {"project_id": 1, "secret": "s"}),        # no secret is returned to a run
+    ("api.v2.secrets.secret", "GET", {"project_id": 1, "secret": "pgvector_project_connstr_x"}),
+    ("api.v2.secrets.secret", "PUT", {"project_id": 1, "secret": "pgvector_project_connstr"}),
     ("api.v2.configurations.configurations", "GET", {"project_id": 1}),
     ("api.v2.elitea_core.applications", "GET", {"mode": "prompt_lib", "project_id": 1}),   # listings
     ("api.v2.elitea_core.tool", "GET", {"mode": "prompt_lib", "project_id": 1, "tool_id": 2}),
