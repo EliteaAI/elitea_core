@@ -1,6 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from pylon.core.tools import log
 from sqlalchemy import desc
@@ -11,8 +11,8 @@ from .skill_run_utils import EMPTY_INSTRUCTIONS_ERROR, SkillRunError, SkillRunTa
     build_skill_run_target, load_skill_run_target, \
     resolve_skill_llm_settings, select_skill_version
 from .skill_llm_override import select_llm_override
-from .skill_mentions import resolves_mentions_in_predict
-from .skill_utils import consume_message_skills
+from .skill_mentions import merge_mention_candidates, resolves_mentions_in_predict
+from .skill_utils import consume_message_skills, validate_message_skill_limit
 from .utils import get_public_project_id
 from ..models.enums.all import ParticipantTypes
 from ..models.message_group import ConversationMessageGroup
@@ -259,16 +259,16 @@ def has_skill_mention(user_input) -> bool:
     return False
 
 
-def participant_skill_mention_candidates(session, msg_group, chat_project_id: int) -> list:
+def participant_skill_mention_candidates(session, conversation_id: int, sent_to_id: int, chat_project_id: int) -> list:
     rows = session.query(Participant, ParticipantMapping.entity_settings).join(
         ParticipantMapping, ParticipantMapping.participant_id == Participant.id,
     ).filter(
-        ParticipantMapping.conversation_id == msg_group.conversation_id,
+        ParticipantMapping.conversation_id == conversation_id,
         Participant.entity_name == ParticipantTypes.skill.value,
     ).order_by(Participant.id).all()
     pins_by_owner = defaultdict(dict)
     for participant, entity_settings in rows:
-        if participant.id == msg_group.sent_to_id:
+        if participant.id == sent_to_id:
             continue
         try:
             source = resolve_skill_participant(participant.entity_meta, chat_project_id)
@@ -307,12 +307,33 @@ def apply_participant_skill_mentions(session, msg_group, result: dict, chat_proj
     is_dummy = participant.entity_name == ParticipantTypes.dummy
     if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, result.get('version_details'))):
         return
-    candidates = participant_skill_mention_candidates(session, msg_group, chat_project_id)
-    if not candidates:
+    candidates = participant_skill_mention_candidates(
+        session, msg_group.conversation_id, msg_group.sent_to_id, chat_project_id,
+    )
+    if candidates:
+        result[CHAT_SKILLS_KEY] = candidates
+    if not has_skill_mention(result.get('user_input')):
         return
-    result[CHAT_SKILLS_KEY] = candidates
-    if is_dummy and has_skill_mention(result.get('user_input')):
+    if not is_dummy:
+        agent_skills = (result.get('version_details') or {}).get('skills') or []
+        validate_message_skill_limit(result['user_input'], merge_mention_candidates(agent_skills, candidates))
+    elif candidates:
         result['user_input'], result[INVOKED_SKILLS_KEY] = consume_message_skills(result['user_input'], candidates)
+
+
+def validate_turn_skill_limit(
+    session, conversation_id: int, participant, user_input, chat_project_id: int,
+    load_version_details: Callable[[], Optional[dict]],
+) -> None:
+    if participant is None or not has_skill_mention(user_input):
+        return
+    version_details = load_version_details()
+    is_dummy = participant.entity_name == ParticipantTypes.dummy
+    if not (is_dummy or resolves_mentions_in_predict(participant.entity_name, version_details)):
+        return
+    candidates = participant_skill_mention_candidates(session, conversation_id, participant.id, chat_project_id)
+    agent_skills = (version_details or {}).get('skills') or []
+    validate_message_skill_limit(user_input, merge_mention_candidates(agent_skills, candidates))
 
 
 def pop_chat_skills(payload: dict) -> dict:
