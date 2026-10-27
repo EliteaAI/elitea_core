@@ -7,27 +7,30 @@ stand-ins. Rows live in SQLite.
 Run via:
     python tests/run_tests.py unit/test_7164_delivery_api.py -v
 """
-import pathlib
 import sys
 import types
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from fixtures import schedule_sqlite as sqlite_db
 from fixtures.helpers import load_module_with_stubs
 
-PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
+PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = 'plugins.elitea_core'
-PROJECT_ID = 7
-OWNER_ID = 42
-ADMIN_ID = 99
-AGENT_ID = 1
+PROJECT_ID, AGENT_ID = 7, 1
+OWNER_ID, ADMIN_ID = 42, 99
 CHAT = uuid4()
-PARTICIPANT_OF_AGENT = 5
-PARTICIPANT_OF_OTHER_AGENT = 6
+# The chat holds two agents and the two users: (participant id, entity name, entity id).
+PARTICIPANT_OF_AGENT, PARTICIPANT_OF_OTHER_AGENT, OWNER_PARTICIPANT, ADMIN_PARTICIPANT = 5, 6, 10, 11
+MEMBERS = [
+    (PARTICIPANT_OF_AGENT, 'application', AGENT_ID), (PARTICIPANT_OF_OTHER_AGENT, 'application', 2),
+    (OWNER_PARTICIPANT, 'user', OWNER_ID), (ADMIN_PARTICIPANT, 'user', ADMIN_ID),
+]
+USER_PARTICIPANT = {OWNER_ID: OWNER_PARTICIPANT, ADMIN_ID: ADMIN_PARTICIPANT}
 NOT_FOUND = 'delivery.conversation_uuid not found'
-NOT_ENTITY = 'entity is not a participant of the conversation'
 NOT_MEMBER = 'owner is not a member of the conversation'
+NOT_ENTITY = 'entity is not a participant of the conversation'
 PREFIX = 'models.applications.schedules.'
 EDITOR = {PREFIX + verb for verb in ('list', 'details', 'create', 'update', 'delete', 'run')}
 NO_DELIVERY = {'mode': 'run_history', 'conversation_uuid': None, 'participant_id': None}
@@ -87,40 +90,27 @@ def harness(isolated_sys_modules, monkeypatch):
     sys.modules['flask'] = flask
     sqlite_db.install_trace_span(types.SimpleNamespace(set_attribute=lambda *a: None), [])
 
-    class Conversation(Base):
-        __tablename__ = 'chat_conversations'
-        __table_args__ = ({'schema': 'tenant'},)
-        id = sa.Column(sa.Integer, primary_key=True)
-        uuid = sa.Column(sa.Uuid, unique=True)
+    def chat_table(class_name, table_name, **columns):
+        return type(class_name, (Base,), {
+            '__tablename__': table_name, '__table_args__': ({'schema': 'tenant'},),
+            'id': sa.Column(sa.Integer, primary_key=True), **columns,
+        })
 
-    class Participant(Base):
-        __tablename__ = 'chat_participants'
-        __table_args__ = ({'schema': 'tenant'},)
-        id = sa.Column(sa.Integer, primary_key=True)
-        entity_name = sa.Column(sa.String)
-        entity_meta = sa.Column(sa.JSON)
-
-    class ParticipantMapping(Base):
-        __tablename__ = 'chat_participant_mapping'
-        __table_args__ = ({'schema': 'tenant'},)
-        id = sa.Column(sa.Integer, primary_key=True)
-        conversation_id = sa.Column(sa.Integer)
-        participant_id = sa.Column(sa.Integer)
-
+    Conversation = chat_table('Conversation', 'chat_conversations', uuid=sa.Column(sa.Uuid, unique=True))
+    Participant = chat_table(
+        'Participant', 'chat_participants', entity_name=sa.Column(sa.String), entity_meta=sa.Column(sa.JSON))
+    ParticipantMapping = chat_table(
+        'ParticipantMapping', 'chat_participant_mapping',
+        conversation_id=sa.Column(sa.Integer), participant_id=sa.Column(sa.Integer))
     harness.ParticipantMapping = ParticipantMapping
     chat_models = types.ModuleType(f'{PACKAGE}.models.conversation')
     chat_models.Conversation = Conversation
     participant_models = types.ModuleType(f'{PACKAGE}.models.participants')
     participant_models.Participant, participant_models.ParticipantMapping = Participant, ParticipantMapping
     access = types.ModuleType(f'{PACKAGE}.utils.conversation_access')
-
-    def is_conversation_participant(session, conversation_id, user_id):
-        rows = session.query(Participant).join(
-            ParticipantMapping, ParticipantMapping.participant_id == Participant.id
-        ).filter(ParticipantMapping.conversation_id == conversation_id, Participant.entity_name == 'user').all()
-        return any(str(p.entity_meta.get('id')) == str(user_id) for p in rows)
-
-    access.is_conversation_participant = is_conversation_participant
+    access.is_conversation_participant = lambda session, conversation_id, user_id: session.query(
+        ParticipantMapping).filter_by(
+        conversation_id=conversation_id, participant_id=USER_PARTICIPANT[user_id]).count() > 0
     for module in (chat_models, participant_models, access):
         sys.modules[module.__name__] = module
 
@@ -186,13 +176,8 @@ def harness(isolated_sys_modules, monkeypatch):
     sqlite_db.add_agent_and_pipeline(harness.session_factory, Application, ApplicationVersion)
     with harness.session_factory() as session:
         session.add(Conversation(id=1, uuid=CHAT))
-        session.add_all([
-            Participant(id=PARTICIPANT_OF_AGENT, entity_name='application', entity_meta={'id': AGENT_ID}),
-            Participant(id=PARTICIPANT_OF_OTHER_AGENT, entity_name='application', entity_meta={'id': 2}),
-            Participant(id=10, entity_name='user', entity_meta={'id': OWNER_ID}),
-            Participant(id=11, entity_name='user', entity_meta={'id': ADMIN_ID}),
-        ])
-        session.add_all([ParticipantMapping(conversation_id=1, participant_id=pid) for pid in (5, 6, 10, 11)])
+        session.add_all(Participant(id=pid, entity_name=kind, entity_meta={'id': ref}) for pid, kind, ref in MEMBERS)
+        session.add_all(ParticipantMapping(conversation_id=1, participant_id=pid) for pid, _, _ in MEMBERS)
         session.commit()
     return harness
 
@@ -291,7 +276,7 @@ def test_participant_of_another_entity_is_400(harness):
 
 
 def test_owner_outside_the_chat_is_400(harness):
-    harness.drop_member(10)
+    harness.drop_member(OWNER_PARTICIPANT)
     assert_400(harness.call('post', agent_body(delivery=to_chat())), NOT_MEMBER)
     assert harness.stored_count() == 0
 
@@ -300,7 +285,7 @@ def test_admin_edit_checks_the_owner_membership(harness):
     schedule_id = harness.seed()
     harness.user_id = ADMIN_ID
     harness.permissions = EDITOR | {PREFIX + 'admin'}
-    harness.drop_member(11)
+    harness.drop_member(ADMIN_PARTICIPANT)
     body, status = harness.call('put', {'delivery': to_chat()}, schedule_id)
     assert status == 200
     assert body['delivery'] == chat_delivery()
@@ -310,6 +295,6 @@ def test_admin_edit_is_400_when_only_the_admin_is_a_member(harness):
     schedule_id = harness.seed()
     harness.user_id = ADMIN_ID
     harness.permissions = EDITOR | {PREFIX + 'admin'}
-    harness.drop_member(10)
+    harness.drop_member(OWNER_PARTICIPANT)
     assert_400(harness.call('put', {'delivery': to_chat()}, schedule_id), NOT_MEMBER)
     assert harness.row(schedule_id).delivery_mode == 'run_history'
