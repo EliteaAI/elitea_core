@@ -14,6 +14,7 @@ from ...utils.skill_utils import (
     list_skills_api,
     create_skill,
     build_skill_detail,
+    enforce_new_skill_spec,
     SkillError,
 )
 from ...utils.constants import PROMPT_LIB_MODE
@@ -135,6 +136,11 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 include_context=False,
                 include_input=False,
             ), 400
+
+        try:
+            enforce_new_skill_spec(skill_data)
+        except SkillError as e:
+            return {"error": str(e)}, e.http_status
 
         with db.get_session(project_id) as session:
             try:

@@ -436,6 +436,14 @@ def skill_utils_module():
 
     _heal_sqlalchemy_stubs()
 
+    frontmatter_spec = importlib.util.spec_from_file_location(
+        "plugins.elitea_core.utils.skill_frontmatter",
+        PLUGIN_ROOT / "utils" / "skill_frontmatter.py",
+    )
+    frontmatter = importlib.util.module_from_spec(frontmatter_spec)
+    sys.modules[frontmatter_spec.name] = frontmatter
+    frontmatter_spec.loader.exec_module(frontmatter)
+
     spec = importlib.util.spec_from_file_location(
         "plugins.elitea_core.utils.skill_utils",
         PLUGIN_ROOT / "utils" / "skill_utils.py",

@@ -39,6 +39,12 @@ def skill_utils(monkeypatch):
         package = types.ModuleType(name)
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
+    frontmatter_spec = importlib.util.spec_from_file_location(
+        f'{PKG}.utils.skill_frontmatter', PLUGIN_ROOT / 'utils' / 'skill_frontmatter.py',
+    )
+    frontmatter = importlib.util.module_from_spec(frontmatter_spec)
+    monkeypatch.setitem(sys.modules, frontmatter_spec.name, frontmatter)
+    frontmatter_spec.loader.exec_module(frontmatter)
     spec = importlib.util.spec_from_file_location(f'{PKG}.utils.skill_utils', PLUGIN_ROOT / 'utils' / 'skill_utils.py')
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)

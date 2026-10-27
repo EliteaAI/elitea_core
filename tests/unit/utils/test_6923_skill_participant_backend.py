@@ -306,6 +306,7 @@ def skill_modules(isolated_sys_modules):
     for name in ('all', 'pd.collection_base', 'pd.skill_publish', 'pd.skill_run_settings'):
         _auto_stub(f'{PACKAGE}.models.{name}')
 
+    _load('utils/skill_frontmatter.py', f'{PACKAGE}.utils.skill_frontmatter')
     skill_utils = _load('utils/skill_utils.py', f'{PACKAGE}.utils.skill_utils')
     skill_publish_utils = _load('utils/skill_publish_utils.py', f'{PACKAGE}.utils.skill_publish_utils')
     return types.SimpleNamespace(

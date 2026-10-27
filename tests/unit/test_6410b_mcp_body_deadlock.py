@@ -174,6 +174,7 @@ def _install_package():
     skill_utils = types.ModuleType(f'{PKG}.utils.skill_utils')
     for name in ('create_skill_version', 'attach_skill_to_agent', 'detach_skill_from_agent'):
         setattr(skill_utils, name, lambda *a, **k: {'id': 1})
+    skill_utils.normalize_version_frontmatter = lambda meta: meta
     skill_utils.update_skill = _record('update_skill')
     skill_utils.update_skill_version = _record('update_skill_version')
     # Recorded, not a silent no-op: a test has to be able to assert that a malformed selector

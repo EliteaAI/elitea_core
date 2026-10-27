@@ -1,3 +1,4 @@
+import json
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -7,6 +8,15 @@ from sqlalchemy.orm import selectinload
 from ..models.skill import Skill, SkillVersion
 from ..models.pd.skill import SkillExportModel
 from .export_import_utils import slugify
+from .skill_frontmatter import (
+    FRONTMATTER_META_KEY,
+    LEGACY_RUN_SETTINGS_KEY,
+    compose_export_frontmatter,
+    extract_passthrough_frontmatter,
+    check_spec_description,
+    check_spec_name,
+    list_unused_frontmatter_keys,
+)
 from .skill_utils import (
     _skill_session,
     get_skill_details,
@@ -19,9 +29,32 @@ ALLOWED_SKILL_EXTENSIONS = {'.md'}
 
 REQUIRED_FRONTMATTER_FIELDS = ('name', 'description')
 
-RUN_SETTINGS_FRONTMATTER_KEY = 'elitea_run_settings'
+RUN_SETTINGS_FRONTMATTER_KEY = LEGACY_RUN_SETTINGS_KEY
 FRONTMATTER_LLM_FIELDS = ('model_name', 'temperature', 'max_tokens', 'reasoning_effort')
 FRONTMATTER_RUN_SETTINGS_FIELDS = (*FRONTMATTER_LLM_FIELDS, 'selection', 'ignore_project_context')
+
+TAGS_METADATA_KEY = 'elitea-tags'
+VERSION_METADATA_KEY = 'elitea-version'
+RUN_SETTINGS_METADATA_KEYS = {
+    'model_name': 'elitea-model',
+    'temperature': 'elitea-temperature',
+    'max_tokens': 'elitea-max-tokens',
+    'reasoning_effort': 'elitea-reasoning-effort',
+    'ignore_project_context': 'elitea-ignore-project-context',
+    'selection': 'elitea-model-selection',
+}
+JSON_ENCODED_METADATA_KEYS = (TAGS_METADATA_KEY, RUN_SETTINGS_METADATA_KEYS['selection'])
+FLAG_STRINGS = {'true': True, 'false': False}
+
+
+def _parse_flag(value: str) -> bool:
+    try:
+        return FLAG_STRINGS[value.strip().lower()]
+    except KeyError:
+        raise ValueError(f'not a boolean: {value!r}')
+
+
+STRING_RUN_SETTINGS_PARSERS = {'temperature': float, 'max_tokens': int, 'ignore_project_context': _parse_flag}
 
 
 def _select_version(skill_data: dict, version_name: Optional[str]) -> dict:
@@ -92,31 +125,25 @@ def skill_to_md(skill_data: dict, version_name: Optional[str] = None) -> str:
     version = _select_version(skill_data, version_name)
 
     details = skill_data.get('version_details') or {}
-    if not version.get('instructions') and details.get('name') == version.get('name'):
-        instructions = details.get('instructions', '')
-        tags_source = details if details.get('tags') else version
-        run_settings = details.get('run_settings')
-    else:
-        instructions = version.get('instructions', '')
-        tags_source = version
-        run_settings = version.get('run_settings')
-
-    frontmatter: Dict[str, Any] = {
-        'name': skill_data.get('name', ''),
-        'description': skill_data.get('description', ''),
-    }
+    version_source = (
+        details
+        if not version.get('instructions') and details.get('name') == version.get('name')
+        else version
+    )
+    tags_source = details if version_source is details and details.get('tags') else version
 
     resolved_version_name = version.get('name', DEFAULT_VERSION_NAME)
-    if resolved_version_name and resolved_version_name != DEFAULT_VERSION_NAME:
-        frontmatter['elitea_version'] = resolved_version_name
-
-    tags = _normalize_tags(tags_source)
-    if tags:
-        frontmatter['tags'] = tags
-
-    run_settings_frontmatter = run_settings_to_frontmatter(run_settings)
-    if run_settings_frontmatter:
-        frontmatter[RUN_SETTINGS_FRONTMATTER_KEY] = run_settings_frontmatter
+    elitea_metadata = encode_elitea_metadata(
+        version_name=resolved_version_name,
+        tags=_normalize_tags(tags_source),
+        run_settings=version_source.get('run_settings'),
+    )
+    passthrough = (version_source.get('meta') or {}).get(FRONTMATTER_META_KEY) or {}
+    frontmatter = compose_export_frontmatter(
+        identity={'name': skill_data.get('name', ''), 'description': skill_data.get('description', '')},
+        passthrough=passthrough,
+        elitea_metadata=elitea_metadata,
+    )
 
     yaml_str = yaml.dump(
         frontmatter,
@@ -126,7 +153,62 @@ def skill_to_md(skill_data: dict, version_name: Optional[str] = None) -> str:
         width=120,
     )
 
-    return f"---\n{yaml_str}---\n\n{instructions}"
+    return f"---\n{yaml_str}---\n\n{version_source.get('instructions', '')}"
+
+
+def encode_elitea_metadata(version_name: Optional[str], tags: List[str], run_settings: Optional[dict]) -> Dict[str, str]:
+    metadata: Dict[str, str] = {}
+    if tags:
+        metadata[TAGS_METADATA_KEY] = json.dumps(tags, ensure_ascii=False)
+    if version_name and version_name != DEFAULT_VERSION_NAME:
+        metadata[VERSION_METADATA_KEY] = version_name
+    for field, value in run_settings_to_frontmatter(run_settings).items():
+        key = RUN_SETTINGS_METADATA_KEYS[field]
+        if key in JSON_ENCODED_METADATA_KEYS:
+            metadata[key] = json.dumps(value, ensure_ascii=False)
+        elif isinstance(value, bool):
+            metadata[key] = str(value).lower()
+        else:
+            metadata[key] = str(value)
+    return metadata
+
+
+def decode_elitea_metadata(metadata: dict) -> Dict[str, Any]:
+    decoded: Dict[str, Any] = {}
+    if TAGS_METADATA_KEY in metadata:
+        decoded['tags'] = _decode_json_metadata(metadata, TAGS_METADATA_KEY)
+
+    run_settings = {
+        field: _decode_run_setting(field, metadata, key)
+        for field, key in RUN_SETTINGS_METADATA_KEYS.items()
+        if key in metadata
+    }
+    if run_settings:
+        decoded[RUN_SETTINGS_FRONTMATTER_KEY] = run_settings
+    return decoded
+
+
+def _decode_json_metadata(metadata: dict, key: str) -> Any:
+    value = metadata[key]
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f'"metadata.{key}" must be valid JSON: {exc}')
+
+
+def _decode_run_setting(field: str, metadata: dict, key: str) -> Any:
+    if key in JSON_ENCODED_METADATA_KEYS:
+        return _decode_json_metadata(metadata, key)
+    value = metadata[key]
+    parse = STRING_RUN_SETTINGS_PARSERS.get(field)
+    if parse is None or not isinstance(value, str):
+        return value
+    try:
+        return parse(value)
+    except ValueError:
+        return value
 
 
 def run_settings_to_frontmatter(run_settings: Optional[dict]) -> Dict[str, Any]:
@@ -358,9 +440,13 @@ def import_skill_md(
     """
 
     parsed = parse_skill_md(content)
-    frontmatter = parsed['frontmatter']
+    raw_frontmatter = parsed['frontmatter']
     body = parsed['body']
+    passthrough = extract_passthrough_frontmatter(raw_frontmatter)
+    frontmatter = {**raw_frontmatter, **decode_elitea_metadata(raw_frontmatter.get('metadata') or {})}
     validate_skill_frontmatter(frontmatter)
+    check_spec_name(frontmatter['name'])
+    check_spec_description(frontmatter['description'])
 
     # Always use 'base' as the version name for imports. The elitea_version
     # field in the frontmatter is only informational (indicates which version
@@ -376,6 +462,8 @@ def import_skill_md(
     }
     if tag_payload:
         version['tags'] = tag_payload
+    if passthrough:
+        version['meta'] = {FRONTMATTER_META_KEY: passthrough}
 
     with _skill_session(session, project_id) as s:
         imported = import_skill(
@@ -387,4 +475,4 @@ def import_skill_md(
             session=s,
         )
         result = get_skill_details(project_id=project_id, skill_id=imported.id, session=s)
-        return result.get('data')
+        return {**result.get('data'), 'unused_frontmatter_keys': list_unused_frontmatter_keys(passthrough)}
