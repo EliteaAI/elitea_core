@@ -672,6 +672,49 @@ def test_a_resume_never_moves_any_context_past_the_runs_own_cap(ns, env, clock):
         assert ns.adm._aware(row.expires_at) <= cap  # pylint: disable=W0212
 
 
+def clone_context(env, ns, ref, **values):
+    """Another context row of the same run (same run_id), with the given columns changed; its id."""
+    table = ns.models.ExecutionSecurityContext.__table__
+    with env.get_session(1) as session:
+        source = session.execute(env.ns.sa.select(table).where(table.c.id == uuid.UUID(ref))).mappings().one()
+        clone = dict(source, id=uuid.uuid4(), attempt=source["attempt"] + 100, **values)
+        session.execute(table.insert().values(**clone))
+        session.commit()
+    return str(clone["id"])
+
+
+def test_an_older_live_context_of_the_run_never_makes_its_verdicts_write_for_nothing(ns, env, clock):
+    _call, ref = admitted_run(ns, env)
+    run_to_running(env, ns, ref)
+    row = context_row(env, ns, ref)
+    created = ns.adm._aware(row.created_at)  # pylint: disable=W0212
+    # a context of the same run admitted a day and an hour earlier is still marked live (never ended, inherited item 8)
+    older = clone_context(env, ns, ref, created_at=created - timedelta(hours=25),
+                          expires_at=created + timedelta(seconds=TTL))
+    clock["now"] = ns.adm._aware(row.expires_at) - timedelta(seconds=TTL // 4)  # pylint: disable=W0212
+    first = updates_during(env, lambda: verdict(ns, env, ref))
+    moved = ns.adm._aware(context_row(env, ns, ref).expires_at)  # pylint: disable=W0212
+    second = updates_during(env, lambda: verdict(ns, env, ref))
+    assert second == []   # the next verdict writes nothing (before the fix: an UPDATE that moved nothing, every time)
+    assert len(first) == 1 and moved > clock["now"] + timedelta(seconds=TTL // 2)   # the verdict's own run moved
+    older_deadline = ns.adm._aware(context_row(env, ns, older).expires_at)  # pylint: disable=W0212
+    assert older_deadline == created + timedelta(seconds=TTL)   # an older admission is never moved past its own cap
+
+
+def test_a_mandate_context_of_the_run_is_never_moved_by_another_contexts_verdict(ns, env, clock):
+    _call, ref = admitted_run(ns, env)
+    run_to_running(env, ns, ref)
+    row = context_row(env, ns, ref)
+    mandate = clone_context(env, ns, ref, subject={"kind": "mandate", "ref": "mandate:" + str(uuid.uuid4())})
+    clock["now"] = ns.adm._aware(row.expires_at) - timedelta(seconds=TTL // 4)  # pylint: disable=W0212
+    assert verdict(ns, env, ref)["ok"] is True
+    assert ns.adm._aware(context_row(env, ns, ref).expires_at) > ns.adm._aware(row.expires_at)  # pylint: disable=W0212
+    assert context_row(env, ns, mandate).expires_at == row.expires_at   # its deadline is the mandate's
+    clock["now"] += timedelta(seconds=60)
+    assert ns.adm.slide_for_resume(env.module(), 1, ref) == 1   # the resume decision moves the run, not the mandate
+    assert context_row(env, ns, mandate).expires_at == row.expires_at
+
+
 def test_a_mandate_context_never_slides(ns, env, clock):
     _call, ref = admitted_run(ns, env)
     with env.get_session(1) as session:   # the row as a mandate run has it
@@ -740,3 +783,4 @@ def test_with_development_runs_off_only_a_saved_chat_toolkit_is_refused_as_switc
     cred = Credential(env, uuid.uuid4())
     unsaved = {**cred.tool(), "id": None}   # switching development runs on would not help it
     assert chat_refusal(env, ns, {"tools": [unsaved]}, allow=False).reason_code == "CREDENTIAL_REFERENCE_REQUIRED"
+

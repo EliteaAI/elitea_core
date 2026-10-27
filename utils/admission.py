@@ -2211,7 +2211,7 @@ def _validate(project_id, context_ref, caller, known, touch=True, ttl=None):  # 
         # only a deadline that would actually move: live, inside its last half window and short of the run's cap (an
         # expired root or a run at its cap would otherwise ask for a write on every verdict that moves nothing)
         target = min(now + timedelta(seconds=int(ttl)),
-                     min(_aware(member.created_at) for member in members) + timedelta(seconds=MAX_RUN_LIFETIME_S))
+                     _aware(_run_anchor(members)) + timedelta(seconds=MAX_RUN_LIFETIME_S))
         due = any(now < _aware(member.expires_at) < min(now + timedelta(seconds=int(ttl) / 2), target)
                   for member in members)
     if touch or row.state != "running" or due:   # the internal MCP asks per request: no write once running (#7214)
@@ -2220,7 +2220,7 @@ def _validate(project_id, context_ref, caller, known, touch=True, ttl=None):  # 
                     and _set_state(session, context_id, "running", from_states=LIVE_STATES) != 1:
                 raise _denied("STALE_CONTEXT")
             if due:
-                _slide(session, row.run_id, min(_aware(member.created_at) for member in members), int(ttl), now)
+                _slide(session, row.run_id, _run_anchor(members), int(ttl), now)
             session.commit()
     return {
         "context_ref": str(context_id), "run_id": row.run_id, "attempt": row.attempt,
@@ -2259,20 +2259,28 @@ def root_context_live(project_id, row) -> bool:
     return root is None or (root is not _NO_ROOT and root.state in LIVE_STATES)
 
 
-def _slide(session, run_id, created_at, ttl, now, allow_expired=False) -> int:
-    """Move the deadline of every live context of the run (its own, its root's, its sub-agents': one admission, one
-    ``created_at``) to ``now + ttl``, never past ``created_at`` + ``MAX_RUN_LIFETIME_S`` and never backwards, in one
-    conditional UPDATE: an ended context is never revived and, unless ``allow_expired`` (the signed-in person's resume
-    decision), neither is one past its window. The number of rows moved."""
+def _run_anchor(members):
+    """The admission time the run's cap counts from: the earliest ``created_at`` of the context asking and its lineage
+    root. The throttle check and the UPDATE use this one anchor, so a slide that is due always moves a deadline."""
+    return min((member.created_at for member in members if member is not None), key=_aware)   # as stored
+
+
+def _slide(session, run_id, anchor, ttl, now, allow_expired=False) -> int:
+    """Move the deadline of every live context of the run admitted at or after ``anchor`` (its own, its root's, its
+    sub-agents': one admission, one ``created_at``) to ``now + ttl``, never past ``anchor`` + ``MAX_RUN_LIFETIME_S``
+    (so never past any moved row's own cap) and never backwards, in one conditional UPDATE: an ended context is never
+    revived, a mandate's never moves, and, unless ``allow_expired`` (the signed-in person's resume decision), neither
+    does one past its window. The number of rows moved."""
     if ttl <= 0 or not run_id:
         return 0
-    # the cap is the run's: the earliest admission among its live contexts (each row's own cap is never passed)
-    first = session.execute(select(func.min(ExecutionSecurityContext.created_at)).where(
-        ExecutionSecurityContext.run_id == run_id, ExecutionSecurityContext.state.in_(LIVE_STATES))).scalar()
-    started = min(_aware(created_at), _aware(first)) if first is not None else _aware(created_at)
-    deadline = min(now + timedelta(seconds=ttl), started + timedelta(seconds=MAX_RUN_LIFETIME_S))
+    deadline = min(now + timedelta(seconds=ttl), _aware(anchor) + timedelta(seconds=MAX_RUN_LIFETIME_S))
     conditions = [ExecutionSecurityContext.run_id == run_id, ExecutionSecurityContext.state.in_(LIVE_STATES),
-                  ExecutionSecurityContext.expires_at < deadline]
+                  # admitted at or after the anchor (strictly after anchor - 1 µs: the same comparison wherever the
+                  # stored value carries fewer digits than the bound one)
+                  ExecutionSecurityContext.created_at > anchor - timedelta(microseconds=1),
+                  ExecutionSecurityContext.expires_at < deadline,
+                  # defence in depth: a mandate's deadline is the mandate's, whatever context of the run asks
+                  func.coalesce(ExecutionSecurityContext.subject["kind"].as_string(), "") != "mandate"]
     if not allow_expired:
         conditions.append(ExecutionSecurityContext.expires_at > now)
     return session.execute(
@@ -2290,11 +2298,15 @@ def slide_for_resume(module, project_id, context_ref) -> int:
         return 0
     with db.get_session(project_id) as session:
         row = session.execute(select(ExecutionSecurityContext.run_id, ExecutionSecurityContext.created_at,
-                                     ExecutionSecurityContext.subject)
+                                     ExecutionSecurityContext.subject, ExecutionSecurityContext.parent_context_ref,
+                                     ExecutionSecurityContext.call_lineage)
                               .where(ExecutionSecurityContext.id == context_id)).one_or_none()
-        if row is None or (row.subject or {}).get("kind") == "mandate":
-            return 0
-        moved = _slide(session, row.run_id, row.created_at, ttl, _now(), allow_expired=True)
+    if row is None or (row.subject or {}).get("kind") == "mandate":
+        return 0
+    root = _root_row(project_id, row)   # the same anchor as a verdict of this context: it and its lineage root
+    members = (row, root) if root not in (None, _NO_ROOT) else (row,)
+    with db.get_session(project_id) as session:
+        moved = _slide(session, row.run_id, _run_anchor(members), ttl, _now(), allow_expired=True)
         session.commit()
     return moved
 
