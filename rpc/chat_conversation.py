@@ -1,7 +1,7 @@
 from pylon.core.tools import web, log
 from tools import db, config as c, auth, serialize, rpc_tools, MinioClient
 
-from sqlalchemy import desc, asc, Integer, String, or_, func
+from sqlalchemy import desc, asc, Integer, or_, func, select
 from sqlalchemy.orm import selectinload
 
 from ..models.conversation import Conversation
@@ -432,7 +432,7 @@ class RPC:
         Args:
             participant_id: Optional participant ID to filter by single_participant in conversation meta
             entity_project_id: Optional owner project of a skill single_participant
-            schedule_id: Optional schedule ID to filter by meta.schedule_id
+            schedule_id: Optional schedule ID; keeps the conversations of that schedule's runs
         """
         with db.get_session(project_id) as session:
             sorting_by = getattr(Conversation, sort_by, Conversation.created_at)
@@ -497,8 +497,11 @@ class RPC:
                 base_query = base_query.filter(*filters)
 
             if schedule_id is not None:
+                # The run row owns the link, so the filter uses its indexed column, not user-writable meta
                 base_query = base_query.filter(
-                    Conversation.meta['schedule_id'].astext.cast(String) == str(schedule_id),  # text compare: a non-numeric row cannot raise
+                    Conversation.id.in_(
+                        select(EntityScheduleRun.conversation_id).where(EntityScheduleRun.schedule_id == schedule_id)
+                    ),
                 )
 
             base_query = base_query.order_by(sorting(sorting_by))

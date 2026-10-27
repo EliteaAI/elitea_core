@@ -222,11 +222,16 @@ def applications_update_version(version_data, session, *, commit: bool = True) -
     notes_provided = 'notes' in dumped
     notes_value = dumped.pop('notes', None) if notes_provided else None
 
+    warning = None
     for key, value in dumped.items():
         if key == 'pipeline_settings' and isinstance(value, dict):
             existing_trigger = (version.pipeline_settings or {}).get('trigger')
             if 'trigger' in value:
+                requested = value['trigger'] or {}
                 value = sanitize_trigger_for_write(value, existing_trigger)
+                if requested.get('type') == 'schedule' and value['trigger'] != requested:
+                    warning = 'A schedule trigger is not saved on a version. Create the schedule in Schedules.'
+                    log.warning('applications_update_version: schedule trigger of version %s not stored', version.id)
             elif existing_trigger:
                 value = {**value, 'trigger': existing_trigger}
         setattr(version, key, value)
@@ -270,7 +275,10 @@ def applications_update_version(version_data, session, *, commit: bool = True) -
         log.error(e)
         return {'updated': False, 'msg': 'Values you passed violates unique constraint'}
 
-    return {'updated': True, 'data': loads(result.model_dump_json())}
+    answer = {'updated': True, 'data': loads(result.model_dump_json())}
+    if warning:
+        answer['warning'] = warning
+    return answer
 
 
 def application_update(project_id: int, application_id: int, update_data: ApplicationUpdateModel, session) -> dict:

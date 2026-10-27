@@ -22,7 +22,6 @@ from flask import request
 from pydantic import ValidationError
 from pylon.core.tools import log
 from tools import auth, rpc_tools
-from tools import config as c
 
 from ..models.pd.generate_schedule_draft import (
     GenerateScheduleDraftRequest,
@@ -35,6 +34,7 @@ from .draft_llm_utils import (
 )
 from .exceptions import PoolSaturationError
 from .predict_utils import PredictPayloadError
+from .schedule_access import schedule_check_spec
 from .schedule_draft_utils import (  # pylint: disable=W0212
     build_schedule_draft_prompt,
     schedule_roster,
@@ -48,6 +48,7 @@ _AWAIT_TASK_TIMEOUT = 60
 _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_TEMPERATURE = 0.3
 _MODEL_FAILED = "model_failed"
+PAYLOAD_REFUSED = "The draft request could not be sent to the model"
 
 
 def _refusal(code: str, text: str, status: int, **extra) -> tuple[dict, int]:
@@ -58,13 +59,7 @@ def _refusal(code: str, text: str, status: int, **extra) -> tuple[dict, int]:
 class ScheduleDraftHandler:
     """Draft a schedule with AI; `self.module` is the plugin module that runs the model call."""
 
-    @auth.decorators.check_api({
-        "permissions": ["models.applications.schedules.create"],
-        "recommended_roles": {
-            c.ADMINISTRATION_MODE: {"admin": True, "editor": True, "viewer": False},
-            c.DEFAULT_MODE: {"admin": True, "editor": True, "viewer": False},
-        }
-    })
+    @auth.decorators.check_api(schedule_check_spec("create"))
     def _draft(self, project_id: int):
         """Draft the fields of a schedule form from plain text and the current form values; nothing is saved.
 
@@ -73,7 +68,7 @@ class ScheduleDraftHandler:
         502 the model failed or its answer cannot be used; 503 busy, retry after `retry_after` seconds.
         """
         try:
-            req = GenerateScheduleDraftRequest.model_validate(request.json)
+            req = GenerateScheduleDraftRequest.model_validate(request.get_json(silent=True))
         except ValidationError as e:
             first = e.errors()[0]
             return _refusal("invalid_input", first["msg"], 400, field=first["loc"][0] if first["loc"] else "body")
@@ -114,8 +109,9 @@ class ScheduleDraftHandler:
                 skip_expansion=True,
                 return_chat_history=True,
             )
-        except PredictPayloadError as exc:
-            return _refusal("invalid_input", str(exc), 400)
+        except PredictPayloadError:
+            log.exception("generate_schedule_draft: the model call was refused")  # the text can name internals
+            return _refusal("invalid_input", PAYLOAD_REFUSED, 400)
         except PoolSaturationError as exc:
             busy = "The service is busy. Please try again in a few seconds."
             return _refusal("temporarily_unavailable", busy, 503, message=busy, retry_after=exc.retry_after)

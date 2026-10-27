@@ -9,6 +9,8 @@ from tools import this
 
 DEFAULT_MIN_INTERVAL_MINUTES = 5
 DEFAULT_MAX_ENABLED_PER_PROJECT = 50
+MAX_MIN_INTERVAL_MINUTES = 1440
+MAX_ENABLED_PER_PROJECT_LIMIT = 1000
 
 
 class ScheduleLimits(NamedTuple):
@@ -22,12 +24,22 @@ class ScheduleLimitError(Exception):
         self.limit = limit
 
 
+def at_least_one(section: dict, key: str, default: int, ceiling: int) -> int:
+    """The configured integer, `default` when missing or null, kept between 1 and `ceiling` (the admin schema maximum).
+
+    config.yml skips the admin schema, so the bounds are applied here.
+    """
+    value = section.get(key)
+    return min(max(1, int(default if value is None else value)), ceiling)
+
+
 def schedule_limits() -> ScheduleLimits:
     """Read at each call, so an admin change applies to the next check."""
     section = this.module.descriptor.config.get('scheduler', {}).get('schedules', {})
     return ScheduleLimits(
-        section.get('min_interval_minutes', DEFAULT_MIN_INTERVAL_MINUTES),
-        section.get('max_enabled_per_project', DEFAULT_MAX_ENABLED_PER_PROJECT),
+        at_least_one(section, 'min_interval_minutes', DEFAULT_MIN_INTERVAL_MINUTES, MAX_MIN_INTERVAL_MINUTES),
+        at_least_one(section, 'max_enabled_per_project', DEFAULT_MAX_ENABLED_PER_PROJECT,
+                     MAX_ENABLED_PER_PROJECT_LIMIT),
     )
 
 

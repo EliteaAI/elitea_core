@@ -56,6 +56,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_schedules_uuid ON {pid}.entity_sched
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS approval_confirmed_by INTEGER NULL;
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS approval_confirmed_at TIMESTAMPTZ NULL;
 ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS approval_fingerprint TEXT NULL;
+ALTER TABLE {pid}.entity_schedules ADD COLUMN IF NOT EXISTS original_trigger JSONB NULL;
+# Revert by hand: set scheduler.schedules.legacy_step_enabled to false, call the RPC schedules_restore_legacy_triggers(project_id)
+# for each project (rows with NULL original_trigger cannot be restored; the RPC counts them), then drop the
+# column (DROP COLUMN IF EXISTS original_trigger) and the index (DROP INDEX IF EXISTS ix_entity_schedule_runs_conversation)
 
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_runs (
     id SERIAL PRIMARY KEY,
@@ -84,6 +88,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_schedule_runs_active
     WHERE status IN ('running', 'waiting_for_approval');
 CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_schedule_started
     ON {pid}.entity_schedule_runs (schedule_id, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS ix_entity_schedule_runs_conversation
+    ON {pid}.entity_schedule_runs (conversation_id);
 
 CREATE TABLE IF NOT EXISTS {pid}.entity_schedule_preferences (
     user_id INTEGER PRIMARY KEY,

@@ -96,6 +96,7 @@ def migrated_row(
         'enabled': reason is None, 'disabled_reason': reason, 'created_by': owner,
         'principal': {'kind': 'delegation', 'ref': owner}, 'last_run': _last_run(trigger.get('last_run')),
         'next_run': compute_next_run(cron, zone, now) if reason is None else None,
+        'original_trigger': trigger,
     }
 
 
@@ -135,18 +136,86 @@ def _legacy_versions(session) -> list:
     ).all()
 
 
-def _migrate_versions(session, project_id: int, dry_run: bool) -> dict:
-    """The project report; each version moves alone, a failed one goes under `errors` and keeps its trigger."""
+RESTORE_FAILED = 'the trigger could not be restored; see the log'
+
+
+def restore_version_trigger(session, schedule_id: int) -> None:
+    """Undo one migration: write `original_trigger` back to the version and delete the schedule row.
+
+    Rows migrated before the column existed hold NULL and cannot be restored, and neither can a row whose
+    version is gone: ValueError, nothing deleted. Switch the legacy step off (`legacy_step_enabled`) first,
+    or the next tick moves the trigger again. The restore removes the schedule row and its run history.
+    """
+    from ..models.all import ApplicationVersion
+    from ..models.entity_schedule import EntitySchedule
+
+    schedule = session.get(EntitySchedule, schedule_id)
+    if schedule is None or schedule.original_trigger is None:
+        raise ValueError('the schedule has no original trigger to restore')
+    version = session.get(ApplicationVersion, schedule.version_id)
+    if version is None:
+        raise ValueError('the version of the schedule is gone, so its trigger has nowhere to go')
+    try:
+        version.pipeline_settings = {**(version.pipeline_settings or {}), 'trigger': schedule.original_trigger}
+        session.delete(schedule)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+
+def restore_project_triggers(project_id: int) -> dict:
+    """Undo every migration of one project; the report lists restored ids, failures and the rows left as they are.
+
+    `without_original_trigger` counts the pipeline rows with NULL: migrated before the column existed, or made
+    in the UI. Both stay as schedules. A failed row goes under `errors` and the next one runs.
+    """
+    from tools import db
+
+    from ..models.entity_schedule import EntitySchedule
+
+    report = {'project_id': project_id, 'restored': [], 'errors': [], 'without_original_trigger': 0}
+    with db.get_session(project_id) as session:
+        ids = session.scalars(
+            select(EntitySchedule.id)
+            .where(EntitySchedule.entity_type == 'pipeline', EntitySchedule.original_trigger.is_not(None))
+            .order_by(EntitySchedule.id)
+        ).all()
+        report['without_original_trigger'] = session.scalar(
+            select(func.count()).select_from(EntitySchedule)
+            .where(EntitySchedule.entity_type == 'pipeline', EntitySchedule.original_trigger.is_(None))
+        )
+        for schedule_id in ids:
+            try:
+                restore_version_trigger(session, schedule_id)
+                report['restored'].append(schedule_id)
+            except Exception as error:  # noqa: BLE001 -- one bad row must not stop the project
+                log.warning('Project %s: cannot restore schedule %s: %s', project_id, schedule_id, error)
+                report['errors'].append({'schedule_id': schedule_id, 'error': RESTORE_FAILED})
+    if report['without_original_trigger']:
+        log.warning('Project %s: %s pipeline schedules have no original trigger and stay schedules',
+                    project_id, report['without_original_trigger'])
+    return report
+
+
+def _migrate_versions(session, project_id: int, dry_run: bool, enforce_limits: bool = False) -> dict:
+    """The project report; each version moves alone, a failed one goes under `errors` and keeps its trigger.
+
+    With `enforce_limits` an enabled row over the project cap or below the minimum interval is not moved:
+    its version keeps the legacy trigger and goes under `held`.
+    """
     from ..models.entity_schedule import EntitySchedule
 
     report = {
         'project_id': project_id, 'found': 0, 'migrated_enabled': 0, 'migrated_disabled': [],
-        'below_minimum_interval': [], 'above_project_cap': False, 'errors': [], 'original_triggers': [],
+        'below_minimum_interval': [], 'above_project_cap': False, 'held': [], 'errors': [],
+        'original_triggers': [],
     }
     enabled_before = session.scalar(
         select(func.count()).select_from(EntitySchedule).where(EntitySchedule.enabled.is_(True))
     )
     now = datetime.now(UTC)
+    cap = schedule_limits().max_enabled_per_project
     for version, pipeline_name in _legacy_versions(session):
         version_id = version.id
         try:
@@ -158,6 +227,9 @@ def _migrate_versions(session, project_id: int, dry_run: bool) -> dict:
             row = migrated_row(project_id, version.application_id, version_id, pipeline_name, version.name,
                                trigger, now, fallback_owner=version.author_id)
             fast = row['disabled_reason'] != DISABLED_INVALID_CRON and below_minimum(row['cron'])
+            if enforce_limits and row['enabled'] and (fast or enabled_before + report['migrated_enabled'] >= cap):
+                report['held'].append(version_id)
+                continue
             if not dry_run:
                 migrate_version(session, version, row)
         except Exception as error:  # noqa: BLE001 -- one bad version must not stop the project
@@ -171,12 +243,11 @@ def _migrate_versions(session, project_id: int, dry_run: bool) -> dict:
             )
         if fast:
             report['below_minimum_interval'].append({'version_id': version_id, 'cron': row['cron']})
-    cap = schedule_limits().max_enabled_per_project
     report['above_project_cap'] = enabled_before + report['migrated_enabled'] > cap
     return report
 
 
-def migrate_project(project_id: int, dry_run: bool) -> dict:
+def migrate_project(project_id: int, dry_run: bool, enforce_limits: bool = False) -> dict:
     """Move every legacy schedule trigger of one project while holding its advisory lock; the project report.
 
     A dry run writes nothing. The lock wait is bounded; a timeout or a failure is raised. The lock is
@@ -197,7 +268,7 @@ def migrate_project(project_id: int, dry_run: bool) -> dict:
             connection.execute(LOCK_WAIT_RESET)
         try:
             with db.get_session(project_id) as session:
-                return _migrate_versions(session, project_id, dry_run)
+                return _migrate_versions(session, project_id, dry_run, enforce_limits)
         finally:
             _unlock_project(connection, key, project_id)
 

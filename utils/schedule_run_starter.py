@@ -1,4 +1,5 @@
 """Owner run starter of an agent or pipeline schedule (EL-7011 US-11, US-12, ADR-0002, ADR-0008)."""
+import queue
 import re
 from types import SimpleNamespace
 
@@ -192,6 +193,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
             trigger_source=trigger_type, is_system_user=False,
             auto_approve_sensitive_actions=auto_approve,
         )
+    except queue.Empty:  # the 5 s predict RPC timeout: the agent may still run, so the stale-run sweep ends it
+        log.warning('Schedule %s run %s: no answer from the predict call within its timeout', schedule_id, run_id)
     except BudgetDoorClosedError as error:  # the door closed after the check (R2.3)
         finish_trigger_run_with_error(project_id, response_id, error)
         block_schedule_run(project_id, run_id, BUDGET_CLOSED.format(error.scope))

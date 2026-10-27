@@ -82,6 +82,8 @@ class EntitySchedule(db_tools.AbstractBaseMixin, db.Base):
     approval_confirmed_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     approval_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approval_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The legacy version trigger a migrated row replaced, read back by restore_version_trigger; NULL on rows moved before the column existed
+    original_trigger: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -100,6 +102,8 @@ class EntityScheduleRun(db_tools.AbstractBaseMixin, db.Base):
         ),
         # Serves the runs list: one schedule, newest first
         Index('ix_entity_schedule_runs_schedule_started', 'schedule_id', desc('started_at'), desc('id')),
+        # Serves the conversation list filtered by schedule
+        Index('ix_entity_schedule_runs_conversation', 'conversation_id'),
         {'schema': c.POSTGRES_TENANT_SCHEMA},
     )
 

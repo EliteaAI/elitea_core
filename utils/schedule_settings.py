@@ -8,6 +8,7 @@ from pylon.core.tools import log
 
 SETTINGS_TYPE = "schedule_settings"
 RPC_TIMEOUT = 5
+OWNER = "elitea_core"
 MANAGE_URL = "/api/v2/elitea_core/schedules/{mode}/{project_id}/settings"
 
 
@@ -42,7 +43,7 @@ def register_schedule_settings_type() -> None:
     plain = {"type_name": SETTINGS_TYPE, "section": "project_settings", "model": ScheduleProjectSettings,
              "replace": True}
     try:
-        _rpc().configurations_register(**plain, managed_by="elitea_core", manage_url=MANAGE_URL)
+        _rpc().configurations_register(**plain, managed_by=OWNER, manage_url=MANAGE_URL)
         return
     except TypeError as error:
         if "managed_by" not in str(error):
@@ -59,29 +60,59 @@ def register_schedule_settings_type() -> None:
         log.exception("Could not register the %s configuration type", SETTINGS_TYPE)
 
 
+def _request_cache() -> dict | None:
+    """The per-request answers by project id; None outside a request, where nothing is cached."""
+    try:
+        from flask import g, has_request_context  # late: the model loads without the web layer
+    except ImportError:
+        return None
+    return g.setdefault("schedule_run_without_asking", {}) if has_request_context() else None
+
+
 def is_run_without_asking_allowed(project_id: int) -> bool:
     """True when the project allows the "Run without asking" rule; false when never saved.
 
-    A read error or a broken record refuses the rule (fail closed).
+    A read error or a broken record refuses the rule (fail closed). A request reads the store once per
+    project; a failed read is not kept, so the next call tries again.
     """
+    cache = _request_cache()
+    if cache is not None and project_id in cache:
+        return cache[project_id]
     try:
         config = _rpc().configurations_get_first_filtered_project(
             project_id=project_id, filter_fields={"type": SETTINGS_TYPE, "elitea_title": SETTINGS_TYPE},
         )
-        return config is not None and ScheduleProjectSettings.model_validate(config["data"]).allow_run_without_asking
+        allowed = config is not None and ScheduleProjectSettings.model_validate(config["data"]).allow_run_without_asking
     except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the rule stays off when the store fails
         log.exception("Could not read the %s of project %s", SETTINGS_TYPE, project_id)
         return False
+    if cache is not None:
+        cache[project_id] = allowed
+    return allowed
+
+
+def _owned(call, **kwargs):
+    """Call a configurations write as the owner; a plugin from before owned types raises TypeError, so repeat it without."""
+    try:
+        return call(**kwargs, owner=OWNER)
+    except TypeError as error:
+        if "owner" not in str(error):
+            raise
+        log.warning("The configurations plugin has no owner argument (%s); writing %s unguarded", error, SETTINGS_TYPE)
+        return call(**kwargs)
 
 
 def save_schedule_settings(project_id: int, settings: ScheduleProjectSettings) -> dict:
     """Create or replace the project's record and answer the saved values; a store error propagates."""
     data = settings.model_dump()
     rpc = _rpc()
-    config, created = rpc.configurations_create_if_not_exists(payload={
+    config, created = _owned(rpc.configurations_create_if_not_exists, payload={
         "project_id": project_id, "elitea_title": SETTINGS_TYPE, "label": "Schedules",
         "type": SETTINGS_TYPE, "data": data,
     })
     if not created:
-        rpc.configurations_update(project_id=project_id, config_id=config["id"], payload={"data": data})
+        _owned(rpc.configurations_update, project_id=project_id, config_id=config["id"], payload={"data": data})
+    cache = _request_cache()
+    if cache is not None:
+        cache.pop(project_id, None)  # a read after the save in this request sees the new value
     return data

@@ -148,8 +148,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         if (payload or {}).get("type") == TriggerType.schedule.value:
             return {
                 "ok": False,
+                "code": "schedules_moved",
                 "error": "Schedules moved. Use the Schedules API: "
-                         f"/elitea_core/schedules/prompt_lib/{project_id}",
+                         f"/api/v2/elitea_core/schedules/prompt_lib/{project_id}",
             }, 400
 
         # Validate input

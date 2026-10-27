@@ -62,6 +62,9 @@ class QuerySession:
     def get(self, _id):
         return None
 
+    def execute(self, _statement):
+        return types.SimpleNamespace(scalar=lambda: None)  # the database clock; no row is due
+
     def commit(self):
         pass
 
@@ -73,6 +76,8 @@ class World:
     def __init__(self):
         self.projects, self.held, self.fail_legacy = [1, 2], set(), set()
         self.events, self.locks, self.versions, self.executed = [], [], [], []
+        self.migrated, self.found, self.fail_migrate, self.errors = [], {}, set(), {}
+        self.order, self.held_versions, self.enforced = [], {}, False
         self.connection = LockConnection(self)
         self.legacy_lock = threading.Lock()
 
@@ -80,8 +85,18 @@ class World:
         self.events.append(("select", session.project_id))
         return []
 
+    def migrate(self, project_id, dry_run, enforce_limits=False):
+        self.migrated.append((project_id, dry_run))
+        self.enforced = enforce_limits
+        self.order.append(("migrate", project_id))
+        if project_id in self.fail_migrate:
+            raise RuntimeError("lock wait timed out")
+        return {"found": self.found.get(project_id, 0), "errors": self.errors.get(project_id, []),
+                "held": self.held_versions.get(project_id, [])}
+
     def check_project(self, project_id, yield_to_hub):
         self.events.append(("legacy", project_id))
+        self.order.append(("legacy", project_id))
         if project_id in self.fail_legacy:
             raise RuntimeError("bad trigger")
 
@@ -114,12 +129,15 @@ def world(monkeypatch):
         "rpc.pipeline_scheduling": {
             "_check_project_pipelines": world.check_project, "_check_pipeline_scheduling_lock": world.legacy_lock,
         },
+        "utils.legacy_schedule_migration": {"migrate_project": world.migrate},
     }
     for dotted, names in stubs.items():
         name = "plugins.elitea_core." + dotted
         monkeypatch.setitem(sys.modules, name, _module(name, **names))
+    world.warnings = []
     pylon_tools = _module("pylon.core.tools", web=types.SimpleNamespace(rpc=lambda *a, **k: (lambda f: f)),
-                          log=types.SimpleNamespace(info=quiet, warning=quiet, exception=quiet))
+                          log=types.SimpleNamespace(info=quiet, exception=quiet,
+                                                    warning=lambda *a, **k: world.warnings.append(a)))
     monkeypatch.setitem(sys.modules, "pylon.core.tools", pylon_tools)
     monkeypatch.setitem(sys.modules, "plugins.elitea_core.rpc.entity_schedules_check", None)
     tick = load("rpc/entity_schedules_check.py", fresh=True)
@@ -133,6 +151,7 @@ def world(monkeypatch):
         module=types.SimpleNamespace(descriptor=types.SimpleNamespace(config=settings))))
     world.settings = settings["scheduler"]["schedules"]
     world.key = tick.legacy_lock_key
+    world.module = tick
     world.tick = lambda: tick.RPC().entity_schedules_check.__func__(
         types.SimpleNamespace(context=types.SimpleNamespace(web_runtime="flask")))
     return world
@@ -177,6 +196,96 @@ def test_7011_r4_2_lock_is_freed_when_the_legacy_check_fails(world):
     world.tick()
     assert ("unlock", world.key(1)) in world.locks
     assert ("legacy", 2) in world.events
+
+
+def test_legacy_step_migrates_each_project_before_its_check(world):
+    world.tick()
+    assert world.migrated == [(1, False), (2, False)]
+    assert world.order.index(("migrate", 1)) < world.order.index(("legacy", 1))
+
+
+def test_a_failed_migration_is_logged_and_the_project_is_still_checked(world):
+    world.fail_migrate = {1}
+    world.tick()
+    assert ("legacy", 1) in world.events and ("legacy", 2) in world.events
+    assert any("legacy migration failed" in warning[0] for warning in world.warnings)
+
+
+def test_versions_that_fail_to_move_are_logged_and_checked(world):
+    world.found, world.errors = {1: 1}, {1: [{"version_id": 4, "error": "bad"}]}
+    world.tick()
+    assert ("legacy", 1) in world.events
+    assert any("kept their legacy trigger" in warning[0] for warning in world.warnings)
+
+
+def test_an_empty_pass_skips_the_step_until_the_recheck_time(world):
+    world.tick()
+    world.events.clear()
+    world.order.clear()
+    world.tick()
+    assert world.order == []
+    world.module._legacy_idle_until = 0.0
+    world.tick()
+    assert ("legacy", 1) in world.events
+
+
+def test_a_pass_that_finds_a_legacy_version_does_not_sleep(world):
+    world.found = {1: 1}
+    world.tick()
+    world.events.clear()
+    world.tick()
+    assert ("legacy", 1) in world.events
+
+
+def test_the_tick_migrates_with_the_schedule_limits_enforced(world):
+    world.tick()
+    assert world.enforced is True
+
+
+def test_a_project_with_held_versions_is_not_migrated_again_within_the_retry_time(world):
+    world.found, world.held_versions = {1: 1}, {1: [4]}
+    world.tick()
+    world.tick()
+    assert world.migrated == [(1, False), (2, False), (2, False)]
+    assert ("legacy", 1) in world.events
+    world.module._migration_retry_at.clear()
+    world.tick()
+    assert world.migrated.count((1, False)) == 2
+
+
+def test_a_failed_migration_is_not_retried_within_the_retry_time(world):
+    world.fail_migrate = {1}
+    world.tick()
+    world.tick()
+    assert world.migrated.count((1, False)) == 1
+
+
+def test_both_rpc_names_run_the_tick(world):
+    ticks = []
+    world.module._run_tick = ticks.append
+    rpc = world.module.RPC()
+    rpc.entity_schedules_check()
+    rpc.pipelines_check_scheduling()
+    assert len(ticks) == 2
+
+
+def test_the_switch_off_skips_the_step_always(world):
+    world.settings["legacy_step_enabled"] = False
+    world.tick()
+    assert [e for e in world.events if e[0] in ("migrate", "legacy")] == [] and world.migrated == []
+
+
+def test_the_restore_rpc_refuses_while_the_legacy_step_is_on(world, monkeypatch):
+    restored = []
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.legacy_schedule_migration", _module(
+        "plugins.elitea_core.utils.legacy_schedule_migration",
+        restore_project_triggers=lambda project_id: restored.append(project_id) or
+        {"restored": [1], "errors": [], "without_original_trigger": 0}))
+    rpc = world.module.RPC()
+    assert "legacy_step_enabled" in rpc.schedules_restore_legacy_triggers(5)["error"]
+    world.settings["legacy_step_enabled"] = False
+    assert rpc.schedules_restore_legacy_triggers(5)["restored"] == [1]
+    assert restored == [5]
 
 
 @pytest.fixture

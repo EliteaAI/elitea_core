@@ -33,9 +33,11 @@ class Session:
         self.world = world
 
     def __enter__(self):
+        self.world.open_sessions += 1
         return self
 
     def __exit__(self, *exc):
+        self.world.open_sessions -= 1
         return False
 
     def query(self, *_):
@@ -62,6 +64,7 @@ class Session:
 class World:
     def __init__(self, meta):
         self.events = []
+        self.open_sessions, self.open_at_step = 0, []
         self.msg_group = types.SimpleNamespace(
             id=1, meta={}, message_items=[], reply_to_id=None, is_streaming=True,
             conversation=types.SimpleNamespace(id=CONVERSATION_ID, uuid="c-1", meta=meta),
@@ -70,11 +73,13 @@ class World:
     fail_step = False
 
     def finish(self, *args):
+        self.open_at_step.append(self.open_sessions)
         self.events.append(("finish", *args))
         if self.fail_step:
             raise RuntimeError("db down")
 
     def pause(self, *args):
+        self.open_at_step.append(self.open_sessions)
         self.events.append(("pause", *args))
         if self.fail_step:
             raise RuntimeError("db down")
@@ -211,3 +216,15 @@ def test_7011_r1_6_a_failing_pause_step_does_not_break_the_pause(make_world):
     world.pause_event({"hitl_interrupt": {"guardrail_type": "sensitive_tool"}})
     assert world.events[0] == "commit"
     assert world.events[-1] == "logged"
+
+
+def test_stream_end_closes_its_session_before_the_schedule_writer_opens_another(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.end({})
+    assert world.open_at_step == [0]
+
+
+def test_stream_pause_closes_its_session_before_the_schedule_writer_opens_another(make_world):
+    world = make_world(dict(SCHEDULE_META))
+    world.pause_event({"hitl_interrupt": {"guardrail_type": "sensitive_tool"}})
+    assert world.open_at_step == [0]

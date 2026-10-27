@@ -18,6 +18,9 @@ class FakeSession:
     def __init__(self):
         self.commits = 0
 
+    def execute(self, _statement):
+        return types.SimpleNamespace(scalar=lambda: NOW)  # the database clock
+
     def commit(self):
         self.commits += 1
 
@@ -92,7 +95,7 @@ def test_7011_r2_1_active_run_at_the_claim_records_a_skipped_run(world):
     world.rows, world.conflict = {1: [_row(1), _row(2)]}, {1}
     world.tick()
     assert world.skipped == [(1, SKIP_REASON, 1)]
-    assert world.sessions[0].commits == 3  # claim of 1, skipped run of 1, claim of 2
+    assert world.sessions[-1].commits == 3  # claim of 1, skipped run of 1, claim of 2
     assert [started[2] for started in world.started] == [2]
 
 
@@ -141,3 +144,10 @@ def test_7011_r2_1_a_failed_skip_record_is_logged_and_the_next_row_still_starts(
     world.tick()
     assert any("skipped run not recorded" in message for message in world.logged)
     assert [started[2] for started in world.started] == [2]
+
+
+def test_7011_the_tick_starts_at_another_project_each_minute(world):
+    world.projects, world.config["dispatch_cap"] = [1, 2, 3], 0
+    world.tick()
+    world.tick()
+    assert [project for project, _ in world.swept] == [1, 2, 3, 2, 3, 1]

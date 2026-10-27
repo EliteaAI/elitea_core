@@ -222,9 +222,8 @@ def test_7011_r1_1_block_has_schedule_indexes(sql_block):
 
 # R1.2: every statement of the block is idempotent
 def test_7011_r1_2_every_statement_is_if_not_exists(sql_block):
-    # 3 tables, 6 indexes, 5 column statements (US-16 runs list index, CR-04 uuid,
-    # CR 2026-10-21 risk confirmation and run log)
-    assert len(sql_block) == 14
+    # 3 tables, 7 indexes (the runs list and the conversation filter among them), 6 column statements
+    assert len(sql_block) == 16
     for stmt in sql_block:
         assert re.match(
             r"CREATE (UNIQUE )?(TABLE|INDEX) IF NOT EXISTS "

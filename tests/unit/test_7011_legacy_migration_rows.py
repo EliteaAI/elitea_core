@@ -84,6 +84,8 @@ def test_el7011_r21_r22_active_row_copies_the_trigger(migration):
         "prompt": None, "variables": [], "enabled": True, "disabled_reason": None,
         "created_by": 7, "principal": {"kind": "delegation", "ref": 7},
         "last_run": datetime(2026, 10, 19, tzinfo=UTC), "next_run": datetime(2026, 10, 21, 0, 0, tzinfo=UTC),
+        "original_trigger": {"type": "schedule", "cron": "0 9 * * *", "timezone": "Asia/Tokyo",
+                             "last_run": "2026-10-19T00:00:00", "created_by": 7},
     }
     assert migration.calls == [(5, 7)]
 
@@ -227,6 +229,26 @@ def test_el7011_r33_failed_floor_check_keeps_the_legacy_trigger(project_loop, mo
     assert (report["errors"], project_loop.moved) == ([{"version_id": 1, "error": "no floor"}], [])
 
 
+def test_enforced_limits_hold_a_fast_cron_and_keep_the_legacy_trigger(project_loop):
+    project_loop.versions = [_version(1, _trigger(cron="* * * * *")), _version(2, TRIGGER)]
+    report = project_loop._migrate_versions(FakeSession(), 5, dry_run=False, enforce_limits=True)
+    assert (report["held"], project_loop.moved) == ([1], [2])
+
+
+def test_enforced_limits_hold_the_row_that_passes_the_project_cap(project_loop, monkeypatch):
+    monkeypatch.setattr(project_loop, "schedule_limits", lambda: types.SimpleNamespace(
+        min_interval_minutes=1, max_enabled_per_project=1))
+    project_loop.versions = [_version(1, TRIGGER), _version(2, TRIGGER)]
+    report = project_loop._migrate_versions(FakeSession(), 5, dry_run=False, enforce_limits=True)
+    assert (report["held"], project_loop.moved) == ([2], [1])
+
+
+def test_the_operator_run_moves_a_fast_cron_without_enforced_limits(project_loop):
+    project_loop.versions = [_version(1, _trigger(cron="* * * * *"))]
+    report = project_loop._migrate_versions(FakeSession(), 5, dry_run=False)
+    assert (report["held"], project_loop.moved) == ([], [1])
+
+
 class FakeLockConnection:
     """Records each statement; the lock or the unlock raises when asked to."""
 
@@ -269,7 +291,7 @@ def locked(migration, monkeypatch):
         return sessions
 
     _stub(monkeypatch, "plugins.elitea_core.utils.schedule_claim", legacy_lock_key=lambda project_id: project_id)
-    monkeypatch.setattr(migration, "_migrate_versions", lambda _s, project_id, _dry: {"project_id": project_id})
+    monkeypatch.setattr(migration, "_migrate_versions", lambda _s, project_id, _dry, _enforce: {"project_id": project_id})
     return migration, use
 
 
@@ -291,3 +313,62 @@ def test_el7011_r42_failed_unlock_still_returns_the_report(locked):
     use(connection)
     assert module.migrate_project(5, dry_run=False) == {"project_id": 5}
     assert connection.invalidated is True
+
+
+class _RestoreSession:
+    def __init__(self, schedule, version):
+        self.items, self.deleted, self.commits = {("S", 1): schedule, ("V", 21): version}, [], 0
+
+    def get(self, model, key):
+        return self.items.get(("S" if model.__name__ == "EntitySchedule" else "V", key))
+
+    def delete(self, row):
+        self.deleted.append(row)
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+
+@pytest.fixture
+def restore(migration, monkeypatch):
+    class EntitySchedule:
+        pass
+
+    class ApplicationVersion:
+        pass
+
+    _stub(monkeypatch, "plugins.elitea_core.models.entity_schedule", EntitySchedule=EntitySchedule)
+    _stub(monkeypatch, "plugins.elitea_core.models.all", ApplicationVersion=ApplicationVersion)
+    return migration.restore_version_trigger, EntitySchedule, ApplicationVersion
+
+
+def test_restore_writes_the_original_trigger_back_and_deletes_the_row(restore):
+    function, schedule_class, version_class = restore
+    schedule, version = schedule_class(), version_class()
+    schedule.version_id, schedule.original_trigger = 21, TRIGGER
+    version.pipeline_settings = {"trigger": {"type": "chat_message"}, "entry_point": "start"}
+    session = _RestoreSession(schedule, version)
+    function(session, 1)
+    assert version.pipeline_settings == {"trigger": TRIGGER, "entry_point": "start"}
+    assert session.deleted == [schedule] and session.commits == 1
+
+
+def test_restore_refuses_a_row_whose_version_is_gone_and_keeps_it(restore):
+    function, schedule_class, _ = restore
+    schedule = schedule_class()
+    schedule.version_id, schedule.original_trigger = 21, TRIGGER
+    session = _RestoreSession(schedule, None)
+    with pytest.raises(ValueError, match="version of the schedule is gone"):
+        function(session, 1)
+    assert session.deleted == [] and session.commits == 0
+
+
+def test_restore_refuses_a_row_moved_before_the_column_existed(restore):
+    function, schedule_class, _ = restore
+    schedule = schedule_class()
+    schedule.version_id, schedule.original_trigger = 21, None
+    with pytest.raises(ValueError, match="no original trigger"):
+        function(_RestoreSession(schedule, None), 1)

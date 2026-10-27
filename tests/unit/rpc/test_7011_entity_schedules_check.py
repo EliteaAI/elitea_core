@@ -19,6 +19,9 @@ class FakeSession:
     def __init__(self, project_id):
         self.project_id, self.commits, self.rollbacks = project_id, 0, 0
 
+    def execute(self, _statement):
+        return types.SimpleNamespace(scalar=lambda: NOW)  # the database clock
+
     def commit(self):
         self.commits += 1
 
@@ -212,7 +215,7 @@ def test_7011_r1_4_a_failing_row_does_not_stop_the_next_one(world):
     world.rows = {1: [_row(1), _row(2)]}
     world.tick()
     assert [started[1] for started in world.started] == [2]
-    assert world.sessions[0].rollbacks == 1
+    assert world.sessions[-1].rollbacks == 1
 
 
 def test_7011_r1_4_a_failing_project_does_not_stop_the_next_one(world):
@@ -235,7 +238,7 @@ def test_7011_r1_3_claim_moves_next_run_and_commits_before_the_start(world):
     world.rows = {1: [_row(1)]}
     world.tick()
     assert world.claims == [(1, NOW, NEXT)]
-    assert world.sessions[0].commits == 1
+    assert world.sessions[-1].commits == 1
 
 
 def test_7011_r1_3_lost_claim_and_active_run_start_nothing(world):

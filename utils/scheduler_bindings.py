@@ -22,9 +22,11 @@ SCHEDULER_CONFIG_DEFAULTS = {
 }
 
 
+# The pipeline row keeps the handler name its stored scheduler row already has, so the sync finds that
+# row and creates no second one; the schedule tick registers this name beside its own
 SCHEDULER_CONFIG_RPC_FUNCS = {
     'index_scheduling': 'applications_check_index_scheduling',
-    'pipeline_scheduling': 'entity_schedules_check',
+    'pipeline_scheduling': 'pipelines_check_scheduling',
 }
 
 

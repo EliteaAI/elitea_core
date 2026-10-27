@@ -8,6 +8,7 @@ from tools import db
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from .error_text import hide_locations, last_exception_line
 from .schedule_claim import append_run_events, fail_run, finished_event, run_event
+from .schedule_timing import at_least_one
 
 STALE_REASON = 'the run did not finish in time'
 EXPIRED_REASON = 'approval expired'
@@ -16,7 +17,8 @@ NAME_LIMIT = 100  # a step or toolkit name in a run reason, shown to the owner
 PAUSE_REASON = 'the run needs a human answer'
 # The notice of each final status a notice follows; skipped and blocked runs send none (R4.3)
 NOTICE_EVENTS = {'failed': 'schedule_run_failed', 'success': 'schedule_run_succeeded'}
-APPROVAL_WAIT_HOURS = 24
+DEFAULT_APPROVAL_WAIT_HOURS = 24
+MAX_APPROVAL_WAIT_HOURS = 720
 REJECT_REASON = 'rejected by the owner'
 # The HITL actions of a decision: `reject` ends a waiting run, the others let it go on (R2.1, R2.2)
 DECISION_ACTIONS = ('approve', 'edit', 'answer', 'block_with_comment', 'reject')
@@ -32,6 +34,51 @@ class ScheduleDecisionInvalid(Exception):
 
 class ScheduleRunNotWaiting(Exception):
     """The run of an approve or reject is not waiting for approval (R2.4)."""
+
+
+def approval_wait_hours() -> int:
+    """The configured wait of a paused run; a missing, 0, negative or over-720 value is bounded here, as config.yml skips the admin schema."""
+    from tools import this  # late: the writers load without the plugin handle
+    section = this.module.descriptor.config.get('scheduler', {}).get('schedules', {})
+    return at_least_one(section, 'approval_wait_hours', DEFAULT_APPROVAL_WAIT_HOURS, MAX_APPROVAL_WAIT_HOURS)
+
+
+def has_waiting_runs(project_id: int) -> bool:
+    """True when the project has a run that waits for approval; its checkpoint must outlive the cleanup."""
+    with db.get_session(project_id) as session:
+        return session.scalar(
+            select(EntityScheduleRun.id).where(EntityScheduleRun.status == 'waiting_for_approval').limit(1)
+        ) is not None
+
+
+def delete_run_checkpoints(project_id: int, conversation_id: int | None) -> None:
+    """Drop the checkpoints of the conversation of a run that ended while it waited; a failure is logged.
+
+    A rejected or expired run is never resumed, so its paused state would stay until the age cleanup.
+    """
+    if not conversation_id:
+        return
+    try:
+        # Imported here: the writers above load without the chat models and the vector store helper
+        from tools import this
+
+        from ..models.conversation import Conversation
+        from ..models.message_group import ConversationMessageGroup
+        from .vectorstore import get_pgvector_connection_string
+        with db.get_session(project_id) as session:
+            thread_ids = {str(uuid) for (uuid,) in session.query(Conversation.uuid).filter(
+                Conversation.id == conversation_id)}
+            thread_ids.update(
+                meta['thread_id'] for (meta,) in session.query(ConversationMessageGroup.meta).filter(
+                    ConversationMessageGroup.conversation_id == conversation_id,
+                    ConversationMessageGroup.meta.isnot(None))
+                if isinstance(meta, dict) and meta.get('thread_id')
+            )
+        this.module.event_node.emit('indexer_delete_checkpoint', {
+            'thread_ids': list(thread_ids), 'pgvector_connstr': get_pgvector_connection_string(project_id),
+        })
+    except Exception:  # noqa: BLE001 -- the run already ended; the age cleanup removes the checkpoints later
+        log.exception('Schedule run: cannot delete the checkpoints of conversation %s', conversation_id)
 
 
 def record_run_events(project_id: int, run_id: int, *events: dict, **columns) -> None:
@@ -107,7 +154,7 @@ def pause_schedule_run(project_id: int, run_id: int, interrupt: dict) -> None:
             .where(EntityScheduleRun.id == run_id, EntityScheduleRun.status == 'running')
             # resumed_at is cleared, so a stale fan-out decision of an earlier pause never matches this one
             .values(status='waiting_for_approval', resumed_at=None,
-                    approval_expires_at=datetime.now(UTC) + timedelta(hours=APPROVAL_WAIT_HOURS))
+                    approval_expires_at=datetime.now(UTC) + timedelta(hours=approval_wait_hours()))
         ).rowcount
         if paused:
             _copy_status(session, run_id, 'waiting_for_approval')  # the list shows the wait (R1.6)
@@ -177,6 +224,7 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
     `ScheduleRunNotWaiting` when another decision or the expiry changed the run since the check (R2.4).
     The run log gets the decision; only the owner decides (the check), so the owner is who decided.
     """
+    conversation_id = None
     with db.get_session(project_id) as session:
         # The lock holds the run in waiting_for_approval until the commit, so the writes below always apply
         run = session.scalar(
@@ -200,7 +248,9 @@ def apply_schedule_decision(project_id: int, run_id: int, decision: str) -> None
         else:  # no notice: the owner made this end (R2.2)
             _end_runs(session, EntityScheduleRun.id == run_id, 'failed', REJECT_REASON, run.conversation_id,
                       expected_status='waiting_for_approval')
+            conversation_id = run.conversation_id
         session.commit()
+    delete_run_checkpoints(project_id, conversation_id)
 
 
 def record_skipped_run(session, schedule_id: int, reason: str) -> int:
@@ -254,6 +304,9 @@ def expire_waiting_runs(project_id: int, now: datetime) -> int:
         session.commit()
         # Only the expiry notice: a plain failure notice would be a second one (R1.3)
         _announce(project_id, session, ended, {'failed': 'schedule_approval_expired'})
+        conversation_ids = [session.get(EntityScheduleRun, run_id).conversation_id for run_id in ended]
+    for conversation_id in conversation_ids:
+        delete_run_checkpoints(project_id, conversation_id)
     return len(ended)
 
 

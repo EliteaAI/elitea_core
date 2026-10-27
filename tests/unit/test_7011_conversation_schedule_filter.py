@@ -20,7 +20,10 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE = 'plugins.elitea_core'
 PROJECT_ID = 7
 CALLER_ID = 42
-SCHEDULE_FILTER = "CAST((chat_conversations.meta ->> 'schedule_id') AS VARCHAR) = '5'"
+SCHEDULE_FILTER = (
+    "chat_conversations.id IN (SELECT entity_schedule_runs.conversation_id FROM entity_schedule_runs "
+    "WHERE entity_schedule_runs.schedule_id = 5)"
+)
 
 
 class Base(DeclarativeBase):
@@ -35,6 +38,13 @@ class Conversation(Base):
     is_private: Mapped[bool] = mapped_column(Boolean)
     meta: Mapped[dict] = mapped_column(JSONB)
     created_at: Mapped[int] = mapped_column(Integer)
+
+
+class EntityScheduleRun(Base):
+    __tablename__ = 'entity_schedule_runs'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    schedule_id: Mapped[int] = mapped_column(Integer)
+    conversation_id: Mapped[int] = mapped_column(Integer)
 
 
 class Participant(Base):
@@ -139,7 +149,7 @@ def rpc_module(isolated_sys_modules):
     for name in ('models.enums.all', 'models.pd.conversation', 'models.pd.participant', 'models.pd.message',
                  'models.message_group', 'models.message_items.text', 'utils.conversation_utils',
                  'utils.participant_utils', 'utils.chat_feature_flags', 'utils.context_analytics',
-                 'utils.exceptions', 'utils.model_defaults', 'models.entity_schedule', 'utils.chat_usage',
+                 'utils.exceptions', 'utils.model_defaults', 'utils.chat_usage',
                  'utils.context_window'):
         _fuzzy(f'{PACKAGE}.{name}')
     _package(f'{PACKAGE}.models.enums')
@@ -147,6 +157,8 @@ def rpc_module(isolated_sys_modules):
     _fuzzy(f'{PACKAGE}.models.enums.all')
     _fuzzy(f'{PACKAGE}.models.message_items.text')
     sys.modules[f'{PACKAGE}.models.conversation'] = types.SimpleNamespace(Conversation=Conversation)
+    sys.modules[f'{PACKAGE}.models.entity_schedule'] = types.SimpleNamespace(
+        EntitySchedule=mock.MagicMock(), EntityScheduleRun=EntityScheduleRun)
     sys.modules[f'{PACKAGE}.models.participants'] = types.SimpleNamespace(
         Participant=Participant, ParticipantMapping=ParticipantMapping)
     module = load_module_with_stubs(PLUGIN_ROOT / 'rpc' / 'chat_conversation.py',
@@ -162,10 +174,9 @@ def _list(rpc_module, **kwargs):
     return rpc_module.session
 
 
-def test_7011_r2_1_rpc_filters_on_meta_schedule_id(rpc_module):
-    """TC-US16-05: only conversations whose meta.schedule_id equals the value stay."""
+def test_rpc_keeps_the_conversations_of_the_schedule_runs(rpc_module):
     session = _list(rpc_module, schedule_id=5)
-    assert SCHEDULE_FILTER in session.base.sql()
+    assert SCHEDULE_FILTER in ' '.join(session.base.sql().split())
 
 
 def test_7011_r2_1_rpc_without_schedule_id_adds_no_schedule_filter(rpc_module):
@@ -177,7 +188,7 @@ def test_7011_r2_1_rpc_without_schedule_id_adds_no_schedule_filter(rpc_module):
 def test_7011_r2_2_rpc_keeps_participant_and_private_filters(rpc_module, is_admin):
     """TC-US16-06: the participant and private filters stay next to the schedule filter."""
     session = _list(rpc_module, schedule_id=5, is_admin=is_admin)
-    base = session.base.sql()
+    base = ' '.join(session.base.sql().split())
     assert SCHEDULE_FILTER in base
     assert 'chat_conversations.id IN' in base
     participant = session.participant_query.sql()

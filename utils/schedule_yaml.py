@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from tools import db
+from yaml import AliasEvent, YAMLError, parse
 
 from ..models.all import Application, ApplicationVersion
 from ..models.entity_schedule import EntitySchedule
@@ -79,6 +80,15 @@ def export_schedules_yaml(project_id: int, ids: list[int] | None) -> str:
     })
 
 
+def _reject_aliases(text: str) -> None:
+    """Raise the not-YAML error for an anchor reference: a small file of nested aliases expands to a huge one."""
+    try:
+        if any(isinstance(event, AliasEvent) for event in parse(text)):
+            raise ValueError(NOT_YAML)
+    except YAMLError:
+        raise ValueError(NOT_YAML) from None
+
+
 def parse_schedules_file(text: str):
     """Return the checked file; the items stay raw dicts, so one bad item fails alone.
 
@@ -90,6 +100,7 @@ def parse_schedules_file(text: str):
     from ..models.pd.schedule_yaml import WRONG_HEADER, ScheduleFile
     if len(text.encode()) > MAX_FILE_BYTES:
         raise ValueError(TOO_LARGE)
+    _reject_aliases(text)
     try:
         data = validate_yaml_from_str(text)
     except ValueError:  # the helper words its errors for pipelines
@@ -195,7 +206,8 @@ def _unchanged(row: EntitySchedule, values: dict, version_id: int) -> bool:
     )
 
 
-def _review_item(project_id: int, owner_id: int, version_id: int, values: dict) -> str | None:
+def _review_item(project_id: int, owner_id: int, version_id: int, values: dict,
+                 reviews: dict | None = None) -> str | None:
     """Apply the risk review to one item as the owner who will run it; return the note of a changed rule.
 
     An import never carries an acknowledgement (owner CR 2026-10-21): "Run without asking" with sensitive
@@ -206,7 +218,12 @@ def _review_item(project_id: int, owner_id: int, version_id: int, values: dict) 
     """
     # late: the export loads without the scan
     from .schedule_risk import scan_complete, scan_schedule
-    review = scan_schedule(project_id, version_id, owner_id)
+    # `reviews` holds the scans of one import by version and owner, so items of one version scan once
+    if reviews is None:
+        reviews = {}
+    if (version_id, owner_id) not in reviews:
+        reviews[(version_id, owner_id)] = scan_schedule(project_id, version_id, owner_id)
+    review = reviews[(version_id, owner_id)]
     if review['blocking']:
         raise ScheduleError('schedule_blocked', '; '.join(finding['message'] for finding in review['blocking']))
     if values['approval_rule'] == 'run_without_asking' and (review['sensitive'] or not scan_complete(review)):
@@ -215,7 +232,8 @@ def _review_item(project_id: int, owner_id: int, version_id: int, values: dict) 
     return None
 
 
-def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, ids: tuple[int, int]):
+def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, ids: tuple[int, int],
+          reviews: dict | None = None):
     """Update the schedule the item matches, else create a disabled one; return (group, row, note).
 
     The group is 'updated' or 'created'; the note is set when the risk review changed the rule.
@@ -226,7 +244,7 @@ def _save(session, project_id: int, scope, indexes: tuple, item, values: dict, i
     by_key, by_name, _ = indexes
     application_id, version_id = ids
     row = _match(*indexes, item, *ids)
-    note = _review_item(project_id, scope.user_id if row is None else row.created_by, version_id, values)
+    note = _review_item(project_id, scope.user_id if row is None else row.created_by, version_id, values, reviews)
     if row is not None and _unchanged(row, values, version_id):
         return 'updated', row, note  # no write, so no admin-edit notice and no new updated_by or next_run (R5.5)
     if row is not None:
@@ -266,6 +284,7 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
     scope = ScheduleScope(user_id=admin_id, is_admin=True, permissions=frozenset())
     may_run_without_asking = is_run_without_asking_allowed(project_id)
     report = {'created': [], 'updated': [], 'skipped': [], 'failed': []}
+    reviews = {}
     names = {raw['entity_name'] for raw in file.schedules if isinstance(raw.get('entity_name'), str)}
     with db.get_session(project_id) as session:
         index = _entity_index(session, names)
@@ -279,7 +298,7 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
                 if item.approval_rule == 'run_without_asking' and not may_run_without_asking:
                     values['approval_rule'] = 'pause_and_ask'
                     entry['note'] = 'Run without asking is not allowed in this project; saved as Pause and ask me'
-                group, row, note = _save(session, project_id, scope, indexes, item, values, ids)
+                group, row, note = _save(session, project_id, scope, indexes, item, values, ids, reviews)
                 if note:
                     entry['note'] = note
                 entry.update(name=row.name, schedule_id=row.id)  # a key match keeps the stored name

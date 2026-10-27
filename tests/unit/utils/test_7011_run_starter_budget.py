@@ -3,6 +3,7 @@
 The real starter runs on faked neighbours. The budget gate is faked, except in the fail-open case
 where the real `closed_budget_scope` meets a failing usage call.
 """
+import queue
 import sys
 import types
 
@@ -78,3 +79,9 @@ def test_7011_r2_2_failing_budget_check_lets_the_run_start(world):
     world.monkeypatch.setattr(world.starter, "closed_budget_scope", real.closed_budget_scope)
     world.run()
     assert world.names() == ["create", "predict"]
+
+
+def test_7011_predict_rpc_timeout_leaves_the_run_running(world):
+    world.predict_error = queue.Empty()
+    world.run()
+    assert world.names() == ["budget", "create", "predict"]

@@ -35,6 +35,9 @@ scheduler:
     agent_scheduling_enabled: true
     dispatch_cap: 100
     stale_run_minutes: 120
+    max_parallel_runs: 100
+    approval_wait_hours: 24
+    legacy_step_enabled: true
 
 # Optional badge and effect text of a sensitive tool, shown by the schedule risk review (EL-7011).
 # Badges: sends_messages, deletes_data, changes_data, runs_code, needs_approval (the default).

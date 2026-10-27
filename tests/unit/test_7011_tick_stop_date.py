@@ -6,6 +6,7 @@ helper are faked, so the test pins what the tick writes and sends, not how Postg
 import contextlib
 import types
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfoNotFoundError
 
 import pytest
 import sqlalchemy as sa
@@ -28,6 +29,8 @@ class FakeSession:
         self.world, self.commits = world, 0
 
     def execute(self, statement):
+        if isinstance(statement, sa.sql.Select):  # the database clock
+            return types.SimpleNamespace(scalar=lambda: self.world.db_now or datetime.now(UTC))
         params = statement.compile().params
         self.world.updates.append(params)
         return types.SimpleNamespace(rowcount=0 if params["id_1"] in self.world.taken else 1)
@@ -44,8 +47,9 @@ class World:
     def __init__(self):
         self.rows, self.taken, self.fail_update = [], set(), False
         self.updates, self.claims, self.notices, self.started, self.events = [], [], [], [], []
+        self.db_now, self.next_run_after = None, []
 
-    def notify(self, project_id, owner_id, event_type, schedule):
+    def notify(self, project_id, owner_id, event_type, schedule, extra=None):
         self.events.append("notice")
         self.notices.append((project_id, owner_id, event_type, schedule.id, schedule.name))
         return True
@@ -64,6 +68,14 @@ def world(monkeypatch):
         world.claims.append(schedule_id)
         return True
 
+    def next_run(cron, zone, after):
+        world.next_run_after.append(after)
+        if cron == "bad cron":
+            raise ValueError(cron)
+        if zone == "Mars/Base":
+            raise ZoneInfoNotFoundError(zone)
+        return NOW
+
     stubs = {
         "utils.schedule_claim": {
             "select_due_schedules": lambda session, types_, limit: world.rows,
@@ -74,11 +86,12 @@ def world(monkeypatch):
             "RUN_STARTERS": {"pipeline": print},
             "start_schedule_run": lambda *a: world.started.append(a[2]) or True, "START_FAILED": "",
         },
-        "utils.schedule_timing": {"compute_next_run": lambda cron, zone, after: NOW},
+        "utils.schedule_timing": {"compute_next_run": next_run},
         "utils.schedule_runs": {"record_skipped_run": quiet, "fail_stale_runs": lambda *a: 0,
                                 "expire_waiting_runs": lambda *a: 0},
         "models.entity_schedule": {"EntitySchedule": FakeEntitySchedule},
-        "models.enums.all": {"NotificationEventTypes": types.SimpleNamespace(schedule_expired="schedule_expired")},
+        "models.enums.all": {"NotificationEventTypes": types.SimpleNamespace(
+            schedule_expired="schedule_expired", schedule_disabled="schedule_disabled")},
         "utils.schedule_notifications": {"notify_schedule_event": world.notify},
     }
     tick = load_tick(
@@ -87,13 +100,14 @@ def world(monkeypatch):
         log=types.SimpleNamespace(info=quiet, warning=quiet, exception=quiet),
     )
     monkeypatch.setattr(tick, "_run_legacy_step", lambda *a: None)
+    world.module = tick
     world.tick = tick_caller(tick)
     return world
 
 
-def _row(row_id, expires_at, owner=7):
+def _row(row_id, expires_at, owner=7, cron="* * * * *", timezone="UTC"):
     return types.SimpleNamespace(
-        id=row_id, entity_type="pipeline", cron="* * * * *", timezone="UTC", next_run=NOW,
+        id=row_id, entity_type="pipeline", cron=cron, timezone=timezone, next_run=NOW,
         expires_at=expires_at, name=f"nightly {row_id}", created_by=owner,
     )
 
@@ -139,7 +153,41 @@ def test_7011_r3_3_expired_and_live_rows_in_one_tick_are_handled_each_its_own_wa
 
 def test_7011_r3_1_a_failing_update_does_not_stop_the_next_row(world, monkeypatch):
     world.rows = [_row(1, PAST), _row(2, FUTURE)]
-    monkeypatch.setattr(FakeSession, "execute", lambda self, statement: (_ for _ in ()).throw(RuntimeError("db")))
+    def broken(self, statement):
+        if isinstance(statement, sa.sql.Select):
+            return types.SimpleNamespace(scalar=lambda: datetime.now(UTC))
+        raise RuntimeError("db")
+
+    monkeypatch.setattr(FakeSession, "execute", broken)
     world.tick()
     assert world.events[0] == "rollback" and not world.notices
     assert world.started == [2]
+
+
+def test_a_bad_cron_and_a_bad_time_zone_are_disabled_once_and_the_next_row_runs(world):
+    world.rows = [_row(1, None, cron="bad cron"), _row(2, None, timezone="Mars/Base"), _row(3, None)]
+    world.tick()
+    assert [(u["enabled"], u["disabled_reason"], u["id_1"]) for u in world.updates] == [
+        (False, "invalid_cron", 1), (False, "invalid_cron", 2)]
+    assert [n[2:4] for n in world.notices] == [("schedule_disabled", 1), ("schedule_disabled", 2)]
+    assert world.claims == [3] and world.started == [3]
+
+
+def test_expiry_and_the_next_run_follow_the_database_clock(world):
+    world.db_now = datetime(2020, 1, 1, tzinfo=UTC)
+    world.rows = [_row(1, datetime(2020, 6, 1, tzinfo=UTC)), _row(2, datetime(2019, 6, 1, tzinfo=UTC))]
+    world.tick()
+    assert world.next_run_after == [world.db_now]
+    assert [n[3] for n in world.notices] == [2] and world.started == [1]
+
+
+def test_a_tick_that_finds_the_previous_one_running_ends_at_once(world):
+    world.rows = [_row(1, None)]
+    assert world.module._tick_lock.acquire(blocking=False)
+    try:
+        world.tick()
+    finally:
+        world.module._tick_lock.release()
+    assert not world.started and not world.claims
+    world.tick()
+    assert world.started == [1]

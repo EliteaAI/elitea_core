@@ -157,6 +157,22 @@ def test_el_7011_r1_4_lowered_floor_applies_to_the_next_validation(timing, confi
     assert timing.schedule_limits().min_interval_minutes == 1
 
 
+@pytest.mark.parametrize("value", [0, -3])
+def test_limits_below_one_are_raised_to_one(timing, config, value):
+    _set_limits(config, minimum=value, maximum=value)
+    assert tuple(timing.schedule_limits()) == (1, 1)
+
+
+def test_limits_above_the_admin_maximum_are_cut_to_it(timing, config):
+    _set_limits(config, minimum=10**6, maximum=10**6)
+    assert tuple(timing.schedule_limits()) == (1440, 1000)
+
+
+def test_a_null_limit_gets_the_default(timing, config):
+    config.setdefault("scheduler", {})["schedules"] = {"min_interval_minutes": None, "max_enabled_per_project": None}
+    assert tuple(timing.schedule_limits()) == (5, 50)
+
+
 # R2.1 the cap of enabled schedules per project (default 50)
 def test_el_7011_r2_1_default_cap_is_fifty(timing):
     assert timing.schedule_limits().max_enabled_per_project == 50

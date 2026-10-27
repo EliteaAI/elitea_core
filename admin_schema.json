@@ -803,6 +803,47 @@
         "maximum": 10080
       }
     },
+    "schedules_max_parallel_runs": {
+      "type": "integer",
+      "title": "Schedules Max Parallel Runs",
+      "description": "Maximum number of scheduled runs this process starts at the same time. Keep this value at least the dispatch cap: a due run without a free slot fails at once and the schedule tries again at its next due time. Allowed range: 1–1000.",
+      "path": "scheduler.schedules.max_parallel_runs",
+      "section": "runtime",
+      "default": 100,
+      "minimum": 1,
+      "maximum": 1000,
+      "requires_restart": true,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "schedules_approval_wait_hours": {
+      "type": "integer",
+      "title": "Schedules Approval Wait Hours",
+      "description": "Hours a scheduled run waits for the owner to approve a sensitive tool before it fails. Allowed range: 1–720.",
+      "path": "scheduler.schedules.approval_wait_hours",
+      "section": "runtime",
+      "default": 24,
+      "minimum": 1,
+      "maximum": 720,
+      "requires_restart": false,
+      "value_schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 720
+      }
+    },
+    "schedules_legacy_step_enabled": {
+      "type": "boolean",
+      "title": "Schedules Legacy Step Enabled",
+      "description": "When enabled, the tick moves legacy pipeline schedule triggers into schedules and still fires the ones it could not move. Disable after every project is migrated. Set it to false before a revert with the RPC schedules_restore_legacy_triggers(project_id); rows migrated before the original trigger was stored cannot be restored.",
+      "path": "scheduler.schedules.legacy_step_enabled",
+      "section": "runtime",
+      "strict_type": true,
+      "default": true
+    },
     "index_scheduling_enabled": {
       "type": "boolean",
       "title": "Index Scheduling Enabled",

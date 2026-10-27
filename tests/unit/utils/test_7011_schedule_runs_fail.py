@@ -39,9 +39,14 @@ def runs(monkeypatch):
     # The `tools` stub: schedule_runs imports `db` from it at load time
     module = types.ModuleType("tools")
     module.db = types.SimpleNamespace(get_session=None)
+    emitted, config = [], {}
+    event_node = types.SimpleNamespace(emit=lambda name, payload: emitted.append((name, payload)))
+    module.this = types.SimpleNamespace(module=types.SimpleNamespace(
+        descriptor=types.SimpleNamespace(config=config), event_node=event_node))
     monkeypatch.setitem(sys.modules, "tools", module)
     runs = load("utils/schedule_runs.py", fresh=True)
     runs.EntityScheduleRun = sys.modules["plugins.elitea_core.models.entity_schedule"].EntityScheduleRun
+    runs.emitted, runs.config = emitted, config  # the checkpoint events and the plugin config of the test
     return runs
 
 

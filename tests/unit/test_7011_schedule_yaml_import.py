@@ -209,9 +209,9 @@ def test_7011_r3_2_a_missing_header_key_raises_the_header_message(env, missing):
 
 
 def test_7011_r3_1_a_file_with_500_items_is_accepted_and_one_with_501_raises_the_count_message(env):
-    assert len(env.module.parse_schedules_file(file_text(*[item()] * 500)).schedules) == 500
+    assert len(env.module.parse_schedules_file(file_text(*[item() for _ in range(500)])).schedules) == 500
     with pytest.raises(ValueError, match=TOO_MANY):
-        env.module.parse_schedules_file(file_text(*[item()] * 501))
+        env.module.parse_schedules_file(file_text(*[item() for _ in range(501)]))
 
 
 # --- R2.1, R2.2, R2.6: a valid item
