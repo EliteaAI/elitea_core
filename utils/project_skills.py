@@ -3,7 +3,7 @@ import re
 
 from pylon.core.tools import log
 from sqlalchemy import func
-from tools import context, db, rpc_tools
+from tools import context, db, rpc_tools, this
 
 from .folder_access import build_folder_ids_exclusion_clause
 from .skill_utils import SkillInvocationLimitError, get_max_invoked_skills_per_turn
@@ -25,6 +25,9 @@ class UnknownSkillMentionError(ValueError):
 
 
 def is_project_skills_in_chat_enabled(project_id: int) -> bool:
+    platform_settings = (this.descriptor.config.get('skills') or {}).get('project_skills_in_chat') or {}
+    if platform_settings.get('available') is not True:
+        return False
     try:
         record = rpc_tools.RpcMixin().rpc.timeout(3).configurations_get_first_filtered_project(
             project_id=project_id, filter_fields={'type': PROJECT_SKILLS_CONFIG_TYPE},
@@ -32,7 +35,10 @@ def is_project_skills_in_chat_enabled(project_id: int) -> bool:
     except Exception as exc:  # pylint: disable=W0718
         log.warning('Could not read project skills setting of project %s: %s', project_id, exc)
         return False
-    return ((record or {}).get('data') or {}).get('enabled') is True
+    project_choice = ((record or {}).get('data') or {}).get('enabled')
+    if project_choice is not None:
+        return project_choice is True
+    return platform_settings.get('project_default') is True
 
 
 def build_project_skill_catalog(project_id: int, sender_id, conversation) -> list:

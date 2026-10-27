@@ -2,6 +2,7 @@
 import ast
 import contextlib
 import importlib.util
+import json
 import pathlib
 import sys
 import types
@@ -61,44 +62,74 @@ def _entry(skill_id, name, version_id=None, project_id=CHAT_PROJECT_ID, **extra)
 
 
 class TestSetting:
-    def _enabled(self, project_skills, monkeypatch, record):
-        rpc = types.SimpleNamespace(configurations_get_first_filtered_project=lambda project_id, filter_fields: record)
-        monkeypatch.setattr(project_skills.rpc_tools, 'RpcMixin', lambda: types.SimpleNamespace(
-            rpc=types.SimpleNamespace(timeout=lambda seconds: rpc),
-        ))
-        return project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID)
-
-    @pytest.mark.parametrize('record, expected', [
-        (None, False),
-        ({'data': {'enabled': True}}, True),
-        ({'data': {'enabled': False}}, False),
-        ({'data': {'enabled': 'yes'}}, False),
-        ({'data': None}, False),
-    ])
-    def test_only_an_explicit_true_turns_the_feature_on(self, project_skills, monkeypatch, record, expected):
-        assert self._enabled(project_skills, monkeypatch, record) is expected
-
-    def test_the_record_is_read_by_type(self, project_skills, monkeypatch):
-        seen = {}
+    @pytest.fixture
+    def setting(self, project_skills, monkeypatch):
+        state = types.SimpleNamespace(platform={}, record=None, reads=0, read_error=None)
 
         def reader(project_id, filter_fields):
-            seen.update(project_id=project_id, filter_fields=filter_fields)
-            return {'data': {'enabled': True}}
+            state.reads += 1
+            state.filter_fields = (project_id, filter_fields)
+            if state.read_error:
+                raise state.read_error
+            return state.record
 
         monkeypatch.setattr(project_skills.rpc_tools, 'RpcMixin', lambda: types.SimpleNamespace(
             rpc=types.SimpleNamespace(timeout=lambda seconds: types.SimpleNamespace(configurations_get_first_filtered_project=reader)),
         ))
-        project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID)
-        assert seen == {'project_id': CHAT_PROJECT_ID, 'filter_fields': {'type': 'project_skills'}}
+        monkeypatch.setattr(project_skills, 'this', types.SimpleNamespace(descriptor=types.SimpleNamespace(
+            config={'skills': {'project_skills_in_chat': state.platform}},
+        )))
+        return state
 
-    def test_a_failing_read_means_off(self, project_skills, monkeypatch):
-        def failing(project_id, filter_fields):
-            raise RuntimeError('configurations down')
+    @pytest.mark.parametrize('project_default, record, expected', [
+        (False, None, False),
+        (True, None, True),
+        (False, {'data': {'enabled': None}}, False),
+        (True, {'data': {'enabled': None}}, True),
+        (False, {'data': {'enabled': True}}, True),
+        (True, {'data': {'enabled': False}}, False),
+        (False, {'data': {'enabled': 'yes'}}, False),
+        (True, {'data': None}, True),
+    ], ids=['default off', 'default on', 'unset choice, default off', 'unset choice, default on',
+            'project on over default off', 'project off over default on', 'non-boolean choice', 'empty record'])
+    def test_a_project_choice_overrides_the_platform_default(self, project_skills, setting, project_default, record, expected):
+        setting.platform.update(available=True, project_default=project_default)
+        setting.record = record
 
-        monkeypatch.setattr(project_skills.rpc_tools, 'RpcMixin', lambda: types.SimpleNamespace(
-            rpc=types.SimpleNamespace(timeout=lambda seconds: types.SimpleNamespace(configurations_get_first_filtered_project=failing)),
-        ))
+        assert project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID) is expected
+
+    @pytest.mark.parametrize('available', [False, None, 'true'])
+    def test_without_the_master_switch_no_project_can_turn_it_on(self, project_skills, setting, available):
+        setting.platform.update(available=available, project_default=True)
+        setting.record = {'data': {'enabled': True}}
+
         assert project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID) is False
+        assert setting.reads == 0
+
+    def test_the_record_is_read_by_type(self, project_skills, setting):
+        setting.platform.update(available=True)
+
+        project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID)
+
+        assert setting.filter_fields == (CHAT_PROJECT_ID, {'type': 'project_skills'})
+
+    def test_a_failing_read_means_off(self, project_skills, setting):
+        setting.platform.update(available=True, project_default=True)
+        setting.read_error = RuntimeError('configurations down')
+
+        assert project_skills.is_project_skills_in_chat_enabled(CHAT_PROJECT_ID) is False
+
+
+class TestPlatformSettings:
+    @pytest.mark.parametrize('name, config_key', [
+        ('project_skills_in_chat_available', 'available'),
+        ('project_skills_in_chat_project_default', 'project_default'),
+    ])
+    def test_the_admin_switches_write_where_the_resolver_reads(self, name, config_key):
+        field = json.loads((PLUGIN_ROOT / 'admin_schema.json').read_text())['properties'][name]
+
+        assert field['path'] == f'skills.project_skills_in_chat.{config_key}'
+        assert (field['section'], field['type'], field['default'], field['requires_restart']) == ('skills', 'boolean', False, False)
 
 
 class _Expression:
