@@ -52,6 +52,7 @@ ENABLED_NOT_EDITABLE = refusal(
     INVALID_INPUT, "enabled cannot be changed by an edit; use the pause or resume action of the schedule",
     field="enabled",
 )
+ENABLED_NOT_BOOLEAN = refusal(INVALID_INPUT, "enabled must be true or false", field="enabled")
 LIMIT_REACHED = "schedule_limit_reached"
 RUN_WITHOUT_ASKING = "run_without_asking"
 # The human texts of the save refusals (owner CR 2026-10-21, risk review)
@@ -350,24 +351,30 @@ class ScheduleItemHandlers:
 
     @auth.decorators.check_api(schedule_check_spec("update"))
     def _edit(self, project_id: int, schedule_id: int):
-        """Change the fields of a schedule; the owner never changes. Pause and resume have their own actions.
+        """Change the fields of a schedule; the owner never changes.
 
+        `enabled` false or true pauses or resumes the schedule after the other fields are saved.
         The risk review runs on the resulting version, name and rule, as for a create.
         Who may call: the owner with `schedules.update`, or a schedules admin (the owner gets a notice).
-        Errors: 400 invalid field, `enabled` in the body, "run without asking" not allowed or a wrong
-        confirmed name (`field: risk_ack`); 403; 404; 409 `schedule_blocked`,
-        `risk_confirmation_required` or `risk_changed`.
+        Errors: 400 invalid field, `enabled` that is not a boolean, "run without asking" not allowed or a
+        wrong confirmed name (`field: risk_ack`); 403; 404; 409 `schedule_blocked`,
+        `risk_confirmation_required`, `risk_changed` or the project limit of active schedules.
         """
         raw = request.get_json(silent=True)
-        if isinstance(raw, dict) and "enabled" in raw:
-            return ENABLED_NOT_EDITABLE
+        enabled = raw.get("enabled") if isinstance(raw, dict) else None
+        if isinstance(raw, dict) and "enabled" in raw and not isinstance(enabled, bool):
+            return ENABLED_NOT_BOOLEAN
         body, error = _parse_body(ScheduleEdit)
         if error:
             return error
-        refused = _refuse_unallowed_rule(project_id, body)
-        if refused:
-            return refused
-        return _apply_update(project_id, schedule_id, body, reviewed=True, module=self.module)
+        if enabled is None or body.model_fields_set:
+            refused = _refuse_unallowed_rule(project_id, body)
+            if refused:
+                return refused
+            answer = _apply_update(project_id, schedule_id, body, reviewed=True, module=self.module)
+            if enabled is None or answer[1] != 200:
+                return answer
+        return _apply_update(project_id, schedule_id, ScheduleUpdate(enabled=enabled))
 
     @auth.decorators.check_api(schedule_check_spec("delete"))
     def _delete(self, project_id: int, schedule_id: int):
