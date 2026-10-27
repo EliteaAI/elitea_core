@@ -57,7 +57,9 @@ from ..utils.predict_utils import generate_predict_payload, PredictPayloadError,
 from ..utils.application_utils_general import deep_update
 from ..models.enums.all import PublishStatus, ToolEntityTypes
 from ..utils.searches import get_search_options_one_entity
-from ..utils.sio_utils import SioValidationError, get_event_room, SioEvents
+from ..utils.sio_utils import (
+    SioValidationError, get_event_room, SioEvents, SOCKET_UNAUTHENTICATED_CODE, SOCKET_UNAUTHENTICATED_MESSAGE,
+)
 from ..utils.internal_tools import (
     require_internal_mcp_pat,
     InternalMcpPatError,
@@ -329,7 +331,16 @@ class RPC:
         sid_project_id = sid_project_id or parsed.project_id
         if sid and not auth.is_sio_user_in_project(sid, sid_project_id):
             log.warning("Sid %s is not in project %s", sid, sid_project_id)
-            return  # FIXME: need some proper error?
+            # Silence here leaves the client's reply placeholder spinning forever (#7024)
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=sio_event,
+                error=SOCKET_UNAUTHENTICATED_MESSAGE,
+                stream_id=data.get("stream_id"),
+                message_id=data.get("message_id"),
+                code=SOCKET_UNAUTHENTICATED_CODE,
+            )
 
         admission_version_row = None  # the row governed admission binds to, never ids from the payload
         if parsed.version_id:
@@ -1962,7 +1973,15 @@ class RPC:
 
         if not auth.is_sio_user_in_project(sid, project_id):
             log.warning("Sid %s is not in project %s", sid, project_id)
-            return  # FIXME: need some proper error?
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=sio_event,
+                error=SOCKET_UNAUTHENTICATED_MESSAGE,
+                stream_id=data.get("stream_id"),
+                message_id=data.get("message_id"),
+                code=SOCKET_UNAUTHENTICATED_CODE,
+            )
 
         if sid:
             if sid not in auth.sio_users.keys():

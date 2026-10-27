@@ -1269,6 +1269,9 @@ class RPC:
             )
 
             room = get_chat_room(conversation.uuid)
+            # A socket that reconnected has not rejoined the room yet, so an early refusal sent
+            # to the room never reaches it and its reply placeholder spins forever (#7024)
+            reply_target = {'to': sid} if sid else {'room': room}
 
             # question_id is client-supplied and lands verbatim in the unique
             # ConversationMessageGroup.uuid, so a resend of an already-stored turn
@@ -1290,7 +1293,7 @@ class RPC:
                         'stream_id': parsed.conversation_uuid,
                         'message_id': parsed.question_id,
                     },
-                    room=room,
+                    **reply_target,
                 )
                 return {"error": "This message has already been submitted"}
 
@@ -1387,7 +1390,7 @@ class RPC:
                             'stream_id': parsed.conversation_uuid,
                             'message_id': parsed.question_id
                         },
-                        room=room
+                        **reply_target,
                     )
                     return {"error": "Conversation is locked while summarization is in progress"}
             except redis.exceptions.ConnectionError:
@@ -1401,7 +1404,7 @@ class RPC:
                         'stream_id': parsed.conversation_uuid,
                         'message_id': parsed.question_id
                     },
-                    room=room
+                    **reply_target,
                 )
                 return {"error": "Redis connection error"}
 

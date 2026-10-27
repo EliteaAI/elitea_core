@@ -45,7 +45,11 @@ from ..utils.canvas_utils import get_canvas_key, get_canvas_authors_key, get_sha
 from ..utils.chat_constants import CANVAS_CONTENT_TTL, CANVAS_SHADOW_KEY_OFFSET_TTL
 from ..utils.sio_utils import get_chat_room, get_canvas_room, get_event_room, get_eval_run_room
 from ..utils.toolkit_test_rooms import claim_stream
-from ..utils.sio_utils import SioEvents, SioValidationError
+from ..utils.exceptions import PoolSaturationError
+from ..utils.sio_utils import (
+    SioEvents, SioValidationError, SOCKET_UNAUTHENTICATED_CODE, SOCKET_UNAUTHENTICATED_MESSAGE,
+    SEND_FAILED_MESSAGE,
+)
 from pydantic import ValidationError
 
 
@@ -65,6 +69,21 @@ def _can_access_canvas(project_id: int, canvas_uuid, user_id: int) -> bool:
 
 
 class SIO:
+    def _predict_failure(self, sid, event, conversation_uuid, message_id, error) -> SioValidationError:
+        """Tell the sender a send failed; the exception text names internals, so it stays in the log."""
+        message = (
+            'The service is busy processing other requests. Please try again in a few seconds.'
+            if isinstance(error, PoolSaturationError) else SEND_FAILED_MESSAGE
+        )
+        return SioValidationError(
+            sio=self.context.sio,
+            sid=sid,
+            event=event,
+            error=message,
+            stream_id=str(conversation_uuid),
+            message_id=message_id,
+        )
+
     @web.sio(SioEvents.chat_enter_room)
     def enter_room(self, sid: str, data: dict) -> None:
         try:
@@ -229,9 +248,28 @@ class SIO:
         #
         if not auth.is_sio_user_in_project(sid, parsed.project_id):
             log.warning("Sid %s is not in project %s", sid, parsed.project_id)
-            return  # FIXME: return valid error or raise SioValidationError
+            # Silence here leaves the client's reply placeholder spinning forever (#7024)
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=SioEvents.chat_predict.value,
+                error=SOCKET_UNAUTHENTICATED_MESSAGE,
+                stream_id=str(parsed.conversation_uuid),
+                message_id=parsed.question_id,
+                code=SOCKET_UNAUTHENTICATED_CODE,
+            )
         #
-        self.chat_predict_sio(sid=sid, data=parsed.model_dump())
+        try:
+            self.chat_predict_sio(sid=sid, data=parsed.model_dump())
+        except SioValidationError:
+            raise
+        except Exception as e:  # pylint: disable=W0703
+            # Pylon only logs an exception raised by a socket handler, so without a reply here
+            # the client's reply placeholder spins forever (#7024)
+            log.exception("chat_predict failed for sid %s", sid)
+            raise self._predict_failure(
+                sid, SioEvents.chat_predict.value, parsed.conversation_uuid, parsed.question_id, e
+            ) from e
 
     @web.sio(SioEvents.chat_continue_predict)
     def continue_predict(self, sid: str, data: dict) -> None:
@@ -253,9 +291,25 @@ class SIO:
         #
         if not auth.is_sio_user_in_project(sid, parsed.project_id):
             log.warning("Sid %s is not in project %s", sid, parsed.project_id)
-            return  # FIXME: return valid error or raise SioValidationError
+            raise SioValidationError(
+                sio=self.context.sio,
+                sid=sid,
+                event=SioEvents.chat_continue_predict.value,
+                error=SOCKET_UNAUTHENTICATED_MESSAGE,
+                stream_id=str(parsed.conversation_uuid),
+                message_id=parsed.message_id,
+                code=SOCKET_UNAUTHENTICATED_CODE,
+            )
         #
-        self.chat_continue_predict_sio(sid=sid, data=parsed.model_dump())
+        try:
+            self.chat_continue_predict_sio(sid=sid, data=parsed.model_dump())
+        except SioValidationError:
+            raise
+        except Exception as e:  # pylint: disable=W0703
+            log.exception("chat_continue_predict failed for sid %s", sid)
+            raise self._predict_failure(
+                sid, SioEvents.chat_continue_predict.value, parsed.conversation_uuid, parsed.message_id, e
+            ) from e
 
     @web.sio(SioEvents.chat_canvas_join)
     def join_canvas(self, sid: str, data: dict):

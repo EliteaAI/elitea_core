@@ -82,8 +82,23 @@ class SioEvents(StrEnum):
     eval_run_room_joined = 'eval_run_room_joined'
 
 
+# Machine-readable reason sent with a rejection of a socket whose handshake did not yield a user
+# that belongs to the project (anonymous after an expired session or a failed authorize call).
+# The client reacts by checking the session and re-handshaking instead of just showing the text.
+SOCKET_UNAUTHENTICATED_CODE = 'socket_unauthenticated'
+SOCKET_UNAUTHENTICATED_MESSAGE = (
+    'Your connection is not authorized for this project. '
+    'Reconnecting; please resend your message.'
+)
+# Shown when a send fails for a reason the user cannot act on, so the reply never hangs
+SEND_FAILED_MESSAGE = 'The request could not be started. Please try again.'
+
+
 class SioValidationError(Exception):
-    def __init__(self, sio, sid: str | None, event: str, error, stream_id: str = '', message_id: str | None = None):
+    def __init__(
+        self, sio, sid: str | None, event: str, error, stream_id: str = '',
+        message_id: str | None = None, code: str | None = None,
+    ):
         self.sio = sio
         self.type = 'error'
         self.event = event
@@ -91,6 +106,7 @@ class SioValidationError(Exception):
         self.stream_id = stream_id
         self.sid = sid
         self.message_id = message_id
+        self.code = code
         # self.room = get_event_room(
         #     event_name=event,
         #     room_id=stream_id
@@ -104,15 +120,18 @@ class SioValidationError(Exception):
     #     self.sio.enter_room(self.sid, self.room)
 
     def emit_error(self) -> None:
+        data = {
+            'event': self.event,
+            'content': self.error,
+            'type': self.type,
+            'stream_id': self.stream_id,
+            'message_id': self.message_id
+        }
+        if self.code:
+            data['code'] = self.code
         self.sio.emit(
             event=SioEvents.socket_validation_error.value,
-            data={
-                'event': self.event,
-                'content': self.error,
-                'type': self.type,
-                'stream_id': self.stream_id,
-                'message_id': self.message_id
-            },
+            data=data,
             to=self.sid,
         )
 

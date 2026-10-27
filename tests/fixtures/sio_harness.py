@@ -25,6 +25,7 @@ _STUBBED = ('redis', 'tools', 'sqlalchemy', 'pylon', f'{SIO_PKG}.models.conversa
 
 # Loaded for real, in dependency order.
 _REAL = (
+    (f'{SIO_PKG}.utils.exceptions', 'utils/exceptions.py'),
     (f'{SIO_PKG}.utils.sio_utils', 'utils/sio_utils.py'),
     (f'{SIO_PKG}.utils.toolkit_test_rooms', 'utils/toolkit_test_rooms.py'),
     (f'{SIO_PKG}.models.pd.sio', 'models/pd/sio.py'),
