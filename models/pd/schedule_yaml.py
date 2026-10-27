@@ -9,7 +9,9 @@ from .entity_schedule import (
     DESCRIPTION_MAX,
     NAME_MAX,
     ApprovalRule,
+    DeliveryMode,
     RunMode,
+    ScheduleDelivery,
     ScheduleVariable,
 )
 
@@ -34,6 +36,14 @@ class ScheduleFile(BaseModel):
             raise ValueError(WRONG_HEADER) from None
 
 
+class ScheduleFileDelivery(ScheduleDelivery):
+    """The delivery object of a file item: the API shape plus include_history, with a required mode."""
+    model_config = ConfigDict(extra='forbid')
+
+    mode: DeliveryMode
+    include_history: bool = False
+
+
 class ScheduleFileItem(BaseModel):
     """One schedule of the file: the allow-listed keys only. Timing rules come from ScheduleCreate."""
     model_config = ConfigDict(extra='forbid')
@@ -51,3 +61,5 @@ class ScheduleFileItem(BaseModel):
     variables: list[ScheduleVariable] = []
     expires_at: date | None = None
     approval_rule: ApprovalRule = 'pause_and_ask'
+    # A chat target is private to the source project, so an import always saves run_history
+    delivery: ScheduleFileDelivery | None = None

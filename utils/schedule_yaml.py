@@ -35,6 +35,17 @@ UPDATE_FIELDS = (
 )  # never enabled or name: an update keeps them (R5.1)
 
 
+def _delivery(row: EntitySchedule) -> dict:
+    """The delivery object in the shape of the API body; run_history leaves the target fields empty."""
+    in_chat = row.delivery_mode == 'conversation'
+    return {
+        'mode': row.delivery_mode,
+        'conversation_uuid': str(row.delivery_conversation_uuid) if in_chat else None,
+        'participant_id': row.delivery_participant_id if in_chat else None,
+        'include_history': False,  # no stored column yet; the key keeps the file shape fixed
+    }
+
+
 def _item(row: EntitySchedule, entity_name: str, version_name: str | None) -> dict:
     """One allow-listed file item; the keys are the file format, in file order."""
     is_entry_point = row.run_mode == 'entry_point'
@@ -53,6 +64,7 @@ def _item(row: EntitySchedule, entity_name: str, version_name: str | None) -> di
         # Stored as the end of the local stop day in UTC; the local date makes the import keep the day
         'expires_at': row.expires_at and row.expires_at.astimezone(ZoneInfo(row.timezone)).date(),
         'approval_rule': row.approval_rule,
+        'delivery': _delivery(row),
     }
 
 
@@ -294,7 +306,7 @@ def import_schedules(project_id: int, admin_id: int, file) -> dict:
             try:
                 item = ScheduleFileItem.model_validate(raw)
                 ids = _resolve(index, item)
-                values = item.model_dump(exclude={'key', 'entity_name', 'version_name'})
+                values = item.model_dump(exclude={'key', 'entity_name', 'version_name', 'delivery'})
                 if item.approval_rule == 'run_without_asking' and not may_run_without_asking:
                     values['approval_rule'] = 'pause_and_ask'
                     entry['note'] = 'Run without asking is not allowed in this project; saved as Pause and ask me'
