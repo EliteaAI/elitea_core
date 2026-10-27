@@ -28,7 +28,7 @@ def list_schedules(session, scope, filters, limit: int, offset: int):
         (S.entity_type, filters.entity_type), (S.last_run_status, filters.status),
         (S.enabled, filters.enabled), (S.application_id, filters.entity_id),
         (S.version_id, filters.version_id),
-        (S.delivery_conversation_uuid, getattr(filters, "delivery_conversation_uuid", None)),
+        (S.delivery_conversation_uuid, filters.delivery_conversation_uuid),
     ):
         if value is not None:
             conditions.append(column == value)

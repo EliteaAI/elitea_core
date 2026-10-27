@@ -24,7 +24,8 @@ class Env:
 
     def names(self, scope=ADMIN, **filters):
         values = {"entity_type": None, "status": None, "enabled": None, "owner_ids": None, "entity_id": None,
-                  "version_id": None, "search": None, "sort_by": "next_run", "sort_order": "asc"}
+                  "version_id": None, "search": None, "delivery_conversation_uuid": None,
+                  "sort_by": "next_run", "sort_order": "asc"}
         with self.session_factory() as session:
             total, rows = self.module.list_schedules(
                 session, scope, types.SimpleNamespace(**{**values, **filters}), 20, 0)
