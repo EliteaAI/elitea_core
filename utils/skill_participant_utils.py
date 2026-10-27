@@ -24,6 +24,7 @@ from ..models.skill import Skill
 SKILL_DISPATCH_KEY = '_skill_dispatch'
 CHAT_SKILLS_KEY = '_chat_skills'
 INVOKED_SKILLS_KEY = '_invoked_skills'
+CAPPED_SKILLS_KEY = '_capped_skills'
 FOREIGN_SKILL_ERROR = 'A skill participant must come from this project or the public catalog'
 SKILL_NOT_FOUND_ERROR = 'Skill not found'
 
@@ -312,11 +313,14 @@ def apply_participant_skill_mentions(session, msg_group, result: dict, chat_proj
         return
     result[CHAT_SKILLS_KEY] = candidates
     if is_dummy and has_skill_mention(result.get('user_input')):
-        result['user_input'], result[INVOKED_SKILLS_KEY] = consume_message_skills(result['user_input'], candidates)
+        result['user_input'], result[INVOKED_SKILLS_KEY], result[CAPPED_SKILLS_KEY] = consume_message_skills(
+            result['user_input'], candidates
+        )
 
 
 def pop_chat_skills(payload: dict) -> dict:
     return {
         'chat_skills': payload.pop(CHAT_SKILLS_KEY, None),
         'invoked_skills': payload.pop(INVOKED_SKILLS_KEY, None),
+        'capped_skills': payload.pop(CAPPED_SKILLS_KEY, None),
     }

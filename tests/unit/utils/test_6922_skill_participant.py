@@ -165,7 +165,7 @@ def env(isolated_sys_modules):
     _stub('utils.application_utils', validate_and_resolve_llm_settings=resolve_fake_llm_settings)
     _stub('utils.predict_utils', get_project_context=lambda project_id: {'enabled': False, 'content': ''})
     _stub('utils.utils', get_public_project_id=lambda: PUBLIC_PROJECT_ID)
-    _stub('utils.skill_utils', consume_message_skills=lambda content, candidates: (content, list(candidates)))
+    _stub('utils.skill_utils', consume_message_skills=lambda content, candidates: (content, list(candidates), []))
     _stub('models.skill', Skill=types.SimpleNamespace(id=IdColumn(), versions=None),
           SkillVersion=types.SimpleNamespace(id=IdColumn(), skill_id=Column()))
     _stub('models.message_group', ConversationMessageGroup=types.SimpleNamespace(

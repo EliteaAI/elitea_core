@@ -1689,12 +1689,8 @@ def _find_skill_mention_spans(
 def consume_invoked_skills(
     text: Optional[str],
     attached_skills: List[dict],
-    cap: Optional[int] = None,
 ) -> Tuple[Optional[str], List[dict]]:
-    """Resolve ``~skill`` control tokens AND consume them from ``text``.
-
-    ``cap`` bounds how many skills resolve; ``None`` resolves every match.
-    """
+    """Resolve ``~skill`` control tokens AND consume them from ``text``."""
     # Fast path: the overwhelming majority of turns/instructions contain no
     # ``~`` token, so return the original text object unchanged (identity).
     if not text or not attached_skills or '~' not in text:
@@ -1718,7 +1714,7 @@ def consume_invoked_skills(
     pieces.append(text[cursor:])
     cleaned_text = ''.join(pieces)
 
-    # Resolve: dedup by name (document order), skip blank bodies, cap.
+    # Resolve: dedup by name (document order), skip blank bodies.
     by_name: dict = {}
     for skill in attached_skills:
         name = skill.get('name')
@@ -1751,30 +1747,31 @@ def consume_invoked_skills(
             'icon_meta': skill.get('icon_meta'),
             'instructions': instructions,
         })
-        if cap is not None and len(invoked) >= cap:
-            break
 
     return cleaned_text, invoked
 
 
-def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[object, List[dict]]:
+def _split_at_invocation_cap(mentioned: List[dict]) -> Tuple[List[dict], List[dict]]:
     cap = get_max_invoked_skills_per_turn()
-    if isinstance(message_content, str):
-        cleaned_message, message_skills = consume_invoked_skills(message_content, candidates, cap)
-        return cleaned_message or 'continue', message_skills
-    if not isinstance(message_content, list):
-        return message_content, []
+    capped = [{'skill_id': s.get('skill_id'), 'name': s.get('name')} for s in mentioned[cap:]]
+    return mentioned[:cap], capped
 
-    message_skills: List[dict] = []
+
+def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[object, List[dict], List[dict]]:
+    if isinstance(message_content, str):
+        cleaned_message, mentioned = consume_invoked_skills(message_content, candidates)
+        return (cleaned_message or 'continue', *_split_at_invocation_cap(mentioned))
+    if not isinstance(message_content, list):
+        return message_content, [], []
+
+    mentioned: List[dict] = []
     rebuilt_blocks: list = []
     for block in message_content:
         if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str):
-            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates, cap)
+            cleaned_text, block_skills = consume_invoked_skills(block['text'], candidates)
             for skill in block_skills:
-                if len(message_skills) >= cap:
-                    break
-                if not any(existing.get('skill_id') == skill.get('skill_id') for existing in message_skills):
-                    message_skills.append(skill)
+                if not any(existing.get('skill_id') == skill.get('skill_id') for existing in mentioned):
+                    mentioned.append(skill)
             if cleaned_text.strip():
                 rebuilt_blocks.append({**block, 'text': cleaned_text})
         else:
@@ -1784,7 +1781,7 @@ def consume_message_skills(message_content, candidates: List[dict]) -> Tuple[obj
         for b in rebuilt_blocks
     ):
         rebuilt_blocks.append({'type': 'text', 'text': 'continue'})
-    return rebuilt_blocks, message_skills
+    return (rebuilt_blocks, *_split_at_invocation_cap(mentioned))
 
 
 def apply_runtime_skills(version_details: dict) -> None:

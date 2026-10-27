@@ -125,8 +125,13 @@ class TestChatSkillsReachTheResponder:
         assert result == {'user_input': 'hi'}
 
     def test_the_internal_keys_leave_the_payload_for_the_rpc_kwargs(self, env):
-        payload = {'user_input': 'hi', env.mod.CHAT_SKILLS_KEY: ['chat'], env.mod.INVOKED_SKILLS_KEY: ['invoked']}
-        assert env.mod.pop_chat_skills(payload) == {'chat_skills': ['chat'], 'invoked_skills': ['invoked']}
+        payload = {
+            'user_input': 'hi', env.mod.CHAT_SKILLS_KEY: ['chat'], env.mod.INVOKED_SKILLS_KEY: ['invoked'],
+            env.mod.CAPPED_SKILLS_KEY: ['capped'],
+        }
+        assert env.mod.pop_chat_skills(payload) == {
+            'chat_skills': ['chat'], 'invoked_skills': ['invoked'], 'capped_skills': ['capped'],
+        }
         assert payload == {'user_input': 'hi'}
 
 
@@ -186,7 +191,7 @@ class TestPredictPayloadListsChatSkills:
     def test_chat_skills_are_tilde_candidates_for_the_agent(self, build):
         run, llm = build
         consumed = []
-        run.__globals__['consume_message_skills'] = lambda content, candidates: consumed.append(candidates) or (content, [])
+        run.__globals__['consume_message_skills'] = lambda content, candidates: consumed.append(candidates) or (content, [], [])
         chat_skill = _skill('ui-review', 5)
         run(_predict.parsed(llm, agent=True, auto=False), 2, skip_expansion=True, chat_skills=[chat_skill])
         assert consumed == [[chat_skill]]
@@ -202,6 +207,30 @@ class TestPredictPayloadListsChatSkills:
         resolved = _skill('ui-review', 5)
         result = run(_predict.parsed(llm, agent=False, auto=False), 2, skip_expansion=True, invoked_skills=[resolved])
         assert result['invoked_skills'] == [resolved]
+
+    def test_a_model_chat_hands_the_over_cap_mentions_to_the_runtime(self, build):
+        run, llm = build
+        capped = [{'skill_id': 6, 'name': 'over-cap'}]
+        result = run(_predict.parsed(llm, agent=False, auto=False), 2, skip_expansion=True, capped_skills=capped)
+        assert result['capped_skills'] == capped
+
+    def test_an_agent_chat_hands_the_over_cap_mentions_to_the_runtime(self, build):
+        run, llm = build
+        capped = [{'skill_id': 6, 'name': 'over-cap'}]
+        run.__globals__['consume_message_skills'] = lambda content, candidates: (content, [], capped)
+        result = run(_predict.parsed(llm, agent=True, auto=False), 2, skip_expansion=True)
+        assert result['capped_skills'] == capped
+
+    def test_an_instruction_referenced_skill_is_never_capped(self, build):
+        run, llm = build
+        required = {'skill_id': 6, 'name': 'Formatter', 'instruction_referenced': True}
+        optional = {'skill_id': 7, 'name': 'over-cap', 'instruction_referenced': False}
+        run.__globals__['resolve_runtime_skills'] = lambda version: [required, optional]
+        run.__globals__['consume_message_skills'] = lambda content, candidates: (
+            content, [], [{'skill_id': 6, 'name': 'formatter'}, {'skill_id': 7, 'name': 'over-cap'}]
+        )
+        result = run(_predict.parsed(llm, agent=True, auto=False), 2, skip_expansion=True)
+        assert result['capped_skills'] == [{'skill_id': 7, 'name': 'over-cap'}]
 
     @pytest.mark.parametrize('agent', [False, True])
     def test_a_request_body_cannot_supply_skills(self, build, agent):

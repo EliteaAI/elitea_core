@@ -78,7 +78,7 @@ def test_regenerate_forwards_server_projection_outside_public_payload():
                'regenerate_payload':payload,'SioEvents':SimpleNamespace(chat_predict=SimpleNamespace(value='chat_predict')),
                'msg_group':SimpleNamespace(author_participant_id=2),'project_id':7,
                'start_event_content':{'participant_id':2,'question_id':1},'skill_rpc_kwargs':{},
-               'pop_chat_skills':lambda p:{'chat_skills':p.pop('_chat_skills',None),'invoked_skills':p.pop('_invoked_skills',None)}}
+               'pop_chat_skills':lambda p:{'chat_skills':p.pop('_chat_skills',None),'invoked_skills':p.pop('_invoked_skills',None),'capped_skills':p.pop('_capped_skills',None)}}
     eval(compile(ast.Expression(call),str(path),'eval'),namespace)
     sent=rpc.applications_predict_sio_llm.call_args
     assert sent.kwargs['routing_projection']==projection

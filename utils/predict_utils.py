@@ -324,6 +324,7 @@ def generate_predict_payload(
     skip_expansion: bool = False,
     chat_skills: Optional[list] = None,
     invoked_skills: Optional[list] = None,
+    capped_skills: Optional[list] = None,
 ) -> dict:
     """
     :param parsed: payload
@@ -496,6 +497,7 @@ def generate_predict_payload(
         'supports_vision': supports_vision,
         'return_chat_history': return_chat_history,
         'invoked_skills': invoked_skills or [],
+        'capped_skills': capped_skills or [],
         # Non-interactive predicts (scheduled/webhook/blocking REST) pass sid=None,
         # so bool(sid) alone gates this off for them without a separate flag.
         'next_input_suggestion': {
@@ -562,8 +564,15 @@ def generate_predict_payload(
         disclosable_skills = merge_disclosable_skills(own_disclosable_skills, chat_skills)
 
         mention_candidates = merge_mention_candidates(attached_skills, chat_skills)
-        payload['user_input'], message_skills = consume_message_skills(payload.get('user_input'), mention_candidates)
-        payload['invoked_skills'] = message_skills
+        payload['user_input'], payload['invoked_skills'], capped_skills = consume_message_skills(
+            payload.get('user_input'), mention_candidates
+        )
+        instruction_referenced = {
+            (s.get('name') or '').strip().lower() for s in own_disclosable_skills if s.get('instruction_referenced')
+        }
+        payload['capped_skills'] = [
+            s for s in capped_skills if (s.get('name') or '').strip().lower() not in instruction_referenced
+        ]
 
         # Message-invoked only: an instruction-referenced skill counts as applied
         # only when the model actually loads it (folded in by the indexer).
