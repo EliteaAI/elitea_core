@@ -38,7 +38,7 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
 
     @register_openapi(
         name="Execute a specific version of an agent or pipeline with user input — supports synchronous and asynchronous modes, returns prediction result",
-        description="Execute a specific version of an agent or pipeline with user input — supports synchronous and asynchronous modes, returns prediction result.",
+        description="Execute a specific version of an agent or pipeline with user input — supports synchronous and asynchronous modes, returns prediction result. Sync responses carry the final answer as text in 'output_text' (text only, no images or other non-text content). Set 'return_chat_history': true to also get the full 'chat_history' (larger payload).",
         mcp_description="""
         USE to run an agent or pipeline and get a response to user input. Primary 'invoke' tool.     
         DO NOT USE when:
@@ -49,7 +49,8 @@ class PromptLibAPI(api_tools.APIModeHandler):  # pylint: disable=R0903
         
         Classic agent (sync):
         Body: { 'user_input': 'Summarize this document.' }
-        → Waits and returns agent response.
+        → Waits and returns agent response. Final answer is in response.output_text (text only).
+        Add 'return_chat_history': true to also receive response.chat_history (omitted by default, larger payload).
         
         Pipeline with interrupts (async):
         Body: { 'user_input': 'Process ticket JIRA-123', 'callback_url': 'https://my-service.com/hook', 'callback_headers': { 'Authorization': 'Bearer token' } }
