@@ -55,6 +55,8 @@ def create_trigger_run_conversation(
     conversation_name: str,
     extra_meta: dict | None = None,
     source: Literal["pipeline", "agent"] = "pipeline",
+    target_conversation: int | None = None,
+    delivery_participant_id: int | None = None,
 ) -> tuple[str, int, str]:
     """
     Create a conversation for a triggered pipeline run (scheduled or webhook).
@@ -71,6 +73,9 @@ def create_trigger_run_conversation(
         conversation_name: Name for the conversation (e.g., "Scheduled run: Pipeline Name")
         extra_meta: Additional metadata to include in conversation.meta
         source: Conversation source, "pipeline" or "agent"
+        target_conversation: id of an existing chat to write the groups into instead of a new private chat;
+            needs ``delivery_participant_id``, the chat participant that answers
+        delivery_participant_id: participant that authors the answer group of a target chat
 
     Returns:
         Tuple of (conversation UUID string, pipeline participant ID, response message UUID)
@@ -79,6 +84,11 @@ def create_trigger_run_conversation(
         # Get application name for context
         application = session.query(Application).get(version.application_id)
         pipeline_name = application.name if application else f"Pipeline {version.application_id}"
+
+        if target_conversation is not None:
+            return _write_groups_into_chat(
+                session, target_conversation, delivery_participant_id, user_id, trigger_message, extra_meta,
+            )
 
         # Build single_participant metadata (same as UI creates)
         single_participant = {
@@ -192,6 +202,52 @@ def create_trigger_run_conversation(
         return str(conversation.uuid), pipeline_participant.id, str(response_msg_group.uuid)
 
 
+def _write_groups_into_chat(
+    session, conversation_id: int, participant_id: int | None, user_id: int, trigger_message: str,
+    extra_meta: dict | None,
+) -> tuple[str, int, str]:
+    """Add the owner's trigger group and the participant's streaming answer group to an existing chat."""
+    conversation = session.query(Conversation).get(conversation_id)
+    if conversation is None:
+        raise LookupError("Target chat does not exist")
+    if participant_id is None:
+        raise ValueError("A target chat needs the participant that answers")
+    schedule_ids = {k: v for k, v in (extra_meta or {}).items() if k in ("schedule_id", "schedule_run_id")}
+
+    user_participant, _ = get_or_create_one(
+        session=session,
+        entity_name=ParticipantTypes.user,
+        entity_meta=ParticipantEntityUser(id=user_id),
+    )
+    trigger_group = ConversationMessageGroup(
+        conversation=conversation,
+        author_participant=user_participant,
+        sent_to_id=participant_id,
+        meta={"scheduled_trigger": True, **schedule_ids},
+    )
+    trigger_item = TextMessageItem(
+        message_group=trigger_group,
+        item_type=TextMessageItem.__mapper_args__['polymorphic_identity'],
+        content=trigger_message,
+        order_index=0,
+    )
+    session.add(trigger_group)
+    session.add(trigger_item)
+    session.flush()
+
+    answer_group = ConversationMessageGroup(
+        conversation=conversation,
+        author_participant_id=participant_id,
+        is_streaming=True,
+        reply_to_id=trigger_group.id,
+        meta={"scheduled_run": True, **schedule_ids},
+    )
+    session.add(answer_group)
+    session.flush()
+    session.commit()
+    return str(conversation.uuid), participant_id, str(answer_group.uuid)
+
+
 def finish_trigger_run_with_error(project_id: int, response_message_id: str, error) -> None:
     """End a triggered run's placeholder message with the dispatch error, so History shows why it failed."""
     message = f"Pipeline run could not start: {error}"
@@ -245,6 +301,7 @@ def execute_pipeline_via_predict_sio(
     is_system_user: bool = True,
     auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
     mandate_ticket: str | None = None,
+    participant_id: int | None = None,
 ) -> dict:
     """
     Execute a pipeline using the applications_predict_sio RPC.
@@ -263,11 +320,13 @@ def execute_pipeline_via_predict_sio(
         auto_approve_sensitive_actions: True skips the sensitive-action approval pause (schedule rule and secret);
             a list of (toolkit, tool) pairs approves only those pairs
         mandate_ticket: single-use ticket of a governed run under an autonomous mandate; sent only when there is one
+        participant_id: chat participant the run answers as; sent only for a run delivered into a chat
 
     Returns:
         Dict with task_id from the RPC call, or ``{code, error}`` when a governed admission refused the run
     """
     extra = {"mandate_ticket": mandate_ticket} if mandate_ticket is not None else {}
+    participant = {"participant_id": participant_id} if participant_id is not None else {}
     result = rpc_tools.RpcMixin().rpc.timeout(5).applications_predict_sio(
         sid=None,  # No socket connection for triggered runs
         sio_event=SioEvents.chat_predict.value,  # Required for metadata persistence
@@ -281,6 +340,7 @@ def execute_pipeline_via_predict_sio(
             "message_id": response_message_id,
             "stream_id": conversation_uuid,
             "conversation_id": conversation_uuid,
+            **participant,
         },
         await_task_timeout=-1,  # Don't wait for completion
         user_id=user_id,
