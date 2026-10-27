@@ -66,6 +66,13 @@ class PromptLibAPI(api_tools.APIModeHandler):
         
         if await_response:
             test_data.sid = None
+        if test_data.sid:
+            # the socket an async test streams to stands for the caller (#7229: its holder is who the run is admitted
+            # as): it must be the caller's own
+            holder = auth.sio_users.get(test_data.sid)
+            caller_id = (auth.current_user() or {}).get('id')
+            if holder is None or auth.current_user(auth_data=holder).get('id') != caller_id:
+                return {'error': 'The socket does not belong to the caller'}, 403
         
         try:
             test_data.llm_model, test_data.llm_settings = resolve_test_tool_llm(
@@ -77,6 +84,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
                 await_task_timeout=timeout
             )
         except SioValidationError as e:
+            if isinstance(e.error, dict) and e.error.get('code'):
+                # refused by governance (#7229): the readable reason and its code
+                return {'code': e.error['code'], 'message': e.error.get('error')}, 403
             return {'error': str(e.error)}, 400
         except PoolSaturationError as e:
             return {

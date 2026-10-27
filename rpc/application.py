@@ -40,7 +40,7 @@ from ..utils.application_utils import (
 from ..models.pd.admission import ENTRY_EDITOR_CHAT, ENTRY_INDEX_ON_DEMAND, ENTRY_TOOLKIT_TEST, admission_request_from
 from ..utils.mandate_admission import take_trigger_admission
 from ..utils.admission import CREDENTIAL_FREE
-from ..utils.credential_slots import FREE_FORM_SECRET_MARK, has_free_form_secret, mark_free_form_secret
+from ..utils.credential_slots import has_free_form_secret, has_secret_template, mark_free_form_secret
 from ..utils.governance import is_governed
 from ..utils.exceptions import (
     AdmissionDenied, PoolSaturationError, MaintenanceInProgressError, BudgetDoorClosedError,
@@ -1723,7 +1723,8 @@ class RPC:
         )
         # a {{secret.*}} outside a credential configuration would be resolved where no slot governs it: admission refuses
         free_form_secret = has_free_form_secret(self, {'project_id': project_id,
-                                                       'tools': [data.get('toolkit_config') or {}]})
+                                                       'tools': [data.get('toolkit_config') or {}]}) or (
+            is_governed(self) and has_secret_template(data.get('tool_params')))
 
         # Prepare kwargs without stream_id and message_id since they're passed as args
         task_kwargs = {k: v for k, v in data.items() if k not in ['stream_id', 'message_id']}

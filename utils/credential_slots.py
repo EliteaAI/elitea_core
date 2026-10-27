@@ -322,8 +322,8 @@ def seal_payload(  # pylint: disable=R0912,R0913,R0914
 
     ``children`` (``{"<application id>:<version id>": entries}``, #7227): the sub-agents admitted with decisions of their
     own. The run's own toolkits are then sealed against ``entries_of`` and the toolkits of each admitted sub-agent
-    against its own entries (decided); a prefetched sub-agent that was not admitted is sealed against the run's
-    entries, as before (undecided).
+    against its own entries (decided only when ``decided``: admission just decided them; a dispatch under an inherited
+    context is not); a prefetched sub-agent that was not admitted is sealed against the run's entries, as before.
     """
     if children is not None:
         sealed = seal_payload(_own_view(payload), entries_of, secret_fields_of=secret_fields_of, classify=classify,
@@ -333,7 +333,7 @@ def seal_payload(  # pylint: disable=R0912,R0913,R0914
             sealed += seal_payload(
                 {"project_id": payload.get("project_id"), "tools": tools},
                 entries_of if entries is None else (lambda found=entries: found),
-                secret_fields_of=secret_fields_of, classify=classify, decided=entries is not None)
+                secret_fields_of=secret_fields_of, classify=classify, decided=decided and entries is not None)
         return sealed
     index = None
     toolkits_seen, handled = set(), {}

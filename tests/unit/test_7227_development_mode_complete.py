@@ -334,6 +334,34 @@ def test_a_fan_out_child_nothing_was_decided_for_is_refused_with_the_reason(ns, 
     assert "checked for it when the draft started" in err.value.message
 
 
+def test_a_fan_out_child_holds_its_context_only_while_its_run_does(ns, env):
+    tree = Tree(env)
+    call, ref = dispatch(env, ns, tree.payload)
+    child = call_kwargs(fan_out_child(call), context_ref=ref)
+    ns.adm.admit_dispatch(module(env), "indexer_agent", child, None)
+    child_ref = child["kwargs"]["envelope"]["context_ref"]
+    run_to_running(env, ns, ref)
+    assert ns.adm.validate_context(env.module(), 1, child_ref, CALLER)["ok"] is True
+    with env.get_session(1) as session:   # the run ends (stopped, completed or revoked)
+        ns.adm._set_state(session, uuid.UUID(ref), "revoked", "EPOCH_MISMATCH")  # pylint: disable=W0212
+        session.commit()
+    assert ns.adm.validate_context(env.module(), 1, child_ref, CALLER)["reason_code"] == "STALE_CONTEXT"
+    slot = child["kwargs"]["application"]["version_details"]["tools"][0]["settings"]["credentials"]["credential_slot"]
+    assert release(env, ns, child_ref, 2, slot)["reason_code"] == "STALE_CONTEXT"
+
+
+def test_a_credential_nothing_decided_for_in_a_fan_out_childs_sub_agent_is_refused(ns, env):
+    tree = Tree(env)
+    call, ref = dispatch(env, ns, tree.payload)
+    reconcile = copy.deepcopy(call)
+    stray = Credential(env, uuid.uuid4(), tool_id=4, config_id=8, version_id=81)
+    prefetched = reconcile["kwargs"]["application"]["subagent_version_details"]["9:90"]["version_details"]["tools"]
+    prefetched.append(stray.tool())   # a credential the bound leaf was never decided for
+    with pytest.raises(ns.exceptions.AdmissionDenied) as err:
+        ns.adm.admit_dispatch(module(env), "indexer_agent", reconcile, None)
+    assert err.value.reason_code in ("CREDENTIAL_REFERENCE_REQUIRED", "DENIED_DEVELOPMENT_CHILD")
+
+
 def test_audit_only_rehearses_each_sub_agent_and_writes_no_context(ns, env):
     tree = Tree(env)
     call, ref = dispatch(env, ns, tree.payload, module_=module(env, governed=False, audit=True))
@@ -518,7 +546,11 @@ def test_the_test_entry_says_which_kind_of_toolkit_run_from_the_tool_and_passes_
     runtool = (PLUGIN_ROOT / "methods" / "runtool.py").read_text()
     assert "entry_point=ENTRY_TOOLKIT_TEST" in runtool and "admission=admission" in runtool and "sid=None" in runtool
     api = (PLUGIN_ROOT / "api" / "v2" / "test_toolkit_tool.py").read_text()
-    assert "'message': result.get('error')}, 403" in api
+    assert "'message': result.get('error')}, 403" in api and "'message': e.error.get('error')}, 403" in api
+    # the socket an async REST test streams to is the caller's own: its holder is who the run is admitted as
+    assert "auth.current_user(auth_data=holder).get('id') != caller_id" in api
+    # no payload-wide unsecret under governance: a template in the test parameters is refused, not passed on
+    assert "is_governed(self) and has_secret_template(data.get('tool_params'))" in test
 
 
 def test_scheduled_indexing_stays_refused_before_any_dispatch():

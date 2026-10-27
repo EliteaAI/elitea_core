@@ -135,8 +135,8 @@ MESSAGES = {
     "DENIED_DEVELOPMENT_CHILD": "A sub-agent of this draft asked for a credential that was not checked for it when the "
                                 "draft started (only the sub-agents the draft calls are checked, each on its own); the "
                                 "run was not started.",
-    "DEVELOPMENT_RUNS_DISABLED": "Toolkit tests and on-demand indexing run on your own credentials as development runs, "
-                                 "which are switched off on this platform; the run was not started.",
+    "DEVELOPMENT_RUNS_DISABLED": "Toolkit tests and on-demand indexing run as development runs of the signed-in person, "
+                                 "which this platform does not allow for this run; the run was not started.",
     # the release of credential material to a worker (#6946); fixed per code, no titles, ids or field names
     "RATE_LIMITED": "This run asked for its credentials too often and was stopped.",
     "UNSUPPORTED_AUTH_MODE": "This toolkit cannot use a governed credential yet; the run was not started.",
@@ -1522,7 +1522,8 @@ def descendant_contexts(project_id, run_id, ancestor_ref) -> list:
     with db.get_session(project_id) as session:
         rows = session.execute(
             select(*CHILD_COLUMNS)
-            .where(ExecutionSecurityContext.run_id == run_id, ExecutionSecurityContext.parent_context_ref.isnot(None))
+            .where(ExecutionSecurityContext.run_id == run_id, ExecutionSecurityContext.parent_context_ref.isnot(None),
+                   ExecutionSecurityContext.state.in_(LIVE_STATES))
             .order_by(ExecutionSecurityContext.attempt)
         ).all()
     now, ancestor = _now(), str(ancestor_ref)
@@ -1857,7 +1858,7 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
                    columns.run_id, columns.attempt, columns.project_id, columns.application_id, columns.version_id,
                    columns.agent_binding_ref, columns.binding_project_id, columns.subject, columns.caller,
                    columns.definition_digest, columns.policy_revision, columns.environment, columns.revocation_epochs,
-                   columns.allowed_bindings)
+                   columns.allowed_bindings, columns.parent_context_ref, columns.call_lineage)
             .where(columns.id == context_id)
         ).one_or_none()
         binding = None
@@ -1885,6 +1886,8 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
         reason = row.revoked_reason if row.state == "revoked" else None
         raise _denied(reason if reason in REVOKE_CODES else "STALE_CONTEXT")
     if _now() >= _aware(row.expires_at):
+        raise _denied("STALE_CONTEXT")
+    if not root_context_live(project_id, row):   # a fan-out sub-agent of a run that ended (#7227)
         raise _denied("STALE_CONTEXT")
     #
     def revoke(code):
@@ -1948,6 +1951,23 @@ def _validate(project_id, context_ref, caller, known, touch=True):  # pylint: di
         "agent_binding_ref": context_binding_label(row), "policy_revision": row.policy_revision,
         "expires_at": _aware(row.expires_at).isoformat(),
     }
+
+
+def root_context_live(project_id, row) -> bool:
+    """A sub-agent admitted with its run (#7227) holds its admission only while the run's own context (the first of its
+    lineage) is live: a run that ended or was revoked ends its sub-agents with it. A run's own context: True, nothing
+    read; otherwise one read."""
+    if getattr(row, "parent_context_ref", None) is None:
+        return True
+    lineage = row.call_lineage if isinstance(row.call_lineage, list) else []
+    try:
+        root_id = uuid.UUID(str(lineage[0]))
+    except (IndexError, ValueError):
+        return False
+    with db.get_session(project_id) as session:
+        state = session.execute(
+            select(ExecutionSecurityContext.state).where(ExecutionSecurityContext.id == root_id)).scalar_one_or_none()
+    return state in LIVE_STATES
 
 
 def context_binding_label(row) -> str:

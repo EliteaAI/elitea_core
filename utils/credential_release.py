@@ -364,7 +364,8 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
                    columns.run_id, columns.attempt, columns.application_id, columns.agent_binding_ref,
                    columns.binding_project_id, columns.project_id, columns.tenant, columns.subject,
                    columns.allowed_bindings, columns.trace_ref, columns.revocation_epochs, columns.caller,
-                   columns.definition_digest, columns.policy_revision, columns.environment)
+                   columns.definition_digest, columns.policy_revision, columns.environment, columns.parent_context_ref,
+                   columns.call_lineage)
             .where(columns.id == context_id)
         ).one_or_none()
         if row is None:
@@ -393,6 +394,8 @@ def _check_run(module, requests: list) -> _Scope:  # pylint: disable=R0914
         reason = row.revoked_reason if row.state == "revoked" else None
         raise adm._denied(reason if reason in adm.REVOKE_CODES else "STALE_CONTEXT")
     if adm._now() >= adm._aware(row.expires_at):
+        raise adm._denied("STALE_CONTEXT")
+    if not adm.root_context_live(first.project_id, row):   # a fan-out sub-agent of a run that ended (#7227)
         raise adm._denied("STALE_CONTEXT")
     #   4. the exact use the context was admitted for, for every slot
     entries, missing = _entries_of(row, requests)
