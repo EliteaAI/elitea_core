@@ -28,7 +28,7 @@ def validate_new_owner(project_id: int, owner_id: int, entity_type: str | None =
 def change_schedule_owner(session, row, owner_id: int, admin_id: int) -> dict | None:
     """Move created_by and the principal to `owner_id` in one commit (R1.1, R1.2); enabled stays (R1.4).
 
-    The approval rule goes back to "Pause and ask me" and the confirmation is cleared.
+    The approval rule goes back to "Pause and ask me", the confirmation is cleared and the delivery goes back to Run History.
 
     Returns the old and new owner ids for the notices, or None when `owner_id` already owns the row.
 
@@ -44,6 +44,9 @@ def change_schedule_owner(session, row, owner_id: int, admin_id: int) -> dict | 
     # The consent belongs to the old owner: the new owner confirms again before a run approves by itself
     row.approval_rule = 'pause_and_ask'
     row.approval_fingerprint = row.approval_confirmed_by = row.approval_confirmed_at = None
+    # The chat target was checked against the old owner's membership: the new owner starts with Run History only
+    row.delivery_mode = 'run_history'
+    row.delivery_conversation_uuid = row.delivery_participant_id = None
     session.commit()
     return {'old_owner_id': old_owner_id, 'new_owner_id': owner_id}
 

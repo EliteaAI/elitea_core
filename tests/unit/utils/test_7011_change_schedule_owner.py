@@ -1,5 +1,6 @@
 """EL-7011 US-10 R1.1, R1.2, R1.4: the owner and the principal move together in one commit; state stays."""
 import pathlib
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -75,3 +76,14 @@ def test_the_new_owner_starts_with_pause_and_ask_and_no_confirmation(harness, ow
     row = harness.row(schedule_id)
     assert (row.approval_rule, row.approval_fingerprint, row.approval_confirmed_by, row.approval_confirmed_at) == (
         'pause_and_ask', None, None, None)
+
+
+def test_owner_change_resets_chat_delivery_to_run_history(harness, owner):
+    """The chat target was checked against the old owner: the new owner starts with Run History only."""
+    schedule_id = harness.seed(
+        created_by=OWNER_ID, delivery_mode='conversation',
+        delivery_conversation_uuid=uuid.UUID('11111111-1111-4111-8111-111111111111'), delivery_participant_id=5)
+    change(harness, owner, schedule_id, OTHER_ID)
+    row = harness.row(schedule_id)
+    assert (row.delivery_mode, row.delivery_conversation_uuid, row.delivery_participant_id) == (
+        'run_history', None, None)

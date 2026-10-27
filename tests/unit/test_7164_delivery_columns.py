@@ -1,7 +1,7 @@
 """Unit tests for the delivery columns of the schedule table.
 
-Covers R1.1 (a schedule saved without delivery stores mode run_history and no target chat)
-and R1.2 (a schedule that existed before the columns reads as run_history with null targets).
+A schedule saved without delivery stores mode run_history and no target chat.
+A schedule row that existed before the columns reads as run_history with null targets.
 
 Run via:
     python tests/run_tests.py unit/test_7164_delivery_columns.py -v
