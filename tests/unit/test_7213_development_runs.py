@@ -544,7 +544,8 @@ def test_the_context_table_accepts_a_null_binding_reference_and_older_schemas_ar
     assert column.nullable is True
     schema = (PLUGIN_ROOT / "utils" / "agent_identity_schema.py").read_text()
     assert "is_nullable = 'NO'" in schema and "DROP NOT NULL" in schema
-    assert 'ALTER TABLE "p_{int(pid)}".{CONTEXT_TABLE} ALTER COLUMN {BINDING_REF_COLUMN} DROP NOT NULL' in schema
+    assert 'ALTER TABLE "p_{int(pid)}".{CONTEXT_TABLE} ALTER COLUMN {column} DROP NOT NULL' in schema
+    assert 'NULLABLE_COLUMNS = (BINDING_REF_COLUMN, "application_id", "version_id")' in schema   # #7229: toolkit runs
     module_text = (PLUGIN_ROOT / "module.py").read_text()
     guard = module_text[module_text.index("def _ensure_agent_identity_schema"):module_text.index("    def init(self):")]
     assert "project_ids_with_not_null_binding_ref()" in guard and "apply_nullable_binding_ref(strict)" in guard

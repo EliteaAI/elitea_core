@@ -90,6 +90,9 @@ class PromptLibAPI(api_tools.APIModeHandler):
         
         if not result:
             return {'error': 'No response from toolkit tool test'}, 500
+        if result.get('code'):
+            # refused by governance (#7229): the readable reason and its code, as a refused predict
+            return {'code': result['code'], 'message': result.get('error')}, 403
         
         task_id = result.get('task_id')
         if await_response:

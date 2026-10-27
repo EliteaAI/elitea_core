@@ -702,6 +702,9 @@ def _tool_lists(payload):
         for value in prefetched.values():
             if isinstance(value, dict):
                 yield value.get("tools")
+                # Main builds the entry as {name, description, version_details} (subagent_prefetch)
+                if isinstance(value.get("version_details"), dict):
+                    yield value["version_details"].get("tools")
 
 
 def client_path(path) -> str:

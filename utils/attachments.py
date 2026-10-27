@@ -484,7 +484,9 @@ def read_file_content(
         start_event_content={
             'question_id': str(question_id),
         },
-        await_task_timeout=await_task_timeout
+        await_task_timeout=await_task_timeout,
+        # the platform's own read (a built-in toolkit, no credential): not admitted under governance (#7229)
+        platform_read=True,
     )
 
     # Check if read operation completed successfully

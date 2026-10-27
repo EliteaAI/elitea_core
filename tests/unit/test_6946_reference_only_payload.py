@@ -464,7 +464,7 @@ def called(node):
     return node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
 
 
-@pytest.mark.parametrize("path, count", [("rpc/application.py", 2), ("methods/predict.py", 1)])
+@pytest.mark.parametrize("path, count", [("rpc/application.py", 3), ("methods/predict.py", 1)])   # 3: the toolkit test (#7229)
 def test_every_predict_entry_point_checks_before_it_unsecrets_and_marks_after(path, count):
     """The entry points need the Pylon runtime and cannot run here; their order is read from the syntax tree."""
     sites = [lines for lines in calls_in(path, called).values() if any(name == "has_free_form_secret" for _, name in lines)]
@@ -546,8 +546,13 @@ def test_the_probe_also_needs_the_governed_ops_pool(ns):
 
 def test_other_enveloped_tasks_and_the_legacy_profile_are_not_asked_for_credential_slots(ns):
     call = {"kwargs": {}}
-    ns.caps.apply_envelope_gate("indexer_test_toolkit_tool", call, GOVERNED, registry(ns, "task_envelope.v1"))
+    ns.caps.apply_envelope_gate("indexer_test_mcp_connection", call, GOVERNED, registry(ns, "task_envelope.v1"))
     assert call["kwargs"]["envelope"]["required_capabilities"] == ["task_envelope.v1"]
+    # a toolkit Test run or on-demand indexing is admitted since #7229: its toolkit carries slots
+    call = {"kwargs": {}}
+    ns.caps.apply_envelope_gate("indexer_test_toolkit_tool", call, GOVERNED, registry(ns, "task_envelope.v1",
+                                                                                      "credential_slots.v1"))
+    assert call["kwargs"]["envelope"]["required_capabilities"] == ["credential_slots.v1", "task_envelope.v1"]
     legacy = types.SimpleNamespace(enabled=False, policy_revision=None, profile="legacy")
     call = {"kwargs": {}}
     ns.caps.apply_envelope_gate("indexer_agent", call, legacy, registry(ns))

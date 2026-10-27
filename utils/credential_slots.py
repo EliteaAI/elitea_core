@@ -53,15 +53,28 @@ DICT_SECRET_FIELDS = ("headers", "extra_headers", "auth_headers")
 _KEY = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # a concrete key under a wildcard path: what a release request can name
 
 
-def _prefetched_toolkits(payload) -> list:
-    """The toolkits of the sub-agents the predict payload carries ready-expanded (``application.subagent_version_details``,
-    expanded with the same unsecret as the run's own): material rides there too."""
+def prefetched_tool_lists(payload) -> dict:
+    """``{"<application id>:<version id>": [toolkit dicts]}`` of the sub-agents the predict payload carries ready-expanded
+    (``application.subagent_version_details``, expanded with the same unsecret as the run's own): material rides there
+    too. Main builds each entry as ``{name, description, version_details: {tools}}`` (``subagent_prefetch``); a ``tools``
+    list on the entry itself is read as well, so no shape of an entry leaves a toolkit out."""
     application = payload.get("application") if isinstance(payload, dict) else None
     prefetched = application.get("subagent_version_details") if isinstance(application, dict) else None
     if not isinstance(prefetched, dict):
-        return []
-    return [tool for details in prefetched.values() if isinstance(details, dict) and isinstance(details.get("tools"), list)
-            for tool in details["tools"] if isinstance(tool, dict)]
+        return {}
+    found = {}
+    for key, entry in prefetched.items():
+        if not isinstance(entry, dict):
+            continue
+        details = entry.get("version_details") if isinstance(entry.get("version_details"), dict) else {}
+        found[str(key)] = [tool for tools in (entry.get("tools"), details.get("tools")) if isinstance(tools, list)
+                           for tool in tools if isinstance(tool, dict)]
+    return found
+
+
+def _prefetched_toolkits(payload) -> list:
+    """The toolkits of every prefetched sub-agent of a payload (``prefetched_tool_lists``), in one list."""
+    return [tool for tools in prefetched_tool_lists(payload).values() for tool in tools]
 
 
 def dispatched_toolkits(payload) -> list:
@@ -283,9 +296,17 @@ def _slot_matches(slot, entry: Mapping) -> bool:
 
 # --- sealing a payload -----------------------------------------------------------------------
 
+def _own_view(payload) -> dict:
+    """The run's own toolkits of a payload (request level and version), without its prefetched sub-agents: the same
+    dicts, so sealing the view seals the payload."""
+    application = payload.get("application") if isinstance(payload.get("application"), dict) else {}
+    return {"project_id": payload.get("project_id"), "tools": payload.get("tools"),
+            "application": {"version_details": application.get("version_details")}}
+
+
 def seal_payload(  # pylint: disable=R0912,R0913,R0914
     payload, entries_of: Callable[[], list], *, secret_fields_of: Callable = configuration_secret_fields,
-    classify: Optional[Callable] = None, decided: bool = False,
+    classify: Optional[Callable] = None, decided: bool = False, children: Optional[Mapping[str, list]] = None,
 ) -> int:
     """Replace the secret fields of every credential configuration in the dispatched toolkits with a slot, in place.
     The number of configurations sealed; ``CredentialDecisionError`` (nothing is returned) for a refusal.
@@ -298,7 +319,22 @@ def seal_payload(  # pylint: disable=R0912,R0913,R0914
     ``classify``; the toolkits of prefetched sub-agents are never decided (a sub-agent's credential is not admitted,
     WP-1B) and are always classified. A configuration that two toolkits share by identity is refused: a slot names
     one decision.
+
+    ``children`` (``{"<application id>:<version id>": entries}``, #7227): the sub-agents admitted with decisions of their
+    own. The run's own toolkits are then sealed against ``entries_of`` and the toolkits of each admitted sub-agent
+    against its own entries (decided); a prefetched sub-agent that was not admitted is sealed against the run's
+    entries, as before (undecided).
     """
+    if children is not None:
+        sealed = seal_payload(_own_view(payload), entries_of, secret_fields_of=secret_fields_of, classify=classify,
+                              decided=decided)
+        for key, tools in prefetched_tool_lists(payload).items():
+            entries = children.get(key)
+            sealed += seal_payload(
+                {"project_id": payload.get("project_id"), "tools": tools},
+                entries_of if entries is None else (lambda found=entries: found),
+                secret_fields_of=secret_fields_of, classify=classify, decided=entries is not None)
+        return sealed
     index = None
     toolkits_seen, handled = set(), {}
     to_seal, stray = [], []

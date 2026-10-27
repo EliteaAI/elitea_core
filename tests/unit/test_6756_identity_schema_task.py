@@ -121,16 +121,18 @@ def test_the_startup_guard_finds_the_schemas_that_still_refuse_a_null_binding_re
     assert schema.schema.project_ids_with_not_null_binding_ref() == [4]
     [(_, sql, params)] = [entry for entry in log if entry[0] == "execute"]
     assert "information_schema.columns" in sql and "is_nullable = 'NO'" in sql and "p_[0-9]+" in sql
-    assert params == {"table": "execution_security_context", "column": "agent_binding_ref"}
+    assert params == {"table": "execution_security_context",
+                      "columns": ["agent_binding_ref", "application_id", "version_id"]}   # #7213, #7229
 
 
-def test_relaxing_the_binding_reference_is_one_statement_per_project_and_a_dry_run_touches_nothing(schema):
+def test_relaxing_the_nullable_columns_is_one_statement_each_per_project_and_a_dry_run_touches_nothing(schema):
     log = []
     use_sessions(schema, log)
     assert schema.schema.apply_nullable_binding_ref([3, 8]) == ([3, 8], [])
     statements = [(pid, str(sql)) for kind, sql, *_ in log if kind == "execute" for pid in [None]]
-    assert len(statements) == 2 and all(
-        'ALTER COLUMN agent_binding_ref DROP NOT NULL' in sql for _, sql in statements)
+    # one statement per relaxed column (#7213 binding reference, #7229 application and version) per project
+    assert len(statements) == 6 and [sql.split("ALTER COLUMN ")[1] for _, sql in statements[:3]] == [
+        "agent_binding_ref DROP NOT NULL", "application_id DROP NOT NULL", "version_id DROP NOT NULL"]
     assert 'ALTER TABLE "p_3".execution_security_context' in statements[0][1]
     assert [entry[0] for entry in log].count("commit") == 2
     log.clear()
