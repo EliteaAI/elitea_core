@@ -171,10 +171,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 return query.all()
             #
             def resolve_connection_string(pid, toolkit):
-                # The scheduler reads the store the same way: per-schedule credentials only
-                # fill the toolkit's own slot, never pgvector_configuration.
+                # Per-schedule credentials only fill the toolkit's own slot, never
+                # pgvector_configuration, so the toolkit's own settings point at the store.
                 expanded = rpc_tools.RpcMixin().rpc.timeout(5).configurations_expand(
-                    project_id=pid, settings=toolkit.settings,
+                    project_id=pid, settings=orphans.pgvector_settings(toolkit.settings),
                     user_id=toolkit.author_id, unsecret=True,
                 )
                 return (expanded.get("pgvector_configuration") or {}).get("connection_string")

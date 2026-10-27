@@ -241,3 +241,25 @@ def test_params(mod, param, expected):
 def test_bad_params_raise(mod, param):
     with pytest.raises(ValueError):
         mod.parse_prune_params(param)
+
+
+# --- pgvector_settings ----------------------------------------------------------------------
+
+def test_only_the_vector_store_is_expanded(mod):
+    """Dev run: 15 of 20 toolkits were skipped because an unrelated credential was missing."""
+    settings = {
+        "pgvector_configuration": {"elitea_title": "pg", "private": False},
+        "jira_configuration": {"elitea_title": "jira_marian", "private": False},
+        "base_url": "https://jira",
+    }
+    result = mod.pgvector_settings(settings)
+
+    assert result == {"pgvector_configuration": {"elitea_title": "pg", "private": False}}
+    result["pgvector_configuration"]["connection_string"] = "x"
+    assert "connection_string" not in settings["pgvector_configuration"]
+
+
+@pytest.mark.parametrize("settings", [None, {}, {"pgvector_configuration": None}])
+def test_toolkit_without_vector_store_cannot_be_checked(mod, settings):
+    with pytest.raises(ValueError):
+        mod.pgvector_settings(settings)

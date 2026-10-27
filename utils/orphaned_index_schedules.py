@@ -5,6 +5,7 @@ An orphan is an ``indexes_meta.<name>`` entry on a toolkit whose own pgvector st
 judgement here is per toolkit, against that toolkit's store.
 """
 
+import copy
 import json
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
@@ -29,6 +30,18 @@ def parse_prune_params(param: str | None) -> tuple[int | None, int | None, bool]
         raise ValueError("toolkit_id requires project_id: toolkit ids are only unique per project")
     dry_run = params.get("dry_run", "true").lower() != "false"
     return project_id, toolkit_id, dry_run
+
+
+def pgvector_settings(settings: dict | None) -> dict:
+    """Only the toolkit's ``pgvector_configuration``, for expansion.
+
+    Expanding the whole settings also resolves every other credential the toolkit names, so
+    one missing Jira or ADO configuration would stop the vector store from being checked.
+    """
+    pgvector = (settings or {}).get("pgvector_configuration")
+    if not isinstance(pgvector, dict):
+        raise ValueError("toolkit has no pgvector_configuration")
+    return {"pgvector_configuration": copy.deepcopy(pgvector)}
 
 
 def find_orphans(indexes_meta: dict, present_names: set) -> dict:
