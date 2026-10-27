@@ -59,8 +59,9 @@ MCP_PROJECT_CONTEXT_BUILDER_ENDPOINT_CONFIGS = [
 MCP_CURRENT_PROJECT_SUFFIXES = {
     "elitea_core/project_context",
     "elitea_core/skills",
+    "elitea_core/schedules",
 }
-# The builder entity groups a conversation may act on: agents/pipelines, skills, project context.
+# The entity groups a conversation may act on: agents/pipelines, skills, project context, schedules.
 # Their `project_id` tool argument is clamped to the scope project carried on the MCP session.
 MCP_PROJECT_SCOPED_SUFFIXES = MCP_CURRENT_PROJECT_SUFFIXES | {
     "elitea_core/applications",
