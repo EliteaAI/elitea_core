@@ -15,18 +15,23 @@ PAUSE_AND_ASK = 'pause_and_ask'
 PLAIN_FIELDS = ('name', 'description', 'prompt', 'variables', 'expires_at', 'approval_rule')
 
 
-def schedule_roster(project_id: int) -> list[dict]:
-    """One row per agent or pipeline version in the project."""
+def schedule_roster(project_id: int, user_id: int) -> list[dict]:
+    """One row per agent or pipeline version in the project that the user may open (folder access)."""
     # Imported here: the ORM tables are not needed by callers that only check fields.
     from tools import db  # pylint: disable=E0401,C0415
 
     from ..models.all import Application, ApplicationVersion  # pylint: disable=C0415
+    from .folder_access import APPLICATION_ENTITY_TYPES, folder_exclusion_clause  # pylint: disable=C0415
 
+    folder_filter = folder_exclusion_clause(project_id, APPLICATION_ENTITY_TYPES, Application.id, user_id)
     with db.with_project_schema_session(project_id) as session:
-        rows = session.query(
+        query = session.query(
             Application.id, Application.name, ApplicationVersion.agent_type,
             ApplicationVersion.id, ApplicationVersion.name,
-        ).join(ApplicationVersion, ApplicationVersion.application_id == Application.id).all()
+        ).join(ApplicationVersion, ApplicationVersion.application_id == Application.id)
+        if folder_filter is not None:
+            query = query.filter(folder_filter)
+        rows = query.all()
     return [
         {'application_id': app_id, 'name': name, 'agent_type': agent_type,
          'version_id': version_id, 'version_name': version_name}
@@ -88,8 +93,14 @@ def _check_schedule(raw: dict, out: dict, warn) -> None:
             warn(field, str(error))
 
 
-def _resolve_entity(rows: list[dict], raw: dict, locked: dict | None, out: dict, warn) -> None:
-    """Names map to ids from the project roster; the model's own ids are never trusted."""
+def _resolve_entity(rows: list[dict], raw: dict, locked: dict | None, out: dict, warn,
+                    project_id: int, user_id: int) -> None:
+    """Names map to ids from the roster the user may open; the model's own ids are never trusted.
+
+    A resolved id the user cannot open in its folder is dropped, the locked id of the request included.
+    """
+    from .folder_access import entity_access_error  # late: the social RPCs are not needed by the other checks
+
     entity_type = locked['entity_type'] if locked else raw.get('entity_type')
     if entity_type not in ('agent', 'pipeline'):
         if entity_type is not None:
@@ -110,6 +121,10 @@ def _resolve_entity(rows: list[dict], raw: dict, locked: dict | None, out: dict,
     else:
         if raw.get('version_name') is not None:
             warn('version_id', 'A version needs an agent or pipeline name')
+        return
+    if entity_access_error(project_id, entity_type, out['application_id'], user_id=user_id):
+        out.pop('application_id')
+        warn('application_id', f'No {entity_type} with this id in this project')
         return
     if raw.get('version_name') is not None:
         version = next((row for row in rows if _same_name(row['version_name'], raw['version_name'])), None)
@@ -193,7 +208,8 @@ def validate_schedule_draft(
             warn(field, error.errors()[0]['msg'])
     _check_schedule(raw, out, warn)
     _check_stop_date(out, warn)
-    _resolve_entity(schedule_roster(project_id) if roster is None else roster, raw, locked_entity, out, warn)
+    _resolve_entity(schedule_roster(project_id, owner_id) if roster is None else roster, raw, locked_entity, out, warn,
+                    project_id, owner_id)
     _apply_run_mode(raw, out, warn)
     _check_approval_rule(out, warn)
     if out.get('approval_rule') == RUN_WITHOUT_ASKING and not is_run_without_asking_allowed(project_id):

@@ -1,5 +1,6 @@
 """EL-7011 US-10 R1.1, R1.2, R1.4: the owner and the principal move together in one commit; state stays."""
 import pathlib
+from datetime import UTC, datetime
 
 import pytest
 from fixtures import schedule_sqlite as sqlite_db
@@ -63,3 +64,14 @@ def test_7011_r1_1_same_owner_writes_nothing(harness, owner):
     schedule_id = harness.seed(created_by=OWNER_ID)
     assert change(harness, owner, schedule_id, OWNER_ID) == (None, 0)
     assert harness.row(schedule_id).updated_by is None
+
+
+def test_the_new_owner_starts_with_pause_and_ask_and_no_confirmation(harness, owner):
+    """The consent of the old owner never carries over: rule, fingerprint and confirmation are reset."""
+    schedule_id = harness.seed(
+        created_by=OWNER_ID, approval_rule='run_without_asking', approval_fingerprint='fp-1',
+        approval_confirmed_by=OWNER_ID, approval_confirmed_at=datetime.now(UTC))
+    change(harness, owner, schedule_id, OTHER_ID)
+    row = harness.row(schedule_id)
+    assert (row.approval_rule, row.approval_fingerprint, row.approval_confirmed_by, row.approval_confirmed_at) == (
+        'pause_and_ask', None, None, None)

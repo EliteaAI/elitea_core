@@ -80,3 +80,20 @@ def test_el_7011_r1_2_false_flag_gives_chat(model):
 def test_el_7011_r1_3_no_usable_field_gives_chat(model, meta):
     """TC-US16-02: neither field (or an unknown value) gives chat; the list never fails (owner decision 2026-10-21)."""
     assert _row(model, meta).execution_type == "chat"
+
+
+CLIENT_META = {"schedule_id": 3, "schedule_run_id": 9, "scheduled_run": True, "execution_type": "scheduled",
+               "persona": "kept"}
+
+
+def test_a_created_conversation_drops_the_run_keys_of_client_meta(model):
+    created = model.ConversationCreate(name="chat", author_id=1, meta=dict(CLIENT_META))
+    assert created.meta == {"persona": "kept"}
+
+
+def test_a_conversation_update_drops_the_run_keys_of_client_meta(model):
+    assert model.ConversationUpdate(meta=dict(CLIENT_META)).meta == {"persona": "kept"}
+
+
+def test_an_update_without_meta_stays_without_meta(model):
+    assert model.ConversationUpdate(name="renamed").meta is None

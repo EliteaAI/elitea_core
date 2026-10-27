@@ -11,6 +11,7 @@ NOT_ACTIVE = "the new owner is not an active project member"
 CANNOT_USE = "the new owner cannot use schedules"
 UNAVAILABLE = "access check unavailable"
 LIST = "models.applications.schedules.list"
+RUN = "models.applications.schedules.run"
 
 
 class FakeRpc:
@@ -19,7 +20,7 @@ class FakeRpc:
     def __init__(self, member=True, user=None, permissions=None):
         self.answers = {"auth_check_user_in_project": member,
                         "auth_get_user": {"id": 20, "suspended": False} if user is None else user,
-                        "auth_get_project_user_permissions": {LIST} if permissions is None else permissions}
+                        "auth_get_project_user_permissions": {LIST, RUN} if permissions is None else permissions}
         self.calls = []
         self._timeout = None
 
@@ -47,20 +48,28 @@ def load_owner(monkeypatch):
     return prerun, load("utils/schedule_owner.py", fresh=True)
 
 
-def _validate(monkeypatch, rpc, owner_id=20):
+def _validate(monkeypatch, rpc, owner_id=20, folder=None):
+    """`folder` is what entity_access_error answers: None (open), a (payload, status) or an exception."""
     prerun, owner = load_owner(monkeypatch)
-    fake = SimpleNamespace(RpcMixin=lambda: SimpleNamespace(rpc=rpc))
-    monkeypatch.setattr(prerun, "rpc_tools", fake)
-    monkeypatch.setattr(owner, "rpc_tools", fake)
-    return owner.validate_new_owner(34, owner_id)
+    monkeypatch.setattr(prerun, "rpc_tools", SimpleNamespace(RpcMixin=lambda: SimpleNamespace(rpc=rpc)))
+
+    def entity_access_error(project_id, entity_type, entity_id, write=False, user_id=None):
+        rpc.calls.append(("entity_access_error", None, (project_id, entity_type, entity_id, user_id)))
+        if isinstance(folder, Exception):
+            raise folder
+        return folder
+    monkeypatch.setitem(sys.modules, "plugins.elitea_core.utils.folder_access",
+                        types.ModuleType("plugins.elitea_core.utils.folder_access"))
+    sys.modules["plugins.elitea_core.utils.folder_access"].entity_access_error = entity_access_error
+    return owner.validate_new_owner(34, owner_id, "agent", 55)
 
 
 def test_7011_r2_1_r2_2_eligible_new_owner_passes(monkeypatch):
     """TC-US10-11: an active member with schedules.list is accepted; every auth call has the 3 s timeout."""
-    rpc = FakeRpc(permissions={LIST, "models.applications.schedules.details"})
+    rpc = FakeRpc(permissions={LIST, RUN, "models.applications.schedules.details"})
     assert _validate(monkeypatch, rpc) is None
     assert ("auth_get_project_user_permissions", 3, (34, 20)) in rpc.calls
-    assert {timeout for _, timeout, _ in rpc.calls} == {3}
+    assert {timeout for name, timeout, _ in rpc.calls if name != "entity_access_error"} == {3}
 
 
 @pytest.mark.parametrize("rpc", [
@@ -74,10 +83,10 @@ def test_7011_r2_1_inactive_new_owner_is_not_an_active_member(monkeypatch, rpc):
     assert "auth_get_project_user_permissions" not in [name for name, *_ in rpc.calls]
 
 
-@pytest.mark.parametrize("permissions", [set(), {"models.applications.schedules.details"}],
-                         ids=["no-role", "no-list"])
+@pytest.mark.parametrize("permissions", [set(), {"models.applications.schedules.details"}, {RUN}, {LIST}],
+                         ids=["no-role", "no-list-no-run", "no-list", "no-run"])
 def test_7011_r2_2_member_without_schedules_list_cannot_use_schedules(monkeypatch, permissions):
-    """TC-US10-13: an active member without schedules.list is refused."""
+    """TC-US10-13: an active member without schedules.list or schedules.run is refused."""
     assert _validate(monkeypatch, FakeRpc(permissions=permissions), owner_id=23) == CANNOT_USE
 
 
@@ -90,3 +99,13 @@ def test_7011_r2_1_auth_failure_is_unavailable_not_ineligible(monkeypatch, faili
     rpc = FakeRpc()
     rpc.answers[failing] = error
     assert _validate(monkeypatch, rpc) == UNAVAILABLE
+
+
+def test_the_new_owner_who_cannot_open_the_entity_folder_cannot_use_schedules(monkeypatch):
+    rpc = FakeRpc()
+    assert _validate(monkeypatch, rpc, folder=({"ok": False, "error": "Not found"}, 404)) == CANNOT_USE
+    assert ("entity_access_error", None, (34, "agent", 55, 20)) in rpc.calls
+
+
+def test_a_failing_folder_check_is_unavailable_not_ineligible(monkeypatch):
+    assert _validate(monkeypatch, FakeRpc(), folder=RuntimeError("social down")) == UNAVAILABLE

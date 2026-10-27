@@ -1,8 +1,14 @@
 """Request and response of the Build with AI schedule draft endpoint (EL-7011, US-21)."""
+import json
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, constr
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, constr, field_validator
+
+
+PROMPT_MAX_LENGTH = 4000
+VARIABLES_MAX_COUNT = 50
+VARIABLES_MAX_SIZE = 8000  # characters of the JSON text
 
 
 class LockedEntity(BaseModel):
@@ -21,12 +27,20 @@ class CurrentForm(BaseModel):
     application_id: StrictInt | None = Field(None, description='Id of the agent or pipeline', examples=[12])
     version_id: StrictInt | None = Field(None, description='Id of the entity version', examples=[34])
     run_mode: str | None = Field(None, description='How the entity runs', examples=['conversation'])
-    prompt: str | None = Field(None, description='Prompt sent on each run', examples=['Summarize yesterday'])
+    prompt: str | None = Field(None, max_length=PROMPT_MAX_LENGTH, description='Prompt sent on each run', examples=['Summarize yesterday'])
     variables: list | dict | None = Field(None, description='Variable values for the run', examples=[[{'name': 'topic', 'value': 'sales'}]])
     cron: str | None = Field(None, description='Cron expression of the schedule', examples=['0 9 * * 1-5'])
     timezone: str | None = Field(None, description='Time zone of the schedule', examples=['Europe/Warsaw'])
     expires_at: str | None = Field(None, description='Last day of the schedule, as a date', examples=['2026-12-31'])
     approval_rule: str | None = Field(None, description='Approval rule for risky steps', examples=['ask'])
+
+    @field_validator('variables')
+    @classmethod
+    def limit_variables(cls, value):
+        if value is not None and (len(value) > VARIABLES_MAX_COUNT
+                                  or len(json.dumps(value, default=str)) > VARIABLES_MAX_SIZE):
+            raise ValueError(f'At most {VARIABLES_MAX_COUNT} variables and {VARIABLES_MAX_SIZE} characters')
+        return value
 
 
 class GenerateScheduleDraftRequest(BaseModel):
@@ -34,7 +48,7 @@ class GenerateScheduleDraftRequest(BaseModel):
         "prompt": "Run the report agent every weekday at 9", "timezone": "Europe/Warsaw",
     }]})
 
-    prompt: constr(strip_whitespace=True, min_length=1) = Field(
+    prompt: constr(strip_whitespace=True, min_length=1, max_length=PROMPT_MAX_LENGTH) = Field(
         description="The user's description of the schedule", examples=["Run the report agent every weekday at 9"])
     current: CurrentForm = Field(default_factory=CurrentForm, description="Current form values; empty for a new schedule",
                           examples=[{"name": "Daily report", "cron": "0 9 * * 1-5"}])

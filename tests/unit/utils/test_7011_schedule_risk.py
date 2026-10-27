@@ -49,11 +49,20 @@ def _tool(type_='jira', name='Jira', settings=None, meta=None):
     return types.SimpleNamespace(type=type_, name=name, settings=settings or {}, meta=meta or {})
 
 
-def _version(agent_type='openai', meta=None, instructions=None, tools=()):
+def _version(agent_type='openai', meta=None, instructions=None, tools=(), variables=()):
     return types.SimpleNamespace(
         id=VERSION_ID, application_id=3, agent_type=agent_type,
-        meta=meta or {}, instructions=instructions, tools=list(tools),
+        meta=meta or {}, instructions=instructions, tools=list(tools), variables=list(variables),
     )
+
+
+def _content_digest(instructions, variables, tools):
+    """The sha256 of the run content: instructions, sorted (name, value) variables and sorted raw toolkit settings."""
+    content = {
+        'instructions': instructions, 'variables': sorted(json.dumps([v.name, v.value], sort_keys=True) for v in variables),
+        'toolkits': sorted(json.dumps([t.name, t.type, t.settings], sort_keys=True) for t in tools),
+    }
+    return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
 @pytest.fixture
@@ -275,10 +284,20 @@ class TestEL7011CrRiskReviewSplit:
 
     def test_el7011_cr_fingerprint_is_sha256_of_version_and_sorted_sensitive_tools(self, scan):
         scan.sensitive = {('jira', 'delete_issue'), ('jira', 'create_issue')}
-        scan.version = _version(tools=[_tool(settings={'selected_tools': ['delete_issue', 'create_issue']})])
+        tool = _tool(settings={'selected_tools': ['delete_issue', 'create_issue']})
+        scan.version = _version(tools=[tool])
+        digest = _content_digest(None, [], [tool])
         expected = hashlib.sha256(json.dumps(
-            [VERSION_ID, [['Jira', 'create_issue'], ['Jira', 'delete_issue']]]).encode()).hexdigest()
+            [VERSION_ID, [['Jira', 'create_issue'], ['Jira', 'delete_issue']], digest]).encode()).hexdigest()
         assert scan.review()['fingerprint'] == expected
+
+    def test_same_name_variables_with_none_and_text_give_a_stable_digest(self, scan):
+        first = [types.SimpleNamespace(name='to', value=None), types.SimpleNamespace(name='to', value='a')]
+        scan.version = _version(variables=first)
+        review = scan.review()
+        scan.version = _version(variables=list(reversed(first)))
+        assert scan.module.scan_complete(review) is True
+        assert scan.review()['fingerprint'] == review['fingerprint']
 
     def test_el7011_cr_fingerprint_changes_when_a_sensitive_tool_is_added(self, scan):
         scan.sensitive = {('jira', 'delete_issue'), ('jira', 'create_issue')}
@@ -286,6 +305,26 @@ class TestEL7011CrRiskReviewSplit:
         before = scan.review()['fingerprint']
         scan.version.tools = [_tool(settings={'selected_tools': ['delete_issue', 'create_issue']})]
         assert scan.review()['fingerprint'] != before
+
+    @pytest.mark.parametrize('change', [
+        lambda v: setattr(v, 'instructions', 'Send the report to everyone'),
+        lambda v: setattr(v, 'variables', [types.SimpleNamespace(name='to', value='boss@example.com')]),
+        lambda v: v.tools[0].settings.update(url='https://evil.example'),
+    ], ids=['instructions', 'variables', 'toolkit-settings'])
+    def test_the_fingerprint_changes_when_the_run_content_changes(self, scan, change):
+        scan.sensitive = {('jira', 'delete_issue')}
+        scan.version = _version(instructions='Send the report', tools=[_tool(settings={'selected_tools': ['delete_issue']})],
+                                variables=[types.SimpleNamespace(name='to', value='me@example.com')])
+        before = scan.review()['fingerprint']
+        change(scan.version)
+        assert scan.review()['fingerprint'] != before
+
+    def test_the_fingerprint_hashes_the_settings_before_the_secret_expansion(self, scan):
+        scan.sensitive = {('jira', 'delete_issue')}
+        scan.version = _version(tools=[_tool(settings={'selected_tools': ['delete_issue']})])
+        before = scan.review()['fingerprint']
+        scan.expanded = {'jira': {'password': 'rotated-secret'}}
+        assert scan.review()['fingerprint'] == before
 
     def test_el7011_cr_missing_version_gives_an_empty_review(self, scan):
         review = scan.review(version_id=None)
@@ -318,8 +357,10 @@ class TestEL7011CrPersonalCredential:
         assert scan.run() == []
 
     def test_el7011_cr_the_personal_credential_is_in_the_fingerprint_as_toolkit_star(self, scan):
-        scan.version = _version(tools=[_personal()])
-        expected = hashlib.sha256(json.dumps([VERSION_ID, [['GitHub', '*']]]).encode()).hexdigest()
+        tool = _personal()
+        scan.version = _version(tools=[tool])
+        expected = hashlib.sha256(json.dumps(
+            [VERSION_ID, [['GitHub', '*']], _content_digest(None, [], [tool])]).encode()).hexdigest()
         assert scan.review()['fingerprint'] == expected
 
     def test_el7011_cr_personal_credential_and_sensitive_tool_are_both_listed(self, scan):

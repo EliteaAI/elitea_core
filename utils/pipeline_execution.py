@@ -243,7 +243,7 @@ def execute_pipeline_via_predict_sio(
     user_input: str = "",
     trigger_source: str | None = None,
     is_system_user: bool = True,
-    auto_approve_sensitive_actions: bool = False,
+    auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
     mandate_ticket: str | None = None,
 ) -> dict:
     """
@@ -260,7 +260,8 @@ def execute_pipeline_via_predict_sio(
         response_message_id: UUID of the response message group
         user_input: Input to send to the pipeline (empty for scheduled, payload for webhook)
         is_system_user: False runs as ``user_id`` itself, for owner-bound schedule runs
-        auto_approve_sensitive_actions: True skips the sensitive-action approval pause (schedule rule and secret)
+        auto_approve_sensitive_actions: True skips the sensitive-action approval pause (schedule rule and secret);
+            a list of (toolkit, tool) pairs approves only those pairs
         mandate_ticket: single-use ticket of a governed run under an autonomous mandate; sent only when there is one
 
     Returns:

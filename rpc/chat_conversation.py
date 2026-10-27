@@ -8,7 +8,7 @@ from ..models.conversation import Conversation
 from ..models.entity_schedule import EntitySchedule, EntityScheduleRun
 from ..models.enums.all import ParticipantTypes, SELF_MODELLED_PARTICIPANTS
 from ..models.participants import Participant, ParticipantMapping
-from ..models.pd.conversation import ConversationListExtended, ConversationDetails, ScheduleRunRef
+from ..models.pd.conversation import ConversationListExtended, ConversationDetails, ScheduleRunRef, drop_run_keys
 from ..models.pd.participant import ParticipantCreate, ParticipantEntityUser
 from ..models.pd.message import MessageGroupDetail
 from ..models.message_group import ConversationMessageGroup
@@ -258,7 +258,7 @@ class RPC:
 
                 if meta is not None:
                     conversation.meta = conversation.meta or {}
-                    conversation.meta.update(strip_server_owned_meta(dict(meta), conversation.meta))
+                    conversation.meta.update(strip_server_owned_meta(drop_run_keys(dict(meta)), conversation.meta))
                     # #5392: instructions are per-persona now, but meta['default_instructions'] was
                     # baked in at creation time from the then-active persona. When the persona
                     # changes here, re-resolve it from the owner's personalization so a switched

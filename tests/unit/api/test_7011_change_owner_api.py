@@ -29,8 +29,14 @@ def owner(harness):
     load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_prerun.py', f'{PACKAGE}.utils.schedule_prerun')
     module = load_module_with_stubs(PLUGIN_ROOT / 'utils/schedule_owner.py', f'{PACKAGE}.utils.schedule_owner')
     module.ineligible, module.checked = {}, []
-    module.validate_new_owner = lambda project_id, owner_id: module.checked.append(owner_id) or (
-        module.ineligible.get(owner_id))
+    module.entities = []
+
+    def fake_validate(project_id, owner_id, entity_type=None, application_id=None):
+        module.checked.append(owner_id)
+        module.entities.append((entity_type, application_id))
+        return module.ineligible.get(owner_id)
+
+    module.validate_new_owner = fake_validate
     harness.request_as(ADMIN_ID, ADMIN)
     return module
 
@@ -97,6 +103,15 @@ def test_7011_r2_1_r2_2_ineligible_new_owner_is_400_with_the_reason(harness, own
         {'code': 'invalid_input', 'error': reason, 'field': 'owner_id'}, 400)
     assert unchanged(harness, schedule_id)
     assert harness.notices == []
+
+
+def test_new_owner_is_checked_against_the_schedule_entity(harness, owner):
+    schedule_id = harness.seed(created_by=OTHER_ID)
+    row = harness.row(schedule_id)
+    owner.ineligible[OWNER_ID] = owner.CANNOT_USE_SCHEDULES
+    assert change_owner(harness, schedule_id, {'owner_id': OWNER_ID})[1] == 400
+    assert owner.entities == [(row.entity_type, row.application_id)]
+    assert unchanged(harness, schedule_id)
 
 
 def test_7011_r2_1_unavailable_access_check_is_503_not_400(harness, owner):

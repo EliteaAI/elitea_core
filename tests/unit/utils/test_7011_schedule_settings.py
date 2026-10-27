@@ -148,15 +148,16 @@ def test_a_save_names_the_owner_on_create(store):
 
 
 @pytest.mark.parametrize('saved', [None, False])
-def test_an_older_configurations_saves_without_the_owner(store, saved):
-    """A configurations plugin that does not know `owner` raises TypeError: the call is repeated without it."""
+def test_an_older_configurations_refuses_the_save_instead_of_writing_unguarded(store, saved):
+    """A configurations plugin that does not know `owner` raises TypeError: the call is not repeated without it."""
     if saved is not None:
         _saved(store, saved)
     store.old_owner = True
     settings = store.module.ScheduleProjectSettings(allow_run_without_asking=True)
-    assert store.module.save_schedule_settings(PROJECT_ID, settings) == {'allow_run_without_asking': True}
-    assert all('owner' not in kwargs for _name, kwargs in store.calls[-1:])
-    assert store.module.is_run_without_asking_allowed(PROJECT_ID) is True
+    with pytest.raises(TypeError):
+        store.module.save_schedule_settings(PROJECT_ID, settings)
+    assert all('owner' in kwargs for _name, kwargs in store.calls)
+    assert store.module.is_run_without_asking_allowed(PROJECT_ID) is bool(saved)
 
 
 def test_a_type_error_about_another_argument_is_raised_on_save(store):
@@ -186,15 +187,13 @@ def test_the_type_is_registered_as_an_owned_project_setting(store):
     assert kwargs == {**PLAIN_REGISTRATION, 'model': store.module.ScheduleProjectSettings, **OWNER}
 
 
-def test_an_older_configurations_still_gets_the_type(store):
-    """A configurations plugin without owned types rejects the owner arguments: register the plain type."""
+def test_an_older_configurations_gets_no_unguarded_type(store):
+    """A plugin without owned types rejects the owner arguments: the type stays unregistered, with an error logged."""
     store.old_register = True
     store.module.register_schedule_settings_type()
-    assert [kwargs for _name, kwargs in store.calls] == [
-        {**PLAIN_REGISTRATION, 'model': store.module.ScheduleProjectSettings, **OWNER},
-        {**PLAIN_REGISTRATION, 'model': store.module.ScheduleProjectSettings},
-    ]
-    assert [level for level, _args in store.logged] == ['warning']
+    [(name, kwargs)] = store.calls
+    assert name == 'register' and kwargs['managed_by'] == 'elitea_core'
+    assert [level for level, _args in store.logged] == ['exception']
 
 
 @pytest.mark.parametrize('error', [TimeoutError('rpc timeout'), RuntimeError('configurations down')])
@@ -206,20 +205,6 @@ def test_another_error_keeps_the_guard_and_is_logged(store, error):
     assert name == 'register'
     assert kwargs['managed_by'] == 'elitea_core'
     assert [level for level, _args in store.logged] == ['exception']
-
-
-def test_a_type_error_about_another_argument_is_not_an_old_plugin(store):
-    store.register_errors = [TypeError("register() got an unexpected keyword argument 'model'")]
-    store.module.register_schedule_settings_type()
-    assert len(store.calls) == 1
-    assert [level for level, _args in store.logged] == ['exception']
-
-
-def test_an_older_configurations_that_also_fails_plain_is_logged(store):
-    store.register_errors = [TypeError("unexpected keyword argument 'managed_by'"), RuntimeError('down')]
-    store.module.register_schedule_settings_type()
-    assert len(store.calls) == 2
-    assert [level for level, _args in store.logged] == ['warning', 'exception']
 
 
 def test_a_register_error_does_not_stop_the_plugin(store):

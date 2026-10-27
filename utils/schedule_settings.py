@@ -35,29 +35,18 @@ def register_schedule_settings_type() -> None:
     """Register the record type as owned by elitea_core; a failure is logged, the plugin still starts.
 
     The owner makes the configurations REST API refuse writes of the record, so only the schedules
-    settings PUT (schedules admin) changes it. A configurations plugin from before owned types raises
-    TypeError for the unknown `managed_by` argument; only then the type is registered without the
-    owner arguments, unguarded as before. Any other error (a timeout, a failed call) never drops the
-    guard: it is logged and the type stays unregistered or as the first call left it.
+    settings PUT (schedules admin) changes it. Any failure, a configurations plugin from before owned
+    types included, leaves the type unregistered: without the owner the generic REST API would let
+    anyone with configuration write access set the value.
     """
-    plain = {"type_name": SETTINGS_TYPE, "section": "project_settings", "model": ScheduleProjectSettings,
-             "replace": True}
     try:
-        _rpc().configurations_register(**plain, managed_by=OWNER, manage_url=MANAGE_URL)
-        return
-    except TypeError as error:
-        if "managed_by" not in str(error):
-            log.exception("Could not register the %s configuration type", SETTINGS_TYPE)
-            return
-        log.warning("The configurations plugin has no owner arguments (%s); registering %s unguarded",
-                    error, SETTINGS_TYPE)
-    except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the guard must stay; the plugin still starts
-        log.exception("Could not register the %s configuration type", SETTINGS_TYPE)
-        return
-    try:
-        _rpc().configurations_register(**plain)
-    except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- writes then fail with an unknown type
-        log.exception("Could not register the %s configuration type", SETTINGS_TYPE)
+        _rpc().configurations_register(type_name=SETTINGS_TYPE, section="project_settings",
+                                       model=ScheduleProjectSettings, replace=True,
+                                       managed_by=OWNER, manage_url=MANAGE_URL)
+    except Exception:  # noqa: BLE001  # pylint: disable=W0718 -- the plugin still starts; an old plugin's TypeError ends here too
+        log.exception("Could not register the %s configuration type; it stays unregistered. "
+                      "Deploy configurations with owned settings types (managed_by, owner) before elitea_core",
+                      SETTINGS_TYPE)
 
 
 def _request_cache() -> dict | None:
@@ -92,14 +81,8 @@ def is_run_without_asking_allowed(project_id: int) -> bool:
 
 
 def _owned(call, **kwargs):
-    """Call a configurations write as the owner; a plugin from before owned types raises TypeError, so repeat it without."""
-    try:
-        return call(**kwargs, owner=OWNER)
-    except TypeError as error:
-        if "owner" not in str(error):
-            raise
-        log.warning("The configurations plugin has no owner argument (%s); writing %s unguarded", error, SETTINGS_TYPE)
-        return call(**kwargs)
+    """Call a configurations write as the owner; a plugin from before owned types raises TypeError, and it propagates."""
+    return call(**kwargs, owner=OWNER)
 
 
 def save_schedule_settings(project_id: int, settings: ScheduleProjectSettings) -> dict:

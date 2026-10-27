@@ -30,6 +30,10 @@ class _Request:
     json = None  # set per test
     path = f'/api/v2/elitea_core/schedules/prompt_lib/{PROJECT}/draft'
 
+    @classmethod
+    def get_json(cls, silent=False):
+        return cls.json
+
 
 class _Handler:
     """Stand-in for the app-injected ``self.module`` of APIModeHandler."""
@@ -78,6 +82,10 @@ def endpoint():
         state.seen.update(current=current, roster=roster, timezone=timezone, locked=locked_entity)
         return f'{template} current={json.dumps(current)}'
 
+    def roster_of(project_id, user_id):
+        state.seen['roster_user'] = user_id
+        return ROSTER
+
     def validate(project_id, raw, locked_entity, roster=None, *, owner_id):
         if state.validate_error:
             raise state.validate_error
@@ -121,8 +129,10 @@ def endpoint():
     _module(f'{PKG}.utils.service_prompt_utils', get_service_prompt=lambda key: state.service_prompt)
     _module(f'{PKG}.utils.utils', get_public_project_id=lambda: 1,
             extract_json_from_text=lambda text: text[text.find('{'):text.rfind('}') + 1] or text)
+    _module(f'{PKG}.utils.schedule_access',
+            schedule_check_spec=lambda action: {'permissions': [f'models.applications.schedules.{action}']})
     schedule_models = _load_real('models.pd.generate_schedule_draft', 'models/pd/generate_schedule_draft.py')
-    _module(f'{PKG}.utils.schedule_draft_utils', schedule_roster=lambda project_id: ROSTER,
+    _module(f'{PKG}.utils.schedule_draft_utils', schedule_roster=roster_of,
             build_schedule_draft_prompt=build, validate_schedule_draft=validate)
     _load_real('utils.error_text', 'utils/error_text.py')  # draft_llm_utils imports it
     _load_real('utils.draft_llm_utils', 'utils/draft_llm_utils.py')
@@ -240,3 +250,24 @@ def test_el_7011_r1_6_a_busy_worker_pool_is_503_with_retry_after(endpoint):
 
 def test_el_7011_r2_5_the_endpoint_demands_the_schedules_create_permission(endpoint):
     assert endpoint.permissions == ['models.applications.schedules.create']
+
+
+def test_the_roster_is_read_for_the_caller(endpoint):
+    _post(endpoint, {'prompt': 'every day at 9'}, _answer(json.dumps(MODEL_DRAFT)))
+    assert endpoint.seen['roster_user'] == 7
+
+
+def test_the_eleventh_draft_in_a_minute_is_429_with_retry_after_and_no_model_call(endpoint):
+    for _ in range(10):
+        assert _post(endpoint, {'prompt': 'x'}, _answer(json.dumps(MODEL_DRAFT)))[1] == 200
+    payload, status, model = _post(endpoint, {'prompt': 'x'}, _answer(json.dumps(MODEL_DRAFT)))
+    assert status == 429
+    assert 1 <= payload['retry_after'] <= 60
+    assert model.calls == []
+
+
+def test_the_draft_limit_is_kept_per_user(endpoint, monkeypatch):
+    for _ in range(10):
+        _post(endpoint, {'prompt': 'x'}, _answer(json.dumps(MODEL_DRAFT)))
+    monkeypatch.setattr(endpoint.module.auth, 'current_user', lambda: {'id': 8})
+    assert _post(endpoint, {'prompt': 'x'}, _answer(json.dumps(MODEL_DRAFT)))[1] == 200

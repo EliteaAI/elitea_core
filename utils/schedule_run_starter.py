@@ -53,7 +53,8 @@ def _load(project_id: int, schedule_id: int, run_id: int) -> SimpleNamespace | N
                 id=schedule.id, name=schedule.name, principal=schedule.principal, created_by=schedule.created_by,
                 entity_type=schedule.entity_type, run_mode=schedule.run_mode,
                 application_id=schedule.application_id, version_id=schedule.version_id,
-                approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint),
+                approval_rule=schedule.approval_rule, approval_fingerprint=schedule.approval_fingerprint,
+                approval_confirmed_by=schedule.approval_confirmed_by),
             version=SimpleNamespace(id=version.id, application_id=version.application_id, name=version.name),
             entity_name=agent.name, prompt=schedule.prompt or '', variables=list(schedule.variables or []),
             trigger=getattr(session.get(EntityScheduleRun, run_id), 'trigger', 'cron'))
@@ -99,9 +100,19 @@ def _may_auto_approve(project_id: int, schedule, review: dict) -> bool:
     from .schedule_risk import scan_complete
     if schedule.approval_rule != 'run_without_asking' or not scan_complete(review):
         return False
-    if review['sensitive'] and review['fingerprint'] != schedule.approval_fingerprint:
+    if review['sensitive'] and (review['fingerprint'] != schedule.approval_fingerprint
+                                or schedule.approval_confirmed_by != schedule.created_by):
         return False
     return _setting_allows_auto_approve(project_id)
+
+
+def _confirmed_pairs(review: dict):
+    """The confirmed (toolkit, tool) pairs a run may approve; a personal credential is (toolkit, '*'). False when none: an empty scan is no consent.
+
+    An item without a toolkit name is left out: the SDK rejects it, and that tool pauses and asks.
+    """
+    pairs = [(item['toolkit'], item.get('tool') or '*') for item in review['sensitive'] if item.get('toolkit')]
+    return pairs or False
 
 
 def _risk_check(review: dict, rule: str, auto_approve: bool) -> tuple[str, dict]:
@@ -155,7 +166,8 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
     from .schedule_risk import scan_schedule
     review = scan_schedule(project_id, loaded.version.id, check.owner_id)
     auto_approve = not review['blocking'] and _may_auto_approve(project_id, loaded.schedule, review)
-    outcome, risk_line = _risk_check(review, loaded.schedule.approval_rule, auto_approve)
+    approved = _confirmed_pairs(review) if auto_approve else False
+    outcome, risk_line = _risk_check(review, loaded.schedule.approval_rule, bool(approved))
     record_run_events(project_id, run_id, risk_line, risk_outcome=outcome)
     if review['blocking']:  # a scheduled run cannot sign in or answer a person
         block_schedule_run(project_id, run_id, '; '.join(item['message'] for item in review['blocking']), 'error')
@@ -191,7 +203,7 @@ def run_owner_schedule(project_id: int, schedule_id: int, run_id: int) -> None:
             project_id=project_id, version=loaded.version, user_id=check.owner_id,
             conversation_uuid=conversation_uuid, response_message_id=response_id, user_input=user_input,
             trigger_source=trigger_type, is_system_user=False,
-            auto_approve_sensitive_actions=auto_approve,
+            auto_approve_sensitive_actions=approved,
         )
     except queue.Empty:  # the 5 s predict RPC timeout: the agent may still run, so the stale-run sweep ends it
         log.warning('Schedule %s run %s: no answer from the predict call within its timeout', schedule_id, run_id)

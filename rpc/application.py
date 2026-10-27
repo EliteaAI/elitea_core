@@ -297,7 +297,7 @@ class RPC:
                     invoked_skills: Optional[list] = None,
                     applied_skills: Optional[list] = None,
                     sid_project_id: Optional[int] = None,
-                    auto_approve_sensitive_actions: bool = False,
+                    auto_approve_sensitive_actions: bool | list[tuple[str, str]] = False,
                     mandate_ticket: Optional[str] = None,
                     authoring: bool = False,
                     ) -> dict:

@@ -83,3 +83,9 @@ def test_el_7011_r3_1_predict_sio_passes_the_argument(models_path):
 
     assert 'auto_approve_sensitive_actions' in {k.arg for k in call.keywords}
     assert 'auto_approve_sensitive_actions' in {a.arg for a in predict_sio.args.args}
+
+
+def test_a_list_of_pairs_reaches_the_payload_unchanged(build):
+    pairs = [('Outlook', 'send_email'), ('GitHub', '*')]
+
+    assert build(auto_approve_sensitive_actions=pairs)['auto_approve_sensitive_actions'] == pairs

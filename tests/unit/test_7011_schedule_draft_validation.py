@@ -21,18 +21,27 @@ OWNER_ID = 7
 @pytest.fixture
 def setting():
     """The project setting "Allow Run without asking", the project ids it was read for, and the risk review."""
-    return types.SimpleNamespace(allowed=False, reads=[], sensitive=[], notices=[], scans=[])
+    return types.SimpleNamespace(allowed=False, reads=[], sensitive=[], notices=[], scans=[], blocked=set(),
+                                 access=[])
 
 
 def load_draft_utils(monkeypatch, setting=None):
     """schedule_draft_utils on its real models, with the roster above, the given project setting and risk review."""
-    setting = setting or types.SimpleNamespace(allowed=False, reads=[], sensitive=[], notices=[], scans=[])
+    setting = setting or types.SimpleNamespace(allowed=False, reads=[], sensitive=[], notices=[], scans=[],
+                                               blocked=set(), access=[])
     stub = types.ModuleType('tools')
     stub.this = types.SimpleNamespace(module=types.SimpleNamespace(descriptor=types.SimpleNamespace(config={})))
     monkeypatch.setitem(sys.modules, 'tools', stub)
     settings = types.ModuleType('plugins.elitea_core.utils.schedule_settings')
     settings.is_run_without_asking_allowed = lambda project_id: setting.reads.append(project_id) or setting.allowed
     monkeypatch.setitem(sys.modules, settings.__name__, settings)
+    folders = types.ModuleType('plugins.elitea_core.utils.folder_access')
+
+    def entity_access_error(project_id, entity_type, entity_id, write=False, user_id=None):
+        setting.access.append((project_id, entity_type, entity_id, user_id))
+        return ({'ok': False, 'error': 'Not found'}, 404) if entity_id in setting.blocked else None
+    folders.entity_access_error = entity_access_error
+    monkeypatch.setitem(sys.modules, folders.__name__, folders)
     risk = types.ModuleType('plugins.elitea_core.utils.schedule_risk')
     risk.scan_schedule = lambda *args: setting.scans.append(args) or {
         'blocking': [], 'sensitive': list(setting.sensitive), 'notices': list(setting.notices), 'fingerprint': 'fp'}
@@ -46,7 +55,7 @@ def load_draft_utils(monkeypatch, setting=None):
     load('models/pd/entity_schedule.py', fresh=True)
     load('models/pd/generate_schedule_draft.py', fresh=True)
     module = load('utils/schedule_draft_utils.py', fresh=True)
-    monkeypatch.setattr(module, 'schedule_roster', lambda project_id: ROSTER)
+    monkeypatch.setattr(module, 'schedule_roster', lambda project_id, user_id: ROSTER)
     return module
 
 
@@ -207,7 +216,7 @@ def test_el_7011_r2_1_a_future_stop_date_is_kept(validate):
 
 def test_el_7011_p3_a_given_roster_is_used_instead_of_a_new_read(monkeypatch):
     module = load_draft_utils(monkeypatch)
-    monkeypatch.setattr(module, 'schedule_roster', lambda project_id: pytest.fail('roster read twice'))
+    monkeypatch.setattr(module, 'schedule_roster', lambda project_id, user_id: pytest.fail('roster read twice'))
     draft, _ = module.validate_schedule_draft(1, AGENT, None, ROSTER, owner_id=OWNER_ID)
     assert draft.application_id == 42
 
@@ -254,3 +263,24 @@ def test_el7011_cr_a_draft_without_a_version_or_with_pause_and_ask_scans_nothing
     assert draft.approval_rule == 'run_without_asking'  # the form's check runs once a version is chosen
     validate({**AGENT, 'approval_rule': 'pause_and_ask'})
     assert setting.scans == []
+
+
+def test_a_resolved_entity_the_owner_cannot_open_is_cleared(validate, setting):
+    setting.blocked = {42}
+    draft, warnings = validate(AGENT)
+    assert (draft.application_id, draft.version_id) == (None, None)
+    assert _fields(warnings) == ['application_id']
+    assert setting.access == [(1, 'agent', 42, OWNER_ID)]
+
+
+def test_a_locked_entity_the_owner_cannot_open_is_cleared(validate, setting):
+    setting.blocked = {51}
+    draft, warnings = validate({'version_name': 'v2'}, {'entity_type': 'pipeline', 'application_id': 51})
+    assert (draft.application_id, draft.version_id) == (None, None)
+    assert _fields(warnings) == ['application_id']
+
+
+def test_an_entity_the_owner_can_open_is_checked_and_kept(validate, setting):
+    draft, _ = validate(AGENT)
+    assert draft.application_id == 42
+    assert setting.access == [(1, 'agent', 42, OWNER_ID)]

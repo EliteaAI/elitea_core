@@ -63,6 +63,29 @@ def check_owner_access(project_id: int, owner_id: int) -> str | None:
     return OWNER_LOST_ACCESS if not user or user.get('suspended') else None
 
 
+def check_owner_rights(project_id: int, owner_id: int, entity_type: str | None = None,
+                       entity_id: int | None = None, verbs: tuple = ('run',)) -> str | None:
+    """None when the user holds the schedule permissions `verbs` and may open the entity's folder.
+
+    OWNER_LOST_ACCESS when a permission or the folder access is missing; ACCESS_CHECK_UNAVAILABLE when a
+    check fails. No entity skips the folder check. The pre-run step and the owner change share this.
+    """
+    # Late: the permission table pulls in the auth tools, the folder check the social RPCs
+    from .folder_access import entity_access_error
+    from .schedule_access import SCHEDULE_PERMISSIONS
+    try:
+        permissions = rpc_tools.RpcMixin().rpc.timeout(AUTH_TIMEOUT).auth_get_project_user_permissions(
+            project_id, owner_id)
+        if not all(SCHEDULE_PERMISSIONS[verb] in permissions for verb in verbs):
+            return OWNER_LOST_ACCESS
+        if entity_id is not None and entity_access_error(project_id, entity_type, entity_id, user_id=owner_id):
+            return OWNER_LOST_ACCESS
+    except Exception:  # noqa: BLE001 -- a timeout or an RPC error must not read as "no rights"
+        log.exception('User %s of project %s: the schedule rights check failed', owner_id, project_id)
+        return ACCESS_CHECK_UNAVAILABLE
+    return None
+
+
 def check_owner_credentials(project_id: int, schedule) -> str | None:
     """None when a token resolves for the owner with no socket and the version expands as the owner (R2.1-R2.4)."""
     # Imported here: predict_utils pulls flask and the payload models into every importer
@@ -104,6 +127,7 @@ def run_prerun_check(project_id: int, schedule, run_id: int) -> PreRunResult:
     try:
         reason = (check_principal(schedule)
                   or check_owner_access(project_id, owner_id)
+                  or check_owner_rights(project_id, owner_id, schedule.entity_type, schedule.application_id)
                   or check_owner_credentials(project_id, schedule))
     except Exception:  # noqa: BLE001 -- a run left running would block the schedule (R2.5)
         log.exception('Schedule %s run %s: the pre-run check failed', schedule.id, run_id)

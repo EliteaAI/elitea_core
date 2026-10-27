@@ -92,7 +92,7 @@ def test_cr_el7011_run_without_asking_says_so_in_the_risk_line(log, monkeypatch)
     log.world.run(approval_rule="run_without_asking", approval_fingerprint="fp-1")
 
     assert log.events()[2]["text"] == "Risk check: needs approval for github · create_issue; Run without asking is on"
-    assert log.world.predictions[0]["auto_approve_sensitive_actions"] is True
+    assert log.world.predictions[0]["auto_approve_sensitive_actions"] == [("github", "create_issue")]
 
 
 # Owner CR 2026-10-21 (risk review): new sensitive tools since the confirmation turn the run back to asking

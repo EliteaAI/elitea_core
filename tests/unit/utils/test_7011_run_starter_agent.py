@@ -61,7 +61,7 @@ class World:
         self.schedule = Row(
             _world=self, id=SCHEDULE_ID, name="S1", principal={}, application_id=AGENT_ID, version_id=VERSION_ID,
             created_by=OWNER, prompt=PROMPT, variables=[], entity_type="agent", run_mode=None, approval_rule="pause_and_ask",
-            approval_fingerprint=None)
+            approval_fingerprint=None, approval_confirmed_by=None)
         self.run = SimpleNamespace(id=RUN_ID, conversation_id=None)
         self.rows = {
             ("EntitySchedule", SCHEDULE_ID): self.schedule,

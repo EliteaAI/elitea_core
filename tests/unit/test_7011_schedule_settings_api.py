@@ -157,6 +157,12 @@ def test_el7011_cr_put_answers_503_when_the_store_fails(harness):
     assert response['error']
 
 
+def test_put_answers_503_when_configurations_has_no_owned_types(harness):
+    harness.save_error = TypeError("unexpected keyword argument 'owner'")
+    _, status = _call(harness, 'put', {'allow_run_without_asking': True})
+    assert status == 503
+
+
 def test_el7011_cr_get_needs_schedules_list_and_put_needs_schedules_admin(harness):
     assert harness.specs['_get_settings'] == [LIST_PERMISSION]
     assert harness.specs['_save_settings'] == [ADMIN_PERMISSION]

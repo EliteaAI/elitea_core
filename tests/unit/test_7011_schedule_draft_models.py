@@ -56,3 +56,20 @@ def test_el_7011_r2_3_locked_entity_takes_only_agent_or_pipeline(models):
     assert request.locked_entity.model_dump() == {"entity_type": "agent", "application_id": 4}
     with pytest.raises(ValidationError):
         models.GenerateScheduleDraftRequest(prompt="x", locked_entity={"entity_type": "toolkit", "application_id": 4})
+
+
+@pytest.mark.parametrize('body', [
+    {'prompt': 'x' * 4001},
+    {'prompt': 'x', 'current': {'prompt': 'x' * 4001}},
+    {'prompt': 'x', 'current': {'variables': [{'name': f'v{i}', 'value': 'a'} for i in range(51)]}},
+    {'prompt': 'x', 'current': {'variables': {'name': 'x' * 8001}}},
+], ids=['request-prompt', 'form-prompt', 'variable-count', 'variable-size'])
+def test_request_rejects_oversize_prompts_and_variables(models, body):
+    with pytest.raises(ValidationError):
+        models.GenerateScheduleDraftRequest(**body)
+
+
+def test_request_accepts_prompts_and_variables_at_the_limit(models):
+    request = models.GenerateScheduleDraftRequest(
+        prompt='x' * 4000, current={'prompt': 'y' * 4000, 'variables': [{'name': 'v', 'value': 'a'}] * 50})
+    assert len(request.current.variables) == 50

@@ -1,6 +1,7 @@
 """EL-7011 US-09 R1.1-R1.3: the principal check and the owner access check before a run."""
+import sys
 from queue import Empty
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from unit._tool_spend_loader import load
@@ -8,6 +9,7 @@ from unit._tool_spend_loader import load
 PRERUN = "utils/schedule_prerun.py"
 LOST = "owner lost access"
 UNAVAILABLE = "access check unavailable"
+RUN = "models.applications.schedules.run"
 
 
 class FakeRpc:
@@ -15,7 +17,8 @@ class FakeRpc:
 
     def __init__(self, member=True, user=None):
         self.answers = {"auth_check_user_in_project": member,
-                        "auth_get_user": {"id": 12, "suspended": False} if user is None else user}
+                        "auth_get_user": {"id": 12, "suspended": False} if user is None else user,
+                        "auth_get_project_user_permissions": {RUN}}
         self.calls = []
         self._timeout = None
 
@@ -107,3 +110,54 @@ def test_7011_r1_3_principal_that_does_not_match_the_owner_fails(prerun, schedul
 
 def test_7011_r1_3_a_row_without_an_owner_fails_the_principal_check(prerun):
     assert prerun.check_principal(_schedule(ref=None, created_by=None)) == "principal does not match the owner"
+
+
+def _rights(prerun, monkeypatch, rpc, folder=None, entity=("agent", 55), **kwargs):
+    """check_owner_rights with a fake permission table and a fake folder check (None opens, else refuses)."""
+    monkeypatch.setattr(prerun, "rpc_tools", SimpleNamespace(RpcMixin=lambda: SimpleNamespace(rpc=rpc)))
+    access = ModuleType("plugins.elitea_core.utils.schedule_access")
+    access.SCHEDULE_PERMISSIONS = {"run": RUN, "list": "models.applications.schedules.list"}
+    folders = ModuleType("plugins.elitea_core.utils.folder_access")
+
+    def entity_access_error(project_id, entity_type, entity_id, write=False, user_id=None):
+        rpc.calls.append(("entity_access_error", None, (project_id, entity_type, entity_id, user_id), {}))
+        if isinstance(folder, Exception):
+            raise folder
+        return folder
+    folders.entity_access_error = entity_access_error
+    monkeypatch.setitem(sys.modules, access.__name__, access)
+    monkeypatch.setitem(sys.modules, folders.__name__, folders)
+    return prerun.check_owner_rights(34, 12, *entity, **kwargs)
+
+
+def test_an_owner_with_the_run_permission_and_folder_access_passes(prerun, monkeypatch):
+    rpc = FakeRpc()
+    assert _rights(prerun, monkeypatch, rpc) is None
+    assert [call[0] for call in rpc.calls] == ["auth_get_project_user_permissions", "entity_access_error"]
+    assert rpc.calls[0][1:3] == (3, (34, 12))
+    assert rpc.calls[1][2] == (34, "agent", 55, 12)
+
+
+def test_an_owner_without_the_run_permission_loses_access_before_the_folder_check(prerun, monkeypatch):
+    rpc = FakeRpc()
+    rpc.answers["auth_get_project_user_permissions"] = {"models.applications.schedules.list"}
+    assert _rights(prerun, monkeypatch, rpc) == LOST
+    assert "entity_access_error" not in [call[0] for call in rpc.calls]
+
+
+def test_an_owner_who_lost_the_folder_loses_access(prerun, monkeypatch):
+    assert _rights(prerun, monkeypatch, FakeRpc(), folder=({"ok": False}, 404)) == LOST
+
+
+@pytest.mark.parametrize("error", [Empty(), RuntimeError("social down")])
+def test_a_failing_rights_check_is_unavailable_not_lost(prerun, monkeypatch, error):
+    rpc = FakeRpc()
+    rpc.answers["auth_get_project_user_permissions"] = error
+    assert _rights(prerun, monkeypatch, rpc) == UNAVAILABLE
+    assert _rights(prerun, monkeypatch, FakeRpc(), folder=error) == UNAVAILABLE
+
+
+def test_no_entity_skips_the_folder_check(prerun, monkeypatch):
+    rpc = FakeRpc()
+    assert _rights(prerun, monkeypatch, rpc, entity=(None, None)) is None
+    assert "entity_access_error" not in [call[0] for call in rpc.calls]

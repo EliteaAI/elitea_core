@@ -111,13 +111,32 @@ def _toolkit_warnings(tool, project_id, owner_id) -> list:
     return warnings + _sensitive_warnings(tool, name)
 
 
-def _findings(project_id: int, version_id: int, owner_id: int) -> tuple[list, dict | None]:
-    """Every finding of one version run by one owner, and the fix link of its entity. Never raises."""
+def _content_digest(version) -> str:
+    """sha256 of what a run executes: the instructions, the variables and each toolkit's raw settings.
+
+    The settings are read before the secret expansion, so a changed credential reference or endpoint
+    changes the digest and asks the owner to confirm again.
+    """
+    content = {
+        'instructions': version.instructions,
+        'variables': sorted((json.dumps([variable.name, variable.value], sort_keys=True, default=str)
+                            for variable in version.variables)),
+        'toolkits': sorted(json.dumps([tool.name, tool.type, tool.settings or {}], sort_keys=True, default=str)
+                           for tool in version.tools),
+    }
+    return hashlib.sha256(json.dumps(content, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _findings(project_id: int, version_id: int, owner_id: int) -> tuple[list, dict | None, str | None]:
+    """Every finding of one version run by one owner, the fix link of its entity and the digest of its content.
+
+    Never raises.
+    """
     try:
         with db.get_session(project_id) as session:
             version = session.get(ApplicationVersion, version_id) if version_id else None
             if version is None:
-                return [], None
+                return [], None, None
             fix = {'entity_type': 'pipeline' if version.agent_type == 'pipeline' else 'agent',
                    'id': version.application_id, 'version_id': version_id}
             warnings = _human_steps(version)
@@ -128,16 +147,20 @@ def _findings(project_id: int, version_id: int, owner_id: int) -> tuple[list, di
                     log.exception('Schedule risk scan failed for toolkit %s of version %s', tool.name, version_id)
                     warnings.append(_warning(INCOMPLETE_CODE, f'Toolkit "{tool.name or tool.type}" could not be checked for risks',
                                              toolkit=tool.name or tool.type))
-        return warnings, fix
+            digest = _content_digest(version)
+        return warnings, fix, digest
     except Exception:  # noqa: BLE001 - any failure is a notice; the caller decides what it allows
         log.exception('Schedule risk scan failed for version %s', version_id)
-        return [_warning(INCOMPLETE_CODE, 'The version could not be fully checked for risks')], None
+        return [_warning(INCOMPLETE_CODE, 'The version could not be fully checked for risks')], None, None
 
 
-def _fingerprint(version_id: int | None, sensitive: list) -> str:
-    """sha256 of the version id and the sorted (toolkit, tool) pairs; a personal credential is (toolkit, "*")."""
+def _fingerprint(version_id: int | None, sensitive: list, digest: str | None) -> str:
+    """sha256 of the version id, the sorted (toolkit, tool) pairs and the content digest.
+
+    A personal credential is (toolkit, "*").
+    """
     pairs = sorted([item['toolkit'], item['tool'] or '*'] for item in sensitive)
-    return hashlib.sha256(json.dumps([version_id, pairs]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([version_id, pairs, digest]).encode()).hexdigest()
 
 
 def scan_schedule(project_id: int, version_id: int | None, owner_id: int) -> dict:
@@ -147,12 +170,12 @@ def scan_schedule(project_id: int, version_id: int | None, owner_id: int) -> dic
     `sensitive_action` tools and the `personal_credential` toolkits (`tool` null). Never raises: a
     failure is a `scan_incomplete` notice.
     """
-    findings, fix = _findings(project_id, version_id, owner_id)
+    findings, fix, digest = _findings(project_id, version_id, owner_id)
     blocking = [{**item, 'fix': fix} for item in findings if item['code'] in BLOCKING_CODES]
     sensitive = [item for item in findings if item['code'] in SENSITIVE_CODES]
     notices = [item for item in findings if item['code'] not in BLOCKING_CODES | SENSITIVE_CODES]
     return {'blocking': blocking, 'sensitive': sensitive, 'notices': notices,
-            'fingerprint': _fingerprint(version_id, sensitive)}
+            'fingerprint': _fingerprint(version_id, sensitive, digest)}
 
 
 def scan_complete(review: dict) -> bool:

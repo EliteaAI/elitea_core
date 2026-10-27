@@ -41,12 +41,12 @@ def run(monkeypatch):
         review=lambda *args: scans.append(args) or state.review,
     )
 
-    def start(rule, setting, entity_type="pipeline", confirmed="fp-1"):
+    def start(rule, setting, entity_type="pipeline", confirmed="fp-1", confirmed_by=OWNER):
         allowed.value = setting
         loaded = types.SimpleNamespace(
             schedule=types.SimpleNamespace(
                 id=SCHEDULE_ID, entity_type=entity_type, run_mode="prompt", approval_rule=rule,
-                approval_fingerprint=confirmed),
+                approval_fingerprint=confirmed, created_by=OWNER, approval_confirmed_by=confirmed_by),
             version=types.SimpleNamespace(id=9, name="v3"), entity_name="Flow", prompt="Go", variables=[])
         monkeypatch.setattr(starter, "_load", lambda *a: loaded)
         starter.run_owner_schedule(PROJECT_ID, SCHEDULE_ID, RUN_ID)
@@ -58,10 +58,10 @@ def run(monkeypatch):
 
 # R3.1 / R3.2
 @pytest.mark.parametrize("entity_type", ["agent", "pipeline"])
-def test_el_7011_r3_1_run_without_asking_with_the_setting_on_auto_approves(run, entity_type):
+def test_run_without_asking_with_an_empty_scan_approves_nothing(run, entity_type):
     kwargs, reads = run("run_without_asking", True, entity_type)
 
-    assert kwargs["auto_approve_sensitive_actions"] is True
+    assert kwargs["auto_approve_sensitive_actions"] is False
     assert reads == [PROJECT_ID]
 
 
@@ -93,7 +93,25 @@ def test_el7011_cr_confirmed_sensitive_tools_still_auto_approve(run):
 
     kwargs, _ = run("run_without_asking", True, confirmed="fp-1")
 
-    assert kwargs["auto_approve_sensitive_actions"] is True
+    assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "send_email")]
+
+
+def test_a_confirmed_run_with_a_personal_credential_item_auto_approves(run):
+    personal = {"code": "personal_credential", "toolkit": "GitHub", "tool": None}
+    run.state.review = {**clean_review(), "sensitive": [SENSITIVE, personal], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("run_without_asking", True)
+
+    assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "send_email"), ("GitHub", "*")]
+
+
+@pytest.mark.parametrize("confirmed_by", [None, OWNER + 1])
+def test_a_confirmation_by_someone_else_dispatches_as_pause_and_ask(run, confirmed_by):
+    run.state.review = {**clean_review(), "sensitive": [SENSITIVE], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("run_without_asking", True, confirmed_by=confirmed_by)
+
+    assert kwargs["auto_approve_sensitive_actions"] is False
 
 
 # Owner CR 2026-10-21: new sensitive tools since the confirmation run as "Pause and ask me"
@@ -129,3 +147,20 @@ def test_el7011_cr_a_blocking_finding_blocks_the_run_with_the_reason(run, rule):
     assert kwargs is None and run.predicts == []
     reason = 'Node "Review" waits for a person; Toolkit "Jira" has no usable credential for the owner'
     assert run.blocks == [(PROJECT_ID, RUN_ID, reason, 'error')]
+
+
+def test_a_sensitive_item_without_a_toolkit_name_is_left_out_of_the_pairs(run):
+    nameless = {"code": "sensitive_action", "toolkit": None, "tool": "send_email"}
+    run.state.review = {**clean_review(), "sensitive": [nameless, SENSITIVE], "fingerprint": "fp-1"}
+
+    kwargs, _ = run("run_without_asking", True)
+
+    assert kwargs["auto_approve_sensitive_actions"] == [("Outlook", "send_email")]
+
+
+def test_a_confirmed_run_with_no_usable_pair_sends_false(run):
+    nameless = {"code": "sensitive_action", "toolkit": "", "tool": "send_email"}
+    run.state.review = {**clean_review(), "sensitive": [nameless], "fingerprint": "fp-1"}
+    kwargs, _ = run("run_without_asking", True)
+
+    assert kwargs["auto_approve_sensitive_actions"] is False

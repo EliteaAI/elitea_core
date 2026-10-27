@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, constr, ConfigDict, model_validator
+from pydantic import BaseModel, Field, constr, ConfigDict, field_validator, model_validator
 
 from .message import MessageGroupDetail
 from .participant import ParticipantBase, ParticipantCreate
@@ -78,6 +78,16 @@ class ConversationDetails(ConversationDetailsOrm):
         orm_mode = True
 
 
+RUN_KEYS = frozenset({'schedule_id', 'schedule_run_id', 'scheduled_run', 'execution_type'})
+
+
+def drop_run_keys(meta: Optional[dict]) -> Optional[dict]:
+    """Client meta without the keys that tie a chat to a schedule run; only the run starter writes them."""
+    if meta is None:
+        return None
+    return {key: value for key, value in meta.items() if key not in RUN_KEYS}
+
+
 class ConversationCreate(BaseModel):
     name: constr(min_length=3, max_length=CONVERSATION_NAME_MAX_LENGTH)
     is_private: bool = True
@@ -86,6 +96,8 @@ class ConversationCreate(BaseModel):
     source: Optional[constr(to_lower=True, strip_whitespace=True)] = 'elitea'
     meta: Optional[dict] = Field(default_factory=dict)
     instructions: Optional[str] = ''
+
+    strip_run_keys = field_validator('meta')(drop_run_keys)
 
 
 class ConversationUpdate(BaseModel):
@@ -96,3 +108,5 @@ class ConversationUpdate(BaseModel):
     instructions: Optional[str] = None
     is_hidden: Optional[bool] = None
     meta: Optional[dict] = None
+
+    strip_run_keys = field_validator('meta')(drop_run_keys)

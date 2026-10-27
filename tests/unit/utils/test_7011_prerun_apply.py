@@ -14,8 +14,8 @@ RUN_ID = 90
 class Recorder:
     """Stands in for the checks, the writers and the notice helper; records every effect in order."""
 
-    def __init__(self, principal=None, access=None, credentials=None):
-        self.answers = {"principal": principal, "access": access, "credentials": credentials}
+    def __init__(self, principal=None, access=None, rights=None, credentials=None):
+        self.answers = {"principal": principal, "access": access, "rights": rights, "credentials": credentials}
         self.calls = []
 
     def step(self, name):
@@ -51,8 +51,9 @@ def apply(monkeypatch):
                                                    schedule_run_failed="schedule_run_failed")))
         monkeypatch.setattr(prerun, "check_principal", recorder.step("principal"))
         monkeypatch.setattr(prerun, "check_owner_access", recorder.step("access"))
+        monkeypatch.setattr(prerun, "check_owner_rights", recorder.step("rights"))
         monkeypatch.setattr(prerun, "check_owner_credentials", recorder.step("credentials"))
-        schedule = SimpleNamespace(id=5, created_by=OWNER, application_id=3, version_id=4)
+        schedule = SimpleNamespace(id=5, created_by=OWNER, entity_type="agent", application_id=3, version_id=4)
         return prerun.run_prerun_check(34, schedule, RUN_ID)
     return run
 
@@ -61,7 +62,7 @@ def test_7011_r3_3_all_steps_pass_returns_the_owner_and_changes_nothing(apply):
     recorder = Recorder()
     result = apply(recorder)
     assert (result.ok, result.owner_id, result.reason) == (True, OWNER, None)
-    assert recorder.effects() == ["principal", "access", "credentials"]
+    assert recorder.effects() == ["principal", "access", "rights", "credentials"]
 
 
 def test_7011_r1_4_r1_5_lost_access_fails_the_run_disables_the_schedule_and_tells_the_owner(apply):
@@ -80,6 +81,7 @@ def test_7011_r1_4_r1_5_lost_access_fails_the_run_disables_the_schedule_and_tell
 @pytest.mark.parametrize("answers", [
     {"principal": "principal does not match the owner"},
     {"access": "access check unavailable"},
+    {"rights": "access check unavailable"},
     {"credentials": "no token for the owner"},
     {"credentials": "credential 9 not found"},
 ])
@@ -93,6 +95,15 @@ def test_7011_r2_5_other_failures_fail_the_run_keep_the_schedule_and_send_run_fa
         ("fail", 34, RUN_ID, reason),
         ("notify", OWNER, "schedule_run_failed", RUN_ID, reason),
     ]
+
+
+def test_a_lost_schedule_right_fails_the_run_disables_the_schedule_and_skips_the_credentials(apply):
+    recorder = Recorder(rights="owner lost access")
+    result = apply(recorder)
+    assert (result.ok, result.reason) == (False, "owner lost access")
+    assert ("rights", 34, OWNER, "agent", 3) in recorder.calls
+    assert ("disable", 34, 5, "owner_lost_access") in recorder.calls
+    assert "credentials" not in recorder.effects()
 
 
 def test_7011_r3_2_a_failed_step_stops_the_later_steps(apply):

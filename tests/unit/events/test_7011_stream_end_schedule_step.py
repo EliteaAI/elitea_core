@@ -9,7 +9,7 @@ import types
 import pytest
 from unit._tool_spend_loader import load
 
-PROJECT_ID, RUN_ID, CONVERSATION_ID = 5, 9, 42
+PROJECT_ID, RUN_ID, CONVERSATION_ID, AUTHOR_ID = 5, 9, 42, 17
 SCHEDULE_META = {"schedule_id": 3, "schedule_run_id": RUN_ID, "execution_type": "scheduled"}
 
 
@@ -67,14 +67,14 @@ class World:
         self.open_sessions, self.open_at_step = 0, []
         self.msg_group = types.SimpleNamespace(
             id=1, meta={}, message_items=[], reply_to_id=None, is_streaming=True,
-            conversation=types.SimpleNamespace(id=CONVERSATION_ID, uuid="c-1", meta=meta),
+            conversation=types.SimpleNamespace(id=CONVERSATION_ID, uuid="c-1", meta=meta, author_id=AUTHOR_ID),
         )
 
     fail_step = False
 
-    def finish(self, *args):
+    def finish(self, *args, author_id=None):
         self.open_at_step.append(self.open_sessions)
-        self.events.append(("finish", *args))
+        self.events.append(("finish", *args, author_id))
         if self.fail_step:
             raise RuntimeError("db down")
 
@@ -150,7 +150,7 @@ def make_world(monkeypatch):
 def test_7011_r1_1_stream_end_finishes_the_schedule_run_as_success_after_the_commit(make_world):
     world = make_world(dict(SCHEDULE_META))
     world.end({})
-    finish = ("finish", PROJECT_ID, RUN_ID, "success", None, CONVERSATION_ID)
+    finish = ("finish", PROJECT_ID, RUN_ID, "success", None, CONVERSATION_ID, AUTHOR_ID)
     assert finish in world.events
     assert world.events.index("commit") < world.events.index(finish)
 
@@ -158,7 +158,7 @@ def test_7011_r1_1_stream_end_finishes_the_schedule_run_as_success_after_the_com
 def test_7011_r1_1_stream_end_with_an_error_finishes_the_run_as_failed_with_the_error(make_world):
     world = make_world(dict(SCHEDULE_META))
     world.end({"is_error": True, "error": "the model failed"})
-    assert ("finish", PROJECT_ID, RUN_ID, "failed", "short(the model failed)", CONVERSATION_ID) in world.events
+    assert ("finish", PROJECT_ID, RUN_ID, "failed", "short(the model failed)", CONVERSATION_ID, AUTHOR_ID) in world.events
 
 
 # BUG-37 (US-13 R1.3, R6.1): the stored reason is the short one, never the raw traceback
@@ -166,7 +166,7 @@ def test_7011_bug37_stream_end_stores_the_short_reason_not_the_traceback(make_wo
     world = make_world(dict(SCHEDULE_META))
     error = 'Traceback (most recent call last):\n  File "/data/plugins/x.py", line 3\nValueError: boom'
     world.end({"is_error": True, "error": error})
-    assert ("finish", PROJECT_ID, RUN_ID, "failed", f"short({error})", CONVERSATION_ID) in world.events
+    assert ("finish", PROJECT_ID, RUN_ID, "failed", f"short({error})", CONVERSATION_ID, AUTHOR_ID) in world.events
 
 
 @pytest.mark.parametrize("meta", [{}, None, {"scheduled_run": True}])
@@ -180,7 +180,7 @@ def test_7011_r5_1_stream_pause_hands_the_interrupt_to_the_schedule_run_after_th
     world = make_world(dict(SCHEDULE_META))
     interrupt = {"hitl_interrupt": {"guardrail_type": "sensitive_tool"}}
     world.pause_event(interrupt)
-    pause = ("pause", PROJECT_ID, RUN_ID, {"chat_project_id": PROJECT_ID, **interrupt})
+    pause = ("pause", PROJECT_ID, RUN_ID, {"chat_project_id": PROJECT_ID, **interrupt}, CONVERSATION_ID, AUTHOR_ID)
     assert world.events == ["commit", pause]
 
 
@@ -207,7 +207,7 @@ def test_7011_r1_6_a_failing_finish_step_does_not_break_the_stream_end(make_worl
     world.fail_step = True
     world.end({})
     assert world.events == ["commit", ("emit", "sync"), ("finish", PROJECT_ID, RUN_ID, "success", None,
-                                                         CONVERSATION_ID), "logged"]
+                                                         CONVERSATION_ID, AUTHOR_ID), "logged"]
 
 
 def test_7011_r1_6_a_failing_pause_step_does_not_break_the_pause(make_world):

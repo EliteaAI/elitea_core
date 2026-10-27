@@ -327,3 +327,13 @@ def test_predict_llm_routing_surface_survives_the_chat_request(builder, applicat
                                        'scope_mode': 'task_episode', 'reasoning': {'mode': 'auto'}}},
     })
     assert build(request, 2, skip_expansion=True)['llm']['kwargs']['routing_surface'] == 'agent'
+
+
+@pytest.mark.parametrize('given,expected', [
+    (True, True),
+    (False, None),
+])
+def test_auto_approve_flag_reaches_the_payload(builder, given, expected):
+    build, llm, _ = builder
+    result = build(parsed(llm, True), 2, skip_expansion=True, auto_approve_sensitive_actions=given)
+    assert result.get('auto_approve_sensitive_actions') == expected
