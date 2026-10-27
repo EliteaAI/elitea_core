@@ -38,6 +38,7 @@ from ..models.pd.conversation_import import (
     ImportTextItem,
 )
 from ..models.pd.participant import ParticipantCreate
+from ..models.skill import Skill
 from .authors import get_authors_data
 from .attachments import FileToAIProcessorCollector, NotSupportableProcessorExtension, parse_filepath
 from .chat_crypto import (
@@ -404,8 +405,14 @@ def prepare_import(project_id: int, user_id: int, encrypted_path: Path, file_nam
 
 # ---------- commit ----------
 
-def _find_application_id_by_name(session, name: str) -> int | None:
-    row = session.query(Application.id).filter(Application.name == name).order_by(Application.id.asc()).first()
+_LINKABLE_AI_MODELS = {
+    ParticipantTypes.application.value: Application,
+    ParticipantTypes.skill.value: Skill,
+}
+
+
+def _find_entity_id_by_name(session, model, name: str) -> int | None:
+    row = session.query(model.id).filter(model.name == name).order_by(model.id.asc()).first()
     return row[0] if row else None
 
 
@@ -415,37 +422,44 @@ def _participant_key(participant) -> tuple:
 
 
 def _link_ai_participants(session, project_id: int, user_id: int, conversation, envelope) -> dict[int, int]:
-    """Re-add agents that exist in this project by exact name. Returns {original participant id: new participant id}."""
+    """Re-add agents and skills that exist in this project by exact name.
+
+    Returns {original participant id: new participant id}.
+    """
     wanted = {}
     for participant in envelope.conversation.participants:
-        if participant.entity_name != ParticipantTypes.application.value or not participant.name or participant.id is None:
+        model = _LINKABLE_AI_MODELS.get(participant.entity_name)
+        if model is None or not participant.name or participant.id is None:
             continue
-        app_id = _find_application_id_by_name(session, participant.name)
-        if app_id is None:
+        entity_id = _find_entity_id_by_name(session, model, participant.name)
+        if entity_id is None:
             continue
-        wanted.setdefault(app_id, []).append(participant.id)
+        wanted.setdefault((participant.entity_name, entity_id), []).append(participant.id)
 
-    for app_id in wanted:
+    for entity_name, entity_id in wanted:
         try:
             add_participant_to_conversation(
                 project_id=project_id,
                 session=session,
                 participant=ParticipantCreate(
-                    entity_name=ParticipantTypes.application,
-                    entity_meta={'id': app_id, 'project_id': project_id},
+                    entity_name=entity_name,
+                    entity_meta={'id': entity_id, 'project_id': project_id},
                 ),
                 conversation=conversation,
                 initiator_id=user_id,
             )
             session.flush()
         except Exception as exc:  # pylint: disable=W0703
-            log.warning("Chat import: could not add agent %s to conversation %s: %s", app_id, conversation.id, exc)
+            log.warning(
+                "Chat import: could not add %s %s to conversation %s: %s",
+                entity_name, entity_id, conversation.id, exc,
+            )
 
     session.refresh(conversation)
     by_key = {_participant_key(p): p.id for p in conversation.participants}
     mapping = {}
-    for app_id, original_ids in wanted.items():
-        new_id = by_key.get((ParticipantTypes.application.value, app_id))
+    for key, original_ids in wanted.items():
+        new_id = by_key.get(key)
         if new_id:
             for original_id in original_ids:
                 mapping[original_id] = new_id
@@ -651,6 +665,8 @@ def _import_messages(session, conversation, messages, participants: dict, upload
             avatar = avatars.get(_author_key(message.author))
             if avatar:
                 group_meta['imported_author']['avatar'] = avatar
+        if message.sent_to is not None and message.sent_to.name:
+            group_meta['imported_sent_to'] = {'entity_name': message.sent_to.entity_name, 'name': message.sent_to.name}
         if message.is_error:
             group_meta['is_error'] = True
             group_meta['error'] = message.error or ''
