@@ -9,7 +9,7 @@ from tools import api_tools, auth, config as c, register_openapi
 
 from ...models.pd.binding_api import CreateBindingRequest
 from ...utils import binding_api as api
-from ...utils.binding_admin import BindingActionError, run_binding_action
+from ...utils.binding_admin import PLATFORM_OPERATIONS, BindingActionError, run_binding_action
 from ...utils.binding_queries import SORTS, list_page
 
 PROJECT_ID_PARAM = {
@@ -78,6 +78,8 @@ class AdminAPI(api_tools.APIModeHandler):
             "project_id": project_id, "application_id": body.application_id, "version_id": body.version_id,
             "mode": body.identity_mode, "action": "create", "dry_run": False,
         }
+        if body.platform_operations is not None:   # the same parser as the admin task (#7214)
+            values["platform_operations"] = sorted(set(body.platform_operations), key=PLATFORM_OPERATIONS.index)
         try:
             result = run_binding_action(self.module, values, actor)
         except BindingActionError as exc:
