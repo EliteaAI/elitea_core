@@ -4,7 +4,7 @@ A schedule saved without delivery stores mode run_history and no target chat.
 A schedule row that existed before the columns reads as run_history with null targets.
 
 Run via:
-    python tests/run_tests.py unit/test_7164_delivery_columns.py -v
+    python tests/run_tests.py unit/test_schedule_delivery_columns.py -v
 """
 import pathlib
 import re

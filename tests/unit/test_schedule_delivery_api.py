@@ -5,7 +5,7 @@ real. The chat tables, the membership lookup, the permission check and the plugi
 stand-ins. Rows live in SQLite.
 
 Run via:
-    python tests/run_tests.py unit/test_7164_delivery_api.py -v
+    python tests/run_tests.py unit/test_schedule_delivery_api.py -v
 """
 import sys
 import types

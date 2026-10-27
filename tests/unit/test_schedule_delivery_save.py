@@ -4,7 +4,7 @@ The service, the body models and the schedule table are real.
 The chat tables and the membership lookup are small stand-ins, and the rest of the plugin package is stubbed.
 
 Run via:
-    python tests/run_tests.py unit/test_7164_delivery_save.py -v
+    python tests/run_tests.py unit/test_schedule_delivery_save.py -v
 """
 import pathlib
 import sys

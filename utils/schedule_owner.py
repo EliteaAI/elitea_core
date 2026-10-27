@@ -28,7 +28,8 @@ def validate_new_owner(project_id: int, owner_id: int, entity_type: str | None =
 def change_schedule_owner(session, row, owner_id: int, admin_id: int) -> dict | None:
     """Move created_by and the principal to `owner_id` in one commit (R1.1, R1.2); enabled stays (R1.4).
 
-    The approval rule goes back to "Pause and ask me", the confirmation is cleared and the delivery goes back to Run History.
+    The approval rule goes back to "Pause and ask me", the confirmation is cleared
+    and the delivery goes back to Run History.
 
     Returns the old and new owner ids for the notices, or None when `owner_id` already owns the row.
 
