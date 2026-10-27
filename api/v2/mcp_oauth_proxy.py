@@ -28,10 +28,13 @@ from ...utils.mcp_oauth import exchange_token, get_oauth_configurations, pick_oa
 from ....configurations.utils import expand_configuration
 
 
-def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, token_endpoint: str):
-    """Client ID and secret of an admin-managed app; the secret only ever goes to the app's own token endpoint."""
+def _resolve_oauth_app_client(oauth_app_id: str, project_id: int, credential_type: str, token_endpoint: str):
+    """Client ID and secret of an admin-managed app; the secret only ever goes to the app's own token endpoint.
+
+    Both ids come from the browser: the app must serve this credential type in this project.
+    """
     from ....configurations.oauth_apps import resolve_app_client  # pylint: disable=C0415
-    app = resolve_app_client(oauth_app_id, project_id)
+    app = resolve_app_client(oauth_app_id, project_id, credential_type)
     if (token_endpoint or '').rstrip('/') != app['token_endpoint'].rstrip('/'):
         raise PermissionError("token_endpoint does not belong to the selected OAuth app")
     return app['client_id'], app['client_secret']
@@ -103,7 +106,7 @@ class ProjectAPI(api_tools.APIModeHandler):
         if data.oauth_app_id and not data.used_dcr:
             try:
                 client_id, client_secret = _resolve_oauth_app_client(
-                    data.oauth_app_id, project_id, data.token_endpoint)
+                    data.oauth_app_id, project_id, data.credential_type, data.token_endpoint)
             except LookupError as e:  # OAuthAppUnavailable
                 return {"error": "app_unavailable", "error_description": str(e)}, 400
             except PermissionError as e:
