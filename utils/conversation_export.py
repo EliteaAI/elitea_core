@@ -340,12 +340,21 @@ def collect_attachment_sizes(project_id: int, attachments: list[dict]) -> tuple[
         log.warning("Chat export: failed to init storage client for project %s: %s", project_id, e)
         return sizes, False
     complete = True
+    existing_buckets = None
     for bucket, names in names_by_bucket.items():
         try:
             for file_info in mc.list_files(bucket):
                 if file_info['name'] in names:
                     sizes[f"/{bucket}/{file_info['name']}"] = file_info['size']
         except Exception as e:  # pylint: disable=W0703
+            # A deleted bucket means its files are confirmed missing, not that the check failed
+            try:
+                if existing_buckets is None:
+                    existing_buckets = set(mc.list_bucket())
+                if bucket not in existing_buckets:
+                    continue
+            except Exception:  # pylint: disable=W0703
+                pass
             log.warning("Chat export: failed to list bucket %s: %s", bucket, e)
             complete = False
     return sizes, complete
