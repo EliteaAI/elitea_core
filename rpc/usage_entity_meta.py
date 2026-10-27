@@ -1,7 +1,7 @@
 import uuid
 
 from pylon.core.tools import web, log
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from tools import db  # pylint: disable=E0401
 
@@ -14,6 +14,8 @@ from ..utils.utils import get_public_project_id
 
 KIND_AGENT = "agent"
 KIND_PIPELINE = "pipeline"
+# Sources the chat sidebar treats as user chats; 'alita' is the pre-rebrand spelling of 'elitea'.
+CHAT_SOURCES = ("elitea", "alita")
 PARTICIPANT_TYPE_ORDER = ['model', 'agent', 'pipeline', 'skill']
 
 
@@ -104,8 +106,8 @@ def _fetch_conversation_participant_types(project_id: int, conversation_ids: lis
 
     participant_type is one of: 'model', 'agent', 'pipeline', 'skill'.
     User, dummy, toolkit and other non-AI participant types are excluded.
-    For 'application' participants the agent_type from entity_settings distinguishes
-    pipelines ('pipeline') from agents ('agent').
+    For 'application' participants agent_type distinguishes pipelines ('pipeline') from agents
+    ('agent'). It is stored on Participant.meta; the mapping's entity_settings is the fallback.
     """
     if not conversation_ids:
         return {}
@@ -113,6 +115,7 @@ def _fetch_conversation_participant_types(project_id: int, conversation_ids: lis
         rows = session.query(
             ParticipantMapping.conversation_id,
             Participant.entity_name,
+            Participant.meta,
             ParticipantMapping.entity_settings,
         ).join(
             Participant, ParticipantMapping.participant_id == Participant.id,
@@ -121,12 +124,12 @@ def _fetch_conversation_participant_types(project_id: int, conversation_ids: lis
         ).all()
 
     result = {}
-    for conv_id, entity_name, entity_settings in rows:
+    for conv_id, entity_name, participant_meta, entity_settings in rows:
         entity_name = str(entity_name)
         if entity_name == 'llm':
             p_type = 'model'
         elif entity_name == 'application':
-            agent_type = (entity_settings or {}).get('agent_type')
+            agent_type = (participant_meta or {}).get('agent_type') or (entity_settings or {}).get('agent_type')
             p_type = 'pipeline' if agent_type == 'pipeline' else 'agent'
         elif entity_name == 'skill':
             p_type = 'skill'
@@ -175,34 +178,46 @@ def resolve_conversation_ids(project_id: int, conversation_uuids) -> list:
     return result
 
 
-def _search_conversations_by_name(project_id: int, name_search: str, limit: int = 1000) -> list:
-    """Return UUIDs of conversations whose name matches name_search (case-insensitive partial)."""
-    try:
-        with db.get_session(project_id) as session:
-            rows = session.query(Conversation.uuid).filter(
-                Conversation.name.ilike(f"%{name_search}%"),
-            ).limit(limit).all()
-        return [str(row[0]) for row in rows]
-    except Exception:  # pylint: disable=broad-except
-        log.exception("_search_conversations_by_name failed: project %s", project_id)
-        return []
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _fetch_non_chat_uuids(project_id: int, limit: int = 5000) -> list:
-    """Return UUIDs of conversations that are NOT user chats (hidden or non-elitea source).
+def _search_conversations_by_name(
+        project_id: int, name_search: str, limit: int = 1000, requester_id: int | None = None,
+) -> tuple:
+    """(UUIDs, truncated) of conversations whose name contains name_search, case-insensitively.
 
-    Used by the usage analytics plugin to exclude run-history, index, pipeline and support
-    conversations from the Chats tab. Bounded to avoid unbounded scans.
+    Private chats are matched only for their author, so a title cannot be discovered by guessing
+    substrings. Results are ordered, so a capped result is the same subset on every call.
     """
-    try:
-        with db.get_session(project_id) as session:
-            rows = session.query(Conversation.uuid).filter(
-                Conversation.meta['is_hidden'].astext == 'true',
-            ).limit(limit).all()
-        return [str(row[0]) for row in rows]
-    except Exception:  # pylint: disable=broad-except
-        log.exception("_fetch_non_chat_uuids failed: project %s", project_id)
-        return []
+    with db.get_session(project_id) as session:
+        query = session.query(Conversation.uuid).filter(
+            Conversation.name.ilike(f"%{_escape_like(name_search)}%", escape="\\"),
+        )
+        if requester_id is None:
+            query = query.filter(Conversation.is_private.is_(False))
+        else:
+            query = query.filter(or_(
+                Conversation.is_private.is_(False), Conversation.author_id == requester_id,
+            ))
+        rows = query.order_by(Conversation.id.desc()).limit(limit + 1).all()
+    return [str(row[0]) for row in rows[:limit]], len(rows) > limit
+
+
+def _fetch_non_chat_uuids(project_id: int, limit: int = 5000) -> tuple:
+    """(UUIDs, truncated) of conversations that are NOT user chats: hidden, or any source other
+    than the chat sources (pipeline, support, system, agent test chats, ...).
+
+    Used by the usage analytics plugin to keep run-history, index, pipeline and support
+    conversations out of the Chats tab. Ordered and bounded; truncated tells the caller that
+    some non-chat conversations were left out of the list.
+    """
+    with db.get_session(project_id) as session:
+        rows = session.query(Conversation.uuid).filter(or_(
+            Conversation.meta['is_hidden'].astext == 'true',
+            Conversation.source.notin_(CHAT_SOURCES),
+        )).order_by(Conversation.id.desc()).limit(limit + 1).all()
+    return [str(row[0]) for row in rows[:limit]], len(rows) > limit
 
 
 class RPC:
@@ -214,6 +229,7 @@ class RPC:
             fetch_non_chat_uuids: bool = False,
             conversation_name_search: str | None = None,
             conversation_search_limit: int = 1000,
+            requester_id: int | None = None,
     ) -> dict:
         """Names and agent/pipeline kind for the ids usage analytics grouped by (#6678).
 
@@ -243,6 +259,7 @@ class RPC:
             result["conversations"] = []
         if fetch_non_chat_uuids:
             result["non_chat_uuids"] = []
+            result["non_chat_truncated"] = False
         if (
             not wants_applications and not wanted_skills and not conversation_uuids
             and not fetch_non_chat_uuids and not conversation_name_search
@@ -251,14 +268,16 @@ class RPC:
         try:
             public_project_id = get_public_project_id()
             if fetch_non_chat_uuids:
-                result["non_chat_uuids"] = _fetch_non_chat_uuids(project_id)
+                result["non_chat_uuids"], result["non_chat_truncated"] = _fetch_non_chat_uuids(project_id)
             if wanted_skills:
                 result["scoped_skills"] = fetch_scoped_skills(project_id, public_project_id, wanted_skills)
             if conversation_name_search:
-                matched_uuids = _search_conversations_by_name(
+                matched_uuids, search_truncated = _search_conversations_by_name(
                     project_id, conversation_name_search, limit=conversation_search_limit,
+                    requester_id=requester_id,
                 )
                 result["conversations"] = [{"uuid": u} for u in matched_uuids]
+                result["search_truncated"] = search_truncated
             elif conversation_uuids:
                 result["conversations"] = resolve_conversation_ids(project_id, conversation_uuids)
             if not wants_applications:
