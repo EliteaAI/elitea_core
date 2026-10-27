@@ -465,8 +465,14 @@ def test_a_toolkit_that_is_not_saved_declares_nothing(ns, env):
 
 def test_the_attachment_read_is_not_admitted_and_may_carry_no_credential(ns, env):
     plain = {"id": None, "type": "artifact", "settings": {"bucket": "b"}}
-    assert ns.adm.admit_dispatch(module(env), TOOLKIT_TASK, toolkit_call(plain), ns.adm.CREDENTIAL_FREE) is None
-    assert contexts(env, ns) == []
+    call = toolkit_call(plain)
+    assert ns.adm.admit_dispatch(module(env), TOOLKIT_TASK, call, ns.adm.CREDENTIAL_FREE) is None
+    assert contexts(env, ns) == [] and call["kwargs"][ns.adm.UNADMITTED_KWARG] is True   # the worker's marker
+    # a caller cannot bring the marker: any other dispatch has it taken out
+    forged = toolkit_call(plain)
+    forged["kwargs"][ns.adm.UNADMITTED_KWARG] = True
+    ns.adm.admit_dispatch(module(env), TOOLKIT_TASK, forged, toolkit_request(env, toolkit_id=None))
+    assert ns.adm.UNADMITTED_KWARG not in forged["kwargs"] and forged["kwargs"]["envelope"]["context_ref"]
     cred = Credential(env, uuid.uuid4())
     with pytest.raises(ns.exceptions.AdmissionDenied) as err:
         ns.adm.admit_dispatch(module(env), TOOLKIT_TASK, toolkit_call(cred), ns.adm.CREDENTIAL_FREE)

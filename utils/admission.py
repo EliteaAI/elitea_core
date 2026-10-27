@@ -70,6 +70,9 @@ DEVELOPMENT_ENTRY_POINTS = frozenset({ENTRY_EDITOR_CHAT, *TOOLKIT_ENTRY_POINTS})
 # Passed as ``admission`` by the platform's own read of chat attachments (a built-in toolkit with no credential): such a
 # dispatch is not admitted, and its payload must be shown to carry no credential (sealed with no decisions)
 CREDENTIAL_FREE = type("CredentialFreeDispatch", (), {"__repr__": lambda self: "CREDENTIAL_FREE"})()
+# What tells the worker that such a dispatch was not admitted on purpose (it refuses a governed run with no context
+# otherwise): set here only, never taken from a caller. Twin of indexer_worker methods/indexer_test_toolkit.py
+UNADMITTED_KWARG = "c1009_unadmitted_read"
 SCHEMA_VERSION = 1
 MAX_TRACKED_CONTEXTS = 10_000
 CREDENTIAL_FACTS_MIN_VERSION = 3   # the secrets plugin's credential_use_facts shape this module reads
@@ -1291,6 +1294,7 @@ def admit_dispatch(  # pylint: disable=R0911
     meta.pop("context_deadline", None)   # Main-side only (below); never taken from the caller
     free_form_secret = payload.pop(FREE_FORM_SECRET_MARK, False)   # set by the predict entry points (credential_slots)
     payload.pop(internal_obo.TOKEN_KWARG, None)   # only minted below, never taken from what the caller built
+    payload.pop(UNADMITTED_KWARG, None)   # only set below, for the platform's own read
     view_payload = _dispatched_view(task_name, payload)   # a toolkit run: its toolkit as the run's toolkit list (#7229)
     #
     if not isinstance(envelope, dict) or envelope.get("security_profile") != PROFILE_GOVERNED:
@@ -1322,6 +1326,7 @@ def admit_dispatch(  # pylint: disable=R0911
             _seal_dispatch(view_payload, lambda: [])
         except AdmissionDenied as denied:
             _refuse_dispatch(module, denied.reason_code, call_kwargs, run_id)
+        payload[UNADMITTED_KWARG] = True
         return None
     if envelope.get("context_ref"):
         # a child or reconcile dispatch runs under its parent's admission, which decided the parent's credentials
